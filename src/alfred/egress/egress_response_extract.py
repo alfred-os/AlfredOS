@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Annotated, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from alfred.egress.egress_id import TurnEgressContext, compute_egress_id
+from alfred.egress.egress_id import TurnEgressContext, compute_egress_id, compute_request_descriptor
 from alfred.egress.relay_client import Deduplicated, Fired, RelayEgressClient
 from alfred.egress.relay_protocol import _RawToolRequest
 from alfred.security.quarantine import (
@@ -93,6 +93,16 @@ class EgressExtractOutcome(BaseModel):
 # The module-level default ensures the parameter is never required and the
 # production path is never altered by an unconfigured seam.
 # ---------------------------------------------------------------------------
+
+
+def _schema_identity(schema: type[ExtractionSchema]) -> str:
+    """Stable, fully-qualified identity string for an ExtractionSchema subclass.
+
+    Combines the module path, qualified class name, and schema_version so that
+    a schema rename, move, or version bump all produce a distinct identity —
+    folded into the egress-id body hash (C6 / G7-2.5 Task 1).
+    """
+    return f"{schema.__module__}.{schema.__qualname__}:v{schema.schema_version}"
 
 
 async def _noop() -> None:
@@ -161,10 +171,21 @@ class EgressResponseExtractor:
         1. Deserialise ``stored_t2`` via ``_EXTRACTION_RESULT_ADAPTER``.
         2. Return immediately — extractor and ledger are NOT touched.
         """
+        # C6 (G7-2.5 Task 1): fold method + url + schema identity into the ledger
+        # integrity hash so a divergent URL/schema replayed at the same egress-id
+        # fires EgressIdIntegrityError (Spec C §5).  The descriptor is a fixed-width
+        # sha256 hex string — prepending it to the redacted body in C1 cannot introduce
+        # a separator-collision.
+        request_descriptor = compute_request_descriptor(
+            method=raw_request.method,
+            url=raw_request.url,
+            schema_id=_schema_identity(schema),
+        )
         outcome = await self._relay_client.fire(
             raw_request=raw_request,
             ctx=ctx,
             call_index=call_index,
+            request_descriptor=request_descriptor,
         )
 
         if isinstance(outcome, Deduplicated):

@@ -74,6 +74,19 @@ def compute_body_hash(redacted_body: str) -> str:
     return hashlib.sha256(redacted_body.encode("utf-8")).hexdigest()
 
 
+def compute_request_descriptor(*, method: str, url: str, schema_id: str) -> str:
+    """sha256 hex over the length-prefixed (method, url, schema_id) — the per-call
+    request identity folded into the ledger integrity hash so a divergent URL/schema
+    replayed at the same egress-id fires EgressIdIntegrityError (Spec C §5 / G7-2.5 C6).
+
+    Reuses ``_length_prefixed`` for injective field boundaries — the same
+    collision-resistance guarantee as ``compute_egress_id``.  The result is a
+    fixed-width 64-char hex digest so prepending it to ``redacted_text`` before
+    ``compute_body_hash`` cannot introduce a separator-collision (fixed-width prefix).
+    """
+    return hashlib.sha256(_length_prefixed(method, url, schema_id)).hexdigest()
+
+
 class EgressIdIntegrityError(AlfredError):
     """A duplicate egress-id arrived with a different redacted-body hash.
 
@@ -94,4 +107,5 @@ __all__ = [
     "TurnEgressContext",
     "compute_body_hash",
     "compute_egress_id",
+    "compute_request_descriptor",
 ]

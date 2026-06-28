@@ -115,6 +115,23 @@ class _StubRelayClient:
         return self.outcome
 
 
+@dataclass
+class _SpyRelayClient:
+    """Relay client that captures every fire() call's kwargs for assertion."""
+
+    outcome: Fired | Deduplicated
+    _ledger: _StubLedger = field(default_factory=_StubLedger)
+    fire_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def ledger(self) -> _StubLedger:
+        return self._ledger
+
+    async def fire(self, **kwargs: Any) -> Fired | Deduplicated:
+        self.fire_calls.append(dict(kwargs))
+        return self.outcome
+
+
 def _make_extracted(payload: str = "structured-data") -> Extracted:
     return Extracted(data=T3DerivedData({"payload": payload}), extraction_mode="native_constrained")
 
@@ -377,3 +394,55 @@ async def test_result_is_always_structural_t2(
         schema=_TestSchema,
     )
     assert isinstance(outcome_c.result, (Extracted, TypedRefusal))
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — C6 request_descriptor: handle() passes a non-empty descriptor to fire()
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_passes_non_empty_request_descriptor_to_fire(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """C6: EgressResponseExtractor.handle() computes a request_descriptor from
+    raw_request.method + url + schema identity and passes it to relay_client.fire()
+    as a non-empty string.  A non-empty descriptor proves the method+url+schema
+    fields are folded into the body_hash (Spec C §5 / G7-2.5 C6).
+    """
+    raw_req = _make_raw_request()
+    fired_response = _make_fired_response()
+    ledger = _StubLedger()
+
+    spy_client = _SpyRelayClient(outcome=fired_response, _ledger=ledger)
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    mock_extractor.extract = AsyncMock(return_value=_make_extracted("desc-test"))
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=spy_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+    )
+
+    await extractor_obj.handle(
+        raw_request=raw_req,
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    assert len(spy_client.fire_calls) == 1, "fire() must be called exactly once"
+    descriptor = spy_client.fire_calls[0].get("request_descriptor")
+    assert descriptor, "request_descriptor must be a non-empty string passed to fire()"
+    # It must be a 64-char sha256 hex digest.
+    assert len(descriptor) == 64, f"expected 64-char hex digest, got {len(descriptor)}"
+    assert all(c in "0123456789abcdef" for c in descriptor), (
+        "request_descriptor must be lowercase hex"
+    )

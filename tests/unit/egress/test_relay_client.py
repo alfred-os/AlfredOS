@@ -137,6 +137,30 @@ class _ErrorLedger:
         return 0
 
 
+@dataclass
+class _HashTrackingLedger:
+    """Ledger that raises EgressIdIntegrityError when the same egress_id arrives
+    with a different body_hash (mirrors the real Postgres store's integrity guard)."""
+
+    _seen: dict[str, str] = field(default_factory=dict)
+
+    async def commit_intent(
+        self, *, egress_id: str, body_hash: str, **_kwargs: Any
+    ) -> CommitIntentResult:
+        if egress_id in self._seen:
+            if self._seen[egress_id] != body_hash:
+                raise EgressIdIntegrityError(egress_id=egress_id)
+            return IntentFresh()
+        self._seen[egress_id] = body_hash
+        return IntentFresh()
+
+    async def record_response(self, **_kwargs: Any) -> None:
+        return None
+
+    async def prune_expired(self, **_kwargs: Any) -> int:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Spy audit writer (captures append_schema calls)
 # ---------------------------------------------------------------------------
@@ -947,3 +971,68 @@ async def test_wait_closed_hang_is_bounded_by_the_per_call_timeout() -> None:
         timeout=5.0,
     )
     assert isinstance(outcome, Fired)
+
+
+# ---------------------------------------------------------------------------
+# C6-T1 — request_descriptor folds into body_hash: divergent descriptor fires
+#          EgressIdIntegrityError (same ctx + call_index + empty body)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_different_request_descriptor_causes_integrity_error() -> None:
+    """C6-T1: the same (ctx, call_index) with different request_descriptor yields a
+    different body_hash → EgressIdIntegrityError on the second fire.
+
+    Uses _HashTrackingLedger which mirrors the real store's integrity guard.
+    Both fires use an empty body so compute_body_hash(descriptor + "") is
+    the only variable — proving that request_descriptor is folded in.
+    """
+    resp = _make_resp(b"ok")
+    open_conn_a = await _make_open_connection(EgressRelayReply(response=resp))
+
+    tracking_ledger = _HashTrackingLedger()
+    client = _make_client(ledger=tracking_ledger, open_connection=open_conn_a)
+
+    # Raw requests with empty bodies; only request_descriptor changes.
+    raw = _make_raw_request(body="")
+
+    # First fire with descriptor "desc-A" — should succeed (IntentFresh).
+    await client.fire(
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor="desc-A"
+    )
+
+    # Second fire with descriptor "desc-B" — same egress_id, different body_hash.
+    with pytest.raises(EgressIdIntegrityError):
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor="desc-B"
+        )
+
+
+# ---------------------------------------------------------------------------
+# C6-T2 — request_descriptor with ReplayComplete still returns Deduplicated
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_same_descriptor_replay_complete_returns_deduplicated() -> None:
+    """C6-T2: passing an explicit request_descriptor with a ReplayComplete ledger
+    returns Deduplicated (the descriptor is folded but doesn't break replay)."""
+
+    async def _should_not_dial(host: str, port: int) -> Any:
+        raise AssertionError("must not dial on replay")
+
+    client = _make_client(
+        ledger=_StubLedger(result=IntentReplayComplete(response="stored_t2", language="en")),
+        open_connection=_should_not_dial,
+    )
+    raw = _make_raw_request(body="")
+    outcome = await client.fire(
+        raw_request=raw,
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        request_descriptor="desc-A",
+    )
+
+    assert isinstance(outcome, Deduplicated)
+    assert outcome.stored_t2 == "stored_t2"
