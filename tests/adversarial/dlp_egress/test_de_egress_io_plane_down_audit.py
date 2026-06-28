@@ -245,6 +245,9 @@ async def test_gateway_deny_emits_audit_row_before_raise(
         )
         # Secondary: agree with the live exception (cross-checks the wire value roundtrip).
         assert row["subject"]["reason"] == exc_info.value.deny_reason
+        # The refusal row must be tied to the BLOCKED host (HARD rule #7) — a
+        # gateway-deny that audited the wrong authority would otherwise stay green.
+        assert row["subject"]["destination"] == "blocked-destination.example"
         # Row must be payload-blind: only the three closed-vocab fields.
         assert set(row["subject"].keys()) == EGRESS_RELAY_REFUSED_FIELDS, (
             f"Audit row subject keys must equal {EGRESS_RELAY_REFUSED_FIELDS!r}; "

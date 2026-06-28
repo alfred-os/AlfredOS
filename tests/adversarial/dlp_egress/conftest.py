@@ -22,6 +22,7 @@ suites in sync without duplication.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -36,6 +37,14 @@ from tests.helpers.egress_doubles import (
     _FireCounter,
     make_fake_external_world,
 )
+
+# Held for the ENTIRE lifetime of an ``authorized_t3_nonce`` fixture (the whole
+# test body), so two same-process tests cannot overlap their ownership of the
+# single global ``_AUTHORIZED_T3_NONCE`` slot — one test's teardown can never
+# restore ``previous`` while another is still relying on its nonce. The inner
+# ``_NONCE_LOCK`` still guards the slot MUTATION itself; this outer lock guards
+# OWNERSHIP, so a test that itself acquires ``_NONCE_LOCK`` cannot deadlock.
+_AUTHORIZED_T3_NONCE_FIXTURE_LOCK = threading.Lock()
 
 
 @pytest.fixture
@@ -68,15 +77,20 @@ def authorized_t3_nonce() -> Iterator[CapabilityGateNonce]:
     Mirrors the canonical fixture in
     ``tests/adversarial/tier_laundering/conftest.py``.
     """
-    with _NONCE_LOCK:
-        previous = _tiers._AUTHORIZED_T3_NONCE
-        nonce = CapabilityGateNonce()
-        _tiers._set_authorized_t3_nonce(nonce)
-    try:
-        yield nonce
-    finally:
+    # Own the global slot for the WHOLE test (not just the set/restore) so a
+    # concurrent same-process test cannot restore ``previous`` while this test is
+    # still relying on its nonce (CR-346 — the slot's lifetime, not just its
+    # mutation, must be serialised).
+    with _AUTHORIZED_T3_NONCE_FIXTURE_LOCK:
         with _NONCE_LOCK:
-            _tiers._set_authorized_t3_nonce(previous)
+            previous = _tiers._AUTHORIZED_T3_NONCE
+            nonce = CapabilityGateNonce()
+            _tiers._set_authorized_t3_nonce(nonce)
+        try:
+            yield nonce
+        finally:
+            with _NONCE_LOCK:
+                _tiers._set_authorized_t3_nonce(previous)
 
 
 @pytest.fixture
