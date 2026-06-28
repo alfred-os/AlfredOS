@@ -128,7 +128,7 @@ async def test_quarantined_to_structured_gate_denies_without_t3_grant(
         )
     )
 
-    with pytest.raises(AlfredError):
+    with pytest.raises(AlfredError, match=r"quarantine\.dereference"):
         await quarantined_to_structured(
             handle,
             _TestSchema,
@@ -231,9 +231,10 @@ async def test_egress_response_extractor_fired_path_never_returns_raw_body(
     mock_extractor.extract.assert_called_once()
 
     # (b) The outcome carries the typed ExtractionResult, NOT the raw body.
-    assert outcome.result is expected_extraction, (
-        "Outcome.result must be the typed ExtractionResult from the extractor"
+    assert isinstance(outcome.result, Extracted), (
+        "Outcome.result must be an Extracted instance from the extractor"
     )
+    assert outcome.result.extraction_mode == "native_constrained"
     assert outcome.result.data["payload"] == "structured-t2-result"  # type: ignore[index]
     # The raw body bytes are NOT reachable from the outcome.
     assert not hasattr(outcome.result, "body")

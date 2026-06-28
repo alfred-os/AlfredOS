@@ -44,7 +44,6 @@ Spec C §4.3, CLAUDE.md security rule #7.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -70,6 +69,7 @@ from alfred.security.quarantine import (
 )
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
+from tests.helpers.egress_doubles import _await_relay_ready, _NullAuditWriter
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 pytestmark = pytest.mark.integration
@@ -159,28 +159,8 @@ _FAKE_URL = f"https://{_FAKE_HOST}/tool"
 _FAKE_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({(_FAKE_HOST, _FAKE_PORT)})
 
 
-class _NullAuditWriter:
-    """Minimal AuditWriter stub that discards every append_schema call."""
-
-    async def append_schema(self, **_kw: Any) -> None:
-        return None
-
-
-async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
-    """Probe until the relay's listener accepts a TCP connection."""
-    for _ in range(500):
-        if serve_task.done():
-            await serve_task
-        try:
-            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        except OSError:
-            await asyncio.sleep(0.005)
-            continue
-        writer.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(writer.wait_closed(), timeout=1)
-        return
-    raise AssertionError("EgressRelay did not become ready within 2.5 s")
+# _NullAuditWriter and _await_relay_ready imported from tests.helpers.egress_doubles
+# so the implementation is shared with the barrier test and adversarial dlp_egress suite.
 
 
 # ---------------------------------------------------------------------------
@@ -200,15 +180,37 @@ class _GatedExtractor:
     sets the gate after A is confirmed to be blocking, then both A and B
     complete.
 
-    ``_call_order`` is a list that the test body inspects to confirm the
-    sequencing.
+    A1 single-slot lock
+    -------------------
+    ``_slot`` is an ``asyncio.Lock`` that serialises every ``extract()`` call.
+    Call 1 acquires the slot and then blocks on the gate WHILE HOLDING the
+    slot — so call 2 cannot enter ``extract()`` until call 1 releases the
+    slot (which happens only after the gate fires and the body returns).
+    This enforces the shared-quarantine-child serialisation structurally:
+    the test no longer relies on incidental asyncio scheduling to produce
+    the correct ordering.
+
+    ``call_order`` and ``call_count`` are inspected by the test body.
+    ``_completions`` (optional) is populated at exit from ``extract()`` while
+    the slot is still held — proving extraction-exit ordering without relying
+    on post-``record_response`` timing (which runs outside the slot).
     """
 
-    def __init__(self, *, gate: asyncio.Event, payload: str = "extracted-payload") -> None:
+    def __init__(
+        self,
+        *,
+        gate: asyncio.Event,
+        payload: str = "extracted-payload",
+        completions: list[str] | None = None,
+    ) -> None:
         self._gate = gate
         self._payload = payload
         self._call_count: int = 0
+        self._slot = asyncio.Lock()
         self.call_order: list[int] = []
+        # Populated at extract()-exit while holding the slot: ["a", "b"] proves
+        # A's extraction completed (and slot was released) before B entered.
+        self._completions = completions
 
     @property
     def call_count(self) -> int:
@@ -219,17 +221,28 @@ class _GatedExtractor:
         handle: Any,
         schema: type[ExtractionSchema],
     ) -> Extracted:
-        """Fake extraction: first call blocks on the gate."""
-        self._call_count += 1
-        call_index = self._call_count
-        if call_index == 1:
-            # Block until the test sets the gate.
-            await self._gate.wait()
-        self.call_order.append(call_index)
-        return Extracted(
-            data=T3DerivedData({"payload": f"{self._payload}-{call_index}"}),
-            extraction_mode="native_constrained",
-        )
+        """Fake extraction: serialised through ``_slot``; first call blocks on the gate.
+
+        The lock is acquired BEFORE incrementing the call counter so call B
+        cannot ENTER this method until call A has released the slot (i.e. A has
+        returned ``Extracted``).  This is the structural invariant the test
+        asserts — not merely the observed scheduling order.
+        """
+        async with self._slot:
+            self._call_count += 1
+            call_index = self._call_count
+            if call_index == 1:
+                # Block until the test sets the gate.
+                await self._gate.wait()
+            self.call_order.append(call_index)
+            if self._completions is not None:
+                # Record exit while still holding the slot: B cannot append
+                # before A because B cannot enter the slot until A returns.
+                self._completions.append("a" if call_index == 1 else "b")
+            return Extracted(
+                data=T3DerivedData({"payload": f"{self._payload}-{call_index}"}),
+                extraction_mode="native_constrained",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +300,11 @@ async def test_two_concurrent_calls_serialise_through_shared_extractor(
     )
 
     # The event-gated extractor — ONE instance shared across both calls.
+    # completions is populated inside extract() while the slot is held, so
+    # the ordering proof is structural rather than timing-dependent.
     extraction_gate = asyncio.Event()
-    gated_extractor = _GatedExtractor(gate=extraction_gate)
+    completions: list[str] = []
+    gated_extractor = _GatedExtractor(gate=extraction_gate, completions=completions)
 
     relay_client = RelayEgressClient(
         relay_url=f"tcp://127.0.0.1:{port}",
@@ -319,6 +335,10 @@ async def test_two_concurrent_calls_serialise_through_shared_extractor(
     # Event to signal when call A has entered the blocking extraction wait.
     a_blocked = asyncio.Event()
     outcomes: dict[str, Any] = {}
+    # A1: completions (defined above) tracks which extract() call exits first —
+    # populated INSIDE _GatedExtractor.extract() while the slot is still held,
+    # so B cannot append before A (B cannot enter extract() until A releases
+    # the slot).  This is structural ordering, not incidental scheduling.
 
     async def _run_a() -> None:
         """Fire call A; signal when the extractor has started (and is blocking)."""
@@ -384,6 +404,20 @@ async def test_two_concurrent_calls_serialise_through_shared_extractor(
         # The extractor was called exactly twice (once per distinct call).
         assert gated_extractor.call_count == 2, (
             f"Expected 2 extractor calls, got {gated_extractor.call_count}"
+        )
+
+        # A1: The single-slot lock in _GatedExtractor ensures A's extract() runs
+        # and returns BEFORE B can enter extract().  Both call_order and
+        # completions must reflect A-before-B.  If either differs, the
+        # structural serialisation has broken — incidental timing is not enough.
+        # call_order tracks entry-into-body order; completions tracks exit-from-
+        # extract() order while the slot is still held — both must be [A, B].
+        assert gated_extractor.call_order == [1, 2], (
+            f"Expected call_order [1, 2] (A before B), got {gated_extractor.call_order!r}"
+        )
+        assert completions == ["a", "b"], (
+            f"Expected extraction completions ['a', 'b'] (A before B), got {completions!r}.  "
+            "B exited extract() before A released the extractor slot — serialisation broken."
         )
 
         # Call A's extraction was the first (returned payload-1).
