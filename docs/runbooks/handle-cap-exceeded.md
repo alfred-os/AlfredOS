@@ -1,5 +1,10 @@
 # Runbook: `handle_cap_exceeded` in the `tool.web.fetch` audit log
 
+> **[2026-06-28 — G7-2.5 update]** `web.fetch` no longer triggers the handle-cap. As of
+> G7-2.5, `dispatch_web_fetch` is detached from `HandleCap` (ADR-0041 — fused fetch+extract
+> path). This runbook applies to remaining consumers of `HandleCap` only (e.g. any
+> `StdioTransport`-based content plugin that still returns a `ContentHandle`).
+
 > **Audit row signal:** `rate_limit_bucket="handle_cap"` + `dlp_scan_result="handle_cap_exceeded"` + `result="rate_limited"` on a `tool.web.fetch` event.
 
 ## What it means

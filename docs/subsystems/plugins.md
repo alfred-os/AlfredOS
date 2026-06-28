@@ -180,6 +180,11 @@ orchestrator directly:
    `ContentHandle` (opaque id + source url + timestamp) is returned.
 5. The orchestrator receives the `ContentHandle` from `dispatch()`.
 
+> **[2026-06-28 — G7-2.5]** The `web.fetch` tool no longer follows this path. Post-G7-2.5,
+> `dispatch_web_fetch` returns a T2 `EgressExtractOutcome` (fused fetch+extract, ADR-0041)
+> rather than a T3 `ContentHandle`. The steps above describe the `StdioTransport`
+> inbound pipeline; `ContentHandle` remains valid for other content plugins.
+
 At no point does the orchestrator see the content string itself; it holds
 only the opaque handle. The only way to get structured data from the
 handle is `quarantined_to_structured()` in `src/alfred/security/quarantine.py`,
