@@ -76,12 +76,15 @@ class EgressExtractOutcome(BaseModel):
     ``result`` is structurally T2 (``Extracted | TypedRefusal``) — the orchestrator
     NEVER sees raw T3 bytes.  ``deduplicated`` distinguishes a fresh extraction from
     a ledger replay.  ``language`` carries the BCP-47 tag from the calling context
-    (or the stored tag on replay).
+    (or the stored tag on replay).  ``status`` is the upstream HTTP response code on
+    a fresh ``Fired`` extraction, or ``None`` on a ``Deduplicated`` replay (the
+    original status is not stored in the ledger).
     """
 
     result: ExtractionResult
     deduplicated: bool
     language: str | None
+    status: int | None
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
@@ -191,11 +194,14 @@ class EgressResponseExtractor:
         if isinstance(outcome, Deduplicated):
             # Replay: return the stored T2 directly.  The extractor must NOT be
             # called — re-tagging raw T3 on replay violates HARD rule #5.
+            # status=None: the original upstream HTTP status is not stored in the
+            # ledger (only the post-extraction T2 is persisted).
             stored_result = _EXTRACTION_RESULT_ADAPTER.validate_json(outcome.stored_t2)
             return EgressExtractOutcome(
                 result=stored_result,
                 deduplicated=True,
                 language=outcome.language,
+                status=None,
             )
 
         # outcome is Fired — raw T3 bytes in outcome.response.body.
@@ -242,7 +248,12 @@ class EgressResponseExtractor:
             language=language,
         )
 
-        return EgressExtractOutcome(result=result, deduplicated=False, language=language)
+        return EgressExtractOutcome(
+            result=result,
+            deduplicated=False,
+            language=language,
+            status=outcome.response.status,
+        )
 
 
 __all__ = [

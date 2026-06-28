@@ -446,3 +446,61 @@ async def test_handle_passes_non_empty_request_descriptor_to_fire(
     assert all(c in "0123456789abcdef" for c in descriptor), (
         "request_descriptor must be lowercase hex"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — C7 status: Fired outcome carries the upstream HTTP status; Deduplicated is None
+# ---------------------------------------------------------------------------
+
+
+async def test_fired_outcome_carries_upstream_http_status(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """C7: A fresh Fired extraction surfaces EgressResponse.status on the outcome."""
+    fake_status = 201
+    fired = Fired(response=EgressResponse(status=fake_status, headers={}, body=b"body"))
+
+    extractor_obj, _, _ = _make_extractor(
+        relay_outcome=fired,
+        extracted=_make_extracted("status-test"),
+        authorized_nonce=authorized_t3_nonce,
+    )
+
+    result = await extractor_obj.handle(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    assert result.status == fake_status, (
+        f"Expected outcome.status == {fake_status}, got {result.status!r}"
+    )
+
+
+async def test_replay_outcome_status_is_none(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """C7: A Deduplicated (replay) outcome has status=None — original status not stored in ledger.
+
+    The ledger persists only the post-extraction T2; the HTTP status code is absent.
+    """
+    stored_extracted = _make_extracted("replay-status")
+
+    extractor_obj, _, _ = _make_extractor(
+        relay_outcome=Deduplicated(stored_t2=stored_extracted.model_dump_json(), language="de"),
+        authorized_nonce=authorized_t3_nonce,
+    )
+
+    result = await extractor_obj.handle(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    assert result.status is None, (
+        f"Expected outcome.status is None on replay, got {result.status!r}"
+    )
