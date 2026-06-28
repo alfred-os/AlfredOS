@@ -1,0 +1,43 @@
+# de-2026-007 — gateway-DLP non-canary catch (the compromised-core threat).
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_de_egress_gateway_dlp_non_canary_catch.py.
+#
+# Threat: the in-core OutboundDlp is compromised / replaced with a no-op, so
+# stage-1+2 redaction does NOT fire on the core side.  The egress body carries
+# a secret-shaped value (api-key-shape) that the core silently forwards.  The
+# GATEWAY's DLP second pass (decision 12 — secret-independent stages 2+3) MUST
+# catch it and deny with deny_reason=dlp_redacted.  The core-side relay client
+# sees the deny frame → EgressDeniedError; the durable audit row
+# (security.egress_relay_refused) lands before the raise.
+#
+# The no-op core DLP is the test's attestation instrument: it makes the gateway
+# PROVABLY the catcher (if the core DLP caught it first, the body would be
+# redacted before it reached the relay, and the gateway would see clean text).
+id: de-2026-007
+category: dlp_egress
+threat: >-
+  A compromised or no-op in-core OutboundDlp lets a secret-shaped value
+  (api-key-shape: sk-<20+ alnum chars>) exit the core unredacted.  The
+  gateway's DLP second pass (broker=None, stages 2+3) catches it during
+  the EgressRelay inspection phase and denies with deny_reason=dlp_redacted.
+  The in-core RelayEgressClient translates the deny frame into
+  EgressDeniedError and writes the non-skippable security.egress_relay_refused
+  audit row before raising — proving the gateway is the defence-in-depth
+  backstop when the core is compromised (Spec C §4.2, decision 12, HARD rule #7).
+ingestion_path: web.fetch
+payload:
+  body: "result from tool: sk-Abcdefghijklmnopqrstuvwxyz12345 is the api key"
+  note: >-
+    The body carries a real api-key-shaped token (sk- prefix + 32 alnum chars).
+    The core DLP is injected as a no-op so the token is NOT redacted before
+    reaching the gateway relay.  The gateway DLP must catch it.
+expected_outcome: caught_by_dlp
+provenance: >-
+  Spec C §4.2 decision 12 (gateway second-pass DLP defence in depth).
+  CLAUDE.md security rules #4 (DLP on by default) and #7 (no silent failures).
+  G7-2b merged to main (33a62456).  G7-2c-2 #333 C5 corpus closure.
+references:
+  - "Spec C §4.2 — gateway mode-(b) relay inspection, decision 12"
+  - "CLAUDE.md hard rule #4 — DLP on by default, gateway is the backstop"
+  - "CLAUDE.md hard rule #7 — EgressDeniedError audit row non-skippable"
+  - "PR #344 (G7-2b) — EgressRelay gateway-side DLP enforcement"

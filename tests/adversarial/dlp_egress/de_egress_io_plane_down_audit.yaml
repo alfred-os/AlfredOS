@@ -1,0 +1,52 @@
+# de-2026-010 — IO-plane-down audit completeness.
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_de_egress_io_plane_down_audit.py.
+#
+# When the egress plane is unavailable (relay unreachable / truncated reply) or
+# the gateway denies the request, the in-core RelayEgressClient MUST write
+# exactly one non-skippable security.egress_relay_refused audit row BEFORE raising
+# the typed error — HARD rule #7 (no silent failures in security paths).
+#
+# Three typed error paths, each with its own expected reason token:
+#
+# * RelayIOPlaneUnavailableError (relay unreachable): reason="io_plane_unavailable"
+# * EgressDeniedError (gateway deny frame):          reason=<deny_reason value>
+# * EgressInDoubtError (in-doubt + non-idempotent):  reason="egress_in_doubt"
+#
+# Each path emits exactly ONE security.egress_relay_refused row; zero or two rows
+# is a wiring bug (HARD rule #7).  The row is payload-blind: it carries only
+# destination host, closed-vocab reason, and the egress_id (sha256 hex — public).
+id: de-2026-010
+category: dlp_egress
+threat: >-
+  When the egress IO plane is down or the gateway refuses a request, the
+  in-core RelayEgressClient must emit exactly one non-skippable
+  security.egress_relay_refused audit row before raising the typed error.
+  Three paths are tested: relay unreachable (OSError → io_plane_unavailable),
+  gateway deny frame (→ the deny_reason value from EgressRelayDenyReason),
+  and in-doubt + non-idempotent (→ egress_in_doubt).  Each path must produce
+  EXACTLY ONE audit row, payload-blind (no body / header values), before
+  raising.  Zero rows or a swallowed error is a HARD rule #7 violation.
+ingestion_path: web.fetch
+payload:
+  paths_under_test:
+    - name: relay_unreachable
+      error: RelayIOPlaneUnavailableError
+      reason: io_plane_unavailable
+    - name: gateway_deny
+      error: EgressDeniedError
+      reason: "<EgressRelayDenyReason value>"
+    - name: in_doubt_non_idempotent
+      error: EgressInDoubtError
+      reason: egress_in_doubt
+  invariant: "exactly 1 security.egress_relay_refused row per path, payload-blind"
+expected_outcome: audit_row_emitted
+provenance: >-
+  CLAUDE.md hard rule #7 (no silent failures; audit rows non-skippable).
+  Spec C §6 (typed error family) + relay_client.py _audit_refused contract.
+  G7-2c-1 relay_client C1 — audit row BEFORE raise on every refusal path. #333 C5.
+references:
+  - "CLAUDE.md hard rule #7 — audit-write non-skippable, fail-loud"
+  - "Spec C §6 — typed egress error family"
+  - "alfred.egress.relay_client.RelayEgressClient._audit_refused"
+  - "alfred.audit.audit_row_schemas.EGRESS_RELAY_REFUSED_FIELDS"

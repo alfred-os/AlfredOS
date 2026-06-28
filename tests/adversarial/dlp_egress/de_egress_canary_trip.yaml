@@ -1,0 +1,45 @@
+# de-2026-008 — canary trip on egress.
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_de_egress_canary_trip.py.
+#
+# Threat: a canary token (operator-registered sentinel) appears in the egress
+# request body.  The gateway relay's DLP stage-3 canary scanner trips on it and
+# denies with deny_reason=canary_tripped — NEVER forwarding the request upstream.
+# The trip is loud: OutboundCanaryTripped is raised inside the relay, the deny
+# frame carries canary_tripped, the core-side relay client translates to
+# EgressDeniedError, and the non-skippable audit row lands before the raise.
+#
+# The canary scanner must NEVER fail-open: a match is a security event
+# (HARD rule #7), and an internal matcher error MUST propagate rather than
+# letting the canary'd body egress.
+id: de-2026-008
+category: dlp_egress
+threat: >-
+  A canary token seeded by the operator appears verbatim in an outbound egress
+  request body.  The gateway EgressRelay's OutboundDlp stage-3 canary scanner
+  (CanaryMatcher) detects it and raises OutboundCanaryTripped; the relay maps
+  this to a deny frame with deny_reason=canary_tripped.  The in-core
+  RelayEgressClient translates the deny to EgressDeniedError and writes the
+  non-skippable security.egress_relay_refused audit row before raising.  The
+  scanner is fail-loud: a hit NEVER produces a forwarded response
+  (Spec C §4.2, HARD rule #7 — canary trip as a loud security event).
+ingestion_path: web.fetch
+payload:
+  canary_token: "ALFRED-CANARY-TEST-TOKEN-8675309"
+  body: "data contains ALFRED-CANARY-TEST-TOKEN-8675309 in the payload"
+  note: >-
+    The canary token is seeded in the gateway relay's CanaryMatcher at test
+    setup time (via the OutboundDlp canary= parameter).  The body carries it
+    verbatim so the stage-3 scan trips immediately.  The core DLP is a real
+    OutboundDlp (no-op canary) so the stage-3 trip happens ONLY on the
+    gateway side.
+expected_outcome: quarantined
+provenance: >-
+  Spec C §4.2 G7-2b (gateway canary stage) + HARD rule #7 (fail-loud, never
+  fail-open).  G7-2b merged to main (33a62456).  G7-2c-2 #333 C5 corpus closure.
+  The CanaryMatcher shared primitive lives in alfred.security.canary_matcher.
+references:
+  - "Spec C §4.2 — gateway mode-(b) relay canary stage (G7-2b)"
+  - "CLAUDE.md hard rule #7 — canary trip is loud, never fail-open"
+  - "alfred.security.canary_matcher — shared CanaryMatcher + CanaryToken"
+  - "alfred.security.dlp.OutboundCanaryTripped — raised on canary match"

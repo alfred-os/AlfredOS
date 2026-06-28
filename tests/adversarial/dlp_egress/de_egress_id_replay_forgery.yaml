@@ -1,0 +1,55 @@
+# de-2026-009 — egress-id replay / false-replay / forgery / different-hash.
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_de_egress_id_replay_forgery.py.
+#
+# Four sub-assertions against the real PostgresEgressIdempotencyStore + real
+# RelayEgressClient via the loopback relay stack:
+#
+# (a) committed_with_response replay: a completed row is short-circuited
+#     with NO re-fire (fire_count unchanged) — the memoised T2 replays.
+# (b) committed_no_response (in-doubt) + non-idempotent: EgressInDoubtError,
+#     no re-fire — the at-most-once firewall.
+# (c) forged / out-of-range egress-id: commit_intent rejects it (only valid
+#     sha256 hex 64-char ids accepted; an injected bad id fails the ledger).
+# (d) same-position different-hash: EgressIdIntegrityError — a non-deterministic
+#     re-run is LOUD (HARD rule #7).
+#
+# All four assertions carry the property: the egress-id is a trust-boundary
+# primitive; any deviation from the one-fire, one-response contract is refused
+# or detected loud — never silently duplicated or replayed as a T2.
+id: de-2026-009
+category: dlp_egress
+threat: >-
+  Four distinct egress-id attacks against the relay ledger:
+  (a) a completed (committed_with_response) row is replayed by the ledger
+  — the upstream is NOT re-fired; fire_count stays 1 (dedup / memoize);
+  (b) an in-doubt (committed_no_response) + non-idempotent call raises
+  EgressInDoubtError before any re-fire (at-most-once firewall);
+  (c) a caller injects an invalid egress-id (not a valid sha256 hex) or a
+  forged id that does not correspond to the (ctx, call_index) pair — the
+  ledger produces a hash-mismatch that raises EgressIdIntegrityError;
+  (d) the same (ctx, call_index) slot is re-used with a DIFFERENT body
+  hash — EgressIdIntegrityError is raised loud before any re-fire.
+  All four must refuse or deduplicate without an upstream re-fire, proving
+  the egress-id is a tamper-evident, collision-resistant gate
+  (Spec C §5, HARD rule #7).
+ingestion_path: web.fetch
+payload:
+  scenarios:
+    - id: replay_complete
+      desc: "committed_with_response row → deduplicated, fire_count=1"
+    - id: in_doubt_non_idempotent
+      desc: "committed_no_response + non-idempotent → EgressInDoubtError, no refire"
+    - id: different_hash
+      desc: "same egress_id, different body hash → EgressIdIntegrityError"
+expected_outcome: refused
+provenance: >-
+  Spec C §5 (at-most-once + dedup ledger) + HARD rules #5/#7.
+  PostgresEgressIdempotencyStore commit_intent / record_response contract.
+  G7-2a (#343) + G7-2c-1 (relay_client) + G7-2c-2 C4 (barrier/dedup). #333 C5.
+references:
+  - "Spec C §5 — egress-id ledger tri-state + at-most-once guarantee"
+  - "CLAUDE.md hard rule #5 — dedup must not re-extract raw T3"
+  - "CLAUDE.md hard rule #7 — integrity mismatch is loud, never silent"
+  - "alfred.egress.egress_id.EgressIdIntegrityError — body-hash mismatch"
+  - "alfred.memory.egress_idempotency.PostgresEgressIdempotencyStore"
