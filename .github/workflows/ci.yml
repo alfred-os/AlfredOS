@@ -408,10 +408,6 @@ jobs:
         #     bypass fix, commit 0ac4232) + the ``..`` traversal refusal.
         #     A missed branch silently widens the allowlist past the
         #     operator's cap.
-        #   * ``src/alfred/plugins/web_fetch/tls_policy.py`` — TLS
-        #     fail-closed in production with ``ALFRED_ENV=development`` as
-        #     the only escape hatch (spec §7.11). A skipped branch makes
-        #     the escape hatch always-on.
         #   * ``src/alfred/plugins/web_fetch/content_store.py`` — Redis-
         #     backed ``ContentHandle`` with single-use ``GETDEL`` semantics
         #     (spec §7.5). A missed branch breaks the

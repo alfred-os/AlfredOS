@@ -53,7 +53,12 @@ type[ExtractionSchema]`) is a required per-call parameter, not baked in. The sch
 what the orchestrator may receive from attacker-influenced T3 bytes; a default would be a
 wide free-text passthrough and would prejudge issue #339's live tool-call→schema mapping.
 
-### Decision 2 — `HandleCap` removal
+### Decision 2 — `HandleCap` detached from `dispatch_web_fetch`
+
+`HandleCap` is **detached** from the `web.fetch` dispatcher path (no longer reserved or
+released by `dispatch_web_fetch`). The `handle_cap.py` module and `test_handle_cap.py`
+remain in-tree — a `canary_scanner.py` consumer keeps the module live; file-level deletion
+is deferred.
 
 `HandleCap` was designed to bound parked T3 bodies in the Redis content-store per user.
 The fused model removes the Redis content-store write, eliminating the parked resource
@@ -62,11 +67,13 @@ shipped C2 `QuarantineStagingMap` is unbounded and carries no TTL. A gate-deny o
 extract-failure before the extractor transport drains the map orphans a `TaggedContent[T3]`
 body for process lifetime.
 
-Removal is therefore sound only paired with the **C2 drain-on-error fix** (§4 fold C9):
+Detachment is therefore sound only paired with the **C2 drain-on-error fix** (§4 fold C9):
 stage-after-gate, or a `finally` block that drains the staging map if extraction did not
-complete. With that fix there is no parked resource, and `HandleCap` is genuinely vestigial.
+complete. With that fix there is no parked resource, and `HandleCap` is genuinely vestigial
+on the `dispatch_web_fetch` path.
 
-The C9 fix is a co-shipped prerequisite of `HandleCap` removal in PR1.
+The C9 fix is a co-shipped prerequisite of detaching `HandleCap` from `dispatch_web_fetch`
+in PR1.
 
 ### Decision 3 — de-2026-004 re-targeted, not retired
 
@@ -92,8 +99,9 @@ is explicitly deferred to issue #339. The re-target requires **explicit
 
 - The dedup ledger is internally consistent: the stored T2 and the returned T2 are the
   same type. A replay short-circuits without raw-byte reconstruction.
-- `HandleCap` is removed from a path with zero production callers. Its Redis
-  content-store assumption is no longer valid in the fused model.
+- `HandleCap` is detached from `dispatch_web_fetch` (zero production callers on this
+  path). The `handle_cap.py` module and `test_handle_cap.py` remain in-tree; the
+  `canary_scanner.py` consumer keeps them live. File-level deletion is deferred.
 - de-2026-004 is preserved as a release-blocking adversarial property, now aligned with
   the correct post-C2 threat model (in-flight bound + no-orphan).
 - The C2 drain-on-error fix closes the shipped staging-map leak regardless of how future
@@ -110,6 +118,12 @@ is explicitly deferred to issue #339. The re-target requires **explicit
   layering (the supervisor owns timeout audit; the pre-fire ledger intent + replay `in_doubt`
   makes the side-effect safe), but #339's orchestrator wiring MUST audit the surfaced
   `TimeoutError` and include a cross-layer test.
+- **C8 residual — second trigger: canary `record_response` cancellation.** The C8 fix moves
+  the ledger to a terminal-refused state on a canary trip. However, a cancellation during the
+  canary `record_response` write itself (not only DB-down) also leaves the ledger
+  `committed_no_response`, so an idempotent replay re-fires — re-sending the seeded canary to
+  the hostile origin. #339's orchestrator wiring must audit and close this cancellation window;
+  add it to the #347 obligation list alongside the C8 DB-down residual.
 - **`language` source is a #339 residual.** The turn-user's `User.language` lands in #339.
   A `None` language is never stored silently; the choice is stated explicitly at the call
   site. HARD rule #3 is satisfied deferentially, not silently.
@@ -152,7 +166,9 @@ narrowing that pays for itself on the first correctly-refused binary response.
 
 Retain the per-user `HandleCap` even in the fused model, either adapting it to the
 `QuarantineStagingMap` resource or keeping it as a no-op placeholder for #339. Three
-reviewers to one (3-to-1 disposition) favored removal; one reviewer (`alfred-security-engineer`)
+reviewers to one (3-to-1 disposition) favored removal from the dispatcher path (detach,
+not delete the module — `handle_cap.py` remains in-tree for its `canary_scanner.py`
+consumer); one reviewer (`alfred-security-engineer`)
 dissented, correctly noting the C1 semaphore is global, not per-user, so per-user fairness
 is lost on the fused path.
 

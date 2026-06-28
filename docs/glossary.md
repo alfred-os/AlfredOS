@@ -240,6 +240,11 @@ successful extract; a second extract raises `ContentHandleExpired`.
 See [T3DerivedData](#t3deriveddata), [ContentStoreBase](#contentstorebase),
 and [docs/subsystems/security.md](subsystems/security.md).
 
+> **[2026-06-28 — G7-2.5]** `web.fetch` no longer returns a `ContentHandle`. Post-G7-2.5,
+> `dispatch_web_fetch` returns a T2 `EgressExtractOutcome` (fused fetch+extract — ADR-0041).
+> `ContentHandle` remains valid for other content plugins whose inbound pipeline goes through
+> `StdioTransport`.
+
 ## T3DerivedData
 
 A `NewType` over `dict[str, object]` (`src/alfred/security/quarantine.py`).
@@ -431,8 +436,10 @@ The return-type union of `StdioTransport.dispatch()`
 (`src/alfred/plugins/transport.py`). Three shapes, branched by `isinstance`
 at call sites (no Pydantic discriminator field):
 
-- `ContentHandle` — content-bearing tools (e.g. `web.fetch`); T3 bytes
-  are in the content store, the caller receives the opaque handle only.
+- `ContentHandle` — content-bearing tools that go through the `StdioTransport` inbound
+  pipeline; T3 bytes are in the content store, the caller receives the opaque handle only.
+  **[2026-06-28 — G7-2.5]** `web.fetch` no longer fits this shape: it returns a T2
+  `EgressExtractOutcome` (fused fetch+extract, ADR-0041), not a `ContentHandle`.
 - `ExtractionResult` — `quarantine.extract` calls; itself a union of
   `Extracted` and `TypedRefusal`.
 - `ControlResult` — lifecycle, config, health-check methods; no T3 content.

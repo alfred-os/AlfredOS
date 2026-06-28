@@ -136,6 +136,13 @@ with `dlp_scan_result="handle_cap_exceeded"`. See
 [docs/runbooks/handle-cap-exceeded.md](../runbooks/handle-cap-exceeded.md)
 for the operator-facing runbook.
 
+> **[2026-06-28 — G7-2.5 PR1 update]** For `web.fetch`, the per-user cap is now
+> **detached**: `dispatch_web_fetch` no longer reserves or releases a `HandleCap` slot.
+> The inbound-canary property moved to the C2 pre-extract seam; the per-user
+> resource-exhaustion-refusal bound is deferred to issues #339 and #347 (see ADR-0041).
+> The `handle_cap.py` module remains in-tree for its `canary_scanner.py` consumer;
+> the runbook below applies to any remaining non-`web.fetch` consumers of `HandleCap`.
+
 **Audit vocabulary widening (handle-cap + dispatch-params PRs).** Closed
 vocabularies on `WEB_FETCH_FIELDS` widened across two trust-boundary PRs —
 operators with SIEM filters MUST extend their allow-lists:
