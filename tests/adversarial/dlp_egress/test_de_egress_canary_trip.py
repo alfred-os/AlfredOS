@@ -63,7 +63,7 @@ def test_payload_schema_valid() -> None:
     payload = _load_payload()
     assert payload.id == "de-2026-008"
     assert payload.category == "dlp_egress"
-    assert payload.expected_outcome == "quarantined"
+    assert payload.expected_outcome == "caught_by_dlp"
     assert payload.ingestion_path == "web.fetch"
 
 

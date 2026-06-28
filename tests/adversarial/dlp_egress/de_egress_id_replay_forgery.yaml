@@ -42,6 +42,8 @@ payload:
       desc: "committed_no_response + non-idempotent → EgressInDoubtError, no refire"
     - id: different_hash
       desc: "same egress_id, different body hash → EgressIdIntegrityError"
+    - id: forged_unknown_id
+      desc: "record_response on a never-committed egress-id → EgressLedgerStateError"
 expected_outcome: refused
 provenance: >-
   Spec C §5 (at-most-once + dedup ledger) + HARD rules #5/#7.

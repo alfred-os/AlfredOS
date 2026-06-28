@@ -33,7 +33,7 @@ payload:
     verbatim so the stage-3 scan trips immediately.  The core DLP is a real
     OutboundDlp (no-op canary) so the stage-3 trip happens ONLY on the
     gateway side.
-expected_outcome: quarantined
+expected_outcome: caught_by_dlp
 provenance: >-
   Spec C §4.2 G7-2b (gateway canary stage) + HARD rule #7 (fail-loud, never
   fail-open).  G7-2b merged to main (33a62456).  G7-2c-2 #333 C5 corpus closure.

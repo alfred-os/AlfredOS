@@ -12,8 +12,14 @@ relay stack + real PostgresEgressIdempotencyStore):
 (c) Different-hash on the SAME egress-id slot: directly calling
     commit_intent with a different body_hash raises EgressIdIntegrityError
     (HARD rule #7 — non-deterministic re-run is loud, never silent).
+(d) Forged / unknown egress-id: calling record_response with a syntactically-
+    valid 64-char sha256-hex string that was NEVER committed via commit_intent
+    raises EgressLedgerStateError (caller-contract violation — loud,
+    HARD rule #7; a forged id can never inject a response into the ledger).
+    Also proves that incrementing call_index produces a DIFFERENT egress-id
+    (collision-resistance across logical call slots).
 
-All three must refuse or deduplicate without an additional upstream fire.
+All four must refuse or deduplicate without an additional upstream fire.
 The egress-id is a tamper-evident, collision-resistant gate (Spec C §5).
 """
 
@@ -43,7 +49,7 @@ from alfred.egress.relay_protocol import _RawToolRequest
 from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
-from alfred.memory.egress_idempotency import PostgresEgressIdempotencyStore
+from alfred.memory.egress_idempotency import EgressLedgerStateError, PostgresEgressIdempotencyStore
 from alfred.security import tiers as _tiers
 from alfred.security.canary_matcher import CanaryMatcher
 from alfred.security.dlp import OutboundDlp
@@ -370,4 +376,51 @@ async def test_different_hash_raises_integrity_error(
         )
     assert exc_info.value.egress_id == egress_id, (
         f"EgressIdIntegrityError must carry the egress_id; got {exc_info.value.egress_id!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_forged_unknown_id_raises_ledger_state_error(
+    store: PostgresEgressIdempotencyStore,
+    migrated_url: str,
+) -> None:
+    """(d) Forged / unknown egress-id → EgressLedgerStateError (HARD rule #7).
+
+    de-2026-009 sub-assertion (d): a caller attempts to record a response for
+    an egress-id that was NEVER committed via ``commit_intent``.  The ledger
+    must raise ``EgressLedgerStateError`` rather than silently no-op'ing or
+    accepting the injection — a forged id cannot plant a response into the
+    ledger (Spec C §5, HARD rule #7).
+
+    A syntactically-valid 64-char sha256-hex string is used (not a random
+    string) to demonstrate the check is not merely a format guard: the ledger
+    enforces the committed-intent-first contract at the DATA layer.
+
+    Additionally proves that ``compute_egress_id`` is call_index-sensitive:
+    incrementing the call_index produces a DIFFERENT egress-id, so a forger
+    cannot collide another logical call's slot by guessing a neighbouring index.
+    """
+    ctx = TurnEgressContext(adapter_id="ada-009d", inbound_id="in-009d", session_id="sess-009d")
+
+    # A syntactically-valid sha256 hex that was NEVER committed via commit_intent.
+    # "a" * 64 is a valid 64-char hex string but corresponds to no DB row.
+    forged_id = "a" * 64
+
+    with pytest.raises(EgressLedgerStateError) as exc_info:
+        await store.record_response(
+            egress_id=forged_id,
+            response="injected-payload",
+            language="en",
+        )
+    assert exc_info.value.egress_id == forged_id, (
+        f"EgressLedgerStateError must carry the forged egress_id; got {exc_info.value.egress_id!r}"
+    )
+
+    # Prove call_index-sensitivity: different call_index → different egress-id.
+    # A forger cannot collide a neighbouring call's slot by incrementing the index.
+    id_at_0 = compute_egress_id(ctx, call_index=0)
+    id_at_1 = compute_egress_id(ctx, call_index=1)
+    assert id_at_0 != id_at_1, (
+        "compute_egress_id must produce a DIFFERENT id for each call_index "
+        f"(call_index=0 → {id_at_0!r}, call_index=1 → {id_at_1!r})"
     )
