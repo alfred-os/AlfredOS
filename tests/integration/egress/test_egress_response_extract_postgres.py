@@ -369,7 +369,11 @@ async def test_gate_denial_leaves_ledger_committed_no_response(
         recorder=recorder,
     )
 
-    with pytest.raises(AlfredError):
+    # Pin the raise to the gate-denial path specifically (the rendered
+    # ``security.quarantine.dereference_denied`` message names the hookpoint) — a bare
+    # ``pytest.raises(AlfredError)`` would also pass on an unrelated earlier failure
+    # (staging, fire), masking a regression that skips the gate check.
+    with pytest.raises(AlfredError, match=r"quarantine\.dereference"):
         await extractor_obj.handle(
             raw_request=_make_raw_request(),
             ctx=ctx,
