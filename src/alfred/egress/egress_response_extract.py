@@ -94,6 +94,14 @@ class EgressExtractOutcome(BaseModel):
     deduplicated: bool
     language: str | None
     status: int | None
+    policy_refusal_token: str | None = None
+    """Web.fetch-agnostic "why the pre-extract policy refused" token.
+
+    Set only on a D1 :class:`~alfred.egress.response_inspection._SoftRefusal` outcome
+    (``"mime_type_not_allowed"`` or ``"size_limit_exceeded"``); ``None`` for any other
+    outcome (extracted, deduplicated, or canary-tripped).  Task 6 reads this to audit
+    the per-attack-class ``dlp_scan_result`` subject token.
+    """
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
@@ -250,7 +258,7 @@ class EgressResponseExtractor:
                     egress_id=compute_egress_id(ctx, call_index=call_index),
                 )
             if isinstance(verdict, _SoftRefusal):
-                refusal = TypedRefusal(reason=verdict.reason)  # type: ignore[arg-type]
+                refusal = TypedRefusal(reason=verdict.reason)
                 await self._relay_client.ledger.record_response(
                     egress_id=compute_egress_id(ctx, call_index=call_index),
                     response=refusal.model_dump_json(),
@@ -261,6 +269,7 @@ class EgressResponseExtractor:
                     deduplicated=False,
                     language=language,
                     status=outcome.response.status,
+                    policy_refusal_token=verdict.subject_token,
                 )
             # verdict is _Proceed → fall through to mint/stage/extract.
 

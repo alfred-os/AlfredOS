@@ -30,7 +30,7 @@ from alfred.egress.egress_response_extract import (
     _EXTRACTION_RESULT_ADAPTER,
     EgressResponseExtractor,
 )
-from alfred.egress.relay_client import Deduplicated, Fired
+from alfred.egress.relay_client import Deduplicated, Fired, RelayEgressClient
 from alfred.egress.relay_protocol import EgressResponse, _RawToolRequest
 from alfred.egress.response_inspection import (
     InboundCanaryTripped,
@@ -51,6 +51,8 @@ from alfred.security.quarantine import (
 )
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
+from tests.helpers.dlp import identity_outbound_dlp
+from tests.helpers.egress_doubles import _NullAuditWriter
 from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
 
 pytestmark = pytest.mark.integration
@@ -523,74 +525,51 @@ async def test_canary_replay_no_refire(
     # Extractor was NOT called.
     mock_extractor.extract.assert_not_awaited()
 
-    # --- Round 2: same (ctx, call_index) → commit_intent sees committed_with_response
-    #              → C1 returns Deduplicated → handle() returns without re-firing. ---
-    # Build a fresh relay pointing at the same store so commit_intent can see the
-    # completed row and return IntentReplayComplete.  C1 would short-circuit to
-    # Deduplicated; we simulate the same by wiring a relay that returns Deduplicated
-    # directly (same as the existing replay integration test above — the C1 ledger
-    # query is proven by the barrier-dedup postgres test).
+    # --- Round 2: drive the REAL RelayEgressClient.fire() against the same Postgres store.
+    #
+    # The row is now committed_with_response (terminal).  When C1 calls commit_intent it
+    # receives IntentReplayComplete and short-circuits with Deduplicated — WITHOUT opening
+    # a new connection to the gateway relay.  We inject a spy open_connection that raises
+    # if called, proving no re-dial occurs (C8 invariant proven end-to-end vs real Postgres).
+    #
+    # request_descriptor="" matches the body_hash stored in Round 1's pre-commit
+    # (compute_body_hash("") — the default used when the synthetic stub bypasses C2's
+    # compute_request_descriptor step).
 
-    stored_json = row["response"]
-    stored_lang = row["language"]
+    open_conn_called = False
 
-    class _DeduplicatedRelay:
-        def __init__(self, _store: Any) -> None:
-            self._ledger = _store
+    async def _never_dial(host: str, port: int) -> tuple[Any, Any]:
+        nonlocal open_conn_called
+        open_conn_called = True
+        # Prove no re-dial occurred; message is test-only, never reaches production.
+        raise AssertionError(f"C1 re-dialed on {host}:{port} — C8 regression")
 
-        @property
-        def ledger(self) -> Any:
-            return self._ledger
-
-        async def fire(self, **_kw: Any) -> Any:
-            nonlocal fire_call_count
-            fire_call_count += 1  # must NOT increment (replay short-circuits)
-            return Fired(
-                response=EgressResponse(
-                    status=200,
-                    headers={"Content-Type": "text/html"},
-                    body=canary_body,
-                )
-            )
-
-    from alfred.egress.relay_client import Deduplicated as _Dedup
-
-    class _StaticDeduplicatedRelay:
-        """Returns Deduplicated directly (simulates C1 seeing IntentReplayComplete)."""
-
-        def __init__(self, _store: Any) -> None:
-            self._ledger = _store
-
-        @property
-        def ledger(self) -> Any:
-            return self._ledger
-
-        async def fire(self, **_kw: Any) -> _Dedup:
-            return _Dedup(stored_t2=stored_json, language=stored_lang)
-
-    extractor_obj_2 = EgressResponseExtractor(
-        relay_client=_StaticDeduplicatedRelay(store),  # type: ignore[arg-type]
-        gate=gate,
-        extractor=mock_extractor,
-        recorder=recorder,
-        response_policy=policy,
+    relay_c1 = RelayEgressClient(
+        relay_url="tcp://127.0.0.1:1",  # unreachable; open_connection must NOT be called
+        core_dlp=identity_outbound_dlp(),
+        ledger=store,
+        audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
+        concurrency=1,
+        open_connection=_never_dial,  # type: ignore[arg-type]
     )
 
-    outcome_2 = await extractor_obj_2.handle(
+    c1_outcome = await relay_c1.fire(
         raw_request=raw_req,
         ctx=ctx,
         call_index=call_index,
-        schema=_TestSchema,
-        language="en",
+        request_descriptor="",  # matches stored body_hash = compute_body_hash("")
     )
 
-    # Replay returned Deduplicated outcome.
-    assert outcome_2.deduplicated is True
-    # The stored result is the refused_by_safety TypedRefusal.
-    assert isinstance(outcome_2.result, TypedRefusal)
-    assert outcome_2.result.reason == "refused_by_safety"
-
-    # fire() was called only ONCE total (no re-fetch on replay).
-    assert fire_call_count == 1, (
-        f"fire() was called {fire_call_count} times — the canary replay re-fired (C8 regression)"
+    # C1 must return Deduplicated (row is committed_with_response → IntentReplayComplete).
+    assert isinstance(c1_outcome, Deduplicated), (
+        f"Expected Deduplicated from real C1 on replay, got {type(c1_outcome)}"
     )
+    assert "refused_by_safety" in c1_outcome.stored_t2
+
+    # open_connection must NOT have been called — no re-dial on replay.
+    assert not open_conn_called, (
+        "open_connection was called — C1 re-dialed on canary replay (C8 regression)"
+    )
+
+    # fire_call_count must still be 1 — the real C1 never touched _CountingFiredRelay.
+    assert fire_call_count == 1, f"fire_call_count={fire_call_count} — unexpected re-fire"

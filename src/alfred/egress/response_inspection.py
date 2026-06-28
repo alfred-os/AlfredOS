@@ -48,6 +48,7 @@ from __future__ import annotations
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -80,7 +81,7 @@ class _SoftRefusal:
     precedent): ``"mime_type_not_allowed"`` | ``"size_limit_exceeded"``.
     """
 
-    reason: str = "cannot_extract"
+    reason: Literal["cannot_extract"] = "cannot_extract"
     subject_token: str = ""
 
 

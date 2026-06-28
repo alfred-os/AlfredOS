@@ -265,6 +265,9 @@ async def test_fresh_fire_runs_extractor_once_and_records_t2(
     assert isinstance(replayed, Extracted)
     assert replayed.data == outcome_extracted.data
 
+    # Fix 1: policy_refusal_token is None on a successful extraction (no D1 refusal).
+    assert result.policy_refusal_token is None
+
 
 # ---------------------------------------------------------------------------
 # Test 2 — Gate-denial: AlfredError propagates; extractor + ledger not called
@@ -338,6 +341,9 @@ async def test_replay_returns_stored_t2_without_calling_extractor(
 
     # Ledger record_response must NOT be called on replay.
     assert ledger.record_calls == []
+
+    # Fix 1: policy_refusal_token is None on a deduplicated replay (no D1 refusal).
+    assert result.policy_refusal_token is None
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +693,63 @@ async def test_d1_disallowed_mime_returns_soft_refusal_extractor_not_called(
     # Attacker-controlled Content-Type MUST NOT appear in the stored refusal value.
     assert "application/octet-stream" not in rec["response"]
     assert raw_body.decode("latin-1") not in rec["response"]
+
+    # Fix 1: policy_refusal_token surfaces the D1 subject token for Task 6 auditing.
+    assert outcome.policy_refusal_token == "mime_type_not_allowed"  # noqa: S105 — audit token, not a credential
+
+
+# ---------------------------------------------------------------------------
+# Test 10b — D1 soft refusal: size limit exceeded → size_limit_exceeded token
+# ---------------------------------------------------------------------------
+
+
+async def test_d1_size_limit_exceeded_returns_size_token(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """D1: a Fired response whose body exceeds max_bytes returns TypedRefusal(cannot_extract)
+    with policy_refusal_token="size_limit_exceeded".
+    """
+    large_body = b"x" * 100
+    fired = Fired(
+        response=EgressResponse(
+            status=200,
+            headers={"Content-Type": "text/plain"},
+            body=large_body,
+        )
+    )
+    relay_client = _StubRelayClient(outcome=fired)
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    spy_extract = mock_extractor.extract = AsyncMock()
+
+    # Set max_bytes to 50 — the 100-byte body exceeds it.
+    policy = _make_response_policy(max_bytes=50)
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=relay_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+        response_policy=policy,
+    )
+
+    outcome = await extractor_obj.handle(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    spy_extract.assert_not_called()
+    assert isinstance(outcome.result, TypedRefusal)
+    assert outcome.result.reason == "cannot_extract"
+    assert outcome.policy_refusal_token == "size_limit_exceeded"  # noqa: S105 — audit token, not a credential
 
 
 # ---------------------------------------------------------------------------
