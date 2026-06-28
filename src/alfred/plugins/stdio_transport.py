@@ -38,7 +38,7 @@ silently downgrades T3 → untagged on retrieval.
 * Env scrubbing: the subprocess inherits a minimal env dict containing
   only ``PATH``, i18n vars, and a SINGLE whitelisted ``ALFRED_ENV``
   passthrough (arch-003 — needed for the documented dev-mode TLS
-  escape hatch in ``web_fetch/tls_policy.py``). Never ``os.environ`` —
+  escape hatch). Never ``os.environ`` —
   read attempts are blocked by the AST guard in
   ``test_env_scrub_subprocess.py``; the ``ALFRED_ENV`` value is read
   in :mod:`alfred.plugins._env_passthrough`, the single sanctioned
@@ -373,11 +373,9 @@ class StdioTransport:
         #
         # arch-003 fix: ``ALFRED_ENV`` is the SINGLE whitelisted
         # passthrough from the parent's environment. Plugin subprocesses
-        # need it to honour the development escape hatch for TLS
-        # verification (``web_fetch/tls_policy.py``) — without it the
-        # subprocess always sees the env unset, defaults to
-        # ``"production"``, and refuses ``skip_tls_verify=True`` even in
-        # legitimate dev. The read is delegated to
+        # need it to honour dev-mode escape hatches — without it the
+        # subprocess always sees the env unset and defaults to
+        # ``"production"`` behaviour. The read is delegated to
         # :func:`alfred_env_for_subprocess` (in a sibling module) so the
         # AST guard against host-env reads in THIS file stays intact;
         # no other parent-env key leaks.

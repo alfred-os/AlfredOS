@@ -17,8 +17,8 @@ LOUD failure on a broken or malformed wire (CLAUDE.md hard rule #7).
 
 **Wire shape.** Line-delimited JSON-RPC: one ``json.dumps(frame) + "\\n"`` per
 frame in each direction, matching the reference plugin
-(``plugins/alfred_comms_test/main.py``) and the ``alfred_web_fetch`` /
-``alfred_quarantined_llm`` plugins. This is a DIFFERENT framing + conversation
+(``plugins/alfred_comms_test/main.py``) and the ``alfred_quarantined_llm``
+plugin. This is a DIFFERENT framing + conversation
 shape from the length-prefixed :class:`StdioTransport`; the two are not
 interchangeable, so the patterns below are mirrored, not reused.
 
