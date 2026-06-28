@@ -7,7 +7,8 @@
   [ADR-0036](0036-gateway-adapter-hosting-inversion.md) (gateway privilege model — gateway holds no `CapabilityGateNonce`),
   [ADR-0039](0039-gateway-adapter-inbound-bridge.md) (gateway adapter inbound bridge),
   epic [#333](https://github.com/alfred-os/AlfredOS/issues/333) (Spec C),
-  issue [#339](https://github.com/alfred-os/AlfredOS/issues/339) (per-user fairness / live wiring)
+  issue [#339](https://github.com/alfred-os/AlfredOS/issues/339) (per-user fairness / live wiring),
+  issue [#347](https://github.com/alfred-os/AlfredOS/issues/347) (the deferred-residual merge-blockers on #339's first live caller)
 - **Supersedes**: —
 
 > **ADR-0040 reservation note.** ADR-0040 is reserved for the comprehensive Spec-C egress ADR
