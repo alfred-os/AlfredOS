@@ -496,9 +496,11 @@ jobs:
         # (gateway/egress_relay.py — in-memory-stream + fake-client unit tests), and
         # the relay audit vocab (gateway/egress_relay_audit.py — structlog vocab).
         # All three reach 100% from unit data, so they gate here in the unit job too.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != ''
+        # G7-2c-1 adds the in-core relay client (egress/relay_client.py) — pure
+        # asyncio, no Postgres; fully covered by unit data, so it gates here too.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != ''
         run: |
-          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py' --fail-under=100
+          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py' --fail-under=100
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
@@ -1639,9 +1641,11 @@ jobs:
         # committed_no_response branch is exercised only by the Postgres integration
         # tests, so it reaches 100% ONLY on this combined (unit + integration) data —
         # it is deliberately absent from the python-job ``(unit)`` step above (TE-2).
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/memory/egress_idempotency.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != ''
+        # G7-2c-1 adds the in-core relay client (egress/relay_client.py) — pure asyncio,
+        # 100% covered by unit data; mirrored here for parity per the two-gates pattern.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/memory/egress_idempotency.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != ''
         run: |
-          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/memory/egress_idempotency.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py' --fail-under=100
+          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/memory/egress_idempotency.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py' --fail-under=100
 
   smoke:
     name: Smoke (end-to-end)

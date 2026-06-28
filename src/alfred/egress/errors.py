@@ -59,4 +59,27 @@ class EgressDeniedError(AlfredError):
         super().__init__(t("egress.denied", destination=destination, reason=deny_reason))
 
 
-__all__ = ["EgressDeniedError", "EgressRelayUnavailableError", "IOPlaneUnavailableError"]
+class EgressInDoubtError(AlfredError):
+    """A prior fire for this egress-id is in-doubt (committed_no_response) and the
+    caller did not declare the request idempotent.
+
+    Refuses by default (Spec C §5 H3): re-firing a non-idempotent call whose
+    outcome is unknown risks a double side-effect. The relay client raises this
+    when ``commit_intent`` returns ``IntentInDoubt`` and ``_RawToolRequest.idempotent``
+    is ``False``. For idempotent refires, the client forwards ``egress_id`` as the
+    remote ``Idempotency-Key`` header instead of raising.
+    """
+
+    reason = "egress_in_doubt"
+
+    def __init__(self, *, destination: str) -> None:
+        self.destination = destination
+        super().__init__(t("egress.in_doubt", destination=destination))
+
+
+__all__ = [
+    "EgressDeniedError",
+    "EgressInDoubtError",
+    "EgressRelayUnavailableError",
+    "IOPlaneUnavailableError",
+]
