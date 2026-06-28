@@ -48,12 +48,10 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchCanaryTripped,
     WebFetchDomainNotAllowed,
     WebFetchError,
-    WebFetchInternalIPRefused,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
     WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
-    WebFetchTlsError,
 )
 from alfred.plugins.web_fetch.rate_limit import RateLimitConfig, RateLimiter
 from alfred.security.tiers import T3
@@ -119,11 +117,9 @@ __all__ = [
     "WebFetchCanaryTripped",
     "WebFetchDomainNotAllowed",
     "WebFetchError",
-    "WebFetchInternalIPRefused",
     "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
     "WebFetchRedirectRefused",
     "WebFetchSizeLimitExceeded",
-    "WebFetchTlsError",
     "register_hookpoints",
 ]

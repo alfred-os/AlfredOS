@@ -84,10 +84,6 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"status_code": 301, "redirect_target": "https://internal.example.com/"},
         ("redirect",),
     ),
-    "web.fetch.error.tls_failure": (
-        {"url": "https://example.com/", "detail": "test"},
-        ("tls",),
-    ),
     "web.fetch.error.rate_limited": (
         {"bucket": "per_domain"},
         ("rate limit", "per_domain"),
@@ -104,27 +100,22 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"url": "https://example.com/"},
         ("canary",),
     ),
+    # G7-2.5 Task 7 (#333): ``web.fetch.error.internal_ip_refused`` was removed —
+    # ``WebFetchInternalIPRefused`` class is deleted; the SSRF guard now lives in
+    # the gateway egress relay (``EgressRelayDenyReason.RESOLVED_IP_NOT_GLOBAL``);
+    # the connectivity-free core (Spec C) no longer resolves DNS or raises this
+    # in-core exception.
+    # G7-2.5 Task 7 (#333): ``web.fetch.error.tls_failure`` was removed —
+    # ``WebFetchTlsError`` class is deleted; TLS now originates at the gateway
+    # relay (G7-2b), so the in-core TLS exception no longer exists.
+    # G7-2.5 Task 7 (#333): ``web.fetch.tls.skip_refused_in_non_dev`` was
+    # removed — ``tls_policy.py`` (its only t() call site) is deleted; TLS now
+    # originates at the gateway, so the in-core TlsPolicy refusal no longer exists.
     # G7-2.5 Task 6 (#333): ``web.fetch.error.unexpected_dispatch_shape`` and
     # ``web.fetch.error.plugin_returned_message`` were removed — the re-homed
     # dispatcher no longer drives a plugin subprocess (no ControlResult /
     # dispatch-shape arms), so those t() call sites (and their catalog entries)
     # are gone.
-    "web.fetch.error.internal_ip_refused": (
-        # sec-pr-s3-5-003 / H3 — host-IP allowlist guard against
-        # DNS-rebinding / cloud-metadata SSRF.
-        #
-        # CR-146 major: neither ``url`` nor ``resolved_ip`` is
-        # interpolated into the caller-visible message any more
-        # (leaking the resolved IP turns the refusal into a
-        # metadata-IP / RFC1918 oracle). Kwargs preserved here so a
-        # future regression that re-adds the placeholder gets caught
-        # by the placeholder-leak guard below.
-        {"url": "https://example.com/", "resolved_ip": "10.0.0.1"},
-        ("internal", "ip"),
-    ),
-    # G7-2.5 Task 7 (#333): ``web.fetch.tls.skip_refused_in_non_dev`` was
-    # removed — ``tls_policy.py`` (its only t() call site) is deleted; TLS now
-    # originates at the gateway, so the in-core TlsPolicy refusal no longer exists.
     # G7-2.5 Task 6 (#333): ``web.fetch.error.dispatch_param_invalid`` was
     # removed — the re-homed dispatcher no longer constructs
     # ``WebFetchDispatchParams`` (no host-side param-validation arm), so its
