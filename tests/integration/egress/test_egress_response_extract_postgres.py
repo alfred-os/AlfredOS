@@ -32,6 +32,7 @@ from alfred.egress.egress_response_extract import (
 )
 from alfred.egress.relay_client import Deduplicated, Fired
 from alfred.egress.relay_protocol import EgressResponse, _RawToolRequest
+from alfred.errors import AlfredError
 from alfred.memory.db import session_scope
 from alfred.memory.egress_idempotency import (
     PostgresEgressIdempotencyStore,
@@ -45,7 +46,7 @@ from alfred.security.quarantine import (
 )
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
-from tests.helpers.gates import make_quarantined_extract_chain_gate
+from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
 
 pytestmark = pytest.mark.integration
 
@@ -315,3 +316,73 @@ async def test_replay_handle_returns_deduplicated_without_re_extracting(
     assert row is not None
     assert row["state"] == "committed_with_response"
     assert row["response"] == stored_t2
+
+
+async def test_gate_denial_leaves_ledger_committed_no_response(
+    store: PostgresEgressIdempotencyStore,
+    migrated_url: str,
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """S12: a DENY gate raises before record_response → the real Postgres row STAYS
+    ``committed_no_response``.
+
+    The at-most-once firewall (HARD rules #5/#7) is proven against real Postgres, not
+    just a unit stub: a denied T3 dereference must never store a T2, and the intent row
+    must remain un-finalized so the egress is never recorded as completed.
+    """
+    ctx = TurnEgressContext(adapter_id="ada-deny", inbound_id="in-deny", session_id="sess-deny")
+    call_index = 0
+
+    from alfred.egress.egress_id import compute_body_hash, compute_egress_id
+
+    egress_id = compute_egress_id(ctx, call_index=call_index)
+    await store.commit_intent(
+        egress_id=egress_id,
+        adapter_id=ctx.adapter_id,
+        inbound_id=ctx.inbound_id,
+        session_id=ctx.session_id,
+        call_index=call_index,
+        body_hash=compute_body_hash(""),
+    )
+
+    class _DirectFiredRelay:
+        def __init__(self, _store: Any) -> None:
+            self._ledger = _store
+
+        @property
+        def ledger(self) -> Any:
+            return self._ledger
+
+        async def fire(self, **_kw: Any) -> Fired:
+            return Fired(response=EgressResponse(status=200, headers={}, body=b"raw T3 body"))
+
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_deny_all_gate()  # empty-grant RealGate → check_content_clearance is False
+    mock_extractor = AsyncMock()
+    mock_extractor.extract = AsyncMock()  # must NOT be awaited on a denied dereference
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=_DirectFiredRelay(store),  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,
+        recorder=recorder,
+    )
+
+    with pytest.raises(AlfredError):
+        await extractor_obj.handle(
+            raw_request=_make_raw_request(),
+            ctx=ctx,
+            call_index=call_index,
+            schema=_TestSchema,
+            language="en",
+        )
+
+    # The gate denied BEFORE the extractor ran.
+    mock_extractor.extract.assert_not_awaited()
+
+    # The real ledger row stays committed_no_response — no T2 was stored.
+    row = await _query_row(migrated_url, egress_id)
+    assert row is not None
+    assert row["state"] == "committed_no_response"
+    assert row["response"] is None
