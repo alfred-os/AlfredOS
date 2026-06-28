@@ -1,0 +1,94 @@
+# egress_inflight_and_no_orphan.yaml — dlp_egress adversarial payload.
+# Spec §4.3 / Spec C G7-2c-1 (#333). Schema: tests/adversarial/payload_schema.py.
+#
+# Renamed from handle_cap_exhaustion.yaml when the per-user ContentHandle cap
+# was removed in G7-2.5 (the fused fetch+extract stages T3 in-memory transiently;
+# no Redis handle store). The de-2026-004 corpus id is RETAINED — this entry
+# supersedes the old handle-cap threat and carries the deferred-property obligation.
+#
+# Two related egress fetch+extract resource-integrity threats proved here:
+#
+# (a) No-orphan (C9): a gate-denied OR cancelled fetch MUST NOT leave a raw T3
+#     body alive in the unbounded QuarantineStagingMap. Without the C9 fix
+#     (except BaseException: self._recorder.discard_staged(handle.id) in
+#     EgressResponseExtractor.handle), a gate-denial raises AlfredError BEFORE
+#     the transport drains the staged body → the TaggedContent[T3] for that
+#     handle.id lives in the unbounded map for process lifetime. A
+#     CancelledError from Task 6's action-deadline has the same shape (it is a
+#     BaseException subclass; an except Exception: block would let it escape
+#     without discarding the staged body).
+#
+# (b) In-flight liveness (C1): the EgressResponseExtractor holds ONE shared
+#     QuarantinedExtractor. Concurrent handle() calls MUST NOT deadlock on that
+#     single extractor — the bounded-wait property must hold (asyncio.wait_for
+#     wraps the concurrent gather; a TimeoutError is a FAIL, not a skip).
+#
+# Deferred property (#339 merge-blocker, machine-visible as xfail in test file):
+#   The ACTIVE per-user resource-exhaustion REFUSAL bound (handle_cap=5 → 6th
+#   call refused with WebFetchRateLimited(bucket='handle_cap') BEFORE the plugin
+#   call, Lua-atomic Redis ZADD, spec §7.10 HandleCap) was removed with the
+#   handle-cap in G7-2.5. It is DEFERRED to PR #339 (needs real turn-user;
+#   no production caller until after G7-3). PR #339 MUST reinstate this bound
+#   before merging — the xfail stub in test_egress_no_orphan_and_inflight.py is
+#   an explicit merge-blocker on that PR.
+id: de-2026-004
+category: dlp_egress
+threat: >-
+  A gate-denied or cancelled egress fetch must not orphan a raw T3 body in the
+  unbounded QuarantineStagingMap (C9 no-orphan), and concurrent egress calls must
+  not deadlock on the shared single quarantine child (C1 in-flight liveness). A
+  breach of the no-orphan property leaks TaggedContent[T3] into host-process memory
+  for process lifetime; a deadlock blocks the OODA loop indefinitely.
+note: >-
+  Three sub-scenarios proved here: (a) gate-deny no-orphan — make_deny_all_gate()
+  causes quarantined_to_structured to raise AlfredError at the gate-first check;
+  the except BaseException block in EgressResponseExtractor.handle() calls
+  discard_staged(handle.id); the QuarantineStagingMap is empty on exit.
+  (b) cancellation no-orphan — a CancelledError injected at the
+  extractor.extract() seam (simulating Task 6's action-deadline) propagates through
+  the same except BaseException block; staging map is empty on exit.
+  (c) in-flight liveness — two concurrent handle() calls serialise through the
+  shared single gated extractor without hang; both complete within
+  _LIVENESS_DEADLINE_S. Deferred property (machine-visible xfail, PR #339
+  merge-blocker): per-user resource-exhaustion REFUSAL bound
+  (WebFetchRateLimited(bucket='handle_cap') before network, cap=5 → 6th call
+  refused) was removed with the handle-cap in G7-2.5 and MUST be reinstated
+  before the first live dispatch_web_fetch caller merges on PR #339.
+ingestion_path: web.fetch
+payload:
+  threat_class: "egress_fetch_extract_resource_integrity"
+  sub_scenarios:
+    - "gate_deny_no_orphan"
+    - "cancellation_no_orphan"
+    - "inflight_liveness"
+  deferred_property:
+    id: "per_user_exhaustion_refusal"
+    deferred_to: "PR #339"
+    merge_blocker: true
+    reason: >-
+      Needs the real turn-user the C1 global semaphore lacks;
+      no production caller until #339 (after G7-3). The per-user REFUSAL
+      bound (WebFetchRateLimited(bucket='handle_cap') before network) must
+      be reinstated before the first live dispatch_web_fetch caller merges.
+expected_outcome: refused
+provenance: >-
+  Spec C G7-2c-1 (#333) C9 no-orphan fix: EgressResponseExtractor.handle()
+  wraps quarantined_to_structured in except BaseException to discard any staged T3
+  body on gate-deny, extract failure, or CancelledError — preventing the unbounded
+  QuarantineStagingMap from accumulating unreachable TaggedContent[T3] entries.
+  C1 in-flight liveness: the shared single QuarantinedExtractor serialises concurrent
+  extractions without deadlock (asyncio.Lock in the gated extractor; mirrors
+  test_quarantine_contention.py's full-stack proof). The per-user resource-exhaustion
+  REFUSAL bound from the original de-2026-004 (handle_cap=5, WebFetchRateLimited
+  before network) is deferred to PR #339 as a merge-blocker and is machine-visible
+  as a @pytest.mark.xfail(strict=False) stub in the test file.
+references:
+  - "Spec C G7-2c-1 (#333) — EgressResponseExtractor C9 no-orphan fix"
+  - "src/alfred/egress/egress_response_extract.py EgressResponseExtractor.handle except BaseException"
+  - "src/alfred/security/quarantine_transport.py T3BodyRecorder.discard_staged"
+  - "tests/integration/egress/test_quarantine_contention.py — C1 in-flight liveness full-stack proof"
+  - "tests/unit/egress/test_egress_response_extract.py tests 8+9 — C9 unit-level proofs"
+  - "CLAUDE.md security rule #7 no silent failures in security paths"
+  - "PR #339 merge-blocker — per-user exhaustion refusal reinstatement (task-9-brief.md §Step 3)"
+  - "CWE-400 Uncontrolled Resource Consumption — https://cwe.mitre.org/data/definitions/400.html"
+  - "CWE-833 Deadlock — https://cwe.mitre.org/data/definitions/833.html"
