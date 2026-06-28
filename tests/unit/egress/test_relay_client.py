@@ -34,6 +34,7 @@ from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
 from alfred.egress.egress_id import (
     EgressIdIntegrityError,
     TurnEgressContext,
+    compute_request_descriptor,
 )
 from alfred.egress.errors import EgressDeniedError, EgressInDoubtError, IOPlaneUnavailableError
 from alfred.egress.relay_client import Deduplicated, Fired, RelayEgressClient
@@ -58,6 +59,17 @@ from alfred.security.dlp import OutboundCanaryTripped
 _CTX = TurnEgressContext(adapter_id="ada-1", inbound_id="in-1", session_id="sess-1")
 _RELAY_URL = "tcp://localhost:9999"
 _CALL_INDEX = 0
+
+# A valid 64-char lowercase-hex request_descriptor (compute_request_descriptor).
+# fire() now REQUIRES it (the empty default was the C6 bypass) and validates the
+# shape, so every fire() call site passes this canonical value.
+_DESCRIPTOR = compute_request_descriptor(
+    method="POST", url="https://api.example.com/data", schema_id="m.S:v1"
+)
+# A SECOND distinct valid descriptor for the divergent-descriptor integrity test.
+_DESCRIPTOR_B = compute_request_descriptor(
+    method="GET", url="https://api.example.com/data", schema_id="m.S:v1"
+)
 
 
 def _make_raw_request(
@@ -297,7 +309,9 @@ async def test_fresh_fire_sends_correct_frame_and_returns_fired() -> None:
     client = _make_client(open_connection=open_conn, audit=audit)
 
     raw = _make_raw_request(body="RAW: secret data")
-    outcome = await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+    outcome = await client.fire(
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+    )
 
     assert isinstance(outcome, Fired)
     assert outcome.response == resp
@@ -336,7 +350,9 @@ async def test_fresh_fire_body_is_dlp_redacted() -> None:
 
     client = _make_client(open_connection=_capture_open)
     raw = _make_raw_request(body="RAW: some sensitive value")
-    await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+    await client.fire(
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+    )
 
     # Decode the written frame: 4-byte prefix + JSON payload
     assert written_frames, "no bytes written to connection"
@@ -373,7 +389,9 @@ async def test_replay_complete_returns_deduplicated_without_dialing() -> None:
         audit=audit,
     )
     raw = _make_raw_request()
-    outcome = await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+    outcome = await client.fire(
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+    )
 
     assert isinstance(outcome, Deduplicated)
     assert outcome.stored_t2 == "stored_t2"
@@ -405,7 +423,9 @@ async def test_indoubt_non_idempotent_raises_and_audits() -> None:
     )
     raw = _make_raw_request(idempotent=False)
     with pytest.raises(EgressInDoubtError) as exc_info:
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     err = exc_info.value
     assert err.egress_id, "EgressInDoubtError must carry the egress_id (M7)"
@@ -457,7 +477,9 @@ async def test_indoubt_idempotent_refires_with_idempotency_key_header() -> None:
         audit=audit,
     )
     raw = _make_raw_request(idempotent=True)
-    outcome = await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+    outcome = await client.fire(
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+    )
 
     assert isinstance(outcome, Fired)
     assert outcome.response == resp
@@ -493,7 +515,9 @@ async def test_integrity_error_propagates_without_dialing() -> None:
     )
     raw = _make_raw_request()
     with pytest.raises(EgressIdIntegrityError):
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     assert not dialed
 
@@ -515,7 +539,9 @@ async def test_unreachable_relay_raises_io_plane_unavailable_and_audits() -> Non
     raw = _make_raw_request()
 
     with pytest.raises(IOPlaneUnavailableError):
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     assert len(audit.calls) == 1
     assert audit.calls[0]["result"] == "io_plane_unavailable"
@@ -535,7 +561,9 @@ async def test_truncated_reply_raises_io_plane_unavailable_and_audits() -> None:
     raw = _make_raw_request()
 
     with pytest.raises(IOPlaneUnavailableError):
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     assert len(audit.calls) == 1
     assert audit.calls[0]["result"] == "io_plane_unavailable"
@@ -556,7 +584,9 @@ async def test_deny_frame_raises_egress_denied_and_audits() -> None:
     raw = _make_raw_request()
 
     with pytest.raises(EgressDeniedError) as exc_info:
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     err = exc_info.value
     assert err.deny_reason == str(deny_reason)
@@ -622,14 +652,17 @@ async def test_concurrent_fire_does_not_head_of_line_block() -> None:
     ctx1 = TurnEgressContext(adapter_id="ada-1", inbound_id="in-1", session_id="sess-1")
     ctx2 = TurnEgressContext(adapter_id="ada-2", inbound_id="in-2", session_id="sess-2")
 
-    t1 = asyncio.create_task(client.fire(raw_request=raw1, ctx=ctx1, call_index=0))
+    t1 = asyncio.create_task(
+        client.fire(raw_request=raw1, ctx=ctx1, call_index=0, request_descriptor=_DESCRIPTOR)
+    )
 
     # Wait for the first fire to enter the gateway open_connection (gated).
     await asyncio.wait_for(first_started.wait(), timeout=5.0)
 
     # Second fire should complete immediately (its slot is free).
     outcome2 = await asyncio.wait_for(
-        client.fire(raw_request=raw2, ctx=ctx2, call_index=0), timeout=5.0
+        client.fire(raw_request=raw2, ctx=ctx2, call_index=0, request_descriptor=_DESCRIPTOR),
+        timeout=5.0,
     )
     try:
         assert isinstance(outcome2, Fired)
@@ -686,7 +719,9 @@ async def test_malformed_reply_frame_raises_io_plane_unavailable_and_audits() ->
     raw = _make_raw_request()
 
     with pytest.raises(IOPlaneUnavailableError):
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     assert len(audit.calls) == 1
     assert audit.calls[0]["result"] == "io_plane_unavailable"
@@ -771,7 +806,9 @@ async def test_audit_row_is_payload_blind_for_malformed_url() -> None:
     raw = _make_raw_request(url="not-a-valid-url", idempotent=False)
 
     with pytest.raises(EgressInDoubtError):
-        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     assert len(audit.calls) == 1
     subject = audit.calls[0]["subject"]
@@ -825,7 +862,9 @@ async def test_canary_tripped_propagates_without_committing_intent() -> None:
     raw = _make_raw_request()
 
     with pytest.raises(OutboundCanaryTripped):
-        await canary_client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+        await canary_client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
 
     assert not committed, "commit_intent must NOT be reached when canary trips before it"
     assert len(audit.calls) == 0, "no audit row should be written for a canary trip"
@@ -863,7 +902,9 @@ async def test_timeout_expiry_raises_io_plane_unavailable_and_audits() -> None:
 
     with pytest.raises(IOPlaneUnavailableError):
         await asyncio.wait_for(
-            client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX),
+            client.fire(
+                raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+            ),
             timeout=2.0,
         )
 
@@ -920,7 +961,12 @@ async def test_wait_closed_failure_in_teardown_is_swallowed() -> None:
         return reader, _BadCloseWriter()
 
     client = _make_client(open_connection=_open)
-    outcome = await client.fire(raw_request=_make_raw_request(), ctx=_CTX, call_index=_CALL_INDEX)
+    outcome = await client.fire(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        request_descriptor=_DESCRIPTOR,
+    )
     # The teardown error is swallowed; the successful Fired result survives intact.
     assert isinstance(outcome, Fired)
 
@@ -967,7 +1013,12 @@ async def test_wait_closed_hang_is_bounded_by_the_per_call_timeout() -> None:
         per_call_timeout=0.1,
     )
     outcome = await asyncio.wait_for(
-        client.fire(raw_request=_make_raw_request(), ctx=_CTX, call_index=_CALL_INDEX),
+        client.fire(
+            raw_request=_make_raw_request(),
+            ctx=_CTX,
+            call_index=_CALL_INDEX,
+            request_descriptor=_DESCRIPTOR,
+        ),
         timeout=5.0,
     )
     assert isinstance(outcome, Fired)
@@ -985,8 +1036,8 @@ async def test_different_request_descriptor_causes_integrity_error() -> None:
     different body_hash → EgressIdIntegrityError on the second fire.
 
     Uses _HashTrackingLedger which mirrors the real store's integrity guard.
-    Both fires use an empty body so compute_body_hash(descriptor + "") is
-    the only variable — proving that request_descriptor is folded in.
+    Both fires use the same empty body + headers so the request_descriptor is the
+    only variable — proving that request_descriptor is folded into the body_hash.
     """
     resp = _make_resp(b"ok")
     open_conn_a = await _make_open_connection(EgressRelayReply(response=resp))
@@ -997,15 +1048,15 @@ async def test_different_request_descriptor_causes_integrity_error() -> None:
     # Raw requests with empty bodies; only request_descriptor changes.
     raw = _make_raw_request(body="")
 
-    # First fire with descriptor "desc-A" — should succeed (IntentFresh).
+    # First fire with descriptor _DESCRIPTOR — should succeed (IntentFresh).
     await client.fire(
-        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor="desc-A"
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
     )
 
-    # Second fire with descriptor "desc-B" — same egress_id, different body_hash.
+    # Second fire with a DIVERGENT descriptor — same egress_id, different body_hash.
     with pytest.raises(EgressIdIntegrityError):
         await client.fire(
-            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor="desc-B"
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR_B
         )
 
 
@@ -1031,8 +1082,103 @@ async def test_same_descriptor_replay_complete_returns_deduplicated() -> None:
         raw_request=raw,
         ctx=_CTX,
         call_index=_CALL_INDEX,
-        request_descriptor="desc-A",
+        request_descriptor=_DESCRIPTOR,
     )
 
     assert isinstance(outcome, Deduplicated)
     assert outcome.stored_t2 == "stored_t2"
+
+
+# ---------------------------------------------------------------------------
+# C6 — divergent method / schema / headers each fire EgressIdIntegrityError at
+#      the same (ctx, call_index) (the C6 integrity contract; CR-1 + CR-cloud-3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_divergent_method_descriptor_causes_integrity_error() -> None:
+    """Same (ctx, call_index) + same body/headers, but a descriptor that differs
+    only by HTTP METHOD → different body_hash → EgressIdIntegrityError."""
+    resp = _make_resp(b"ok")
+    open_conn = await _make_open_connection(EgressRelayReply(response=resp))
+    client = _make_client(ledger=_HashTrackingLedger(), open_connection=open_conn)
+    raw = _make_raw_request(body="")
+
+    desc_get = compute_request_descriptor(method="GET", url="https://x.test/a", schema_id="m.S:v1")
+    desc_post = compute_request_descriptor(
+        method="POST", url="https://x.test/a", schema_id="m.S:v1"
+    )
+    assert desc_get != desc_post  # the descriptors themselves diverge on method
+
+    await client.fire(
+        raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=desc_get
+    )
+    with pytest.raises(EgressIdIntegrityError):
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=desc_post
+        )
+
+
+@pytest.mark.asyncio
+async def test_divergent_schema_descriptor_causes_integrity_error() -> None:
+    """A descriptor that differs only by SCHEMA identity → EgressIdIntegrityError."""
+    resp = _make_resp(b"ok")
+    open_conn = await _make_open_connection(EgressRelayReply(response=resp))
+    client = _make_client(ledger=_HashTrackingLedger(), open_connection=open_conn)
+    raw = _make_raw_request(body="")
+
+    desc_v1 = compute_request_descriptor(method="GET", url="https://x.test/a", schema_id="m.S:v1")
+    desc_v2 = compute_request_descriptor(method="GET", url="https://x.test/a", schema_id="m.S:v2")
+
+    await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=desc_v1)
+    with pytest.raises(EgressIdIntegrityError):
+        await client.fire(
+            raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=desc_v2
+        )
+
+
+@pytest.mark.asyncio
+async def test_divergent_headers_cause_integrity_error() -> None:
+    """Same descriptor + same body, but DIFFERENT redacted headers at the same
+    (ctx, call_index) → different body_hash → EgressIdIntegrityError.
+
+    Proves the redacted headers are folded into the C6 integrity hash, so a
+    divergent-header replay (e.g. a swapped Authorization value) cannot short-
+    circuit on the old body-only hash."""
+    resp = _make_resp(b"ok")
+    open_conn = await _make_open_connection(EgressRelayReply(response=resp))
+    client = _make_client(ledger=_HashTrackingLedger(), open_connection=open_conn)
+
+    raw_a = _RawToolRequest(
+        method="POST", url="https://api.example.com/data", headers={"accept": "a"}, body=""
+    )
+    raw_b = _RawToolRequest(
+        method="POST", url="https://api.example.com/data", headers={"accept": "b"}, body=""
+    )
+
+    await client.fire(
+        raw_request=raw_a, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+    )
+    with pytest.raises(EgressIdIntegrityError):
+        await client.fire(
+            raw_request=raw_b, ctx=_CTX, call_index=_CALL_INDEX, request_descriptor=_DESCRIPTOR
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["", "desc-A", "ABC123", "g" * 64, "a" * 63, "a" * 65])
+async def test_fire_rejects_malformed_request_descriptor(bad: str) -> None:
+    """A request_descriptor that is not 64-char lowercase-hex fails loud (ValueError)
+    BEFORE any dial — closing the C6 bypass the old empty default opened."""
+
+    async def _should_not_dial(host: str, port: int) -> Any:
+        raise AssertionError("must not dial on a malformed descriptor")
+
+    client = _make_client(open_connection=_should_not_dial)
+    with pytest.raises(ValueError, match="request_descriptor"):
+        await client.fire(
+            raw_request=_make_raw_request(),
+            ctx=_CTX,
+            call_index=_CALL_INDEX,
+            request_descriptor=bad,
+        )

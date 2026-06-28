@@ -180,6 +180,26 @@ async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
     raise AssertionError("EgressRelay did not become ready within 2.5 s")
 
 
+async def _await_bound_port(relay: Any, serve_task: asyncio.Task[Any]) -> int:
+    """Poll until ``relay`` reports its OS-assigned bound port (``port=0`` bind).
+
+    Eliminates the close-then-rebind free-port TOCTOU: bind the relay to port 0,
+    then read the actual port back off ``relay.bound_port`` once :meth:`serve`
+    has bound it. Re-raises a bind error if ``serve_task`` exits early.
+
+    Raises ``AssertionError`` if the relay does not report a port within
+    2.5 seconds (500 x 5 ms).
+    """
+    for _ in range(500):
+        if serve_task.done():
+            await serve_task  # re-raise a bind error rather than spinning
+        port: int | None = relay.bound_port
+        if port is not None:
+            return port
+        await asyncio.sleep(0.005)
+    raise AssertionError("EgressRelay did not report a bound port within 2.5 s")
+
+
 class _CapturingAuditWriter:
     """AuditWriter stub that captures every ``append_schema`` call into ``rows``.
 
@@ -214,6 +234,7 @@ __all__ = [
     "_FakeResponse",
     "_FireCounter",
     "_NullAuditWriter",
+    "_await_bound_port",
     "_await_relay_ready",
     "make_fake_external_world",
 ]

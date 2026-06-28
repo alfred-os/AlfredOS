@@ -468,3 +468,60 @@ def test_t3_body_recorder_discard_staged(
 
     # A second discard is a no-op — must not raise even though handle is gone.
     recorder.discard_staged(handle.id)
+
+
+def test_staging_map_discard_is_silent_non_raising_no_op(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """``QuarantineStagingMap.discard`` removes a present handle and is a no-op
+    (never raises) on an absent one — and, unlike ``drain``, it is NON-logging."""
+    staging = QuarantineStagingMap()
+    staging.stage("h1", _tag(authorized_t3_nonce, "body"))
+
+    # Present handle → removed.
+    staging.discard("h1")
+    assert "h1" not in staging._staged
+    with pytest.raises(StagingHandleNotConfiguredError):
+        staging.drain("h1")
+
+    # Absent handle → silent no-op (no raise).
+    staging.discard("never-staged")
+
+
+def test_discard_staged_on_drained_handle_emits_no_warning(
+    authorized_t3_nonce: CapabilityGateNonce,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C9 happy-path: ``discard_staged`` on an already-drained handle emits NO
+    ``security.quarantine_staging.handle_not_configured`` warning and does not raise.
+
+    The OutboundDlp extractor drains the staged body on the success path; C9's
+    unconditional ``except BaseException`` cleanup then calls ``discard_staged`` on
+    the already-gone handle. Routing that through the loud ``drain`` (old behaviour)
+    logged a warning + would have raised — false security noise on a benign cleanup.
+    ``discard`` is silent.
+    """
+    import alfred.security.quarantine_transport as qt
+
+    warnings: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        qt._log,
+        "warning",
+        lambda *a, **k: warnings.append((a, k)),  # type: ignore[arg-type]
+    )
+
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    handle = _make_handle()
+    recorder(handle=handle, body="attack payload")
+
+    # Simulate the success path: the extractor already drained the body.
+    staging.drain(handle.id)
+    assert warnings == [], "the happy-path drain itself must not warn"
+
+    # C9 cleanup on the already-drained handle: silent + no raise.
+    recorder.discard_staged(handle.id)
+    assert warnings == [], (
+        "discard_staged on an already-drained handle must NOT emit "
+        "security.quarantine_staging.handle_not_configured (false security noise)"
+    )

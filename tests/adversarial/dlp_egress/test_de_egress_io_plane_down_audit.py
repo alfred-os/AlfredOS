@@ -37,7 +37,7 @@ import yaml
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
-from alfred.egress.egress_id import TurnEgressContext
+from alfred.egress.egress_id import TurnEgressContext, compute_request_descriptor
 from alfred.egress.errors import EgressDeniedError, EgressInDoubtError
 from alfred.egress.relay_client import RelayEgressClient
 from alfred.egress.relay_protocol import EgressRelayDenyReason, _RawToolRequest
@@ -52,6 +52,11 @@ from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.egress_doubles import _await_relay_ready, _CapturingAuditWriter
 
 _PAYLOAD_PATH = Path(__file__).parent / "de_egress_io_plane_down_audit.yaml"
+
+# A valid 64-char lowercase-hex request_descriptor — fire() requires + validates it.
+_DESCRIPTOR = compute_request_descriptor(
+    method="GET", url="https://safe-upstream.example/tool", schema_id="m.S:v1"
+)
 
 
 def _load_payload() -> AdversarialPayload:
@@ -144,7 +149,9 @@ async def test_relay_unreachable_emits_audit_row_before_raise(
     )
 
     with pytest.raises(RelayIOPlaneUnavailableError):
-        await relay_client.fire(raw_request=raw_request, ctx=ctx, call_index=0)
+        await relay_client.fire(
+            raw_request=raw_request, ctx=ctx, call_index=0, request_descriptor=_DESCRIPTOR
+        )
 
     # Exactly one security.egress_relay_refused audit row — proves the row was
     # committed synchronously BEFORE the exception propagated (HARD rule #7).
@@ -223,7 +230,9 @@ async def test_gateway_deny_emits_audit_row_before_raise(
 
     try:
         with pytest.raises(EgressDeniedError) as exc_info:
-            await relay_client.fire(raw_request=raw_request, ctx=ctx, call_index=0)
+            await relay_client.fire(
+                raw_request=raw_request, ctx=ctx, call_index=0, request_descriptor=_DESCRIPTOR
+            )
 
         # The upstream must NOT have been reached.
         assert fire_counter.value == 0
@@ -304,7 +313,9 @@ async def test_in_doubt_emits_audit_row_before_raise(
     )
 
     with pytest.raises(EgressInDoubtError):
-        await relay_client.fire(raw_request=raw_request, ctx=ctx, call_index=0)
+        await relay_client.fire(
+            raw_request=raw_request, ctx=ctx, call_index=0, request_descriptor=_DESCRIPTOR
+        )
 
     # Exactly one security.egress_relay_refused audit row — proves the row was
     # committed BEFORE the exception propagated (HARD rule #7).

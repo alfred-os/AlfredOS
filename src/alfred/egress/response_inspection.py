@@ -50,7 +50,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from alfred.egress.relay_protocol import EgressResponse
 from alfred.errors import AlfredError
@@ -105,6 +105,8 @@ class ResponsePolicy(BaseModel, frozen=True):
 
     ``mime_allowlist``
         Set of bare MIME types (no parameters) that are allowed through.
+        Normalised to lowercase at construction so an operator who configures
+        ``"Text/HTML"`` still matches the lowercased parsed ``Content-Type``.
         ``Content-Type`` is parsed case-insensitively; charset/boundary/etc.
         parameters are stripped.  A missing or duplicate ``Content-Type``
         header fails closed (→ :class:`_SoftRefusal`).
@@ -117,7 +119,7 @@ class ResponsePolicy(BaseModel, frozen=True):
     ``canary``
         Compiled :class:`~alfred.security.canary_matcher.CanaryMatcher`; ``None``
         means the canary step is skipped.  When set, the raw bytes are decoded
-        with ``errors="replace"`` for matching only.
+        byte-losslessly (latin-1) for matching only.
     """
 
     mime_allowlist: frozenset[str]
@@ -125,6 +127,16 @@ class ResponsePolicy(BaseModel, frozen=True):
     canary: CanaryMatcher | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator("mime_allowlist", mode="before")
+    @classmethod
+    def _lowercase_mime_allowlist(cls, value: object) -> object:
+        """Lowercase every allowlisted MIME so casing in operator config never
+        diverges from the lowercased parsed ``Content-Type`` (CR-2).
+        """
+        if isinstance(value, (frozenset, set, list, tuple)):
+            return frozenset(str(item).lower() for item in value)
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +175,14 @@ class InboundCanaryTripped(AlfredError):  # noqa: N818 -- SECURITY EVENT, name p
 def _host_only(url: str) -> str:
     """Extract the bare hostname for audit attribution (payload-blind).
 
-    Mirrors
-    :meth:`~alfred.egress.relay_client.RelayEgressClient._destination_for_audit`:
-    returns hostname only — never a path or query — so a malformed URL cannot
-    sneak body content into an error message or audit row.
+    Returns the parsed ``hostname`` ONLY — never a path, query, or the raw
+    ``netloc`` (which can carry attacker ``user:pass@`` userinfo or a ``:port``).
+    A URL with no parseable hostname collapses to ``"<invalid-url>"`` so a
+    malformed URL cannot sneak userinfo/port/body content into an error message
+    or audit row.
     """
     parsed = urllib.parse.urlsplit(url)
-    return parsed.hostname or parsed.netloc or "<invalid-url>"
+    return parsed.hostname or "<invalid-url>"
 
 
 def _parse_content_type(headers: Mapping[str, str]) -> str | None:
@@ -208,7 +221,7 @@ def inspect_response(
 
     **Order (load-bearing)**:
 
-    1. Canary scan on raw bytes (decode with ``errors="replace"`` for the
+    1. Canary scan on raw bytes (byte-lossless latin-1 decode for the
        :class:`~alfred.security.canary_matcher.CanaryMatcher`).
     2. MIME-type check (fail closed on missing/garbage ``Content-Type``).
     3. Size cap check.
@@ -218,8 +231,14 @@ def inspect_response(
     the three verdict dataclasses.
     """
     # Step 1: Canary scan (raw bytes decoded to str for the string-based matcher).
+    #
+    # SECURITY (G7-2.5 C12): decode latin-1 (byte-LOSSLESS — every byte 0-255 maps
+    # to one code point, never raises). A lossy ``errors="replace"`` decode collapses
+    # each invalid byte sequence to a single U+FFFD, which can MERGE byte-adjacent
+    # tokens and let a canary that sits next to invalid-UTF-8 bytes slip the matcher.
+    # Canary tokens are ASCII, so latin-1 preserves them exactly for the match.
     if policy.canary is not None:
-        decoded_for_canary = response.body.decode("utf-8", errors="replace")
+        decoded_for_canary = response.body.decode("latin-1")
         if policy.canary.first_match(decoded_for_canary) is not None:
             return _CanaryHit()
 

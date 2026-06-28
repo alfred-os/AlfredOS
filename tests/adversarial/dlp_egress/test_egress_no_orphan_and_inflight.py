@@ -7,7 +7,7 @@ original de-2026-004 proved an ACTIVE per-user resource-exhaustion REFUSAL bound
 ``WebFetchRateLimited(bucket='handle_cap')`` BEFORE the plugin call). That property
 is DEFERRED to PR #339 (needs the real turn-user the C1 global semaphore lacks; no
 production caller until after G7-3) and is machine-visible here as a
-``@pytest.mark.xfail(strict=False)`` stub that is an explicit **merge-blocker on
+``@pytest.mark.xfail(strict=True)`` stub that is an explicit **merge-blocker on
 PR #339**.
 
 Two properties exercised here — both are release-blocking:
@@ -323,6 +323,12 @@ async def test_cancellation_no_orphan(authorized_t3_nonce: CapabilityGateNonce) 
             language=None,
         )
 
+    # CR-cloud-10: the CancelledError must actually REACH extract() (i.e. land
+    # inside the ``try:`` at ``quarantined_to_structured``), not somewhere earlier —
+    # otherwise the test would pass even if the cancellation never exercised the
+    # except-BaseException discard path.
+    mock_extractor.extract.assert_awaited_once()
+
     # C9 invariant: no orphaned T3 body in the staging map.
     assert len(staging._staged) == 0, (
         "No-orphan BREACH (cancellation): staging map non-empty after CancelledError — "
@@ -453,7 +459,10 @@ async def test_inflight_liveness_concurrent_handles_no_deadlock(
         "(Lua-atomic Redis ZADD, handle_cap=5 → 6th call refused, spec §7.10) "
         "MUST be reinstated before the first live caller merges on #339."
     ),
-    strict=False,
+    # CR-16: strict=True — the body raises today (XFAIL). When #339 reinstates the
+    # property the body will pass → XPASS → strict turns the XPASS into a FAILURE,
+    # mechanically forcing this stub's removal rather than leaving a silent XPASS.
+    strict=True,
 )
 def test_per_user_exhaustion_refusal_deferred_to_339() -> None:
     """Deferred: per-user WebFetchRateLimited(bucket='handle_cap') refusal before network.
@@ -476,7 +485,7 @@ def test_per_user_exhaustion_refusal_deferred_to_339() -> None:
       - Has access to the real turn-user context the per-user cap requires.
       - MUST reinstate the per-user REFUSAL bound BEFORE merging.
 
-    Until then this test is a ``@pytest.mark.xfail(strict=False)`` stub — CI
+    Until then this test is a ``@pytest.mark.xfail(strict=True)`` stub — CI
     surfaces it as a machine-visible known-gap (XFAIL), not prose a reviewer may
     miss.  When PR #339 reinstates the property:
 
@@ -486,7 +495,8 @@ def test_per_user_exhaustion_refusal_deferred_to_339() -> None:
        ``WebFetchRateLimited(bucket='handle_cap')`` before the plugin call).
     2. Update ``expected_outcome`` in the YAML to ``audit_row_emitted`` (or
        add a sub-scenario) once the audit row is re-verified.
-    3. Flip ``strict=False`` → ``strict=True`` once the property consistently passes.
+    3. The mark is already ``strict=True``: once the reinstated body passes, the
+       XPASS becomes a strict FAILURE that forces this step.
     4. Remove the ``xfail`` mark entirely once stable.
 
     **PR #339 merge-blocker**: do NOT merge PR #339 until this xfail is converted

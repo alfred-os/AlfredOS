@@ -41,7 +41,11 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import pydantic
 
 from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
-from alfred.egress.egress_id import TurnEgressContext, compute_body_hash, compute_egress_id
+from alfred.egress.egress_id import (
+    TurnEgressContext,
+    compute_egress_body_hash,
+    compute_egress_id,
+)
 from alfred.egress.errors import (
     EgressDeniedError,
     EgressInDoubtError,
@@ -83,6 +87,30 @@ _DEFAULT_MAX_FRAME_LEN: int = 64 * 1024 * 1024  # 64 MiB
 # Stable closed-vocab audit event name (never localised — audit tokens are English).
 _AUDIT_EVENT: Final[str] = "security.egress_relay_refused"
 _AUDIT_SCHEMA_NAME: Final[str] = "EGRESS_RELAY_REFUSED_FIELDS"
+
+# A request_descriptor MUST be a 64-char lowercase-hex sha256 digest
+# (compute_request_descriptor). The C6 integrity contract requires the
+# (method, url, schema_id) identity to be folded into the body hash; a
+# malformed/empty descriptor would let a caller bypass it (G7-2.5 C6).
+_HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdef")
+_DESCRIPTOR_LEN: Final[int] = 64
+
+
+def _require_request_descriptor(request_descriptor: str) -> None:
+    """Fail loud (ValueError) unless ``request_descriptor`` is a 64-char lowercase-hex digest.
+
+    A non-conforming descriptor is a programming-contract violation: C2 must
+    compute it via :func:`~alfred.egress.egress_id.compute_request_descriptor`.
+    Refusing here closes the C6 bypass an empty/short descriptor would open
+    (the old ``request_descriptor=""`` default).
+    """
+    if len(request_descriptor) != _DESCRIPTOR_LEN or any(
+        c not in _HEX_DIGITS for c in request_descriptor
+    ):
+        raise ValueError(
+            "request_descriptor must be a 64-char lowercase-hex sha256 digest "
+            "(compute_request_descriptor) — the C6 integrity contract requires it"
+        )
 
 
 @dataclass(frozen=True)
@@ -176,11 +204,17 @@ class RelayEgressClient:
         raw_request: _RawToolRequest,
         ctx: TurnEgressContext,
         call_index: int,
-        request_descriptor: str = "",
+        request_descriptor: str,
     ) -> RelayOutcome:
         """Execute one egress call through the gateway relay.
 
+        ``request_descriptor`` is REQUIRED (no default): a 64-char lowercase-hex
+        sha256 digest C2 computes via ``compute_request_descriptor`` from
+        ``(method, url, schema_id)``. A malformed/empty value fails loud
+        (``ValueError``) — closing the C6 bypass an empty default would open.
+
         See module docstring for the exact flow. Raises:
+        - ``ValueError`` — request_descriptor is not a 64-char lowercase-hex digest.
         - ``EgressIdIntegrityError`` — same logical slot, different body hash
           (let it propagate; the ledger detected a non-deterministic re-run).
         - ``EgressInDoubtError`` — in-doubt + non-idempotent (refused by policy).
@@ -188,17 +222,26 @@ class RelayEgressClient:
           timeout.
         - ``EgressDeniedError`` — gateway deny frame (allowlist / DLP / SSRF).
         """
+        # Step 0: contract guard — a bad descriptor cannot fold the C6 identity in.
+        _require_request_descriptor(request_descriptor)
+
         # Step 1: Core-side DLP pass (stage 1+2+3 with broker).
         scanned = self._core_dlp.scan_for_outbound(raw_request.body)
         redacted_text: str = scanned[0]
 
-        # Step 2: Deterministic dedup key + body-hash.
+        # Step 2: Deterministic dedup key + integrity body-hash.
         # ``request_descriptor`` is a fixed-width (64-char) sha256 hex string computed
-        # by C2 from (method, url, schema_id) so a divergent URL/schema replayed at
-        # the same (ctx, call_index) fires EgressIdIntegrityError (Spec C §5 / G7-2.5
-        # C6).  The default "" preserves the synthetic-driver hash for backward compat.
+        # by C2 from (method, url, schema_id); the redacted request HEADERS are folded
+        # in too, so a divergent method/url/schema OR a divergent-header replay at the
+        # same (ctx, call_index) fires EgressIdIntegrityError (Spec C §5 / G7-2.5 C6).
+        # The headers folded are the pre-Idempotency-Key ``raw_request.headers`` so a
+        # legitimate idempotent refire (which only ADDS the key) keeps a stable hash.
         egress_id = compute_egress_id(ctx, call_index=call_index)
-        body_hash = compute_body_hash(request_descriptor + redacted_text)
+        body_hash = compute_egress_body_hash(
+            request_descriptor=request_descriptor,
+            headers=raw_request.headers,
+            redacted_body=redacted_text,
+        )
 
         # Step 3: Commit intent durably BEFORE the fire (commit-then-fire).
         # EgressIdIntegrityError propagates if the same id arrives with a

@@ -305,6 +305,20 @@ class EgressRelay:
         self._response_byte_cap = response_byte_cap
         self._upstream_deadline_s = upstream_deadline_s
         self._conns: set[asyncio.Task[None]] = set()
+        # Set once the listener binds; with ``port=0`` it carries the
+        # OS-assigned ephemeral port (tests read it to dial the relay without a
+        # close-then-rebind free-port TOCTOU). ``None`` until ``serve`` binds.
+        self._bound_port: int | None = None
+
+    @property
+    def bound_port(self) -> int | None:
+        """The actually-bound listener port, or ``None`` before :meth:`serve` binds.
+
+        Equals the configured ``port`` for a fixed port; with ``port=0`` it is the
+        OS-assigned ephemeral port. Lets a caller bind to ``0`` and discover the
+        port WITHOUT a close-then-rebind free-port reservation race.
+        """
+        return self._bound_port
 
     async def serve(self, shutdown_event: asyncio.Event) -> None:
         """Bind + serve the framed endpoint until ``shutdown_event``, then drain.
@@ -315,7 +329,8 @@ class EgressRelay:
         server = await asyncio.start_server(
             self._handle_client, self._bind_host, self._port, limit=_REQUEST_FRAME_CAP
         )
-        _log.info("gateway.egress.relay_serving", bind=self._bind_host, port=self._port)
+        self._bound_port = server.sockets[0].getsockname()[1]
+        _log.info("gateway.egress.relay_serving", bind=self._bind_host, port=self._bound_port)
         try:
             async with server:
                 await shutdown_event.wait()

@@ -349,17 +349,22 @@ def test_rate_limit_bucket_literal_closed_set() -> None:
 
 
 def test_dlp_scan_result_literal_includes_new_values() -> None:
-    """dlp_scan_result's Literal pins the full closed vocabulary after
-    the handle-cap widening (spec §6.2) and the host-side dispatch-
-    params validation widening (#147).
+    """dlp_scan_result's Literal pins the closed vocabulary AFTER the G7-2.5
+    ``web.fetch`` re-home reconciliation (#333).
 
-    Mirrors the ``RateLimitBucket`` pattern (exact-set equality) so a
-    stray extra literal, a dropped existing one, or a typo all surface
-    here — not at a downstream audit-graph consumer. The handle-cap
-    pair (``handle_cap_exceeded`` / ``handle_id_mismatch``) is recorded
-    by PR #160 (issue #157); the dispatch-params value
-    (``dispatch_param_invalid``) is added by PR for issue #147 (#147 spec
-    §4). Update this set in lockstep with the schema.
+    Mirrors the ``RateLimitBucket`` pattern (exact-set equality) so a stray extra
+    literal, a dropped existing one, or a typo all surface here — not at a
+    downstream audit-graph consumer.
+
+    The re-home removed the plugin subprocess, so the whole subprocess
+    ``dlp_scan_result`` family (``scanned_dirty`` / ``transport_error`` /
+    ``dispatch_shape_error`` / ``internal_ip_refused`` / ``redirect_refused`` /
+    ``tls_verification_failed`` / ``fetch_error`` / ``handle_cap_exceeded`` /
+    ``handle_id_mismatch`` / ``dispatch_param_invalid``) is gone — none has a live
+    ``"dlp_scan_result": "<token>"`` emit site after the re-home. The four NEW
+    tokens are the re-homed dispatcher's emits (URL-secret refusal, inbound canary,
+    and the two D1 MIME/size pre-extract policy tokens). Update this set in
+    lockstep with the schema.
     """
     from typing import get_args
 
@@ -367,19 +372,13 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
 
     assert set(get_args(DlpScanResult)) == {
         "clean",
-        "scanned_dirty",
         "dlp_scan_error",
+        "url_secret_refused",  # NEW per G7-2.5
         "domain_not_allowed",
         "rate_limited",
-        "transport_error",
-        "dispatch_shape_error",
-        "internal_ip_refused",
-        "redirect_refused",
-        "tls_verification_failed",
-        "fetch_error",
-        "handle_cap_exceeded",
-        "handle_id_mismatch",
-        "dispatch_param_invalid",  # NEW per #147
+        "inbound_canary_tripped",  # NEW per G7-2.5
+        "mime_type_not_allowed",  # NEW per G7-2.5
+        "size_limit_exceeded",  # NEW per G7-2.5
     }
 
 
