@@ -32,6 +32,7 @@ import pytest
 import yaml
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.egress_response_extract import EgressResponseExtractor
 from alfred.egress.errors import EgressDeniedError
@@ -273,6 +274,13 @@ async def test_gateway_dlp_catches_secret_when_core_dlp_is_noop(
             f"got {len(refused_rows)}: {refused_rows}"
         )
         row = refused_rows[0]
+        # The refused row is payload-blind (HARD rule #5/#7): its subject carries
+        # ONLY the closed-vocab {destination, reason, egress_id} — never the
+        # secret-shaped body the gateway DLP just caught.
+        assert set(row["subject"].keys()) == EGRESS_RELAY_REFUSED_FIELDS, (
+            f"Audit row subject keys must equal {EGRESS_RELAY_REFUSED_FIELDS!r}; "
+            f"got {set(row['subject'].keys())!r}"
+        )
         assert row["subject"]["reason"] == "dlp_redacted"
         assert row["subject"]["destination"] == _FAKE_HOST
 
