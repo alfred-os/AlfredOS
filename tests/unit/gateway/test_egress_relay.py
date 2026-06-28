@@ -718,9 +718,13 @@ async def test_serve_binds_and_stops_on_shutdown() -> None:
     await free.wait_closed()
     relay = _relay(open_client=_open_client_factory({}))
     relay._port = port  # type: ignore[attr-defined]
+    # bound_port is None before serve() binds, then carries the actually-bound
+    # port (the TOCTOU-free port-discovery seam the adversarial driver dials).
+    assert relay.bound_port is None
     shutdown = asyncio.Event()
     serve_task = asyncio.ensure_future(relay.serve(shutdown))
     await asyncio.sleep(0.05)
+    assert relay.bound_port == port
     shutdown.set()
     await asyncio.wait_for(serve_task, timeout=5)
     assert serve_task.done()
