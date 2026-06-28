@@ -1315,6 +1315,31 @@ SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# security.egress_relay_refused family (Spec C G7-2c-1 / #333)
+# ---------------------------------------------------------------------------
+#
+# Emitted by the in-core RelayEgressClient (relay_client.py) on every refusal
+# path: gateway deny, IO-plane down, or in-doubt (Spec C §5 H3). The row is
+# PAYLOAD-BLIND: it carries ONLY the destination host authority (NOT the relay
+# URL), the closed-vocab reason token, and the egress_id (a sha256 hex —
+# already public, non-secret). No body, no header values, no raw T3 content.
+#
+# Gateway holds no DB (ADR-0036), so this durable core-side row is the sole
+# non-skippable audit record for HARD rule #7 refusal paths.
+#
+# destination: the upstream host authority (not the relay_url — the relay is
+#   core-internal plumbing; the *upstream* host is the forensic subject).
+# reason: closed-vocab token — "io_plane_unavailable" | "egress_in_doubt" |
+#   the str value of EgressRelayDenyReason (e.g. "destination_not_allowlisted").
+# egress_id: the deterministic sha256 dedup key (64 lowercase hex chars).
+EGRESS_RELAY_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "destination",
+        "reason",
+        "egress_id",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Audit fieldset roster (test surface)
@@ -1374,4 +1399,6 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "CORE_ADAPTER_SPAWN_GRANT_FIELDS",
     "GATEWAY_ADAPTER_AWAITING_CORE_FIELDS",
     "GATEWAY_ADAPTER_SPAWN_ABORTED_FIELDS",
+    # Spec C (#333) G7-2c-1 egress-relay refusal family (payload-blind; ADR-0036).
+    "EGRESS_RELAY_REFUSED_FIELDS",
 )

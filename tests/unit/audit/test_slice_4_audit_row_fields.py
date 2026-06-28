@@ -54,9 +54,12 @@ def test_slice_4_fieldset_names_count() -> None:
     terminal-drop row; content-free, reuses in-domain ``refused`` / ``dropped``);
     and G6-7-5 (Spec B / #309 / ADR-0039 item 4b) added
     ``COMMS_INBOUND_POISONED_FIELDS`` — the 40th (the dispatched-edge dead-letter
-    row; content-free plus a bounded ``attempt_count`` int, ``result="poisoned"``).
+    row; content-free plus a bounded ``attempt_count`` int, ``result="poisoned"``);
+    and G7-2c-1 (Spec C / #333) added ``EGRESS_RELAY_REFUSED_FIELDS`` — the 41st
+    (the payload-blind egress-relay refusal row; destination host, closed-vocab
+    reason token, egress_id only — no body, no T3 content, ADR-0036).
     """
-    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 40
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 41
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:

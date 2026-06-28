@@ -204,7 +204,11 @@ class AuditEntry(Base):
             "'dlp_scan_error', 'domain_not_allowed', 'internal_ip_refused', "
             "'transport_error', 'handle_id_mismatch', "
             "'dispatch_param_invalid', 'dispatch_shape_error', 'ok', "
-            "'rolled_back', 'drift_detected', 'modified')",
+            "'rolled_back', 'drift_detected', 'modified', "
+            # Spec C G7-2c-1 (migration 0024, #333) — egress-relay refusal rows
+            # written by RelayEgressClient._audit_refused (dynamic emit site;
+            # manually audited in the G7-2c-1 C1 pass). 'denied' is already above.
+            "'in_doubt', 'io_plane_unavailable')",
             name="ck_audit_log_result",
         ),
     )
