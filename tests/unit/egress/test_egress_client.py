@@ -3,28 +3,28 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from alfred.config.settings import Settings
 from alfred.egress.client import EgressClient
 from alfred.egress.errors import IOPlaneUnavailableError
 
 
-class _Settings:
-    deepseek_base_url = "https://api.deepseek.com/v1"
-
-    def __init__(self, proxy: str | None) -> None:
-        self.egress_proxy_url = proxy
+def _settings(*, egress_proxy_url: str | None) -> Settings:
+    # A real, properly-typed Settings via Pydantic's validation-bypassing constructor —
+    # EgressClient.from_settings reads only ``egress_proxy_url``; no type suppression needed.
+    return Settings.model_construct(egress_proxy_url=egress_proxy_url)
 
 
 def test_unset_proxy_raises_io_plane_unavailable() -> None:
     # G7-3: the connectivity-free core has no direct-egress fallback — an unset
     # ALFRED_EGRESS_PROXY_URL is fail-closed, and the message names the variable.
     with pytest.raises(IOPlaneUnavailableError) as exc_info:
-        EgressClient.from_settings(_Settings(None))  # type: ignore[arg-type]
+        EgressClient.from_settings(_settings(egress_proxy_url=None))
     assert "ALFRED_EGRESS_PROXY_URL" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
 async def test_proxy_builds_a_non_redirecting_httpx_client() -> None:
-    client = EgressClient.from_settings(_Settings("http://alfred-gateway:8889"))  # type: ignore[arg-type]
+    client = EgressClient.from_settings(_settings(egress_proxy_url="http://alfred-gateway:8889"))
     assert client.proxy_url == "http://alfred-gateway:8889"
     http_client = client.build_provider_http_client()
     assert isinstance(http_client, httpx.AsyncClient)

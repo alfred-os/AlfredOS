@@ -6,13 +6,16 @@ import httpx
 import pytest
 
 from alfred.cli._bootstrap import build_router
+from alfred.config.settings import Settings
 from alfred.egress.errors import IOPlaneUnavailableError
 from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
 
 
-class _StubBroker:
-    """Minimal SecretBroker surface build_router touches."""
+class _RecordingBroker:
+    """A recording double that structurally satisfies build_router's ``_SecretBrokerLike``
+    Protocol (``get``/``has``) — so it type-checks with no suppression — and tracks calls so
+    the no-proxy path can assert the broker was never touched."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -26,21 +29,20 @@ class _StubBroker:
         return False  # no anthropic fallback — keep the wiring single-provider
 
 
-class _StubSettings:
-    deepseek_base_url = "https://api.deepseek.com/v1"
-    deepseek_model = "deepseek-chat"
-    anthropic_model = "claude-sonnet-4-6"
-
-    def __init__(self, proxy: str | None) -> None:
-        self.egress_proxy_url = proxy
+def _settings(*, egress_proxy_url: str | None) -> Settings:
+    # A real, properly-typed Settings instance via Pydantic's validation-bypassing
+    # constructor — no env/secrets needed and no type suppression at the call site.
+    # ``model_construct`` fills the other fields build_router reads (deepseek_base_url /
+    # deepseek_model / anthropic_model) from their declared defaults.
+    return Settings.model_construct(egress_proxy_url=egress_proxy_url)
 
 
 def test_build_router_refuses_without_proxy() -> None:
     # build_router calls EgressClient.from_settings FIRST, so an unset proxy URL
     # fails closed before any provider/broker access.
-    broker = _StubBroker()
+    broker = _RecordingBroker()
     with pytest.raises(IOPlaneUnavailableError, match="ALFRED_EGRESS_PROXY_URL"):
-        build_router(broker, _StubSettings(None))  # type: ignore[arg-type]
+        build_router(broker, _settings(egress_proxy_url=None))
     assert broker.calls == [], (
         "broker must not be touched on the no-proxy path — "
         "EgressClient.from_settings must raise before any provider/broker access."
@@ -61,7 +63,9 @@ def test_build_router_injects_the_proxied_client_into_the_provider(
         return Mock()  # ProviderRouter only stores `primary`; never validates it here
 
     monkeypatch.setattr(DeepSeekProvider, "from_settings", _spy)
-    router = build_router(_StubBroker(), _StubSettings("http://alfred-gateway:8889"))  # type: ignore[arg-type]
+    router = build_router(
+        _RecordingBroker(), _settings(egress_proxy_url="http://alfred-gateway:8889")
+    )
     assert isinstance(router, ProviderRouter)
     # The proxied client is a real httpx.AsyncClient (proxy=…); an un-proxied regression
     # would inject None here and the SDK would build a direct client.
