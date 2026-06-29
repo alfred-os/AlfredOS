@@ -85,10 +85,14 @@ Linux, published ports NAT independently of the internal network, so host access
 
 ### Mandatory egress proxy
 
-`ALFRED_EGRESS_PROXY_URL` is mandatory — the core has no direct-egress fallback. A non-default
-`ALFRED_ANTHROPIC_BASE_URL` / `ALFRED_DEEPSEEK_BASE_URL` override must be on the gateway's
-destination allowlist (set the matching base-url var on `alfred-gateway` too), or the proxied
-call is denied.
+`ALFRED_EGRESS_PROXY_URL` is mandatory — the core has no direct-egress fallback.
+
+**DeepSeek:** if you override `ALFRED_DEEPSEEK_BASE_URL` from its default, set the same value on
+**both** `alfred-core` and `alfred-gateway`. The gateway derives its destination allowlist from
+that variable; a mismatch means the core dials a host the gateway denies.
+
+**Anthropic:** the gateway allowlist is hardcoded to `api.anthropic.com`. A custom Anthropic
+endpoint is not supported — it would be denied by the allowlist.
 
 ### Enable Discord (Developer Mode walkthrough)
 

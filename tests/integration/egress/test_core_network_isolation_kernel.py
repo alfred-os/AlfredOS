@@ -38,6 +38,15 @@ def _run(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
 
 
 def test_internal_network_blocks_egress_and_dns() -> None:
+    # Ensure the image is present before we create the --internal network.
+    # Without this pull, if this test runs before any testcontainers fixture has
+    # pulled postgres:16, the --internal network is already up and Docker cannot
+    # reach Docker Hub to fetch the image (no route out), causing a collection-order
+    # flake.  The network does not exist yet at this point, so the pull always
+    # succeeds on the host-side daemon regardless of any later --internal flag.
+    pull = _run("pull", _IMAGE, timeout=180)
+    assert pull.returncode == 0, f"pre-pull of {_IMAGE} failed: {pull.stderr}"
+
     suffix = uuid.uuid4().hex[:10]
     net = f"alfred_g73_isolation_{suffix}"
     sibling = f"alfred_g73_sibling_{suffix}"
