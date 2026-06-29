@@ -133,6 +133,9 @@ def build_web_fetch_egress_extractor(
 
     Returns:
         A wired ``EgressResponseExtractor`` ready for ``dispatch_web_fetch``.
+        Build this ONCE at composition and cache it: the relay client's in-flight
+        concurrency semaphore is per-INSTANCE, so calling the factory per fetch
+        would give each fire its own semaphore and defeat the global cap (#339).
 
     Raises:
         ValueError: ``settings.egress_relay_url`` is unset (fail-closed: the

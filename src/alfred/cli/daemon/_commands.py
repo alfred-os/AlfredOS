@@ -871,6 +871,13 @@ async def _build_comms_boot_graph(
         # The gateway relay address rides ``settings.egress_relay_url`` (PR2
         # compose). An integration test over a loopback relay proves the wiring
         # (test_web_fetch_assembly.py), per ADR-0041.
+        #
+        # SINGLETON CONTRACT (#339): the live caller MUST build the extractor ONCE
+        # here at composition and reuse that single instance — do NOT call
+        # build_web_fetch_egress_extractor per fetch. RelayEgressClient's in-flight
+        # concurrency semaphore is PER-INSTANCE, so a per-fetch factory call would
+        # give each fire its own semaphore and defeat the global cap (the "a burst
+        # cannot head-of-line the comms relay" guarantee).
         # ────────────────────────────────────────────────────────────────────
         # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
         # runtime (its append/append_schema are the keyword forms the limiter calls);
