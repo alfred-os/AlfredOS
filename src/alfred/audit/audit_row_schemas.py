@@ -56,6 +56,17 @@ DlpScanResult = Literal[
     "inbound_canary_tripped",  # G7-2.5 — inbound canary reflected in the T3 response
     "mime_type_not_allowed",  # G7-2.5 — D1 pre-extract MIME refusal (response_inspection)
     "size_limit_exceeded",  # G7-2.5 — D1 pre-extract size refusal (response_inspection)
+    # Quarantined-extractor refusal tokens (TypedRefusalReason reach-through).
+    # The re-homed dispatcher drives the quarantined extractor on the success path;
+    # when that extractor refuses, the dispatcher surfaces the TypedRefusalReason as
+    # the dlp_scan_result so operators can see WHY the extract sub-call failed.
+    "cannot_extract",
+    "refused_by_safety",
+    "ambiguous_input",
+    "provider_refused",
+    "provider_unavailable",
+    "post_stage_refused",
+    "nonce_check_failed",
 ]
 """Closed vocabulary recorded in ``WEB_FETCH_FIELDS['dlp_scan_result']``.
 

@@ -13,7 +13,7 @@ The hierarchy splits along two intentionally non-overlapping trees:
   in :mod:`tests.unit.plugins.web_fetch.test_errors`.
 
 Each operational error carries the structured attribute(s) the
-``WEB_FETCH_FIELDS`` audit row records (``domain``, ``url``, ``bucket``).
+``WEB_FETCH_FIELDS`` audit row records (``domain``, ``url``, ``rate_limit_bucket``).
 The audit writer reads typed exception attributes — never string-parses
 messages — so a future i18n change to the message template cannot drift
 the audit row.
