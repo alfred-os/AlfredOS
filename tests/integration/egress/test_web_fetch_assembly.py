@@ -148,7 +148,14 @@ async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
     )
     shutdown = asyncio.Event()
     serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
-    await _await_relay_ready(port, serve_task)
+    # Tear the serve task down if readiness times out / the relay fails at startup
+    # — otherwise ``shutdown`` is never set below and ``serve_task`` leaks.
+    try:
+        await _await_relay_ready(port, serve_task)
+    except BaseException:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+        raise
 
     # --- The daemon quarantine-graph components (reused, never re-spawned). ----
     staging = QuarantineStagingMap()
@@ -224,6 +231,10 @@ async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
         assert row["state"] == "committed_with_response"
         assert row["response"] == extracted.model_dump_json()
     finally:
-        shutdown.set()
-        await asyncio.wait_for(serve_task, timeout=5)
-        await engine.dispose()
+        # Nest the relay teardown inside ``try`` so a re-raise from
+        # ``wait_for(serve_task)`` cannot skip ``engine.dispose()`` (async-engine leak).
+        try:
+            shutdown.set()
+            await asyncio.wait_for(serve_task, timeout=5)
+        finally:
+            await engine.dispose()
