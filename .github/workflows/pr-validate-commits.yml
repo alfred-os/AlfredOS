@@ -52,7 +52,7 @@ jobs:
         # (unpinned-uses). persist-credentials disabled because these jobs
         # only read git history — no push needed — so leaving credentials in
         # .git/config (artipacked) is unnecessary exposure.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -92,7 +92,7 @@ jobs:
         # (unpinned-uses). persist-credentials disabled because these jobs
         # only read git history — no push needed — so leaving credentials in
         # .git/config (artipacked) is unnecessary exposure.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -150,7 +150,7 @@ jobs:
         # (unpinned-uses). persist-credentials disabled because these jobs
         # only read git history — no push needed — so leaving credentials in
         # .git/config (artipacked) is unnecessary exposure.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
