@@ -17,8 +17,10 @@ assert these security properties. The tests below close that gap.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -537,3 +539,122 @@ def test_gateway_derives_egress_allowlist_from_same_provider_config(
         "alfred-gateway must set ALFRED_DEEPSEEK_BASE_URL so it derives the SAME egress "
         "allowlist as the core (no silent mismatch on a base_url override)."
     )
+
+
+# ---------------------------------------------------------------------------
+# G7-2c (Spec C §4.3): tool-egress relay wiring — core dials the right gateway
+# relay port, relay-plane keys are confined to the right services, and the relay
+# port is never host-published.
+# ---------------------------------------------------------------------------
+
+_RELAY_PORT = 8890
+
+_COMPOSE_DEFAULT_RE = re.compile(r"^\$\{[^:]+:-([^}]*)\}$")
+
+
+def _compose_default(raw: str) -> str:
+    """Extract the ``default`` from a ``${VAR:-default}`` Compose literal.
+
+    The compose fixture loads raw YAML, so env values are the ``${VAR:-default}``
+    strings, not the shell-resolved values.  This extracts the fallback so tests
+    compare apples to apples: two matching defaults mean the stack wires
+    consistently when operator overrides are absent.
+    """
+    m = _COMPOSE_DEFAULT_RE.match(raw)
+    return m.group(1) if m else raw
+
+
+def test_relay_port_matches_core_relay_url(compose: dict[str, Any]) -> None:
+    """G7-2c: the core's ALFRED_EGRESS_RELAY_URL port == the gateway's ALFRED_EGRESS_RELAY_PORT.
+
+    A mismatch — core dials a port the gateway does not bind — is a silent
+    black-hole: tool calls succeed in the test suite (the synthetic driver stubs
+    the relay) but fail at runtime (no listener).  The two compose default values
+    must agree; an operator who overrides them must set both consistently.
+    """
+    core_env = compose["services"]["alfred-core"].get("environment", {}) or {}
+    gw_env = compose["services"]["alfred-gateway"].get("environment", {}) or {}
+
+    raw_url = core_env.get("ALFRED_EGRESS_RELAY_URL", "")
+    raw_port = gw_env.get("ALFRED_EGRESS_RELAY_PORT", "")
+
+    assert raw_url, "alfred-core must set ALFRED_EGRESS_RELAY_URL (G7-2c)."
+    assert raw_port, "alfred-gateway must set ALFRED_EGRESS_RELAY_PORT (G7-2c)."
+
+    default_url = _compose_default(str(raw_url))
+    default_port_str = _compose_default(str(raw_port))
+
+    parsed = urlparse(default_url)
+    assert parsed.port is not None, (
+        f"ALFRED_EGRESS_RELAY_URL default {default_url!r} has no port component (G7-2c)."
+    )
+    url_port = str(parsed.port)
+
+    assert url_port == default_port_str, (
+        f"Port mismatch: ALFRED_EGRESS_RELAY_URL default dials :{url_port} but "
+        f"ALFRED_EGRESS_RELAY_PORT default binds :{default_port_str}. "
+        "The core would dial a port the gateway does not bind (G7-2c)."
+    )
+
+
+def test_relay_env_keys_on_correct_services(compose: dict[str, Any]) -> None:
+    """G7-2c: relay-plane env keys are confined to the correct services.
+
+    Positives:
+    - ``ALFRED_EGRESS_RELAY_URL`` on the core (it is the relay *client*).
+    - ``ALFRED_TOOL_EGRESS_ALLOWLIST`` + ``ALFRED_CANARY_TOKENS`` on the gateway
+      (gateway-only — NOT symmetric like ``ALFRED_DEEPSEEK_BASE_URL``; the core
+      runs its own 3-way allowlist + core DLP).
+
+    Negatives lock against drift: a core-side ``ALFRED_CANARY_TOKENS`` would
+    shadow the gateway's canary seeding at the wrong layer; a gateway-side
+    ``ALFRED_EGRESS_RELAY_URL`` would configure the gateway as its own relay
+    client (nonsense).
+    """
+    core_env = compose["services"]["alfred-core"].get("environment", {}) or {}
+    gw_env = compose["services"]["alfred-gateway"].get("environment", {}) or {}
+
+    # Positive: relay URL belongs on the core (the relay *client*)
+    assert "ALFRED_EGRESS_RELAY_URL" in core_env, (
+        "alfred-core must declare ALFRED_EGRESS_RELAY_URL so the relay client seam "
+        "picks up the gateway address (G7-2c)."
+    )
+    # Positive: gateway-only keys belong on the gateway
+    assert "ALFRED_TOOL_EGRESS_ALLOWLIST" in gw_env, (
+        "alfred-gateway must declare ALFRED_TOOL_EGRESS_ALLOWLIST (gateway-only; "
+        "the core runs a separate 3-way allowlist) — G7-2c."
+    )
+    assert "ALFRED_CANARY_TOKENS" in gw_env, (
+        "alfred-gateway must declare ALFRED_CANARY_TOKENS (gateway-only DLP seeding) — G7-2c."
+    )
+    # Negative: relay URL must NOT be on the gateway (it is the relay *server*)
+    assert "ALFRED_EGRESS_RELAY_URL" not in gw_env, (
+        "alfred-gateway must NOT carry ALFRED_EGRESS_RELAY_URL — the gateway IS the "
+        "relay listener; the URL belongs only on the core (G7-2c)."
+    )
+    # Negative: gateway-only keys must NOT be on the core
+    assert "ALFRED_TOOL_EGRESS_ALLOWLIST" not in core_env, (
+        "alfred-core must NOT carry ALFRED_TOOL_EGRESS_ALLOWLIST — this is a "
+        "gateway-only key (G7-2c)."
+    )
+    assert "ALFRED_CANARY_TOKENS" not in core_env, (
+        "alfred-core must NOT carry ALFRED_CANARY_TOKENS — this is a gateway-only key (G7-2c)."
+    )
+
+
+def test_relay_port_never_host_published(compose: dict[str, Any]) -> None:
+    """G7-2c: NO service host-publishes the tool-egress relay container port (8890).
+
+    Mirrors ``test_egress_proxy_port_never_host_published`` (8889 guard) exactly:
+    inspect the CONTAINER side of every ``ports`` mapping in both the short (string)
+    and long (dict) Compose forms across ALL services.  The relay listener must stay
+    compose-internal — exposing it would allow any host process to inject
+    tool-call responses directly into the framed relay wire, bypassing the
+    gateway's DLP and canary checks.
+    """
+    for name, svc in (compose.get("services", {}) or {}).items():
+        for mapping in svc.get("ports", []) or []:
+            assert _container_port(mapping) != str(_RELAY_PORT), (
+                f"{name} host-publishes the tool-egress relay container port "
+                f"{_RELAY_PORT}; the relay must stay compose-internal (G7-2c)."
+            )
