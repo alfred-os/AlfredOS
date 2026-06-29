@@ -25,7 +25,7 @@ jobs:
     # downstream step short-circuits on `steps.check.outputs.has_e2e`.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Check for e2e suite
@@ -38,7 +38,7 @@ jobs:
             echo "has_e2e=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/e2e/conftest.py missing — skipping E2E job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_e2e == 'true'
       - if: steps.check.outputs.has_e2e == 'true'
         run: uv sync --frozen --dev
@@ -84,7 +84,7 @@ jobs:
     # No job-level `hashFiles()` guard (see e2e job above for rationale).
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Check for adversarial corpus
@@ -97,7 +97,7 @@ jobs:
             echo "has_adversarial=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/adversarial/conftest.py missing — skipping adversarial job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_adversarial == 'true'
       - if: steps.check.outputs.has_adversarial == 'true'
         run: uv sync --frozen --dev
