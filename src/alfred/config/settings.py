@@ -91,10 +91,11 @@ class Settings(BaseSettings):
     primary_provider: str = "deepseek"
     fallback_provider: str = "anthropic"
 
-    # Spec C / G7-1 (#333): when set, the core builds provider SDK clients with an
+    # Spec C / G7-3 (#333, ADR-0042): the core builds provider SDK clients with an
     # httpx proxy pointed at the gateway L7 CONNECT proxy (e.g. "http://alfred-gateway:8889").
-    # UNSET => direct egress (today's behaviour); the direct fallback is deleted
-    # atomically at G7-3.
+    # MANDATORY — the connectivity-free core has no direct-egress fallback: an unset/blank
+    # value fails closed at the EgressClient seam (IOPlaneUnavailableError). The field stays
+    # optional here (a dumb config holder); the egress seam owns the "None is fatal" invariant.
     egress_proxy_url: str | None = None
 
     # Spec C / G7-2c (#333): when set, the in-core RelayEgressClient dials the
@@ -347,8 +348,9 @@ class Settings(BaseSettings):
 
         Without this, ``ALFRED_EGRESS_PROXY_URL=`` (a common .env typo) would
         deserialize to ``""`` — a non-None string that forces the proxied path with
-        an empty proxy URL, silently breaking egress instead of preserving the
-        documented ``unset => direct`` fallback (Spec C G7-1).
+        an empty proxy URL, silently breaking egress. Normalizing blank to None makes
+        an empty value fail closed identically to unset at the EgressClient seam
+        (IOPlaneUnavailableError — Spec C G7-3, ADR-0042; there is no direct fallback).
         """
         if isinstance(value, str):
             stripped = value.strip()
