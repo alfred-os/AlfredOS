@@ -49,7 +49,8 @@ def test_build_router_refuses_without_proxy() -> None:
     )
 
 
-def test_build_router_injects_the_proxied_client_into_the_provider(
+@pytest.mark.asyncio
+async def test_build_router_injects_the_proxied_client_into_the_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Prove the happy path actually INJECTS the proxied http_client into the provider —
@@ -66,7 +67,13 @@ def test_build_router_injects_the_proxied_client_into_the_provider(
     router = build_router(
         _RecordingBroker(), _settings(egress_proxy_url="http://alfred-gateway:8889")
     )
-    assert isinstance(router, ProviderRouter)
-    # The proxied client is a real httpx.AsyncClient (proxy=…); an un-proxied regression
-    # would inject None here and the SDK would build a direct client.
-    assert isinstance(captured["http_client"], httpx.AsyncClient)
+    # Stubbing the provider means the SDK never took ownership of the proxied client, so
+    # the test must close it (else it leaks). The proxied client is a real
+    # httpx.AsyncClient (proxy=…); an un-proxied regression would inject None here.
+    client = captured["http_client"]
+    try:
+        assert isinstance(router, ProviderRouter)
+        assert isinstance(client, httpx.AsyncClient)
+    finally:
+        if isinstance(client, httpx.AsyncClient):
+            await client.aclose()
