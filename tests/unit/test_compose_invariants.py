@@ -454,9 +454,12 @@ def test_no_service_uses_host_network_mode(compose: dict[str, Any]) -> None:
 def test_core_depends_on_gateway(compose: dict[str, Any]) -> None:
     """G7-3 (Spec C §11, arch-001): the isolated core waits for the gateway egress plane."""
     depends = (compose.get("services", {}).get("alfred-core", {}) or {}).get("depends_on", {}) or {}
-    assert "alfred-gateway" in depends, (
-        "alfred-core must depend_on alfred-gateway so the egress proxy/relay listeners are up "
-        f"before the connectivity-free core's first CONNECT; got depends_on={sorted(depends)}."
+    assert (
+        isinstance(depends, dict)
+        and depends.get("alfred-gateway", {}).get("condition") == "service_healthy"
+    ), (
+        "alfred-core must depend_on alfred-gateway with condition=service_healthy so the "
+        f"egress proxy/relay listeners are up before first CONNECT; got depends_on={depends!r}."
     )
 
 

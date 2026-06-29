@@ -47,8 +47,8 @@ class EgressClient:
             raise IOPlaneUnavailableError(
                 detail=(
                     "ALFRED_EGRESS_PROXY_URL is unset — the connectivity-free core has "
-                    "no direct-egress fallback (HARD rule #9); set it to the gateway L7 "
-                    "CONNECT proxy (compose default http://alfred-gateway:8889)."
+                    "no direct-egress fallback; set it to the gateway L7 CONNECT proxy "
+                    "(compose default http://alfred-gateway:8889)."
                 )
             )
         return cls(proxy_url=settings.egress_proxy_url)

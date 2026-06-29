@@ -21,7 +21,12 @@ from alfred.i18n import t
 
 
 class IOPlaneUnavailableError(AlfredError):
-    """The gateway egress proxy is unreachable — total external-I/O outage."""
+    """The gateway egress proxy is unreachable OR unconfigured — total external-I/O outage.
+
+    The ``io_plane_unavailable`` reason token is deliberately shared across both the
+    "proxy URL unset" (unconfigured) and "proxy unreachable" (runtime) cases; ADR-0042
+    records this as an intentional single-bucket for egress-plane absence.
+    """
 
     reason = "io_plane_unavailable"
 

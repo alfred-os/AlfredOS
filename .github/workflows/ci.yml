@@ -852,7 +852,7 @@ jobs:
             echo "::error::connectivity-free-core kernel proof SKIPPED on the required Integration lane — paper-gate hazard (#245); docker provisioning regressed."
             exit 1
           fi
-          grep -q "1 passed" /tmp/core_net_isolation.out || { echo "::error::connectivity-free-core kernel proof did not report '1 passed'."; exit 1; }
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/core_net_isolation.out || { echo "::error::connectivity-free-core kernel proof did not report a passing run."; exit 1; }
       - name: Upload integration coverage artifact
         if: steps.check.outputs.has_integration == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
