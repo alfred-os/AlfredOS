@@ -74,6 +74,22 @@ re-created owned by the `alfred` user.
 > need none of this (the `security_opt` lines are runtime no-ops there). The bundled PBS
 > interpreter adds roughly +110 MB to the `alfred-core` image.
 
+### macOS host access to Postgres (G7-3 connectivity-free core)
+
+`alfred_internal` is `internal: true`, so on Docker-Desktop/OrbStack (macOS) the
+`alfred-postgres` host-published port `5432` is not forwarded — `psql -h localhost` from a
+Mac host will not connect. The compose-internal core reaches Postgres over `alfred_internal`,
+and the dev test loop uses testcontainers, so neither is affected. For a one-off host query,
+exec into the network: `docker compose exec alfred-postgres psql -U alfred -d alfred`. On
+Linux, published ports NAT independently of the internal network, so host access still works.
+
+### Mandatory egress proxy
+
+`ALFRED_EGRESS_PROXY_URL` is mandatory — the core has no direct-egress fallback. A non-default
+`ALFRED_ANTHROPIC_BASE_URL` / `ALFRED_DEEPSEEK_BASE_URL` override must be on the gateway's
+destination allowlist (set the matching base-url var on `alfred-gateway` too), or the proxied
+call is denied.
+
 ### Enable Discord (Developer Mode walkthrough)
 
 AlfredOS ships a DM-only Discord adapter hosted by the gateway. Operator
