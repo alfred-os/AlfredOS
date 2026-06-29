@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
+import httpx
 import pytest
 
 from alfred.cli._bootstrap import build_router
 from alfred.egress.errors import IOPlaneUnavailableError
+from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
 
 
@@ -43,6 +47,22 @@ def test_build_router_refuses_without_proxy() -> None:
     )
 
 
-def test_build_router_wires_a_router_when_proxy_set() -> None:
+def test_build_router_injects_the_proxied_client_into_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Prove the happy path actually INJECTS the proxied http_client into the provider —
+    # not merely that build_router returns a ProviderRouter. A regression that dropped the
+    # injection (reverting to an un-proxied/direct client at the source) must FAIL here, not
+    # slip past with HARD rule #9 only appearing covered (CR cloud, Functional Correctness).
+    captured: dict[str, object] = {}
+
+    def _spy(**kwargs: object) -> Mock:
+        captured["http_client"] = kwargs.get("http_client")
+        return Mock()  # ProviderRouter only stores `primary`; never validates it here
+
+    monkeypatch.setattr(DeepSeekProvider, "from_settings", _spy)
     router = build_router(_StubBroker(), _StubSettings("http://alfred-gateway:8889"))  # type: ignore[arg-type]
     assert isinstance(router, ProviderRouter)
+    # The proxied client is a real httpx.AsyncClient (proxy=…); an un-proxied regression
+    # would inject None here and the SDK would build a direct client.
+    assert isinstance(captured["http_client"], httpx.AsyncClient)
