@@ -379,6 +379,14 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
         "inbound_canary_tripped",  # NEW per G7-2.5
         "mime_type_not_allowed",  # NEW per G7-2.5
         "size_limit_exceeded",  # NEW per G7-2.5
+        # Quarantined-extractor refusal tokens added alongside G7-2.5 CR follow-ons.
+        "cannot_extract",
+        "refused_by_safety",
+        "ambiguous_input",
+        "provider_refused",
+        "provider_unavailable",
+        "post_stage_refused",
+        "nonce_check_failed",
     }
 
 

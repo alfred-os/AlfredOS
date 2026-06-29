@@ -472,20 +472,38 @@ def test_t3_body_recorder_discard_staged(
 
 def test_staging_map_discard_is_silent_non_raising_no_op(
     authorized_t3_nonce: CapabilityGateNonce,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``QuarantineStagingMap.discard`` removes a present handle and is a no-op
     (never raises) on an absent one — and, unlike ``drain``, it is NON-logging."""
+    import alfred.security.quarantine_transport as qt
+
+    warnings: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        qt._log,
+        "warning",
+        lambda *a, **k: warnings.append((a, k)),  # type: ignore[arg-type]
+    )
+
     staging = QuarantineStagingMap()
     staging.stage("h1", _tag(authorized_t3_nonce, "body"))
 
     # Present handle → removed.
     staging.discard("h1")
     assert "h1" not in staging._staged
+    # drain() on an absent handle raises AND logs — that's the loud/expected drain
+    # contract, not what we're testing here.  Clear captured warnings before the
+    # critical discard() assertion so drain's noise doesn't pollute it.
     with pytest.raises(StagingHandleNotConfiguredError):
         staging.drain("h1")
+    warnings.clear()
 
-    # Absent handle → silent no-op (no raise).
+    # Absent handle → silent no-op (no raise, no warning).
     staging.discard("never-staged")
+    assert warnings == [], (
+        "discard() on an absent handle must NOT emit "
+        "security.quarantine_staging.handle_not_configured (NON-logging contract)"
+    )
 
 
 def test_discard_staged_on_drained_handle_emits_no_warning(

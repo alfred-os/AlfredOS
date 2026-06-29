@@ -57,6 +57,12 @@ _PAYLOAD_PATH = Path(__file__).parent / "de_egress_io_plane_down_audit.yaml"
 _DESCRIPTOR = compute_request_descriptor(
     method="GET", url="https://safe-upstream.example/tool", schema_id="m.S:v1"
 )
+# Descriptor bound to the blocked-destination URL used in path 2 (gateway-deny test).
+# Computing the descriptor from the actual request URL keeps the dedup key consistent
+# with what a real fire() call would produce (method+url+schema_id integrity hash).
+_BLOCKED_DESCRIPTOR = compute_request_descriptor(
+    method="GET", url="https://blocked-destination.example/tool", schema_id="m.S:v1"
+)
 
 
 def _load_payload() -> AdversarialPayload:
@@ -231,7 +237,10 @@ async def test_gateway_deny_emits_audit_row_before_raise(
     try:
         with pytest.raises(EgressDeniedError) as exc_info:
             await relay_client.fire(
-                raw_request=raw_request, ctx=ctx, call_index=0, request_descriptor=_DESCRIPTOR
+                raw_request=raw_request,
+                ctx=ctx,
+                call_index=0,
+                request_descriptor=_BLOCKED_DESCRIPTOR,
             )
 
         # The upstream must NOT have been reached.
