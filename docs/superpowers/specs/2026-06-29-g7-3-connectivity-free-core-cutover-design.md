@@ -84,8 +84,18 @@ alfred_external: {}
   the core on `alfred_internal`, reaches the internet on `alfred_external`).
 - Datastores (`alfred-postgres`, `alfred-redis`) are already `alfred_internal`-only —
   unaffected by the membership change, but now genuinely isolated by `internal: true`.
-- The stale `# G7-3 removes this line` / `# The ISOLATION FLIP is a single atomic step at
-  G7-3` comments are rewritten to describe the realized end-state.
+- **Boot ordering (Spec C §11):** add `alfred-core.depends_on: alfred-gateway` (the gateway
+  boots healthy in its core-down/buffering state and has no `depends_on` on the core, so
+  there is no cycle). This makes the gateway's egress-proxy/relay listeners ready before the
+  isolated core's first CONNECT — Spec C §11 line 167 lists this `depends_on`/`--wait` as a
+  canonical G7-3 deliverable. (Not load-bearing *today* — no production egress caller until
+  #338/#339 wires the orchestrator into boot — but cheap, correct, and prevents a real
+  future first-CONNECT race.)
+- **Stale-doc sweep (HARD rule #9 — security-boundary doc drift).** Every surface that still
+  describes the now-deleted "unset ⇒ direct egress" fallback is rewritten to the realized
+  end-state: the network-block comments (`# G7-3 removes this line` / `# The ISOLATION FLIP
+  is a single atomic step at G7-3`), the inline `ALFRED_EGRESS_PROXY_URL` comment
+  (`docker-compose.yaml:165-167`), and `.env.example:54-56`.
 
 **macOS / OrbStack consequence (verified empirically, 2026-06-29):** an `internal: true`
 container's host-published port is **not** forwarded on OrbStack/Docker-Desktop
@@ -106,23 +116,45 @@ connection (the gateway holds no DB session, ADR-0036) — verified during plann
   fallback (HARD rule #9). The constructor tightens to `proxy_url: str` (non-optional).
 - `build_provider_http_client()` loses its `None`-branch and the `egress.client.direct`
   log; it unconditionally returns the proxied `httpx.AsyncClient` (return type
-  `httpx.AsyncClient`, no longer `| None`).
+  `httpx.AsyncClient`, no longer `| None`). The error `detail` string **names
+  `ALFRED_EGRESS_PROXY_URL`** so the refusal points the operator at the missing variable.
 - `Settings.egress_proxy_url` **stays** `str | None` (a dumb config holder; the blank→None
   validator is unchanged). The invariant — "None is fatal" — lives at the egress seam, not
   in Settings.
-- Net runtime effect: `build_router` (reached only by `daemon start`'s orchestrator and
-  `alfred chat`) refuse-boots without the proxy URL. Non-egress CLI paths (`status`,
-  `user`, `migrate`, `login`) never build a router, so they are unaffected. Compose always
-  sets the proxy URL (default `http://alfred-gateway:8889`), so the deployed stack boots
-  normally.
+- **Stale-doc sweep within `client.py`:** the module docstring (lines 7-12, which still
+  describes "unset ⇒ None and providers construct directly") and the `proxy_url` property
+  (`-> str | None` → `-> str`, now that the ctor takes a non-optional `proxy_url`) are
+  rewritten for a type-clean, doc-accurate deletion.
+- **Resolve the deferred limits marker (`client.py:62-71`).** That comment promised
+  "revisit the limits before G7-3 deletes the direct fallback and the proxied path becomes
+  the only egress" — G7-3 *is* that trigger. Decision: **accept httpx's default connection
+  limits / HTTP-version** (safe at single-operator scale; the operative request timeout
+  stays on the SDK ctor, `rider 4`) and rewrite the marker so G7-3 does not ship a stale
+  promise. Tuning the proxied-path limits is a tracked G7-5 ops concern, not a G7-3 blocker.
 - The error message reuses the existing `egress.io_plane_unavailable` i18n key
   (detail-driven); no new catalog key. The deleted `egress.client.direct` is a structlog
   event, not a `t()` string.
 
+**Runtime reality (honest framing — `component-complete ≠ runtime-wired`).** The fallback
+deletion is a **fail-closed seam guarantee**: `EgressClient` can no longer hand a provider a
+direct (un-proxied) client. It is *not* yet a live daemon boot-refusal — `build_router`'s
+only production caller is `build_orchestrator` (`_bootstrap.py:448`), and the orchestrator
+is **not** wired into daemon `start` today (the deterministic-echo daemon; post-Spec-A-G5
+`alfred chat` no longer builds the router either), and `IOPlaneUnavailableError` is in **no**
+daemon-start `except` tuple. So the **live** G7-3 enforcement is the kernel isolation
+(`internal: true`), not a boot refusal. **Hand-off:** when #338/#339 wires
+`build_orchestrator` into boot, that PR MUST catch `IOPlaneUnavailableError` at the boot
+boundary and route it to the audited `_refuse_boot` path (HARD rule #7), not let it surface
+as a bare unaudited traceback. G7-3 records this hand-off; it does not pre-wire it (no
+consumer would be dead code — the G7-0/G7-1 "no dead seam" discipline).
+
 The **tool-egress relay** path needs no code change: `build_web_fetch_egress_extractor`
 already raises on an unset `egress_relay_url`, and `RelayEgressClient` raises
-`RelayIOPlaneUnavailableError` when it cannot reach the gateway. G7-3 records this symmetry
-in ADR-0042 but adds no enforcement (no live caller until #339).
+`RelayIOPlaneUnavailableError` when it cannot reach the gateway. Note the symmetry is
+**nominal, not exact**: the proxy seam raises a typed/audited `IOPlaneUnavailableError`
+while the relay assembly raises a bare `ValueError` (`assembly.py:160`). G7-3 records this in
+ADR-0042 as an honest residual (a typed `RelayIOPlaneUnavailableError` at the assembly seam
+is a #339-era cleanup) and adds no relay enforcement (no live caller until #339).
 
 ### 3.3 Flip the compose-invariant tests (`tests/unit/test_compose_invariants.py`)
 
@@ -133,12 +165,28 @@ in ADR-0042 but adds no enforcement (no live caller until #339).
 - Tighten `test_only_gateway_and_core_on_external` (:418) → the on-external set is now
   exactly `{alfred-gateway}` (the core has left). Keep its generic "any new service on
   external fails" property.
+- **Add `test_core_joins_internal_only`** — assert `alfred-core`'s network set is *exactly*
+  `== {"alfred_internal"}` (mirroring the datastores' `test_datastores_join_internal_only`),
+  **plus** a no-`network_mode` invariant (no service sets `network_mode: host`). The
+  existing flips assert core-on-internal (a *subset* check) + core-not-on-external; neither
+  catches a future *third* internet-reachable network (or `network_mode: host`) on the core
+  silently re-opening egress. The core is the subject of the connectivity-free invariant, so
+  it gets the same exact-set treatment the datastores already get (sec-001 / test-002).
 
-### 3.4 Update the one affected integration test
+### 3.4 Add the missing fail-closed coverage of the egress seam
 
-`tests/integration/test_orchestrator_bootstrap.py` builds a router; it must set
-`egress_proxy_url` (env or Settings) so the now-mandatory proxy URL is present. Verified
-during planning that this is the only `build_router` caller outside production wiring.
+The originally-planned "fix `test_orchestrator_bootstrap.py` to set `egress_proxy_url`" is a
+**no-op**: that test monkeypatches `_bootstrap.build_router` (line 131) before
+`build_orchestrator` runs, so the real `build_router → EgressClient.from_settings` is never
+executed there (prov-001 / test-003 / sec-004). It needs no change.
+
+Instead, the fail-closed path needs **its own** required-lane unit coverage: a focused
+`build_router`-seam test (`tests/unit/...`) asserting both directions —
+`egress_proxy_url` unset ⇒ `pytest.raises(IOPlaneUnavailableError)` (and the message names
+`ALFRED_EGRESS_PROXY_URL`), and `egress_proxy_url` set ⇒ a proxied client is wired onto the
+provider. This is the test that proves the §3.2 deletion actually fails closed; without it
+no required check exercises the new raise branch (the `egress/client.py` 100% line+branch
+gate covers `EgressClient` in isolation, but the `build_router` wiring needs its own test).
 
 ## 4. The connectivity proof (layered; paper-gate-proof)
 
@@ -163,13 +211,36 @@ testcontainers so the docker daemon is available to the non-root runner — gate
 `test_quarantined_llm_policy_kernel_enforced.py`):
 
 1. Create a throwaway `internal: true` docker network.
-2. Run a minimal container on it and assert **both**:
-   - `socket.connect()` to an external IP (e.g. `1.1.1.1:443`) fails (`Network is
+2. Run a container on it and assert **both**:
+   - a TCP `connect()` to an external IP (e.g. `1.1.1.1:443`) fails (`Network is
      unreachable`), and
-   - `socket.getaddrinfo()` of an external hostname fails (the DNS hole is closed).
+   - resolving an external hostname (`getaddrinfo` / `getent hosts`) fails (the DNS hole is
+     closed).
 3. Assert a sibling container on the same network **is** reachable (we isolate from the
    internet without over-blocking the internal plane).
 4. Tear the network + containers down.
+
+**Image + probe mechanics (avoid a flake vector in a required lane):** use an image already
+present in the lane (`postgres:16`, which testcontainers pulls) and drive the probes with
+shell primitives (`bash`'s `/dev/tcp`, `getent hosts`) rather than pulling an anonymous
+`python:3.12-slim` (an extra Docker Hub pull = a rate-limit flake vector on a *required*
+check). Pre-pull / reuse so the proof never depends on a fresh anonymous pull
+(test-006 / devops-003).
+
+**The skip must not silently pass the gate.** A "loud skip" is still a *green* required
+check — exactly the paper-gate the project's own #245 not-skipped guard exists to prevent.
+The proof carries a **not-skipped assertion** in the required lane (assert the docker daemon
+is present and the proof ran, fail rather than skip when it is absent), mirroring
+`integration-privileged`'s #245 guard — not merely a loud skip reason (test-001 / err-002 /
+sec-003).
+
+**Honest scope of the DNS-hole claim (sec-002).** `getaddrinfo`-must-fail validates that
+*this lane's* docker daemon does not forward its embedded resolver out of an `internal: true`
+network (empirically true on OrbStack and the GitHub `ubuntu-latest` daemon). It does **not**
+prove every production daemon closes the hole — a differently-configured embedded resolver
+could still recurse. ADR-0042 scopes the claim to "the core performs no client-side DNS (the
+gateway resolves for both the proxy and the relay) **and** the tested daemons close the
+forward path"; a resolver-strip / operator-verify backstop is named as a G7-5 ops residual.
 
 **Why the primitive, not the full stack:** the chain is *(static) `alfred-core` is on
 `alfred_internal`-only and `alfred_internal` is `internal: true`* **∧** *(runtime)
@@ -186,23 +257,29 @@ resolution`), siblings resolvable+reachable, host-published port on an internal-
 container refused. The runtime proof therefore reproduces locally on the dev Mac as well
 as in Linux CI.
 
-The skip must be **loud** (a clear skip reason naming "docker unavailable") so a runner
-without docker cannot silently mask a containment regression, and the `Integration` lane —
-a required status check (`docs/ci/required-checks.md`) — runs it on every PR.
+The `Integration` lane — a required status check (`docs/ci/required-checks.md`) — runs the
+proof on every PR, and the not-skipped assertion above guarantees it cannot pass
+green-because-skipped.
 
 ## 5. Tests & quality gates
 
 - **Unit** (`src/alfred/egress/client.py`, in the egress 100% line+branch gate): add
-  `from_settings(egress_proxy_url=None)` → raises `IOPlaneUnavailableError`; delete the
-  `egress.client.direct` log-assertion and the `None`-returns-direct test. Keep coverage
-  at 100% line **and** branch (the deleted `None`-branch removes a branch; the new raise
-  adds one).
+  `from_settings(egress_proxy_url=None)` → raises `IOPlaneUnavailableError` (message names
+  `ALFRED_EGRESS_PROXY_URL`); delete the `egress.client.direct` log-assertion and the
+  `None`-returns-direct test. Keep coverage at 100% line **and** branch (the deleted
+  `None`-branch removes a branch; the new raise adds one).
+- **Unit (new) — the `build_router` seam** (§3.4): proxy unset ⇒
+  `pytest.raises(IOPlaneUnavailableError)`; proxy set ⇒ a proxied client is wired onto the
+  provider. The required-lane proof that the §3.2 deletion fails closed in the wiring, not
+  just in `EgressClient` isolation.
 - **Settings** (`tests/unit/config/test_settings_egress_proxy_url.py`): the field stays
   optional; the unset-is-fatal behavior is now asserted at the egress seam, not Settings.
   Audit and adjust the test's framing.
-- **Compose-invariant**: the three flips (§3.3).
-- **Integration**: the docker-gated egress/DNS proof (§4.2); the
-  `test_orchestrator_bootstrap.py` fix (§3.4).
+- **Compose-invariant**: the three flips + `test_core_joins_internal_only` (exact-set +
+  no-`network_mode`) (§3.3).
+- **Integration**: the docker-gated egress/DNS proof with the not-skipped assertion (§4.2).
+  `test_orchestrator_bootstrap.py` needs **no change** — it monkeypatches `build_router`
+  (§3.4).
 - **Smoke**: no change. `tests/smoke/test_discord_gateway_smoke.py`'s `127.0.0.1:5432`
   is a placeholder DSN for `Settings.model_validate` (the test only reads adapter status;
   the gateway holds no DB session) — it never dials the compose Postgres, so the flip does
@@ -220,23 +297,38 @@ a required status check (`docs/ci/required-checks.md`) — runs it on every PR.
 
 - **New ADR-0042 — "connectivity-free-core cutover."** Records: the atomic-flip decision
   (and why one PR over a guarded sequence); the macOS/OrbStack host-port consequence and
-  the keep-the-port decision; the DNS-hole-closed finding; the layered-proof strategy
-  (static required + docker-gated runtime, paper-gate avoidance); and the now-true
-  relay/proxy fail-closed symmetry. ADRs are agent-authorable (unlike CLAUDE.md/PRD.md);
-  ADR-0040 stays reserved for the comprehensive G7-5 egress ADR; ADR-0041 is taken.
+  the keep-the-port decision; the DNS-hole-closed finding **scoped to the tested daemons**
+  (sec-002) plus the no-client-side-DNS invariant; the layered-proof strategy (static
+  required, docker-gated runtime, not-skipped assertion — paper-gate avoidance); the
+  now-nominal proxy/relay fail-closed symmetry and the bare-`ValueError` relay residual; the **runtime
+  reality** that the fallback deletion is a fail-closed *seam* (the live enforcement is the
+  kernel isolation) with the #338/#339 boot-boundary catch as a recorded hand-off; that the
+  cutover **preserves the ADR-0036 cred-concentration invariant** (the gateway still holds
+  no vault key; the Proxy-Authorization upgrade is a future add); and the **lag** that PRD
+  §5/§7.1 + ADR-0040 are realized-in-code here but their prose update is human-gated to G7-5
+  (forward-reference it so the gap is tracked, not reconstructed — arch-002 / sec-007). ADRs
+  are agent-authorable (unlike CLAUDE.md/PRD.md); ADR-0040 stays reserved for the
+  comprehensive G7-5 egress ADR; ADR-0041 is taken.
 - **Factual amendments** to any ADR that still describes the core's direct-egress fallback
   as live (e.g. the G7-1 fallback note) — mark it deleted as of G7-3 (the dated factual
   amendment precedent from G7-1a/2b; status flips stay human-gated).
-- **Runbook / README**: document the macOS host-tooling limitation — host `psql` →
+- **Operator-facing doc sweep** (the §3.1/§3.2 stale-doc surfaces, gathered here for the
+  doc-author): `.env.example:54-56`, the `docker-compose.yaml:165-167` inline comment, and
+  the `client.py` docstring — all must drop the "unset ⇒ direct egress" model.
+- **Runbook / README**: document (a) the macOS host-tooling limitation — host `psql` →
   compose-Postgres now needs Linux or a one-off `docker compose exec alfred-postgres
   psql …`; the dev test loop (testcontainers) and the daemon (internal network) are
-  unaffected.
+  unaffected; and (b) that a set `ALFRED_ANTHROPIC_BASE_URL` / `ALFRED_DEEPSEEK_BASE_URL`
+  override must be on the gateway's allowlist or the now-mandatory proxy hard-fails the call
+  (prov-004; the known arch-002 safe-fail/deny).
 
 ## 7. Risk & rollback
 
-- **Risk:** a deployment that forgets `ALFRED_EGRESS_PROXY_URL` now refuse-boots the
-  daemon (vs. silently egressing direct). This is the *intended* fail-closed posture;
-  compose ships the default, and the boot error names the missing variable.
+- **Risk:** a deployment that forgets `ALFRED_EGRESS_PROXY_URL`. Today this is fail-closed
+  by the kernel isolation (any direct provider dial hits `Network is unreachable`); once the
+  orchestrator is wired into boot (#338/#339) the egress seam refuses at the boot boundary
+  (audited `_refuse_boot`). Either way it is *never* a silent direct hop. Compose ships the
+  default, and the error `detail` names the missing variable.
 - **Risk:** a Linux host that genuinely needs host-side Postgres access is unaffected
   (published ports still NAT); a Mac host loses `localhost:5432` (documented; use
   `docker compose exec`).
@@ -250,11 +342,16 @@ a required status check (`docs/ci/required-checks.md`) — runs it on every PR.
 isolation-test-first so no commit lands an unguarded window):
 
 1. ADR-0042 + the spec.
-2. `client.py` fail-closed (RED: the new raise test, then GREEN) + unit-test updates.
-3. Compose flip + the three un-skipped/tightened compose-invariant tests + the
-   `test_orchestrator_bootstrap.py` fix.
-4. The docker-gated runtime egress/DNS proof.
-5. Smoke-test repoint (if needed) + runbook/README + ADR factual amendments.
+2. `client.py` fail-closed (RED: the new `EgressClient.from_settings` raise test + the
+   `build_router`-seam test, then GREEN) + unit-test updates + the `client.py` docstring /
+   `proxy_url` property / limits-marker sweep.
+3. Compose flip (`internal: true`, core off `alfred_external`, `depends_on: alfred-gateway`),
+   the three un-skipped/tightened compose-invariant tests, and the new
+   `test_core_joins_internal_only` (exact-set + no-`network_mode`).
+4. The docker-gated runtime egress/DNS proof (with the #245-style not-skipped assertion,
+   `postgres:16` + shell-primitive probes).
+5. Operator-doc sweep (`.env.example`, compose inline comment) + runbook/README + ADR
+   factual amendments.
 
 `writing-plans` sequences and details each task.
 
