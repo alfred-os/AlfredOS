@@ -166,6 +166,13 @@ services:
       # log). G7-3 makes this mandatory + deletes the direct fallback atomically with
       # the internal:true flip.
       ALFRED_EGRESS_PROXY_URL: ${ALFRED_EGRESS_PROXY_URL:-http://alfred-gateway:8889}
+      # Spec C G7-2c (#333): route tool egress through the gateway EgressRelay (the
+      # framed JSON-over-TCP relay). Compose-internal — the relay port is NEVER
+      # host-published (mirrors ALFRED_EGRESS_PROXY_URL / port 8889 pattern).
+      # The in-core RelayEgressClient parses host:port from this URL via
+      # urllib.parse.urlsplit; the scheme is informational (raw asyncio TCP, not HTTP).
+      # UNSET => relay client reports a configuration error at first call.
+      ALFRED_EGRESS_RELAY_URL: ${ALFRED_EGRESS_RELAY_URL:-http://alfred-gateway:8890}
     # state.git lives on this volume and is the source of truth for
     # reviewer-gated proposals + plugin grants (spec §11.1). NOT mounted in
     # alfred-discord — the comms adapter has no business writing grants.
@@ -225,6 +232,19 @@ services:
       # (the core dials http://alfred-gateway:8889). NEVER host-published (no `ports:` line —
       # test_egress_proxy_port_never_host_published).
       ALFRED_EGRESS_PROXY_PORT: ${ALFRED_EGRESS_PROXY_PORT:-8889}
+      # Spec C G7-2c (#333): the gateway EgressRelay listens on this port for the core's
+      # framed JSON-over-TCP tool-egress requests. NEVER host-published (no `ports:` line —
+      # mirrors the proxy port; test_alfred_gateway_publishes_no_host_port is the pin).
+      ALFRED_EGRESS_RELAY_PORT: ${ALFRED_EGRESS_RELAY_PORT:-8890}
+      # Tool-egress destination allowlist consumed by the gateway EgressRelay. Empty (default)
+      # means default-deny — no tool may fire external requests until the operator adds
+      # entries (public, non-secret; ADR-0036 — the gateway holds no vault key).
+      ALFRED_TOOL_EGRESS_ALLOWLIST: ${ALFRED_TOOL_EGRESS_ALLOWLIST:-}
+      # Canary token list for inbound-egress-response scanning. Empty (default) means no canary
+      # is seeded; set to a comma-separated list of token strings in .env to enable the guard.
+      # Public, non-secret — tokens are opaque strings with no exploitable value outside the
+      # detection context (ADR-0036 no-secret-on-gateway invariant).
+      ALFRED_CANARY_TOKENS: ${ALFRED_CANARY_TOKENS:-}
       # The gateway derives the egress destination allowlist from the SAME provider config
       # the core uses, so an operator base_url override must reach BOTH (else the gateway
       # would deny the core's legitimate destination — a silent mismatch). NOT a secret (a
