@@ -1594,13 +1594,15 @@ jobs:
       - name: Web-fetch trust-boundary 100% line+branch coverage (combined)
         id: web_fetch_cov_combined
         # Combined-data mirror of the ``python`` job's web-fetch gate
-        # (see the matching step above for the per-file rationale). The
-        # web-fetch trust-boundary files are proven by unit-only data
-        # today — no integration test exercises them. The combined-job
-        # mirror exists for parity with every other Slice-3 trust
-        # boundary so an operator scanning the CI plan sees one gate per
-        # subsystem in both contexts; a future integration test that
-        # adds to the .coverage data will land here automatically.
+        # (see the matching step above for the per-file rationale). Most
+        # web-fetch trust-boundary files are proven by unit-only data;
+        # ``assembly.py`` is now ALSO exercised by an integration test
+        # (tests/integration/egress/test_web_fetch_assembly.py — G7-2.5 PR2,
+        # the assembled extractor over a loopback relay + real Postgres), whose
+        # coverage merges into this combined ``.coverage`` data. The combined-job
+        # mirror exists for parity with every other Slice-3 trust boundary so an
+        # operator scanning the CI plan sees one gate per subsystem in both
+        # contexts.
         # Chained ``&&`` hashFiles guard per PR-S3-1 R1 F1.
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != '' && hashFiles('src/alfred/plugins/web_fetch/assembly.py') != ''
         run: |
@@ -1610,10 +1612,10 @@ jobs:
       - name: Web-fetch coverage gate — remediation hint (combined)
         # devex-004 mirror: combined-job gate failure deserves the same
         # actionable remediation card as the per-job gate above. The
-        # combined gate reads merged unit + integration coverage data,
-        # but the local-reproduction recipe targets the unit suite where
-        # web_fetch coverage is actually proven today (no integration
-        # test exercises the trust boundary yet).
+        # combined gate reads merged unit + integration coverage data; the
+        # local-reproduction recipe below targets the unit suite (which proves
+        # most web_fetch files at 100%), while ``assembly.py`` is additionally
+        # exercised by tests/integration/egress/test_web_fetch_assembly.py.
         if: failure() && steps.check.outputs.has_coverage_corpus == 'true' && steps.web_fetch_cov_combined.outcome == 'failure'
         run: |
           echo "::error::Trust-boundary coverage gate failed for web_fetch."
