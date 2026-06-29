@@ -13,6 +13,7 @@ bash primitives, bounds every probe with `timeout`, and tears down in a finally.
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 import uuid
@@ -45,8 +46,16 @@ def test_internal_network_blocks_egress_and_dns() -> None:
     assert created_net.returncode == 0, f"network create failed: {created_net.stderr}"
     try:
         sib = _run(
-            "run", "-d", "--name", sibling, "--network", net,
-            "--entrypoint", "sleep", _IMAGE, "300",
+            "run",
+            "-d",
+            "--name",
+            sibling,
+            "--network",
+            net,
+            "--entrypoint",
+            "sleep",
+            _IMAGE,
+            "300",
         )
         assert sib.returncode == 0, f"sibling start failed: {sib.stderr}"
 
@@ -60,13 +69,27 @@ def test_internal_network_blocks_egress_and_dns() -> None:
             "then echo SIBLING_DNS_OK; else echo SIBLING_DNS_BLOCKED; fi"
         )
         probe = _run(
-            "run", "--rm", "--network", net,
-            "--entrypoint", "bash", _IMAGE, "-c", script,
+            "run",
+            "--rm",
+            "--network",
+            net,
+            "--entrypoint",
+            "bash",
+            _IMAGE,
+            "-c",
+            script,
         )
+        assert probe.returncode == 0, f"probe container failed to start: {probe.stderr}"
         out = probe.stdout
         assert "EXTERNAL_CONNECT_BLOCKED" in out, f"core could reach the internet: {out!r}"
-        assert "EXTERNAL_DNS_BLOCKED" in out, f"core could resolve an external name (DNS hole): {out!r}"
-        assert "SIBLING_DNS_OK" in out, f"internal plane over-blocked (sibling unreachable): {out!r}"
+        assert "EXTERNAL_DNS_BLOCKED" in out, (
+            f"core could resolve an external name (DNS hole): {out!r}"
+        )
+        assert "SIBLING_DNS_OK" in out, (
+            f"internal plane over-blocked (sibling unreachable): {out!r}"
+        )
     finally:
-        _run("rm", "-f", sibling, timeout=30)
-        _run("network", "rm", net, timeout=30)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            _run("rm", "-f", sibling, timeout=30)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            _run("network", "rm", net, timeout=30)
