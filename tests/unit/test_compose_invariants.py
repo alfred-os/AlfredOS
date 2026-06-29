@@ -627,6 +627,10 @@ def test_relay_env_keys_on_correct_services(compose: dict[str, Any]) -> None:
     assert "ALFRED_CANARY_TOKENS" in gw_env, (
         "alfred-gateway must declare ALFRED_CANARY_TOKENS (gateway-only DLP seeding) — G7-2c."
     )
+    assert "ALFRED_EGRESS_RELAY_PORT" in gw_env, (
+        "alfred-gateway must declare ALFRED_EGRESS_RELAY_PORT (relay listener port; "
+        "mirrors ALFRED_EGRESS_PROXY_PORT) — G7-2c."
+    )
     # Negative: relay URL must NOT be on the gateway (it is the relay *server*)
     assert "ALFRED_EGRESS_RELAY_URL" not in gw_env, (
         "alfred-gateway must NOT carry ALFRED_EGRESS_RELAY_URL — the gateway IS the "
@@ -639,6 +643,10 @@ def test_relay_env_keys_on_correct_services(compose: dict[str, Any]) -> None:
     )
     assert "ALFRED_CANARY_TOKENS" not in core_env, (
         "alfred-core must NOT carry ALFRED_CANARY_TOKENS — this is a gateway-only key (G7-2c)."
+    )
+    assert "ALFRED_EGRESS_RELAY_PORT" not in core_env, (
+        "alfred-core must NOT declare ALFRED_EGRESS_RELAY_PORT as an env key — the core "
+        "dials the full ALFRED_EGRESS_RELAY_URL; the port lives only on the gateway (G7-2c)."
     )
 
 
