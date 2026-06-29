@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from alfred.config.settings import Settings
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.egress_response_extract import EgressExtractOutcome
+from alfred.errors import AlfredError
 from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
@@ -45,7 +46,7 @@ from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRec
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.egress_doubles import _await_relay_ready, _NullAuditWriter
-from tests.helpers.gates import make_quarantined_extract_chain_gate
+from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
 
 pytestmark = pytest.mark.integration
 
@@ -233,6 +234,122 @@ async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
     finally:
         # Nest the relay teardown inside ``try`` so a re-raise from
         # ``wait_for(serve_task)`` cannot skip ``engine.dispose()`` (async-engine leak).
+        try:
+            shutdown.set()
+            await asyncio.wait_for(serve_task, timeout=5)
+        finally:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_assembled_extractor_refuses_on_gate_deny(
+    migrated_url: str,
+    authorized_t3_nonce: CapabilityGateNonce,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_external_world: tuple[Any, Any, Any],
+) -> None:
+    """The SAME factory-assembled extractor REFUSES when the gate denies clearance.
+
+    Closes the trust-boundary proof at the composition root: the allow-arm test
+    above proves the happy path; this proves the deny arm of the SAME
+    ``build_web_fetch_egress_extractor`` output. With ``make_deny_all_gate()`` the
+    gate-first content-clearance check inside ``quarantined_to_structured`` denies,
+    so:
+
+    * ``handle`` raises ``AlfredError`` (loud refusal — HARD rule #7), and
+    * the quarantined extractor is NEVER awaited (gate-first short-circuit — the
+      orchestrator/quarantine child never dereferences the T3 body, HARD rule #5),
+      and
+    * the staged T3 body is discarded — the ``QuarantineStagingMap`` is empty on
+      exit (C9 no-orphan), proving the assembled extractor's drain-on-error path.
+
+    Note on ordering: the content-clearance gate is consulted AFTER the relay
+    fires (``EgressResponseExtractor.handle`` step 1 fires; step 3 gate-checks the
+    T3→T2 dereference), so the upstream IS reached once (``fire_counter == 1``).
+    The gate governs whether the RESPONSE body may cross into T2, not whether the
+    allowlisted request may egress — the refusal is on the inbound boundary.
+    """
+    open_client_factory, fire_counter, _canned = fake_external_world
+
+    # --- Boot the same loopback gateway EgressRelay (upstream faked). ---------
+    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port: int = srv.sockets[0].getsockname()[1]
+    srv.close()
+    await srv.wait_closed()
+
+    gateway_dlp = OutboundDlp(
+        broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
+    )
+    relay = EgressRelay(
+        tool_allowlist=_FAKE_ALLOWLIST,
+        dlp=gateway_dlp,
+        audit=record_egress_relay,
+        bind_host="127.0.0.1",
+        port=port,
+        resolve=lambda _h: "1.1.1.1",
+        open_client=open_client_factory,
+        response_byte_cap=4096,
+        upstream_deadline_s=10.0,
+    )
+    shutdown = asyncio.Event()
+    serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
+    try:
+        await _await_relay_ready(port, serve_task)
+    except BaseException:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+        raise
+
+    # --- DENY gate: every content-clearance check returns False (RealGate, no
+    #     grants) — never a permissive shim (CLAUDE.md hard rule #2). ----------
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    deny_gate = make_deny_all_gate()
+    mock_extractor = AsyncMock()
+    mock_extractor.extract = AsyncMock()  # must NOT be reached on a gate-deny
+
+    engine = create_async_engine(migrated_url, future=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    try:
+        assembled = build_web_fetch_egress_extractor(
+            settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
+            gate=deny_gate,
+            extractor=mock_extractor,
+            recorder=recorder,
+            outbound_dlp=identity_outbound_dlp(),
+            audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
+            session_scope=lambda: session_scope(factory),
+        )
+
+        ctx = TurnEgressContext(adapter_id="ada-deny", inbound_id="in-deny", session_id="sess-deny")
+        from alfred.egress.relay_protocol import _RawToolRequest
+
+        raw_request = _RawToolRequest(
+            method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
+        )
+
+        # The deny propagates as a loud AlfredError — the orchestrator gets no T2.
+        with pytest.raises(AlfredError):
+            await assembled.handle(
+                raw_request=raw_request,
+                ctx=ctx,
+                call_index=0,
+                schema=_TestSchema,
+                language="en",
+            )
+
+        # Gate-first: the quarantine child was bypassed — it never saw the T3 body.
+        mock_extractor.extract.assert_not_awaited()
+        # C9 no-orphan at the composition root: the staged T3 body was discarded.
+        assert len(staging._staged) == 0, (
+            "No-orphan BREACH: staging map non-empty after gate-deny AlfredError — "
+            f"discard_staged was not called: {staging._staged!r}"
+        )
+        # The request did reach the (faked) upstream once — the deny is on the
+        # inbound T3→T2 crossing, not on the outbound egress (see docstring).
+        assert fire_counter.value == 1
+    finally:
         try:
             shutdown.set()
             await asyncio.wait_for(serve_task, timeout=5)
