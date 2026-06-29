@@ -31,6 +31,22 @@ from alfred.plugins.web_fetch.assembly import (
 
 _RELAY_URL = "tcp://127.0.0.1:8890"
 
+# Spec C5 (G7-2.5): the EXACT web.fetch inbound MIME allowlist, pinned here as a
+# literal — deliberately NOT imported from the module under test. The assertions
+# below check BOTH the assembled policy AND the production constant against this
+# literal, so a production drift (widening/narrowing _WEB_FETCH_MIME_ALLOWLIST)
+# FAILS the test instead of silently tracking the new value. Transcribe any
+# intended Spec-C5 change here AND in assembly.py — never only one.
+_EXPECTED_WEB_FETCH_MIME_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "text/html",
+        "text/plain",
+        "application/json",
+        "application/xml",
+        "text/markdown",
+    }
+)
+
 
 def _settings(monkeypatch: pytest.MonkeyPatch, *, relay_url: str | None) -> Settings:
     """A real :class:`Settings` with the provider key satisfied + the relay URL pinned."""
@@ -78,7 +94,12 @@ def test_factory_reuses_graph_and_stamps_web_fetch_policy(
     policy = extractor._response_policy
     assert policy is not None
     assert policy.max_bytes == _WEB_FETCH_RESPONSE_MAX_BYTES == 5 * 1024 * 1024
-    assert policy.mime_allowlist == _WEB_FETCH_MIME_ALLOWLIST
+    # The assembled policy carries the EXACT Spec-C5 MIME set (inlined literal).
+    assert policy.mime_allowlist == _EXPECTED_WEB_FETCH_MIME_ALLOWLIST
+    # Drift guard: the production constant must equal the inlined literal too, so a
+    # production allowlist change (broader OR narrower) fails HERE — the assertion
+    # cannot silently track a drifted production value.
+    assert _WEB_FETCH_MIME_ALLOWLIST == _EXPECTED_WEB_FETCH_MIME_ALLOWLIST
     assert "text/html" in policy.mime_allowlist
     # canary defaults to None — the inbound-canary source is a tracked #339 residual.
     assert policy.canary is None
