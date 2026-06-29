@@ -4,15 +4,35 @@ The orchestrator never calls ``web.fetch`` directly — it calls
 :func:`dispatch_web_fetch`. This module runs on the HOST SIDE (the orchestrator
 process), not inside any plugin subprocess.
 
-G7-2.5 re-home (#333): the dispatcher no longer drives a plugin subprocess over
-``transport.dispatch``. The connectivity-free core (HARD rule #9 / Spec C) cannot
-open an external socket, so the fetch is performed by the gateway egress relay.
-The dispatcher keeps the CORE-SIDE gatekeeping and hands the request to
+G7-2.5 re-home (#333; ADR-0041): the dispatcher no longer drives a plugin
+subprocess over ``transport.dispatch``, and it no longer returns an opaque T3
+``ContentHandle`` for deferred extraction. The connectivity-free core (HARD rule
+#9 / Spec C) cannot open an external socket, so the fetch is performed by the
+gateway egress relay. The dispatcher keeps the CORE-SIDE gatekeeping and hands
+the request to
 :class:`alfred.egress.egress_response_extract.EgressResponseExtractor`, which
 fires the request through the gateway relay and returns a **T2**
 :class:`~alfred.egress.egress_response_extract.EgressExtractOutcome`
 (``Extracted | TypedRefusal``) via the sanctioned ``quarantined_to_structured``
 seam — the orchestrator never sees raw T3 bytes.
+
+``web.fetch`` is therefore now a **fused fetch+extract unit** returning T2, not a
+fetch-then-defer-extraction contract (ADR-0041 records the three coupled
+decisions: the T3-handle→T2 contract, the ``HandleCap`` removal, and the
+de-2026-004 re-target). Kept core-side: outbound DLP (URL refuse-on-secret +
+header redaction), the three-way path-prefix allowlist + broadening cap, the
+per-domain rate limiter, and the success/refusal audit rows. Removed core-side
+(now the gateway's structural job): the SSRF host-IP guard, redirect refusal,
+TLS origination, and the subprocess fetch path. The 5 MiB response cap + MIME
+allowlist + inbound-canary scan move to the C2 pre-extract seam
+(:class:`~alfred.egress.response_inspection.ResponsePolicy`). Production assembly
+(reusing the daemon's one quarantine graph) lives in
+:func:`alfred.plugins.web_fetch.assembly.build_web_fetch_egress_extractor`.
+
+Residual (ADR-0041 / §7, tracked #339): no live ``dispatch_web_fetch`` caller
+exists until #339 wires the tool-calling loop (after G7-3); the per-user
+fairness bound, the ``language`` source (HARD rule #3), and broker
+secret-injection for authenticated fetch land there too.
 
 Core-side responsibilities (in order):
 

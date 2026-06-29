@@ -428,6 +428,12 @@ jobs:
         #     dispatcher that composes allowlist + rate-limit + TLS +
         #     scanner + audit row emission (spec §7.4). A skipped branch
         #     skips one of those gates on the audit graph.
+        #   * ``src/alfred/plugins/web_fetch/assembly.py`` — the G7-2.5
+        #     production composition root for the T3->T2 egress extractor
+        #     (#333). Its fail-closed ``egress_relay_url`` branch refuses to
+        #     wire a relay-less extractor (HARD rule #9 — no direct egress
+        #     fallback); a missed branch would silently build an extractor
+        #     that crashes on first fire.
         #
         # Per-file ``--include`` mirrors the plugins / hooks / supervisor
         # precedent so a new web-fetch trust-boundary file gets added to
@@ -435,10 +441,10 @@ jobs:
         # at < 100% coverage. Chained ``&&`` hashFiles guard per
         # PR-S3-1 R1 F1: ANY-match must NOT no-op the gate; ALL files
         # must be present before the coverage report runs.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != '' && hashFiles('src/alfred/plugins/web_fetch/assembly.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
+            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py,src/alfred/plugins/web_fetch/assembly.py' \
             --fail-under=100
       - name: Web-fetch coverage gate — remediation hint
         # devex-004: when the 100% trust-boundary gate fails the operator
@@ -452,20 +458,20 @@ jobs:
         run: |
           echo "::error::Trust-boundary coverage gate failed for web_fetch."
           echo "Files required at 100% line+branch:"
-          echo "  - src/alfred/plugins/web_fetch/{allowlist,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
+          echo "  - src/alfred/plugins/web_fetch/{allowlist,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors,assembly}.py"
           echo ""
           echo "Local reproduction (matches the CI gate one-for-one):"
           echo "  cd \$(git rev-parse --show-toplevel)"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch --cov-branch --cov-report=term-missing"
           echo "  uv run coverage report \\"
-          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \\"
+          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py,src/alfred/plugins/web_fetch/assembly.py' \\"
           echo "    --fail-under=100"
           echo ""
           echo "Per-file drill-down (replace <module> with a specific name):"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch.<module> --cov-branch --cov-fail-under=100 --cov-report=term-missing"
-          echo "  where <module> is one of: allowlist, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors."
+          echo "  where <module> is one of: allowlist, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors, assembly."
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
       - name: Egress control-plane 100% line+branch coverage (unit)
@@ -1596,10 +1602,10 @@ jobs:
         # subsystem in both contexts; a future integration test that
         # adds to the .coverage data will land here automatically.
         # Chained ``&&`` hashFiles guard per PR-S3-1 R1 F1.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != '' && hashFiles('src/alfred/plugins/web_fetch/assembly.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
+            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py,src/alfred/plugins/web_fetch/assembly.py' \
             --fail-under=100
       - name: Web-fetch coverage gate — remediation hint (combined)
         # devex-004 mirror: combined-job gate failure deserves the same
@@ -1612,20 +1618,20 @@ jobs:
         run: |
           echo "::error::Trust-boundary coverage gate failed for web_fetch."
           echo "Files required at 100% line+branch:"
-          echo "  - src/alfred/plugins/web_fetch/{allowlist,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
+          echo "  - src/alfred/plugins/web_fetch/{allowlist,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors,assembly}.py"
           echo ""
           echo "Local reproduction (matches the CI gate one-for-one):"
           echo "  cd \$(git rev-parse --show-toplevel)"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch --cov-branch --cov-report=term-missing"
           echo "  uv run coverage report \\"
-          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \\"
+          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py,src/alfred/plugins/web_fetch/assembly.py' \\"
           echo "    --fail-under=100"
           echo ""
           echo "Per-file drill-down (replace <module> with a specific name):"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch.<module> --cov-branch --cov-fail-under=100 --cov-report=term-missing"
-          echo "  where <module> is one of: allowlist, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors."
+          echo "  where <module> is one of: allowlist, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors, assembly."
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
       - name: Egress control-plane 100% line+branch coverage (combined)

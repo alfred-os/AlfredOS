@@ -48,11 +48,6 @@ dependencies = [
   # subprocess cold-start). Process-local default registry; the SigNoz /
   # OpenTelemetry bridge is independently configured in ops/.
   "prometheus-client>=0.20,<1",
-  # PR-S3-5 (web.fetch): aiohttp is the HTTP client used by the
-  # alfred-web-fetch plugin subprocess (plugins/alfred-web-fetch/
-  # web_fetch_plugin.py). Pinned >=3.9 because the plugin uses
-  # ``ClientTimeout(connect=..., sock_read=...)`` which landed in 3.9.
-  "aiohttp>=3.9,<4",
   # PR-S3-6 (err-002): GitPython powers the state.git grant-policy parser
   # (alfred.security.capability_gate._state_git_parser). The parser reads
   # the policies/grants/ tree at a known commit hash and projects it into

@@ -853,6 +853,25 @@ async def _build_comms_boot_graph(
         # fallback).
         recorder = T3BodyRecorder(nonce=t3_nonce, staging=staging)
         extractor_bridge = CommsExtractorBridge(extractor=extractor, record_body=recorder)
+        # ── #339 SEAM (G7-2.5 PR2 / §5.3) ───────────────────────────────────
+        # The live ``web.fetch`` egress extractor is assembled by
+        # ``alfred.plugins.web_fetch.assembly.build_web_fetch_egress_extractor``,
+        # REUSING this same ``extractor`` + ``recorder`` (and the boot
+        # ``CapabilityGate``) — it must NOT spawn a second quarantined child
+        # (§4.3 one production extractor; CORE-4 shared-child HoL). The factory
+        # is NOT called here: ``dispatch_web_fetch`` has zero production callers
+        # until #339 wires the tool-calling loop (after G7-3), so building it at
+        # boot would be dangling, never-exercised construction. #339 calls the
+        # factory at the point it first needs a live ``web.fetch``, threading:
+        #   build_web_fetch_egress_extractor(
+        #       settings=settings, gate=<the boot CapabilityGate>,
+        #       extractor=extractor, recorder=recorder, outbound_dlp=<cast>,
+        #       audit_writer=audit,
+        #       session_scope=build_boot_session_scope(settings))
+        # The gateway relay address rides ``settings.egress_relay_url`` (PR2
+        # compose). An integration test over a loopback relay proves the wiring
+        # (test_web_fetch_assembly.py), per ADR-0041.
+        # ────────────────────────────────────────────────────────────────────
         # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
         # runtime (its append/append_schema are the keyword forms the limiter calls);
         # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
