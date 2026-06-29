@@ -1638,10 +1638,13 @@ jobs:
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
       - name: Egress control-plane 100% line+branch coverage (combined)
         # Combined-data mirror of the ``python`` job's egress gate (Spec C / G7-1,
-        # #333). The in-core egress seam files are proven by unit-only data today;
-        # this mirror exists for parity with every other trust boundary so a
-        # future integration test that adds to the .coverage data lands here
-        # automatically. Keep this ``--include`` list in sync with the python-job
+        # #333). Most in-core egress seam files are proven by unit data; several
+        # (the ledger DAO, the §4.3 extract wrapper, and — as of G7-2.5 — the
+        # web.fetch assembly chain via test_web_fetch_assembly.py) also draw on the
+        # Postgres integration tests, per the per-file notes below. This mirror
+        # exists for parity with every other trust boundary so an integration test
+        # that adds to the .coverage data lands here automatically. Keep this
+        # ``--include`` list in sync with the python-job
         # ``(unit)`` step. Chained ``&&`` hashFiles guard per the two-gates pattern.
         # G7-2a adds the pure egress-id (egress/egress_id.py, also gated unit-side)
         # AND the tri-state ledger DAO (memory/egress_idempotency.py). The DAO's
