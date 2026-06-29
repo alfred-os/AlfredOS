@@ -250,6 +250,12 @@ ignore = ["S101"]
 # read_state_git_head_sha coverage exercises a real temp git repo via
 # trusted `git` invocations (partial path, fixed-literal args).
 "tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
+# The G7-3 connectivity-free-core kernel proof drives `docker` by name (partial
+# path) with fixed-literal argv to create an internal:true network + probe
+# containers — same trusted-CLI rationale as the smokes above. No untrusted input
+# reaches a subprocess (the only interpolated value is a uuid-suffixed network/
+# container name built from fixed literals).
+"tests/integration/egress/test_core_network_isolation_kernel.py" = ["S603", "S607"]
 "src/alfred/memory/migrations/**/*.py" = ["N999"]
 # FBT001/FBT002/FBT003 (boolean-trap rules) are valid for general API design
 # but conflict with Typer's declarative CLI surface — Typer flags are by
