@@ -365,17 +365,10 @@ def test_two_custom_networks_defined(compose: dict[str, Any]) -> None:
     )
 
 
-@pytest.mark.skip(
-    reason="G7-3 adds internal:true to alfred_internal as ONE atomic isolation flip with "
-    "removing alfred_external from alfred-core. G7-0 keeps both networks internet-reachable "
-    "(behaviour-neutral) — internal:true here breaks the alfred-postgres host-published port "
-    "on Docker Desktop/macOS before the proxy that justifies it exists."
-)
-def test_alfred_internal_is_internal_true_deferred_to_g7_3(compose: dict[str, Any]) -> None:
+def test_alfred_internal_is_internal_true(compose: dict[str, Any]) -> None:
     """G7-3 (Spec C §3, §6): alfred_internal must be internal:true (no route to the internet).
 
-    This is the kernel enforcement-of-record for the connectivity-free core; un-skip and make
-    it pass in the G7-3 PR (together with test_core_not_on_external_deferred_to_g7_3).
+    This is the kernel enforcement-of-record for the connectivity-free core.
     """
     internal = compose.get("networks", {}).get("alfred_internal", {}) or {}
     assert internal.get("internal") is True, (
@@ -415,35 +408,55 @@ def test_core_joins_internal(compose: dict[str, Any]) -> None:
     assert "alfred_internal" in nets, f"alfred-core must join alfred_internal; got {sorted(nets)}."
 
 
-def test_only_gateway_and_core_on_external(compose: dict[str, Any]) -> None:
-    """G7-0 (Spec C §3): alfred_external carries ONLY the gateway + (until G7-3) the core.
+def test_only_gateway_on_external(compose: dict[str, Any]) -> None:
+    """G7-3 (Spec C §3): alfred_external carries ONLY the gateway — the core has left.
 
-    A GENERIC guard: any future service (e.g. a Qdrant datastore, Spec C §3 names it as a
-    not-yet-present internal datastore) silently joining alfred_external fails here — which
-    the per-datastore ``test_datastores_join_internal_only`` tuple cannot catch. At G7-3 this
-    set tightens to {alfred-gateway} when the core leaves alfred_external (the flip).
+    A GENERIC guard: any future service silently joining alfred_external fails here.
     """
     services = compose.get("services", {})
     on_external = {n for n in services if "alfred_external" in _service_networks(compose, n)}
-    assert on_external == {"alfred-gateway", "alfred-core"}, (
-        "Only alfred-gateway (+ alfred-core until G7-3) may join alfred_external; "
-        f"got {sorted(on_external)}. A new service on alfred_external breaks the "
+    assert on_external == {"alfred-gateway"}, (
+        "Only alfred-gateway may join alfred_external (the connectivity-free core has "
+        f"left it); got {sorted(on_external)}. A new service on alfred_external breaks the "
         "connectivity-free invariant."
     )
 
 
-@pytest.mark.skip(
-    reason="G7-3 removes alfred_external from alfred-core once the gateway proxy exists; "
-    "G7-0 keeps the core externally reachable (no behaviour change)."
-)
-def test_core_not_on_external_deferred_to_g7_3(compose: dict[str, Any]) -> None:
-    """G7-3 (Spec C §11): the connectivity-free flip — core must NOT be on alfred_external.
-
-    Recorded now so the intent is tracked; un-skip and make it pass in the G7-3 PR.
-    """
+def test_core_not_on_external(compose: dict[str, Any]) -> None:
+    """G7-3 (Spec C §11): the connectivity-free flip — core must NOT be on alfred_external."""
     nets = _service_networks(compose, "alfred-core")
     assert "alfred_external" not in nets, (
         f"alfred-core must NOT join alfred_external (connectivity-free core); got {sorted(nets)}."
+    )
+
+
+def test_core_joins_internal_only(compose: dict[str, Any]) -> None:
+    """G7-3 (Spec C §3, sec-001/test-002): the core is on EXACTLY alfred_internal.
+
+    The subset check (test_core_joins_internal) + external-absent (test_core_not_on_external)
+    do not catch a future THIRD internet-reachable network on the core; the exact-set does
+    (mirroring test_datastores_join_internal_only). The core is the subject of the invariant.
+    """
+    nets = _service_networks(compose, "alfred-core")
+    assert nets == {"alfred_internal"}, (
+        f"alfred-core must join alfred_internal ONLY (connectivity-free core); got {sorted(nets)}."
+    )
+
+
+def test_no_service_uses_host_network_mode(compose: dict[str, Any]) -> None:
+    """G7-3 (sec-001): network_mode: host bypasses the custom networks entirely — forbid it."""
+    for name, svc in (compose.get("services", {}) or {}).items():
+        assert "network_mode" not in (svc or {}), (
+            f"{name} sets network_mode (bypasses alfred_internal/alfred_external isolation)."
+        )
+
+
+def test_core_depends_on_gateway(compose: dict[str, Any]) -> None:
+    """G7-3 (Spec C §11, arch-001): the isolated core waits for the gateway egress plane."""
+    depends = (compose.get("services", {}).get("alfred-core", {}) or {}).get("depends_on", {}) or {}
+    assert "alfred-gateway" in depends, (
+        "alfred-core must depend_on alfred-gateway so the egress proxy/relay listeners are up "
+        f"before the connectivity-free core's first CONNECT; got depends_on={sorted(depends)}."
     )
 
 

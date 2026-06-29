@@ -89,6 +89,8 @@ services:
         condition: service_healthy
       alfred-redis:
         condition: service_healthy
+      alfred-gateway:
+        condition: service_healthy
     # SETUID is load-bearing for spec §5.2: alfred-plugin-launcher needs the
     # setuid bit (or this capability) to drop privileges to alfred-quarantine
     # at subprocess spawn. The compose-invariant test (devops-010, in
@@ -159,12 +161,11 @@ services:
       # the compose network can reach it. PR-S3-5 ContentStore + RateLimiter
       # consume this.
       ALFRED_REDIS_URL: ${ALFRED_REDIS_URL:-redis://alfred-redis:6379/0}
-      # Spec C G7-1b (#333): route provider egress through the gateway L7 CONNECT
-      # proxy (the gateway is the sole external egress plane). Compose-internal —
-      # the proxy port is NEVER host-published (test_egress_proxy_port_never_host_published).
-      # UNSET => direct egress (dev / pre-G7-3 fallback, with a loud egress.client.direct
-      # log). G7-3 makes this mandatory + deletes the direct fallback atomically with
-      # the internal:true flip.
+      # Spec C G7-3 (#333, ADR-0042): route ALL provider egress through the gateway L7
+      # CONNECT proxy — the gateway is the sole external egress plane. The connectivity-free
+      # core has NO direct-egress fallback: an unset value fails closed at the EgressClient
+      # seam (IOPlaneUnavailableError). Compose-internal — the proxy port is NEVER
+      # host-published (test_egress_proxy_port_never_host_published).
       ALFRED_EGRESS_PROXY_URL: ${ALFRED_EGRESS_PROXY_URL:-http://alfred-gateway:8889}
       # Spec C G7-2c (#333): route tool egress through the gateway EgressRelay (the
       # framed JSON-over-TCP relay). Compose-internal — the relay port is NEVER
@@ -183,7 +184,6 @@ services:
       - alfred_run:/home/alfred/.run
     networks:
       - alfred_internal
-      - alfred_external   # G7-3 removes this line (the connectivity-free flip)
 
   # Spec B (#288) — the always-up resumable gateway, deployed as its own service.
   # Reuses the alfred-core image (one Dockerfile) and runs `alfred gateway start`. It is
@@ -263,17 +263,15 @@ services:
       start_period: 10s
 
 networks:
-  # Spec C / G7 (epic #333, ADR-0040): the connectivity-free-core split. G7-0
-  # lays down the network MEMBERSHIP only — core + datastores on alfred_internal,
-  # the gateway on both — behaviour-neutrally (both networks reach the internet
-  # for now, exactly like today's default bridge). The ISOLATION FLIP is a single
-  # atomic step at G7-3: add `internal: true` to alfred_internal AND remove
-  # alfred_external from alfred-core. It is deliberately NOT split across PRs —
-  # `internal: true` here would break the alfred-postgres host-published port on
-  # Docker Desktop (verified: an internal-only container is not port-forwarded on
-  # macOS), regressing dev/setup before the proxy that justifies it even exists.
-  # `internal: true` is the kernel enforcement-of-record; it lands with the flip.
-  alfred_internal: {}
+  # Spec C / G7 (epic #333, ADR-0042): the connectivity-free-core split. alfred_internal is
+  # kernel-isolated (internal: true — no route to the internet); the core + datastores live
+  # here. The gateway is the sole bridge: it joins BOTH networks and is the only external
+  # egress plane. alfred_internal's internal:true is the kernel enforcement-of-record.
+  # NOTE: an internal:true container's host-published port is not forwarded on
+  # Docker-Desktop/OrbStack (macOS) — alfred-postgres's 5432:5432 works on Linux but is
+  # unreachable from a Mac host (use `docker compose exec alfred-postgres psql …`).
+  alfred_internal:
+    internal: true
   alfred_external: {}
 
 volumes:
