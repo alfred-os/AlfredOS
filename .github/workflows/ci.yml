@@ -835,6 +835,22 @@ jobs:
         # paper-only on every push. #184 item 3.
         run: |
           uv run pytest tests/integration -q --cov=src/alfred --cov-append --cov-branch --cov-fail-under=0
+      - name: Assert the connectivity-free-core kernel proof RUNS (not skipped) — #245 paper-gate guard
+        # The runtime egress/DNS proof is the enforcement-of-record for the connectivity-free
+        # core (ADR-0042 / Spec C §4.2). A `skipif(docker unavailable)` LOUD skip is still a
+        # GREEN required check — the exact #245 failure mode. The Integration runner has Docker
+        # (testcontainers), so the proof MUST run here. `tee` keeps the summary on disk to
+        # skip-parse it; `set -o pipefail` propagates a pytest non-zero exit through the pipe.
+        if: steps.check.outputs.has_integration == 'true' && hashFiles('tests/integration/egress/test_core_network_isolation_kernel.py') != ''
+        run: |
+          set -euo pipefail
+          uv run pytest tests/integration/egress/test_core_network_isolation_kernel.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/core_net_isolation.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/core_net_isolation.out; then
+            echo "::error::connectivity-free-core kernel proof SKIPPED on the required Integration lane — paper-gate hazard (#245); docker provisioning regressed."
+            exit 1
+          fi
+          grep -q "1 passed" /tmp/core_net_isolation.out || { echo "::error::connectivity-free-core kernel proof did not report '1 passed'."; exit 1; }
       - name: Upload integration coverage artifact
         if: steps.check.outputs.has_integration == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
