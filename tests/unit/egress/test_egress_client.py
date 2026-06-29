@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from alfred.egress.client import EgressClient
+from alfred.egress.errors import IOPlaneUnavailableError
 
 
 class _Settings:
@@ -13,10 +14,12 @@ class _Settings:
         self.egress_proxy_url = proxy
 
 
-def test_no_proxy_returns_none_client() -> None:
-    client = EgressClient.from_settings(_Settings(None))  # type: ignore[arg-type]
-    assert client.proxy_url is None
-    assert client.build_provider_http_client() is None
+def test_unset_proxy_raises_io_plane_unavailable() -> None:
+    # G7-3: the connectivity-free core has no direct-egress fallback — an unset
+    # ALFRED_EGRESS_PROXY_URL is fail-closed, and the message names the variable.
+    with pytest.raises(IOPlaneUnavailableError) as exc_info:
+        EgressClient.from_settings(_Settings(None))  # type: ignore[arg-type]
+    assert "ALFRED_EGRESS_PROXY_URL" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
