@@ -98,8 +98,10 @@ class AnthropicProvider:
         cls, api_key: str, model: str, *, http_client: httpx.AsyncClient | None = None
     ) -> AnthropicProvider:
         # http_client is the G7-1 egress seam (Spec C, #333): a proxied client when
-        # the gateway proxy is configured, None => direct (today's behaviour). The
-        # SDK builds its own client on None, so the default is byte-for-byte today.
+        # the gateway proxy is configured. The SDK builds its own (un-proxied) client
+        # on None — kept as a general provider contract (tests inject None/mocks), but
+        # post-G7-3 (ADR-0042) build_router ALWAYS injects the proxied client, and that
+        # un-proxied path is dead-by-kernel on the connectivity-free core.
         #
         # timeout + max_retries STAY on the SDK ctor (rider 4): the SDK applies
         # timeout per-request and never inherits max_retries from the http_client,

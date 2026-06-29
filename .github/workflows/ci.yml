@@ -841,6 +841,8 @@ jobs:
         # GREEN required check — the exact #245 failure mode. The Integration runner has Docker
         # (testcontainers), so the proof MUST run here. `tee` keeps the summary on disk to
         # skip-parse it; `set -o pipefail` propagates a pytest non-zero exit through the pipe.
+        # NOTE: the proof FILE's presence is load-bearing — the hashFiles() gate disables this
+        # guard if the file is deleted (a meta-paper-gate); a deletion is visible in the diff.
         if: steps.check.outputs.has_integration == 'true' && hashFiles('tests/integration/egress/test_core_network_isolation_kernel.py') != ''
         run: |
           set -euo pipefail

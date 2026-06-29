@@ -117,10 +117,11 @@ class DeepSeekProvider:
         http_client: httpx.AsyncClient | None = None,
     ) -> DeepSeekProvider:
         # http_client is the G7-1 egress seam (Spec C, #333); see
-        # AnthropicProvider.from_settings. None => the SDK builds its own client
-        # (byte-for-byte today's direct path). timeout stays on the SDK ctor
-        # (rider 4); max_retries is left at the SDK default (2), the same effective
-        # posture as Anthropic's explicit value.
+        # AnthropicProvider.from_settings. None => the SDK builds its own (un-proxied)
+        # client — a general provider contract, but post-G7-3 (ADR-0042) build_router
+        # ALWAYS injects the proxied client and that path is dead-by-kernel on the
+        # connectivity-free core. timeout stays on the SDK ctor (rider 4); max_retries
+        # is left at the SDK default (2), the same effective posture as Anthropic's.
         return cls(
             client=AsyncOpenAI(
                 api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT, http_client=http_client

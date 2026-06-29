@@ -118,10 +118,12 @@ def build_router(broker: SecretBroker, settings: Settings) -> ProviderRouter:
     the Anthropic key is configured. Slice 2 replaces this with tiered
     capability-aware routing across more providers.
 
-    Spec C / G7-1 (#333): when ``ALFRED_EGRESS_PROXY_URL`` is set the providers get
-    a proxied ``http_client`` pointed at the gateway L7 CONNECT proxy; unset =>
-    direct (byte-for-byte today's path). One proxied client per provider is
-    intentional (no cross-provider pool sharing in G7-1); the ``EgressClient`` is a
+    Spec C / G7-3 (#333, ADR-0042): the providers get a proxied ``http_client``
+    pointed at the gateway L7 CONNECT proxy — the gateway is the sole external egress
+    plane. ``ALFRED_EGRESS_PROXY_URL`` is MANDATORY: ``EgressClient.from_settings``
+    (called first, below) raises ``IOPlaneUnavailableError`` when it is unset (the
+    connectivity-free core has no direct-egress fallback). One proxied client per
+    provider is intentional (no cross-provider pool sharing); the ``EgressClient`` is a
     stateless factory and the SDK/process owns each client's lifetime
     (open-decision 3).
     """
