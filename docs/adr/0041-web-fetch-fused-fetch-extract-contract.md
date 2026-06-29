@@ -114,6 +114,14 @@ is explicitly deferred to issue #339. The re-target requires **explicit
   `dispatch_web_fetch` caller PR** — security sign-off M4 required. The `alfred-security-engineer`
   dissent (correctly noting the C1 semaphore is global, not per-user) is recorded as the
   obligation that #339 must discharge.
+- **Inbound egress-response canary deferred to #339.** The C2 inbound-canary seam
+  (`ResponsePolicy.canary` → `inspect_response` → `InboundCanaryTripped`) is built, but the
+  PR2 factory `build_web_fetch_egress_extractor` passes `canary=None`: there is no core-side
+  canary-token source (`resolve_canary_tokens` is gateway-only, reading `ALFRED_CANARY_TOKENS`,
+  and an env not set on the core). The gateway's OUTBOUND canary still runs (de-2026-008); the
+  web.fetch INBOUND-reflection canary — a hostile origin reflecting a seeded token in its
+  RESPONSE — is wired by #339 once a core-side token source exists. Enforced machine-visibly by
+  the `de-2026-012` strict-xfail merge-blocker (#347 obligation list).
 - **Action-deadline `TimeoutError` surfaces un-audited at the dispatcher.** This is defensible
   layering (the supervisor owns timeout audit; the pre-fire ledger intent + replay `in_doubt`
   makes the side-effect safe), but #339's orchestrator wiring MUST audit the surfaced
