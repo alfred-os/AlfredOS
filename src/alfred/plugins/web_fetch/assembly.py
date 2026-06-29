@@ -171,6 +171,11 @@ def build_web_fetch_egress_extractor(
     response_policy = ResponsePolicy(
         mime_allowlist=_WEB_FETCH_MIME_ALLOWLIST,
         max_bytes=_WEB_FETCH_RESPONSE_MAX_BYTES,
+        # TRACKED RESIDUAL (#339): ``canary`` is ``None`` today — there is no
+        # core-side canary-token source (``resolve_canary_tokens`` is gateway-only;
+        # see the "Residual (tracked, #339)" docstring block above). #339 threads a
+        # real ``CanaryMatcher`` here so a reflected canary in the upstream RESPONSE
+        # trips. The de-2026-012 strict-xfail merge-blocker enforces that wiring.
         canary=canary,
     )
     return EgressResponseExtractor(
