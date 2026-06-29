@@ -69,7 +69,14 @@ def test_internal_network_blocks_egress_and_dns() -> None:
         assert sib.returncode == 0, f"sibling start failed: {sib.stderr}"
 
         # One probe container, three checks. Each line prints a stable marker.
+        # Guard the probe tools first: a MISSING `timeout` would make the
+        # `if timeout …` below exit non-zero and fall through to
+        # EXTERNAL_CONNECT_BLOCKED *without ever dialing* — a silent false-pass
+        # (the #245 paper-gate hazard). Exit 90 so the probe.returncode==0 assert
+        # below catches it loudly. (`getent` absence is caught by SIBLING_DNS_OK.)
         script = (
+            "command -v timeout >/dev/null 2>&1 || "
+            "{ echo 'missing timeout binary in probe image' >&2; exit 90; }; "
             'if timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443" 2>/dev/null; '
             "then echo EXTERNAL_CONNECT_OK; else echo EXTERNAL_CONNECT_BLOCKED; fi; "
             "if getent hosts api.deepseek.com >/dev/null 2>&1; "

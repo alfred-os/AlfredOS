@@ -35,7 +35,7 @@ def test_build_router_refuses_without_proxy() -> None:
     # build_router calls EgressClient.from_settings FIRST, so an unset proxy URL
     # fails closed before any provider/broker access.
     broker = _StubBroker()
-    with pytest.raises(IOPlaneUnavailableError):
+    with pytest.raises(IOPlaneUnavailableError, match="ALFRED_EGRESS_PROXY_URL"):
         build_router(broker, _StubSettings(None))  # type: ignore[arg-type]
     assert broker.calls == [], (
         "broker must not be touched on the no-proxy path — "

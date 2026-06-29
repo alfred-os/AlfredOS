@@ -385,9 +385,11 @@ isolation-test-first so no commit lands an unguarded window):
 - Spec C design: `docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`
   (§3 topology, §7 connectivity-free enforcement, §11 decomposition).
 - G7-2.5 design: `docs/superpowers/specs/2026-06-28-g7-2.5-web-fetch-rehome-design.md`.
-- The fallback marker: `src/alfred/egress/client.py:49` (`# G7-3: DELETE this …`).
-- The deferred invariant tests: `tests/unit/test_compose_invariants.py:368`, `:435`,
-  `:418`.
+- The fallback marker: `src/alfred/egress/client.py` (`# G7-3: DELETE this …`).
+- The end-state invariant tests (`tests/unit/test_compose_invariants.py`):
+  `test_alfred_internal_is_internal_true`, `test_core_not_on_external`,
+  `test_only_gateway_on_external`, `test_core_joins_internal_only` (referenced by name —
+  line numbers drift as the file evolves).
 - The kernel-test gating precedent:
   `tests/integration/test_quarantined_llm_policy_kernel_enforced.py`.
 - HARD rule #9 (egress): `CLAUDE.md` "Security rules — HARD".
