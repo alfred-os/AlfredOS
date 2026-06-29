@@ -133,7 +133,11 @@ connection (the gateway holds no DB session, ADR-0036) — verified during plann
   promise. Tuning the proxied-path limits is a tracked G7-5 ops concern, not a G7-3 blocker.
 - The error message reuses the existing `egress.io_plane_unavailable` i18n key
   (detail-driven); no new catalog key. The deleted `egress.client.direct` is a structlog
-  event, not a `t()` string.
+  event, not a `t()` string. The audit `reason` token stays `io_plane_unavailable` for both
+  the runtime "proxy unreachable" and the new config "proxy unconfigured" conditions
+  (sec-006) — both *are* "the egress plane is unavailable", and the `detail` string
+  disambiguates for the operator; a distinct token is a deliberate non-goal here (a future
+  refinement, noted in ADR-0042).
 
 **Runtime reality (honest framing — `component-complete ≠ runtime-wired`).** The fallback
 deletion is a **fail-closed seam guarantee**: `EgressClient` can no longer hand a provider a
@@ -200,7 +204,12 @@ hole (`internal: true` can leave Docker's `127.0.0.11` resolver able to recurse,
 - The three un-skipped compose-invariant tests (§3.3) — run in the required `python` unit
   lane. They prove the compose file *declares* the isolation.
 - The existing non-root AST import-guard (`tests/unit/egress/test_in_core_http_egress_guard.py`)
-  — proves no in-core code constructs a direct provider SDK / alt-HTTP / httpx client.
+  — proves no in-core code constructs a direct provider SDK / alt-HTTP / httpx client. Note
+  its documented blind spot (sec-005): it covers only the httpx/SDK vector — `subprocess`,
+  `urllib.request`, `http.client`, and raw `socket` are exempt by design. The kernel block
+  (`internal: true`) is therefore the **sole** enforcement-of-record for those residual
+  egress vectors, which is precisely why the §4.2 runtime kernel proof (not just the static
+  ratchet) is load-bearing.
 
 ### 4.2 Enforcement-of-record (the kernel actually blocks egress)
 
@@ -233,6 +242,14 @@ The proof carries a **not-skipped assertion** in the required lane (assert the d
 is present and the proof ran, fail rather than skip when it is absent), mirroring
 `integration-privileged`'s #245 guard — not merely a loud skip reason (test-001 / err-002 /
 sec-003).
+
+**Required-lane flake discipline (rev-003).** Because this proof rides an *already-required*
+lane, a flake blocks **all** merges (the project's #321 N≥3 soak discipline was waived for
+the required lanes, so there is no soft-landing). The proof must be deterministic by
+construction — no anonymous image pull (above), bounded timeouts on every probe, no
+race on container readiness — **and** verified green on the actual `ubuntu-latest`
+`Integration` runner before merge. The OrbStack verification is necessary, not sufficient;
+Linux CI is the authority for the `internal: true` primitive's behavior on the runner.
 
 **Honest scope of the DNS-hole claim (sec-002).** `getaddrinfo`-must-fail validates that
 *this lane's* docker daemon does not forward its embedded resolver out of an `internal: true`
@@ -288,7 +305,11 @@ green-because-skipped.
 - **Adversarial (release-blocking)**: this touches the egress boundary, so the full
   adversarial suite must run green. The existing `sbx_2026_005` /
   `test_quarantined_llm_not_yet_spawned_while_egress_open` gates stay green and are **not**
-  weakened.
+  weakened. The §4.2 runtime egress/DNS proof is G7-3's enforcement test of the new
+  core-container network-isolation boundary; a **formal adversarial corpus payload**
+  mirroring `sbx_2026_005` (the quarantine-child netns closure) for the *core* container is
+  deferred to G7-5 §9, where Spec C already schedules the corpus additions (test-005). The
+  disposition is explicit so the boundary isn't silently left without corpus coverage.
 - **`make check`** before every push; full `/review-pr` fleet (security ALWAYS) +
   CodeRabbit (both); resolve every thread; UAT; plain `gh pr merge --rebase` (never
   `--admin`).
@@ -328,7 +349,11 @@ green-because-skipped.
   by the kernel isolation (any direct provider dial hits `Network is unreachable`); once the
   orchestrator is wired into boot (#338/#339) the egress seam refuses at the boot boundary
   (audited `_refuse_boot`). Either way it is *never* a silent direct hop. Compose ships the
-  default, and the error `detail` names the missing variable.
+  default, and the error `detail` names the missing variable. An operator who *empties*
+  `ALFRED_EGRESS_PROXY_URL` in `.env` hits the same path (blank → `None` via the validator),
+  so under `restart: unless-stopped` the refusal becomes a deliberate crash-loop — the same
+  fail-closed posture as the gateway's own proxy/relay bind-failure, with the variable named
+  in the loud error (devops-002).
 - **Risk:** a Linux host that genuinely needs host-side Postgres access is unaffected
   (published ports still NAT); a Mac host loses `localhost:5432` (documented; use
   `docker compose exec`).
