@@ -111,7 +111,21 @@ def build_broker(settings: Settings) -> SecretBroker:
     return SecretBroker.from_settings(settings)
 
 
-def build_router(broker: SecretBroker, settings: Settings) -> ProviderRouter:
+class _SecretBrokerLike(Protocol):
+    """The narrow secret-broker surface ``build_router`` consumes.
+
+    Typed as a Protocol (the codebase's ``dlp._BrokerLike`` pattern) rather than the
+    concrete :class:`SecretBroker` so callers depend on the abstraction and test doubles
+    type-check structurally without a ``# type: ignore``. The real ``SecretBroker``
+    satisfies it (it exposes ``get``/``has`` with these signatures).
+    """
+
+    def get(self, name: str) -> str: ...
+
+    def has(self, name: str) -> bool: ...
+
+
+def build_router(broker: _SecretBrokerLike, settings: Settings) -> ProviderRouter:
     """Build the slice-1 ``ProviderRouter`` from the broker's secrets.
 
     DeepSeek is the primary; Anthropic is wired in as the fallback only if
