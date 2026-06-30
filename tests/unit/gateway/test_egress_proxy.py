@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 import pytest
 import structlog
 
+from alfred.egress.allowlist import exact_match
 from alfred.gateway.egress_proxy import (
     EgressForwardProxy,
     resolve_egress_proxy_bind,
@@ -88,6 +89,7 @@ def _proxy(
 
     return EgressForwardProxy(
         allowlist=_ALLOWLIST,
+        match=exact_match,
         bind_host="127.0.0.1",
         port=0,
         audit=lambda event, fields: audit.append((event, fields)),
@@ -364,7 +366,7 @@ async def test_connection_done_surfaces_an_escaped_exception_loud() -> None:
         raise ValueError("audit sink rejected the row")
 
     proxy = EgressForwardProxy(
-        allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=0, audit=_raising_audit
+        allowlist=_ALLOWLIST, match=exact_match, bind_host="127.0.0.1", port=0, audit=_raising_audit
     )
     writer = _CaptureWriter()
     with structlog.testing.capture_logs() as logs:
@@ -394,6 +396,7 @@ async def test_audit_failure_on_allowed_path_still_reaps_both_writers() -> None:
 
     proxy = EgressForwardProxy(
         allowlist=_ALLOWLIST,
+        match=exact_match,
         bind_host="127.0.0.1",
         port=0,
         audit=_raising_audit,
@@ -412,7 +415,11 @@ async def test_audit_failure_on_allowed_path_still_reaps_both_writers() -> None:
 async def test_connection_done_ignores_a_cancelled_task() -> None:
     # A cancelled connection task is reaped without touching .exception() (which would raise).
     proxy = EgressForwardProxy(
-        allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=0, audit=lambda e, f: None
+        allowlist=_ALLOWLIST,
+        match=exact_match,
+        bind_host="127.0.0.1",
+        port=0,
+        audit=lambda e, f: None,
     )
 
     async def _block() -> None:
@@ -455,7 +462,11 @@ async def test_bind_failure_propagates_oserror() -> None:
     busy_port = blocker.sockets[0].getsockname()[1]
     async with blocker:
         proxy = EgressForwardProxy(
-            allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=busy_port, audit=lambda e, f: None
+            allowlist=_ALLOWLIST,
+            match=exact_match,
+            bind_host="127.0.0.1",
+            port=busy_port,
+            audit=lambda e, f: None,
         )
         with pytest.raises(OSError):
             await proxy.serve(asyncio.Event())
@@ -469,6 +480,7 @@ async def test_serve_binds_and_stops_on_shutdown() -> None:
     await free.wait_closed()
     proxy = EgressForwardProxy(
         allowlist=_ALLOWLIST,
+        match=exact_match,
         bind_host="127.0.0.1",
         port=port,
         audit=lambda e, f: None,
@@ -487,7 +499,11 @@ async def test_drain_connections_cancels_in_flight_tasks() -> None:
     # Deterministic unit test of the shutdown reap: a blocking connection task is
     # cancelled + awaited (no real socket, no nested-timeout cancellation hazard).
     proxy = EgressForwardProxy(
-        allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=0, audit=lambda e, f: None
+        allowlist=_ALLOWLIST,
+        match=exact_match,
+        bind_host="127.0.0.1",
+        port=0,
+        audit=lambda e, f: None,
     )
 
     async def _block() -> None:
