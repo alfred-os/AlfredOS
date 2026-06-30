@@ -1,6 +1,6 @@
 # G7-4 — Discord-adapter egress hardening via the gateway L7 CONNECT proxy
 
-- **Status:** Design (approved to plan)
+- **Status:** Design (approved to plan) — revised 2026-06-30 after an 8-lens `/review-plan` pass (see §12)
 - **Date:** 2026-06-29
 - **Epic:** Spec C (G7) egress control plane / connectivity-free core — [#333](https://github.com/alfred-os/AlfredOS/issues/333)
 - **Slice:** G7-4 (the tail of the egress-mechanism work; G7-5 is the docs/ADR-0040/ops/CLI closeout)
@@ -26,7 +26,7 @@ children still need egress and were brought under control incrementally:
    `--unshare-net`, so a compromised adapter (a crafted Discord gateway frame
    triggering a `discord.py`/parser bug) has **full unrestricted outbound** and could
    exfiltrate the T3 content it relays plus its bot token to any host. This is the
-   open `#230` gap; `sbx-2026-005` is its adversarial-corpus marker.
+   open `#230` gap.
 
 **The topology (verified).** The Discord adapter is a **bwrap child process *inside*
 the gateway container** — `GatewayAdapterChildFactory.spawn_and_handshake`
@@ -39,13 +39,14 @@ compose-layer handle to its namespace.
 privileged turn** yet (the forwarded-inbound bridge is wired, but `build_orchestrator`
 is not in the daemon `start` graph — ADR-0042 "seam vs boot"; #338/#339/#235 open). So
 G7-4 — like G7-1's quarantine flip and G7-2c's synthetic-driver relay — hardens the
-**mechanism** (policy migration + the proxy/allowlist/shim + corpus flip + test
+**mechanism** (policy migration + the proxy/allowlist/shim + corpus addition + test
 migration), proven by a synthetic/loopback driver and a docker-gated kernel egress
 proof. It does **not** stand up a live Discord bot.
 
 **Out of scope:** G7-5 (PRD §5/§7.1 + ADR-0040 + the full adversarial corpus + ops
 dashboards/alerts + the operator egress-state CLI); the encrypted secret vault (#330);
-the gateway-side serial-credential-transit residual (ADR-0036; survives G7-4 — see §7).
+the gateway-side serial-credential-transit residual (ADR-0036; survives G7-4 — see §6);
+the config-as-interface DIP pass (#351).
 
 ---
 
@@ -64,8 +65,9 @@ widening or new forwarder tooling. But it left a contradiction unspecified:
 > *pathname* socket** bind-mounted into the child's mount namespace (abstract AF_UNIX
 > sockets are net-namespace-scoped and do **not** cross).
 
-**The reconciliation (this design).** The gateway proxy gains a **bind-mounted AF_UNIX
-CONNECT listener**; a **thin in-child TCP→unix byte-splice shim** lets `discord.py`'s
+**The reconciliation (this design).** The gateway gains a **bind-mounted AF_UNIX CONNECT
+listener** (a second instance of the existing proxy, carrying a Discord-only allowlist);
+a **thin in-child TCP→unix byte-splice shim** lets `discord.py`'s
 `Client(proxy="http://127.0.0.1:PORT")` work unmodified. The empty netns is the
 kernel enforcement-of-record; the AF_UNIX socket is the single hole; the proxy's
 Discord allowlist is the userspace defense-in-depth. This is the same shape as the
@@ -73,46 +75,41 @@ existing fd-3 broker channel — a sanctioned, bind-mounted, cross-sandbox-bound
 primitive.
 
 This was confirmed by a four-lens specialist panel (security, devops, comms,
-architect), unanimous on the mechanism below.
+architect) and tightened by an 8-lens `/review-plan` pass (§12).
 
 ### Why not the alternatives
 
 - **A — shared netns + `Client(proxy=...)` routing only.** No `--unshare-net`, no
   shim. Routes the happy path, but the child still shares the gateway netns, so a
-  compromised adapter opens a raw socket to any host — *exactly* the sbx-2026-005
-  threat. No kernel boundary; does not close `#230`. **Rejected** (it is the status quo
-  gap, relabeled).
+  compromised adapter opens a raw socket to any host — *exactly* the threat we are
+  closing. No kernel boundary; does not close `#230`. **Rejected** (the status quo gap,
+  relabeled).
 - **C — empty netns + SCM_RIGHTS fd-broker** (the spec's reserved-for-2c model).
   `discord.py`/`aiohttp` expose no per-connection fd-request hook; realizing it means
   forking `aiohttp`'s connection pool — the "transport surgery" decision 10 retired.
   **Rejected** (infeasible for a third-party library; reserved for the in-house 2c
   child).
-- **pasta/slirp4netns as transport (not enforcer).** A fair reframing — let the proxy
-  do the allowlisting and use pasta/slirp only to carry bytes from the empty netns to
-  the proxy. Rejected on three grounds: (1) **category error** — slirp4netns/pasta are
-  not network daemons you connect to; they take a target PID/netns and *inject* a
-  userspace IP stack into it via `setns`, so a separate container (its own netns) has
-  no handle to a bwrap child's empty netns inside the gateway container. (2) **More
-  network, not less** — they hand the netns a full userspace stack (NAT to the host =
-  broad egress by default) that must then be firewalled back down with IP/port rules,
-  which can't pin Discord's rotating IPs, so the L7 proxy is *still* required on top.
-  (3) **Strictly larger surface** — a full TCP/IP stack the compromised adapter can
-  probe, vs an empty netns with one unix socket; plus the `setns`/CAP_NET_ADMIN
-  plumbing and the tooling decision 10 retired. The AF_UNIX bridge gives the identical
-  "reach only the proxy" property with one socket and ~30 lines.
-- **`socat` as the shim binary.** `socat TCP-LISTEN:…,fork UNIX-CONNECT:…` does exactly
-  the splice, but embedding a powerful multi-address binary in the adversary-facing
-  sandbox is itself the "new forwarder tooling + new bwrap bind" decision 10 retired,
-  and gives a compromised parser a far larger capability than a single-purpose
-  in-process splice. **Rejected** in favour of the stdlib splice (reusing
-  `egress_proxy._pipe`).
+- **pasta/slirp4netns as transport (not enforcer).** Rejected on three grounds:
+  (1) **category error** — they are not network daemons you connect to; they take a
+  target PID/netns and *inject* a userspace IP stack via `setns`, so a separate
+  container has no handle to a bwrap child's empty netns inside the gateway container.
+  (2) **More network, not less** — they hand the netns a full userspace stack (NAT to
+  the host = broad egress by default) that must then be firewalled back down with
+  IP/port rules, which can't pin Discord's rotating IPs, so the L7 proxy is *still*
+  required on top. (3) **Strictly larger surface** — a full TCP/IP stack the
+  compromised adapter can probe, vs an empty netns with one unix socket; plus the
+  `setns`/CAP_NET_ADMIN plumbing and the tooling decision 10 retired.
+- **`socat` as the shim binary.** `socat TCP-LISTEN:…,fork UNIX-CONNECT:…` does the
+  splice, but embedding a powerful multi-address binary in the adversary-facing sandbox
+  is itself the "new forwarder tooling + new bwrap bind" decision 10 retired, and gives
+  a compromised parser a far larger capability than a single-purpose in-process splice.
+  **Rejected** in favour of the stdlib splice.
 - **`aiohttp.UnixConnector` / a custom connector** to dial the proxy over the unix
   socket directly (no shim). `UnixConnector` ignores `req.proxy` and emits no CONNECT
   line — it would send requests *directly* over the unix socket with no tunnel,
   silently defeating the gateway's CONNECT enforcement. A custom `TCPConnector`
-  subclass that overrides the proxy-dial step binds to `aiohttp` private internals
-  (version-fragile — the surgery decision 10 avoids). **Rejected**; the dumb shim is
-  strictly safer and version-stable.
+  subclass binds to `aiohttp` private internals (version-fragile — the surgery
+  decision 10 avoids). **Rejected**; the dumb shim is strictly safer and stable.
 
 ---
 
@@ -120,47 +117,63 @@ architect), unanimous on the mechanism below.
 
 Adopt **Option B**. Concretely:
 
-1. **One `EgressForwardProxy` class, two instances.** Add a mutually-exclusive
-   AF_UNIX-bind option to the existing proxy (`start_unix_server` instead of
-   `start_server`); the security-critical CONNECT splice + SSRF chain
-   (`_serve_connection`/`_read_connect_target`/`_authorize`/`_tunnel`) is **reused
-   verbatim, never copy-pasted**. The gateway runs **two** instances:
+1. **One `EgressForwardProxy` class, two instances.** Add a bind selector to the
+   existing proxy: `serve()` accepts **either** a pre-bound listening socket (`sock=`,
+   for the AF_UNIX instance) **or** a TCP `(host, port)` (the existing provider
+   instance). The security-critical chain
+   (`_serve_connection`/`_read_connect_target`/`_authorize`/`_tunnel`) is **shared, not
+   copy-pasted**; the *only* per-instance variation is the allowlist contents and an
+   injected **match predicate** (see #3). The gateway runs **two** instances:
    - TCP listener on `alfred_internal` + the **provider** allowlist (existing,
-     unchanged);
-   - AF_UNIX listener (a bind-mounted 0600 pathname socket) + the **Discord**
-     allowlist (new).
-2. **Per-caller allowlist = listener reachability**, not invented caller-auth. The TCP
-   listener is reachable only by the core (post-`internal:true`); the AF_UNIX listener
-   is bind-mounted into exactly one child. The *listener* is the caller-discriminator,
-   so the two instances carry **separate** allowlist frozensets — that separation is
-   the per-caller control. A cheap `SO_PEERCRED` same-uid check on the unix listener is
-   added as defense-in-depth (caller-auth the TCP path structurally cannot have).
-3. **Suffix/wildcard matching for the Discord allowlist** (scoped to the Discord
-   listener only; the provider listener keeps exact-match). `discord.py` connects to a
-   **dynamic** `resume_gateway_url` (a regional `*.discord.gg` subdomain returned on
-   every `READY`) that is not knowable up front — an exact `(host, port)` allowlist
-   would deny the live RESUME and invalidate the session. The Discord allowlist matches
-   a small set of **suffixes**.
-4. **A dumb in-child TCP→unix byte-splice shim.** ~30 lines of stdlib asyncio in the
-   adapter wheel: accept on `127.0.0.1:PORT`, splice each connection to the
-   bind-mounted unix socket (reuse the `egress_proxy._pipe` pattern). **Zero** CONNECT
-   parsing, **zero** allowlisting — it is transport glue, not a policy plane. All
-   enforcement stays at the gateway proxy (the single policy surface).
+     unchanged, byte-identical `serve()` path);
+   - AF_UNIX listener (a bind-mounted 0600 pathname socket) + the **Discord** allowlist
+     (new).
+2. **Per-caller allowlist = listener reachability.** The TCP listener is reachable only
+   by the core (post-`internal:true`); the AF_UNIX listener is bind-mounted into exactly
+   one child. The *listener* is the caller-discriminator, so the two instances carry
+   **separate** allowlist frozensets — that separation is the per-caller control.
+   **No `SO_PEERCRED` check** is added: the kind:full child runs at the gateway uid (no
+   `--unshare-user`), so a same-uid check would authenticate nothing while modifying the
+   shared `_handle_client` and adding an undefined refusal path. Reachability (the
+   bind-mount into one child) is the honest, sufficient control.
+3. **Per-*entry* match-mode for the allowlist** (NOT a per-instance suffix mode).
+   Each allow entry carries a mode: **`exact` is the default**; **`suffix` is used only
+   for `*.discord.gg`** (the dynamic `resume_gateway_url` regional subdomain). The
+   provider listener's entries are all `exact` (untouched); the Discord listener's entries
+   are `discord.com` exact, `*.discord.gg` suffix, (CDN exact when added). The matcher is
+   a small predicate injected into the **single shared** `_authorize` — `literal-IP`
+   refusal, `RESOLVED_IP_NOT_GLOBAL`, and the deny-audit stay single-sourced across both
+   instances. The suffix predicate is anchored: `host == base or host.endswith("." + base)`
+   (never a bare `endswith` — that would match `evildiscord.gg`).
+4. **A dumb in-child TCP→unix byte-splice shim, located under `src/alfred/`.** It accepts
+   on `127.0.0.1:PORT` and splices each connection to the bind-mounted unix socket via a
+   **shared splice helper** (extracted from the proxy's `_pipe`; see #1/§4.5 — the shim
+   does **not** import a gateway-private symbol across the package boundary). **Zero**
+   CONNECT parsing, **zero** allowlisting — it is transport glue, not a policy plane.
+   Living under `src/alfred/` makes it both coverage-gated and reliably importable inside
+   bwrap (the bound-interpreter prefix); `plugins/alfred_discord/` imports it.
 5. **`discord.py` `proxy=` threading.** One construction site:
    `AlfredDiscordBot.__init__` forwards a `proxy: str | None` to
-   `super().__init__(..., proxy=proxy)`. Verified that `discord.py` 2.7.1 routes its
-   *entire used surface* — REST, the gateway WSS, RESUME/reconnect, CDN, rate-limit
-   retries — through that one knob via `aiohttp` HTTP-CONNECT (payload-blind; no
-   client-side DNS for Discord hosts). The only bypass paths (webhooks, voice) are
-   unused; a guard test forbids regressing that.
-6. **Bwrap policy migration.** Add `"net"` to `unshare` and an `rw_binds` entry for the
-   socket directory in `discord-adapter.linux.bwrap.policy`; keep the `/etc/ssl/certs`
-   ro-bind (TLS verification still happens end-to-end in the child) and `keep_fds=[3]`
-   (the bot-token broker channel). No `SandboxPolicy` schema change — `rw_binds` →
-   `--bind` already exists.
-7. **Corpus + tests.** Flip `sbx-2026-005` for the Discord policy to enforced
-   containment (assert `"net" in discord-policy.unshare` + proxy-only egress); add the
-   §6 corpus entries; **migrate, don't drop** `test_discord_adapter_sandbox_policy.py`.
+   `super().__init__(..., proxy=proxy)`. The URL is `http://127.0.0.1:PORT` (scheme
+   pinned to `http://`). `discord.py` 2.7.1 routes its *entire used surface* — REST, the
+   gateway WSS, RESUME/reconnect, CDN, rate-limit retries — through that one knob via
+   `aiohttp` HTTP-CONNECT (payload-blind; no client-side DNS for Discord hosts). The only
+   bypass paths (webhooks, voice) are unused; a static-symbol guard test forbids
+   regressing that.
+6. **Bwrap policy migration.** Add `"net"` to `unshare` and bind-mount the socket
+   directory in `discord-adapter.linux.bwrap.policy`; keep the `/etc/ssl/certs` ro-bind
+   (TLS verification still happens end-to-end in the child) and `keep_fds=[3]` (the
+   bot-token broker channel). **Prefer `--ro-bind`** for the socket dir (least
+   privilege; `connect()` needs only the 0600 socket's w-bit, not a writable mount) and
+   fall back to `rw_binds`/`--bind` only if the bookworm repro shows `connect()` fails on
+   `MNT_READONLY`. No `SandboxPolicy` schema change (`ro_binds`/`rw_binds` already exist).
+7. **Corpus + tests.** Mint a **new** Discord-specific adversarial corpus entry (next
+   free `sbx-2026-0NN`, `policy_ref` = the Discord policy) asserting enforced
+   containment — `"net" in discord-policy.unshare` + proxy-only egress + the named
+   near-miss DENYs (§8). **Leave `sbx-2026-005` untouched** (it is the *quarantine*
+   marker, already flipped in G7-1; reusing it would regress that assertion). **Migrate,
+   don't drop** `test_discord_adapter_sandbox_policy.py` — *flip* its `#230`-deferral
+   assertions to the enforced posture.
 
 ---
 
@@ -168,83 +181,94 @@ Adopt **Option B**. Concretely:
 
 Each unit, its interface, and what it depends on.
 
-### 4.1 `EgressForwardProxy` AF_UNIX bind option — `src/alfred/gateway/egress_proxy.py`
+### 4.1 `EgressForwardProxy` bind selector — `src/alfred/gateway/egress_proxy.py`
 
-- **What:** add a constructor selector so `serve()` binds via `start_unix_server(path)`
-  **or** `start_server(host, port)` (mutually exclusive). `_handle_client` and the whole
-  enforcement chain are unchanged.
-- **Interface:** `EgressForwardProxy(*, allowlist, audit, resolve, open_upstream,
-  unix_path=None, bind_host=None, port=None)` — exactly one bind mode supplied
-  (validated; a both/neither is a loud construction error).
-- **Depends on:** the existing SSRF chain; the new suffix matcher (4.2); `_local_socket`
-  for the 0600/0700 bound socket (4.3).
-- **Enforcement parity (free):** literal-IP refusal, default-deny allowlist, gateway-
-  side DNS, reject-non-globally-routable-resolved-IP (DNS-rebind TOCTOU), bounded
-  handshake, payload-blind splice, per-CONNECT audit — all inherited via the shared
-  `_handle_client`.
+- **What:** `serve()` binds via `start_unix_server(sock=<pre-bound>)` **or**
+  `start_server(host, port)` (exactly one mode; a both/neither is a loud construction
+  error). The AF_UNIX socket is **pre-bound by the listener-lifecycle module (§4.3)** and
+  passed in — `serve()` never binds a path itself (avoids the EADDRINUSE/double-bind the
+  eager-bind would otherwise race). `_handle_client` and the SSRF chain are unchanged.
+- **Interface:** `EgressForwardProxy(*, allowlist, match, audit, resolve, open_upstream,
+  unix_sock=None, bind_host=None, port=None)`. `match` is the injected per-entry
+  predicate (default exact); the provider instance passes the exact-only matcher.
+- **Depends on:** the shared splice helper (§4.5); the per-entry allowlist type (§4.2).
 
-### 4.2 Discord allowlist + suffix matcher — `src/alfred/egress/allowlist.py`
+### 4.2 Discord allowlist + per-entry matcher — `src/alfred/egress/allowlist.py`
 
-- **What:** a new `discord_egress_allowlist()` returning the Discord destination set as
-  **suffix rules**, distinct from the exact-tuple `provider_egress_allowlist`. Fix the
-  `provider_egress_allowlist` docstring drift ("G7-4 adds the Discord hosts" — it must
-  **not** merge Discord into the provider set).
-- **Matcher:** the proxy `_authorize` gains a per-instance match strategy: providers
-  keep exact `(host, port) in allowlist`; the Discord instance matches host **suffix**
-  (`host == base or host.endswith("." + base)`) for the suffix set, port-checked. The
-  suffix set is closed and small.
+- **What:** a per-entry allow type carrying a match mode (e.g.
+  `EgressAllowEntry = frozenset of (host, port, Literal["exact","suffix"])`, default
+  `exact`), and a `discord_egress_allowlist()` returning the Discord set, **distinct**
+  from `provider_egress_allowlist`. Fix the `provider_egress_allowlist` docstring drift
+  (`allowlist.py:60`, "G7-4 adds the Discord hosts" — it must **not** merge Discord into
+  the provider set). The matcher predicate resolves the mypy-strict type cleanly (one
+  entry type, two strategies; provider entries are all `exact`).
 - **Discord destination set (verified against `discord.py` 2.7.1):**
 
-  | Destination | Source | Notes |
-  | --- | --- | --- |
-  | `discord.com:443` | `Route.BASE` REST | login, sends, fetches |
-  | `*.discord.gg:443` | `DEFAULT_GATEWAY` + dynamic `resume_gateway_url` | WSS connect + RESUME (dynamic regional subdomain) |
-  | `cdn.discordapp.com:443` | `Asset.BASE` | only if asset/attachment fetch occurs |
-  | `media.discordapp.net:443` | attachment `proxy_url` | only if attachment fetch is added; today inbound marshals text only |
+  | Destination | Mode | Source | Notes |
+  | --- | --- | --- | --- |
+  | `discord.com:443` | exact | `Route.BASE` REST | login, sends, fetches |
+  | `discord.gg` + `*.discord.gg:443` | suffix | `DEFAULT_GATEWAY` + dynamic `resume_gateway_url` | WSS connect + RESUME (dynamic regional subdomain) |
+  | `cdn.discordapp.com:443` | exact | `Asset.BASE` | only if asset/attachment fetch is added |
+  | `media.discordapp.net:443` | exact | attachment `proxy_url` | only if attachment fetch is added; today inbound marshals text only |
 
-  The shipped default is the minimal set the adapter actually uses; CDN/media are added
-  only when attachment fetch is. Delivered via a **public** gateway env
+  Shipped default is the minimal set the adapter actually uses; CDN/media are added only
+  when attachment fetch is. Delivered via a **public** gateway env
   `ALFRED_DISCORD_EGRESS_ALLOWLIST` (gateway-reads-env-never-`Settings`, ADR-0036),
   mirroring `ALFRED_TOOL_EGRESS_ALLOWLIST`/`resolve_*`.
 
-### 4.3 AF_UNIX listener lifecycle — `src/alfred/cli/gateway/_commands.py`
+### 4.3 AF_UNIX listener lifecycle — new module `src/alfred/gateway/adapter_egress_listener.py`
 
-- **What:** create + **eagerly bind** the Discord AF_UNIX listener **before** entering
-  the gateway TaskGroup (the supervisor's spawn is a sibling task with no ordering
-  guarantee; bwrap `--bind` of a missing socket path fails the spawn). Serve it in a
-  fail-closed sibling task, mirroring the existing `EgressForwardProxy`/relay mounts.
-- **Socket:** reuse `_local_socket.bind_owner_only_unix_socket` — `0700` dir, `0600`
-  socket, owned by the gateway uid (the kind:full child runs at the gateway uid; no
-  `--unshare-user`), under a dedicated per-adapter dir (e.g.
-  `/run/alfred/egress/discord/`) holding only that socket. Pathname socket (never
-  abstract).
-- **Fail-closed:** a bind failure maps to `IOPlaneUnavailableError` (gateway
-  crash-loops under `restart: unless-stopped`) — never "no listener but child spawned".
-- **Depends on:** `_local_socket`; the proxy (4.1).
+- **What (extracted into its own coverable module, NOT buried in `_commands.py`):**
+  create + **eagerly bind** the Discord AF_UNIX socket via
+  `_local_socket.bind_owner_only_unix_socket` (0700 dir, 0600 socket, pathname not
+  abstract) **before** the gateway TaskGroup is entered, then hand the pre-bound socket
+  to the `EgressForwardProxy` AF_UNIX instance whose `serve()` runs as a fail-closed
+  sibling task. `_commands.py` calls this module (one line), keeping its own coverage
+  untouched and letting the new boundary reach **per-file 100% line+branch**.
+- **Socket path:** under the existing `alfred_run` mount / trust chain (align with the
+  established run-dir, not a bespoke `/run/alfred/egress/...`), in a dedicated dir holding
+  only that socket. One shared **path constant** is referenced by the gateway bind, the
+  bwrap bind target, and the shim's `open_unix_connection` (§4.5) — never three literals.
+- **Fail-closed + distinctly typed:** a bind failure maps to a **new**
+  `EgressAdapterProxyUnavailableError(IOPlaneUnavailableError)` with its **own exit code**
+  (proxy=7, relay=8 precedent → adapter-proxy=9) and a distinct `t()` key — so the
+  operator sees "Discord egress listener failed", not the provider-proxy outage. (Like
+  the provider proxy, this fail-closed sibling crash-loops the gateway under
+  `restart: unless-stopped`; the distinct error/exit prevents mislabelling.)
+- **Depends on:** `_local_socket`; the proxy (§4.1); the allowlist (§4.2).
 
 ### 4.4 Bwrap policy migration — `config/sandbox/discord-adapter.linux.bwrap.policy`
 
-- **What:** `unshare += ["net"]`; `rw_binds += [["/run/alfred/egress/discord", "..."]]`
-  (a dedicated dir, so a write-mode bind exposes only the socket); rewrite the
-  "EGRESS IS CURRENTLY UNRESTRICTED — #230" header (lines ~92-115) to the enforced
-  posture; keep `ro_binds` `/etc/ssl/certs`, `keep_fds=[3]`, the tmpfs, and the
+- **What:** `unshare += ["net"]`; bind the socket dir (**`ro_binds` preferred**, `rw_binds`
+  fallback per §3 #6) using the shared path constant; rewrite **both** egress comment
+  blocks — the "DELIBERATELY DO NOT unshare net" note (lines ~76-78) and the "EGRESS IS
+  CURRENTLY UNRESTRICTED — #230" header (lines ~92-115) — to the enforced posture; **do
+  not** touch the unrelated `#230` `/usr`-prefix-tightening reference (lines ~46-48).
+  Keep `ro_binds` `/etc/ssl/certs`, `keep_fds=[3]`, the tmpfs, and the
   pid/uts/cgroup/ipc unshares.
-- **Empirical check (in the plan):** confirm `connect()` to a `--ro-bind`-vs-`--bind`
-  socket in a `debian:bookworm` bwrap repro (a socket inode is likely exempt from
-  `MNT_READONLY`, but use `rw_binds`/`--bind` as the unambiguous default and verify).
+- **Empirical check (in the plan):** confirm `connect()` to the `--ro-bind` socket in a
+  `debian:bookworm` bwrap repro; only switch to `--bind` if `connect()` fails on
+  `MNT_READONLY`.
 - **Depends on:** nothing new in `sandbox_policy.py` (the schema already expresses it).
 
-### 4.5 In-child TCP→unix shim — `plugins/alfred_discord/` (new small module + wiring)
+### 4.5 In-child TCP→unix shim + shared splice helper — `src/alfred/egress/`
 
-- **What:** an asyncio task that `start_server`s on `127.0.0.1:PORT` and splices each
-  accepted connection to `open_unix_connection(<bind-mounted path>)` bidirectionally.
-  No parsing, no allowlist, no DNS, no `0.0.0.0`, no fallback.
-- **Lifecycle:** **awaited (listening) before** `discord.py`'s first egress (the
-  synchronous `login()` `/users/@me` REST inside `lifecycle.start → gateway.connect →
-  bot.login`). Started in `server.serve()` (after stderr-json logging, before
-  `_serve_stdin_stdout`) **or** in `DiscordLifecycle.start` immediately before
-  `gateway.connect`. Run under the adapter's crash discipline (a shim death is terminal
-  and audited, not a silent reconnect spin).
+- **What:** a shared splice helper (extract the proxy's `_pipe` byte-splice into e.g.
+  `src/alfred/egress/byte_splice.py`; `egress_proxy._pipe` refactors to call it,
+  behaviour-neutral) and the shim module `src/alfred/egress/adapter_proxy_shim.py`: an
+  asyncio task that `start_server`s on `127.0.0.1:PORT` and splices each accepted
+  connection to `open_unix_connection(<shared path constant>)`. No parsing, no allowlist,
+  no DNS, no `0.0.0.0`, no fallback. Both files are under `src/alfred/` → coverage-gated.
+- **Lifecycle (process scope):** started in `plugins/alfred_discord/server.serve()`
+  (after stderr-json logging, **before** `_serve_stdin_stdout`), **awaited (listening)**
+  before `discord.py`'s first egress (the synchronous `login()` `/users/@me` REST). NOT
+  in `DiscordLifecycle.start` (that carries a latent EADDRINUSE on a stop→start cycle).
+  The shim port comes from one shared **port constant** also used to build the bot's
+  `proxy=` URL (a port skew would silently ECONNREFUSE `login()`).
+- **Supervised termination (hard rule #7):** the shim runs under the adapter's crash
+  discipline so its death is a **terminal, audited** adapter exit — never a silent
+  ECONNREFUSED→`discord.py`-reconnect spin. This mechanism + its guard test are mandated
+  here (not deferred).
 - **Depends on:** loopback up in the empty netns (bwrap brings `lo` up under
   `--unshare-net`; the `RTM_NEWADDR` skip-guard handles unprivileged CI runners).
 
@@ -252,9 +276,8 @@ Each unit, its interface, and what it depends on.
 
 - **What:** `AlfredDiscordBot.__init__(*, proxy: str | None = None, ...)` →
   `super().__init__(command_prefix="!", intents=_least_privilege_intents(),
-  proxy=proxy)`. `_build_server` reads the proxy URL (env-derived
-  `http://127.0.0.1:PORT`) and passes it. `login()`/`connect()` need no change (the
-  proxy lives on the `HTTPClient` built at `Client.__init__`).
+  proxy=proxy)`. `_build_server` reads the proxy URL (`http://127.0.0.1:PORT` from the
+  shared port constant) and passes it. `login()`/`connect()` need no change.
 
 ---
 
@@ -263,16 +286,17 @@ Each unit, its interface, and what it depends on.
 ```
 discord.py (in the --unshare-net child)
   Client(proxy=http://127.0.0.1:PORT)
-  -> aiohttp issues:  CONNECT gateway.discord.gg:443 HTTP/1.1   (to 127.0.0.1:PORT)
+  -> aiohttp issues:  CONNECT gateway-us-east1-b.discord.gg:443 HTTP/1.1   (to 127.0.0.1:PORT)
         |
         v  child loopback (lo up in the empty netns)
-  [in-child shim]  accept 127.0.0.1:PORT  ->  open_unix_connection(/run/.../discord.sock)
-        |                                          (byte-splice, no parsing)
-  ======= --unshare-net kernel boundary; only this AF_UNIX path crosses =======
+  [in-child shim: src/alfred/egress/adapter_proxy_shim.py]
+        accept 127.0.0.1:PORT  ->  open_unix_connection(<shared path>)   (byte-splice, no parsing)
+        |
+  ======= --unshare-net kernel boundary; only this AF_UNIX pathname socket crosses =======
         |
         v  gateway netns
-  EgressForwardProxy (AF_UNIX instance, Discord allowlist)
-     _read_connect_target -> _authorize (suffix match *.discord.gg, refuse literal-IP)
+  EgressForwardProxy (AF_UNIX instance, Discord allowlist, per-entry matcher)
+     _read_connect_target -> _authorize (suffix-match *.discord.gg, refuse literal-IP)
      -> gateway-side DNS -> reject non-global resolved IP -> 200 Connection Established
      -> opaque byte splice to the resolved upstream on alfred_external
         |
@@ -290,33 +314,29 @@ security control.
 ## 6. Security model
 
 - **Enforcement-of-record:** the empty netns (`--unshare-net`). A direct
-  `socket.create_connection(('attacker.example', 443))` — the sbx-2026-005 probe —
-  fails at the kernel: no route, no interface.
+  `socket.create_connection(('attacker.example', 443))` fails at the kernel: no route,
+  no interface.
 - **Defense-in-depth:** the gateway proxy's Discord allowlist + the full SSRF chain
   (literal-IP refusal, gateway-side DNS, reject-non-globally-routable-resolved-IP).
 - **Cred-concentration (Spec B §8):** preserved and narrowed. The child still decrypts
   exactly one credential (its bot token, over fd-3); post-G7-4 it reaches only Discord,
-  so the blast radius of that one credential drops from "any host" to "allowlisted
-  Discord + the cotenant residual".
-- **Corpus (`sbx-2026-005` Discord half + new entries):**
-  - Discord direct-egress from the empty netns → **CAUGHT** (kernel).
-  - proxy-bypass attempt from the empty netns → **CAUGHT** (no route).
-  - literal-IP CONNECT via the proxy → **CAUGHT** (`LITERAL_IP_TARGET`).
-  - non-allowlisted host via the proxy → **CAUGHT** (`DESTINATION_NOT_ALLOWLISTED`).
-  - DNS-rebind (allowlisted name → private IP) → **CAUGHT** (`RESOLVED_IP_NOT_GLOBAL`).
-  - SNI-spoof-to-cotenant (allowlisted CONNECT authority, different inner SNI) →
-    **HONEST RESIDUAL** (TLS-passthrough is SNI-blind; ECH defeats any SNI-peek) —
-    recorded, not claimed caught.
-  - CDN-cotenant (allowlisted host shares a Cloudflare edge with attacker infra) →
-    **HONEST RESIDUAL** — recorded.
-- **Residuals that survive G7-4 (do not over-claim):**
-  - T3 exfil **through Discord itself** (the adapter legitimately reaches Discord, so it
-    can post relayed T3 to an attacker-owned server/DM). That is the comms
+  so the blast radius drops from "any host" to "allowlisted Discord + the cotenant
+  residual".
+- **Honest residuals (recorded, NOT claimed caught):**
+  - SNI-spoof-to-cotenant (allowlisted CONNECT authority, different inner SNI) — TLS-
+    passthrough is SNI-blind; ECH defeats any SNI-peek.
+  - CDN-cotenant (allowlisted host shares a Cloudflare edge with attacker infra).
+  - T3 exfil **through Discord itself** — the adapter legitimately reaches Discord, so it
+    can post relayed T3 to an attacker-owned server/DM. That is the comms
     `OutboundDlp`/canary path's job, **not** the egress proxy's.
+  - **Detection blind-spot:** kernel-blocked direct-egress attempts produce **no gateway
+    audit row** (the kernel drops the packet before it reaches the gateway), so a
+    compromised adapter probing for egress is invisible to the egress audit. Record this
+    honestly; host-level netns/seccomp telemetry is the future detection path, not G7-4.
   - The gateway still **serially transits** each credential's plaintext at spawn over
-    fd-3 (ADR-0036 serial-harvest residual; the gateway keeps egress, so a compromised
-    gateway can still harvest-and-exfil). G7-4 does not close this; ADR-0043
-    cross-references ADR-0040's honest-residual (iii) and does not claim closure.
+    fd-3 (ADR-0036 serial-harvest residual; the gateway keeps egress). G7-4 does not
+    close this; ADR-0043 cross-references ADR-0040's honest-residual (iii) and does not
+    claim closure.
 
 ---
 
@@ -324,51 +344,61 @@ security control.
 
 | Condition | Behaviour |
 | --- | --- |
-| Gateway AF_UNIX bind fails | `IOPlaneUnavailableError` → gateway crash-loops (fail-closed; the proxy is the gateway's reason to exist) |
-| `lo` can't come up in the empty netns (unprivileged userns) | bwrap exits non-zero before the child runs → `GatewayAdapterSpawnError` → supervisor restart/breaker (no egress, adapter down). `RTM_NEWADDR` skip-guard for restricted CI runners |
-| Socket not bind-mounted (policy/gateway error) | shim `open_unix_connection` raises → adapter can't reach the proxy → fail-closed, loud |
-| Shim dies | `discord.py` CONNECT gets ECONNREFUSED; the shim death is terminal + audited under the adapter crash discipline (never a silent reconnect storm) |
-| Non-allowlisted / literal-IP / rebind destination | proxy `_deny` with the closed-vocab reason + audit; child's tunnel refused |
+| Gateway AF_UNIX bind fails | `EgressAdapterProxyUnavailableError` (exit 9, distinct `t()` key) → gateway crash-loops — never mislabelled as the provider-proxy outage |
+| `lo` can't come up in the empty netns | bwrap exits non-zero before the child runs → `GatewayAdapterSpawnError` → supervisor restart/breaker. `RTM_NEWADDR` skip-guard for restricted CI runners |
+| Socket not bind-mounted | shim `open_unix_connection` raises → adapter can't reach the proxy → fail-closed, loud |
+| Shim task dies | terminal + audited adapter exit under the crash discipline (§4.5) — never a silent `discord.py` reconnect spin |
+| Non-allowlisted / literal-IP / rebind / suffix near-miss | proxy `_deny` with the closed-vocab reason + audit; tunnel refused |
 
-There is no fallback path anywhere: the shim has a fixed loopback accept, a fixed unix
-path, no DNS, no `0.0.0.0`. In an empty netns there is nothing to fall back to — keep
-it structurally so.
+There is no fallback path: the shim has a fixed loopback accept, a fixed unix path, no
+DNS, no `0.0.0.0`. In an empty netns there is nothing to fall back to.
 
 ---
 
 ## 8. Testing / proof bar
 
-The established Spec C pattern (G7-1 quarantine flip, G7-2c synthetic relay, G7-3
-kernel proof) — **no live Discord bot**:
+The established Spec C pattern — **no live Discord bot**:
 
-- **Unit:** the proxy AF_UNIX bind + suffix matcher; the Discord allowlist set; the
-  shim splice; the `proxy=` threading; the policy migration (`test_discord_adapter_
-  sandbox_policy.py`, migrated). The two new boundary files (the AF_UNIX listener
-  wiring + the shim) each get their own **per-file 100% line+branch** two-gates
-  coverage step in `ci.yml` (alongside the existing egress gates).
-- **Synthetic/loopback integration:** a real `EgressForwardProxy` AF_UNIX instance on
-  loopback + a real shim + real `discord.py` `Client(proxy=...)` against a fake upstream
-  (reusing the `egress_doubles`/`fake_external_world` helpers): proves the full CONNECT
-  path, suffix match (incl. a synthetic `gateway-us-east1-b.discord.gg` resume host),
-  payload-blindness, and refusal.
-- **Docker-gated kernel proof** in the REQUIRED Integration lane (clone
-  `tests/integration/egress/test_core_network_isolation_kernel.py` /
-  `test_quarantined_llm_policy_kernel_enforced.py`): spawn the Discord policy (or the
-  `discord_probe` via the env-gated `override_map`) with `--unshare-net` + the bound
-  socket and assert (a) direct external connect is **blocked**, (b) `getaddrinfo`
-  external **fails**, (c) an allowlisted host via the bridge **succeeds**, (d) a
-  non-allowlisted host via the bridge is **denied** — with the `RTM_NEWADDR`
-  netns-unconfigurable skip-guard and a **#245-style not-skipped CI guard**.
-- **Adversarial:** the `sbx-2026-005` Discord flip + the §6 corpus entries. Touching
-  `src/alfred/security/` and the egress/sandbox boundary makes the **full adversarial
-  suite release-blocking**.
-- **Compose-invariants:** `ALFRED_DISCORD_EGRESS_ALLOWLIST` on the gateway, **absent**
-  on the core; no new host-published port/socket.
-- **Smoke-test trap to avoid:** Discord often returns `gateway.discord.gg` itself as
-  `resume_gateway_url`, so an exact-match bug can hide behind green. The synthetic
-  driver MUST exercise a regional resume host.
-
-Run docker-driven tests with `DOCKER_HOST=unix:///Users/iandominey/.orbstack/run/docker.sock`.
+- **Unit (per-file 100% line+branch, two-gates, both ci.yml jobs):** the proxy bind
+  selector + injected matcher (`egress_proxy.py`); the per-entry matcher + Discord
+  allowlist (`allowlist.py`); the shared splice helper (`byte_splice.py`); the shim
+  (`adapter_proxy_shim.py`); the AF_UNIX listener lifecycle
+  (`adapter_egress_listener.py`); the `proxy=` threading. **All new boundary files live
+  under `src/alfred/`** so the existing `[tool.coverage.run] source=["src/alfred"]` gate
+  actually traces them (the shim must NOT live in `plugins/alfred_discord/`, which is
+  uncovered).
+- **Suffix-matcher near-miss DENYs (security-critical):** named adversarial entries —
+  `evildiscord.gg`, `discord.gg.evil.com`, `gateway.discord.gg.attacker.com`, an
+  allowlisted suffix on a non-443 port, a trailing-dot host — each asserted DENIED. A
+  *generic* "non-allowlisted host" deny is insufficient (it passes against a regressed
+  bare `endswith`).
+- **Synthetic/loopback integration:** a real `EgressForwardProxy` AF_UNIX instance + a
+  real shim + real `discord.py` `Client(proxy=...)` against a fake upstream (reusing the
+  `egress_doubles`/`fake_external_world` helpers): full CONNECT path, payload-blindness,
+  refusal, and a **regional `resume_gateway_url`** (e.g. `gateway-us-east1-b.discord.gg`)
+  so the suffix path is exercised (a smoke test that only sees `gateway.discord.gg` masks
+  the regional failure). Plus a shim-listening-**before**-first-`login()` ordering
+  assertion (the production wiring orders it, not just "works when up").
+- **Docker-gated kernel proof — `integration-privileged` lane (NOT plain Integration):**
+  clone `test_quarantined_llm_policy_kernel_enforced.py`; run as euid-0 (apparmor
+  relaxed) so the netns is configurable and the `RTM_NEWADDR` skip cannot fire; assert
+  (a) direct external connect **blocked**, (b) `getaddrinfo` external **fails**, (c) an
+  allowlisted host via the bridge **succeeds**, (d) a non-allowlisted host via the bridge
+  **denied**. Pin with a **precondition assertion + per-test not-skipped guard** in the
+  privileged lane (the plain-lane `RTM_NEWADDR` skip and the `#245` not-skipped guard have
+  *opposite* semantics — pick the privileged lane explicitly). Backed by the non-root
+  structural assertion `"net" in discord-policy.unshare` (so the gate is not paper-only).
+  Local runs: `DOCKER_HOST=unix:///…/docker.sock` is a developer note, **not** committed
+  to CI.
+- **Adversarial:** the **new** Discord `sbx-2026-0NN` enforced-containment entry (mint a
+  fresh id; do **not** touch `sbx-2026-005`); the §6 residuals tracked as corpus rows
+  (CAUGHT vs honest-RESIDUAL split). Touching `src/alfred/security/` and the egress/sandbox
+  boundary makes the **full adversarial suite release-blocking**.
+- **Migrate-don't-drop:** `test_discord_adapter_sandbox_policy.py` — *flip* its
+  `#230`-deferral assertions to the enforced posture (don't delete them).
+- **Compose-invariants:** `ALFRED_DISCORD_EGRESS_ALLOWLIST` on the gateway, **absent** on
+  the core; no new host-published port/socket; the socket dir is container-internal.
+- **happy/error/refusal trio** for each new unit.
 
 ---
 
@@ -377,46 +407,78 @@ Run docker-driven tests with `DOCKER_HOST=unix:///Users/iandominey/.orbstack/run
 Linux/bwrap is the **enforced** plane. The macOS `.sb` (Seatbelt) and Windows stub are
 **dev stubs with a documented gap** — the launcher already refuses `kind:full` on macOS
 (`macos_full_not_yet_shipped`), and neither platform has an empty-netns/unix-bridge
-primitive. G7-4 tightens the (inert) macOS `.sb` network allow toward the Discord
-remotes and documents the gap; there is no runtime path to harden there. This matches
-the existing policy-header/README posture.
+primitive. G7-4 tightens the (inert) macOS `.sb` network allow toward the Discord remotes
+and documents the gap; there is no runtime path to harden there.
 
 ---
 
-## 10. ADR plan
+## 10. ADR + docs plan
 
 - **New ADR-0043** — "Discord-adapter egress via the gateway L7 CONNECT proxy (the
   empty-netns AF_UNIX bridge)". Records: the bind-mounted AF_UNIX CONNECT listener as a
-  second proxy *instance*; per-caller allowlist via listener reachability (+ the
-  `SO_PEERCRED` check); the non-enforcing in-child shim (fd-3-channel analog); the
-  decision-10 reconciliation; the policy migration; the honest residuals. Follows the
-  ADR-0042 precedent (G7-3 got its own focused cutover ADR alongside reserved-0040).
+  second proxy *instance*; per-caller allowlist via listener reachability (and **why
+  `SO_PEERCRED` was dropped** — it authenticates nothing at the shared gateway uid); the
+  per-entry matcher; the non-enforcing in-child shim (fd-3-channel analog); the
+  decision-10 reconciliation; the policy migration; the honest residuals (incl. the
+  kernel-blocked-egress audit blind-spot). Follows the ADR-0042 (G7-3) precedent.
 - **Amend ADR-0016** (Discord adapter egress; already factually amended in G7-1a) with a
-  G7-4 block pointing at ADR-0043 and closing the `#230`/G7-4 thread.
-- **Cross-reference ADR-0036** (gateway privilege) — the gateway gains an in-model duty
-  (hosting a bind-mounted unix proxy listener) and **no new capability**; the
-  serial-transit residual is unchanged. A note, not a re-decision.
-- **Do NOT consume ADR-0040** (reserved — the comprehensive G7-5 egress ADR).
+  G7-4 block pointing at ADR-0043 and closing the `#230`/G7-4 thread; flip its status from
+  "Proposed" if now accurate. **Touch ADR-0015's** egress-deferral text (now stale once
+  `#230` is fully closed).
+- **Cross-reference ADR-0036** (gateway privilege) — an in-model duty, no new capability.
+- **Deep-doc updates (English-only, NON-human-gated → G7-4 deliverables, same PR):**
+  `docs/subsystems/comms.md` (~L341-372, "Sandbox posture and egress" — asserts the policy
+  does NOT `--unshare-net`; goes false on merge); `docs/subsystems/security.md` (the
+  egress-planes prose — the adapter is now a third egress consumer);
+  `config/sandbox/README.md` (the Discord egress note). The plan must size these.
+- **Human-gated → G7-5 (do NOT edit here):** CLAUDE.md HARD rule #9's "adapter-egress G7-4"
+  status line; PRD §5/§7.1; **ADR-0040** (reserved comprehensive egress ADR).
+- **i18n:** the new operator-facing strings (`EgressAdapterProxyUnavailableError` /
+  shim-failure messages) need `t()` keys + catalog entries (the plan adds them; run the
+  pybabel extract→update→compile flow).
 - **Spec erratum note** (in the Spec C design doc, mirror the G7-1 §3 TCP-proxy
-  reconciliation note): factual reconciliation of decision 10 — `Client(proxy=...)` is
+  reconciliation note): factual reconciliation of decision 10 — `Client(proxy=...)`
   preserved on the enforcement axis; the empty-netns constraint forces a thin in-child
-  transport bridge to a bind-mounted AF_UNIX listener; this re-introduces nothing
-  decision 10 retired (it enforces nothing). Correct §3's "one L7 CONNECT *listener*"
-  to "one *implementation*, per-caller instances"; soften decision 10's "a config knob,
-  not transport surgery" overclaim. Drafting the factual note is in-remit; the
-  authoritative PRD §5/§7.1 + ADR-0040 prose stays **human-gated** to G7-5.
+  transport bridge; this re-introduces nothing decision 10 retired (it enforces nothing).
+  Correct §3's "one L7 CONNECT *listener*" to "one *implementation*, per-caller instances".
+  Drafting the factual note is in-remit; authoritative PRD/ADR-0040 prose is human-gated.
 
 ---
 
-## 11. Open items for the plan (not blockers)
+## 11. Open items for the plan (genuinely deferrable)
 
-- The exact `_authorize` suffix-match API shape (per-instance strategy vs a typed
-  allowlist that carries match-mode) — decide in the plan; keep the provider exact-match
-  untouched.
-- The `--ro-bind`-vs-`--bind` socket `connect()` empirical result (debian:bookworm
-  repro).
-- The precise shim-start site (`server.serve()` vs `DiscordLifecycle.start`) and its
-  crash-emitter wiring.
-- The fixed shim loopback port (a constant; the relay/proxy-port `resolve_*` precedent).
+- The `--ro-bind`-vs-`--bind` socket `connect()` empirical result (debian:bookworm repro)
+  — decides §4.4's bind mode.
 - Whether to enumerate CDN/media hosts now or gate them behind an attachment-fetch
   capability (today: text-only inbound → omit until needed, logged).
+- The exact next-free `sbx-2026-0NN` id (mechanical; the plan reads the corpus).
+
+(Resolved by this revision — no longer open: the suffix-match shape = per-entry match-mode;
+the shim placement = `server.serve()` process scope; the shared path + port constants; the
+bind lifecycle = pre-bind + `serve(sock=)`; SO_PEERCRED dropped; the corpus = a new id.)
+
+---
+
+## 12. Plan-review revisions (2026-06-30)
+
+Folded from an 8-lens `/review-plan` pass (architect, reviewer, test, security, comms,
+devops, provider, docs — 0 Critical, 9 High, 29 Medium, 21 Low). Highlights:
+
+- **Suffix-match → per-entry match-mode** (only `*.discord.gg` is suffix; exact default),
+  injected as a predicate into the single shared `_authorize`; mypy type resolved; named
+  near-miss DENY tests mandated `[arch-001, rev-001, prov-001, sec-001/002]`.
+- **Boundary code relocated under `src/alfred/`** (shim + listener) and **extracted into
+  own modules** so the per-file 100% gate has real data `[test-001/002, ops-002]`.
+- **Kernel proof pinned to `integration-privileged`** with a precondition + not-skipped
+  guard (reconciling the opposite skip semantics) `[test-003, ops-003]`.
+- **New Discord corpus id** instead of flipping `sbx-2026-005` (the quarantine marker)
+  `[test-004]` — maintainer-chosen.
+- **Bind lifecycle**: pre-bind + `serve(sock=)` (no double-bind race) `[prov-003, ops-001]`.
+- **Distinct typed error + exit 9** for the adapter-proxy bind fault `[prov-002, ops-004]`.
+- **Shim-death supervised termination + test** mandated, not deferred `[rev-003, comms-002,
+  sec-005]`.
+- **SO_PEERCRED dropped** (authenticates nothing at the shared gateway uid) `[arch-003,
+  rev-002, ops-006]` — maintainer-chosen.
+- **Shared path + port constants** `[rev-005, comms-003]`; **`ro-bind` preferred**
+  `[sec-003, ops-008]`; **deep-doc enumeration** as G7-4 deliverables `[docs-001, arch-002]`;
+  **kernel-blocked-egress audit blind-spot** recorded `[sec-006]`.
