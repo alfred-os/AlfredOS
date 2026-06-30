@@ -45,6 +45,7 @@ _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 _HAS_JQ = shutil.which("jq") is not None
 _HAS_BWRAP = shutil.which("bwrap") is not None
 _QUARANTINED_LINUX_POLICY = _REPO_ROOT / "config" / "sandbox" / "quarantined-llm.linux.bwrap.policy"
+_DISCORD_LINUX_POLICY = _REPO_ROOT / "config" / "sandbox" / "discord-adapter.linux.bwrap.policy"
 
 
 def _load(payload_id: str) -> AdversarialPayload:
@@ -548,9 +549,40 @@ def test_sbx_2026_005_outbound_network_egress_contained() -> None:
     )
 
 
+def test_sbx_2026_014_discord_outbound_contained() -> None:
+    """sbx-2026-014 is an ENFORCED-containment vector (Spec C G7-4, #333).
+
+    The Discord adapter is ``--unshare-net``'d into an empty network namespace
+    (G7-4 / ADR-0043): outbound TCP connections are refused at the kernel and
+    egress routes ONLY through the bind-mounted gateway L7 CONNECT proxy socket.
+    The corpus entry marks the containment as enforced; we assert the SHIPPED
+    Discord policy genuinely unshares ``net`` so the claim stays honest.
+    The kernel-observable proof (direct connect blocked + getaddrinfo fails) is
+    in ``tests/integration/egress/test_discord_policy_kernel_enforced.py``.
+    """
+    payload = _load("sbx-2026-014")
+    assert payload.out_of_scope is False
+    assert payload.expected_outcome == "refused"
+    policy = read_policy_toml(_DISCORD_LINUX_POLICY.read_text())
+    assert "net" in policy.unshare, (
+        "Discord policy no longer unshares net — sbx-2026-014 asserts the "
+        "adapter's egress is kernel-closed (--unshare-net); a dropped 'net' "
+        "silently re-opens the adapter's egress (Spec C G7-4 / ADR-0043)"
+    )
+
+
 def test_all_pr_s4_7_payloads_load() -> None:
     # Every PR-S4-7 sbx payload schema-validates + carries the sbx prefix.
-    ids = ["sbx-2026-003", "sbx-2026-004", "sbx-2026-005", "sbx-2026-006", "sbx-2026-011"]
+    # sbx-2026-014 (G7-4 Discord egress containment) is structurally equivalent
+    # to the PR-S4-7 bwrap-containment payloads and is validated here.
+    ids = [
+        "sbx-2026-003",
+        "sbx-2026-004",
+        "sbx-2026-005",
+        "sbx-2026-006",
+        "sbx-2026-011",
+        "sbx-2026-014",
+    ]
     for pid in ids:
         payload = _load(pid)
         assert payload.id == pid
