@@ -53,6 +53,29 @@ class EgressRelayUnavailableError(IOPlaneUnavailableError):
         AlfredError.__init__(self, t("egress.relay_unavailable", detail=detail))
 
 
+class EgressAdapterProxyUnavailableError(IOPlaneUnavailableError):
+    """The gateway's Discord-adapter AF_UNIX egress listener could not bind/serve.
+
+    A subtype of :class:`IOPlaneUnavailableError` (the adapter egress proxy IS an egress
+    I/O plane, so generic I/O-plane handling still applies), but DISTINCT so the gateway
+    start catches it FIRST and renders an adapter-specific refusal + exit code 9 (separate
+    from the CONNECT proxy's exit code 7 and the relay's exit code 8). The operator sees
+    "Discord egress listener failed", not the provider-proxy outage message.
+
+    Its ``except``-clause MUST precede ``except IOPlaneUnavailableError`` in any handler
+    that wants adapter-specific behaviour — see ``cli/gateway/_commands.py`` for the
+    established pattern (``EgressRelayUnavailableError`` as the precedent).
+    """
+
+    reason = "egress_adapter_proxy_unavailable"
+
+    def __init__(self, *, detail: str) -> None:
+        self.detail = detail
+        # Bypass IOPlaneUnavailableError.__init__ (its message names the CONNECT proxy);
+        # set the adapter-specific message directly on AlfredError.
+        AlfredError.__init__(self, t("egress.adapter_proxy_unavailable", detail=detail))
+
+
 class EgressDeniedError(AlfredError):
     """An egress call was refused by the destination allowlist or the DLP pass."""
 
@@ -103,6 +126,7 @@ class RelayIOPlaneUnavailableError(IOPlaneUnavailableError):
 
 
 __all__ = [
+    "EgressAdapterProxyUnavailableError",
     "EgressDeniedError",
     "EgressInDoubtError",
     "EgressRelayUnavailableError",
