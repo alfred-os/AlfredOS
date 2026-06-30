@@ -511,11 +511,13 @@ jobs:
         # the byte-splice primitive (egress/byte_splice.py — the payload-blind
         # bidirectional asyncio-stream copier), the child-side address constants
         # (egress/adapter_egress_addr.py — the TCP shim port + AF_UNIX socket path),
-        # and the gateway-side AF_UNIX adapter egress listener
+        # the in-process proxy shim (egress/adapter_proxy_shim.py — connects the
+        # child-side TCP shim to the gateway AF_UNIX egress socket), and the
+        # gateway-side AF_UNIX adapter egress listener
         # (gateway/adapter_egress_listener.py — the sole external-facing acceptance
         # surface the Discord adapter child connects to; an un-exercised branch is an
         # un-exercised connection or error disposition at the gateway boundary).
-        # All three reach 100% from unit data, so they gate here in the unit job too.
+        # All four reach 100% from unit data, so they gate here in the unit job too.
         # The TWO-GATES pattern: keep BOTH ``--include`` lists in sync with the
         # matching (combined) step below. Chained ``&&`` hashFiles guard: ALL
         # files must be present before the report runs.
@@ -1736,8 +1738,8 @@ jobs:
           uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/memory/egress_idempotency.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py,src/alfred/egress/egress_response_extract.py,src/alfred/egress/response_inspection.py' --fail-under=100
       - name: Egress adapter-bridge per-file 100% line+branch coverage (combined)
         # Combined-data mirror of the ``python`` job's adapter-bridge gate
-        # (Spec C G7-4, #333 — the two-gates pattern). The three G7-4 boundary
-        # modules (byte_splice.py, adapter_egress_addr.py,
+        # (Spec C G7-4, #333 — the two-gates pattern). The four G7-4 boundary
+        # modules (byte_splice.py, adapter_egress_addr.py, adapter_proxy_shim.py,
         # gateway/adapter_egress_listener.py) are proven by unit data; this
         # combined mirror exists for parity so a future integration test that
         # exercises these paths contributes to the gate. Keep the ``--include``

@@ -18,15 +18,11 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
-import structlog
-
 from alfred.egress.adapter_egress_addr import DISCORD_EGRESS_SOCKET_PATH
 from alfred.egress.allowlist import discord_egress_allowlist, suffix_match
 from alfred.egress.errors import EgressAdapterProxyUnavailableError
 from alfred.gateway import egress_proxy
 from alfred.gateway.egress_audit import record_egress_connect
-
-_log = structlog.get_logger(__name__)
 
 
 class _EgressProxyLike(Protocol):
