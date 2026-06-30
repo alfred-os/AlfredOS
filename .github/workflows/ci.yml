@@ -516,19 +516,13 @@ jobs:
         # surface the Discord adapter child connects to; an un-exercised branch is an
         # un-exercised connection or error disposition at the gateway boundary).
         # All three reach 100% from unit data, so they gate here in the unit job too.
-        # NOTE: egress/adapter_proxy_shim.py (the in-child TCP→unix shim) is
-        # intentionally ABSENT: the OSError upstream-unavailable path in _bridge
-        # (lines 28-31) is not yet covered by any unit test. That gap was surfaced
-        # in Task 11; once a test for that path lands (Task 11 NEEDS_CONTEXT
-        # follow-up), adapter_proxy_shim.py must be added to BOTH this step and
-        # the matching (combined) step in the coverage-gates job.
         # The TWO-GATES pattern: keep BOTH ``--include`` lists in sync with the
         # matching (combined) step below. Chained ``&&`` hashFiles guard: ALL
         # files must be present before the report runs.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/byte_splice.py') != '' && hashFiles('src/alfred/egress/adapter_egress_addr.py') != '' && hashFiles('src/alfred/gateway/adapter_egress_listener.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/byte_splice.py') != '' && hashFiles('src/alfred/egress/adapter_egress_addr.py') != '' && hashFiles('src/alfred/gateway/adapter_egress_listener.py') != '' && hashFiles('src/alfred/egress/adapter_proxy_shim.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py' \
+            --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py,src/alfred/egress/adapter_proxy_shim.py' \
             --fail-under=100
 
   python-arm64:
@@ -1712,14 +1706,11 @@ jobs:
         # combined mirror exists for parity so a future integration test that
         # exercises these paths contributes to the gate. Keep the ``--include``
         # list in sync with the python-job ``(unit)`` step.
-        # NOTE: egress/adapter_proxy_shim.py is intentionally ABSENT (same
-        # reason as the unit step — the OSError upstream-unavailable path at
-        # lines 28-31 is not yet covered; must be added once that test lands).
         # Chained ``&&`` hashFiles guard: ALL listed files must be present.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/byte_splice.py') != '' && hashFiles('src/alfred/egress/adapter_egress_addr.py') != '' && hashFiles('src/alfred/gateway/adapter_egress_listener.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/byte_splice.py') != '' && hashFiles('src/alfred/egress/adapter_egress_addr.py') != '' && hashFiles('src/alfred/gateway/adapter_egress_listener.py') != '' && hashFiles('src/alfred/egress/adapter_proxy_shim.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py' \
+            --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py,src/alfred/egress/adapter_proxy_shim.py' \
             --fail-under=100
 
   smoke:
