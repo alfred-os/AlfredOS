@@ -8,12 +8,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from typing import Protocol
 
 _SPLICE_CHUNK = 65536
 
 
+class _SpliceDst(Protocol):
+    """The narrow write-side surface ``splice`` needs from its destination.
+
+    ``asyncio.StreamWriter`` (the proxy tunnel) satisfies this structurally, as does any
+    in-child shim's writer — so callers never have to hand us a concrete ``StreamWriter``.
+    """
+
+    def write(self, data: bytes) -> None: ...
+    async def drain(self) -> None: ...
+    def write_eof(self) -> None: ...
+
+
 async def splice(
-    src: asyncio.StreamReader, dst: asyncio.StreamWriter, *, chunk: int = _SPLICE_CHUNK
+    src: asyncio.StreamReader, dst: _SpliceDst, *, chunk: int = _SPLICE_CHUNK
 ) -> None:
     """Copy ``src``→``dst`` incrementally until EOF, then half-close ``dst``.
 
@@ -28,7 +41,7 @@ async def splice(
                 break
             dst.write(data)
             await dst.drain()
-            await asyncio.sleep(0)
+            await asyncio.sleep(0)  # yield so the reverse direction interleaves
     finally:
         with contextlib.suppress(OSError):
             dst.write_eof()

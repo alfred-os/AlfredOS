@@ -30,13 +30,27 @@ class _CaptureWriter:
         self.closed = True
 
 
+class _NoHalfCloseWriter(_CaptureWriter):
+    """A transport that cannot half-close — ``write_eof`` raises (covered by suppress)."""
+
+    def write_eof(self) -> None:
+        raise OSError("cannot half-close")
+
+
+class _ResetMidSpliceWriter(_CaptureWriter):
+    """A peer that resets mid-splice — ``drain`` raises so the OSError must propagate."""
+
+    async def drain(self) -> None:
+        raise OSError("connection reset by peer")
+
+
 @pytest.mark.asyncio
 async def test_splice_copies_then_half_closes() -> None:
     r = asyncio.StreamReader()
     r.feed_data(b"hello")
     r.feed_eof()
     w = _CaptureWriter()
-    await splice(r, w)  # type: ignore[arg-type]
+    await splice(r, w)
     assert bytes(w.buf) == b"hello"
     assert w.eof is True
 
@@ -45,10 +59,15 @@ async def test_splice_copies_then_half_closes() -> None:
 async def test_splice_write_eof_oserror_suppressed() -> None:
     r = asyncio.StreamReader()
     r.feed_eof()
-    w = _CaptureWriter()
+    w = _NoHalfCloseWriter()
+    await splice(r, w)  # must not raise
 
-    def boom() -> None:
-        raise OSError("cannot half-close")
 
-    w.write_eof = boom  # type: ignore[method-assign]
-    await splice(r, w)  # type: ignore[arg-type]  # must not raise
+@pytest.mark.asyncio
+async def test_splice_mid_splice_oserror_propagates() -> None:
+    r = asyncio.StreamReader()
+    r.feed_data(b"hello")
+    r.feed_eof()
+    w = _ResetMidSpliceWriter()
+    with pytest.raises(OSError):
+        await splice(r, w)
