@@ -250,8 +250,16 @@ services:
       # would deny the core's legitimate destination — a silent mismatch). NOT a secret (a
       # public API base URL), so it does not breach the no-secret-on-gateway invariant.
       ALFRED_DEEPSEEK_BASE_URL: ${ALFRED_DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      # G7-4: Discord adapter L7-proxy egress allowlist. Empty (default) = the built-in
+      # discord.com + *.discord.gg set. Public, non-secret (ADR-0036 no-secret-on-gateway
+      # invariant). Mounted on the GATEWAY only (alfred_discord_egress) — the
+      # connectivity-free core must NOT reach the Discord egress socket (devops-001).
+      ALFRED_DISCORD_EGRESS_ALLOWLIST: ${ALFRED_DISCORD_EGRESS_ALLOWLIST:-}
     volumes:
       - alfred_run:/home/alfred/.run
+      # G7-4: Discord adapter egress socket dir, gateway-hosted only (devops-001).
+      # The core must never mount this volume — it is the whole point of Spec C / G7-4.
+      - alfred_discord_egress:/home/alfred/.egress
     networks:
       - alfred_internal
       - alfred_external
@@ -279,3 +287,6 @@ volumes:
   alfred_redis_data:
   alfred_state_git:
   alfred_run:
+  # G7-4: gateway-only Discord adapter egress socket dir. Mounted on alfred-gateway ONLY.
+  # The connectivity-free core never mounts this volume (devops-001 / Spec C invariant).
+  alfred_discord_egress:

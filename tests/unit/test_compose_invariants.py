@@ -336,10 +336,15 @@ def test_no_secret_env_or_mount_on_gateway(compose: dict[str, Any]) -> None:
     env = gw.get("environment", {}) or {}
     assert "ALFRED_DISCORD_BOT_TOKEN" not in env
     assert "ALFRED_SECRETS_FILE" not in env
-    # Exact-set assertion: the gateway must mount ONLY alfred_run.  A bind-mounted
-    # directory could silently carry secrets.toml (the _PREFER_FILE path), so we
-    # pin the approved mounts rather than just filtering for the filename.
-    approved_mounts = {"alfred_run:/home/alfred/.run"}
+    # Exact-set assertion: the gateway must mount ONLY the approved named volumes.
+    # A bind-mounted directory could silently carry secrets.toml (the _PREFER_FILE path),
+    # so we pin the approved mounts rather than just filtering for the filename.
+    # G7-4: alfred_discord_egress added here (gateway-only Discord egress socket dir;
+    # devops-001 — the core must NEVER mount it, enforced by test_discord_egress_volume_gateway_only).
+    approved_mounts = {
+        "alfred_run:/home/alfred/.run",
+        "alfred_discord_egress:/home/alfred/.egress",
+    }
     actual_mounts = set(_volume_strings(gw.get("volumes", []) or []))
     assert actual_mounts == approved_mounts, (
         f"Gateway mounts deviated from approved set: {actual_mounts!r}"
@@ -682,3 +687,46 @@ def test_relay_port_never_host_published(compose: dict[str, Any]) -> None:
                 f"{name} host-publishes the tool-egress relay container port "
                 f"{_RELAY_PORT}; the relay must stay compose-internal (G7-2c)."
             )
+
+
+# ---------------------------------------------------------------------------
+# G7-4 (Spec C §4.4 / devops-001): Discord adapter egress volume + allowlist env
+# are gateway-ONLY.  The connectivity-free core must never touch either.
+# ---------------------------------------------------------------------------
+
+
+def test_discord_egress_volume_gateway_only(compose: dict[str, Any]) -> None:
+    """G7-4 / devops-001: alfred_discord_egress is mounted by the gateway and NOT the core.
+
+    The Discord egress socket dir is the gateway's egress plane for the hosted Discord
+    adapter.  Mounting it on the core would give the connectivity-free core a path to the
+    Discord network socket, breaking the Spec-C structural isolation invariant.
+    """
+    gw = _volume_strings(compose["services"]["alfred-gateway"].get("volumes", []) or [])
+    core = _volume_strings(compose["services"]["alfred-core"].get("volumes", []) or [])
+    assert any("alfred_discord_egress" in v for v in gw), (
+        "alfred-gateway must mount alfred_discord_egress (G7-4 Discord adapter egress socket dir)."
+    )
+    assert not any("alfred_discord_egress" in v for v in core), (
+        "devops-001: alfred_discord_egress must NOT be mounted on alfred-core — "
+        "the connectivity-free core must never reach the Discord egress socket (Spec C / G7-4)."
+    )
+
+
+def test_discord_egress_allowlist_env_gateway_only(compose: dict[str, Any]) -> None:
+    """G7-4 / devops-001: ALFRED_DISCORD_EGRESS_ALLOWLIST is on the gateway and NOT the core.
+
+    The allowlist controls which Discord endpoints the gateway's L7-proxy permits.
+    Placing it on the core would be meaningless (the core has no egress socket) and would
+    signal a future wiring mistake; keeping it gateway-only is the structural guard.
+    """
+    gw_env = compose["services"]["alfred-gateway"].get("environment", {}) or {}
+    core_env = compose["services"]["alfred-core"].get("environment", {}) or {}
+    assert "ALFRED_DISCORD_EGRESS_ALLOWLIST" in gw_env, (
+        "alfred-gateway must declare ALFRED_DISCORD_EGRESS_ALLOWLIST "
+        "(Discord L7-proxy allowlist; empty default = built-in discord.com + *.discord.gg set) — G7-4."
+    )
+    assert "ALFRED_DISCORD_EGRESS_ALLOWLIST" not in core_env, (
+        "alfred-core must NOT carry ALFRED_DISCORD_EGRESS_ALLOWLIST — "
+        "Discord allowlist enforcement is gateway-only (devops-001 / G7-4)."
+    )
