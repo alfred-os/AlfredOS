@@ -185,4 +185,7 @@ def test_serve_adapter_egress_failclosed_maps_oserror() -> None:
             raise OSError("EADDRINUSE")
 
     with pytest.raises(EgressAdapterProxyUnavailableError):
-        asyncio.run(serve_adapter_egress_failclosed(_BindFailingProxy(), asyncio.Event()))  # type: ignore[arg-type]
+        # _BindFailingProxy structurally satisfies the _EgressProxyLike Protocol that
+        # serve_adapter_egress_failclosed's `proxy` param is typed against, so no
+        # suppression is needed (mirrors test_adapter_egress_listener.py's _BoomProxy).
+        asyncio.run(serve_adapter_egress_failclosed(_BindFailingProxy(), asyncio.Event()))
