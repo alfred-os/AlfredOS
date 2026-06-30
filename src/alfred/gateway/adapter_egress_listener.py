@@ -23,8 +23,8 @@ import structlog
 from alfred.egress.adapter_egress_addr import DISCORD_EGRESS_SOCKET_PATH
 from alfred.egress.allowlist import discord_egress_allowlist, suffix_match
 from alfred.egress.errors import EgressAdapterProxyUnavailableError
+from alfred.gateway import egress_proxy
 from alfred.gateway.egress_audit import record_egress_connect
-from alfred.gateway.egress_proxy import EgressForwardProxy
 
 _log = structlog.get_logger(__name__)
 
@@ -38,7 +38,7 @@ class _EgressProxyLike(Protocol):
 def build_adapter_egress_proxy(
     *,
     extra_allowlist: str = "",
-) -> EgressForwardProxy:
+) -> egress_proxy.EgressForwardProxy:
     """Build the Discord-adapter egress proxy instance (no eager bind).
 
     Returns the proxy ONLY — no socket is created or bound here. The bind happens
@@ -58,7 +58,7 @@ def build_adapter_egress_proxy(
         """Allow host+port if it is in the Discord exact set or the *.discord.gg suffix set."""
         return (host, port) in exact or suffix_match(host, port, suffix_bases)
 
-    return EgressForwardProxy(
+    return egress_proxy.EgressForwardProxy(
         allowlist=exact,
         match=match,
         audit=record_egress_connect,
