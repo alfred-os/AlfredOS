@@ -118,7 +118,10 @@ def discord_egress_allowlist(extra: str = "") -> DiscordEgressAllowlist:
     for token in (t.strip() for t in extra.split(",") if t.strip()):
         host, sep, port_str = token.rpartition(":")
         if sep and port_str.isascii() and port_str.isdigit():
-            exact.add((host.lower(), int(port_str)))
+            port = int(port_str)
+            if not 1 <= port <= 65535:
+                raise ValueError(f"Discord egress allowlist port out of range: {token!r}")
+            exact.add((host.lower(), port))
         else:
             exact.add((token.lower(), _DEFAULT_HTTPS_PORT))
     return DiscordEgressAllowlist(exact=frozenset(exact), suffix_bases=_DISCORD_SUFFIX)

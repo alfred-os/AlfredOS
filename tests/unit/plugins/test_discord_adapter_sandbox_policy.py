@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from alfred.egress.adapter_egress_addr import DISCORD_EGRESS_SOCKET_PATH
 from alfred.plugins.manifest import parse_manifest
 from alfred.plugins.sandbox_policy import policy_to_bwrap_flags, read_policy_toml
 
@@ -93,8 +94,11 @@ def test_linux_policy_rw_binds_egress_socket_dir() -> None:
     # ro-bound (--ro-bind). connect(2) on a UNIX-domain socket path requires
     # write permission; a read-only bind fails with EACCES.
     policy = read_policy_toml(_linux_policy_text())
-    egress_rw = [src for src, _dst in policy.rw_binds if "/home/alfred/.egress/discord" in src]
-    assert egress_rw, "discord policy must rw-bind /home/alfred/.egress/discord (FIX-5)"
+    # Pin the EXACT directory path derived from the canonical constant so this
+    # assertion tracks any future path change automatically (no hardcoded guess).
+    egress_socket_dir = str(DISCORD_EGRESS_SOCKET_PATH.parent)
+    egress_rw = [src for src, _dst in policy.rw_binds if src == egress_socket_dir]
+    assert egress_rw, f"discord policy must rw-bind {egress_socket_dir!r} exactly (FIX-5)"
 
 
 def test_enforced_egress_posture_documented_in_policy() -> None:

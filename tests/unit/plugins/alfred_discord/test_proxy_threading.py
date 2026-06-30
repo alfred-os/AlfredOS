@@ -9,7 +9,10 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+
+import pytest
 
 import plugins.alfred_discord.server as server_mod
 from plugins.alfred_discord.discord_gateway import AlfredDiscordBot
@@ -50,7 +53,13 @@ def test_no_webhook_or_voice_egress() -> None:
 
 
 class _StubTask:
-    """Minimal done-task stand-in for _route_shim_failure tests."""
+    """Minimal done-task stand-in for _route_shim_failure tests.
+
+    Mirrors the real ``asyncio.Task`` semantics: ``exception()`` raises
+    ``asyncio.CancelledError`` when the task was cancelled (so the cancelled-path
+    assertions exercise real semantics even if ``_route_shim_failure`` ever stops
+    checking ``cancelled()`` first).
+    """
 
     def __init__(self, *, exception: BaseException | None = None, cancelled: bool = False) -> None:
         self._exc = exception
@@ -60,6 +69,8 @@ class _StubTask:
         return self._cancelled
 
     def exception(self) -> BaseException | None:
+        if self._cancelled:
+            raise asyncio.CancelledError
         return self._exc
 
 
@@ -96,3 +107,42 @@ def test_route_shim_failure_ignores_clean_task() -> None:
     task = _StubTask(exception=None)
     _route_shim_failure(task, crash)
     assert crash.calls == []
+
+
+# ---------------------------------------------------------------------------
+# serve() shim-bind-failure routing (FIX-3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_serve_routes_shim_oserror_to_crash_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``start_shim`` raises ``OSError`` (e.g. EADDRINUSE on the loopback port),
+    ``serve()`` catches it via its ``BaseException`` handler and calls
+    ``crash.handle_crash`` — the bind failure is audited, not propagated raw.
+
+    (This is the FIX-3 invariant: shim startup is INSIDE the try that routes to the
+    crash emitter, not before it.)
+    """
+    crash_calls: list[BaseException] = []
+
+    class _StubCrashEmitter:
+        def handle_crash(self, exc: BaseException) -> None:
+            crash_calls.append(exc)
+
+    bind_error = OSError("EADDRINUSE: shim loopback bind failure")
+
+    async def _raise_on_start() -> None:
+        raise bind_error
+
+    import alfred.egress.adapter_proxy_shim as _shim
+
+    monkeypatch.setattr(server_mod, "configure_stderr_json_logging", lambda: None)
+    monkeypatch.setattr(server_mod, "StdoutNotificationSink", lambda: object())
+    monkeypatch.setattr(server_mod, "_build_server", lambda _s: object())
+    monkeypatch.setattr(server_mod, "CrashEmitter", lambda **_kw: _StubCrashEmitter())
+    monkeypatch.setattr(_shim, "start_shim", _raise_on_start)
+
+    await server_mod.serve()
+    assert crash_calls == [bind_error]

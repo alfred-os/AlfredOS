@@ -2,11 +2,9 @@ id: sbx-2026-014
 category: sandbox_escape
 threat: >-
   A runtime-compromised Discord adapter opens an outbound TCP connection to an
-  arbitrary attacker host to exfiltrate the T3 content it relays and its bot
-  token. Spec C G7-4 (#333) --unshare-net's it into an EMPTY network namespace;
-  egress is ONLY via the bind-mounted gateway L7 CONNECT proxy socket at
-  /home/alfred/.egress/discord/egress.sock (Discord allowlist enforced at the
-  gateway). The direct connection is refused at the kernel.
+  arbitrary attacker host to exfiltrate T3 content and its bot token; Spec C
+  G7-4 (#333) places it in an empty network namespace so the direct connection
+  is refused at the kernel (egress only via the gateway L7 CONNECT proxy socket).
 ingestion_path: sandbox_policy_load
 payload:
   attack: outbound_network_egress_to_arbitrary_host

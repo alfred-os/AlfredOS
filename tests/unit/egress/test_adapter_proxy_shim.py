@@ -39,7 +39,9 @@ async def test_shim_closes_connection_on_upstream_unavailable(
             assert data == b""
         except ConnectionResetError:
             pass  # RST is a valid close signal on this platform
-        server.close()
+        finally:
+            server.close()
+            await server.wait_closed()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

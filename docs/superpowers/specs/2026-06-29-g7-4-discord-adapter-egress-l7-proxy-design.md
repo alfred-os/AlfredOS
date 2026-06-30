@@ -163,10 +163,10 @@ Adopt **Option B**. Concretely:
 6. **Bwrap policy migration.** Add `"net"` to `unshare` and bind-mount the socket
    directory in `discord-adapter.linux.bwrap.policy`; keep the `/etc/ssl/certs` ro-bind
    (TLS verification still happens end-to-end in the child) and `keep_fds=[3]` (the
-   bot-token broker channel). **Prefer `--ro-bind`** for the socket dir (least
-   privilege; `connect()` needs only the 0600 socket's w-bit, not a writable mount) and
-   fall back to `rw_binds`/`--bind` only if the bookworm repro shows `connect()` fails on
-   `MNT_READONLY`. No `SandboxPolicy` schema change (`ro_binds`/`rw_binds` already exist).
+   bot-token broker channel). Use **`rw_binds`/`--bind`** for the socket dir — a
+   read-only bind (`--ro-bind`) causes `connect(2)` on the UNIX-domain socket to fail
+   with `EACCES` (the kernel requires write permission on the socket path). No
+   `SandboxPolicy` schema change (`ro_binds`/`rw_binds` already exist).
 7. **Corpus + tests.** Mint a **new** Discord-specific adversarial corpus entry (next
    free `sbx-2026-0NN`, `policy_ref` = the Discord policy) asserting enforced
    containment — `"net" in discord-policy.unshare` + proxy-only egress + the named
@@ -226,12 +226,14 @@ Each unit, its interface, and what it depends on.
 ### 4.3 AF_UNIX listener lifecycle — new module `src/alfred/gateway/adapter_egress_listener.py`
 
 - **What (extracted into its own coverable module, NOT buried in `_commands.py`):**
-  create + **eagerly bind** the Discord AF_UNIX socket via
-  `_local_socket.bind_owner_only_unix_socket` (0700 dir, 0600 socket, pathname not
-  abstract) **before** the gateway TaskGroup is entered, then hand the pre-bound socket
-  to the `EgressForwardProxy` AF_UNIX instance whose `serve()` runs as a fail-closed
-  sibling task. `_commands.py` calls this module (one line), keeping its own coverage
-  untouched and letting the new boundary reach **per-file 100% line+branch**.
+  `build_adapter_egress_proxy()` constructs the `EgressForwardProxy` AF_UNIX instance
+  at call time — **no eager bind**. The bind happens inside `proxy.serve(shutdown_event)`
+  (via `_local_socket.bind_owner_only_unix_socket`: 0700 dir, 0600 socket, pathname not
+  abstract), which runs as a fail-closed sibling task inside the gateway TaskGroup.
+  This keeps the bind and the TaskGroup start atomic, avoiding the adapter-spawn-
+  before-bind race. `_commands.py` calls `build_adapter_egress_proxy()` (one line),
+  keeping its own coverage untouched and letting the new boundary reach **per-file 100%
+  line+branch**.
 - **Socket path — on a GATEWAY-ONLY volume, NEVER `alfred_run` (devops-001, the blocker).**
   The socket lives on a **new `alfred_discord_egress` volume mounted ONLY into
   `alfred-gateway`**, NOT `alfred_run`. `alfred_run` is mounted into **both** `alfred-core`
@@ -244,8 +246,9 @@ Each unit, its interface, and what it depends on.
   reach, but **wrong** for an egress socket that must be **core-unreachable**.) One shared
   **path constant** spans the gateway bind / bwrap target / shim connect. The helpers
   (`bind_owner_only_unix_socket`, `runtime_dir`) live in
-  `src/alfred/plugins/_local_socket.py` — import them, do not re-implement. Eager-bind does
-  **unlink-before-bind** so a stale socket from a prior crash can't `EADDRINUSE` the restart.
+  `src/alfred/plugins/_local_socket.py` — import them, do not re-implement.
+  `bind_owner_only_unix_socket` already does **unlink-before-bind** (called from inside
+  `serve()`), so a stale socket from a prior crash can't `EADDRINUSE` the restart.
 - **Fail-closed + distinctly typed:** a bind failure maps to a **new**
   `EgressAdapterProxyUnavailableError(IOPlaneUnavailableError)` with its **own exit code**
   (proxy=7, relay=8 precedent → adapter-proxy=9) and a distinct `t()` key. Because it
@@ -261,16 +264,14 @@ Each unit, its interface, and what it depends on.
 
 ### 4.4 Bwrap policy migration — `config/sandbox/discord-adapter.linux.bwrap.policy`
 
-- **What:** `unshare += ["net"]`; bind the socket dir (**`ro_binds` preferred**, `rw_binds`
-  fallback per §3 #6) using the shared path constant; rewrite **both** egress comment
-  blocks — the "DELIBERATELY DO NOT unshare net" note (lines ~76-78) and the "EGRESS IS
-  CURRENTLY UNRESTRICTED — #230" header (lines ~92-115) — to the enforced posture; **do
-  not** touch the unrelated `#230` `/usr`-prefix-tightening reference (lines ~46-48).
+- **What:** `unshare += ["net"]`; bind the socket dir via **`rw_binds`/`--bind`** using
+  the shared path constant (a read-only bind causes `connect(2)` on the UNIX-domain socket
+  path to fail with `EACCES`; rw is required); rewrite **both** egress comment blocks —
+  the "DELIBERATELY DO NOT unshare net" note (lines ~76-78) and the "EGRESS IS CURRENTLY
+  UNRESTRICTED — #230" header (lines ~92-115) — to the enforced posture; **do not** touch
+  the unrelated `#230` `/usr`-prefix-tightening reference (lines ~46-48).
   Keep `ro_binds` `/etc/ssl/certs`, `keep_fds=[3]`, the tmpfs, and the
   pid/uts/cgroup/ipc unshares.
-- **Empirical check (in the plan):** confirm `connect()` to the `--ro-bind` socket in a
-  `debian:bookworm` bwrap repro; only switch to `--bind` if `connect()` fails on
-  `MNT_READONLY`.
 - **Depends on:** nothing new in `sandbox_policy.py` (the schema already expresses it).
 
 ### 4.5 In-child TCP→unix shim + shared splice helper — `src/alfred/egress/`
