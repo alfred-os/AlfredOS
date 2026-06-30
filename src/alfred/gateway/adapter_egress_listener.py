@@ -36,7 +36,8 @@ class _EgressProxyLike(Protocol):
 
 
 def build_adapter_egress_proxy(
-    *, extra_allowlist: str = "",
+    *,
+    extra_allowlist: str = "",
 ) -> EgressForwardProxy:
     """Build the Discord-adapter egress proxy instance (no eager bind).
 

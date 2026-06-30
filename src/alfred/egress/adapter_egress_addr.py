@@ -9,6 +9,7 @@ the core reach the Discord egress proxy and reopen G7-3 / HARD-#9 (devops-001).
 ONE constant each for the path (gateway bind / bwrap target / shim connect) and the shim
 port (shim listen / bot ``proxy=`` URL) so the three sites can never skew.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

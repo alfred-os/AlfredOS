@@ -6,6 +6,7 @@ proxy. This shim is the thin bridge: accept on child-loopback, splice each conne
 bind-mounted gateway AF_UNIX egress socket. It is TRANSPORT GLUE, not a policy plane — zero
 CONNECT parsing, zero allowlisting; the gateway proxy is the sole enforcement point.
 """
+
 from __future__ import annotations
 
 import asyncio

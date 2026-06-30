@@ -1,4 +1,5 @@
 """Unit test: the in-child TCP→unix egress shim splices bytes verbatim (Spec C G7-4, #333)."""
+
 import asyncio
 import shutil
 import tempfile
