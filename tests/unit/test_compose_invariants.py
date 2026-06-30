@@ -705,10 +705,13 @@ def test_discord_egress_volume_gateway_only(compose: dict[str, Any]) -> None:
     """
     gw = _volume_strings(compose["services"]["alfred-gateway"].get("volumes", []) or [])
     core = _volume_strings(compose["services"]["alfred-core"].get("volumes", []) or [])
-    assert any("alfred_discord_egress" in v for v in gw), (
+    # Exact source match (mirrors the alfred_run invariant): a future volume whose name
+    # merely CONTAINS ``alfred_discord_egress`` (e.g. ``alfred_discord_egress_backup``) must
+    # neither satisfy the gateway mount nor false-trip the core-isolation guard.
+    assert any(v.split(":", 1)[0] == "alfred_discord_egress" for v in gw), (
         "alfred-gateway must mount alfred_discord_egress (G7-4 Discord adapter egress socket dir)."
     )
-    assert not any("alfred_discord_egress" in v for v in core), (
+    assert not any(v.split(":", 1)[0] == "alfred_discord_egress" for v in core), (
         "devops-001: alfred_discord_egress must NOT be mounted on alfred-core — "
         "the connectivity-free core must never reach the Discord egress socket (Spec C / G7-4)."
     )
