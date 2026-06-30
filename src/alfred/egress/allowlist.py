@@ -16,6 +16,8 @@ DeepSeek) to keep the no-drift property. [rev: arch-009, prov-006, devops-008]
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Callable
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 EgressDestination = tuple[str, int]
@@ -64,7 +66,10 @@ def provider_egress_allowlist(deepseek_base_url: str) -> frozenset[EgressDestina
     provider API key (ADR-0036), so loading ``Settings`` there would fail / pull in secrets.
     The core passes ``settings.deepseek_base_url``; the gateway reads the public
     ``ALFRED_DEEPSEEK_BASE_URL`` env var (compose threads it to both, keeping the two
-    derivations in lock-step)."""
+    derivations in lock-step).
+
+    The Discord adapter has its OWN disjoint allowlist (``discord_egress_allowlist``) —
+    provider egress is never merged with it."""
     return frozenset(
         {
             host_port_from_url(deepseek_base_url),
@@ -73,11 +78,62 @@ def provider_egress_allowlist(deepseek_base_url: str) -> frozenset[EgressDestina
     )
 
 
+Match = Callable[[str, int, frozenset[EgressDestination]], bool]
+
+
+def exact_match(host: str, port: int, allow: frozenset[EgressDestination]) -> bool:
+    """The provider matcher — identical to the prior ``(host, port) in allowlist``."""
+    return (host, port) in allow
+
+
+def suffix_match(host: str, port: int, suffix_bases: frozenset[EgressDestination]) -> bool:
+    """Anchored suffix match: ``host == base`` (apex) or ``host`` ends with ``"." + base``.
+
+    Never a bare ``endswith`` — that would match ``evildiscord.gg`` against ``discord.gg``.
+    The port must match the base entry's port.
+    """
+    for base_host, base_port in suffix_bases:
+        if port == base_port and (host == base_host or host.endswith("." + base_host)):
+            return True
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordEgressAllowlist:
+    exact: frozenset[EgressDestination]
+    suffix_bases: frozenset[EgressDestination]
+
+
+_DISCORD_EXACT: frozenset[EgressDestination] = frozenset({("discord.com", _DEFAULT_HTTPS_PORT)})
+_DISCORD_SUFFIX: frozenset[EgressDestination] = frozenset({("discord.gg", _DEFAULT_HTTPS_PORT)})
+
+
+def discord_egress_allowlist(extra: str = "") -> DiscordEgressAllowlist:
+    """The Discord-only egress set: ``discord.com`` exact + ``*.discord.gg`` (incl. the
+    dynamic ``resume_gateway_url``) suffix. ``extra`` (the public
+    ``ALFRED_DISCORD_EGRESS_ALLOWLIST`` env, comma ``host[:port]``) adds exact entries
+    (e.g. ``cdn.discordapp.com`` when attachment fetch is enabled). Gateway reads the env,
+    never ``Settings`` (ADR-0036)."""
+    exact = set(_DISCORD_EXACT)
+    for token in (t.strip() for t in extra.split(",") if t.strip()):
+        host, sep, port_str = token.rpartition(":")
+        if sep and port_str.isascii() and port_str.isdigit():
+            exact.add((host.lower(), int(port_str)))
+        else:
+            exact.add((token.lower(), _DEFAULT_HTTPS_PORT))
+    return DiscordEgressAllowlist(exact=frozenset(exact), suffix_bases=_DISCORD_SUFFIX)
+
+
 __all__ = [
     "ANTHROPIC_DEFAULT_HOST",
+    "DiscordEgressAllowlist",
     "EgressDestination",
+    "Match",
+    "discord_egress_allowlist",
+    "exact_match",
     "host_port_from_url",
     "is_globally_routable",
     "is_literal_ip",
     "provider_egress_allowlist",
+    "suffix_match",
 ]
