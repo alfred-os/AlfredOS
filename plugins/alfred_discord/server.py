@@ -30,12 +30,13 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 import structlog
 
 from alfred.comms_mcp.plugin_logging import configure_stderr_json_logging
 from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.egress.adapter_egress_addr import discord_proxy_url
 from plugins.alfred_discord.crash_emitter import CrashEmitter
 from plugins.alfred_discord.discord_gateway import AlfredDiscordBot
 from plugins.alfred_discord.gateway_adapter import DiscordGatewayAdapter
@@ -47,6 +48,35 @@ from plugins.alfred_discord.outbound_handler import OutboundHandler
 from plugins.alfred_discord.rate_limit_emitter import RateLimitEmitter
 
 _log = structlog.get_logger(__name__)
+
+
+class _DoneTask(Protocol):
+    """Minimal structural type for a completed future as seen by :func:`_route_shim_failure`."""
+
+    def cancelled(self) -> bool: ...
+    def exception(self) -> BaseException | None: ...
+
+
+class _CrashHandler(Protocol):
+    """Minimal structural type for the crash-routing collaborator."""
+
+    def handle_crash(self, exc: BaseException) -> None: ...
+
+
+def _route_shim_failure(task: _DoneTask, crash_emitter: _CrashHandler) -> None:
+    """Route a shim-server task failure through the crash emitter (FIX-3).
+
+    A non-cancellation exception from the shim's ``serve_forever`` task means the
+    in-child TCP→unix bridge died — discord.py's next egress would hit ECONNREFUSED
+    and spin silently. Routing through the crash emitter makes it a terminal, audited
+    adapter exit so the supervisor trips its breaker instead.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        crash_emitter.handle_crash(exc)
+
 
 # ADR-0024 wire method names — host -> plugin requests.
 _METHOD_LIFECYCLE_START: Final[str] = "lifecycle.start"
@@ -260,6 +290,7 @@ def _build_server(
         sink=sink,
         crash_emitter=crash,
         channel_listen_set=frozenset(),
+        proxy=discord_proxy_url(),
     )
     gateway = DiscordGatewayAdapter(bot=bot)
     # The core injects the bot token over LITERAL fd 3 at child spawn (Spec B
@@ -287,6 +318,10 @@ async def serve() -> None:  # pragma: no cover - process entrypoint
     sink = StdoutNotificationSink()
     server = _build_server(sink)
     crash = CrashEmitter(adapter_id=_ADAPTER_ID, sink=sink)
+    from alfred.egress.adapter_proxy_shim import start_shim
+    shim_server = await start_shim()  # listening before discord.py's first egress (login)
+    shim_task = asyncio.create_task(shim_server.serve_forever())
+    shim_task.add_done_callback(lambda t: _route_shim_failure(t, crash))
     try:
         await _serve_stdin_stdout(server)
     except (KeyboardInterrupt, SystemExit):
