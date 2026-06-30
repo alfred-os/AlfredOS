@@ -229,7 +229,7 @@ def start_gateway() -> None:
     # perf-001: the relay graph imports lazily here, not at module-top, so
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
-    from alfred.egress.allowlist import provider_egress_allowlist
+    from alfred.egress.allowlist import exact_match, provider_egress_allowlist
     from alfred.egress.errors import EgressRelayUnavailableError, IOPlaneUnavailableError
     from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.egress_audit import record_egress_connect
@@ -302,6 +302,9 @@ def start_gateway() -> None:
         # failure aborts the start (CONTRAST the metrics server's loud-and-continue above).
         proxy = EgressForwardProxy(
             allowlist=provider_egress_allowlist(resolve_deepseek_base_url()),
+            # Provider TCP path uses exact_match (same semantics as the prior ``in``
+            # membership check; Discord will inject suffix_match via its own instance).
+            match=exact_match,
             bind_host=resolve_egress_proxy_bind(),
             port=resolve_egress_proxy_port(),
             # The field-allowlisted ({destination, reason}) gateway-local egress audit sink.

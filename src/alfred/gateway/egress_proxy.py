@@ -36,12 +36,13 @@ import contextlib
 import os
 import socket
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Final
 
 import structlog
 from prometheus_client import Counter
 
-from alfred.egress.allowlist import EgressDestination, is_globally_routable, is_literal_ip
+from alfred.egress.allowlist import EgressDestination, Match, is_globally_routable, is_literal_ip
 from alfred.gateway.egress_audit import (
     EGRESS_CONNECT_ALLOWED_EVENT,
     EGRESS_CONNECT_DENIED_EVENT,
@@ -132,21 +133,38 @@ async def _default_open_upstream(
 
 
 class EgressForwardProxy:
-    """A TLS-passthrough L7 CONNECT forward-proxy with destination enforcement."""
+    """A TLS-passthrough L7 CONNECT forward-proxy with destination enforcement.
+
+    Exactly ONE bind mode must be supplied — either ``(bind_host, port)`` for TCP or
+    ``unix_path`` for AF_UNIX — a both/neither raises ``ValueError`` at construction.
+    This lets the SAME class serve as the provider TCP instance (G7-1b) and the Discord
+    AF_UNIX instance (G7-4) without changing the ``serve(shutdown_event)`` signature
+    that ``_EgressProxyLike`` declares.
+    """
 
     def __init__(
         self,
         *,
         allowlist: frozenset[EgressDestination],
-        bind_host: str,
-        port: int,
+        match: Match,
         audit: _AuditSink,
         resolve: _Resolver = _default_resolve,
         open_upstream: _UpstreamOpener = _default_open_upstream,
+        bind_host: str | None = None,
+        port: int | None = None,
+        unix_path: Path | None = None,
     ) -> None:
+        tcp_mode = bind_host is not None and port is not None
+        unix_mode = unix_path is not None
+        if tcp_mode == unix_mode:
+            raise ValueError(
+                "EgressForwardProxy: exactly one of (bind_host, port) or unix_path must be set"
+            )
         self._allowlist = allowlist
+        self._match = match
         self._bind_host = bind_host
         self._port = port
+        self._unix_path = unix_path
         self._audit = audit
         self._resolve = resolve
         self._open_upstream = open_upstream
@@ -155,13 +173,26 @@ class EgressForwardProxy:
     async def serve(self, shutdown_event: asyncio.Event) -> None:
         """Bind + serve until ``shutdown_event``, then close the listener and reap.
 
-        Fail-closed: an ``OSError`` from ``start_server`` (e.g. EADDRINUSE) propagates
-        — B2 maps it to ``IOPlaneUnavailableError``.
+        Dispatches to AF_UNIX (``unix_path`` mode) or TCP (``bind_host``/``port`` mode)
+        depending on the bind config supplied at construction.  Fail-closed: an
+        ``OSError`` from the listener bind (e.g. EADDRINUSE / EACCES) propagates — B2
+        maps it to ``IOPlaneUnavailableError``.
         """
-        server = await asyncio.start_server(
-            self._handle_client, self._bind_host, self._port, limit=_REQUEST_LINE_CAP
-        )
-        _log.info("gateway.egress.serving", bind=self._bind_host, port=self._port)
+        if self._unix_path is not None:
+            from alfred.plugins._local_socket import bind_owner_only_unix_socket
+
+            sock = bind_owner_only_unix_socket(self._unix_path)
+            server = await asyncio.start_unix_server(
+                self._handle_client, sock=sock, limit=_REQUEST_LINE_CAP
+            )
+            _log.info("gateway.egress.serving", unix=True, path=str(self._unix_path))
+        else:
+            # TCP mode: bind_host and port are both non-None (guaranteed by __init__).
+            assert self._bind_host is not None and self._port is not None
+            server = await asyncio.start_server(
+                self._handle_client, self._bind_host, self._port, limit=_REQUEST_LINE_CAP
+            )
+            _log.info("gateway.egress.serving", bind=self._bind_host, port=self._port)
         try:
             async with server:
                 await shutdown_event.wait()
@@ -277,7 +308,7 @@ class EgressForwardProxy:
         if is_literal_ip(host):
             await self._deny(writer, 403, EgressDenyReason.LITERAL_IP_TARGET, f"{host}:{port}")
             return False
-        if (host, port) not in self._allowlist:
+        if not self._match(host, port, self._allowlist):
             await self._deny(
                 writer, 403, EgressDenyReason.DESTINATION_NOT_ALLOWLISTED, f"{host}:{port}"
             )
