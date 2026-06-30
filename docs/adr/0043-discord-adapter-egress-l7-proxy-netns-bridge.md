@@ -10,7 +10,7 @@
   (gateway privilege; G7-4 is an in-model duty, no new capability), [ADR-0042](0042-connectivity-free-core-cutover.md)
   (G7-3 kernel isolation the Discord child now joins), ADR-0040 (reserved — comprehensive
   Spec-C egress ADR, G7-5), epic [#333](https://github.com/alfred-os/AlfredOS/issues/333),
-  issue [#230](https://github.com/MrReasonable/AlfredOS/issues/230) (the Discord half closed here;
+  issue [#230](https://github.com/alfred-os/AlfredOS/issues/230) (the Discord half closed here;
   the 2c real-LLM child egress remains open under #230/#340)
 - **Supersedes**: —
 
