@@ -73,6 +73,14 @@ _EXIT_EGRESS_PROXY_BIND_FAILED = 7
 # and the gateway crash-loops under ``restart: unless-stopped``.
 _EXIT_EGRESS_RELAY_BIND_FAILED = 8
 
+# A friendly "the Discord-adapter AF_UNIX egress socket could not bind" refusal (Spec C
+# G7-4 / #333). Like the CONNECT proxy and the relay, the adapter egress listener is a
+# gateway egress plane, so a bind failure is FAIL-CLOSED — a DISTINCT non-zero (apart
+# from the proxy / relay / client-socket / core-dial / config refusals) so an operator
+# can tell an adapter-egress-plane outage apart, and the gateway crash-loops under
+# ``restart: unless-stopped``.
+_EXIT_EGRESS_ADAPTER_PROXY_BIND_FAILED = 9
+
 # The adapter id the gateway dials on the core (the core binds ``comms-{adapter_kind}.sock``;
 # the socket-backed ``alfred_tui`` adapter has manifest ``adapter_kind="tui"``). Operator-
 # overridable via the env so the dial target is not a hidden constant (Spec B G6-0b / #288).
@@ -230,7 +238,15 @@ def start_gateway() -> None:
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
     from alfred.egress.allowlist import exact_match, provider_egress_allowlist
-    from alfred.egress.errors import EgressRelayUnavailableError, IOPlaneUnavailableError
+    from alfred.egress.errors import (
+        EgressAdapterProxyUnavailableError,
+        EgressRelayUnavailableError,
+        IOPlaneUnavailableError,
+    )
+    from alfred.gateway.adapter_egress_listener import (
+        build_adapter_egress_proxy,
+        serve_adapter_egress_failclosed,
+    )
     from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.egress_audit import record_egress_connect
     from alfred.gateway.egress_proxy import (
@@ -325,6 +341,16 @@ def start_gateway() -> None:
             port=resolve_egress_relay_port(),
         )
 
+        # Spec C G7-4 (#333): the gateway is also the SOLE maker of adapter (Discord)
+        # egress connections. Its start co-runs the Discord-adapter AF_UNIX egress
+        # listener alongside the CONNECT proxy, relay, and gateway process. The
+        # extra-allowlist env is PUBLIC (gateway reads env, never Settings — ADR-0036).
+        # No bind here — FIX-2: the bind happens inside serve(), keeping it atomic with
+        # the TaskGroup start. Fail-CLOSED like the proxy + relay.
+        adapter_proxy = build_adapter_egress_proxy(
+            extra_allowlist=os.environ.get("ALFRED_DISCORD_EGRESS_ALLOWLIST", ""),
+        )
+
         async def _run_gateway() -> None:
             try:
                 await GatewayProcess(
@@ -348,6 +374,7 @@ def start_gateway() -> None:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(_serve_egress_proxy_failclosed(proxy, shutdown_event))
                 tg.create_task(_serve_egress_relay_failclosed(relay, shutdown_event))
+                tg.create_task(serve_adapter_egress_failclosed(adapter_proxy, shutdown_event))
                 tg.create_task(_run_gateway())
         except BaseExceptionGroup as group:
             _reraise_first_meaningful(group)
@@ -362,6 +389,15 @@ def start_gateway() -> None:
         log.warning("gateway.cli.egress_relay_bind_failed", error=repr(exc))
         typer.echo(t("gateway.start.egress_relay_bind_failed"))
         raise typer.Exit(code=_EXIT_EGRESS_RELAY_BIND_FAILED) from exc
+    except EgressAdapterProxyUnavailableError as exc:
+        # Friendly refusal — the Discord-adapter AF_UNIX egress socket could not bind
+        # (Spec C G7-4 / #333). Caught BEFORE IOPlaneUnavailableError (it is a subtype)
+        # so the adapter renders its OWN line + exit, distinct from the CONNECT proxy's
+        # and the relay's. Fail-closed: the gateway crash-loops under
+        # ``restart: unless-stopped`` (intended posture).
+        log.warning("gateway.cli.egress_adapter_bind_failed", error=repr(exc))
+        typer.echo(t("gateway.start.egress_adapter_bind_failed"))
+        raise typer.Exit(code=_EXIT_EGRESS_ADAPTER_PROXY_BIND_FAILED) from exc
     except IOPlaneUnavailableError as exc:
         # Friendly refusal — the egress forward-proxy could not bind (Spec C G7-1b / #333).
         # The gateway is the sole external egress plane, so this is fail-closed: refuse the

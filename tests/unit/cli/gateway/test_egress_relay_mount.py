@@ -49,7 +49,11 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_process_and_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Doubles for the OTHER two co-run siblings whose ``serve`` / ``run`` return at once."""
+    """Doubles for the OTHER three co-run siblings whose ``serve`` / ``run`` return at once.
+
+    Includes ``build_adapter_egress_proxy`` so the Discord AF_UNIX egress socket is
+    never bound in relay-focused tests (G7-4 sibling task).
+    """
 
     class _FakeProcess:
         def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
@@ -65,8 +69,16 @@ def _patch_process_and_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
         async def serve(self, shutdown_event: asyncio.Event) -> None:
             del shutdown_event
 
+    class _FakeAdapterProxy:
+        async def serve(self, shutdown_event: asyncio.Event) -> None:
+            del shutdown_event
+
     monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
     monkeypatch.setattr("alfred.gateway.egress_proxy.EgressForwardProxy", _FakeProxy)
+    monkeypatch.setattr(
+        "alfred.gateway.adapter_egress_listener.build_adapter_egress_proxy",
+        lambda **_kw: _FakeAdapterProxy(),
+    )
 
 
 def test_start_mounts_the_relay_with_the_relay_audit_sink(
