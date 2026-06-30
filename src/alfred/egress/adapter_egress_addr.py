@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Final
 
 # Gateway-only mount (see docker-compose.yaml: alfred_discord_egress -> /home/alfred/.egress,
-# mounted into alfred-gateway ONLY). The bwrap policy ro-binds the parent dir into the child.
+# mounted into alfred-gateway ONLY). The bwrap policy rw-binds the parent dir into the child
+# (--bind, not --ro-bind; connect(2) on a UNIX-domain socket requires write permission on the
+# socket file — a read-only bind fails EACCES; see FIX-5 in ADR-0043).
 DISCORD_EGRESS_SOCKET_PATH: Final[Path] = Path("/home/alfred/.egress/discord/egress.sock")
 DISCORD_EGRESS_SHIM_PORT: Final[int] = 8891
 

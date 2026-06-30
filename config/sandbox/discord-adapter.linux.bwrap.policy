@@ -96,8 +96,11 @@ keep_fds = [3]
 # The Discord plugin's outbound network is now kernel-enforced:
 #
 #   * `--unshare-net` (the "net" entry above) gives the sandbox an EMPTY
-#     network namespace — no loopback, no host network, no raw-socket access.
-#     A compromised Discord plugin CANNOT open an arbitrary outbound connection.
+#     network namespace — ONLY loopback (bwrap brings lo up); no host network,
+#     no raw-socket access to external hosts. The in-child shim binds 127.0.0.1
+#     (loopback) so discord.py's proxy URL resolves; egress to any non-loopback
+#     destination fails at the kernel. A compromised Discord plugin CANNOT open
+#     an arbitrary outbound connection.
 #
 #   * The ONLY egress path is the bind-mounted gateway L7 CONNECT forward-proxy
 #     socket at /home/alfred/.egress/discord/egress.sock (rw-bound below).

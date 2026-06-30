@@ -192,9 +192,13 @@ def test_discord_policy_unshare_set_matches_shipped() -> None:
     A future edit that drops ``net`` from the policy would silently re-open the
     adapter's outbound network surface without triggering a containment failure
     here unless this structural pin catches it first. This is the non-root
-    counterpart of the kernel-observable probes below — it runs on every branch
-    in the adversarial workflow (no bwrap needed) so the gate is not paper-only
-    even if the privileged lane is temporarily unavailable.
+    counterpart of the kernel-observable probes below. NOTE: this test lives in
+    ``tests/integration`` and is guarded by ``skipif(bwrap is None)`` — it
+    requires bwrap and runs only on the privileged CI lane. The bwrap-free,
+    runs-everywhere backstop is
+    ``tests/adversarial/sandbox_escape/test_sbx_corpus_executable.py``
+    (``test_sbx_2026_014_discord_outbound_contained``), which reads policy bytes
+    only and runs on every branch in the plain adversarial workflow.
 
     Mirror of ``test_real_policy_unshare_set_matches_shipped`` in the quarantined-LLM
     kernel test (``tests/integration/test_quarantined_llm_policy_kernel_enforced.py``).

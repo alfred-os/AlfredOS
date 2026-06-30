@@ -144,11 +144,15 @@ test forbids regressing that.
 
 ### 8. Bwrap policy migration
 
-`"net"` is added to `unshare` and the socket directory is bind-mounted (`ro_binds` preferred;
-`connect()` needs only the 0600 socket's w-bit, not a writable mount) in
-`config/sandbox/discord-adapter.linux.bwrap.policy`. `/etc/ssl/certs` ro-bind and
-`keep_fds=[3]` are preserved (TLS verification still happens end-to-end in the child; the
-bot token still arrives over fd-3).
+`"net"` is added to `unshare` and the socket directory is bind-mounted via **`rw_binds`
+(`--bind`)** in `config/sandbox/discord-adapter.linux.bwrap.policy`. A `--ro-bind` causes
+`connect(2)` to fail with `EACCES` — empirically confirmed in the FIX-5 Debian Bookworm
+repro. The writable mount is not a cross-uid concern: the `kind: full` Discord child runs
+as the same `alfred` uid as the gateway, so the rw mount gives the child no uid-escalation
+surface beyond what it already holds. The socket directory is a dedicated gateway-only
+volume holding only the egress socket, so mount-writability confers no additional filesystem
+reach. `/etc/ssl/certs` ro-bind and `keep_fds=[3]` are preserved (TLS verification still
+happens end-to-end in the child; the bot token still arrives over fd-3).
 
 ## Consequences
 
