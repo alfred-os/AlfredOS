@@ -283,6 +283,27 @@ large frames.
 | --- | --- | --- | --- |
 | Security | Full T0–T3 type system; nonce-gated `tag_t3_with_nonce`; `TaggedContent` wire format; `RealGate` + `GatePolicy` + `GrantRow`; `ContentHandle` + `T3DerivedData`; `QuarantinedExtractor` + `ExtractionMode` + `TypedRefusalReason` + `ProviderCapability`; full `quarantined_to_structured` + `downgrade_to_orchestrator` + `T3_DERIVED_DOWNGRADE_FIELDS` (all shipped in PR-S3-4 #TBD) | Slice 4+: `RealGate.rebuild_from_state_git` full impl (PR-S3-6); container isolation for quarantined LLM (ADR-0015) | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) |
 
+## Egress planes
+
+The gateway is the **sole external egress plane** (Spec C G7-3, ADR-0042). The security
+subsystem interacts with three distinct egress consumers, all routed through the gateway:
+
+1. **Provider egress** — the core's `EgressClient` builds provider SDK clients with a
+   proxied `httpx.AsyncClient`; the gateway L7 CONNECT forward-proxy enforces the
+   destination allowlist and audits every connection (mode a, TLS-passthrough).
+2. **Tool egress relay** — gateway inspecting relay for mode-(b) tool calls (web-fetch);
+   the gateway re-runs `OutboundDlp` as an independent second pass over the
+   DLP-redacted body, providing two-layer content enforcement.
+3. **Discord-adapter egress** — the gateway-hosted Discord bwrap child (Spec C G7-4,
+   ADR-0043) runs `--unshare-net` (empty netns); its sole egress path is a bind-mounted
+   AF_UNIX socket on the gateway-only `alfred_discord_egress` volume, served by a second
+   `EgressForwardProxy` instance with a Discord-only allowlist. The AF_UNIX socket is
+   never reachable from the connectivity-free core (it is on a volume mounted into
+   `alfred-gateway` only — not `alfred_run`).
+
+See [ADR-0043](../adr/0043-discord-adapter-egress-l7-proxy-netns-bridge.md) for the
+Discord egress bridge decision record.
+
 ## Cross-references
 
 - PRD §7.1 — dual-LLM split as the load-bearing prompt-injection defence.

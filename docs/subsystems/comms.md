@@ -344,18 +344,18 @@ The adapter manifest declares `[sandbox] kind = "full"` (sec-1): it ingests
 adversary-controlled bytes and runs under bwrap fs/namespace containment mirroring
 the quarantined LLM, plus a `/etc/ssl/certs` ro-bind for the Discord TLS chain.
 
-Egress is NOT yet kernel-enforced: outbound is currently **UNRESTRICTED**
-(release-blocker `#230`), mirroring `config/sandbox/README.md` and the EGRESS note
-in `config/sandbox/discord-adapter.linux.bwrap.policy`. The policy does not yet
-run `--unshare-net` because the sandbox schema cannot express a Discord-only
-endpoint allowlist. The intended `#230` design — the mechanism this note will be
-updated to describe once landed — is: a `network.outbound_allowlist` field on the
-`kind = "full"` policy, enforced by running bwrap with `--unshare-net` plus a
-slirp/pasta-style filtered forwarder pinned to the Discord endpoints, so the
-kernel (not the manifest's advisory `[network] allowlist`) caps egress to
-Discord-only. The manifest `[network] allowlist` documents the intended endpoints
-today; `#230` makes the policy ENFORCE them at the kernel boundary. See
-[ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md) and
+**Egress is now kernel-enforced (Spec C G7-4, #333).** The Linux bwrap policy runs
+`--unshare-net`, placing the adapter child in an **empty network namespace** —
+a direct `connect()` to any external host fails at the kernel. Egress routes through
+the gateway's L7 CONNECT forward-proxy via a **bind-mounted AF_UNIX socket** on
+the gateway-only `alfred_discord_egress` volume (never reachable from the
+connectivity-free core). A thin in-child TCP→unix byte-splice shim lets
+`discord.py`'s `Client(proxy=...)` work unmodified. The gateway proxy's
+Discord-only allowlist (`discord.com`, `*.discord.gg`) is defense-in-depth on top of
+the kernel enforcement-of-record. This closes the **Discord half** of `#230`;
+the 2c real-LLM quarantine-child egress remains deferred to `#230/#340`. See
+[ADR-0043](../adr/0043-discord-adapter-egress-l7-proxy-netns-bridge.md),
+[ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md), and
 [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md).
 
 ### Daemon go-live flip + fail-closed dev-host behaviour (PR-S4-11c-2b)

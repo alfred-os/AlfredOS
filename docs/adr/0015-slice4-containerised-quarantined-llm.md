@@ -150,6 +150,16 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
 > invariant — two independent layers). #230 now tracks only the 2c real-LLM child,
 > which reaches its provider provider-only through the gateway L7 CONNECT proxy, not
 > by re-opening this namespace.
+>
+> **Spec C G7-4 note (2026-06-30, #333).** The **Discord adapter** egress is now
+> kernel-closed (the **Discord half** of `#230`): its Linux bwrap policy adds
+> `--unshare-net`; egress routes through the gateway L7 CONNECT proxy via a
+> bind-mounted AF_UNIX bridge (see [ADR-0043](0043-discord-adapter-egress-l7-proxy-netns-bridge.md)).
+> **The 2c real-LLM quarantine-child egress deferred in this ADR (#230/#340) is
+> NOT closed by G7-4 and remains open.** When 2c lands, the real-LLM child will
+> reach its provider through the gateway L7 CONNECT proxy; it will NOT re-open the
+> child network namespace. The `#230` deferral in the Negative consequences above
+> (the provider-only path + unset-provider-key boot guard) stands intact until 2c.
 
 ## References
 
