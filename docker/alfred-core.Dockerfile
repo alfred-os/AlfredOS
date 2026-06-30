@@ -155,7 +155,13 @@ RUN groupadd --system alfred \
     && chown -R alfred:alfred /var/lib/alfred \
     && mkdir -p /home/alfred/.run \
     && chown alfred:alfred /home/alfred/.run \
-    && chmod 0700 /home/alfred/.run
+    && chmod 0700 /home/alfred/.run \
+    # G7-4: Discord adapter egress socket dir (gateway-only; the volume that mounts
+    # here on the gateway copies this pre-created, chowned discord/ subdir on first
+    # use so the gateway process can bind its UDS without root at runtime).
+    && mkdir -p /home/alfred/.egress/discord \
+    && chown -R alfred:alfred /home/alfred/.egress \
+    && chmod 0700 /home/alfred/.egress
 
 # The self-contained PBS interpreter + the non-editable `alfred` install. Copied
 # verbatim from the builder — it is fully relocatable (RUNPATH-relative). World-
