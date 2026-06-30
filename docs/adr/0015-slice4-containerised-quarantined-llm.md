@@ -86,7 +86,7 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
   bind leaves `/usr/bin/*` (python, curl, …) **exec-reachable** inside the
   sandbox, so PRD §5's "no capability to spawn further subprocesses" condition
   does NOT yet fully hold. Tightening the bind to a minimal interpreter set is
-  tracked in [#230](https://github.com/MrReasonable/AlfredOS/issues/230)
+  tracked in [#230](https://github.com/alfred-os/AlfredOS/issues/230)
   alongside the egress allowlist; both are release-blockers before the
   quarantined LLM is wired live.
 
@@ -106,7 +106,7 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
   spawn it end-to-end, so the justification is now the no-egress-capable-child
   property, not the absence of a spawn.)
   The provider-only egress allowlist + HTTPS-downgrade refusal are tracked in
-  **[#230](https://github.com/MrReasonable/AlfredOS/issues/230) and are a
+  **[#230](https://github.com/alfred-os/AlfredOS/issues/230) and are a
   release-blocker before the quarantined LLM is wired live.** Until #230 lands,
   the earlier claim that outbound calls are "kernel-enforced against the
   declared allowlist" does NOT hold and is superseded by this amendment.
