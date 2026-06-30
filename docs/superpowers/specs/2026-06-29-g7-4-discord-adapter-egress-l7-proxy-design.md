@@ -188,20 +188,27 @@ Each unit, its interface, and what it depends on.
   error). The AF_UNIX socket is **pre-bound by the listener-lifecycle module (§4.3)** and
   passed in — `serve()` never binds a path itself (avoids the EADDRINUSE/double-bind the
   eager-bind would otherwise race). `_handle_client` and the SSRF chain are unchanged.
-- **Interface:** `EgressForwardProxy(*, allowlist, match, audit, resolve, open_upstream,
-  unix_sock=None, bind_host=None, port=None)`. `match` is the injected per-entry
-  predicate (default exact); the provider instance passes the exact-only matcher.
-- **Depends on:** the shared splice helper (§4.5); the per-entry allowlist type (§4.2).
+- **Interface:** `EgressForwardProxy(*, allowlist, match, audit, resolve, open_upstream)` —
+  the bind is configured at `serve()` (ONE place, not the constructor too):
+  `serve(sock=<pre-bound>)` for the AF_UNIX instance, `serve(host, port)` for the provider
+  TCP instance. `match` is the injected per-entry predicate; the provider instance passes
+  the **exact-only** matcher, so its behaviour is provably the prior `host in allowlist` (a
+  test pins `exact-match ≡ the old membership` — "byte-identical `serve()`" overstated it,
+  since `_authorize` is now parameterized).
+- **Depends on:** the shared splice helper (§4.5); the allowlist + matcher (§4.2).
 
 ### 4.2 Discord allowlist + per-entry matcher — `src/alfred/egress/allowlist.py`
 
-- **What:** a per-entry allow type carrying a match mode (e.g.
-  `EgressAllowEntry = frozenset of (host, port, Literal["exact","suffix"])`, default
-  `exact`), and a `discord_egress_allowlist()` returning the Discord set, **distinct**
-  from `provider_egress_allowlist`. Fix the `provider_egress_allowlist` docstring drift
-  (`allowlist.py:60`, "G7-4 adds the Discord hosts" — it must **not** merge Discord into
-  the provider set). The matcher predicate resolves the mypy-strict type cleanly (one
-  entry type, two strategies; provider entries are all `exact`).
+- **What:** keep the existing `EgressDestination = tuple[str, int]` **unchanged** — the
+  match-mode is NOT baked into that shared alias, so `provider_egress_allowlist`'s
+  signature + its three unit tests + the shared `gateway/egress_relay.py` consumer are all
+  **untouched** (no 3-tuple ripple — the prior "EgressAllowEntry 3-tuple" sketch rippled
+  into all three; corrected). The Discord allowlist is its **own** typed structure — a
+  frozenset of `(host, port)` exact entries plus a small frozenset of `(host, port)` suffix
+  bases — consumed only by the injected `match` predicate. `discord_egress_allowlist()`
+  returns it, **distinct** from `provider_egress_allowlist`; fix the latter's docstring drift
+  (`allowlist.py:60`, "G7-4 adds the Discord hosts" — it must **not** merge Discord into the
+  provider set). (Entry is a tuple; the allowlist is a frozenset of tuples — don't conflate.)
 - **Discord destination set (verified against `discord.py` 2.7.1):**
 
   | Destination | Mode | Source | Notes |
@@ -225,17 +232,32 @@ Each unit, its interface, and what it depends on.
   to the `EgressForwardProxy` AF_UNIX instance whose `serve()` runs as a fail-closed
   sibling task. `_commands.py` calls this module (one line), keeping its own coverage
   untouched and letting the new boundary reach **per-file 100% line+branch**.
-- **Socket path:** under the existing `alfred_run` mount / trust chain (align with the
-  established run-dir, not a bespoke `/run/alfred/egress/...`), in a dedicated dir holding
-  only that socket. One shared **path constant** is referenced by the gateway bind, the
-  bwrap bind target, and the shim's `open_unix_connection` (§4.5) — never three literals.
+- **Socket path — on a GATEWAY-ONLY volume, NEVER `alfred_run` (devops-001, the blocker).**
+  The socket lives on a **new `alfred_discord_egress` volume mounted ONLY into
+  `alfred-gateway`**, NOT `alfred_run`. `alfred_run` is mounted into **both** `alfred-core`
+  (`docker-compose.yaml:184`) and `alfred-gateway` (`:254`) at the same uid, and a pathname
+  AF_UNIX socket is **filesystem-namespace-scoped — NOT gated by `internal:true`** (a
+  net-ns control). So a socket on `alfred_run` would let the connectivity-free **core**
+  `connect()` the Discord egress proxy and reach the Discord allowlist — **reopening
+  G7-3 / HARD-#9** and contradicting §3 #2. (This corrects the earlier "align to
+  `alfred_run`" fold: that is right for the *comms control wire* the core is meant to
+  reach, but **wrong** for an egress socket that must be **core-unreachable**.) One shared
+  **path constant** spans the gateway bind / bwrap target / shim connect. The helpers
+  (`bind_owner_only_unix_socket`, `runtime_dir`) live in
+  `src/alfred/plugins/_local_socket.py` — import them, do not re-implement. Eager-bind does
+  **unlink-before-bind** so a stale socket from a prior crash can't `EADDRINUSE` the restart.
 - **Fail-closed + distinctly typed:** a bind failure maps to a **new**
   `EgressAdapterProxyUnavailableError(IOPlaneUnavailableError)` with its **own exit code**
-  (proxy=7, relay=8 precedent → adapter-proxy=9) and a distinct `t()` key — so the
-  operator sees "Discord egress listener failed", not the provider-proxy outage. (Like
-  the provider proxy, this fail-closed sibling crash-loops the gateway under
-  `restart: unless-stopped`; the distinct error/exit prevents mislabelling.)
-- **Depends on:** `_local_socket`; the proxy (§4.1); the allowlist (§4.2).
+  (proxy=7, relay=8 precedent → adapter-proxy=9) and a distinct `t()` key. Because it
+  **subclasses** `IOPlaneUnavailableError`, its `except` clause in `_commands.py` MUST
+  precede `except IOPlaneUnavailableError` or it falls through to exit 7 + the provider
+  line (a pinning test asserts exit 9 + the distinct key). It shares the gateway's
+  fail-closed `TaskGroup`, so a Discord-listener bind fault **crash-loops the whole
+  gateway — dropping LIVE provider egress + the comms relay too**. That coupling is
+  accepted (the crash-loop is the intended loud fail-closed signal; a misconfigured,
+  not-yet-live Discord plane taking down provider egress is the cost; adapter-spawn-boundary
+  isolation is a noted future option, not G7-4).
+- **Depends on:** `src/alfred/plugins/_local_socket.py`; the proxy (§4.1); the allowlist (§4.2).
 
 ### 4.4 Bwrap policy migration — `config/sandbox/discord-adapter.linux.bwrap.policy`
 
@@ -265,10 +287,13 @@ Each unit, its interface, and what it depends on.
   in `DiscordLifecycle.start` (that carries a latent EADDRINUSE on a stop→start cycle).
   The shim port comes from one shared **port constant** also used to build the bot's
   `proxy=` URL (a port skew would silently ECONNREFUSE `login()`).
-- **Supervised termination (hard rule #7):** the shim runs under the adapter's crash
-  discipline so its death is a **terminal, audited** adapter exit — never a silent
-  ECONNREFUSED→`discord.py`-reconnect spin. This mechanism + its guard test are mandated
-  here (not deferred).
+- **Supervised termination (hard rule #7) — name the structural mechanism:** the shim task
+  is bound to the adapter's structured concurrency via a **done-callback / `TaskGroup`
+  propagation** (the `CrashEmitter` pattern), NOT a bare fire-and-forget
+  `asyncio.create_task` (which hits the codebase's documented orphan-task trap at
+  `gateway_adapter.py` that silently swallows the failure). Its death is a **terminal,
+  audited** adapter exit — never a silent ECONNREFUSED→`discord.py`-reconnect spin. A guard
+  test asserts the propagation reaches a terminal exit (not merely "works when the shim is up").
 - **Depends on:** loopback up in the empty netns (bwrap brings `lo` up under
   `--unshare-net`; the `RTM_NEWADDR` skip-guard handles unprivileged CI runners).
 
@@ -335,8 +360,9 @@ security control.
     honestly; host-level netns/seccomp telemetry is the future detection path, not G7-4.
   - The gateway still **serially transits** each credential's plaintext at spawn over
     fd-3 (ADR-0036 serial-harvest residual; the gateway keeps egress). G7-4 does not
-    close this; ADR-0043 cross-references ADR-0040's honest-residual (iii) and does not
-    claim closure.
+    close this; ADR-0043 cross-references the gateway-compromise residual that the reserved
+    G7-5 egress ADR (ADR-0040) will enumerate, and does not claim closure (no numbered
+    citation into the not-yet-written ADR).
 
 ---
 
@@ -359,14 +385,29 @@ DNS, no `0.0.0.0`. In an empty netns there is nothing to fall back to.
 
 The established Spec C pattern — **no live Discord bot**:
 
-- **Unit (per-file 100% line+branch, two-gates, both ci.yml jobs):** the proxy bind
-  selector + injected matcher (`egress_proxy.py`); the per-entry matcher + Discord
-  allowlist (`allowlist.py`); the shared splice helper (`byte_splice.py`); the shim
-  (`adapter_proxy_shim.py`); the AF_UNIX listener lifecycle
-  (`adapter_egress_listener.py`); the `proxy=` threading. **All new boundary files live
-  under `src/alfred/`** so the existing `[tool.coverage.run] source=["src/alfred"]` gate
-  actually traces them (the shim must NOT live in `plugins/alfred_discord/`, which is
-  uncovered).
+- **Unit (per-file 100% line+branch):** the proxy bind selector + injected matcher
+  (`egress_proxy.py`); the Discord allowlist + matcher (`allowlist.py`); the shared splice
+  helper (`byte_splice.py`); the shim (`adapter_proxy_shim.py`); the AF_UNIX listener
+  lifecycle (`adapter_egress_listener.py`); the `proxy=` threading. **All new boundary files
+  live under `src/alfred/`** so `[tool.coverage.run] source=["src/alfred"]` traces them — but
+  that only makes coverage *measurable*: the per-file 100% gate is a **hand-maintained
+  `coverage report --include=<path> --fail-under=100`** step in **both** ci.yml jobs +
+  the `hashFiles` precondition. **The 3 new modules MUST be added to both `--include` lists
+  and the `hashFiles` guard** (test-001) — placement alone is not enforcement (else a
+  paper gate of the #245 kind).
+- **Refactor safety:** the `byte_splice.py` extraction touches the provider tunnel
+  **hot path** — pin the existing `_pipe`/`_tunnel` half-close + OSError-propagation tests
+  against the refactor (behaviour-neutral).
+- **Per-caller separation (enforce, don't rely):** an explicit test that the provider and
+  Discord allowlists are **disjoint**, the provider instance is constructed with the
+  **exact-only** matcher, and a **provider exact near-miss DENY** — all three pass line
+  coverage while violated, so they need direct assertions (the shared-`_authorize` refactor
+  must be provably non-widening).
+- **Shim-death guard:** a test that the supervised shim termination reaches a **terminal,
+  audited adapter exit** (§4.5), not a silent reconnect spin.
+- **Distinct-error guard:** a test pinning the adapter-proxy bind fault to **exit 9 + its
+  distinct `t()` key** (the subclass-before-superclass `except` ordering, §4.3) — a regression
+  to exit 7 passes coverage otherwise.
 - **Suffix-matcher near-miss DENYs (security-critical):** named adversarial entries —
   `evildiscord.gg`, `discord.gg.evil.com`, `gateway.discord.gg.attacker.com`, an
   allowlisted suffix on a non-443 port, a trailing-dot host — each asserted DENIED. A
@@ -397,7 +438,10 @@ The established Spec C pattern — **no live Discord bot**:
 - **Migrate-don't-drop:** `test_discord_adapter_sandbox_policy.py` — *flip* its
   `#230`-deferral assertions to the enforced posture (don't delete them).
 - **Compose-invariants:** `ALFRED_DISCORD_EGRESS_ALLOWLIST` on the gateway, **absent** on
-  the core; no new host-published port/socket; the socket dir is container-internal.
+  the core; no new host-published port/socket; **the new `alfred_discord_egress` volume is
+  mounted into `alfred-gateway` ONLY, NEVER `alfred-core`** (mirror
+  `test_egress_proxy_port_never_host_published`) — this is the structural guard for
+  devops-001 (the connectivity-free core must not reach the Discord egress socket).
 - **happy/error/refusal trio** for each new unit.
 
 ---
@@ -422,15 +466,20 @@ and documents the gap; there is no runtime path to harden there.
   decision-10 reconciliation; the policy migration; the honest residuals (incl. the
   kernel-blocked-egress audit blind-spot). Follows the ADR-0042 (G7-3) precedent.
 - **Amend ADR-0016** (Discord adapter egress; already factually amended in G7-1a) with a
-  G7-4 block pointing at ADR-0043 and closing the `#230`/G7-4 thread; flip its status from
-  "Proposed" if now accurate. **Touch ADR-0015's** egress-deferral text (now stale once
-  `#230` is fully closed).
+  G7-4 block pointing at ADR-0043 and closing the **Discord half** of the `#230` thread;
+  flip its status from "Proposed" if now accurate. **Amend ADR-0015** to record the Discord
+  egress is now closed — but **PRESERVE its 2c real-LLM quarantine-child egress deferral**:
+  `#230` is **NOT fully closed** by G7-4 (the 2c real-LLM child egress remains under
+  `#230`/`#340`, ADR-0015 L147-150, README L129-134). Do **not** mark `#230` fully closed or
+  delete that deferral (docs-G74-001).
 - **Cross-reference ADR-0036** (gateway privilege) — an in-model duty, no new capability.
 - **Deep-doc updates (English-only, NON-human-gated → G7-4 deliverables, same PR):**
   `docs/subsystems/comms.md` (~L341-372, "Sandbox posture and egress" — asserts the policy
-  does NOT `--unshare-net`; goes false on merge); `docs/subsystems/security.md` (the
-  egress-planes prose — the adapter is now a third egress consumer);
-  `config/sandbox/README.md` (the Discord egress note). The plan must size these.
+  does NOT `--unshare-net`; goes false on merge); **ADD a brief egress-planes note to**
+  `docs/subsystems/security.md` (it has **none** today — do not claim to edit non-existent
+  prose; docs-G74-002); `config/sandbox/README.md` (the Discord egress note — carries the
+  same overloaded-`#230` hazard, so apply the same surgical exclusion the policy file gets).
+  The plan must size these.
 - **Human-gated → G7-5 (do NOT edit here):** CLAUDE.md HARD rule #9's "adapter-egress G7-4"
   status line; PRD §5/§7.1; **ADR-0040** (reserved comprehensive egress ADR).
 - **i18n:** the new operator-facing strings (`EgressAdapterProxyUnavailableError` /
@@ -453,9 +502,13 @@ and documents the gap; there is no runtime path to harden there.
   capability (today: text-only inbound → omit until needed, logged).
 - The exact next-free `sbx-2026-0NN` id (mechanical; the plan reads the corpus).
 
-(Resolved by this revision — no longer open: the suffix-match shape = per-entry match-mode;
-the shim placement = `server.serve()` process scope; the shared path + port constants; the
-bind lifecycle = pre-bind + `serve(sock=)`; SO_PEERCRED dropped; the corpus = a new id.)
+(Resolved — no longer open: the matcher shape (exact `EgressDestination` 2-tuple unchanged +
+a separate Discord suffix set, injected `match` predicate); the egress socket on a
+gateway-only `alfred_discord_egress` volume (NOT `alfred_run`); the shim placement
+(`server.serve()` process scope) + structural supervised-termination; the shared path/port
+constants; the bind lifecycle (pre-bind + `serve(sock=)` + unlink-before-bind); the
+`except`-ordering (subclass before superclass); SO_PEERCRED dropped; the corpus = a new id;
+`#230` closes the Discord half only.)
 
 ---
 
@@ -482,3 +535,39 @@ devops, provider, docs — 0 Critical, 9 High, 29 Medium, 21 Low). Highlights:
 - **Shared path + port constants** `[rev-005, comms-003]`; **`ro-bind` preferred**
   `[sec-003, ops-008]`; **deep-doc enumeration** as G7-4 deliverables `[docs-001, arch-002]`;
   **kernel-blocked-egress audit blind-spot** recorded `[sec-006]`.
+
+### Round 2 (2026-06-30) — folded from the formal re-review (Phase A re-run + coordinator Phase B/C)
+
+The revised spec was put back through the full 8-lens fleet **plus** the
+`alfred-review-coordinator` (Phase B classification + Phase C cross-checks: 6 dispatched, 6
+confirmed, 0 disputed, 0 retracted). It converged on every Round-1 fold; the re-review then
+**caught one fold-induced High** and a set of confirmed must-fixes, all folded here:
+
+- **BLOCKER — egress socket OFF `alfred_run`, ONTO a gateway-only `alfred_discord_egress`
+  volume** + a compose-invariant (egress volume not mounted into core). The Round-1
+  "align to `alfred_run`" fold reopened G7-3 / HARD-#9 (`alfred_run` is core+gateway-mounted;
+  AF_UNIX is filesystem-ns, not gated by `internal:true`) — double-confirmed by security +
+  architect `[devops-001]`.
+- **`EgressDestination` stays a 2-tuple** — no `EgressAllowEntry` 3-tuple ripple into
+  `provider_egress_allowlist` / its tests / the shared `egress_relay.py`; the Discord suffix
+  set + injected `match` predicate carry the mode `[arch-003, rev-002, prov-conv-001, comms-r2-004]`.
+- **`except`-clause ordering** (subclass `EgressAdapterProxyUnavailableError` before
+  `IOPlaneUnavailableError`, or it mislabels as exit 7) + a pinning test `[prov-conv-002]`.
+- **Total-outage coupling stated** (a Discord-listener bind fault crash-loops the whole
+  gateway → drops live provider egress too) + **unlink-before-bind** `[prov-conv-003]`.
+- **Coverage gate wired, not just measurable** — the 3 new modules added to both ci.yml
+  `--include` lists + the `hashFiles` guard `[test-001]`; **disjointness + provider-exact
+  near-miss + byte_splice behaviour-neutrality + shim-death + exit-9** tests `[test-002, sec-002,
+  reviewer-003, prov-conv-005]`.
+- **Shim termination = structural mechanism** (CrashEmitter done-callback / TaskGroup
+  propagation; avoid the `gateway_adapter.py` orphan-task trap) `[reviewer-001]`.
+- **`#230` closes the Discord half only** — preserve ADR-0015's 2c real-LLM quarantine-child
+  deferral `[docs-G74-001]`; **ADD** egress-planes prose to `security.md` (it has none today)
+  `[docs-G74-002]`; no numbered citation into the unwritten ADR-0040 `[docs-G74-004]`.
+- **`serve()`-only bind seam** (drop the constructor's `unix_sock/bind_host/port`) + the
+  exact-match≡prior equivalence assertion `[arch-001, arch-005, prov-conv-004]`; name the
+  `_local_socket.py` import path `[devops-002]`.
+
+Remaining post-Round-2 solos are all Low cosmetic (shared-audit caller label; TOML-bind-path
+equality test; `RESOLVED_IP_NOT_GLOBAL` attributed to `_tunnel`) — carried as plan punch-list,
+no escalation.
