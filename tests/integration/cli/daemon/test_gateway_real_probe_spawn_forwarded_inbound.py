@@ -115,6 +115,7 @@ from alfred.cli.daemon._commands import (
     _listen_socket_comms_adapter,
 )
 from alfred.config.settings import Settings
+from alfred.egress.adapter_egress_addr import DISCORD_EGRESS_SOCKET_PATH
 from alfred.gateway.adapter_child_factory import GatewayAdapterChildFactory
 from alfred.gateway.adapter_credential_client import GatewayAdapterCredentialClient
 from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
@@ -395,7 +396,21 @@ def _boot_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> Iterator[No
     monkeypatch.setenv("ALFRED_AUDIT.HASH_PEPPER", _AUDIT_HASH_PEPPER)
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ADAPTER_ID}"]')
     monkeypatch.setenv("ALFRED_PLUGIN_UID", _LAUNCHER_TEST_UID)
-    yield
+    # G7-4 / ADR-0043: the shared discord-adapter bwrap policy rw-binds the gateway
+    # egress-socket dir (``DISCORD_EGRESS_SOCKET_PATH.parent``). The REAL launcher binds
+    # it unconditionally — fail-closed: a missing egress plane MUST fail the real adapter
+    # spawn — so the real-spawn probe needs the source dir to exist exactly as the gateway
+    # container provides it (the alfred-core image's mkdir + the egress volume). The probe
+    # performs no egress; an empty dir satisfies the bwrap bind. (Skipped tests never reach
+    # this fixture, so the mkdir only runs in the root+bwrap privileged lane.)
+    egress_dir = DISCORD_EGRESS_SOCKET_PATH.parent
+    egress_dir_created = not egress_dir.exists()
+    egress_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        yield
+    finally:
+        if egress_dir_created:
+            shutil.rmtree(egress_dir, ignore_errors=True)
 
 
 async def _wait_for(
