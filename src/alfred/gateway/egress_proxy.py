@@ -42,7 +42,13 @@ from typing import Final
 import structlog
 from prometheus_client import Counter
 
-from alfred.egress.allowlist import EgressDestination, Match, is_globally_routable, is_literal_ip
+from alfred.egress.allowlist import (
+    EgressDestination,
+    Match,
+    exact_match,
+    is_globally_routable,
+    is_literal_ip,
+)
 from alfred.gateway.egress_audit import (
     EGRESS_CONNECT_ALLOWED_EVENT,
     EGRESS_CONNECT_DENIED_EVENT,
@@ -146,7 +152,7 @@ class EgressForwardProxy:
         self,
         *,
         allowlist: frozenset[EgressDestination],
-        match: Match,
+        match: Match = exact_match,
         audit: _AuditSink,
         resolve: _Resolver = _default_resolve,
         open_upstream: _UpstreamOpener = _default_open_upstream,
