@@ -101,7 +101,7 @@ Four egress classes. Three are handled in Spec C; the fourth (2c) reuses the sam
 | Core to provider (Anthropic / DeepSeek) | direct HTTPS from the core | core SDK targets the gateway **L7 CONNECT proxy** (mode a); destination allowlist + audit; TLS passthrough (gateway never sees the prompt); streaming preserved; responses tagged **T2** |
 | Core / plugin tool egress (web-fetch, email) | allowlist data model exists, unenforced | **inspecting relay** (mode b): core DLP-redacts the body, then the **gateway re-runs `OutboundDlp` (redaction + canary) as an independent pass**, destination-allowlists, audits, forwards; the response is handled by the §4.3 quarantine-extract entry |
 | Quarantine child | full unrestricted net (no 2c yet) | gets `--unshare-net` immediately — deterministic-echo needs zero net; the L7-proxy provider path is built in the 2c follow-on |
-| Hosted Discord adapter child | full unrestricted net, live in prod (closed G7-4 — see reconciliation note above) | `--unshare-net` + `discord.py` pointed at the **same L7 CONNECT proxy** via `Client(proxy=...)` (mode-a-shaped, TLS-passthrough); per-adapter destination allowlist; tail PR |
+| Hosted Discord adapter child | full unrestricted net, live in prod (closed G7-4 — see reconciliation note above) | `--unshare-net` + `discord.py` pointed at the **AF_UNIX adapter-egress L7 CONNECT proxy instance** (`/home/alfred/.egress/discord/egress.sock` via in-child TCP→unix shim) via `Client(proxy=...)` (mode-a-shaped, TLS-passthrough); per-adapter destination allowlist; tail PR |
 
 ### 4.1 Mode (a) — provider forward-proxy
 

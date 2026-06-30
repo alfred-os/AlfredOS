@@ -19,7 +19,7 @@
 - **No `--no-verify`.** **Conventional Commits** on every commit.
 - **`.rulesync/` is canonical** — never edit generated `.claude/` / root `CLAUDE.md`. **CLAUDE.md / PRD.md / ADR-0040 edits are human-gated** (out of this plan; G7-5).
 - **The gateway reads PUBLIC env, never `Settings`** (ADR-0036) — it holds no provider/secret key.
-- **Quality gate before every push:** `make check` (lint + format + type + unit/integration). Docker-driven tests: `export DOCKER_HOST=unix:///Users/iandominey/.orbstack/run/docker.sock`.
+- **Quality gate before every push:** `make check` (lint + format + type + unit/integration). Docker-driven tests: `export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`.
 
 ## Plan-review fixes (2026-06-30) — READ BEFORE ANY TASK; these OVERRIDE the task bodies below
 
@@ -804,7 +804,7 @@ def test_adapter_except_precedes_io_plane(monkeypatch):
 
 ```python
         except EgressAdapterProxyUnavailableError as exc:
-            _emit_friendly_failure("gateway.start.adapter_egress_bind_failed", exc)
+            _emit_friendly_failure("gateway.start.egress_adapter_bind_failed", exc)
             raise typer.Exit(code=_EXIT_EGRESS_ADAPTER_PROXY_BIND_FAILED) from exc
 ```
 
@@ -1039,6 +1039,11 @@ payload:
   policy_ref: config/sandbox/discord-adapter.linux.bwrap.policy
   probe: socket.create_connection(('attacker.example', 443))
 expected_outcome: refused
+provenance: >-
+  G7-4 (#333) ships the Discord adapter under ``--unshare-net`` (ADR-0043),
+  closing the egress gap deferred in pre-G7-4 policy versions. All outbound
+  network access routes exclusively through the bind-mounted gateway L7 CONNECT
+  forward-proxy socket; a direct ``connect(2)`` is refused at the kernel.
 references:
   - "config/sandbox/discord-adapter.linux.bwrap.policy (EGRESS via gateway proxy only — unshare net)"
   - "docs/adr/0043-discord-adapter-egress-l7-proxy-netns-bridge.md"
@@ -1057,7 +1062,7 @@ Add `"sbx-2026-014"` to the corpus-id completeness list (`:553`).
 
 - [ ] **Step 3: Create the kernel proof** in the `integration-privileged` lane (clone `tests/integration/test_quarantined_llm_policy_kernel_enforced.py`; run euid-0 so the netns is configurable). Assert: (a) direct external connect blocked, (b) `getaddrinfo` external fails, (c) an allowlisted host via the bridge succeeds, (d) a non-allowlisted host via the bridge denied. Reuse the `RTM_NEWADDR` skip-guard for restricted runners + a **per-test not-skipped** assertion pinned to the privileged lane (do NOT use the plain-lane `#245` guard — opposite skip semantics).
 
-- [ ] **Step 4: Run** the unit-runnable parts; run the docker-gated proof under `DOCKER_HOST=unix:///Users/iandominey/.orbstack/run/docker.sock`. Then `uv run pytest tests/adversarial -q` (release-blocking).
+- [ ] **Step 4: Run** the unit-runnable parts; run the docker-gated proof under `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`. Then `uv run pytest tests/adversarial -q` (release-blocking).
 
 - [ ] **Step 5: Commit**
 
@@ -1079,7 +1084,7 @@ git commit -m "test(egress): sbx-2026-014 Discord egress-contained + docker-gate
 - [ ] **Step 2: Amend ADR-0016** (G7-4 block → ADR-0043; close the **Discord half** of `#230`; flip status). **Amend ADR-0015** to record Discord egress closed but **PRESERVE its 2c real-LLM deferral** (`#230` is NOT fully closed). Cross-ref ADR-0036.
 - [ ] **Step 3: Update deep-docs** — `comms.md` (~L341-372: the policy now `--unshare-net`s, egress via the proxy); **ADD** a brief egress-planes note to `security.md` (it has none today); `config/sandbox/README.md` (Discord egress closed; preserve the 2c `#230` deferral, same surgical exclusion the policy got).
 - [ ] **Step 4: Spec erratum note** in the Spec C design doc (mirror the G7-1 §3 TCP-proxy reconciliation note): factual decision-10 reconciliation; correct "one L7 CONNECT *listener*" → "one *implementation*, per-caller instances". (CLAUDE.md #9 + PRD §5/§7.1 + ADR-0040 stay human-gated → G7-5 — do NOT edit.)
-- [ ] **Step 5: i18n** — add the operator strings (`gateway.start.adapter_egress_bind_failed`, any shim-failure message) to the catalog source; run `pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins` → `pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching` → fill the English msgstr → `pybabel compile -d locale -D alfred --statistics`. Verify `pybabel ... --check` (CI uses `--ignore-pot-creation-date`) exits 0.
+- [ ] **Step 5: i18n** — add the operator strings (`gateway.start.egress_adapter_bind_failed`, any shim-failure message) to the catalog source; run `pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins` → `pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching` → fill the English msgstr → `pybabel compile -d locale -D alfred --statistics`. Verify `pybabel ... --check` (CI uses `--ignore-pot-creation-date`) exits 0.
 - [ ] **Step 6: Lint + commit** — `npx markdownlint-cli2 docs/**` (no `--fix`; fix tables by hand).
 
 ```bash
@@ -1093,7 +1098,7 @@ git commit -m "docs(egress): ADR-0043 + G7-4 deep-doc + i18n for the Discord egr
 
 - [ ] `make check` (lint + format + mypy + pyright + unit/integration) green.
 - [ ] `uv run pytest tests/adversarial -q` green (release-blocking — security/sandbox boundary touched).
-- [ ] Docker-gated kernel proof green under `DOCKER_HOST=unix:///Users/iandominey/.orbstack/run/docker.sock`.
+- [ ] Docker-gated kernel proof green under `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`.
 - [ ] The two-pass review: full `/review-pr` fleet (security ALWAYS) + CodeRabbit CLI (`--base origin/main`) + cloud.
 
 ## Punch-list (Low — carry into implementation, no separate task)

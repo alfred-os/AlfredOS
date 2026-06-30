@@ -62,3 +62,24 @@ def test_provider_and_discord_disjoint():
     disc_hosts = {h for h, _ in disc.exact} | {h for h, _ in disc.suffix_bases}
     prov_hosts = {h for h, _ in prov}
     assert disc_hosts.isdisjoint(prov_hosts)
+
+
+# --- Port validation (fix 1 / CR #352) -------------------------------------------
+
+
+def test_discord_extra_port_zero_raises() -> None:
+    """Port 0 is out of range for a real TCP port — must raise ValueError loudly."""
+    with pytest.raises(ValueError, match="port out of range"):
+        discord_egress_allowlist("x.discord.com:0")
+
+
+def test_discord_extra_port_65536_raises() -> None:
+    """Port 65536 exceeds the valid TCP port range — must raise ValueError loudly."""
+    with pytest.raises(ValueError, match="port out of range"):
+        discord_egress_allowlist("x.discord.com:65536")
+
+
+def test_discord_extra_port_valid_8443_accepted() -> None:
+    """A valid non-standard port (8443) is accepted and stored verbatim."""
+    al = discord_egress_allowlist("cdn.discord.com:8443")
+    assert ("cdn.discord.com", 8443) in al.exact

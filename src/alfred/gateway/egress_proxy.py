@@ -160,7 +160,10 @@ class EgressForwardProxy:
         port: int | None = None,
         unix_path: Path | None = None,
     ) -> None:
-        tcp_mode = bind_host is not None and port is not None
+        partial_tcp_mode = (bind_host is None) != (port is None)
+        if partial_tcp_mode:
+            raise ValueError("EgressForwardProxy: bind_host and port must be set together")
+        tcp_mode = bind_host is not None
         unix_mode = unix_path is not None
         if tcp_mode == unix_mode:
             raise ValueError(

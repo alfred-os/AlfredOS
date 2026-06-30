@@ -101,13 +101,26 @@ def test_construction_neither_mode_raises() -> None:
 
 
 def test_construction_partial_tcp_only_bind_host_raises() -> None:
-    """bind_host without port collapses to 'neither' — also raises."""
-    with pytest.raises(ValueError, match="exactly one"):
+    """bind_host without port is a partial TCP config — raises before the one-mode check."""
+    with pytest.raises(ValueError, match="bind_host and port must be set together"):
         EgressForwardProxy(
             allowlist=_PROVIDER_ALLOWLIST,
             match=exact_match,
             audit=lambda _e, _f: None,
             bind_host="127.0.0.1",
+        )
+
+
+def test_construction_partial_tcp_bind_host_without_port_with_unix_raises() -> None:
+    """bind_host set + port=None + unix_path set: partial TCP config is rejected even though
+    unix_path is provided — the partial-TCP guard fires first with its own message."""
+    with pytest.raises(ValueError, match="bind_host and port must be set together"):
+        EgressForwardProxy(
+            allowlist=_PROVIDER_ALLOWLIST,
+            match=exact_match,
+            audit=lambda _e, _f: None,
+            bind_host="127.0.0.1",
+            unix_path=Path("unused.sock"),
         )
 
 
@@ -206,11 +219,29 @@ async def test_serve_unix_path_bind_and_connect() -> None:
             open_upstream=_open,
             unix_path=unix_path,
         )
+
+        async def _wait_until_connectable(path: Path, *, timeout: float = 5.0) -> None:
+            """Poll until the AF_UNIX socket at ``path`` is connectable (or deadline)."""
+
+            async def _poll() -> None:
+                while True:
+                    if path.exists():
+                        try:
+                            _r, _w = await asyncio.open_unix_connection(str(path))
+                            _w.close()
+                            await _w.wait_closed()
+                            return
+                        except OSError:
+                            pass
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(_poll(), timeout=timeout)
+
         shutdown = asyncio.Event()
         serve_task = asyncio.ensure_future(proxy.serve(shutdown))
         try:
             async with up_server:
-                await asyncio.sleep(0.05)  # let serve() bind the unix socket
+                await _wait_until_connectable(unix_path)  # wait until serve() has bound the socket
 
                 # allowlisted CONNECT -> 200 + the upstream bytes relayed back
                 reader1, writer1 = await asyncio.open_unix_connection(str(unix_path))
