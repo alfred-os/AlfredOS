@@ -59,7 +59,7 @@ def is_globally_routable(host_or_ip: str) -> bool:
 
 def provider_egress_allowlist(deepseek_base_url: str) -> frozenset[EgressDestination]:
     """Allowed provider egress destinations: the DeepSeek base_url host + the Anthropic
-    SDK default. G7-4 adds the Discord hosts.
+    SDK default.
 
     Takes the base-URL STRING (not a ``Settings``) so the gateway can derive the allowlist
     WITHOUT constructing the secret-requiring ``Settings`` model — the gateway holds no
