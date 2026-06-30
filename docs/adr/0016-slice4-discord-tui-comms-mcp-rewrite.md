@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-05-31
 
@@ -62,6 +62,16 @@ enforces it at the kernel boundary.
 > egress deferral stands ALONE, tracked by #230 / G7-4. The quarantined-LLM 2c
 > real-LLM egress (also #230) and the Discord egress both route through the gateway
 > L7 CONNECT proxy when they land, not by re-opening their own net namespaces.
+
+> **Amended 2026-06-30, Spec C G7-4 (#333).** The **Discord half** of `#230` is now
+> closed. The Linux policy adds `"net"` to `unshare` (empty netns, kernel-enforced);
+> the adapter reaches the gateway's L7 CONNECT proxy via a bind-mounted AF_UNIX socket
+> on a gateway-only `alfred_discord_egress` volume (never `alfred_run` / never reachable
+> from the connectivity-free core). A thin in-child TCP→unix shim lets
+> `discord.py`'s `Client(proxy=...)` work unmodified. See
+> [ADR-0043](0043-discord-adapter-egress-l7-proxy-netns-bridge.md) for the full
+> decision record. The **2c real-LLM quarantine-child egress deferred to #230/#340**
+> (ADR-0015) is **not** closed here and remains open.
 
 ## Consequences
 

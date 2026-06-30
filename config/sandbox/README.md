@@ -25,18 +25,18 @@ carve-out). Their policy files:
 | `quarantined-llm.linux.bwrap.policy` | Linux | **Kernel-enforced** via bwrap |
 | `quarantined-llm.macos.sb` | macOS | File only — `sandbox-exec` execution deferred (#230); launcher refuses `kind:full` on macOS today |
 | `quarantined-llm.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
-| `discord-adapter.linux.bwrap.policy` | Linux | **Kernel-enforced** via bwrap; mirrors the quarantined-LLM fs/namespace containment + ro-binds `/etc/ssl/certs` for the Discord TLS chain |
+| `discord-adapter.linux.bwrap.policy` | Linux | **Kernel-enforced** via bwrap; mirrors the quarantined-LLM fs/namespace containment + ro-binds `/etc/ssl/certs` for the Discord TLS chain; now `--unshare-net` (G7-4) — egress via the gateway AF_UNIX bridge |
 | `discord-adapter.macos.sb` | macOS | File only — execution deferred (#230) |
 | `discord-adapter.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
 
-The **quarantined-LLM** policy now `unshare net`s (Spec C G7-1, #333): the
-shipped deterministic-echo child needs no egress, so it runs in an empty network
-namespace — egress is kernel-closed for it. The **Discord adapter** still leaves
-egress UN-kernel-enforced (the schema cannot yet express its endpoint allowlist),
-so it does not `unshare net` yet; that Discord-only egress cap is deferred to
-**#230 / G7-4** (the manifest's `[network] allowlist` documents the intended cap,
-which G7-4 makes the policy enforce via the gateway L7 CONNECT proxy). The 2c
-real-LLM quarantined child (still **#230**) likewise reaches its provider only
+The **quarantined-LLM** policy `unshare net`s (Spec C G7-1, #333): the shipped
+deterministic-echo child needs no egress, so it runs in an empty network
+namespace — egress is kernel-closed for it. The **Discord adapter** policy now
+also `unshare net`s (Spec C G7-4, #333, ADR-0043): the Discord child runs in an
+empty network namespace and reaches the gateway L7 CONNECT proxy via a bind-mounted
+AF_UNIX socket on the gateway-only `alfred_discord_egress` volume — this closes
+the **Discord half** of `#230`. The **2c real-LLM quarantined child** (#230/#340)
+is NOT closed here: when that child lands, it likewise reaches its provider only
 through the gateway proxy, never by re-opening the child's network namespace.
 
 `_fixtures/` holds policy files used only by tests; they are NOT production
@@ -110,21 +110,27 @@ Kernel enforcement of these bytes is proven by the merge-blocking integration
 test `tests/integration/test_quarantined_llm_policy_kernel_enforced.py` and the
 adversarial corpus `tests/adversarial/sandbox_escape/sbx-2026-003/004/006`.
 
-## Outbound egress — CLOSED for the echo child (Spec C G7-1); 2c real-LLM egress is #230
+## Outbound egress — CLOSED for the echo child (G7-1) and the Discord adapter (G7-4); 2c real-LLM egress is #230
 
 The shipped quarantined-LLM child runs a **deterministic echo loop** with no
 provider client and no socket of its own, so it needs **zero** outbound network.
 Spec C G7-1 (#333) therefore makes the Linux policy `unshare net`, putting the
-child in an **empty network namespace**. Consequently:
+child in an **empty network namespace**. Spec C G7-4 (#333, ADR-0043) applies the
+same to the **Discord adapter**: its policy now `--unshare-net`s the child; egress
+routes through the gateway's L7 CONNECT proxy via a bind-mounted AF_UNIX socket on
+the gateway-only `alfred_discord_egress` volume. Consequently:
 
-- Filesystem, process, and pid/uts/cgroup/ipc isolation **are** kernel-enforced.
-- Outbound network egress is now **kernel-closed** for the echo child — even a
-  compromised child has no network namespace to connect from.
+- Filesystem, process, and pid/uts/cgroup/ipc isolation **are** kernel-enforced
+  for both children.
+- Outbound network egress is now **kernel-closed** for the echo child and the
+  Discord adapter — even a compromised child has no network namespace to connect
+  from; the sole hole is the sanctioned AF_UNIX socket to the gateway proxy.
 
-The adversarial corpus records this as an **enforced-containment** vector in
-`tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml`
+The adversarial corpus records the echo-child egress as an **enforced-containment**
+vector in `tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml`
 (`out_of_scope: false`; the executable corpus asserts the shipped policy unshares
-`net`).
+`net`). A new Discord-specific corpus entry records the Discord adapter's enforced
+containment.
 
 **Still tracked by #230 — the 2c real-LLM child.** The real-LLM quarantined child
 (a separate follow-on) DOES make a provider call. It will **not** re-open this

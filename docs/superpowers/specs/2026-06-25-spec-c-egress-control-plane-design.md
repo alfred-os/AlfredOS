@@ -69,10 +69,28 @@ The headline invariant: **the core has no external sockets** (kernel-enforced, t
 - The **gateway** joins both networks — it is the bridge/chokepoint. The **core and datastores** (Postgres, Redis, Qdrant — enumerate all in compose; Qdrant is currently absent and must be added) join `alfred_internal` only, so the core *cannot route* to the internet. That container-level isolation is the core's kernel enforcement-of-record; it is independent of, and stronger than, the userspace proxy allowlist.
 - **The core does no client-side DNS for egress.** It sends `CONNECT host:port` and the gateway resolves the name. `internal:true` alone does **not** block DNS — Docker's embedded resolver (127.0.0.11) can still recurse upstream, so a `connect()`-only block would leave a DNS-exfil (QNAME) channel open (§7). Forbidding core-side external resolution closes it.
 - **The egress channel is a dedicated core↔gateway socket**, separate from the Spec A/B comms control wire (perf-F2 — a streaming provider call must not head-of-line-block the comms relay). `[fleet]` Its lifecycle must be specified, not assumed: a 0600 unix socket under the shared `alfred_run` dir, `SO_PEERCRED`-checked, epoch-tagged handshake, supervised accept/pump, bounded reconnect/backoff, and defined delivery semantics — reusing the Spec A/B socket discipline (ADR-0031/0032), not a new ad-hoc transport.
-- **One L7 CONNECT forward-proxy listener** on the gateway serves providers, the hosted Discord child, and (later) the 2c quarantine child. It enforces a **per-caller** destination allowlist, refuses literal-IP CONNECT targets, resolves the host itself, and audits the destination. `[fleet]` This unifies the provider and adapter egress paths and retires the pasta/slirp design.
+- **One L7 CONNECT forward-proxy *implementation*, per-caller instances** on the gateway — one TCP instance serves providers (reachable on `alfred_internal`); one AF_UNIX instance serves the Discord adapter child (bind-mounted into the child's mount namespace — see G7-4 reconciliation note below). Each instance carries its own destination allowlist; the security-critical `_authorize` chain is shared. This unifies provider and adapter egress paths on one implementation and retires the pasta/slirp design.
 - Postgres currently publishes `5432:5432` to the host. **Platform note (verified live during G7-0):** an `internal: true` membership breaks that published host port on **Docker Desktop/macOS** (an internal-only container is not port-forwarded there) but works on **Linux** (published ports NAT independently of the network's external gateway). This is why G7-0 lays the network *membership* without `internal: true`, and the isolation flip (`internal: true` + core-off-external) is deferred to G7-3, which re-probes on its target Linux host. Intra-compose DNS is unaffected (all internal services co-inhabit `alfred_internal`). The gateway already carries `cap_add: SETUID` + the bwrap launcher (Spec B); Spec C adds **no** new capability and (with decision 10) **no** new forwarder tooling. Note: core and gateway build from one Dockerfile today — with pasta/slirp retired, no image split is needed.
 
 > **G7-1 plan reconciliation (#333).** G7-1b implements the egress channel as a **TCP CONNECT proxy on `alfred_internal`**, NOT a 0600 unix socket. An httpx / discord.py CONNECT proxy needs a TCP endpoint, and a unix-socket proxy is not natively supported by either client, so this **supersedes the §3 egress-channel unix-socket lifecycle described above**. The 0600-unix-socket + `SO_PEERCRED` discipline that paragraph borrows (ADR-0031/0032) remains the **Spec A/B comms control wire's**; only the egress channel adopts the TCP form. **Honest framing of the control:** the proxy is **reachability-scoped** to `alfred_internal` (network membership) and allowlist-enforced — it does **not** authenticate the individual caller (a `Proxy-Authorization` token / mTLS is the named ADR-0040 future path, not built in G7-1). A 5-lens fleet panel recommended and the maintainer co-signed this transport (2026-06-26). The compensating riders: never host-published, destination-allowlist-is-the-control, refuse-literal-IP, gateway-resolves-DNS, reject a non-globally-routable resolved IP (DNS-rebinding TOCTOU), request-line-authority-only (never trust the `Host:` header), bounded reads, and a gateway-local audit on every CONNECT. The authoritative PRD / ADR-0040 reconciliation is human-gated and lands at G7-5.
+
+> **G7-4 decision-10 reconciliation (2026-06-30, #333).** Decision 10 locked
+> `discord.py`'s `Client(proxy=...)` **and** `--unshare-net` as the mechanism — but left
+> a contradiction unspecified: `--unshare-net` gives the child an **empty network
+> namespace**, and `discord.py`/`aiohttp`'s `proxy=` needs a **TCP URL** on a
+> reachable host. The gateway's TCP proxy listener lives in the gateway's netns — not
+> reachable from an empty child netns. The resolution (ADR-0043): the gateway binds a
+> **second proxy instance** on a bind-mounted **AF_UNIX pathname socket**
+> (`alfred_discord_egress` volume, gateway-only); a **thin in-child TCP→unix
+> byte-splice shim** lets `discord.py`'s `Client(proxy="http://127.0.0.1:PORT")` work
+> unmodified, splicing to the unix socket over the loopback bwrap brings up. The shim
+> enforces nothing — it is transport glue (the same structural role as the fd-3 broker
+> channel); the enforcement-of-record is the empty netns; the gateway proxy's Discord
+> allowlist is defense-in-depth. This **re-introduces nothing** decision 10 retired:
+> it is not a new forwarder tool, not veth/slirp, not transport surgery — it is a
+> bind-mounted unix socket (the only cross-`--unshare-net` primitive available without
+> user-namespace pairing) carrying the same shared `EgressForwardProxy` implementation.
+> The §3 bullet above is updated to reflect two instances of one implementation.
 
 ## 4. The egress classes and the two modes
 

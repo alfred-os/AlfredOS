@@ -354,6 +354,13 @@ in-process.
   where unprivileged userns is disabled (ADR-0015 / ADR-0037). Switching to
   rootless userns is a *global* sandbox-model change, out of Spec B's scope.
 
+> **G7-4 annotation (2026-06-30, #333).** Spec C G7-4 adds an **in-model duty** to the
+> gateway: it binds and serves a second `EgressForwardProxy` instance on a bind-mounted
+> AF_UNIX socket (`alfred_discord_egress` volume) for the Discord adapter child. This is
+> not a new privilege — the gateway is already SETUID-privileged and the sole egress plane;
+> hosting the AF_UNIX listener is within its current capability set. See
+> [ADR-0043](0043-discord-adapter-egress-l7-proxy-netns-bridge.md).
+
 ## References
 
 - `docs/superpowers/specs/2026-06-18-spec-b-adapter-inversion-design.md` —
