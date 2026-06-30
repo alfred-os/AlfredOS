@@ -77,8 +77,9 @@ class AlfredDiscordBot(commands.Bot):
         sink: NotificationSink,
         crash_emitter: _CrashForwarder,
         channel_listen_set: Set[int],
+        proxy: str | None = None,
     ) -> None:
-        super().__init__(command_prefix="!", intents=_least_privilege_intents())
+        super().__init__(command_prefix="!", intents=_least_privilege_intents(), proxy=proxy)
         self._adapter_id = adapter_id
         self._bot_user_id = bot_user_id
         self._sink = sink
