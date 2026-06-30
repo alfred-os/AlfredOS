@@ -72,10 +72,11 @@ dev = true
 #   * uts    — its own hostname; cannot read the host's.
 #   * cgroup — cannot observe/escape the host cgroup hierarchy.
 #   * ipc    — cannot reach host System V IPC / POSIX shm.
-#
-# We DELIBERATELY DO NOT unshare `net`. SECURITY-CRITICAL — read the egress
-# note below.
-unshare = ["pid", "uts", "cgroup", "ipc"]
+#   * net    — empty network namespace; the sandbox has NO network access.
+#              G7-4 / ADR-0043: all outbound egress routes through the
+#              bind-mounted gateway L7 CONNECT proxy socket at
+#              /home/alfred/.egress/discord/egress.sock (see rw_binds below).
+unshare = ["pid", "uts", "cgroup", "ipc", "net"]
 
 # Reap the sandbox subtree when the Supervisor process exits — no orphaned
 # Discord plugin can outlive its parent and keep relaying T3 content.
@@ -90,26 +91,31 @@ die_with_parent = true
 keep_fds = [3]
 
 # ============================================================================
-# !! EGRESS IS CURRENTLY UNRESTRICTED — tracked in #230 !!
+# Egress containment — G7-4 enforced (ADR-0043, closes #230)
 # ============================================================================
-# The Discord plugin needs outbound network: a persistent WSS connection to
-# `gateway.discord.gg` and REST calls to `discord.com/api`. The simple
-# `SandboxPolicy` schema this file uses cannot express "egress to the Discord
-# endpoints ONLY" — there is no `network.outbound_allowlist` field yet.
+# The Discord plugin's outbound network is now kernel-enforced:
 #
-# Consequently we do NOT `unshare net`: the sandbox has FULL outbound network.
-# Filesystem and process/namespace containment are STILL kernel-enforced, but a
-# compromised Discord plugin could in principle open an outbound connection to
-# an arbitrary host (data-exfiltration of whatever it holds in-process — the T3
-# content it relays + the Discord bot token). This is an ACCEPTED, DOCUMENTED
-# gap for the mid-flight slice state, IDENTICAL to the quarantined-LLM posture.
+#   * `--unshare-net` (the "net" entry above) gives the sandbox an EMPTY
+#     network namespace — no loopback, no host network, no raw-socket access.
+#     A compromised Discord plugin CANNOT open an arbitrary outbound connection.
 #
-# Before the Discord adapter goes live against production traffic, #230 MUST
-# land the Discord-only egress allowlist (a `network.outbound_allowlist` field
-# + the bwrap `--unshare-net` + a slirp/pasta-style filtered forwarder pinned to
-# `gateway.discord.gg` + `discord.com`, OR an egress proxy the sandbox is pinned
-# to). The manifest's `[network] allowlist` already documents the INTENDED
-# Discord-only cap; #230 makes the policy ENFORCE it at the kernel boundary.
-# Until then this policy is for resolver/containment testing, not production
-# Discord traffic.
+#   * The ONLY egress path is the bind-mounted gateway L7 CONNECT forward-proxy
+#     socket at /home/alfred/.egress/discord/egress.sock (rw-bound below).
+#     discord.py is configured (G7-4) to route all WSS + REST calls through this
+#     proxy. The gateway enforces the Discord-only destination allowlist:
+#     only `gateway.discord.gg` and `discord.com` may be connected to.
+#
+#   * `connect(2)` to any other host, or any raw-socket attempt, is refused at
+#     the kernel (empty netns) — not just at the proxy layer. This is the G7-4
+#     closure of the egress gap that was documented as deferred in pre-G7-4
+#     policy versions. See ADR-0043 for the full design rationale.
 # ============================================================================
+
+# Egress socket directory — rw-bind (--bind, NOT --ro-bind). connect(2) on a
+# UNIX-domain socket path requires write permission on the socket file; a
+# read-only bind fails with EACCES (FIX-5). The gateway-only socket dir is
+# the SOLE network surface mounted into the sandbox; the host netns remains
+# invisible behind the --unshare-net kernel boundary.
+rw_binds = [
+  ["/home/alfred/.egress/discord", "/home/alfred/.egress/discord"],
+]

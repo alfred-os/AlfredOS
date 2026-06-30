@@ -6,9 +6,11 @@ ship here. The Discord adapter ingests adversary-controlled bytes from arbitrary
 Discord users, so it runs under the SAME bwrap fs/namespace containment as the
 quarantined LLM — with deliberate differences: it needs outbound TLS to the
 Discord gateway, so it ro-binds ``/etc/ssl/certs`` (the quarantined LLM does
-not) and, UNLIKE the quarantined LLM (whose echo child now ``--unshare-net``s
-under Spec C G7-1, #333), the Discord adapter does NOT yet ``unshare net`` — its
-Discord-only egress allowlist is deferred to #230 / G7-4.
+not).
+
+G7-4 (#230): ``net`` IS now in the unshare set — the sandbox runs in an empty
+netns; the ONLY egress path is the bind-mounted gateway L7 CONNECT proxy socket
+at ``/home/alfred/.egress/discord/egress.sock`` (rw-bound, ADR-0043).
 
 These tests pin:
 
@@ -16,7 +18,9 @@ These tests pin:
 * the Linux bwrap policy parses via ``read_policy_toml`` and translates via
   ``policy_to_bwrap_flags`` to the expected fs/namespace containment;
 * ``/etc/ssl/certs`` is ro-bound (TLS to the Discord gateway);
-* ``net`` is NOT in the unshare set — egress is NOT yet kernel-enforced (#230);
+* ``net`` IS in the unshare set — egress is kernel-enforced (G7-4 / ADR-0043);
+* the egress socket dir ``/home/alfred/.egress/discord`` is rw-bound (FIX-5:
+  ``connect(2)`` on a UNIX-domain socket requires write permission on the path);
 * the macOS profile + Windows stub mirror the quarantined-LLM shape.
 """
 
@@ -68,16 +72,15 @@ def test_linux_policy_binds_tls_certs_unlike_quarantined_llm() -> None:
     assert cert_binds, "discord adapter must ro-bind /etc/ssl/certs for TLS"
 
 
-def test_linux_policy_unshares_namespaces_but_not_net() -> None:
+def test_linux_policy_unshares_net_for_egress_containment() -> None:
     policy = read_policy_toml(_linux_policy_text())
     assert "pid" in policy.unshare
     assert "uts" in policy.unshare
     assert "cgroup" in policy.unshare
     assert "ipc" in policy.unshare
-    # SECURITY-CRITICAL (#230): egress is NOT yet kernel-enforced. The plugin
-    # needs outbound network for the Discord WSS connection, and the policy
-    # schema cannot yet express a Discord-only egress allowlist. NO unshare net.
-    assert "net" not in policy.unshare
+    # G7-4 / ADR-0043: net IS unshared — empty netns; egress ONLY via the
+    # bind-mounted gateway L7 CONNECT proxy socket.
+    assert "net" in policy.unshare
 
 
 def test_linux_policy_keep_fd_3_for_broker_channel() -> None:
@@ -85,12 +88,21 @@ def test_linux_policy_keep_fd_3_for_broker_channel() -> None:
     assert 3 in policy.keep_fds
 
 
-def test_egress_deferral_to_230_documented_in_policy() -> None:
-    # The accepted egress gap must be explicit in the policy bytes so an auditor
-    # sees the #230 tracking issue, not a silent omission.
+def test_linux_policy_rw_binds_egress_socket_dir() -> None:
+    # FIX-5 / G7-4: the egress socket dir must be rw-bound (--bind), NOT
+    # ro-bound (--ro-bind). connect(2) on a UNIX-domain socket path requires
+    # write permission; a read-only bind fails with EACCES.
+    policy = read_policy_toml(_linux_policy_text())
+    egress_rw = [src for src, _dst in policy.rw_binds if "/home/alfred/.egress/discord" in src]
+    assert egress_rw, "discord policy must rw-bind /home/alfred/.egress/discord (FIX-5)"
+
+
+def test_enforced_egress_posture_documented_in_policy() -> None:
+    # G7-4: the enforced egress posture (--unshare-net + ADR-0043) must be
+    # explicit in the policy bytes so an auditor sees the enforcement contract.
     text = _linux_policy_text()
-    assert "#230" in text
-    assert "unshare-net" in text or "unshare net" in text
+    assert "ADR-0043" in text
+    assert "--unshare-net" in text or '"net"' in text
 
 
 def test_macos_profile_is_deny_default() -> None:
