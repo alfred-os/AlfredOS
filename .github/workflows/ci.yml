@@ -1320,6 +1320,42 @@ jobs:
           sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
             tests/adversarial/sandbox_escape -q \
             -p no:cacheprovider --cov-fail-under=0
+      - name: Assert the Discord kernel proof RUNS (not skipped) — FIX-7 paper-gate guard (#245)
+        # FIX-7: the Discord policy kernel-enforcement proof
+        # (tests/integration/egress/test_discord_policy_kernel_enforced.py) SKIPS
+        # wherever bwrap cannot configure the unshared net namespace (RTM_NEWADDR /
+        # unprivileged runner). On the privileged lane (euid-0, AppArmor relaxed,
+        # bwrap installed) the RTM_NEWADDR issue does not arise, so the test MUST
+        # execute — not silently skip. This is the exact #245 paper-gate failure
+        # mode: a skip that reports green while gating nothing.
+        #
+        # We run the proof file in isolation under `sudo env` (same PATH/env as
+        # the main run step) and fail if ANY test in the file skipped. The
+        # `hashFiles()` guard disables this step cleanly if the file is deleted
+        # (a deletion is visible in the diff — meta-paper-gate).
+        #
+        # NOTE: DO NOT add this guard to the plain `integration` job. That job
+        # runs as non-root; bwrap MAY not be able to configure the netns there
+        # (RTM_NEWADDR), and a LOUD skip is the CORRECT outcome on a
+        # non-privileged runner. The asymmetry (skip OK on plain-integration,
+        # skip FORBIDDEN on privileged) is intentional — the privileged job is
+        # the enforcement-of-record.
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/egress/test_discord_policy_kernel_enforced.py') != ''
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          # `tee` keeps the summary on disk for the skip-parse below.
+          # `set -o pipefail` propagates a pytest non-zero exit through the pipe.
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/egress/test_discord_policy_kernel_enforced.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/discord_kernel_proof.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/discord_kernel_proof.out; then
+            echo "::error::Discord policy kernel proof SKIPPED on the privileged lane — paper-gate hazard (#245); bwrap / euid-0 / netns provisioning regressed (FIX-7)."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/discord_kernel_proof.out \
+            || { echo "::error::Discord policy kernel proof did not report a passing run."; exit 1; }
 
 
   coverage-gates:
