@@ -506,6 +506,30 @@ jobs:
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != '' && hashFiles('src/alfred/egress/response_inspection.py') != ''
         run: |
           uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py,src/alfred/egress/response_inspection.py' --fail-under=100
+      - name: Egress adapter-bridge per-file 100% line+branch coverage (unit)
+        # Spec C G7-4 (#333): the Discord adapter egress-bridge boundary modules —
+        # the byte-splice primitive (egress/byte_splice.py — the payload-blind
+        # bidirectional asyncio-stream copier), the child-side address constants
+        # (egress/adapter_egress_addr.py — the TCP shim port + AF_UNIX socket path),
+        # and the gateway-side AF_UNIX adapter egress listener
+        # (gateway/adapter_egress_listener.py — the sole external-facing acceptance
+        # surface the Discord adapter child connects to; an un-exercised branch is an
+        # un-exercised connection or error disposition at the gateway boundary).
+        # All three reach 100% from unit data, so they gate here in the unit job too.
+        # NOTE: egress/adapter_proxy_shim.py (the in-child TCP→unix shim) is
+        # intentionally ABSENT: the OSError upstream-unavailable path in _bridge
+        # (lines 28-31) is not yet covered by any unit test. That gap was surfaced
+        # in Task 11; once a test for that path lands (Task 11 NEEDS_CONTEXT
+        # follow-up), adapter_proxy_shim.py must be added to BOTH this step and
+        # the matching (combined) step in the coverage-gates job.
+        # The TWO-GATES pattern: keep BOTH ``--include`` lists in sync with the
+        # matching (combined) step below. Chained ``&&`` hashFiles guard: ALL
+        # files must be present before the report runs.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/byte_splice.py') != '' && hashFiles('src/alfred/egress/adapter_egress_addr.py') != '' && hashFiles('src/alfred/gateway/adapter_egress_listener.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py' \
+            --fail-under=100
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
@@ -1680,6 +1704,23 @@ jobs:
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/memory/egress_idempotency.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != '' && hashFiles('src/alfred/egress/egress_response_extract.py') != '' && hashFiles('src/alfred/egress/response_inspection.py') != ''
         run: |
           uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/memory/egress_idempotency.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py,src/alfred/egress/egress_response_extract.py,src/alfred/egress/response_inspection.py' --fail-under=100
+      - name: Egress adapter-bridge per-file 100% line+branch coverage (combined)
+        # Combined-data mirror of the ``python`` job's adapter-bridge gate
+        # (Spec C G7-4, #333 — the two-gates pattern). The three G7-4 boundary
+        # modules (byte_splice.py, adapter_egress_addr.py,
+        # gateway/adapter_egress_listener.py) are proven by unit data; this
+        # combined mirror exists for parity so a future integration test that
+        # exercises these paths contributes to the gate. Keep the ``--include``
+        # list in sync with the python-job ``(unit)`` step.
+        # NOTE: egress/adapter_proxy_shim.py is intentionally ABSENT (same
+        # reason as the unit step — the OSError upstream-unavailable path at
+        # lines 28-31 is not yet covered; must be added once that test lands).
+        # Chained ``&&`` hashFiles guard: ALL listed files must be present.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/byte_splice.py') != '' && hashFiles('src/alfred/egress/adapter_egress_addr.py') != '' && hashFiles('src/alfred/gateway/adapter_egress_listener.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py' \
+            --fail-under=100
 
   smoke:
     name: Smoke (end-to-end)
