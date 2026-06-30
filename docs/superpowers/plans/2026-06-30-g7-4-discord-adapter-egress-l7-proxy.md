@@ -21,9 +21,37 @@
 - **The gateway reads PUBLIC env, never `Settings`** (ADR-0036) — it holds no provider/secret key.
 - **Quality gate before every push:** `make check` (lint + format + type + unit/integration). Docker-driven tests: `export DOCKER_HOST=unix:///Users/iandominey/.orbstack/run/docker.sock`.
 
+## Plan-review fixes (2026-06-30) — READ BEFORE ANY TASK; these OVERRIDE the task bodies below
+
+A focused security/devops/comms plan-review found execution-fidelity blockers (design unchanged). Apply these — they supersede the conflicting task text.
+
+**FIX-1 (Critical — new prerequisite, do FIRST). Pre-create the gateway-only egress dir in the image.** A Docker-created volume mountpoint is `root:root`; the gateway runs as `alfred`, so binding the socket would `EACCES` and crash-loop every boot. In `docker/alfred-core.Dockerfile`, in the **runtime stage**, mirror the existing `/home/alfred/.run` creation: add `RUN mkdir -p /home/alfred/.egress/discord && chown -R alfred:alfred /home/alfred/.egress` (match the exact `useradd`/`chown` idiom already used for `~/.run`). The compose `alfred_discord_egress` volume mounts over `/home/alfred/.egress` and inherits the pre-created+chowned `discord/` subdir.
+
+**FIX-2 (High — supersedes Task 3 Step 3, Task 5, Task 7). Bind CONFIG on the constructor; bind INSIDE `serve()`; `serve(shutdown_event)` signature UNCHANGED.** Do NOT move the bind to `serve()`'s params (that breaks the shared `_EgressProxyLike` Protocol at `_commands.py:151` and both call-sites) and do NOT eager-bind at construction (that mislabels a bind failure as exit-4 and breaks `test_egress_proxy_mount.py`/`test_egress_relay_mount.py`). Instead:
+
+- `EgressForwardProxy.__init__(*, allowlist, match, audit, resolve=..., open_upstream=..., bind_host=None, port=None, unix_path=None)` — exactly one bind mode (`bind_host`+`port` **or** `unix_path`); a both/neither is a loud `ValueError`. `serve(self, shutdown_event)` keeps its EXACT current signature.
+- `serve()` does the bind itself: if `unix_path` → `sock = bind_owner_only_unix_socket(unix_path); server = await asyncio.start_unix_server(self._handle_client, sock=sock, limit=_REQUEST_LINE_CAP)`; else the existing `asyncio.start_server(self._handle_client, bind_host, port, limit=_REQUEST_LINE_CAP)`. Because the bind is INSIDE `serve()`, an `OSError` propagates to the per-instance fail-closed wrapper and maps to the right exit code.
+- Provider call-site (`_commands.py:303`): `EgressForwardProxy(..., match=exact_match, bind_host=resolve_egress_proxy_bind(), port=resolve_egress_proxy_port())`; `_serve_egress_proxy_failclosed` keeps calling `proxy.serve(shutdown_event)` UNCHANGED. The Protocol + relay are untouched.
+- Task 5 `build_adapter_egress_proxy(*, extra_allowlist="") -> EgressForwardProxy` returns ONLY the proxy (no socket; NO eager bind) built with `unix_path=DISCORD_EGRESS_SOCKET_PATH`. `serve_adapter_egress_failclosed(proxy, shutdown_event)` just calls `await proxy.serve(shutdown_event)` and maps `OSError → EgressAdapterProxyUnavailableError`. Task 7 mounts `tg.create_task(serve_adapter_egress_failclosed(adapter_proxy, shutdown_event))` (no `adapter_sock`). (This supersedes the Round-2 "pre-bind + `serve(sock=)`": the bwrap policy binds the DIR, not the socket file, and FIX-1 pre-creates the dir, so no pre-bind-before-TaskGroup is needed; binding inside `serve()` matches the provider/relay and fixes the exit-code mapping.)
+- Add an **in-process AF_UNIX serve test** (Task 3) that actually serves a CONNECT over a real unix socket + asserts allow/deny — the `serve(unix_path=...)` branch must be unit-covered (not docker-gated only), or `egress_proxy.py` drops below its 100% gate.
+
+**FIX-3 (High — supersedes Task 8 shim supervision). Own the shim in `server.serve()` via the LOCAL `CrashEmitter`.** `DiscordServer` has no crash forwarder; `bind_shim`/`_on_shim_done`/`DiscordServer` indirection is wrong — delete it. In `server.serve()` (which already builds a `CrashEmitter` at ~`server.py:289`): `shim_server = await start_shim()`, then `shim_task = asyncio.create_task(shim_server.serve_forever())`, then `shim_task.add_done_callback(lambda t: _route_shim_failure(t, crash_emitter))` where `_route_shim_failure` retrieves `t.exception()` (skip `CancelledError`) and calls `crash_emitter.handle_crash(exc)` — a terminal, audited adapter exit, not a silent reconnect spin. `start_shim()` returns the `asyncio.Server` (Task 6 unchanged). Test the **`_route_shim_failure` handler directly** (a coverable function), not the `# pragma: no cover` `serve()` entrypoint.
+
+**FIX-4 (Medium — Task 7). Use the REAL failure-emit pattern, not the invented `_emit_friendly_failure`.** Copy the relay's `except EgressRelayUnavailableError` body verbatim (`_commands.py:354-361`) for the new `except EgressAdapterProxyUnavailableError` clause (log + `raise typer.Exit(code=_EXIT_EGRESS_ADAPTER_PROXY_BIND_FAILED)`), placed BEFORE `except IOPlaneUnavailableError`. **Fix the except-order test** to be non-vacuous: assert the `except EgressAdapterProxyUnavailableError` *clause* index (search `src.index("except EgressAdapterProxyUnavailableError")`), not the bare class name (which matches the import).
+
+**FIX-5 (Medium — Task 9). Use `--bind` (rw), not `--ro-bind`.** A `connect()` over a `--ro-bind` unix socket fails; cross-UID is NOT a concern (kind=full runs as `alfred`, no `runuser`). Add to `rw_binds` (not `ro_binds`): `["/home/alfred/.egress/discord", "/home/alfred/.egress/discord"]`. Also FLIP the existing `test_egress_deferral_to_230_documented_in_policy` (it stays green-but-false after enforcement) to assert the enforced posture.
+
+**FIX-6 (High — Task 10). Update the EXACT-SET gateway-mount + relevant compose tests, don't just add.** Adding the mount breaks the required exact-set gateway-volume pin (`tests/unit/test_compose_invariants.py` — the gateway-mounts assertion near `:232`, plus `test_alfred_run_mounted_only_by_core_and_gateway:246` which must still hold for `alfred_run`). Update the gateway-mount exact-set to include `alfred_discord_egress:/home/alfred/.egress`; add an assertion that `alfred_discord_egress` is mounted by the gateway ONLY (mirror `:246`'s only-by pattern).
+
+**FIX-7 (Medium — Task 11/12). Add the kernel-proof not-skipped CI guard step.** Task 12's privileged-lane proof needs a ci.yml step asserting it was collected-and-not-skipped (the `#245` pattern, but in the `integration-privileged` job) — Task 11 must add it, or the kernel gate is paper-only.
+
+**FIX-8 (drop the trap). Remove the "caller label on the shared egress audit" punch-list item** — `record_egress_connect` validates an EXACT field set and RAISES on an extra field, so a naive caller label breaks ALL Discord egress. If attribution is wanted, it's a separate change extending the sink's field-allowlist (out of scope here). Likewise drop the `match.__name__ = "suffix_match"` hack in Task 5 — assert the matcher behaviour in the test, not its `__name__`.
+
 ## File Structure
 
 **Create:**
+
+- `docker/alfred-core.Dockerfile` (modify — FIX-1: pre-create+chown `/home/alfred/.egress/discord`).
 
 - `src/alfred/egress/adapter_egress_addr.py` — the single source of truth for the gateway-only socket **path** + the shim **port** + the proxy-URL builder (shared by listener, shim, bot).
 - `src/alfred/egress/byte_splice.py` — the shared bidirectional byte-splice (extracted from `EgressForwardProxy._pipe`).
