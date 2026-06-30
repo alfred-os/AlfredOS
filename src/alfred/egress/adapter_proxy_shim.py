@@ -28,7 +28,8 @@ async def _bridge(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
         up_reader, up_writer = await asyncio.open_unix_connection(str(DISCORD_EGRESS_SOCKET_PATH))
     except OSError as exc:
         _log.warning("discord.egress.shim.upstream_unavailable", error=repr(exc))
-        writer.close()
+        with contextlib.suppress(OSError):
+            writer.close()
         return
     try:
         await asyncio.gather(splice(reader, up_writer), splice(up_reader, writer))

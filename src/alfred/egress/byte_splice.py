@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Protocol
+from typing import Final, Protocol
 
-_SPLICE_CHUNK = 65536
+_SPLICE_CHUNK: Final[int] = 65536
 
 
 class _SpliceDst(Protocol):
