@@ -65,9 +65,7 @@ def test_build_matcher_allows_discord_gg_suffix(
     assert proxy._match("gateway-us-east1-b.discord.gg", 443, proxy._allowlist) is True
 
 
-def test_build_matcher_denies_unknown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_matcher_denies_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The matcher denies non-allowlisted destinations (default-deny)."""
     import alfred.gateway.adapter_egress_listener as m
 
@@ -79,9 +77,7 @@ def test_build_matcher_denies_unknown(
     assert proxy._match("evildiscord.gg", 443, proxy._allowlist) is False
 
 
-def test_build_matcher_denies_wrong_port(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_matcher_denies_wrong_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The matcher denies a port mismatch even on an allowlisted host."""
     import alfred.gateway.adapter_egress_listener as m
 

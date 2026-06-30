@@ -319,6 +319,7 @@ async def serve() -> None:  # pragma: no cover - process entrypoint
     server = _build_server(sink)
     crash = CrashEmitter(adapter_id=_ADAPTER_ID, sink=sink)
     from alfred.egress.adapter_proxy_shim import start_shim
+
     shim_server = await start_shim()  # listening before discord.py's first egress (login)
     shim_task = asyncio.create_task(shim_server.serve_forever())
     shim_task.add_done_callback(lambda t: _route_shim_failure(t, crash))

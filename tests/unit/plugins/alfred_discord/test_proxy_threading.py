@@ -52,9 +52,7 @@ def test_no_webhook_or_voice_egress() -> None:
 class _StubTask:
     """Minimal done-task stand-in for _route_shim_failure tests."""
 
-    def __init__(
-        self, *, exception: BaseException | None = None, cancelled: bool = False
-    ) -> None:
+    def __init__(self, *, exception: BaseException | None = None, cancelled: bool = False) -> None:
         self._exc = exception
         self._cancelled = cancelled
 

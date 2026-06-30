@@ -340,7 +340,8 @@ def test_no_secret_env_or_mount_on_gateway(compose: dict[str, Any]) -> None:
     # A bind-mounted directory could silently carry secrets.toml (the _PREFER_FILE path),
     # so we pin the approved mounts rather than just filtering for the filename.
     # G7-4: alfred_discord_egress added here (gateway-only Discord egress socket dir;
-    # devops-001 — the core must NEVER mount it, enforced by test_discord_egress_volume_gateway_only).
+    # devops-001 — the core must NEVER mount it, enforced by
+    # test_discord_egress_volume_gateway_only).
     approved_mounts = {
         "alfred_run:/home/alfred/.run",
         "alfred_discord_egress:/home/alfred/.egress",
@@ -724,7 +725,8 @@ def test_discord_egress_allowlist_env_gateway_only(compose: dict[str, Any]) -> N
     core_env = compose["services"]["alfred-core"].get("environment", {}) or {}
     assert "ALFRED_DISCORD_EGRESS_ALLOWLIST" in gw_env, (
         "alfred-gateway must declare ALFRED_DISCORD_EGRESS_ALLOWLIST "
-        "(Discord L7-proxy allowlist; empty default = built-in discord.com + *.discord.gg set) — G7-4."
+        "(Discord L7-proxy allowlist; empty default = built-in discord.com"
+        " + *.discord.gg set) — G7-4."
     )
     assert "ALFRED_DISCORD_EGRESS_ALLOWLIST" not in core_env, (
         "alfred-core must NOT carry ALFRED_DISCORD_EGRESS_ALLOWLIST — "

@@ -4,6 +4,7 @@ Pins the exact ``_pipe`` behaviour so the extraction is provably neutral:
 payload-blind incremental copy, half-close on EOF, mid-splice OSError propagates,
 write_eof OSError suppressed.
 """
+
 import asyncio
 
 import pytest

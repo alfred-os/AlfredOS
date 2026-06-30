@@ -4,6 +4,7 @@ Extracted from ``EgressForwardProxy._pipe`` so the AF_UNIX bridge's shim reuses 
 audited copy loop instead of importing a gateway-private symbol across the package boundary.
 Payload-blind: never buffers-until-EOF, so native TLS streaming survives.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,9 +26,7 @@ class _SpliceDst(Protocol):
     def write_eof(self) -> None: ...
 
 
-async def splice(
-    src: asyncio.StreamReader, dst: _SpliceDst, *, chunk: int = _SPLICE_CHUNK
-) -> None:
+async def splice(src: asyncio.StreamReader, dst: _SpliceDst, *, chunk: int = _SPLICE_CHUNK) -> None:
     """Copy ``src``→``dst`` incrementally until EOF, then half-close ``dst``.
 
     A mid-splice ``OSError`` (peer reset) is NOT swallowed — it propagates to the caller's
