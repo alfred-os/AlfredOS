@@ -319,18 +319,14 @@ class EgressForwardProxy:
         the ``_tunnel`` gather → ``_serve_connection``'s bounded OSError handler, which
         tears the whole tunnel down. On normal EOF we half-close (``write_eof``) so the
         peer observes the close; ``suppress`` covers a transport that cannot half-close.
+
+        Delegates to the shared ``alfred.egress.byte_splice.splice`` helper so the
+        in-child shim (G7-4) can reuse the same audited copy loop without importing a
+        gateway-private symbol across the package boundary.
         """
-        try:
-            while True:
-                chunk = await src.read(_SPLICE_CHUNK)
-                if not chunk:
-                    break
-                dst.write(chunk)
-                await dst.drain()
-                await asyncio.sleep(0)  # yield so the reverse direction interleaves
-        finally:
-            with contextlib.suppress(OSError):
-                dst.write_eof()
+        from alfred.egress.byte_splice import splice
+
+        await splice(src, dst, chunk=_SPLICE_CHUNK)
 
     async def _deny(
         self,
