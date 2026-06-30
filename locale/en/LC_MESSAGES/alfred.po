@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-29 02:42+0100\n"
+"POT-Creation-Date: 2026-06-30 12:29+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1273,7 +1273,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS and the named plugin manifests, then re-run"
 " `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:360
+#: src/alfred/cli/gateway/_commands.py:363
 msgid "gateway.start.egress_relay_bind_failed"
 msgstr ""
 "The gateway could not bind its tool-egress relay — another gateway may "
@@ -1282,7 +1282,7 @@ msgstr ""
 " refuses to start without it. Free the port (or fix the config), then re-"
 "run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:368
+#: src/alfred/cli/gateway/_commands.py:371
 msgid "gateway.start.egress_proxy_bind_failed"
 msgstr ""
 "The gateway could not bind its egress forward-proxy — another gateway may"
@@ -1291,51 +1291,51 @@ msgstr ""
 "refuses to start without it. Free the port (or fix the config), then re-"
 "run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:374
+#: src/alfred/cli/gateway/_commands.py:377
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:381
+#: src/alfred/cli/gateway/_commands.py:384
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:390
+#: src/alfred/cli/gateway/_commands.py:393
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:392
+#: src/alfred/cli/gateway/_commands.py:395
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:413
-#: src/alfred/cli/gateway/_commands.py:427
+#: src/alfred/cli/gateway/_commands.py:416
+#: src/alfred/cli/gateway/_commands.py:430
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:431
+#: src/alfred/cli/gateway/_commands.py:434
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:503
-#: src/alfred/cli/gateway/_commands.py:509
+#: src/alfred/cli/gateway/_commands.py:506
+#: src/alfred/cli/gateway/_commands.py:512
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:513
+#: src/alfred/cli/gateway/_commands.py:516
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
@@ -1372,7 +1372,7 @@ msgstr ""
 "audit log for this egress-id and its originating turn to find why the "
 "same logical call produced a different body."
 
-#: src/alfred/egress/errors.py:30
+#: src/alfred/egress/errors.py:35
 msgid "egress.io_plane_unavailable"
 msgstr ""
 "External I/O is unavailable: the core could not reach the gateway egress "
@@ -1380,14 +1380,22 @@ msgstr ""
 "ALFRED_EGRESS_PROXY_URL points at it — the gateway is the sole external "
 "egress plane, so every provider call routes through it."
 
-#: src/alfred/egress/errors.py:48
+#: src/alfred/egress/errors.py:53
 msgid "egress.relay_unavailable"
 msgstr ""
 "The gateway tool-egress relay is unavailable: it could not bind "
 "({detail}). The gateway is the sole maker of tool HTTP requests, so tool "
 "egress is down until it starts."
 
-#: src/alfred/egress/errors.py:59
+#: src/alfred/egress/errors.py:76
+msgid "egress.adapter_proxy_unavailable"
+msgstr ""
+"The gateway Discord-adapter egress listener is unavailable: it could not "
+"bind/serve ({detail}). The Discord adapter cannot reach the gateway "
+"egress proxy until the listener starts — check that the "
+"alfred_discord_egress volume is mounted and the socket path is writable."
+
+#: src/alfred/egress/errors.py:87
 msgid "egress.denied"
 msgstr ""
 "Tool egress to {destination} was denied ({reason}) by the gateway egress "
@@ -1396,7 +1404,7 @@ msgstr ""
 " not assume the destination should be allowlisted. See the egress audit "
 "log for the full decision."
 
-#: src/alfred/egress/errors.py:78
+#: src/alfred/egress/errors.py:106
 msgid "egress.in_doubt"
 msgstr ""
 "Egress to {destination} is in-doubt (egress-id: {egress_id}): a prior "
@@ -1406,7 +1414,7 @@ msgstr ""
 "the previous attempt succeeded, then retry manually or declare the "
 "request idempotent if safe to refire."
 
-#: src/alfred/egress/errors.py:97
+#: src/alfred/egress/errors.py:125
 msgid "egress.relay_io_unavailable"
 msgstr ""
 "External I/O is unavailable: the in-core relay client could not reach the"
