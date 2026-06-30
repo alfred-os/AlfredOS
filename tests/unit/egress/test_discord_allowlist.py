@@ -42,6 +42,17 @@ def test_suffix_match_port_checked():
     assert suffix_match("gateway.discord.gg", 8080, bases) is False
 
 
+def test_discord_extra_parses_both_branches_and_lowercases():
+    al = discord_egress_allowlist(
+        "cdn.discordapp.com:443, media.discordapp.net, CDN.Discordapp.com"
+    )
+    assert ("cdn.discordapp.com", 443) in al.exact  # host:port branch
+    assert ("media.discordapp.net", 443) in al.exact  # bare-host branch -> default 443
+    # "CDN.Discordapp.com" (no port) lowercases and collapses with the :443 entry above
+    assert ("CDN.Discordapp.com", 443) not in al.exact
+    assert al.suffix_bases == frozenset({("discord.gg", 443)})  # extra never widens suffix
+
+
 def test_provider_and_discord_disjoint():
     prov = provider_egress_allowlist("https://api.deepseek.com/v1")
     disc = discord_egress_allowlist()
