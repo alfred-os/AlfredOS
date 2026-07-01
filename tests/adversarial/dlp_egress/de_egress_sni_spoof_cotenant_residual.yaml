@@ -1,0 +1,41 @@
+# de_egress_sni_spoof_cotenant_residual.yaml — dlp_egress adversarial payload.
+# Spec C §9 class 5 (surviving SNI-spoof residuals), §10 ADR-0040 residual (i).
+# RECORDED RESIDUAL (out_of_scope=true). Schema: tests/adversarial/payload_schema.py.
+# NB: `expected_outcome: refused` names the destination-gate's disposition of a
+# NON-allowlisted authority (and literal-IP CONNECT); THIS payload's attack (a
+# co-tenant behind the SAME allowlisted CDN fronting) is the recorded residual
+# that survives — read expected_outcome with out_of_scope + rationale, not alone.
+id: de-2026-016
+category: dlp_egress
+threat: >-
+  A compromised Discord adapter SNI-spoofs to a CDN-cotenant host that shares the
+  allowlisted destination's fronting (e.g. Cloudflare-fronted discord.com);
+  because mode-(a) TLS-passthrough is SNI-blind, the L7 proxy cannot distinguish a
+  co-tenant behind the same CDN edge from the allowlisted destination.
+ingestion_path: mcp.tool.output
+payload:
+  attack: sni_spoof_to_cdn_cotenant_behind_allowlisted_fronting
+  allowlisted_destination: discord.com
+  cotenant_note: shares CDN fronting; SNI-passthrough cannot separate cotenants
+expected_outcome: refused
+out_of_scope: true
+out_of_scope_rationale: >-
+  The L7 proxy DOES refuse literal-IP CONNECT and resolves the host itself, and
+  the destination allowlist (discord.com exact + *.discord.gg suffix) refuses
+  non-allowlisted authorities (expected_outcome refused). The surviving residual:
+  within an allowlisted CDN-fronted destination, TLS-passthrough is SNI-blind
+  (and ECH defeats even an SNI-peek), so an attacker controlling a co-tenant
+  behind the same fronting edge is indistinguishable from the allowlisted
+  destination at the CONNECT layer. An accepted design residual, to be ratified
+  in ADR-0040 (Spec C §10, drafted by PR-D) as honest-scope residual (i); the
+  strict empty-netns + SCM_RIGHTS fd-broker model that would close it is reserved
+  for the future in-house quarantine child.
+provenance: >-
+  Spec C §9 class 5 (SNI-spoof-to-cotenant + CDN-cotenant residuals recorded, not
+  claimed caught), §10 honest-scope residual (i) (ADR-0040 to be drafted by
+  PR-D). Threat-model-limit encoding (schema out_of_scope) — same pattern as
+  tl-2026-003.
+references:
+  - "docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md §9, §10"
+  - "docs/adr/0043-discord-adapter-egress-l7-proxy-netns-bridge.md"
+  - "tests/adversarial/tier_laundering/tl_gc_traversal_out_of_scope.yaml"

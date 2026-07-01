@@ -1,0 +1,40 @@
+# de_egress_mode_a_provider_prompt_residual.yaml — dlp_egress adversarial payload.
+# Spec C §4.1 (mode-(a) TLS-passthrough), §9 class 4, §10 ADR-0040 residual (ii).
+# RECORDED RESIDUAL (out_of_scope=true). Schema: tests/adversarial/payload_schema.py.
+# NB: `expected_outcome: refused` names the destination-gate's disposition of a
+# NON-allowlisted authority; THIS payload's attack (exfil to an ALLOWLISTED
+# provider host) is the recorded residual that survives — read expected_outcome
+# together with out_of_scope + the rationale, never in isolation.
+id: de-2026-014
+category: dlp_egress
+threat: >-
+  In mode-(a) provider egress the gateway L7 proxy is TLS-passthrough and
+  destination-allowlisted only; a compromised orchestrator embeds exfil data in
+  the provider PROMPT itself, which reaches an allowlisted provider endpoint
+  unread — the proxy never inspects the TLS-wrapped request body.
+ingestion_path: mcp.tool.output
+payload:
+  attack: provider_prompt_exfil_via_allowlisted_tls_passthrough
+  note: exfil payload rides inside the plaintext prompt to an allowlisted provider host
+expected_outcome: refused
+out_of_scope: true
+out_of_scope_rationale: >-
+  Mode-(a) provider egress is TLS-passthrough by design: the gateway sees only
+  the CONNECT destination (an allowlisted provider host), never the plaintext
+  prompt, so native SDK streaming + prompt-cache are preserved and the API key
+  stays sealed. The destination allowlist DOES refuse non-allowlisted authorities
+  (expected_outcome refused), but content-level exfil via the prompt to an
+  ALLOWLISTED destination is destination-gated only, not payload-inspected. This
+  is an accepted design residual, recorded here and to be ratified in ADR-0040
+  (Spec C §10, drafted by PR-D) as honest-scope residual (ii), so the absence of
+  a content catch is a documented invariant, not a silent gap. The mode-(b)
+  tool-egress relay DOES inspect + DLP-scan bodies; only mode-(a) provider egress
+  is passthrough.
+provenance: >-
+  Spec C §4.1 (mode-(a) TLS-passthrough), §9 class 4 (mode-(a) provider-prompt
+  exfil residual — recorded, not claimed caught), §10 honest-scope residual (ii)
+  (ADR-0040 to be drafted by PR-D). Threat-model-limit encoding (schema
+  out_of_scope) — same pattern as tl-2026-003.
+references:
+  - "docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md §4.1, §9, §10"
+  - "tests/adversarial/tier_laundering/tl_gc_traversal_out_of_scope.yaml"
