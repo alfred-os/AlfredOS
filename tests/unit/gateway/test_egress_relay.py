@@ -915,3 +915,29 @@ async def test_relay_deny_increments_denied_total_for_every_reason(
     )
     hit = next(s for s in fam.samples if s.labels == {"plane": "relay", "reason": reason.value})
     assert hit.value == 1.0
+
+
+@pytest.mark.asyncio
+async def test_relay_denied_total_delta_matches_outcome_denied() -> None:
+    """Sum invariant (delta form): the shared, plane-less GATEWAY_EGRESS_RELAY{outcome=denied}
+    and the new GATEWAY_EGRESS_DENIED{plane=relay,reason} are module-global + process-
+    cumulative, so assert the +1 delta over one drive (an absolute compare is non-
+    deterministic). PR-B relies on this equality to pick denied_total as the by-reason source.
+    """
+    from alfred.gateway.egress_metrics import GATEWAY_EGRESS_DENIED
+    from alfred.gateway.egress_relay_audit import GATEWAY_EGRESS_RELAY
+
+    def _val(counter: object, **labels: str) -> float:
+        return float(counter.labels(**labels)._value.get())  # type: ignore[attr-defined]
+
+    before_outcome = _val(GATEWAY_EGRESS_RELAY, outcome="denied")
+    before_reason = _val(GATEWAY_EGRESS_DENIED, plane="relay", reason="literal_ip_target")
+    await _emit_deny(
+        _relay(open_client=_open_client_factory({})),
+        EgressRelayDenyReason.LITERAL_IP_TARGET,
+    )
+    assert _val(GATEWAY_EGRESS_RELAY, outcome="denied") - before_outcome == 1.0
+    assert (
+        _val(GATEWAY_EGRESS_DENIED, plane="relay", reason="literal_ip_target") - before_reason
+        == 1.0
+    )
