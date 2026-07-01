@@ -381,11 +381,13 @@ tests:
   - interval: 1m
     input_series:
       - series: 'gateway_egress_inflight{plane="proxy"}'
-        values: '0 50 101 101 101 101 101 101'
+        values: '0 50 101 101 101 101 101 101 101 101'
       - series: 'gateway_egress_inflight{plane="relay"}'
-        values: '0 10 90 90 90 90 90 90'
+        values: '0 10 90 90 90 90 90 90 90 90'
     alert_rule_test:
-      - eval_time: 7m
+      # eval at 8m (not the 7m for-boundary) so a future `for` bump or one fewer
+      # sample doesn't silently flip this to pending → confusing "no alerts" failure.
+      - eval_time: 8m
         alertname: GatewayEgressInflightSaturation
         exp_alerts:
           - exp_labels: { severity: warning, plane: proxy }
@@ -399,7 +401,9 @@ tests:
       - eval_time: 8m
         alertname: GatewayEgressOutage
         exp_alerts:
-          - exp_labels: { severity: warning }
+          # promtool requires the COMPLETE label set; rate()>0 preserves outcome="error"
+          # from the firing series, so it must appear alongside the rule's severity label.
+          - exp_labels: { severity: warning, outcome: error }
 ```
 
 - [ ] **Step 2: Install promtool + run it locally to verify**
@@ -418,12 +422,14 @@ Temporarily change the `GatewayEgressSecurityDenySpike` expr's `|` to `\|` and r
 
 - [ ] **Step 4: Add the CI job**
 
-Add a job to `.github/workflows/ci.yml` (mirror the existing jobs' `runs-on`/`checkout` style; pin a Prometheus version):
+Add a job to `.github/workflows/ci.yml` (mirror the sibling jobs: `actions/checkout@v4`, a job-level `permissions: contents: read` — the `python` job pins this and it's what the required `Zizmor` check enforces):
 
 ```yaml
   ops-promtool:
     name: promtool (alert rules)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Install promtool
@@ -438,10 +444,20 @@ Add a job to `.github/workflows/ci.yml` (mirror the existing jobs' `runs-on`/`ch
           promtool test rules gateway_test.yml
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Register the check as required (a job that runs but isn't required does NOT gate merge)**
+
+Add a row to the "Currently required" table in `docs/ci/required-checks.md` (Check name = the job's `name:` string):
+
+```markdown
+| `promtool (alert rules)` | `.github/workflows/ci.yml` | `ops-promtool` | 2026-07-01 | Block PRs that break the gateway alert rules — `promtool check rules` validates PromQL syntax + `promtool test rules` unit-tests firing logic (esp. that the critical security/exfil alerts actually fire on the right reasons and stay quiet otherwise; a pure-Python test cannot validate PromQL or firing behaviour). |
+```
+
+The branch-protection promotion itself (`gh api -X POST .../branch-protection/required_status_checks/contexts` adding `promtool (alert rules)`) is a repo-admin action taken after the job first runs green — recorded here so it lands with this PR. The controller performs it at merge time if it has admin, else flags the maintainer (the manifest row documents the intent regardless).
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add ops/alerts/gateway_test.yml .github/workflows/ci.yml
+git add ops/alerts/gateway_test.yml .github/workflows/ci.yml docs/ci/required-checks.md
 git commit -m "ci(ops): promtool check + firing-logic test rules for the egress alerts (#333)"
 ```
 
