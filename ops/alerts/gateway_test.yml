@@ -1,0 +1,111 @@
+# promtool test rules for ops/alerts/gateway.yml (Spec C G7-5 PR-B, #333).
+# NOTE: promtool matches exp_annotations too (not just exp_labels) — each firing entry's
+# exp_annotations MUST equal the alert's summary+description in gateway.yml verbatim. The
+# repeated blocks below are YAML-anchored (&name / *name) so they are written once.
+rule_files:
+  - gateway.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- security-spike fires on EACH reason in its set (a typo in any is caught) ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_denied_total{plane="relay",reason="canary_tripped"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+      - series: 'gateway_egress_denied_total{plane="proxy",reason="literal_ip_target"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+      - series: 'gateway_egress_denied_total{plane="proxy",reason="resolved_ip_not_global"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+      - series: 'gateway_egress_denied_total{plane="relay",reason="dlp_redacted"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressSecurityDenySpike
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: relay, reason: canary_tripped }
+            exp_annotations: &sec_ann
+              summary: "AlfredOS gateway refused a security-relevant egress"
+              description: "A zero-baseline security deny is occurring: SSRF (literal_ip_target / resolved_ip_not_global), a canary trip (active exfil probe), or a DLP catch (dlp_redacted). Treat as a possible active attack."
+          - exp_labels: { severity: critical, plane: proxy, reason: literal_ip_target }
+            exp_annotations: *sec_ann
+          - exp_labels: { severity: critical, plane: proxy, reason: resolved_ip_not_global }
+            exp_annotations: *sec_ann
+          - exp_labels: { severity: critical, plane: relay, reason: dlp_redacted }
+            exp_annotations: *sec_ann
+
+  # --- security-spike STAYS QUIET on a routine allowlist-miss; DenyRate fires (positive control) ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_denied_total{plane="proxy",reason="destination_not_allowlisted"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressSecurityDenySpike
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GatewayEgressDenyRate
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: proxy, reason: destination_not_allowlisted }
+            exp_annotations: &deny_ann
+              summary: "AlfredOS gateway is denying egress"
+              description: "gateway_egress_denied_total{plane,reason} is increasing for 5m; a client/tool/adapter is repeatedly hitting the default-deny egress allowlist. Inspect the plane + reason breakdown."
+
+  # --- exfil-spike fires above the 0.1/s threshold (10/min ≈ 0.167/s) ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_denied_total{plane="proxy",reason="destination_not_allowlisted"}'
+        values: '0 10 20 30 40 50 60 70 80 90'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressExfilSpike
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: proxy, reason: destination_not_allowlisted }
+            exp_annotations:
+              summary: "AlfredOS gateway is refusing a burst of non-allowlisted egress"
+              description: "gateway_egress_denied_total{reason=destination_not_allowlisted} rate > 0.1/s for 2m. A burst of denials to non-allowlisted (globally-routable) destinations is the realistic data-exfil signal (POST to an attacker domain). NOTE: 0.1/s is a conservative STARTING threshold — tune to baseline; the warning-tier GatewayEgressDenyRate still catches the trickle."
+
+  # --- exfil-spike QUIET below threshold (3/min ≈ 0.05/s); DenyRate fires (positive control) ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_denied_total{plane="proxy",reason="destination_not_allowlisted"}'
+        values: '0 3 6 9 12 15 18 21 24 27'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressExfilSpike
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GatewayEgressDenyRate
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: proxy, reason: destination_not_allowlisted }
+            exp_annotations: *deny_ann
+
+  # --- inflight saturation fires above 100, quiet below ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_inflight{plane="proxy"}'
+        values: '0 50 101 101 101 101 101 101 101 101'
+      - series: 'gateway_egress_inflight{plane="relay"}'
+        values: '0 10 90 90 90 90 90 90 90 90'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressInflightSaturation
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: proxy }
+            exp_annotations:
+              summary: "AlfredOS gateway egress in-flight is high"
+              description: "gateway_egress_inflight{plane} > 100 concurrent CONNECT tunnels for 5m. NOTE: egress in-flight has no hard cap; 100 is a conservative STARTING threshold — tune it to your deployment's baseline."
+
+  # --- outage fires on a sustained connect_total error rate ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_connect_total{outcome="error"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressOutage
+        exp_alerts:
+          - exp_labels: { severity: warning, outcome: error }
+            exp_annotations:
+              summary: "AlfredOS gateway egress is erroring"
+              description: "gateway_egress_{connect,relay}_total{outcome=error} is increasing for 5m; the egress plane is failing to complete tunnels/fetches. A sustained outage can itself suppress deny-counting, blinding the security alerts — investigate promptly."
