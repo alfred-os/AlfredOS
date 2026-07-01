@@ -104,6 +104,7 @@ or `--help` will simply not list them; do not assume them present.
 | Local stack up | Slice 1 | `docker compose up -d` |
 | TUI conversation | Slice 1 | `alfred chat` (dials the running gateway) |
 | Gateway (comms front door) | Slice 4 | `alfred gateway start` · `status` · `adapters` · `healthcheck` |
+| Gateway egress state | Spec C | `alfred gateway egress` — reports inflight counts, deny-reason breakdown, and static allowlists per egress plane (proxy / relay / adapter); exit 2 on metrics unavailable |
 | Status snapshot | Slice 1 | `alfred status` |
 | Inspect audit log/graph | Slice 3 | `alfred audit log` / `alfred audit graph --since 24h` |
 | Inspect a user's memory | Slice 4+ (planned) | `alfred memory show <user>` |
@@ -168,7 +169,7 @@ These rules override everything else. Violating them is a release blocker.
 6. **Secrets live in the broker, not in env vars accessible to plugins.** Plugins request secret IDs; the broker substitutes at the tool-call boundary.
 7. **No silent failures in security paths.** Failed DLP, failed capability check, canary trip → loud audit entry + alert + (where appropriate) quarantine.
 8. **No skipping pre-commit hooks** with `--no-verify`. If a hook fails, fix the issue.
-9. **The gateway is the sole external egress plane; the core is connectivity-free (Spec C).** Never open an external socket directly from core `src/alfred/` code — provider/tool/adapter egress routes through the gateway L7 CONNECT forward-proxy (default-deny destination allowlist, refuse-literal-IP, gateway-side DNS, reject-non-globally-routable-resolved-IP, audit every CONNECT). The core builds provider SDK clients with a proxied `httpx.AsyncClient` via the `EgressClient` seam; the in-core HTTP-egress import-guard forbids new direct provider-SDK / alt-HTTP-lib / `httpx` client construction. A proxy bind failure is fail-closed (the gateway refuses to start). Shipped for providers in G7-1; tool-egress is G7-2, adapter-egress G7-4, and the `internal:true` kernel isolation of the core network lands at G7-3.
+9. **The gateway is the sole external egress plane; the core is connectivity-free (Spec C).** Never open an external socket directly from core `src/alfred/` code — provider/tool/adapter egress routes through the gateway L7 CONNECT forward-proxy (default-deny destination allowlist, refuse-literal-IP, gateway-side DNS, reject-non-globally-routable-resolved-IP, audit every CONNECT). The core builds provider SDK clients with a proxied `httpx.AsyncClient` via the `EgressClient` seam; the in-core HTTP-egress import-guard forbids new direct provider-SDK / alt-HTTP-lib / `httpx` client construction. A proxy bind failure is fail-closed (the gateway refuses to start). Spec C mechanism complete (G7-0..G7-4 merged, G7-3 `internal:true` connectivity-free cutover done); see [ADR-0040](docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md) for the full two-layer enforcement model and accepted residuals.
 
 ## Internationalization rules — HARD
 
