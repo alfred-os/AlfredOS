@@ -173,10 +173,23 @@ def test_alert_reason_labels_are_real_enum_values() -> None:
     cfg = yaml.safe_load((OPS / "alerts" / "gateway.yml").read_text())
     known = _known_reason_values()
     reason_re = re.compile(r'reason(?:=~|=)"([^"]+)"')
+    # Sentinel: accumulate checked reasons per alert so we can assert the two security-critical
+    # alerts are NOT vacuous (a future refactor that removes the reason= matcher would silently
+    # zero the guard — this catches it before the gap ships).
+    checked_reasons: dict[str, list[str]] = {}
     for r in (r for g in cfg["groups"] for r in g["rules"] if "alert" in r):
+        alert_name: str = r["alert"]
         for match in reason_re.findall(r["expr"]):
             for alt in match.split("|"):  # bare-| alternation; a lone value has no |
-                assert alt in known, f"alert {r['alert']} references unknown reason: {alt!r}"
+                assert alt in known, f"alert {alert_name} references unknown reason: {alt!r}"
+                checked_reasons.setdefault(alert_name, []).append(alt)
+    # Both reason-bearing critical alerts must have contributed ≥1 checked reason.
+    assert "GatewayEgressSecurityDenySpike" in checked_reasons, (
+        "GatewayEgressSecurityDenySpike has no reason= matcher — the enum guard is vacuous"
+    )
+    assert "GatewayEgressExfilSpike" in checked_reasons, (
+        "GatewayEgressExfilSpike has no reason= matcher — the enum guard is vacuous"
+    )
 
 
 def test_egress_panels_present() -> None:

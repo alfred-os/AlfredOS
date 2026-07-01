@@ -56,7 +56,10 @@ jobs:
         run: |
           set -euo pipefail
           PROM_VERSION=2.53.0
-          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" | tar xz
+          curl --fail -sSL -o prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "d9900a11e3c89261e6416e3c9989858bad7b206af8b6838dfe9a5392d8ddc60d  prometheus.tar.gz" | sha256sum -c -
+          tar xzf prometheus.tar.gz
           sudo mv "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
       - name: Validate + unit-test the gateway alert rules
         working-directory: ops/alerts

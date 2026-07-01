@@ -313,12 +313,20 @@ git commit -m "feat(ops): egress in-flight + deny-rate Grafana panels (#333)"
 
 - Consumes: `ops/alerts/gateway.yml` (Task 2).
 
-- [ ] **Step 1: Write the promtool test file (the "failing test" — it fails until the rules exist, which they now do)**
+- [x] **Step 1: Write the promtool test file (the "failing test" — it fails until the rules exist, which they now do)**
 
-Create `ops/alerts/gateway_test.yml`. Window math: `interval: 1m` with 10 samples spans 9m; `eval_time` past each alert's `for` window with ≥2 samples inside `rate([5m])`. Each "quiet" negative is anchored by a genuinely-firing positive control.
+Create `ops/alerts/gateway_test.yml`. Window math: `interval: 1m` with 10 samples spans 9m; `eval_time` past each alert's `for` window with ≥2 samples inside `rate([5m])`. Each "quiet" negative is anchored by a genuinely-firing positive control. `exp_annotations` must match the alert's summary+description verbatim — YAML-anchored (`&name` / `*name`) to avoid drift.
+
+The shipped file also includes two additional cases (sec-355-1 / FIX-3):
+
+- **First-occurrence (sec-355-1):** series `0 0 0 1 1 1 1 1 1 1` (pre-init 0 baseline, single 0→1 deny). Window math: rate([5m]) at eval_time=7m covers [2m,7m] (samples t=2m(0), t=3m(1)…t=7m(1)), non-zero; for:2m satisfied since t=5m. eval_time=8m would have rate=0 (window [3m,8m] is flat at 1 — the 0 baseline is outside the 5m window).
+- **Relay outage disjunct (FIX-3):** exercises the `or rate(gateway_egress_relay_total{outcome="error"}...)` branch of `GatewayEgressOutage`.
 
 ```yaml
 # promtool test rules for ops/alerts/gateway.yml (Spec C G7-5 PR-B, #333).
+# NOTE: promtool matches exp_annotations too (not just exp_labels) — each firing entry's
+# exp_annotations MUST equal the alert's summary+description in gateway.yml verbatim. The
+# repeated blocks below are YAML-anchored (&name / *name) so they are written once.
 rule_files:
   - gateway.yml
 
@@ -341,9 +349,15 @@ tests:
         alertname: GatewayEgressSecurityDenySpike
         exp_alerts:
           - exp_labels: { severity: critical, plane: relay, reason: canary_tripped }
+            exp_annotations: &sec_ann
+              summary: "AlfredOS gateway refused a security-relevant egress"
+              description: "A zero-baseline security deny is occurring: SSRF (literal_ip_target / resolved_ip_not_global), a canary trip (active exfil probe), or a DLP catch (dlp_redacted). Treat as a possible active attack."
           - exp_labels: { severity: critical, plane: proxy, reason: literal_ip_target }
+            exp_annotations: *sec_ann
           - exp_labels: { severity: critical, plane: proxy, reason: resolved_ip_not_global }
+            exp_annotations: *sec_ann
           - exp_labels: { severity: critical, plane: relay, reason: dlp_redacted }
+            exp_annotations: *sec_ann
 
   # --- security-spike STAYS QUIET on a routine allowlist-miss; DenyRate fires (positive control) ---
   - interval: 1m
@@ -358,6 +372,9 @@ tests:
         alertname: GatewayEgressDenyRate
         exp_alerts:
           - exp_labels: { severity: warning, plane: proxy, reason: destination_not_allowlisted }
+            exp_annotations: &deny_ann
+              summary: "AlfredOS gateway is denying egress"
+              description: "gateway_egress_denied_total{plane,reason} is increasing for 5m; a client/tool/adapter is repeatedly hitting the default-deny egress allowlist. Inspect the plane + reason breakdown."
 
   # --- exfil-spike fires above the 0.1/s threshold (10/min ≈ 0.167/s) ---
   - interval: 1m
@@ -369,6 +386,9 @@ tests:
         alertname: GatewayEgressExfilSpike
         exp_alerts:
           - exp_labels: { severity: critical, plane: proxy, reason: destination_not_allowlisted }
+            exp_annotations:
+              summary: "AlfredOS gateway is refusing a burst of non-allowlisted egress"
+              description: "gateway_egress_denied_total{reason=destination_not_allowlisted} rate > 0.1/s for 2m. A burst of denials to non-allowlisted (globally-routable) destinations is the realistic data-exfil signal (POST to an attacker domain). NOTE: 0.1/s is a conservative STARTING threshold — tune to baseline; the warning-tier GatewayEgressDenyRate still catches the trickle."
 
   # --- exfil-spike QUIET below threshold (3/min ≈ 0.05/s); DenyRate fires (positive control) ---
   - interval: 1m
@@ -383,6 +403,7 @@ tests:
         alertname: GatewayEgressDenyRate
         exp_alerts:
           - exp_labels: { severity: warning, plane: proxy, reason: destination_not_allowlisted }
+            exp_annotations: *deny_ann
 
   # --- inflight saturation fires above 100, quiet below ---
   - interval: 1m
@@ -392,12 +413,28 @@ tests:
       - series: 'gateway_egress_inflight{plane="relay"}'
         values: '0 10 90 90 90 90 90 90 90 90'
     alert_rule_test:
-      # eval at 8m (not the 7m for-boundary) so a future `for` bump or one fewer
-      # sample doesn't silently flip this to pending → confusing "no alerts" failure.
       - eval_time: 8m
         alertname: GatewayEgressInflightSaturation
         exp_alerts:
           - exp_labels: { severity: warning, plane: proxy }
+            exp_annotations:
+              summary: "AlfredOS gateway egress in-flight is high"
+              description: "gateway_egress_inflight{plane} > 100 concurrent CONNECT tunnels for 5m. NOTE: egress in-flight has no hard cap; 100 is a conservative STARTING threshold — tune it to your deployment's baseline."
+
+  # --- security-spike fires on a first-occurrence deny (pre-init 0 baseline, then 0→1 flat) ---
+  # sec-355-1 (#333): without pre-init the series appears at t=3m with value=1 and
+  # rate([5m]) is 0 (flat-at-1, no baseline). With pre-init the 0→1 rise is visible.
+  # eval_time=7m: window [2m,7m] contains the 0→1 transition; for:2m satisfied since t=5m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_denied_total{plane="relay",reason="canary_tripped"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GatewayEgressSecurityDenySpike
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: relay, reason: canary_tripped }
+            exp_annotations: *sec_ann
 
   # --- outage fires on a sustained connect_total error rate ---
   - interval: 1m
@@ -408,12 +445,25 @@ tests:
       - eval_time: 8m
         alertname: GatewayEgressOutage
         exp_alerts:
-          # promtool requires the COMPLETE label set; rate()>0 preserves outcome="error"
-          # from the firing series, so it must appear alongside the rule's severity label.
           - exp_labels: { severity: warning, outcome: error }
+            exp_annotations: &outage_ann
+              summary: "AlfredOS gateway egress is erroring"
+              description: "gateway_egress_{connect,relay}_total{outcome=error} is increasing for 5m; the egress plane is failing to complete tunnels/fetches. A sustained outage can itself suppress deny-counting, blinding the security alerts — investigate promptly."
+
+  # --- outage fires on the relay_total{outcome=error} disjunct (tests the 'or' branch) ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_relay_total{outcome="error"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressOutage
+        exp_alerts:
+          - exp_labels: { severity: warning, outcome: error }
+            exp_annotations: *outage_ann
 ```
 
-- [ ] **Step 2: Install promtool + run it locally to verify**
+- [x] **Step 2: Install promtool + run it locally to verify**
 
 Install promtool (choose per platform): `brew install prometheus` (macOS) OR download from `https://github.com/prometheus/prometheus/releases` and put `promtool` on PATH.
 
@@ -425,13 +475,13 @@ cd ops/alerts && promtool check rules gateway.yml && promtool test rules gateway
 
 Expected: `SUCCESS` for check-rules and `PASSED` for all unit tests. If any `exp_alerts` mismatch, fix the window math / labels (NOT by loosening an assertion to `[]`).
 
-- [ ] **Step 3: Verify the negative control (bare-| guard)**
+- [x] **Step 3: Verify the negative control (bare-| guard)**
 
 Temporarily change the `GatewayEgressSecurityDenySpike` expr's `|` to `\|` and re-run `promtool test rules gateway_test.yml`. Expected: the security-spike fire cases FAIL (matcher now matches a literal-pipe reason → no series → no alert). This proves the test catches the fail-open regex. Revert the `\|` back to `|` before committing.
 
-- [ ] **Step 4: Add the CI job**
+- [x] **Step 4: Add the CI job**
 
-Add a job to `.github/workflows/ci.yml` (mirror the sibling jobs: `actions/checkout@v4`, a job-level `permissions: contents: read` — the `python` job pins this and it's what the required `Zizmor` check enforces):
+Add a job to `.github/workflows/ci.yml` (mirror the sibling jobs: `actions/checkout@v4`, a job-level `permissions: contents: read` — the `python` job pins this and it's what the required `Zizmor` check enforces). The Install step downloads to a temp file, verifies the sha256 before extracting (FIX-2 integrity check), and keeps `set -euo pipefail`:
 
 ```yaml
   ops-promtool:
@@ -443,25 +493,30 @@ Add a job to `.github/workflows/ci.yml` (mirror the sibling jobs: `actions/check
       - uses: actions/checkout@v4
       - name: Install promtool
         run: |
+          set -euo pipefail
           PROM_VERSION=2.53.0
-          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" | tar xz
+          curl --fail -sSL -o prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "d9900a11e3c89261e6416e3c9989858bad7b206af8b6838dfe9a5392d8ddc60d  prometheus.tar.gz" | sha256sum -c -
+          tar xzf prometheus.tar.gz
           sudo mv "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
       - name: Validate + unit-test the gateway alert rules
         working-directory: ops/alerts
         run: |
+          set -euo pipefail
           promtool check rules gateway.yml
           promtool test rules gateway_test.yml
 ```
 
-- [ ] **Step 5: Register the check as required (a job that runs but isn't required does NOT gate merge)**
+- [x] **Step 5: Register the check as required (a job that runs but isn't required does NOT gate merge)**
 
-Add a row to the "Currently required" table in `docs/ci/required-checks.md` (Check name = the job's `name:` string):
+Add a row to the **"Pending required"** table in `docs/ci/required-checks.md` (not "Currently required" — the branch-protection POST has not yet run; the doc's own flow routes a not-yet-promoted check through Pending first):
 
 ```markdown
-| `promtool (alert rules)` | `.github/workflows/ci.yml` | `ops-promtool` | 2026-07-01 | Block PRs that break the gateway alert rules — `promtool check rules` validates PromQL syntax + `promtool test rules` unit-tests firing logic (esp. that the critical security/exfil alerts actually fire on the right reasons and stay quiet otherwise; a pure-Python test cannot validate PromQL or firing behaviour). |
+| `promtool (alert rules)` | `.github/workflows/ci.yml` | `ops-promtool` | Spec C G7-5 PR-B (#333): `promtool check rules` validates the gateway alert PromQL/syntax + `promtool test rules` unit-tests firing logic — critically that the critical security/exfil alerts fire on the right deny reasons and stay quiet otherwise. | First green run on `main`; controller runs `gh api -X POST` at merge time. |
 ```
 
-The branch-protection promotion itself (`gh api -X POST .../branch-protection/required_status_checks/contexts` adding `promtool (alert rules)`) is a repo-admin action taken after the job first runs green — recorded here so it lands with this PR. The controller performs it at merge time if it has admin, else flags the maintainer (the manifest row documents the intent regardless).
+The branch-protection promotion itself is a repo-admin action taken after the job first runs green — the manifest row documents the intent regardless.
 
 - [ ] **Step 6: Commit**
 
