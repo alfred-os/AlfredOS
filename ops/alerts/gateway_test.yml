@@ -96,6 +96,22 @@ tests:
               summary: "AlfredOS gateway egress in-flight is high"
               description: "gateway_egress_inflight{plane} > 100 concurrent CONNECT tunnels for 5m. NOTE: egress in-flight has no hard cap; 100 is a conservative STARTING threshold — tune it to your deployment's baseline."
 
+  # --- security-spike fires on a first-occurrence deny (pre-init 0 baseline, then 0→1 flat) ---
+  # sec-355-1 (#333): without pre-init, the series would appear at t=3m with value=1 and
+  # rate([5m]) would be 0 (flat-at-1, no baseline); the pre-init'd 0 gives Prometheus the
+  # 0→1 transition it needs. eval_time=7m: rate([5m]) window [2m,7m] sees the 0→1 rise;
+  # for:2m satisfied since t=5m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_denied_total{plane="relay",reason="canary_tripped"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GatewayEgressSecurityDenySpike
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: relay, reason: canary_tripped }
+            exp_annotations: *sec_ann
+
   # --- outage fires on a sustained connect_total error rate ---
   - interval: 1m
     input_series:
@@ -106,6 +122,18 @@ tests:
         alertname: GatewayEgressOutage
         exp_alerts:
           - exp_labels: { severity: warning, outcome: error }
-            exp_annotations:
+            exp_annotations: &outage_ann
               summary: "AlfredOS gateway egress is erroring"
               description: "gateway_egress_{connect,relay}_total{outcome=error} is increasing for 5m; the egress plane is failing to complete tunnels/fetches. A sustained outage can itself suppress deny-counting, blinding the security alerts — investigate promptly."
+
+  # --- outage fires on the relay_total{outcome=error} disjunct (tests the 'or' branch) ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_relay_total{outcome="error"}'
+        values: '0 1 2 3 4 5 6 7 8 9'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GatewayEgressOutage
+        exp_alerts:
+          - exp_labels: { severity: warning, outcome: error }
+            exp_annotations: *outage_ann

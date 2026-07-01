@@ -65,7 +65,7 @@ Added to the `alfred-gateway` group, following the existing `expr`/`for`/`severi
 
 **Thresholds are honest starting points, not derived caps.** `GatewayEgressInflightSaturation`'s `>100` (concurrent CONNECT tunnels — no hard cap exists) and `GatewayEgressExfilSpike`'s `>0.1`/s each carry a `description` saying "conservative starting threshold; tune to your deployment's baseline."
 
-**Outage alert.** `GatewayEgressOutage` (warning) fires on a sustained egress error rate — a broken egress plane that could itself suppress deny-counting (making the security alerts blind). The exact `outcome` label value (`"error"`) must be verified against the `gateway_egress_connect_total` outcome set during implementation; if the relay uses a separate outcome counter, the alert covers both.
+**Outage alert.** `GatewayEgressOutage` (warning) fires on a sustained egress error rate — a broken egress plane that could itself suppress deny-counting (making the security alerts blind). The `outcome="error"` value is confirmed real on both `gateway_egress_connect_total` and `gateway_egress_relay_total`; the `or` disjunct in the alert expr covers both counters. Note the scope boundary: this alert covers the **erroring-but-alive** case (the gateway process is up, `/metrics` reachable, tunnels/fetches failing). A **hard-down** gateway (process dead or `/metrics` unreachable) is covered by Prometheus scrape-health (`up{job="alfred-gateway"}==0`), not this alert.
 
 ## 6. promtool gate (check + test rules)
 
