@@ -4,13 +4,13 @@
 
 **Goal:** Make the PR-A egress metric families operator-observable — a Grafana dashboard view + 5 Prometheus alerts, gated by an extended ops-scaffold AST test and a promtool check+test suite.
 
-**Architecture:** No `src/` change. Extend `tests/unit/test_ops_scaffold.py` so its metric-name derivation sees the custom-collector / module-const egress metrics and add a reason-label-value ⊆ enum guard; add 5 rules to `ops/alerts/gateway.yml` + 2 panels to `ops/grafana/gateway.json`; add a promtool `test rules` file + a CI job that installs promtool and runs `check rules` + `test rules`.
+**Architecture:** Ops-only, plus one small metric-hygiene `src/` fix (the sec-355-1 deny-counter pre-init, folded in per a PR-B review finding so the alert's correctness ships with it). Extend `tests/unit/test_ops_scaffold.py` so its metric-name derivation sees the custom-collector / module-const egress metrics and add a reason-label-value ⊆ enum guard; add 5 rules to `ops/alerts/gateway.yml` + 2 panels to `ops/grafana/gateway.json`; add a promtool `test rules` file + a CI job that installs promtool and runs `check rules` + `test rules`.
 
 **Tech Stack:** Prometheus alerting rules (YAML), Grafana dashboard (JSON), `promtool` (Prometheus toolchain), pytest + `ast`/`yaml`/`json`, GitHub Actions.
 
 ## Global Constraints
 
-- **No `src/alfred/` change** — PR-A owns the metric contract; PR-B only observes it.
+- **One `src/alfred/` change only** — the sec-355-1 deny-counter pre-init in `egress_metrics.py` (metric hygiene the critical alert requires). PR-A still owns the metric contract; PR-B adds no new families.
 - **Consumed metrics:** `gateway_egress_inflight{plane}` (via `GaugeMetricFamily(_INFLIGHT_NAME,…)`, `_INFLIGHT_NAME: Final[str] = "gateway_egress_inflight"`); `gateway_egress_denied_total{plane,reason}` (via `Counter(_DENIED_NAME,…)`, `_DENIED_NAME: Final[str] = "gateway_egress_denied_total"`). Both in `src/alfred/gateway/egress_metrics.py`.
 - **Pre-existing (already string-literal Counters, already in the known set):** `gateway_egress_connect_total{outcome}` (`egress_proxy.py:86`), `gateway_egress_relay_total{outcome}` (`egress_relay_audit.py:89`). Outcome values used in source: `error`, `allowed`/`forwarded`, `denied`.
 - **Reason enums:** `EgressDenyReason` (`src/alfred/gateway/egress_audit.py`, `enum.Enum`, 4 values); `EgressRelayDenyReason` (`src/alfred/egress/relay_protocol.py`, `enum.StrEnum`, 8 values). Member `.value`s are the label strings.
