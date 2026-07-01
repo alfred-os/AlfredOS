@@ -59,9 +59,38 @@ def test_denied_counter_labels_are_plane_and_reason() -> None:
     # ("gateway_egress_denied"), while the SAMPLE keeps `_total`. This asymmetry is
     # load-bearing — key family lookups on the stripped name, sample filters on `_total`.
     denied = next(f for f in families if f.name == "gateway_egress_denied")
-    hit = next(s for s in denied.samples if s.name == "gateway_egress_denied_total")
+    # Filter by both name AND the specific labels — build_denied_counter now pre-inits all
+    # 16 children, so the first _total sample may be a different plane/reason combination.
+    hit = next(
+        s
+        for s in denied.samples
+        if s.name == "gateway_egress_denied_total"
+        and s.labels == {"plane": "proxy", "reason": "literal_ip_target"}
+    )
     assert hit.labels == {"plane": "proxy", "reason": "literal_ip_target"}
     assert hit.value == 1.0
+
+
+def test_denied_counter_children_preinitialized_to_zero() -> None:
+    """sec-355-1 (#333): build_denied_counter pre-inits all 16 planexreason children to 0.
+
+    Without pre-init, the first one-shot deny (counter 0→1, then flat) produces a
+    flat-at-1 series that has rate=0 over any window where it was already 1 —
+    ``GatewayEgressSecurityDenySpike`` would miss the very first occurrence.
+    """
+    reg = CollectorRegistry()
+    build_denied_counter(reg)
+    families = list(text_string_to_metric_families(generate_latest(reg).decode()))
+    # NB: parser reports the Counter FAMILY name without the `_total` suffix.
+    denied = next(f for f in families if f.name == "gateway_egress_denied")
+    total_samples = [s for s in denied.samples if s.name == "gateway_egress_denied_total"]
+    assert len(total_samples) == 16
+    assert all(s.value == 0.0 for s in total_samples)
+    # Spot-check: relay uses EgressRelayDenyReason (has canary_tripped);
+    # proxy uses EgressDenyReason (does not have canary_tripped).
+    labels_set = {(s.labels["plane"], s.labels["reason"]) for s in total_samples}
+    assert ("relay", "canary_tripped") in labels_set
+    assert ("proxy", "canary_tripped") not in labels_set
 
 
 def test_module_wrappers_register_and_deregister() -> None:
