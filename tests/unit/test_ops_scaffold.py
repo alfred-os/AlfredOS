@@ -177,3 +177,10 @@ def test_alert_reason_labels_are_real_enum_values() -> None:
         for match in reason_re.findall(r["expr"]):
             for alt in match.split("|"):  # bare-| alternation; a lone value has no |
                 assert alt in known, f"alert {r['alert']} references unknown reason: {alt!r}"
+
+
+def test_egress_panels_present() -> None:
+    dash = json.loads((OPS / "grafana" / "gateway.json").read_text())
+    exprs = {t.get("expr") for p in dash["panels"] for t in p.get("targets", [])}
+    assert "gateway_egress_inflight" in exprs
+    assert "rate(gateway_egress_denied_total[5m])" in exprs
