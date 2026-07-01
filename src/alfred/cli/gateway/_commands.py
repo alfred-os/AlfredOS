@@ -325,6 +325,7 @@ def start_gateway() -> None:
             port=resolve_egress_proxy_port(),
             # The field-allowlisted ({destination, reason}) gateway-local egress audit sink.
             audit=record_egress_connect,
+            plane="proxy",
         )
 
         # Spec C G7-2b (#333): the gateway is also the SOLE maker of inspectable tool

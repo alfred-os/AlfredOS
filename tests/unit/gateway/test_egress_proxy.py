@@ -21,8 +21,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 import structlog
+from prometheus_client import CollectorRegistry, generate_latest
+from prometheus_client.parser import text_string_to_metric_families
 
 from alfred.egress.allowlist import exact_match
+from alfred.gateway import egress_metrics
 from alfred.gateway.egress_proxy import (
     EgressForwardProxy,
     resolve_egress_proxy_bind,
@@ -80,6 +83,8 @@ def _proxy(
     resolve_to: str = "1.1.1.1",
     upstream: tuple[asyncio.StreamReader, _CaptureWriter] | None = None,
     open_error: Exception | None = None,
+    plane: str = "proxy",
+    denied_counter: object | None = None,
 ) -> EgressForwardProxy:
     async def _open(_ip: str, _port: int) -> tuple[asyncio.StreamReader, _CaptureWriter]:
         if open_error is not None:
@@ -95,6 +100,8 @@ def _proxy(
         audit=lambda event, fields: audit.append((event, fields)),
         resolve=lambda _h: resolve_to,
         open_upstream=_open,  # type: ignore[arg-type]
+        plane=plane,
+        denied_counter=denied_counter,  # type: ignore[arg-type]
     )
 
 
@@ -515,3 +522,49 @@ async def test_drain_connections_cancels_in_flight_tasks() -> None:
     await asyncio.sleep(0)  # let it start blocking
     await asyncio.wait_for(proxy._drain_connections(), timeout=5)  # type: ignore[attr-defined]
     assert task.cancelled()
+
+
+# --- Egress metrics (G7-5): plane label + denied_total counter wiring. ---
+
+
+@pytest.mark.asyncio
+async def test_literal_ip_deny_increments_denied_total_after_audit() -> None:
+    reg = CollectorRegistry()
+    denied = egress_metrics.build_denied_counter(reg)
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = _proxy(audit, plane="proxy", denied_counter=denied)
+    writer = _CaptureWriter()
+    await _serve(proxy, b"CONNECT 203.0.113.5:443 HTTP/1.1\r\n\r\n", writer)
+    # audit fired before the counter increment
+    assert any(f.get("reason") == "literal_ip_target" for _, f in audit)
+    # AND the new counter incremented, keyed by plane+reason
+    fam = next(
+        f
+        for f in text_string_to_metric_families(generate_latest(reg).decode())
+        if f.name == "gateway_egress_denied"  # parser strips the _total suffix
+    )
+    hit = next(
+        s for s in fam.samples if s.labels == {"plane": "proxy", "reason": "literal_ip_target"}
+    )
+    assert hit.value == 1.0
+
+
+@pytest.mark.asyncio
+async def test_deny_still_audits_and_refuses_when_metric_raises() -> None:
+    audit: list[tuple[str, dict[str, object]]] = []
+
+    class _Boom:
+        def labels(self, **_: str) -> _Boom:
+            return self
+
+        def inc(self) -> None:
+            raise RuntimeError("metrics backend down")
+
+    proxy = _proxy(audit, plane="proxy", denied_counter=_Boom())
+    writer = _CaptureWriter()
+    with contextlib.suppress(RuntimeError):
+        await _serve(proxy, b"CONNECT 203.0.113.5:443 HTTP/1.1\r\n\r\n", writer)
+    assert any(f.get("reason") == "literal_ip_target" for _, f in audit), (
+        "audit must fire before the metric"
+    )
+    assert b"403" in writer.buf, "refusal must be written before/independent of the metric"

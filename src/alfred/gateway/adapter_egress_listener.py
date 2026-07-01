@@ -59,6 +59,7 @@ def build_adapter_egress_proxy(
         match=match,
         audit=record_egress_connect,
         unix_path=DISCORD_EGRESS_SOCKET_PATH,
+        plane="adapter",
     )
 
 
