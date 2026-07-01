@@ -96,10 +96,29 @@ def test_denied_counter_labels_are_plane_and_reason() -> None:
     counter = build_denied_counter(reg)
     counter.labels(plane="proxy", reason="literal_ip_target").inc()
     families = list(text_string_to_metric_families(generate_latest(reg).decode()))
-    denied = next(f for f in families if f.name == "gateway_egress_denied_total")
+    # NB: the parser reports the counter FAMILY name WITHOUT the `_total` suffix
+    # ("gateway_egress_denied"), while the SAMPLE keeps `_total`. This asymmetry is
+    # load-bearing — key family lookups on the stripped name, sample filters on `_total`.
+    denied = next(f for f in families if f.name == "gateway_egress_denied")
     hit = next(s for s in denied.samples if s.name == "gateway_egress_denied_total")
     assert hit.labels == {"plane": "proxy", "reason": "literal_ip_target"}
     assert hit.value == 1.0
+
+
+def test_module_wrappers_register_and_deregister() -> None:
+    # Direct coverage of the singleton wrappers (the 4 tests above use a fresh
+    # instance; the module-level wrappers are otherwise only hit via proxy serve).
+    from alfred.gateway.egress_metrics import (
+        EGRESS_INFLIGHT_COLLECTOR,
+        deregister_egress_inflight,
+        register_egress_inflight,
+    )
+
+    conns: set[object] = {object()}
+    register_egress_inflight("proxy", conns)
+    assert EGRESS_INFLIGHT_COLLECTOR._planes.get("proxy") is conns
+    deregister_egress_inflight("proxy")
+    assert "proxy" not in EGRESS_INFLIGHT_COLLECTOR._planes
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -263,7 +282,7 @@ async def test_literal_ip_deny_increments_denied_total_after_audit() -> None:
     # AND the new counter incremented, keyed by plane+reason
     fam = next(
         f for f in text_string_to_metric_families(generate_latest(reg).decode())
-        if f.name == "gateway_egress_denied_total"
+        if f.name == "gateway_egress_denied"  # family name is `_total`-stripped by the parser
     )
     hit = next(s for s in fam.samples if s.labels == {"plane": "proxy", "reason": "literal_ip_target"})
     assert hit.value == 1.0
@@ -338,15 +357,15 @@ In `_deny`, add the new counter increment **after** `self._audit(...)` (keep the
             self._audit(
                 EGRESS_CONNECT_DENIED_EVENT, {"reason": reason.value, "destination": destination}
             )
-            self._denied_counter.labels(plane=self._plane, reason=reason.value).inc()
             with contextlib.suppress(OSError):
                 writer.write(f"HTTP/1.1 {status} {reason.value}\r\n\r\n".encode("latin-1"))
                 await writer.drain()
+            self._denied_counter.labels(plane=self._plane, reason=reason.value).inc()
         finally:
             self._close(writer)
 ```
 
-Note: the increment is inside the `try` after the audit, so a raising `.inc()` still leaves the audit fired and the `finally` still closes the writer. (The refusal `write` is best-effort/`OSError`-suppressed already; a metric `RuntimeError` propagating out of `_deny` is acceptable — the audit + close both ran. The test asserts audit+403 both happened.)
+Note: the increment is **strictly after** both the audit AND the refusal-write (the additive-telemetry constraint). A raising `.inc()` therefore leaves the audit fired AND the 403 written, and the `finally` still closes the writer — so `test_deny_still_audits_and_refuses_when_metric_raises` (which asserts both the audit row and `b"403" in writer.buf`) passes. A metric `RuntimeError` then propagating out of `_deny` is acceptable (both the audit and the refusal already happened).
 
 - [ ] **Step 4: Pass `plane=` at the two ctor sites**
 
@@ -400,7 +419,7 @@ async def test_relay_deny_increments_denied_total_for_every_reason(reason) -> No
     await _emit_deny(relay, reason)  # drive _emit with an EgressRelayReply(deny_reason=reason)
     fam = next(
         f for f in text_string_to_metric_families(generate_latest(reg).decode())
-        if f.name == "gateway_egress_denied_total"
+        if f.name == "gateway_egress_denied"  # family name is `_total`-stripped by the parser
     )
     hit = next(s for s in fam.samples if s.labels == {"plane": "relay", "reason": reason.value})
     assert hit.value == 1.0
@@ -515,6 +534,24 @@ def test_unknown_reason_token_fails_loud(monkeypatch) -> None:
     monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
     with pytest.raises((ValueError, typer.Exit)):
         _egress.egress_status()
+
+
+def test_present_zero_vs_metric_absent_are_distinct(capsys, monkeypatch) -> None:
+    # design §8(a): a present deny family with no nonzero count for a plane → "no denials";
+    # the family ABSENT entirely → a DISTINCT "unavailable" output (metric not wired).
+    monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
+    monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: _METRICS)
+    _egress.egress_status()
+    with_family = capsys.readouterr().out
+    no_family = _METRICS.replace(
+        '# TYPE gateway_egress_denied_total counter\n'
+        'gateway_egress_denied_total{plane="proxy",reason="literal_ip_target"} 1.0\n',
+        "",
+    )
+    monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: no_family)
+    _egress.egress_status()
+    without_family = capsys.readouterr().out
+    assert with_family != without_family  # "no denials"/counts vs "deny counter unavailable"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -571,12 +608,15 @@ def egress_status() -> None:
 
     families = {f.name: f for f in text_string_to_metric_families(metrics_text)}
     inflight = _samples_by_label(families.get("gateway_egress_inflight"), "plane")
-    denied = _denied_by_plane(families.get("gateway_egress_denied_total"))
+    # The counter FAMILY name is `_total`-stripped by the parser; the presence of the
+    # family (vs a plane's zero count) is tracked so "no denials" ≠ "metric absent".
+    denied_family_present = "gateway_egress_denied" in families
+    denied = _denied_by_plane(families.get("gateway_egress_denied"))
     adapter_up = _samples_by_label(families.get("gateway_adapter_up"), "adapter")
 
-    _render_plane("proxy", "gateway.egress.plane.proxy", inflight, denied, reachable=True)
-    _render_plane("relay", "gateway.egress.plane.relay", inflight, denied, reachable=True)
-    _render_adapter(inflight, denied, present=bool(adapter_up))
+    _render_plane("proxy", "gateway.egress.plane.proxy", inflight, denied, denied_family_present)
+    _render_plane("relay", "gateway.egress.plane.relay", inflight, denied, denied_family_present)
+    _render_adapter(inflight, denied, denied_family_present, present=bool(adapter_up))
 
 
 def _samples_by_label(family: object | None, label: str) -> dict[str, float]:
@@ -601,15 +641,21 @@ def _render_plane(
     header_key: str,
     inflight: dict[str, float],
     denied: dict[str, dict[str, float]],
-    *,
-    reachable: bool,
+    denied_family_present: bool,
 ) -> None:
-    typer.echo(t(header_key) + "  " + (t("gateway.egress.reachable") if reachable else t("gateway.egress.down")))
+    # Reached only PAST the exit-2 /metrics check, so proxy/relay are up (fail-closed
+    # bind — a down proxy/relay means the gateway already exited). Hence no "down" branch.
+    typer.echo(t(header_key) + "  " + t("gateway.egress.reachable"))
     typer.echo("  " + t("gateway.egress.inflight_label") + " " + str(int(inflight.get(plane, 0))))
-    typer.echo("  " + t("gateway.egress.denies_label") + " " + _fmt_denies(plane, denied.get(plane, {})))
+    typer.echo(
+        "  " + t("gateway.egress.denies_label") + " "
+        + _fmt_denies(plane, denied.get(plane, {}), denied_family_present)
+    )
 
 
-def _fmt_denies(plane: str, reasons: dict[str, float]) -> str:
+def _fmt_denies(plane: str, reasons: dict[str, float], family_present: bool) -> str:
+    if not family_present:  # the deny counter is not exposed at all — distinct from "0 denies"
+        return t("gateway.egress.denies_unavailable")
     allowed = _PROXY_REASONS if plane in {"proxy", "adapter"} else _RELAY_REASONS
     key_fn = proxy_reason_key if plane in {"proxy", "adapter"} else relay_reason_key
     enum_cls = EgressDenyReason if plane in {"proxy", "adapter"} else EgressRelayDenyReason
@@ -626,12 +672,16 @@ def _fmt_denies(plane: str, reasons: dict[str, float]) -> str:
 
 
 def _render_adapter(
-    inflight: dict[str, float], denied: dict[str, dict[str, float]], *, present: bool
+    inflight: dict[str, float],
+    denied: dict[str, dict[str, float]],
+    denied_family_present: bool,
+    *,
+    present: bool,
 ) -> None:
     if not present:
         typer.echo(t("gateway.egress.plane.adapter") + "  " + t("gateway.egress.not_configured"))
         return
-    _render_plane("adapter", "gateway.egress.plane.adapter", inflight, denied, reachable=True)
+    _render_plane("adapter", "gateway.egress.plane.adapter", inflight, denied, denied_family_present)
 ```
 
 (Allowlist rendering — a `t("gateway.egress.allowlist_label")` line per plane reading `provider_egress_allowlist()` / `resolve_tool_egress_allowlist()` / `discord_egress_allowlist()` — is folded into `_render_plane`/`_render_adapter`; grep the exact builder names in `src/alfred/egress/allowlist.py` + `src/alfred/gateway/egress_relay.py` and add the line. Keep it a config read, not a scrape.)
@@ -673,7 +723,7 @@ git commit -m "feat(cli): alfred gateway egress — per-plane egress-state repor
 
 - [ ] **Step 1: Add the new literal keys + English msgstrs**
 
-New keys introduced by Task 4 (all literal `t()` call sites, so `pybabel extract` finds them): `gateway.egress.unreachable`, `gateway.egress.reachable`, `gateway.egress.down`, `gateway.egress.not_configured`, `gateway.egress.no_denials`, `gateway.egress.inflight_label`, `gateway.egress.denies_label`, `gateway.egress.allowlist_label`, `gateway.egress.plane.proxy`, `gateway.egress.plane.relay`, `gateway.egress.plane.adapter`, `gateway.help.egress`. Give each an English `msgstr` — e.g. `gateway.egress.unreachable` → "egress plane unreachable — run inside the gateway container: docker compose exec alfred-gateway alfred gateway egress"; `gateway.egress.plane.proxy` → "provider proxy"; `gateway.egress.no_denials` → "no denials".
+New keys introduced by Task 4 (all literal `t()` call sites, so `pybabel extract` finds them): `gateway.egress.unreachable`, `gateway.egress.reachable`, `gateway.egress.not_configured`, `gateway.egress.no_denials`, `gateway.egress.denies_unavailable`, `gateway.egress.inflight_label`, `gateway.egress.denies_label`, `gateway.egress.allowlist_label`, `gateway.egress.plane.proxy`, `gateway.egress.plane.relay`, `gateway.egress.plane.adapter`, `gateway.help.egress`. (No `gateway.egress.down` — proxy/relay have no down state reachable from the command; a down proxy/relay exits the gateway.) Give each an English `msgstr` — e.g. `gateway.egress.unreachable` → "egress plane unreachable — run inside the gateway container: docker compose exec alfred-gateway alfred gateway egress"; `gateway.egress.plane.proxy` → "provider proxy"; `gateway.egress.no_denials` → "no denials"; `gateway.egress.denies_unavailable` → "deny counter unavailable".
 
 - [ ] **Step 2: Run the i18n flow**
 
@@ -698,14 +748,37 @@ git commit -m "i18n(egress): gateway.egress.* operator catalog keys for the egre
 
 **Files:** none (verification).
 
-- [ ] **Step 1: Targeted suites**
+- [ ] **Step 1: Targeted suites + a metrics-registry regression check**
 
 Run: `uv run pytest tests/unit/gateway/test_egress_metrics.py tests/unit/gateway/test_egress_proxy.py tests/unit/gateway/test_egress_relay.py tests/unit/cli/gateway/test_egress_command.py -q`
 Expected: all pass.
 
-- [ ] **Step 2: Sum-invariant assertion (add to `test_egress_proxy.py`/`test_egress_relay.py` if not already)**
+**Watch-item:** importing `egress_proxy`/`egress_relay` now registers `EGRESS_INFLIGHT_COLLECTOR` + `GATEWAY_EGRESS_DENIED` on the default `REGISTRY` at import. Run `uv run pytest tests/unit/gateway/test_metrics_server.py -q` (and grep `test_metrics_server.py` for any assertion on a CLOSED/exact `/metrics` family set) — the two new always-present families must not break such a test. If one exists, widen its expected set to include the new families (they are legitimate gateway metrics).
 
-Confirm a test asserts `sum over reason of denied_total{plane="relay"}` equals the relay `gateway_egress_relay_total{outcome="denied"}` increment count over the same drive, and the proxy+adapter aggregate equals the shared `gateway_egress_connect_total{outcome="denied"}`. If missing, add it here (it's the PR-B contract).
+- [ ] **Step 2: Sum-invariant DELTA test**
+
+The shared `GATEWAY_EGRESS_CONNECT` / `GATEWAY_EGRESS_RELAY` counters are module-global on the default `REGISTRY` and PROCESS-CUMULATIVE — an absolute compare is non-deterministic. Assert a **before/after delta**. Add to `tests/unit/gateway/test_egress_relay.py`:
+
+```python
+from alfred.gateway.egress_metrics import GATEWAY_EGRESS_DENIED
+from alfred.gateway.egress_relay_audit import GATEWAY_EGRESS_RELAY
+from alfred.egress.relay_protocol import EgressRelayDenyReason
+
+
+def _val(counter, **labels) -> float:
+    return counter.labels(**labels)._value.get()  # noqa: SLF001 — prometheus test idiom
+
+
+@pytest.mark.asyncio
+async def test_relay_denied_total_delta_matches_outcome_denied() -> None:
+    before_outcome = _val(GATEWAY_EGRESS_RELAY, outcome="denied")
+    before_reason = _val(GATEWAY_EGRESS_DENIED, plane="relay", reason="literal_ip_target")
+    await _emit_deny(_relay(), EgressRelayDenyReason.LITERAL_IP_TARGET)  # default (module) counters
+    assert _val(GATEWAY_EGRESS_RELAY, outcome="denied") - before_outcome == 1.0
+    assert _val(GATEWAY_EGRESS_DENIED, plane="relay", reason="literal_ip_target") - before_reason == 1.0
+```
+
+(The proxy+adapter arm mirrors this against `GATEWAY_EGRESS_CONNECT{outcome="denied"}` — one drive, delta == 1 on both the shared outcome counter and the plane-keyed `denied_total`, proving the sum invariant without an absolute compare.)
 
 - [ ] **Step 3: `make check`**
 
