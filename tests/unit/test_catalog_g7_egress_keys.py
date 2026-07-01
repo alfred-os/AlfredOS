@@ -52,6 +52,8 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "gateway.egress.plane.relay",
     "gateway.egress.plane.adapter",
     "gateway.egress.not_configured",
+    # FIX 2: adapter series present but value < 1.0 (crashed/breaker-open/spawning).
+    "gateway.egress.adapter_down",
     "gateway.egress.allowlist_label",
     "gateway.egress.allowlist_empty",
     "gateway.egress.allowlist_unresolved",

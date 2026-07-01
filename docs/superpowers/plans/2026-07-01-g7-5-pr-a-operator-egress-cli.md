@@ -684,7 +684,11 @@ def _render_adapter(
     _render_plane("adapter", "gateway.egress.plane.adapter", inflight, denied, denied_family_present)
 ```
 
-(Allowlist rendering — a `t("gateway.egress.allowlist_label")` line per plane reading `provider_egress_allowlist()` / `resolve_tool_egress_allowlist()` / `discord_egress_allowlist()` — is folded into `_render_plane`/`_render_adapter`; grep the exact builder names in `src/alfred/egress/allowlist.py` + `src/alfred/gateway/egress_relay.py` and add the line. Keep it a config read, not a scrape.)
+(Shipped layout: the allowlist block is a **separate trailing `_render_allowlists()` call** — NOT
+folded inline into the per-plane stanzas. A shared `_emit_allowlist_line(plane_header_key,
+plane_suffix, build_callable)` helper DRYs the try/log-warn/degrade pattern across all three
+planes. The discord callable threads `os.environ.get("ALFRED_DISCORD_EGRESS_ALLOWLIST", "")`
+into `discord_egress_allowlist()` exactly as `_commands.py` does at boot.)
 
 - [ ] **Step 4: Register the command**
 
@@ -723,7 +727,7 @@ git commit -m "feat(cli): alfred gateway egress — per-plane egress-state repor
 
 - [ ] **Step 1: Add the new literal keys + English msgstrs**
 
-New keys introduced by Task 4 (all literal `t()` call sites, so `pybabel extract` finds them): `gateway.egress.unreachable`, `gateway.egress.reachable`, `gateway.egress.not_configured`, `gateway.egress.no_denials`, `gateway.egress.denies_unavailable`, `gateway.egress.inflight_label`, `gateway.egress.denies_label`, `gateway.egress.allowlist_label`, `gateway.egress.plane.proxy`, `gateway.egress.plane.relay`, `gateway.egress.plane.adapter`, `gateway.help.egress`. (No `gateway.egress.down` — proxy/relay have no down state reachable from the command; a down proxy/relay exits the gateway.) Give each an English `msgstr` — e.g. `gateway.egress.unreachable` → "egress plane unreachable — run inside the gateway container: docker compose exec alfred-gateway alfred gateway egress"; `gateway.egress.plane.proxy` → "provider proxy"; `gateway.egress.no_denials` → "no denials"; `gateway.egress.denies_unavailable` → "deny counter unavailable".
+New keys introduced by Task 4 (all literal `t()` call sites, so `pybabel extract` finds them): `gateway.egress.unreachable` (includes `{port}` placeholder; mentions gateway container as *one possible cause*, not the only fix), `gateway.egress.reachable`, `gateway.egress.not_configured`, `gateway.egress.adapter_down` (new — adapter series present but value < 1.0: "configured, not serving"), `gateway.egress.no_denials`, `gateway.egress.denies_unavailable`, `gateway.egress.inflight_label`, `gateway.egress.denies_label`, `gateway.egress.allowlist_label`, `gateway.egress.plane.proxy`, `gateway.egress.plane.relay`, `gateway.egress.plane.adapter`, `gateway.help.egress`. Give each an English `msgstr`. Note: deny reason keys render as compact `{reason}={count}` tokens (no inline description); the existing reserved `gateway.egress.denied.*` keys are audit-only.
 
 - [ ] **Step 2: Run the i18n flow**
 

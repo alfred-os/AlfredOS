@@ -8,6 +8,8 @@ semantics, never a traceback — hard rule #7).
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from typing import Final
 
 import structlog
@@ -18,8 +20,6 @@ from prometheus_client.parser import text_string_to_metric_families
 from alfred.cli.gateway._commands import _fetch_metrics_text
 from alfred.egress.relay_protocol import EgressRelayDenyReason
 from alfred.gateway.egress_audit import EgressDenyReason
-from alfred.gateway.egress_audit import reason_i18n_key as proxy_reason_key
-from alfred.gateway.egress_relay_audit import reason_i18n_key as relay_reason_key
 from alfred.gateway.metrics_server import resolve_metrics_port
 from alfred.i18n import t
 
@@ -27,19 +27,20 @@ log = structlog.get_logger(__name__)
 
 _EXIT_UNAVAILABLE: Final[int] = 2
 
-# Per-plane closed reason enums + their i18n key functions.
+# Per-plane closed reason enums used for token validation in _validate_reason.
 _PROXY_REASONS: Final = {r.value for r in EgressDenyReason}
 _RELAY_REASONS: Final = {r.value for r in EgressRelayDenyReason}
 
 
 def egress_status() -> None:
     """Render the per-plane egress state; raise ``typer.Exit(2)`` on metrics unavailable."""
+    port: int | str = "unset"
     try:
         port = resolve_metrics_port()
         metrics_text = _fetch_metrics_text(port)
     except (OSError, ValueError) as exc:
-        log.warning("gateway.egress.unreachable", error=repr(exc))
-        typer.echo(t("gateway.egress.unreachable"))
+        log.warning("gateway.egress.unreachable", port=port, error=repr(exc))
+        typer.echo(t("gateway.egress.unreachable", port=port))
         raise typer.Exit(code=_EXIT_UNAVAILABLE) from exc
 
     families = {f.name: f for f in text_string_to_metric_families(metrics_text)}
@@ -53,7 +54,7 @@ def egress_status() -> None:
 
     _render_plane("proxy", "gateway.egress.plane.proxy", inflight, denied, denied_family_present)
     _render_plane("relay", "gateway.egress.plane.relay", inflight, denied, denied_family_present)
-    _render_adapter(inflight, denied, denied_family_present, present=bool(adapter_up))
+    _render_adapter(inflight, denied, denied_family_present, adapter_up=adapter_up)
 
     # Per-plane static allowlist (config read, not a scrape).
     _render_allowlists()
@@ -109,16 +110,15 @@ def _fmt_denies(plane: str, reasons: dict[str, float], family_present: bool) -> 
         return t("gateway.egress.no_denials")
     parts: list[str] = []
     for reason, count in sorted(nonzero.items()):
-        # Validate against the plane's closed enum and get the i18n description.
-        # Metric label VALUES stay English (reason token) so operators can correlate
-        # with Prometheus — the human-readable description follows in parentheses.
-        description = _reason_description(plane, reason)
-        parts.append(f"{reason}={count} ({description})")
+        # Validate against the plane's closed enum. Metric label VALUES stay English
+        # (reason token = Prometheus-correlatable) — no verbose description inline.
+        _validate_reason(plane, reason)
+        parts.append(f"{reason}={count}")
     return "  ".join(parts)
 
 
-def _reason_description(plane: str, reason: str) -> str:
-    """Validate ``reason`` against the plane's closed enum and return the i18n description.
+def _validate_reason(plane: str, reason: str) -> None:
+    """Validate ``reason`` against the plane's closed enum.
 
     Raises ``ValueError`` on an unknown reason token so metric drift fails loud
     (display-side payload-blindness — hard rule #7).
@@ -126,10 +126,9 @@ def _reason_description(plane: str, reason: str) -> str:
     if plane in {"proxy", "adapter"}:
         if reason not in _PROXY_REASONS:
             raise ValueError(f"unknown egress deny reason {reason!r} for plane {plane!r}")
-        return t(proxy_reason_key(EgressDenyReason(reason)))
+        return
     if reason not in _RELAY_REASONS:
         raise ValueError(f"unknown egress deny reason {reason!r} for plane {plane!r}")
-    return t(relay_reason_key(EgressRelayDenyReason(reason)))
 
 
 def _render_adapter(
@@ -137,14 +136,41 @@ def _render_adapter(
     denied: dict[str, dict[str, float]],
     denied_family_present: bool,
     *,
-    present: bool,
+    adapter_up: dict[str, float],
 ) -> None:
-    if not present:
+    if not adapter_up:
         typer.echo(t("gateway.egress.plane.adapter") + "  " + t("gateway.egress.not_configured"))
+        return
+    if not any(v >= 1.0 for v in adapter_up.values()):
+        # Series present but value < 1.0 → adapter is configured but not currently serving
+        # (crashed / breaker-open / spawning).
+        typer.echo(t("gateway.egress.plane.adapter") + "  " + t("gateway.egress.adapter_down"))
         return
     _render_plane(
         "adapter", "gateway.egress.plane.adapter", inflight, denied, denied_family_present
     )
+
+
+def _emit_allowlist_line(
+    plane_header_key: str,
+    plane_suffix: str,
+    build_entries: Callable[[], list[str]],
+) -> None:
+    """Emit one allowlist summary line; degrades loudly on error (never crashes the report)."""
+    label = t("gateway.egress.allowlist_label")
+    plane_name = t(plane_header_key) + plane_suffix
+    try:
+        entries = build_entries()
+        typer.echo(
+            label
+            + " "
+            + plane_name
+            + ": "
+            + (", ".join(entries) if entries else t("gateway.egress.allowlist_empty"))
+        )
+    except Exception as exc:  # degrade loudly — never crash the report
+        log.warning("gateway.egress.allowlist_unresolved", plane=plane_header_key, error=repr(exc))
+        typer.echo(label + " " + plane_name + ": " + t("gateway.egress.allowlist_unresolved"))
 
 
 def _render_allowlists() -> None:
@@ -154,65 +180,31 @@ def _render_allowlists() -> None:
     gateway uses at boot — so the printed set cannot drift from what the proxy/relay
     actually enforces.
     """
-    # Provider proxy allowlist (anthropic + deepseek).
-    try:
+
+    def _proxy_entries() -> list[str]:
         from alfred.egress.allowlist import provider_egress_allowlist
         from alfred.gateway.egress_proxy import resolve_deepseek_base_url
 
-        proxy_al = provider_egress_allowlist(resolve_deepseek_base_url())
-        proxy_entries = sorted(f"{h}:{p}" for h, p in proxy_al)
-        typer.echo(
-            t("gateway.egress.allowlist_label")
-            + " proxy: "
-            + (", ".join(proxy_entries) if proxy_entries else t("gateway.egress.allowlist_empty"))
-        )
-    except Exception as exc:  # degrade loudly — never crash the report
-        log.warning("gateway.egress.allowlist_unresolved", plane="proxy", error=repr(exc))
-        typer.echo(
-            t("gateway.egress.allowlist_label")
-            + " proxy: "
-            + t("gateway.egress.allowlist_unresolved")
-        )
+        return sorted(f"{h}:{p}" for h, p in provider_egress_allowlist(resolve_deepseek_base_url()))
 
-    # Tool-egress relay allowlist.
-    try:
+    def _relay_entries() -> list[str]:
         from alfred.gateway.egress_relay import resolve_tool_egress_allowlist
 
-        relay_al = resolve_tool_egress_allowlist()
-        relay_entries = sorted(f"{h}:{p}" for h, p in relay_al)
-        typer.echo(
-            t("gateway.egress.allowlist_label")
-            + " relay: "
-            + (", ".join(relay_entries) if relay_entries else t("gateway.egress.allowlist_empty"))
-        )
-    except Exception as exc:
-        log.warning("gateway.egress.allowlist_unresolved", plane="relay", error=repr(exc))
-        typer.echo(
-            t("gateway.egress.allowlist_label")
-            + " relay: "
-            + t("gateway.egress.allowlist_unresolved")
-        )
+        return sorted(f"{h}:{p}" for h, p in resolve_tool_egress_allowlist())
 
-    # Discord adapter allowlist.
-    try:
+    def _discord_entries() -> list[str]:
         from alfred.egress.allowlist import discord_egress_allowlist
 
-        discord_al = discord_egress_allowlist()
-        exact_entries = sorted(f"{h}:{p}" for h, p in discord_al.exact)
-        suffix_entries = sorted(f"*.{h}:{p}" for h, p in discord_al.suffix_bases)
-        all_entries = exact_entries + suffix_entries
-        typer.echo(
-            t("gateway.egress.allowlist_label")
-            + " adapter(discord): "
-            + (", ".join(all_entries) if all_entries else t("gateway.egress.allowlist_empty"))
-        )
-    except Exception as exc:
-        log.warning("gateway.egress.allowlist_unresolved", plane="adapter", error=repr(exc))
-        typer.echo(
-            t("gateway.egress.allowlist_label")
-            + " adapter(discord): "
-            + t("gateway.egress.allowlist_unresolved")
-        )
+        # Thread the operator-added env var exactly as _commands.py:352 does so the
+        # report cannot drift from what the adapter proxy actually enforces.
+        al = discord_egress_allowlist(os.environ.get("ALFRED_DISCORD_EGRESS_ALLOWLIST", ""))
+        exact = sorted(f"{h}:{p}" for h, p in al.exact)
+        suffix = sorted(f"*.{h}:{p}" for h, p in al.suffix_bases)
+        return exact + suffix
+
+    _emit_allowlist_line("gateway.egress.plane.proxy", "", _proxy_entries)
+    _emit_allowlist_line("gateway.egress.plane.relay", "", _relay_entries)
+    _emit_allowlist_line("gateway.egress.plane.adapter", "(discord)", _discord_entries)
 
 
 __all__ = ["egress_status"]
