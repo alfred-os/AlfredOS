@@ -24,7 +24,9 @@ GATEWAY_SRC = ROOT / "src" / "alfred" / "gateway"
 # ``Histogram(`` call (via ``ast``) — not a blind ``gateway_*`` string regex — keeps the
 # "no silently-dead alerts" cross-check honest: a quoted metric name that isn't actually
 # a registered series can no longer whitelist an alert/panel that references it.
-_PROMETHEUS_CTORS = frozenset({"Counter", "Gauge", "Histogram"})
+# GaugeMetricFamily is how a custom collector emits a Gauge (gateway_egress_inflight);
+# CounterMetricFamily is intentionally NOT listed — it is unused in source.
+_PROMETHEUS_CTORS = frozenset({"Counter", "Gauge", "Histogram", "GaugeMetricFamily"})
 _METRIC_REF_RE = re.compile(r"\bgateway_[a-z0-9_]*\b")
 
 
@@ -36,16 +38,46 @@ def _call_name(node: ast.expr) -> str | None:
     return None
 
 
+def _module_str_consts(tree: ast.Module) -> dict[str, str]:
+    # Resolve module-level string constants bound via ``X = "..."`` (ast.Assign) OR
+    # ``X: Final[str] = "..."`` (ast.AnnAssign) so a ctor called with a Name first-arg
+    # (e.g. ``Counter(_DENIED_NAME, ...)``) is derivable, not silently skipped.
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    consts[tgt.id] = node.value.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            consts[node.target.id] = node.value.value
+    return consts
+
+
 def _metric_names_in(path: Path) -> set[str]:
     names: set[str] = set()
     tree = ast.parse(path.read_text())
+    consts = _module_str_consts(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _call_name(node.func) not in _PROMETHEUS_CTORS:
             continue
-        if not node.args or not isinstance(node.args[0], ast.Constant):
+        if not node.args:
             continue
-        metric_name = node.args[0].value
-        if isinstance(metric_name, str) and _METRIC_REF_RE.fullmatch(metric_name):
+        arg = node.args[0]
+        metric_name: str | None = None
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            metric_name = arg.value
+        elif isinstance(arg, ast.Name):
+            metric_name = consts.get(arg.id)
+        if metric_name is not None and _METRIC_REF_RE.fullmatch(metric_name):
             names.add(metric_name)
     return names
 
@@ -63,6 +95,14 @@ def _known_metric_bases() -> set[str]:
     for path in _METRIC_DEFINING_FILES:
         names |= _metric_names_in(path)
     return names | {f"{n}_total" for n in names}
+
+
+def _known_reason_values() -> set[str]:
+    # The deny-reason label values the alerts' ``reason=~``/``reason=`` matchers select on.
+    from alfred.egress.relay_protocol import EgressRelayDenyReason
+    from alfred.gateway.egress_audit import EgressDenyReason
+
+    return {r.value for r in EgressDenyReason} | {r.value for r in EgressRelayDenyReason}
 
 
 def test_prometheus_scrape_has_gateway_job() -> None:
@@ -92,3 +132,19 @@ def test_gateway_dashboard_parses_and_references_real_metrics() -> None:
             referenced = set(re.findall(r"gateway_[a-z_]+", target.get("expr", "")))
             unknown = referenced - known
             assert referenced <= known, f"panel {panel.get('title')} references unknown: {unknown}"
+
+
+def test_egress_custom_collector_metrics_are_derivable() -> None:
+    # gateway_egress_inflight (GaugeMetricFamily via _INFLIGHT_NAME const) and
+    # gateway_egress_denied_total (Counter via _DENIED_NAME const) must be visible to
+    # the derivation, else PR-B's egress alerts/panels fail the referenced<=known check.
+    known = _known_metric_bases()
+    assert "gateway_egress_inflight" in known
+    assert "gateway_egress_denied_total" in known
+
+
+def test_known_reason_values_cover_both_enums() -> None:
+    vals = _known_reason_values()
+    assert "canary_tripped" in vals  # EgressRelayDenyReason
+    assert "malformed_connect" in vals  # EgressDenyReason
+    assert "destination_not_allowlisted" in vals  # both
