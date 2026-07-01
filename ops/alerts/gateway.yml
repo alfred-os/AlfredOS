@@ -43,3 +43,44 @@ groups:
         annotations:
           summary: "AlfredOS gateway adapter replay-buffer is near its per-leg cap"
           description: "gateway_adapter_buffer_depth_bytes{adapter} > 6 MiB for 2m (the 8 MiB per-leg soft/breaker cap is approaching; the hard ceiling is 16 MiB); the leg's un-acked backlog is growing — check core reachability for that leg."
+      # Spec C G7-5 PR-B (#333): egress-plane alerting over the PR-A metric families.
+      - alert: GatewayEgressDenyRate
+        expr: rate(gateway_egress_denied_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway is denying egress"
+          description: "gateway_egress_denied_total{plane,reason} is increasing for 5m; a client/tool/adapter is repeatedly hitting the default-deny egress allowlist. Inspect the plane + reason breakdown."
+      - alert: GatewayEgressInflightSaturation
+        expr: gateway_egress_inflight > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway egress in-flight is high"
+          description: "gateway_egress_inflight{plane} > 100 concurrent CONNECT tunnels for 5m. NOTE: egress in-flight has no hard cap; 100 is a conservative STARTING threshold — tune it to your deployment's baseline."
+      - alert: GatewayEgressSecurityDenySpike
+        expr: 'rate(gateway_egress_denied_total{reason=~"literal_ip_target|resolved_ip_not_global|canary_tripped|dlp_redacted"}[5m]) > 0'
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AlfredOS gateway refused a security-relevant egress"
+          description: "A zero-baseline security deny is occurring: SSRF (literal_ip_target / resolved_ip_not_global), a canary trip (active exfil probe), or a DLP catch (dlp_redacted). Treat as a possible active attack."
+      - alert: GatewayEgressExfilSpike
+        expr: 'rate(gateway_egress_denied_total{reason="destination_not_allowlisted"}[5m]) > 0.1'
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AlfredOS gateway is refusing a burst of non-allowlisted egress"
+          description: "gateway_egress_denied_total{reason=destination_not_allowlisted} rate > 0.1/s for 2m. A burst of denials to non-allowlisted (globally-routable) destinations is the realistic data-exfil signal (POST to an attacker domain). NOTE: 0.1/s is a conservative STARTING threshold — tune to baseline; the warning-tier GatewayEgressDenyRate still catches the trickle."
+      - alert: GatewayEgressOutage
+        expr: rate(gateway_egress_connect_total{outcome="error"}[5m]) > 0 or rate(gateway_egress_relay_total{outcome="error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway egress is erroring"
+          description: "gateway_egress_{connect,relay}_total{outcome=error} is increasing for 5m; the egress plane is failing to complete tunnels/fetches. A sustained outage can itself suppress deny-counting, blinding the security alerts — investigate promptly."
