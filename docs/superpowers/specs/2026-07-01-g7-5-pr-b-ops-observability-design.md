@@ -53,11 +53,12 @@ Added to the `alfred-gateway` group, following the existing `expr`/`for`/`severi
 | --- | --- | --- | --- |
 | `GatewayEgressDenyRate` | warning | `rate(gateway_egress_denied_total[5m]) > 0` | 5m |
 | `GatewayEgressInflightSaturation` | warning | `gateway_egress_inflight > 100` | 5m |
-| `GatewayEgressSecurityDenySpike` | critical | `rate(gateway_egress_denied_total{reason=~"literal_ip_target|resolved_ip_not_global|canary_tripped|dlp_redacted"}[5m]) > 0` | 2m |
+| `GatewayEgressSecurityDenySpike` | critical | `rate(gateway_egress_denied_total{reason=~"literal_ip_target\|resolved_ip_not_global\|canary_tripped\|dlp_redacted"}[5m]) > 0` | 2m |
 | `GatewayEgressExfilSpike` | critical | `rate(gateway_egress_denied_total{reason="destination_not_allowlisted"}[5m]) > 0.1` | 2m |
 | `GatewayEgressOutage` | warning | `rate(gateway_egress_connect_total{outcome="error"}[5m]) > 0 or rate(gateway_egress_relay_total{outcome="error"}[5m]) > 0` | 5m |
 
 **Reason tiers (security-reviewed).**
+
 - **Critical zero-baseline set** (`GatewayEgressSecurityDenySpike`): `literal_ip_target`, `resolved_ip_not_global` (SSRF), `canary_tripped` (active exfil probe), `dlp_redacted` (a genuine detector-deny — confirmed at `egress_relay.py` L446-467, increments the counter). Any occurrence pages.
 - **Critical domain-exfil spike** (`GatewayEgressExfilSpike`): `destination_not_allowlisted` is the realistic data-exfil signal (POST to an attacker's *globally-routable* domain — the SSRF reasons never fire on it). It's also the noisiest routine reason (a misconfigured client), so it pages on a **rate SPIKE** (`> 0.1`/s ≈ 6/min, a **conservative tunable starting threshold**), not on the trickle. The warning-tier `GatewayEgressDenyRate` still catches the trickle.
 - **Warning-tier only**: `malformed_connect`, `response_too_large`, `malformed_envelope`, and `upstream_redirect_refused` (benign-noisy — every `web.fetch` http→https/CDN redirect trips it; paging would desensitize on-call and mask a real canary trip).
@@ -84,6 +85,7 @@ CI installs promtool (Prometheus release/toolchain) and runs both; non-zero fail
 `tests/unit/test_ops_scaffold.py::_metric_names_in` currently derives known series only from `Counter(`/`Gauge(`/`Histogram(` calls whose first arg is a **string literal**. Both new egress metrics evade this — `gateway_egress_inflight` via `GaugeMetricFamily(_INFLIGHT_NAME,…)`, `gateway_egress_denied` via `Counter(_DENIED_NAME,…)` — because (a) `GaugeMetricFamily` isn't recognised and (b) the name args are `ast.Name`s bound to `Final[str]` consts.
 
 Extension:
+
 1. Add `GaugeMetricFamily` to the recognised constructor set.
 2. Build a module-level name→value map from top-level `ast.Assign` **and `ast.AnnAssign`** string constants; when a recognised ctor's first arg is an `ast.Name`, resolve it through the map. Applies to the WHOLE ctor set (Counter included).
 3. **Label-value guard (new test):** derive the member `.value`s of `EgressDenyReason` + `EgressRelayDenyReason` (AST or import) and assert every `reason` alternative referenced by an alert `expr` is a real enum value. Keeps the highest-severity pager from silently fail-opening on a typo or enum rename.
