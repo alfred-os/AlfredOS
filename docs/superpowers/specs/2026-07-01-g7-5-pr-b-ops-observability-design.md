@@ -8,7 +8,7 @@
 
 ## 1. Purpose
 
-PR-A shipped two canonical egress metric families but nothing in `ops/` alerts on them *by reason or plane*. PR-B makes the egress plane **operator-observable**: a Grafana dashboard view + Prometheus alerting for the egress control plane, mirroring the existing `gateway_adapter_*` / `gateway_buffer_*` idioms. It ships **no new `src/` runtime behaviour**.
+PR-A shipped two canonical egress metric families but nothing in `ops/` alerts on them *by reason or plane*. PR-B makes the egress plane **operator-observable**: a Grafana dashboard view + Prometheus alerting for the egress control plane, mirroring the existing `gateway_adapter_*` / `gateway_buffer_*` idioms. It adds **no new egress runtime behaviour**; its only `src/` touch is a small metric-hygiene fix the critical alert's correctness requires (§5.1).
 
 The consumed metric contract (from PR-A, `src/alfred/gateway/egress_metrics.py`):
 
@@ -33,8 +33,9 @@ The consumed metric contract (from PR-A, `src/alfred/gateway/egress_metrics.py`)
 | `ops/alerts/gateway_test.yml` (new) | `promtool test rules` firing-logic unit tests |
 | `.github/workflows/*.yml` | new CI step: install promtool + `promtool check rules` + `promtool test rules` |
 | `tests/unit/test_ops_scaffold.py` | extend `_metric_names_in` (ctor set + const resolution over Assign/AnnAssign); add the reason-label-value ⊆ enum guard; assert the 5 egress alerts + 2 panels |
+| `src/alfred/gateway/egress_metrics.py` (+ test) | **one metric-hygiene src change** (sec-355-1, §5.1): pre-initialise the deny counter's 16 closed `(plane,reason)` children to 0 so the critical alert fires on the FIRST occurrence |
 
-No `src/alfred/` change.
+**Src scope:** PR-B is ops observability plus a **single** small metric-hygiene fix in `egress_metrics.py` (the sec-355-1 pre-init, §5.1). A PR-B-review finding surfaced that the critical alert would otherwise miss the first zero-baseline deny; the fix and the alert must reach `main` together (architect coherence constraint), so the pre-init ships here rather than in a separate PR. No other `src/` change.
 
 ## 4. Dashboard panels
 
@@ -67,6 +68,10 @@ Added to the `alfred-gateway` group, following the existing `expr`/`for`/`severi
 
 **Outage alert.** `GatewayEgressOutage` (warning) fires on a sustained egress error rate — a broken egress plane that could itself suppress deny-counting (making the security alerts blind). The `outcome="error"` value is confirmed real on both `gateway_egress_connect_total` and `gateway_egress_relay_total`; the `or` disjunct in the alert expr covers both counters. Note the scope boundary: this alert covers the **erroring-but-alive** case (the gateway process is up, `/metrics` reachable, tunnels/fetches failing). A **hard-down** gateway (process dead or `/metrics` unreachable) is covered by Prometheus scrape-health (`up{job="alfred-gateway"}==0`), not this alert.
 
+### 5.1 Counter pre-initialisation (sec-355-1 — the one `src/` change)
+
+A PR-B-review finding: `gateway_egress_denied_total`'s `(plane,reason)` children are **lazily created** (only on the first `.inc()`). A rate-based alert on a lazily-created counter cannot fire on the FIRST occurrence — a single first deny makes the series appear flat-at-`1`, so `rate([5m])==0` and the critical `GatewayEgressSecurityDenySpike` silently misses the very event it exists to catch (a first canary trip / SSRF / DLP catch). The idiomatic Prometheus fix is to **pre-initialise** the closed label space to 0. `build_denied_counter` (`src/alfred/gateway/egress_metrics.py`) therefore instantiates all 16 children (`proxy`×`EgressDenyReason`=4, `adapter`×`EgressDenyReason`=4, `relay`×`EgressRelayDenyReason`=8) at 0 at construction, giving `rate()` the `0→1` transition it needs. A src test asserts all 16 render at 0 on a fresh registry (`egress_metrics.py` stays 100%); a promtool case (`0 0 0 1 1 1 …`) proves the first single deny fires. This is the alert's enabling metric-hygiene, so it ships with the alert (the alert and the pre-init reach `main` together).
+
 ## 6. promtool gate (check + test rules)
 
 `promtool check rules ops/alerts/gateway.yml` validates every rule's PromQL/structure — but note it PASSES a `\|`-broken regex (valid regex, wrong semantics), so `test rules` is the real guard for the critical alerts' matchers.
@@ -96,10 +101,10 @@ Then extend the alert/panel assertions to require the 5 egress alerts + confirm 
 
 - `tests/unit/test_ops_scaffold.py` — parses JSON/YAML, asserts the 5 egress alerts present, all referenced `gateway_*` series known (via the §7 ctor+const extension), all alert `reason` label-values are real enum members (§7.3), and the 2 egress panels present + reference known series.
 - `promtool check rules` + `promtool test rules` in CI (§6).
-- No `src/` change → no unit/integration/adversarial impact beyond the ops-scaffold test.
+- The only `src/` change is the §5.1 pre-init (a src coverage test keeps `egress_metrics.py` at 100%); no other unit/integration/adversarial impact beyond the ops-scaffold test.
 
 ## 9. Out of scope
 
-- No new metric families or `src/` runtime change (PR-A owns the contract).
+- No new metric families (PR-A owns the contract). The only `src/` change is the §5.1 deny-counter pre-init — metric hygiene the alert requires, not new runtime behaviour.
 - No per-destination panels (payload-blindness — labels are closed enums only).
 - ADR-0040 / PRD / CLAUDE.md documentation of the egress metric set + the corrected adapter-reachability-by-value derivation is **PR-D** (human-gated). PR-B is self-mergeable.
