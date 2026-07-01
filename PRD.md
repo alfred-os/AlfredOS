@@ -75,7 +75,7 @@ Each criterion is binary; all must pass for v0.1.
         │  - Auth & identity binding   - Rate limit per user     │
         │  - Untrusted-content tagging - Outbound DLP scan       │
         └──────────────────────────┬─────────────────────────────┘
-                                   │ event bus (Redis streams)
+                                   │ gateway socket transport (Spec A/B)
         ┌──────────────────────────▼─────────────────────────────┐
         │             AGENTIC CORE (Python 3.12+)                 │
         │                                                         │
@@ -121,6 +121,8 @@ Each criterion is binary; all must pass for v0.1.
 - **The LLM never holds secrets.** The secret broker substitutes values at the tool-call boundary; the LLM sees opaque references (`{{secret:gmail_oauth}}`).
 - **Dual-LLM split.** The privileged orchestrator never processes raw T3 content; the quarantined LLM is the only consumer of T3 content and can only emit structured data.
 - **Every action is hookable.** Every unit of work the agentic core dispatches — tool calls, provider calls, memory writes, comms outbounds, consolidation passes, audit writes, inter-persona messages, skill invocations — is registered with a hookable interface (pre / post / error / cancel). Hook registration is plugin-scoped and capability-gated; hook ordering is deterministic (system tier → operator tier → user-plugin tier, registration order within tier). Detail in §5.1; ADR-0014 carries the rationale and the slice-placement decision.
+- **Gateway as external I/O plane (from Spec B / Spec C).** Comms adapters are hosted in the gateway container (Spec B, [ADR-0036](docs/adr/0036-gateway-adapter-hosting-inversion.md)). The gateway is the sole external egress plane for all outbound network I/O: provider calls, tool-egress, and adapter-egress all route through the gateway's L7 CONNECT forward-proxy (Spec C, [ADR-0040](docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md)).
+- **Connectivity-free core (from Spec C / G7).** `alfred-core` runs on an isolated internal network (`internal: true`); it cannot open external sockets. The kernel enforces this without application-level cooperation. See [ADR-0040](docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md).
 
 ### 5.1 Hookable actions
 
@@ -442,10 +444,17 @@ T3 untrusted       — Web pages, emails, MCP tool outputs, file contents, link 
 
 - Synthetic credentials seeded into ingested untrusted content. Any attempted use trips quarantine + alert + audit entry.
 
-**Egress allowlists per session:**
+**Egress allowlists:**
 
-- Default-deny for outbound network calls.
-- Each conversation starts with an empty allowlist; tools requiring network specify domains.
+- Default-deny for outbound network calls (from Spec C / G7). The gateway is the
+  structural enforcement point: a destination allowlist plus a gateway-side DLP pass
+  (mode b) form the structural ceiling for all outbound I/O. See
+  [ADR-0040](docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md) for
+  the two-layer enforcement model (kernel isolation as enforcement-of-record; gateway
+  allowlist + DLP as independent defense-in-depth).
+- Per-session capability grants narrow within that ceiling: tools requiring network declare
+  the domains they need; those domains must also be in the gateway's destination allowlist.
+  Each conversation starts with an empty per-session grant.
 
 **Audit & rollback:**
 
