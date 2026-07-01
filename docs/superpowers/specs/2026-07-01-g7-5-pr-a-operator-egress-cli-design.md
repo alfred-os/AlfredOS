@@ -24,7 +24,7 @@ Give an operator a read-only view of the **egress plane's** live state so they c
 
 - **Allowlist** — an **in-process config read**. Call the existing resolver/builders (`alfred.egress.allowlist` provider + Discord builders; `alfred.gateway.egress_relay` tool-allowlist parse) which read env/config. Static at startup; no scrape needed.
 - **Reachability + in-flight + deny counts** — a **metrics scrape** of `http://127.0.0.1:<metrics-port>/metrics`, reusing the established `alfred.gateway.metrics_server.resolve_metrics_port()` + `_fetch_metrics_text(port)` seam that `healthcheck_gateway` already uses. **Parse with `prometheus_client.parser.text_string_to_metric_families`** (real label-aware parsing) — NOT `healthcheck`'s naive `_breaker_latched` line-scan, since a `{plane,reason}` table needs the label values. **Reachability is derived** (no `up` gauge): proxy + relay are up iff `/metrics` is reachable (fail-closed bind); the adapter plane's presence is read from the *existing* `gateway_adapter_up{adapter}` series in the same scrape. In-flight + deny-counts come from the two new families. No new wire protocol.
-- **Allowlist caveat:** the allowlist shown is the operator-configured set (a config re-read), not live per-connection proxy state — a one-line caveat in the output makes that honest.
+- **Allowlist caveat:** the allowlist shown is the operator-configured set (a config re-read, including the `ALFRED_DISCORD_EGRESS_ALLOWLIST` env var for the discord plane), not live per-connection proxy state. The caveat lives in the `_render_allowlists()` code docstring.
 
 ## 4. Metric wiring (the `src/` additions)
 
@@ -41,30 +41,52 @@ Metric **names + label values stay English** (Prometheus; not `t()`-wrapped). Th
 
 ## 5. Output & i18n
 
-`egress` renders **per-plane stanzas** (not a single columnar table — the allowlist wraps and breaks columns), all operator text via `t()`, e.g.:
+`egress` renders **per-plane stanzas** followed by a **trailing allowlist block** (the
+allowlist is a separate config-read, not part of the per-plane scrape stanza), all
+operator text via `t()`, e.g.:
 
 ```
-provider proxy      reachable
-  allowlist         api.anthropic.com:443, api.deepseek.com:443
-  in-flight         2
-  denies            destination_not_allowlisted=4  literal_ip_target=1
+provider proxy  up
+  in-flight: 2
+  denials: destination_not_allowlisted=4  literal_ip_target=1
 
-tool relay          reachable
-  allowlist         <none> (default-deny)
-  in-flight         0
-  denies            no denials
+tool-egress relay  up
+  in-flight: 0
+  denials: no denials
 
-discord adapter     not configured
+adapter  not configured (no adapter up)
+
+allowlist: provider proxy: api.anthropic.com:443, api.deepseek.com:443
+allowlist: tool-egress relay: (empty)
+allowlist: adapter(discord): discord.com:443, *.discord.gg:443
 ```
 
-Contract: one stanza per plane; reachability, allowlist, in-flight, deny-counts-by-reason, all `t()`-localised. **The plane header** ("provider proxy"/"tool relay"/"discord adapter") is a **distinct `t()` string**, NOT the English metric label value (`proxy`/`relay`/`adapter`) — so it never ships as hardcoded English. **Deny display:** omit zero-count reasons, but print an explicit `no denials` line so "0 denies" is distinguishable from "metric absent". **Reason labels render via the PER-PLANE `reason_i18n_key()` — there are TWO functions** (`egress_audit.reason_i18n_key` → `gateway.egress.denied.*` for proxy/adapter; `egress_relay_audit.reason_i18n_key` → `gateway.egress.relay_denied.*` for relay); the renderer dispatches by plane. All 12 keys are already reserved in `src/alfred/i18n/_spec_c_reserve.py` — do not mint new ones. **The renderer validates each scraped `reason` token against the plane's closed enum and fails loud on an unknown token** (metric-drift detection + display-side payload-blindness). Deny counts are cumulative-since-gateway-start (windowed rates are a dashboard concern → PR-B).
+**Adapter plane — three states:**
+
+- `gateway_adapter_up{adapter}` series absent → `not configured (no adapter up)` (no Discord adapter hosted).
+- Series present, value `< 1.0` → `configured, not serving` (adapter crashed / breaker-open / spawning).
+- Series present, value `>= 1.0` → renders the full per-plane stanza (in-flight + deny counts).
+
+**Deny display:** omit zero-count reasons; print compact `{reason}={count}` tokens (Prometheus-correlatable, English metric label values — no verbose inline description).
+Print an explicit `no denials` when the family is present but has no nonzero count, so
+"0 denies" is distinguishable from "metric absent" (which prints `deny counter unavailable`).
+**The renderer validates each scraped `reason` token against the plane's closed enum
+and fails loud on an unknown token** (metric-drift detection + display-side payload-blindness).
+
+**Allowlist block:** a trailing `_render_allowlists()` call (not inline per stanza) reads the
+operator-configured allowlist for each plane (the same derivation the gateway uses at boot,
+including the `ALFRED_DISCORD_EGRESS_ALLOWLIST` env var for the discord plane) so the printed
+set cannot drift from what the proxy/relay actually enforces. The caveat ("config read, not a
+scrape") lives in the code docstring.
+
+Deny counts are cumulative-since-gateway-start (windowed rates are a dashboard concern → PR-B).
 
 ## 6. Error handling & exit codes (fail-loud, no traceback)
 
 **Exit codes follow the report family (`adapters`), NOT `healthcheck`.** `adapters` established **exit-2 = backend unavailable** ("I can't read the data") distinct from a real negative state — `healthcheck`'s exit-1 means *unhealthy*. Reusing exit-1 would conflate "can't tell" with "egress is down" and misbranch a script.
 
 - Metrics endpoint unreachable / malformed `ALFRED_GATEWAY_METRICS_PORT` → a friendly `t("gateway.egress.unreachable", …)` line + **exit-2** (unavailable), never a raw traceback. The message includes a next-step hint that `egress` must run **in the gateway container** (`docker compose exec alfred-gateway alfred gateway egress`) — a host invocation legitimately hits this path.
-- **Plane-aware reachability (derived, no `up` gauge):** with `/metrics` reachable, proxy + relay are **up** (fail-closed bind — a down proxy/relay means the gateway already exited). The **adapter** plane is `up` iff a `gateway_adapter_up{adapter}` series is present in the scrape, else `not configured` (no Discord adapter hosted). If `/metrics` itself is unreachable, the whole command takes the exit-2 unavailable path above — no per-plane state is knowable.
+- **Plane-aware reachability (derived, no `up` gauge):** with `/metrics` reachable, proxy + relay are **up** (fail-closed bind — a down proxy/relay means the gateway already exited). The **adapter** plane has three states derived from the `gateway_adapter_up{adapter}` value: series absent → `not configured`; series present with value `< 1.0` → `configured, not serving` (crashed / breaker-open); value `>= 1.0` → renders the full stanza. If `/metrics` itself is unreachable, the whole command takes the exit-2 unavailable path above — no per-plane state is knowable.
 
 ## 7. Security considerations
 

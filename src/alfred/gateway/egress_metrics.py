@@ -52,7 +52,9 @@ class EgressInflightCollector:
             "In-flight egress connections per plane (proxy/relay/adapter).",
             labels=[_PLANE_LABEL],
         )
-        for plane, conns in self._planes.items():
+        # Snapshot before iteration: register/deregister mutate _planes from the asyncio
+        # event-loop thread while collect() may run on the /metrics daemon thread.
+        for plane, conns in list(self._planes.items()):
             family.add_metric([plane], float(len(conns)))
         yield family
 

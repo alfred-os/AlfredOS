@@ -50,6 +50,25 @@ def test_no_adapter_up_series_reports_not_configured(capsys, monkeypatch) -> Non
     assert "not configured (no adapter up)" in out
 
 
+def test_adapter_up_zero_renders_adapter_down(capsys, monkeypatch) -> None:
+    """FIX 2: adapter_up series present but value 0.0 → 'configured, not serving'."""
+    metrics_adapter_down = """\
+# TYPE gateway_egress_inflight gauge
+gateway_egress_inflight{plane="proxy"} 2.0
+gateway_egress_inflight{plane="relay"} 0.0
+# TYPE gateway_egress_denied_total counter
+gateway_egress_denied_total{plane="proxy",reason="literal_ip_target"} 1.0
+# TYPE gateway_adapter_up gauge
+gateway_adapter_up{adapter="discord"} 0.0
+"""
+    monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: metrics_adapter_down)
+    monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
+    _egress.egress_status()
+    out = capsys.readouterr().out
+    # Adapter series is present but value < 1.0 → the gateway.egress.adapter_down msgstr.
+    assert "configured, not serving" in out
+
+
 def test_unknown_reason_token_fails_loud(monkeypatch) -> None:
     bad = _METRICS.replace("literal_ip_target", "totally_bogus_reason")
     monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: bad)
@@ -212,3 +231,46 @@ def test_discord_allowlist_degrade_renders_unresolved(capsys, monkeypatch) -> No
     _egress.egress_status()
     out = capsys.readouterr().out
     assert "adapter(discord): (unresolved" in out
+
+
+def test_discord_allowlist_includes_env_extra(capsys, monkeypatch) -> None:
+    """FIX 4: ALFRED_DISCORD_EGRESS_ALLOWLIST is threaded into discord_egress_allowlist."""
+    import alfred.egress.allowlist as _allowlist_mod
+    from alfred.egress.allowlist import DiscordEgressAllowlist
+
+    def _capture(extra: str = "") -> DiscordEgressAllowlist:
+        assert "extra.example.com" in extra, f"env var not threaded through; got {extra!r}"
+        return DiscordEgressAllowlist(
+            exact=frozenset({("extra.example.com", 443)}),
+            suffix_bases=frozenset(),
+        )
+
+    monkeypatch.setattr(_allowlist_mod, "discord_egress_allowlist", _capture)
+    monkeypatch.setenv("ALFRED_DISCORD_EGRESS_ALLOWLIST", "extra.example.com:443")
+    monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: _METRICS)
+    monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
+    _egress.egress_status()
+    out = capsys.readouterr().out
+    # The operator-added entry must appear in the allowlist block.
+    assert "extra.example.com:443" in out
+
+
+def test_proxy_allowlist_happy_path_renders_entry(capsys, monkeypatch) -> None:
+    """FIX 7: the allowlist success path renders a real host:port entry."""
+    import alfred.egress.allowlist as _allowlist_mod
+    import alfred.gateway.egress_proxy as _egress_proxy_mod
+
+    monkeypatch.setattr(
+        _egress_proxy_mod, "resolve_deepseek_base_url", lambda: "https://api.deepseek.com"
+    )
+    monkeypatch.setattr(
+        _allowlist_mod,
+        "provider_egress_allowlist",
+        lambda _base_url: frozenset({("api.anthropic.com", 443)}),
+    )
+    monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: _METRICS)
+    monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
+    _egress.egress_status()
+    out = capsys.readouterr().out
+    # At least one real host:port entry must appear in the allowlist block.
+    assert "api.anthropic.com:443" in out
