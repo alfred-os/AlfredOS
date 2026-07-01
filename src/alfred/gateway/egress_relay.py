@@ -55,6 +55,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
+from prometheus_client import Counter
 from pydantic import ValidationError
 
 from alfred.egress.allowlist import (
@@ -70,6 +71,11 @@ from alfred.egress.relay_protocol import (
     FrameTooLargeError,
     read_frame,
     write_frame,
+)
+from alfred.gateway.egress_metrics import (
+    GATEWAY_EGRESS_DENIED,
+    deregister_egress_inflight,
+    register_egress_inflight,
 )
 from alfred.gateway.egress_relay_audit import (
     EGRESS_RELAY_CANARY_EVENT,
@@ -294,6 +300,7 @@ class EgressRelay:
         open_client: _ClientFactory = _default_httpx_client,
         response_byte_cap: int = _DEFAULT_RESPONSE_CAP,
         upstream_deadline_s: float = _DEFAULT_UPSTREAM_DEADLINE_S,
+        denied_counter: Counter | None = None,
     ) -> None:
         self._allowlist = tool_allowlist
         self._dlp = dlp
@@ -305,6 +312,9 @@ class EgressRelay:
         self._response_byte_cap = response_byte_cap
         self._upstream_deadline_s = upstream_deadline_s
         self._conns: set[asyncio.Task[None]] = set()
+        self._denied_counter = (
+            denied_counter if denied_counter is not None else GATEWAY_EGRESS_DENIED
+        )
         # Set once the listener binds; with ``port=0`` it carries the
         # OS-assigned ephemeral port (tests read it to dial the relay without a
         # close-then-rebind free-port TOCTOU). ``None`` until ``serve`` binds.
@@ -331,10 +341,12 @@ class EgressRelay:
         )
         self._bound_port = server.sockets[0].getsockname()[1]
         _log.info("gateway.egress.relay_serving", bind=self._bind_host, port=self._bound_port)
+        register_egress_inflight("relay", self._conns)
         try:
             async with server:
                 await shutdown_event.wait()
         finally:
+            deregister_egress_inflight("relay")
             await self._drain_connections()
 
     async def _drain_connections(self) -> None:
@@ -603,9 +615,10 @@ class EgressRelay:
         decision point inside ``_deny`` / ``_forwarded``.
         """
         await write_frame(writer, reply.model_dump_json().encode("utf-8"))
-        GATEWAY_EGRESS_RELAY.labels(
-            outcome="forwarded" if reply.response is not None else "denied"
-        ).inc()
+        denied = reply.response is None
+        GATEWAY_EGRESS_RELAY.labels(outcome="denied" if denied else "forwarded").inc()
+        if denied and reply.deny_reason is not None:
+            self._denied_counter.labels(plane="relay", reason=reply.deny_reason.value).inc()
 
     @staticmethod
     def _close(writer: asyncio.StreamWriter) -> None:

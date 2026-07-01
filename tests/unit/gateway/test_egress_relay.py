@@ -25,8 +25,11 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 import structlog
+from prometheus_client import CollectorRegistry, Counter, generate_latest
+from prometheus_client.parser import text_string_to_metric_families
 
 from alfred.egress.relay_protocol import EgressRelayReply, EgressRequest
+from alfred.gateway import egress_metrics
 from alfred.gateway.egress_relay import (
     EgressRelay,
     _default_httpx_client,
@@ -155,6 +158,7 @@ def _relay(
     allowlist: frozenset[tuple[str, int]] = _ALLOWLIST,
     response_byte_cap: int = 4096,
     upstream_deadline_s: float = 60.0,
+    denied_counter: Counter | None = None,
 ) -> EgressRelay:
     return EgressRelay(
         tool_allowlist=allowlist,
@@ -166,6 +170,7 @@ def _relay(
         open_client=open_client,  # type: ignore[arg-type]
         response_byte_cap=response_byte_cap,
         upstream_deadline_s=upstream_deadline_s,
+        denied_counter=denied_counter,
     )
 
 
@@ -883,3 +888,30 @@ def test_default_resolve_resolves_localhost() -> None:
 
     resolved = _default_resolve("localhost")
     assert resolved.count(".") == 3 or ":" in resolved  # IPv4 dotted-quad or IPv6
+
+
+# --- denied_total counter (G7-5) -------------------------------------------
+
+
+async def _emit_deny(relay: EgressRelay, reason: EgressRelayDenyReason) -> None:
+    """Drive relay._emit with a denied EgressRelayReply for the given reason."""
+    reply = EgressRelayReply(deny_reason=reason)
+    await relay._emit(_CaptureWriter(), reply)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("reason", list(EgressRelayDenyReason))
+@pytest.mark.asyncio
+async def test_relay_deny_increments_denied_total_for_every_reason(
+    reason: EgressRelayDenyReason,
+) -> None:
+    reg = CollectorRegistry()
+    denied = egress_metrics.build_denied_counter(reg)
+    relay = _relay(open_client=_open_client_factory({}), denied_counter=denied)
+    await _emit_deny(relay, reason)
+    fam = next(
+        f
+        for f in text_string_to_metric_families(generate_latest(reg).decode())
+        if f.name == "gateway_egress_denied"  # parser strips _total suffix
+    )
+    hit = next(s for s in fam.samples if s.labels == {"plane": "relay", "reason": reason.value})
+    assert hit.value == 1.0
