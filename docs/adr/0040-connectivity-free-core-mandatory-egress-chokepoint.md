@@ -15,7 +15,7 @@
 
 From Slice 1 through Spec B, every external network connection in AlfredOS was opened
 directly by the process that needed it — `AnthropicProvider`, `DeepSeekProvider`, the
-Discord adapter, the web-fetch tool — with no kernel-level chokepoint. PRD §7.1 (line 447)
+Discord adapter, the web-fetch tool — with no kernel-level chokepoint. PRD §7.1
 stated "Default-deny for outbound network calls" as a goal, but the structural property
 was not true: `alfred-core` had unrestricted outbound NAT, and every sandboxed child ran
 without `--unshare-net`.
@@ -60,21 +60,29 @@ sees the decrypted prompt, API key, or bot token. Provider responses are tagged 
 (assistant output), not T3. Discord adapter traffic is destination-gated to the Discord
 allowlist.
 
-**Mode (b) — Inspecting relay with gateway DLP.** Tool egress (web POST, email) sends an
-`egress.request` frame carrying a core-DLP-redacted body to the gateway. The gateway
-re-runs `OutboundDlp` as an independent pass, destination-checks, audits, and forwards. A
-tool-egress response is a **T3** content handle and routes through the production
-dual-LLM structured-extraction seam — it is never handed raw to the privileged orchestrator.
+**Mode (b) — Inspecting relay with gateway DLP.** Tool egress (web POST, email, `web.fetch`)
+sends an `egress.request` frame carrying a core-DLP-redacted body to the **inspecting
+tool-egress relay** (`EgressRelay` — a separate component from the mode-(a) forward-proxy,
+§4). The relay re-runs `OutboundDlp` as an independent pass, destination-checks, audits, and
+forwards. The **raw** tool-egress response is **T3**; it is structured-extracted (a fused
+fetch+extract for `web.fetch`, [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md))
+into a **T2** outcome before the privileged orchestrator sees it — never handed raw. The
+idempotency ledger (§5) stores and replays that T2 outcome.
 
 ### 4. Unified L7 CONNECT forward-proxy implementation, two instances
 
-One `EgressForwardProxy` implementation, two runtime instances on the gateway:
+One `EgressForwardProxy` implementation (mode a — TLS-passthrough), two runtime instances on
+the gateway:
 
-- **TCP listener** on `alfred_internal` — serves the core's `EgressClient` (providers,
-  tool-egress relay) with the provider destination allowlist.
+- **TCP listener** on `alfred_internal` — serves the core's `EgressClient` provider calls
+  with the provider destination allowlist.
 - **AF_UNIX pathname-socket listener** (on the gateway-only `alfred_discord_egress`
   volume) — serves the Discord adapter child via an in-child TCP→unix byte-splice shim
   (`src/alfred/egress/adapter_proxy_shim.py`), operating the Discord destination allowlist.
+
+Mode-(b) tool egress is a **separate** inspecting relay (`EgressRelay`, Decision 3), not a
+forward-proxy instance — it terminates TLS to run the gateway DLP pass, which a
+TLS-passthrough proxy cannot do.
 
 The `_authorize` chain (literal-IP refusal, gateway-side DNS, non-globally-routable-IP
 rejection, destination-allowlist check, deny-audit write) is shared by both instances
@@ -96,6 +104,11 @@ No process that decrypts more than one platform credential's plaintext also hold
 network. The core decrypts credentials but is connectivity-free. The gateway has external
 network but never holds a vault key (ADR-0036). The Discord child decrypts one credential
 (its bot token over fd-3) and reaches only Discord via the L7 proxy.
+
+The payoff turns on the verb **decrypts**: the gateway does hold external network and does
+**transit** each credential's plaintext to adapter children at spawn (over fd-3, then zeroes
+its copy), but it never *decrypts* the vault. That serial cred-transit is the honest
+qualifier — see residual (iii); the Positive framing and residual (iii) must be read together.
 
 ## Consequences
 
@@ -176,7 +189,7 @@ analysis.
 ## References
 
 - [PRD §7.1](../../PRD.md#71-security--prompt-injection-defense) — "Default-deny for
-  outbound network calls" (line 447); this ADR closes the gap between goal and invariant.
+  outbound network calls"; this ADR closes the gap between goal and invariant.
 - [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — gateway privilege model;
   credential-concentration placement Spec C activates.
 - [ADR-0042](0042-connectivity-free-core-cutover.md) — G7-3 atomic cutover; macOS
