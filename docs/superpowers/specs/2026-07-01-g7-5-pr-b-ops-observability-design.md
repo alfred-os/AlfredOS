@@ -58,6 +58,12 @@ Added to the `alfred-gateway` group, following the existing `expr`/`for`/`severi
 | `GatewayEgressExfilSpike` | critical | `rate(gateway_egress_denied_total{reason="destination_not_allowlisted"}[5m]) > 0.1` | 2m |
 | `GatewayEgressOutage` | warning | `rate(gateway_egress_connect_total{outcome="error"}[5m]) > 0 or rate(gateway_egress_relay_total{outcome="error"}[5m]) > 0` | 5m |
 
+The `GatewayEgressSecurityDenySpike` cell above escapes `|` as `\|` for the markdown table; the copy-safe canonical form (bare `|`, exactly as in `ops/alerts/gateway.yml`) is:
+
+```yaml
+expr: 'rate(gateway_egress_denied_total{reason=~"literal_ip_target|resolved_ip_not_global|canary_tripped|dlp_redacted"}[5m]) > 0'
+```
+
 **Reason tiers (security-reviewed).**
 
 - **Critical zero-baseline set** (`GatewayEgressSecurityDenySpike`): `literal_ip_target`, `resolved_ip_not_global` (SSRF), `canary_tripped` (active exfil probe), `dlp_redacted` (a genuine detector-deny — confirmed at `egress_relay.py` L446-467, increments the counter). Any occurrence pages.
@@ -66,7 +72,7 @@ Added to the `alfred-gateway` group, following the existing `expr`/`for`/`severi
 
 **Thresholds are honest starting points, not derived caps.** `GatewayEgressInflightSaturation`'s `>100` (concurrent CONNECT tunnels — no hard cap exists) and `GatewayEgressExfilSpike`'s `>0.1`/s each carry a `description` saying "conservative starting threshold; tune to your deployment's baseline."
 
-**Outage alert.** `GatewayEgressOutage` (warning) fires on a sustained egress error rate — a broken egress plane that could itself suppress deny-counting (making the security alerts blind). The `outcome="error"` value is confirmed real on both `gateway_egress_connect_total` and `gateway_egress_relay_total`; the `or` disjunct in the alert expr covers both counters. Note the scope boundary: this alert covers the **erroring-but-alive** case (the gateway process is up, `/metrics` reachable, tunnels/fetches failing). A **hard-down** gateway (process dead or `/metrics` unreachable) is covered by Prometheus scrape-health (`up{job="alfred-gateway"}==0`), not this alert.
+**Outage alert.** `GatewayEgressOutage` (warning) fires on a sustained egress error rate — a broken egress plane that could itself suppress deny-counting (making the security alerts blind). The `outcome="error"` value is confirmed real on both `gateway_egress_connect_total` and `gateway_egress_relay_total`; the `or` disjunct in the alert expr covers both counters. Note the scope boundary: this alert covers the **erroring-but-alive** case (the gateway process is up, `/metrics` reachable, tunnels/fetches failing). A **hard-down** gateway (process dead or `/metrics` unreachable) is the domain of a generic Prometheus target-down alert (`up{job="alfred-gateway"}==0`) at the monitoring layer — a cross-cutting concern, not this egress alert's job (the repo does not define one today; it is standard monitoring-infra setup, out of scope for PR-B).
 
 ### 5.1 Counter pre-initialisation (sec-355-1 — the one `src/` change)
 
