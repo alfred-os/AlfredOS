@@ -13,6 +13,8 @@
     {"id": 7, "title": "Adapter leg up (per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}, "targets": [{"expr": "gateway_adapter_up", "legendFormat": "{{adapter}}"}]},
     {"id": 8, "title": "Adapter in-flight (per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}, "targets": [{"expr": "gateway_adapter_inflight", "legendFormat": "{{adapter}}"}]},
     {"id": 9, "title": "Adapter replay-buffer depth (bytes, per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28}, "targets": [{"expr": "gateway_adapter_buffer_depth_bytes", "legendFormat": "{{adapter}}"}]},
-    {"id": 10, "title": "Ingress throttled (rate, per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28}, "targets": [{"expr": "rate(gateway_ingress_throttled_total[5m])", "legendFormat": "{{adapter}}"}]}
+    {"id": 10, "title": "Ingress throttled (rate, per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28}, "targets": [{"expr": "rate(gateway_ingress_throttled_total[5m])", "legendFormat": "{{adapter}}"}]},
+    {"id": 11, "title": "Egress in-flight (per plane)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36}, "targets": [{"expr": "gateway_egress_inflight", "legendFormat": "{{plane}}"}]},
+    {"id": 12, "title": "Egress denials (rate, per plane/reason)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36}, "targets": [{"expr": "rate(gateway_egress_denied_total[5m])", "legendFormat": "{{plane}} / {{reason}}"}]}
   ]
 }
