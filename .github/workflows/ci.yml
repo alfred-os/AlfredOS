@@ -42,6 +42,29 @@ jobs:
             "!LICENSE" \
             "!node_modules/**"
 
+  ops-promtool:
+    name: promtool (alert rules)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install promtool
+        run: |
+          set -euo pipefail
+          PROM_VERSION=2.53.0
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" | tar xz
+          sudo mv "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+      - name: Validate + unit-test the gateway alert rules
+        working-directory: ops/alerts
+        run: |
+          set -euo pipefail
+          promtool check rules gateway.yml
+          promtool test rules gateway_test.yml
+
   python:
     name: Python (lint, types, unit)
     runs-on: ubuntu-latest
