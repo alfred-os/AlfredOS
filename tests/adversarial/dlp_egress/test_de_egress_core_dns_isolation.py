@@ -19,6 +19,7 @@ Two assertions, each adding a signal the compose-invariant lint does NOT:
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import yaml
@@ -80,16 +81,39 @@ def test_de_2026_013_kernel_proof_still_asserts_dns_hole_closed() -> None:
         "the connectivity-free-core kernel proof is missing — de-2026-013's "
         "runtime evidence has rotted away"
     )
-    src = _KERNEL_PROOF.read_text(encoding="utf-8")
-    # Tie the sentinel to the proof's test function AND the `assert` form, so a
-    # gut-but-keep-echo refactor (the token surviving only in the shell heredoc
-    # `echo EXTERNAL_DNS_BLOCKED`) still trips this gate rather than passing on a
-    # stray substring.
-    assert "def test_internal_network_blocks_egress_and_dns" in src, (
-        "the connectivity-free-core kernel-proof test function is gone — "
-        "de-2026-013's runtime evidence has rotted away"
+    # Structure-aware (AST), not raw substring: a comment/docstring mentioning the
+    # sentinel, the token surviving only in the shell heredoc `echo
+    # EXTERNAL_DNS_BLOCKED`, or a quote-style change cannot satisfy or break this —
+    # it must be a real `assert` referencing EXTERNAL_DNS_BLOCKED inside the proof's
+    # test function. (CodeRabbit + test-engineer hardening.)
+    tree = ast.parse(_KERNEL_PROOF.read_text(encoding="utf-8"))
+    proof_fn = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "test_internal_network_blocks_egress_and_dns"
+        ),
+        None,
     )
-    assert 'assert "EXTERNAL_DNS_BLOCKED"' in src, (
-        "the kernel proof no longer asserts the external-DNS hole is closed — "
-        "de-2026-013's §9 class-3 coverage lost its runtime backing"
+    assert proof_fn is not None, (
+        "the connectivity-free-core kernel-proof function "
+        "test_internal_network_blocks_egress_and_dns is gone — de-2026-013's "
+        "runtime evidence has rotted away"
+    )
+    asserts_dns_hole_closed = any(
+        any(
+            isinstance(literal, ast.Constant)
+            and isinstance(literal.value, str)
+            and "EXTERNAL_DNS_BLOCKED" in literal.value
+            for literal in ast.walk(node.test)
+        )
+        for node in ast.walk(proof_fn)
+        if isinstance(node, ast.Assert)
+    )
+    assert asserts_dns_hole_closed, (
+        "the kernel proof no longer ASSERTS the external-DNS hole is closed (no "
+        "assert referencing EXTERNAL_DNS_BLOCKED in "
+        "test_internal_network_blocks_egress_and_dns) — de-2026-013's §9 class-3 "
+        "coverage lost its runtime backing"
     )
