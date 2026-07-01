@@ -24,9 +24,11 @@
 ### Task 1: Extend the ops-scaffold AST derivation + reason-value helper
 
 **Files:**
+
 - Modify: `tests/unit/test_ops_scaffold.py`
 
 **Interfaces:**
+
 - Produces: `_metric_names_in(path)` now also recognises `GaugeMetricFamily(` and resolves a first-arg `ast.Name` via a module const map (from `ast.Assign` + `ast.AnnAssign` string constants). New helper `_known_reason_values() -> set[str]` returning `{r.value for r in EgressDenyReason} | {r.value for r in EgressRelayDenyReason}`.
 
 - [ ] **Step 1: Write the failing test**
@@ -130,10 +132,12 @@ git commit -m "test(ops): derive custom-collector + const-named egress metrics i
 ### Task 2: Add the 5 egress alerts + presence + reason-label-value guard
 
 **Files:**
+
 - Modify: `ops/alerts/gateway.yml`
 - Modify: `tests/unit/test_ops_scaffold.py`
 
 **Interfaces:**
+
 - Consumes: `_known_reason_values()`, `_known_metric_bases()` (Task 1).
 
 - [ ] **Step 1: Write the failing tests**
@@ -238,6 +242,7 @@ git commit -m "feat(ops): egress-plane Prometheus alerts (deny-rate, saturation,
 ### Task 3: Add the 2 egress dashboard panels
 
 **Files:**
+
 - Modify: `ops/grafana/gateway.json`
 - Modify: `tests/unit/test_ops_scaffold.py`
 
@@ -300,10 +305,12 @@ git commit -m "feat(ops): egress in-flight + deny-rate Grafana panels (#333)"
 ### Task 4: promtool check + test rules + CI job
 
 **Files:**
+
 - Create: `ops/alerts/gateway_test.yml`
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
+
 - Consumes: `ops/alerts/gateway.yml` (Task 2).
 
 - [ ] **Step 1: Write the promtool test file (the "failing test" — it fails until the rules exist, which they now do)**
@@ -411,9 +418,11 @@ tests:
 Install promtool (choose per platform): `brew install prometheus` (macOS) OR download from `https://github.com/prometheus/prometheus/releases` and put `promtool` on PATH.
 
 Run (from `ops/alerts/`):
+
 ```bash
 cd ops/alerts && promtool check rules gateway.yml && promtool test rules gateway_test.yml
 ```
+
 Expected: `SUCCESS` for check-rules and `PASSED` for all unit tests. If any `exp_alerts` mismatch, fix the window math / labels (NOT by loosening an assertion to `[]`).
 
 - [ ] **Step 3: Verify the negative control (bare-| guard)**
