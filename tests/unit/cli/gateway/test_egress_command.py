@@ -45,8 +45,9 @@ def test_no_adapter_up_series_reports_not_configured(capsys, monkeypatch) -> Non
     monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: metrics_no_adapter)
     monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
     _egress.egress_status()
-    # the adapter stanza renders the "not configured" state (assert on the t()-key or its English msgstr)
-    assert capsys.readouterr().out  # non-empty; refine to the specific key once catalog lands
+    out = capsys.readouterr().out
+    # Adapter stanza must render the gateway.egress.not_configured msgstr.
+    assert "not configured (no adapter up)" in out
 
 
 def test_unknown_reason_token_fails_loud(monkeypatch) -> None:
@@ -57,6 +58,29 @@ def test_unknown_reason_token_fails_loud(monkeypatch) -> None:
         _egress.egress_status()
 
 
+def test_zero_count_plane_shows_no_denials(capsys, monkeypatch) -> None:
+    # M2: the deny family IS present but has no nonzero sample for the relay plane.
+    # Expected: relay stanza shows the gateway.egress.no_denials msgstr, NOT
+    # gateway.egress.denies_unavailable (which is reserved for the family-absent path).
+    metrics_family_present_no_relay_denial = """\
+# TYPE gateway_egress_inflight gauge
+gateway_egress_inflight{plane="proxy"} 1.0
+gateway_egress_inflight{plane="relay"} 0.0
+# TYPE gateway_egress_denied_total counter
+gateway_egress_denied_total{plane="proxy",reason="literal_ip_target"} 1.0
+# TYPE gateway_adapter_up gauge
+gateway_adapter_up{adapter="discord"} 1.0
+"""
+    monkeypatch.setattr(
+        _egress, "_fetch_metrics_text", lambda _p: metrics_family_present_no_relay_denial
+    )
+    monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
+    _egress.egress_status()
+    out = capsys.readouterr().out
+    assert "no denials" in out
+    assert "deny counter unavailable" not in out
+
+
 def test_present_zero_vs_metric_absent_are_distinct(capsys, monkeypatch) -> None:
     # design §8(a): a present deny family with no nonzero count for a plane → "no denials";
     # the family ABSENT entirely → a DISTINCT "unavailable" output (metric not wired).
@@ -65,7 +89,7 @@ def test_present_zero_vs_metric_absent_are_distinct(capsys, monkeypatch) -> None
     _egress.egress_status()
     with_family = capsys.readouterr().out
     no_family = _METRICS.replace(
-        '# TYPE gateway_egress_denied_total counter\n'
+        "# TYPE gateway_egress_denied_total counter\n"
         'gateway_egress_denied_total{plane="proxy",reason="literal_ip_target"} 1.0\n',
         "",
     )

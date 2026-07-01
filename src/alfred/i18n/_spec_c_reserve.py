@@ -47,6 +47,13 @@ def _register() -> None:
     # it directly — anchored here as a belt-and-braces guard matching the outbound
     # ``egress.outbound_canary_tripped`` precedent.
     t("egress.inbound_canary_tripped")
+    # G7-5 PR-A Task 4: ``alfred gateway egress`` plane header keys.  Passed as a
+    # variable ``header_key`` argument to ``_render_plane()``, which calls
+    # ``t(header_key)`` — the literal msgids are invisible to pybabel at the call
+    # site, so they are anchored here to prevent pybabel update from marking them
+    # obsolete and dropping them from the compiled ``.mo``.
+    t("gateway.egress.plane.proxy")
+    t("gateway.egress.plane.relay")
 
 
 __all__ = ["_register"]

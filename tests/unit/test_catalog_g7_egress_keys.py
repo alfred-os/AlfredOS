@@ -40,6 +40,21 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "gateway.egress.relay_denied.upstream_redirect_refused",
     # G7-2.5 Task 4: inbound canary trip on a web.fetch response (in-core D1 seam).
     "egress.inbound_canary_tripped",
+    # G7-5 PR-A Task 4/5: ``alfred gateway egress`` operator CLI keys.
+    "gateway.help.egress",
+    "gateway.egress.unreachable",
+    "gateway.egress.reachable",
+    "gateway.egress.inflight_label",
+    "gateway.egress.denies_label",
+    "gateway.egress.denies_unavailable",
+    "gateway.egress.no_denials",
+    "gateway.egress.plane.proxy",
+    "gateway.egress.plane.relay",
+    "gateway.egress.plane.adapter",
+    "gateway.egress.not_configured",
+    "gateway.egress.allowlist_label",
+    "gateway.egress.allowlist_empty",
+    "gateway.egress.allowlist_unresolved",
 )
 
 
