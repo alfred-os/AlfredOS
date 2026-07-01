@@ -58,4 +58,11 @@ def adapters(
     adapters_verify(adapter, wait_ready=wait_ready, timeout=timeout)
 
 
+@gateway_app.command("egress", help=t("gateway.help.egress"))
+def egress() -> None:
+    from alfred.cli.gateway._egress import egress_status
+
+    egress_status()
+
+
 __all__ = ["gateway_app"]
