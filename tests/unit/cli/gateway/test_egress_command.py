@@ -38,6 +38,17 @@ def test_metrics_unreachable_exits_2(monkeypatch) -> None:
     assert exc.value.exit_code == 2
 
 
+def test_malformed_metrics_body_exits_2_not_traceback(monkeypatch) -> None:
+    """FIX #1 (CR): a malformed /metrics exposition (parse ValueError) exits 2 per the
+    'never a traceback' contract — the parse is inside the exit-2 try, not after it."""
+    malformed = 'gateway_egress_inflight{plane="proxy"} not_a_float\n'
+    monkeypatch.setattr(_egress, "_fetch_metrics_text", lambda _p: malformed)
+    monkeypatch.setattr(_egress, "resolve_metrics_port", lambda: 9464)
+    with pytest.raises(typer.Exit) as exc:
+        _egress.egress_status()
+    assert exc.value.exit_code == 2
+
+
 def test_no_adapter_up_series_reports_not_configured(capsys, monkeypatch) -> None:
     metrics_no_adapter = _METRICS.replace(
         '# TYPE gateway_adapter_up gauge\ngateway_adapter_up{adapter="discord"} 1.0\n', ""
