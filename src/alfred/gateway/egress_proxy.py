@@ -54,6 +54,11 @@ from alfred.gateway.egress_audit import (
     EGRESS_CONNECT_DENIED_EVENT,
     EgressDenyReason,
 )
+from alfred.gateway.egress_metrics import (
+    GATEWAY_EGRESS_DENIED,
+    deregister_egress_inflight,
+    register_egress_inflight,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -159,6 +164,8 @@ class EgressForwardProxy:
         bind_host: str | None = None,
         port: int | None = None,
         unix_path: Path | None = None,
+        plane: str = "proxy",
+        denied_counter: Counter | None = None,
     ) -> None:
         partial_tcp_mode = (bind_host is None) != (port is None)
         if partial_tcp_mode:
@@ -178,6 +185,10 @@ class EgressForwardProxy:
         self._resolve = resolve
         self._open_upstream = open_upstream
         self._conns: set[asyncio.Task[None]] = set()
+        self._plane = plane
+        self._denied_counter = (
+            denied_counter if denied_counter is not None else GATEWAY_EGRESS_DENIED
+        )
 
     async def serve(self, shutdown_event: asyncio.Event) -> None:
         """Bind + serve until ``shutdown_event``, then close the listener and reap.
@@ -202,10 +213,12 @@ class EgressForwardProxy:
                 self._handle_client, self._bind_host, self._port, limit=_REQUEST_LINE_CAP
             )
             _log.info("gateway.egress.serving", bind=self._bind_host, port=self._port)
+        register_egress_inflight(self._plane, self._conns)
         try:
             async with server:
                 await shutdown_event.wait()
         finally:
+            deregister_egress_inflight(self._plane)
             await self._drain_connections()
 
     async def _drain_connections(self) -> None:
@@ -387,6 +400,7 @@ class EgressForwardProxy:
             with contextlib.suppress(OSError):
                 writer.write(f"HTTP/1.1 {status} {reason.value}\r\n\r\n".encode("latin-1"))
                 await writer.drain()
+            self._denied_counter.labels(plane=self._plane, reason=reason.value).inc()
         finally:
             self._close(writer)
 
