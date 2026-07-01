@@ -928,7 +928,13 @@ async def test_relay_denied_total_delta_matches_outcome_denied() -> None:
     from alfred.gateway.egress_relay_audit import GATEWAY_EGRESS_RELAY
 
     def _val(counter: object, **labels: str) -> float:
-        return float(counter.labels(**labels)._value.get())  # type: ignore[attr-defined]
+        # Read via the public exposition API (Counter.collect()), not the private
+        # _value attribute; the counter's _total sample carries the current value.
+        for metric in counter.collect():  # type: ignore[attr-defined]
+            for sample in metric.samples:
+                if sample.name.endswith("_total") and sample.labels == labels:
+                    return float(sample.value)
+        return 0.0
 
     before_outcome = _val(GATEWAY_EGRESS_RELAY, outcome="denied")
     before_reason = _val(GATEWAY_EGRESS_DENIED, plane="relay", reason="literal_ip_target")

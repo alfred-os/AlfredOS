@@ -38,12 +38,15 @@ def egress_status() -> None:
     try:
         port = resolve_metrics_port()
         metrics_text = _fetch_metrics_text(port)
+        # Parse INSIDE the try: a malformed /metrics exposition raises ValueError, which
+        # must exit 2 ("never a traceback", hard rule #7 / the module docstring), NOT
+        # escape. Reason-drift ValueErrors from _render_* below stay fail-loud (those are
+        # a deploy-skew invariant violation, not a backend-unavailable condition).
+        families = {f.name: f for f in text_string_to_metric_families(metrics_text)}
     except (OSError, ValueError) as exc:
         log.warning("gateway.egress.unreachable", port=port, error=repr(exc))
         typer.echo(t("gateway.egress.unreachable", port=port))
         raise typer.Exit(code=_EXIT_UNAVAILABLE) from exc
-
-    families = {f.name: f for f in text_string_to_metric_families(metrics_text)}
     inflight = _samples_by_label(families.get("gateway_egress_inflight"), "plane")
     # The counter FAMILY name is ``_total``-stripped by the prometheus parser; the
     # presence of the family (vs a plane's zero count) is tracked so "no denials" ≠
