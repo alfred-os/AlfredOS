@@ -148,3 +148,32 @@ def test_known_reason_values_cover_both_enums() -> None:
     assert "canary_tripped" in vals  # EgressRelayDenyReason
     assert "malformed_connect" in vals  # EgressDenyReason
     assert "destination_not_allowlisted" in vals  # both
+
+
+_EGRESS_ALERTS = frozenset(
+    {
+        "GatewayEgressDenyRate",
+        "GatewayEgressInflightSaturation",
+        "GatewayEgressSecurityDenySpike",
+        "GatewayEgressExfilSpike",
+        "GatewayEgressOutage",
+    }
+)
+
+
+def test_egress_alerts_present() -> None:
+    cfg = yaml.safe_load((OPS / "alerts" / "gateway.yml").read_text())
+    names = {r["alert"] for g in cfg["groups"] for r in g["rules"] if "alert" in r}
+    assert names >= _EGRESS_ALERTS
+
+
+def test_alert_reason_labels_are_real_enum_values() -> None:
+    # The critical pager selects on reason label VALUES via reason=~/reason= matchers;
+    # a typo or enum rename would silently fail it open. Assert every alternative is real.
+    cfg = yaml.safe_load((OPS / "alerts" / "gateway.yml").read_text())
+    known = _known_reason_values()
+    reason_re = re.compile(r'reason(?:=~|=)"([^"]+)"')
+    for r in (r for g in cfg["groups"] for r in g["rules"] if "alert" in r):
+        for match in reason_re.findall(r["expr"]):
+            for alt in match.split("|"):  # bare-| alternation; a lone value has no |
+                assert alt in known, f"alert {r['alert']} references unknown reason: {alt!r}"
