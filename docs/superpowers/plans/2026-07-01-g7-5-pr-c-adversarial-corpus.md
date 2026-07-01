@@ -550,8 +550,8 @@ Use the introducing commit's PR/slice for the "Owning PR" column — do NOT hard
 In `tests/adversarial/dlp_egress/README.md`, in the `| Attack vector | Owning PR / Task |` table (after the `de-2026-010` row), add — using the paraphrased threats from Step 1 for `011`/`012` and verbatim for the four new entries:
 
 ```markdown
-| Content-type laundering: outbound body mislabels its content-type to smuggle a secret past the gateway DLP pass | PR #333 G7-2c-2 (`de-2026-011` `de_egress_content_type_laundering.yaml`) — confirm attribution via Step 1 git log |
-| Inbound canary planted in T3 content that is not yet wired to the egress scanner | PR #333 G7-2c-2 (`de-2026-012` `de_egress_inbound_canary_unwired.yaml`) — confirm attribution via Step 1 git log |
+| Content-type laundering: outbound body mislabels its content-type to smuggle a secret past the gateway DLP pass | PR #333 G7-2 (`de-2026-011` `de_egress_content_type_laundering.yaml` + `test_de_egress_content_type_laundering.py`) |
+| Inbound canary planted in T3 content that is not yet wired to the egress scanner | PR #333 (`de-2026-012` `de_egress_inbound_canary_unwired.yaml` + `test_de_egress_inbound_canary_unwired.py`) |
 | Core cannot resolve an external name in the split topology (DNS exfil; §7 getaddrinfo-must-fail probe) — asserts the shipped compose connectivity-free invariant; kernel proof in `tests/integration/egress/` | PR #333 G7-5 (`de-2026-013` `de_egress_core_dns_isolation.yaml`) |
 | Mode-(a) provider-prompt exfil — RECORDED RESIDUAL: TLS-passthrough is destination-gated only, no body inspection (ADR-0040 residual (ii)) | PR #333 G7-5 (`de-2026-014` `de_egress_mode_a_provider_prompt_residual.yaml`, `out_of_scope=true`) |
 | L7-proxy literal-IP CONNECT refusal — drives the real `EgressForwardProxy`, asserts 403 + `literal_ip_target` | PR #333 G7-5 (`de-2026-015` `de_egress_literal_ip_connect_refused.yaml`) |
