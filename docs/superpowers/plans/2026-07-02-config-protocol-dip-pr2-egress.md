@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **Design source of truth:** `docs/superpowers/specs/2026-07-02-config-protocol-dip-design.md` (#351).
-- **Zero runtime behaviour change for every real `Settings` input.** Primarily a typing/DIP refactor. The one runtime touch — hardening the fail-closed guard from `is None` to `not config.egress_proxy_url` (security-lens plan review) — is observably identical for any real `Settings` (which never yields `""`; the `mode="before"` normalizer collapses blank→None), and a strict fail-closed *strengthening* only for the off-type stub domain the narrowing newly admits. Existing tests pass unchanged.
+- **Zero runtime behaviour change for every real `Settings` input.** Primarily a typing/DIP refactor. The one runtime touch — hardening the fail-closed guard from `is None` to a full blank check (`not (proxy_url and proxy_url.strip())`, rejecting `None`/`""`/whitespace-only) per the security-lens plan review + the PR-review round — is observably identical for any real `Settings` (which never yields a blank value; the `mode="before"` normalizer collapses blank/whitespace→None), and a strict fail-closed *strengthening* only for the off-type stub domain the narrowing newly admits. Existing tests pass unchanged.
 - **`Settings` is not modified.** It stays a `BaseSettings`; it only *satisfies* the new Protocol.
 - **Boundary:** only leaf consumers narrow; the composition root (`cli/_bootstrap.py`, `bootstrap/`, loader, `Settings` def) keeps concrete `Settings`. `EgressClient.from_settings` is a leaf consumer (reads exactly one field).
 - **Validator-coupling rule (this batch's wrinkle).** `egress_proxy_url` has a `mode="before"` normalizer `_normalize_egress_proxy_url` (`settings.py:344`, blank/whitespace → `None`). Per the design's validator-coupling rule the Protocol **docstrings the producer invariant** (a `Settings`-sourced value is already blank-normalized; a raw stub is not) and the existing real-`Settings` normalizer test (`tests/unit/config/test_settings_egress_proxy_url.py`) is **retained untouched** — a plain stub bypasses the normalizer, so that file is the validator-retention evidence. This PR adds NO Settings-construction test of its own; it relies on the existing one.
@@ -81,11 +81,12 @@ class EgressProxyConfig(Protocol):
     Producer invariant: ``Settings.egress_proxy_url`` is normalized by
     ``_normalize_egress_proxy_url`` (``mode="before"``) so a blank/whitespace value
     deserializes to ``None`` — a ``Settings``-sourced value is therefore either a
-    non-blank URL or ``None``, never ``""``. A plain stub bypasses that normalizer, so
-    a stub *may* legally supply ``""``; the consumer therefore self-defends
-    (``from_settings`` treats any falsy value — ``None`` or ``""`` — as fail-closed,
-    G7-3, ADR-0042). The "no route without a proxy" fail-closed invariant is owned by
-    ``EgressClient.from_settings``, not by this config surface.
+    non-blank URL or ``None``, never a blank string. A plain stub bypasses that
+    normalizer, so a stub *may* legally supply a blank string; the consumer therefore
+    self-defends (``from_settings`` treats any blank value — ``None``, ``""``, or
+    whitespace-only — as fail-closed, G7-3, ADR-0042). The "no route without a proxy"
+    fail-closed invariant is owned by ``EgressClient.from_settings``, not by this
+    config surface.
     """
 
     @property
@@ -142,25 +143,26 @@ def test_from_settings_accepts_a_plain_stub() -> None:
     assert client.proxy_url == "http://alfred-gateway:8889"
 
 
-@pytest.mark.parametrize("falsy", [None, ""])
-def test_from_settings_falsy_proxy_fails_closed(falsy: str | None) -> None:
-    """Fail-closed (G7-3, ADR-0042) holds for BOTH None and "" against the narrow Protocol.
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_from_settings_blank_proxy_fails_closed(blank: str | None) -> None:
+    """Fail-closed (G7-3, ADR-0042) holds for every blank value against the narrow Protocol.
 
-    Narrowing the param to EgressProxyConfig admits an unnormalized stub value ("") that a
-    real Settings never produces (the mode="before" normalizer collapses blank->None); the
-    consumer self-defends against it so an empty proxy URL never silently builds a client.
+    Narrowing the param to EgressProxyConfig admits an unnormalized stub value (a blank
+    string) that a real Settings never produces (the mode="before" normalizer collapses
+    blank/whitespace->None); the consumer self-defends against None, "", and whitespace-only
+    so a blank proxy URL never silently builds a client.
     """
     with pytest.raises(IOPlaneUnavailableError):
-        EgressClient.from_settings(_StubCfg(egress_proxy_url=falsy))
+        EgressClient.from_settings(_StubCfg(egress_proxy_url=blank))
 ```
 
 - [ ] **Step 3: Run the proof test (runtime green) + type-check (intended mixed-red)**
 
 Run: `uv run pytest tests/unit/egress/test_config_protocol_proof.py -v`
-Expected: PASS (4 tests — Python is duck-typed, so the stub-driven seam tests pass at runtime even while mypy is red below).
+Expected: **INTENDED PARTIAL RED (TDD red state).** `test_plain_stub_satisfies_egress_proxy_config`, `test_from_settings_accepts_a_plain_stub`, and `test_from_settings_blank_proxy_fails_closed[None]` PASS; but `test_from_settings_blank_proxy_fails_closed[""]` and `[...whitespace...]` FAIL — because `client.py` still carries the pre-PR `is None` guard, which does NOT reject `""`/whitespace-only. That failure is the point: it proves Task 2's blank-rejection hardening is load-bearing, not cosmetic. Task 2 Step 3 turns all cases green.
 
 Run: `uv run mypy src/alfred/egress/_config_protocols.py tests/unit/egress/test_config_protocol_proof.py`
-Expected: **INTENDED RED (this is the TDD red state, not a failure to fix here).** `_settings_satisfies` and `test_plain_stub_satisfies_egress_proxy_config` type-check clean, but the two `from_settings`-driving tests (`test_from_settings_accepts_a_plain_stub`, `test_from_settings_falsy_proxy_fails_closed`) mypy-error with `Argument 1 to "from_settings" of "EgressClient" has incompatible type "_StubCfg"; expected "Settings"` — because `from_settings` still takes `Settings` until Task 2 narrows it. Do NOT try to clear this red at Task 1; Task 2 Step 3 re-runs this line and expects full green. (If instead mypy reports `Settings` does not satisfy `EgressProxyConfig` on `_settings_satisfies`, the Protocol shape is wrong — fix the Protocol, not the proof.)
+Expected: **INTENDED RED (this is the TDD red state, not a failure to fix here).** `_settings_satisfies` and `test_plain_stub_satisfies_egress_proxy_config` type-check clean, but the `from_settings`-driving tests (`test_from_settings_accepts_a_plain_stub`, `test_from_settings_blank_proxy_fails_closed`) mypy-error with `Argument 1 to "from_settings" of "EgressClient" has incompatible type "_StubCfg"; expected "Settings"` — because `from_settings` still takes `Settings` until Task 2 narrows it. Do NOT try to clear this red at Task 1; Task 2 Step 3 re-runs both lines and expects full green. (If instead mypy reports `Settings` does not satisfy `EgressProxyConfig` on `_settings_satisfies`, the Protocol shape is wrong — fix the Protocol, not the proof.)
 
 - [ ] **Step 4: Commit**
 
@@ -207,24 +209,29 @@ Re-type `from_settings` (lines 42–54) — rename `settings` → `config`, body
 ```python
     @classmethod
     def from_settings(cls, config: EgressProxyConfig) -> EgressClient:
-        # Fail closed on any falsy proxy URL (None OR ""). A real Settings never yields ""
-        # (the mode="before" _normalize_egress_proxy_url collapses blank->None), so this is
-        # zero-behaviour-change for the sole prod caller; but narrowing the param to
-        # EgressProxyConfig admits an unnormalized value, so the seam self-defends rather
-        # than trusting the producer's normalizer — an empty proxy URL must never build a
-        # client. G7-3 (ADR-0042): the connectivity-free core has no direct-egress fallback.
-        if not config.egress_proxy_url:
+        # Method keeps the ``from_settings`` name (the composition-root factory idiom) while
+        # narrowing its param to the read-only EgressProxyConfig Protocol (#351 DIP): the sole
+        # prod caller (cli/_bootstrap) still passes a real Settings, which satisfies it.
+        #
+        # Fail closed on any BLANK proxy URL — None, "", or whitespace-only. A real Settings
+        # never yields blank (the mode="before" _normalize_egress_proxy_url collapses
+        # blank/whitespace->None), so this is zero-behaviour-change for that caller; but the
+        # narrowed param admits an unnormalized value, so the seam self-defends rather than
+        # trusting the producer's normalizer — a blank proxy URL must never build a client.
+        # G7-3 (ADR-0042): the connectivity-free core has no direct-egress fallback.
+        proxy_url = config.egress_proxy_url
+        if not (proxy_url and proxy_url.strip()):
             raise IOPlaneUnavailableError(
                 detail=(
-                    "ALFRED_EGRESS_PROXY_URL is unset — the connectivity-free core has "
-                    "no direct-egress fallback; set it to the gateway L7 CONNECT proxy "
+                    "ALFRED_EGRESS_PROXY_URL is unset or blank — the connectivity-free core "
+                    "has no direct-egress fallback; set it to the gateway L7 CONNECT proxy "
                     "(compose default http://alfred-gateway:8889)."
                 )
             )
-        return cls(proxy_url=config.egress_proxy_url)
+        return cls(proxy_url=proxy_url)
 ```
 
-(Method name stays `from_settings` — the composition root's factory name; only the param TYPE narrows. Guard is `not ...` rather than `is None` per the security-lens plan review: the narrowed Protocol drops the normalizer guarantee, so the seam closes the empty-string hole itself. `"   "` whitespace-only stubs stay out of scope — that's the normalizer's job, covered by the retained real-`Settings` test. Leave the module docstring's `from_settings` references as-is.)
+(Method name stays `from_settings` — the composition root's factory name; only the param TYPE narrows, with the naming rationale folded into the classmethod comment. Guard fully rejects blank — `None`, `""`, AND whitespace-only — per the security-lens plan review + the PR-review round: the narrowed Protocol drops the normalizer guarantee, so the seam self-defends completely against any blank a stub could supply. A single local `proxy_url` read keeps mypy's non-None narrowing robust across the two accesses. Leave the module docstring's `from_settings` references as-is.)
 
 - [ ] **Step 3: Verify green + no unused import/ignore**
 
@@ -313,7 +320,7 @@ Follow the project cadence: full `/review-pr` fleet (security ALWAYS) + CodeRabb
 - Narrow `@property` Protocol grouped in `egress/_config_protocols.py` — Task 1. ✓
 - Sole leaf consumer narrowed; `Settings` import swapped, param renamed `settings`→`config` — Task 2. ✓
 - Mechanism-proof as a committed mypy-checked artifact + a plain-stub DIP-win test that drives the real seam — Task 1. ✓
-- Fail-closed guard hardened `is None`→`not ...` (security-lens plan review): closes the empty-string input-domain the narrowing admits; zero-behaviour-change for real `Settings`; proof test parametrized over `[None, ""]` — Task 1 Step 2 + Task 2 Step 2. ✓
+- Fail-closed guard hardened `is None`→full blank check `not (proxy_url and proxy_url.strip())` (security-lens plan review + PR-review round): rejects the whole blank input-domain (`None`/`""`/whitespace-only) the narrowing admits; zero-behaviour-change for real `Settings`; proof test parametrized over `[None, "", "   "]` — Task 1 Step 2 + Task 2 Step 2. ✓
 - Validator-coupling rule honoured: Protocol docstrings the `_normalize_egress_proxy_url` producer invariant; the existing real-`Settings` normalizer test is retained untouched — Global Constraints + Task 3 Step 1. ✓
 - `warn_unused_ignores` gate + zero-behaviour-change bootstrap/import-guard proof — Task 3. ✓
 - Convention doc: already landed in PR1 — no doc change this batch. ✓

@@ -22,11 +22,12 @@ class EgressProxyConfig(Protocol):
     Producer invariant: ``Settings.egress_proxy_url`` is normalized by
     ``_normalize_egress_proxy_url`` (``mode="before"``) so a blank/whitespace value
     deserializes to ``None`` — a ``Settings``-sourced value is therefore either a
-    non-blank URL or ``None``, never ``""``. A plain stub bypasses that normalizer, so
-    a stub *may* legally supply ``""``; the consumer therefore self-defends
-    (``from_settings`` treats any falsy value — ``None`` or ``""`` — as fail-closed,
-    G7-3, ADR-0042). The "no route without a proxy" fail-closed invariant is owned by
-    ``EgressClient.from_settings``, not by this config surface.
+    non-blank URL or ``None``, never a blank string. A plain stub bypasses that
+    normalizer, so a stub *may* legally supply a blank string; the consumer therefore
+    self-defends (``from_settings`` treats any blank value — ``None``, ``""``, or
+    whitespace-only — as fail-closed, G7-3, ADR-0042). The "no route without a proxy"
+    fail-closed invariant is owned by ``EgressClient.from_settings``, not by this
+    config surface.
     """
 
     @property

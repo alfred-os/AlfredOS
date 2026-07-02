@@ -43,13 +43,14 @@ def test_from_settings_accepts_a_plain_stub() -> None:
     assert client.proxy_url == "http://alfred-gateway:8889"
 
 
-@pytest.mark.parametrize("falsy", [None, ""])
-def test_from_settings_falsy_proxy_fails_closed(falsy: str | None) -> None:
-    """Fail-closed (G7-3, ADR-0042) holds for BOTH None and "" against the narrow Protocol.
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_from_settings_blank_proxy_fails_closed(blank: str | None) -> None:
+    """Fail-closed (G7-3, ADR-0042) holds for every blank value against the narrow Protocol.
 
-    Narrowing the param to EgressProxyConfig admits an unnormalized stub value ("") that a
-    real Settings never produces (the mode="before" normalizer collapses blank->None); the
-    consumer self-defends against it so an empty proxy URL never silently builds a client.
+    Narrowing the param to EgressProxyConfig admits an unnormalized stub value (a blank
+    string) that a real Settings never produces (the mode="before" normalizer collapses
+    blank/whitespace->None); the consumer self-defends against None, "", and whitespace-only
+    so a blank proxy URL never silently builds a client.
     """
     with pytest.raises(IOPlaneUnavailableError):
-        EgressClient.from_settings(_StubCfg(egress_proxy_url=falsy))
+        EgressClient.from_settings(_StubCfg(egress_proxy_url=blank))

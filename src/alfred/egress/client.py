@@ -41,21 +41,26 @@ class EgressClient:
 
     @classmethod
     def from_settings(cls, config: EgressProxyConfig) -> EgressClient:
-        # Fail closed on any falsy proxy URL (None OR ""). A real Settings never yields ""
-        # (the mode="before" _normalize_egress_proxy_url collapses blank->None), so this is
-        # zero-behaviour-change for the sole prod caller; but narrowing the param to
-        # EgressProxyConfig admits an unnormalized value, so the seam self-defends rather
-        # than trusting the producer's normalizer — an empty proxy URL must never build a
-        # client. G7-3 (ADR-0042): the connectivity-free core has no direct-egress fallback.
-        if not config.egress_proxy_url:
+        # Method keeps the ``from_settings`` name (the composition-root factory idiom) while
+        # narrowing its param to the read-only EgressProxyConfig Protocol (#351 DIP): the sole
+        # prod caller (cli/_bootstrap) still passes a real Settings, which satisfies it.
+        #
+        # Fail closed on any BLANK proxy URL — None, "", or whitespace-only. A real Settings
+        # never yields blank (the mode="before" _normalize_egress_proxy_url collapses
+        # blank/whitespace->None), so this is zero-behaviour-change for that caller; but the
+        # narrowed param admits an unnormalized value, so the seam self-defends rather than
+        # trusting the producer's normalizer — a blank proxy URL must never build a client.
+        # G7-3 (ADR-0042): the connectivity-free core has no direct-egress fallback.
+        proxy_url = config.egress_proxy_url
+        if not (proxy_url and proxy_url.strip()):
             raise IOPlaneUnavailableError(
                 detail=(
-                    "ALFRED_EGRESS_PROXY_URL is unset — the connectivity-free core has "
-                    "no direct-egress fallback; set it to the gateway L7 CONNECT proxy "
+                    "ALFRED_EGRESS_PROXY_URL is unset or blank — the connectivity-free core "
+                    "has no direct-egress fallback; set it to the gateway L7 CONNECT proxy "
                     "(compose default http://alfred-gateway:8889)."
                 )
             )
-        return cls(proxy_url=config.egress_proxy_url)
+        return cls(proxy_url=proxy_url)
 
     @property
     def proxy_url(self) -> str:
