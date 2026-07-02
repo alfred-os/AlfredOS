@@ -2,6 +2,10 @@
 
 - **Status**: Accepted (G7-5 closeout)
 - **Date**: 2026-07-01
+- **Amended**: 2026-07-02 — residual set expanded to (iv)/(v)/(vi) and the core→proxy
+  authentication mitigation tracked as
+  [#358](https://github.com/alfred-os/AlfredOS/issues/358), per the ADR-0040 sign-off
+  residual panel.
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
@@ -134,9 +138,10 @@ qualifier — see residual (iii); the Positive framing and residual (iii) must b
 - The AST import-guard lint and compose-invariant tests are permanent structural ratchets.
   They do not enforce the kernel invariant — the kernel does — but they prevent accidental
   regressions in code review.
-- `Proxy-Authorization` / mTLS authentication of the core-to-proxy connection is a future
-  add (named in ADR-0042). The current control is network-membership plus destination
-  allowlist.
+- `Proxy-Authorization` / mTLS authentication of the core-to-proxy connection is a tracked
+  future add (#358, also named in ADR-0042); until then the caller is authenticated by
+  network-membership plus destination allowlist — see residual (iv) for the confused-deputy
+  consequence.
 
 ## Honest residuals accepted at sign-off
 
@@ -151,13 +156,58 @@ a CDN edge with attacker-controlled infrastructure.
 provider: the gateway cannot inspect the prompt or the API key. An instruction in a prompt
 to exfiltrate to `api.anthropic.com` reaches the provider. This is the explicit cost of
 TLS-passthrough — SDK streaming, retry semantics, and prompt confidentiality toward the
-gateway operator are preserved; payload-blindness is the trade-off.
+gateway operator are preserved; payload-blindness is the trade-off. The compensating
+barrier is upstream, not at egress: the privileged orchestrator that composes the provider
+prompt never sees raw T3 content (dual-LLM split, PRD §7.1), so an injected exfil
+instruction is structured-extracted to T2 before it can act; and secrets are
+broker-substituted at the tool-call boundary rather than embedded in the prompt, so no
+plaintext secret sits in the provider prompt to exfiltrate. Destination-gating is the last
+line here, not the only one. This residual is recorded in the adversarial corpus
+(de-2026-014, `out_of_scope`).
 
 **(iii) Under full gateway compromise the two-layer framing degrades.** The gateway is both
 the sole egress point and the serial cred-transit point (it relays each credential's
 plaintext to adapter children at spawn over fd-3, then zeroes its copy — ADR-0036
 serial-harvest residual). A `Proxy-Authorization` credential for the core→proxy channel
-and the encrypted vault (#330) narrow this surface in future slices.
+(#358) and the encrypted vault (#330) narrow this surface in future slices.
+
+**(iv) The provider forward-proxy authenticates callers by network membership alone —
+confused-deputy.** `EgressForwardProxy._authorize` (`src/alfred/gateway/egress_proxy.py`)
+checks literal-IP refusal and the destination allowlist but performs **no per-caller
+authentication**. Any process that can reach the TCP listener on `alfred_internal` — not
+just the orchestrator, but Postgres, Redis, Qdrant, or a compromised in-core plugin — can
+use the proxy as a deputy to reach any allowlisted destination. This generalises residual
+(iii) from "gateway RCE" to "any `alfred_internal`-peer compromise": the kernel-isolation
+layer still bars a *direct* external socket, but not this proxied path. Same fix as (iii) —
+per-caller `Proxy-Authorization` / mTLS on the core→proxy channel, tracked in #358. The
+AF_UNIX Discord instance is materially less exposed: its socket lives on a gateway-only
+volume never mounted into the core (§4; ADR-0043 devops-001).
+
+**(v) Reply-path / tool-arg laundering to an allowlisted destination.** A T3 injection can
+drive the model to launder a secret — or other sensitive content already in its context —
+into its user-visible **reply** (egressed to a correctly-allowlisted `discord.com` over
+mode (a)) or into a **tool argument** that egresses to an allowlisted destination over the
+mode-(b) relay. Destination-gating passes it (the destination is legitimately allowlisted),
+and the mode-(b) DLP is shape / known-value / canary matching
+(`src/alfred/security/dlp.py`), which base64, paraphrase, or homoglyph encoding defeats; the
+mode-(a) reply path is TLS-passthrough with no content inspection at all. Destination-gating
+is therefore *not* the control for this class. The controls are upstream and architectural:
+the **dual-LLM quarantine boundary** (the privileged orchestrator never sees raw T3 — an
+injected instruction is structured-extracted to T2 before it can act, PRD §7.1) and the
+**secret-broker** (secrets are substituted at the tool-call boundary and never enter a
+prompt, so there is no plaintext secret for the model to launder). Where those barriers are
+imperfect — e.g. laundering sensitive context the model legitimately holds rather than a
+broker-held secret — this residual stands. A reply-path-laundering `dlp_egress` corpus entry
+(out-of-scope-residual class, cf. de-2026-014 / de-2026-016) is a tracked candidate.
+
+**(vi) The outbound-canary detector's token set is readable from the gateway environment.**
+`ALFRED_CANARY_TOKENS` and `ALFRED_TOOL_EGRESS_ALLOWLIST` are read from the gateway process
+environment / `docker-compose.yaml` (`src/alfred/gateway/egress_relay.py`), so an attacker
+who can read that environment learns the canary set and can shape an exfiltration payload to
+avoid tripping the mode-(b) outbound-canary *detector*. The canary is defense-in-depth — a
+detector, not a primary control (a hit fails loud and refuses egress) — so this weakens a
+secondary layer, not the destination allowlist or the kernel isolation. The relay code
+records this as accepted.
 
 ## Alternatives considered
 
@@ -198,4 +248,6 @@ analysis.
   AF_UNIX bridge; the devops-001 gateway-only volume constraint.
 - [Spec C design §2, §8, §10](../superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md)
   — locked decisions, credential-concentration analysis, PRD/ADR change spec.
+- Issue [#358](https://github.com/alfred-os/AlfredOS/issues/358) — core→proxy authentication
+  (`Proxy-Authorization` / mTLS); the tracked mitigation for residuals (iii)/(iv).
 - Epic [#333](https://github.com/alfred-os/AlfredOS/issues/333) — Spec C tracking.
