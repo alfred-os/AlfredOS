@@ -251,14 +251,18 @@ Expected: PASS — includes the retained validator test untouched + the new proo
 The new `src/alfred/security/_config_protocols.py` falls under the `ci.yml` gate `coverage report --include='src/alfred/security/*' --fail-under=100`. A `Protocol` `@property` getter body is never executed, so this MUST be verified (not assumed):
 
 Run:
+
 ```bash
 uv run pytest tests/unit -q --cov=src/alfred --cov-report= && \
 uv run coverage report --include='src/alfred/security/*' --fail-under=100
 ```
+
 Expected: `--fail-under=100` PASSES. The single-line getter form `def comms_enabled_adapters(self) -> tuple[str, ...]: ...` executes its whole line at import (the proof test imports the module), so it should report 100%. If — and ONLY if — it red-lines on the Protocol module's `...` line, add the surgical exclusion to `pyproject.toml [tool.coverage.report]`:
+
 ```toml
 exclude_also = ["\\.\\.\\."]
 ```
+
 Do NOT pre-emptively add the exclusion — run the gate first; only add it if the report shows the `...` line uncovered. Re-run the gate after any change.
 
 - [ ] **Step 3: Run the RELEASE-BLOCKING adversarial suite (mandatory — security subsystem changed)**
