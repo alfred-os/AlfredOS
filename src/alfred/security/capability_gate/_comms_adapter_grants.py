@@ -67,7 +67,7 @@ from alfred.plugins.manifest import parse_manifest
 from alfred.security.capability_gate.policy import GrantRow
 
 if TYPE_CHECKING:
-    from alfred.config.settings import Settings
+    from alfred.security._config_protocols import CommsAdapterGrantsConfig
 
 # The tier ceiling for a config-seeded comms-adapter LOAD grant (FIX 1). A
 # comms adapter is ``operator`` or ``user-plugin`` BY CONSTRUCTION — both are
@@ -94,10 +94,10 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[4]
 _COMMS_ADAPTER_PROPOSAL_BRANCH: Final[str] = "bootstrap:first-party-comms-adapter"
 
 
-def comms_adapter_load_grants(settings: Settings) -> tuple[GrantRow, ...]:
+def comms_adapter_load_grants(config: CommsAdapterGrantsConfig) -> tuple[GrantRow, ...]:
     """Derive the boot plugin-LOAD grants for every enabled comms adapter.
 
-    Pure ``Settings -> tuple[GrantRow, ...]`` transform: reads each enabled
+    Pure ``CommsAdapterGrantsConfig -> tuple[GrantRow, ...]`` transform: reads each enabled
     adapter's source-controlled manifest, derives the manifest ``[plugin]
     id`` (the launcher plugin id the handshake's
     :meth:`GatePolicy.check_plugin_load` queries) + its declared
@@ -126,7 +126,7 @@ def comms_adapter_load_grants(settings: Settings) -> tuple[GrantRow, ...]:
             builder's repo root. Also surfaced loudly — never a silent skip.
     """
     grants: list[GrantRow] = []
-    for adapter_id in settings.comms_enabled_adapters:
+    for adapter_id in config.comms_enabled_adapters:
         manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
         # Loud on a missing/unreadable file — the Settings validator proved
         # the file existed at construction, but the builder must never seed
