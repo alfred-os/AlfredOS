@@ -147,9 +147,12 @@ class SecretBrokerPermissionsError(SecretBrokerConfigError):
     The ``mode`` field carries the offending POSIX mode bits as an int (render
     as ``oct(mode)``). For the ``.git``-in-parent location-rejection branch the
     sentinel ``mode=0`` is used — there's no perm-bits failure, the file lives
-    in the wrong place; the i18n template branches on ``mode == 0`` to render
-    the location-specific message (decision 3.2 in the plan: reuse this class
-    rather than add a fourth i18n key).
+    in the wrong place. The exception CLASS is reused for API/dispatch
+    compatibility (callers catch one type across both failure shapes), but the
+    rendered message comes from the dedicated ``secrets.file_in_git_repo``
+    catalog entry (#363 blocker 2) — NOT the perms-template — so the operator
+    sees the accurate "wrong location" remedy instead of a misleading `chmod`
+    instruction.
     """
 
     __slots__ = ("mode", "parent")
@@ -383,9 +386,8 @@ class SecretBroker:
             if git_parent is not None:
                 raise SecretBrokerPermissionsError(
                     t(
-                        "secrets.file_perms_too_open",
+                        "secrets.file_in_git_repo",
                         path=str(self._secrets_file_path),
-                        octal_mode="0",
                         parent=str(git_parent),
                     ),
                     path=self._secrets_file_path,
@@ -400,16 +402,11 @@ class SecretBroker:
     def from_settings(cls, settings: Settings) -> SecretBroker:
         """Build a broker primed from a Settings instance.
 
-        Reads ``settings.secrets_file`` (Pydantic default) and passes it as
-        the ``settings_default`` layer of the path-resolution pipeline. The
-        env var and constructor override still take precedence.
+        Reads ``settings.secrets_file`` (ADR-0012 layer-3 host default) and passes it as the
+        ``settings_default`` layer. The constructor override + ``ALFRED_SECRETS_FILE`` env var
+        still take precedence.
         """
-        raw = getattr(settings, "secrets_file", None)
-        # Defensive: only honour Path-like values. MagicMock from
-        # tests/unit/security/test_secrets.py::test_from_settings_constructs_broker
-        # would otherwise hit the .git-walk path with a nonsense path.
-        settings_default = raw if isinstance(raw, Path) else None
-        return cls(settings_default=settings_default)
+        return cls(settings_default=settings.secrets_file)
 
     def get(self, name: str) -> str:
         if name not in SUPPORTED_SECRETS:

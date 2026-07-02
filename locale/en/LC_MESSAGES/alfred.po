@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-01 17:53+0100\n"
+"POT-Creation-Date: 2026-07-03 00:30+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1357,54 +1357,54 @@ msgstr ""
 "unhealthy. The core daemon is not draining buffered input — check it is "
 "reachable and restart it if wedged."
 
-#: src/alfred/cli/gateway/_egress.py:43
+#: src/alfred/cli/gateway/_egress.py:48
 msgid "gateway.egress.unreachable"
 msgstr ""
 "Egress metrics unavailable on port {port} — the gateway may not be "
-"running, or this command must run inside the gateway container: "
-"docker compose exec alfred-gateway alfred gateway egress"
+"running, or this command must run inside the gateway container: docker "
+"compose exec alfred-gateway alfred gateway egress"
 
-#: src/alfred/cli/gateway/_egress.py:89
+#: src/alfred/cli/gateway/_egress.py:92
 msgid "gateway.egress.reachable"
 msgstr "up"
 
-#: src/alfred/cli/gateway/_egress.py:90
+#: src/alfred/cli/gateway/_egress.py:93
 msgid "gateway.egress.inflight_label"
 msgstr "in-flight:"
 
-#: src/alfred/cli/gateway/_egress.py:93
+#: src/alfred/cli/gateway/_egress.py:96
 msgid "gateway.egress.denies_label"
 msgstr "denials:"
 
-#: src/alfred/cli/gateway/_egress.py:107
+#: src/alfred/cli/gateway/_egress.py:110
 msgid "gateway.egress.denies_unavailable"
 msgstr "deny counter unavailable"
 
-#: src/alfred/cli/gateway/_egress.py:110
+#: src/alfred/cli/gateway/_egress.py:113
 msgid "gateway.egress.no_denials"
 msgstr "no denials"
 
-#: src/alfred/cli/gateway/_egress.py:142 src/alfred/cli/gateway/_egress.py:147
+#: src/alfred/cli/gateway/_egress.py:145 src/alfred/cli/gateway/_egress.py:150
 msgid "gateway.egress.plane.adapter"
 msgstr "adapter"
 
-#: src/alfred/cli/gateway/_egress.py:142
+#: src/alfred/cli/gateway/_egress.py:145
 msgid "gateway.egress.not_configured"
 msgstr "not configured (no adapter up)"
 
-#: src/alfred/cli/gateway/_egress.py:147
+#: src/alfred/cli/gateway/_egress.py:150
 msgid "gateway.egress.adapter_down"
 msgstr "configured, not serving"
 
-#: src/alfred/cli/gateway/_egress.py:160
+#: src/alfred/cli/gateway/_egress.py:163
 msgid "gateway.egress.allowlist_label"
 msgstr "allowlist:"
 
-#: src/alfred/cli/gateway/_egress.py:169
+#: src/alfred/cli/gateway/_egress.py:172
 msgid "gateway.egress.allowlist_empty"
 msgstr "(empty)"
 
-#: src/alfred/cli/gateway/_egress.py:173
+#: src/alfred/cli/gateway/_egress.py:176
 msgid "gateway.egress.allowlist_unresolved"
 msgstr "(unresolved — check gateway config)"
 
@@ -2905,25 +2905,31 @@ msgstr ""
 "`quarantine.ingest` is an internal pre-step; only `quarantine.extract` is"
 " dispatched as the extractor-observed method on this path."
 
-#: src/alfred/security/secrets.py:250 src/alfred/security/secrets.py:261
-#: src/alfred/security/secrets.py:277 src/alfred/security/secrets.py:289
-#: src/alfred/security/secrets.py:386
+#: src/alfred/security/secrets.py:253 src/alfred/security/secrets.py:264
+#: src/alfred/security/secrets.py:280 src/alfred/security/secrets.py:292
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:271
+#: src/alfred/security/secrets.py:274
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:362 src/alfred/security/secrets.py:373
+#: src/alfred/security/secrets.py:365 src/alfred/security/secrets.py:376
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
+
+#: src/alfred/security/secrets.py:389
+msgid "secrets.file_in_git_repo"
+msgstr ""
+"Secrets file '{path}' is inside a git repository (found '.git' at "
+"'{parent}'); secrets must never be committed. Move it outside any git "
+"repository, or set ALFRED_SECRETS_FILE to a path outside a repo."
 
 # Slice-3 retrospective arch-003 — i18n the four hardcoded English raise
 # paths in alfred.security.tiers. Each error retains all the diagnostic
