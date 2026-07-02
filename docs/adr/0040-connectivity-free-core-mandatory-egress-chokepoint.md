@@ -2,10 +2,10 @@
 
 - **Status**: Accepted (G7-5 closeout)
 - **Date**: 2026-07-01
-- **Amended**: 2026-07-02 — residual set expanded to (iv)/(v)/(vi) and the core→proxy
+- **Amended**: 2026-07-02 — residual set expanded to (iv)–(vii) and the core→proxy
   authentication mitigation tracked as
-  [#358](https://github.com/alfred-os/AlfredOS/issues/358), per the ADR-0040 sign-off
-  residual panel.
+  [#358](https://github.com/alfred-os/AlfredOS/issues/358). (iv)–(vi) + the (ii) framing fix
+  are from the ADR-0040 sign-off residual panel; (vii) surfaced in the follow-up PR review.
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
@@ -213,6 +213,18 @@ control (a hit fails loud and refuses egress) — so this weakens a secondary la
 destination allowlist or the kernel isolation. (`ALFRED_TOOL_EGRESS_ALLOWLIST` is read from
 the same env, but disclosing it carries no weakening — it is a public default-deny policy,
 not a secret.) The relay code records the canary case as accepted.
+
+**(vii) Routine egress audit is gateway-local, not the signed append-only core audit log.**
+Every CONNECT (`egress_audit.py`) and every relay forward (`egress_relay_audit.py`) is
+audited — field-allowlisted and payload-blind — but on the gateway's structlog tier plus
+Prometheus counters, not the hash-chained core audit log. This follows from the gateway's
+deliberate privilege model: it holds no vault key and no audit-signing key (ADR-0036), so it
+cannot write a signed durable row. Security-critical relay events are *not* lost — a mode-(b)
+DLP / canary trip is surfaced core-side off the typed `EgressDeniedError` the in-core relay
+client raises, which writes the durable core row — but the durable signed reconcile of the
+full egress audit stream into the core log is deferred (both egress-audit modules mark it a
+deferred ADR-0040 residual, mirroring the G6-2b durable-audit disposition). Until it lands,
+the routine allow/forward audit stream is only as durable as the gateway's logs and metrics.
 
 ## Alternatives considered
 
