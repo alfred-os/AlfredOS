@@ -29,6 +29,7 @@ constructor accepts any object satisfying the ``RateLimiter`` Protocol.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -38,6 +39,27 @@ from sqlalchemy.orm import Session, sessionmaker
 from alfred.audit.log import AuditWriter
 from alfred.identity import IdentityVersionCounter, NullRateLimiter
 from alfred.memory.models import Base
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_secrets_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Isolate the ADR-0012 host-default secrets file for every unit test (#363).
+
+    Completing ADR-0012 makes ``Settings.secrets_file`` default to
+    ``~/.config/alfred/secrets.toml``, so a ``SecretBroker`` built from a real ``Settings`` over
+    the default ``os.environ`` now reads the DEVELOPER'S real home secrets file — previously
+    inert while the field was phantom. Unit tests must be hermetic: point ``ALFRED_SECRETS_FILE``
+    (the layer-2 override, which precedes the host default AND auto-maps onto the field) at a
+    guaranteed-absent tmp path so any broker over the default environment resolves to the
+    env-only backend, never the operator's real ``~/.config/alfred/secrets.toml``.
+
+    Chosen over patching ``$HOME`` because the daemon builds an ``AF_UNIX`` socket under
+    ``$HOME`` and a deep pytest tmp home overflows the ~104-char socket-path limit; a secrets
+    *file* path has no such limit. Tests exercising the file backend pass ``secrets_file=`` (the
+    constructor kwarg, which wins over this env layer) or override/clear ``ALFRED_SECRETS_FILE``
+    themselves (e.g. the ``Settings.secrets_file`` default/override tests) and are unaffected.
+    """
+    monkeypatch.setenv("ALFRED_SECRETS_FILE", str(tmp_path / "no-secrets.toml"))
 
 
 @pytest.fixture
