@@ -55,7 +55,7 @@ from alfred.errors import AlfredError
 from alfred.i18n import t
 
 if TYPE_CHECKING:
-    from alfred.config.settings import Settings
+    from alfred.security._config_protocols import SecretBrokerConfig
 
 _log = structlog.get_logger(__name__)
 
@@ -399,14 +399,15 @@ class SecretBroker:
         self._file_secrets = _load_toml_file(self._secrets_file_path)
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> SecretBroker:
-        """Build a broker primed from a Settings instance.
+    def from_settings(cls, config: SecretBrokerConfig) -> SecretBroker:
+        """Build a broker primed from a config object (#351 DIP narrowing).
 
-        Reads ``settings.secrets_file`` (ADR-0012 layer-3 host default) and passes it as the
+        Reads ``config.secrets_file`` (ADR-0012 layer-3 host default) and passes it as the
         ``settings_default`` layer. The constructor override + ``ALFRED_SECRETS_FILE`` env var
-        still take precedence.
+        still take precedence. Narrowed to :class:`SecretBrokerConfig` rather than the full
+        ``Settings`` — a plain stub exposing only ``secrets_file`` satisfies this seam.
         """
-        return cls(settings_default=settings.secrets_file)
+        return cls(settings_default=config.secrets_file)
 
     def get(self, name: str) -> str:
         if name not in SUPPORTED_SECRETS:

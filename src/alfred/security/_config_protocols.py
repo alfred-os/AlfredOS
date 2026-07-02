@@ -9,10 +9,10 @@ read-only Protocols".
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
-# Future security config Protocols (e.g. a SecretBroker config surface once #363 resolves the
-# phantom ``Settings.secrets_file`` field) belong in THIS module — don't mint a second one.
+# Future security config Protocols belong in THIS module — don't mint a second one.
 
 
 class CommsAdapterGrantsConfig(Protocol):
@@ -36,3 +36,15 @@ class CommsAdapterGrantsConfig(Protocol):
 
     @property
     def comms_enabled_adapters(self) -> tuple[str, ...]: ...
+
+
+class SecretBrokerConfig(Protocol):
+    """The config surface ``SecretBroker.from_settings`` reads: the host-default secrets path.
+
+    Producer invariant: ``Settings.secrets_file`` is an absolute ``Path`` (ADR-0012 layer 3,
+    default ``~/.config/alfred/secrets.toml`` via ``default_factory``). The broker treats it as
+    the lowest-precedence path layer and fails closed on a bad file at construction.
+    """
+
+    @property
+    def secrets_file(self) -> Path: ...
