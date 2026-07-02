@@ -30,7 +30,7 @@ import structlog
 from alfred.egress.errors import IOPlaneUnavailableError
 
 if TYPE_CHECKING:
-    from alfred.config.settings import Settings
+    from alfred.egress._config_protocols import EgressProxyConfig
 
 _log = structlog.get_logger(__name__)
 
@@ -40,10 +40,14 @@ class EgressClient:
         self._proxy_url = proxy_url
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> EgressClient:
-        if settings.egress_proxy_url is None:
-            # G7-3 (ADR-0042): the connectivity-free core has no direct-egress
-            # fallback — a missing proxy URL is fail-closed, not a silent direct hop.
+    def from_settings(cls, config: EgressProxyConfig) -> EgressClient:
+        # Fail closed on any falsy proxy URL (None OR ""). A real Settings never yields ""
+        # (the mode="before" _normalize_egress_proxy_url collapses blank->None), so this is
+        # zero-behaviour-change for the sole prod caller; but narrowing the param to
+        # EgressProxyConfig admits an unnormalized value, so the seam self-defends rather
+        # than trusting the producer's normalizer — an empty proxy URL must never build a
+        # client. G7-3 (ADR-0042): the connectivity-free core has no direct-egress fallback.
+        if not config.egress_proxy_url:
             raise IOPlaneUnavailableError(
                 detail=(
                     "ALFRED_EGRESS_PROXY_URL is unset — the connectivity-free core has "
@@ -51,7 +55,7 @@ class EgressClient:
                     "(compose default http://alfred-gateway:8889)."
                 )
             )
-        return cls(proxy_url=settings.egress_proxy_url)
+        return cls(proxy_url=config.egress_proxy_url)
 
     @property
     def proxy_url(self) -> str:
