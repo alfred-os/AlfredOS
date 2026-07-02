@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from alfred.config.settings import Settings
 from alfred.errors import AlfredError
 from alfred.security import secrets as secrets_module
 from alfred.security.secrets import (
@@ -71,10 +72,17 @@ class TestSecretBroker:
         broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "x"})
         assert broker.has("deepseek_api_key") is True
 
-    def test_from_settings_constructs_broker(self) -> None:
-        from unittest.mock import MagicMock
-
-        broker = SecretBroker.from_settings(MagicMock())
+    def test_from_settings_constructs_broker(self, tmp_path: Path) -> None:
+        # Blocker 4 (#363): a MagicMock stood in here only because the phantom
+        # `getattr`+`isinstance` guard in `from_settings` swallowed anything
+        # that wasn't a real Path. Now that `Settings.secrets_file` is a typed
+        # `Path` field, exercise the real construction path with a Settings
+        # instance built via `model_construct` (no env/secret requirements)
+        # pointed at a path that provably does not exist.
+        settings = Settings.model_construct(
+            secrets_file=tmp_path / "does-not-exist" / "secrets.toml"
+        )
+        broker = SecretBroker.from_settings(settings)
         assert isinstance(broker, SecretBroker)
 
 
@@ -333,6 +341,28 @@ class TestGitWalk:
         assert exc_info.value.mode == 0
         assert exc_info.value.parent == worktree
 
+    def test_git_walk_rejection_renders_the_location_message(self, tmp_path: Path) -> None:
+        """Blocker 2 (#363): the .git-parent refusal must render the accurate
+        "wrong location" remedy, NOT the misleading `chmod 600` perms-template
+        text (the pre-fix defect: the message rendered `secrets.file_perms_too_open`
+        with a sentinel `octal_mode="0"`, which reads as a permissions problem for
+        a file that is actually in the wrong place)."""
+        worktree = tmp_path / "repo"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+        alfred = worktree / "alfred"
+        alfred.mkdir(mode=0o700)
+        path = alfred / "secrets.toml"
+        path.write_text('discord_bot_token = "x"\n')
+        path.chmod(0o600)
+        with pytest.raises(SecretBrokerPermissionsError) as exc_info:
+            SecretBroker(env={}, secrets_file=path)
+        message = str(exc_info.value)
+        assert "inside a git repository" in message
+        assert str(path) in message
+        assert str(worktree) in message
+        assert "chmod" not in message
+
     def test_allow_inside_git_worktree_bypasses(self, tmp_path: Path) -> None:
         worktree = tmp_path / "repo"
         worktree.mkdir()
@@ -511,13 +541,12 @@ class TestFromSettings:
         assert broker.has("discord_bot_token") is True
         assert broker.get("discord_bot_token") == "from-file"
 
-    def test_ignores_non_path_settings_attribute(self) -> None:
-        from types import SimpleNamespace
-
-        # If Settings.secrets_file is something weird (mock, str), from_settings
-        # must not blow up — it falls through to env-only.
-        broker = SecretBroker.from_settings(SimpleNamespace(secrets_file="not-a-path-object"))
-        assert isinstance(broker, SecretBroker)
+    # test_ignores_non_path_settings_attribute REMOVED (#363 blocker 4): its
+    # premise — Settings.secrets_file might be a str/mock — dies once the
+    # field is a typed Path. Without the isinstance guard the phantom
+    # getattr()+isinstance() defence used to swallow, `from_settings` now
+    # trusts the typed field directly; a str would crash on `.exists()`,
+    # which is correct (a caller error, not something to paper over).
 
 
 class TestReload:

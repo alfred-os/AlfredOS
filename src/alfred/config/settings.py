@@ -205,6 +205,26 @@ class Settings(BaseSettings):
         "boot. Override via ALFRED_POLICIES_PATH.",
     )
 
+    # #363: completes ADR-0012's layer-3 host-default secrets-file path. The
+    # broker's `settings_default` plumbing (`_resolve_secrets_path` /
+    # `SecretBroker.__init__`, see src/alfred/security/secrets.py) has existed
+    # since Slice 2 and reads exactly this field; until now the field itself
+    # was never added, so the layer was permanently dead (`bin/alfred-setup.sh`
+    # creates `~/.config/alfred/secrets.toml` on first boot, but nothing read
+    # it). See the description below for the deliberate env-var-collision
+    # this activation surfaces (Blocker 1 of the #363 security plan review).
+    secrets_file: Path = Field(
+        default_factory=lambda: Path.home() / ".config/alfred/secrets.toml",
+        description=(
+            "Host-default secrets.toml path (ADR-0012 layer 3). NOTE: with env_prefix "
+            "'ALFRED_', this field ALSO auto-maps from ALFRED_SECRETS_FILE — the same env "
+            "var the broker reads directly for its layer-2 override — so ADR-0012 layers 2 "
+            "and 3 collapse onto one env var by design (both read the same value). "
+            "default_factory yields an absolute path (no '~'), so no expanduser is needed "
+            "and the raw Path() the broker applies to ALFRED_SECRETS_FILE stays symmetric."
+        ),
+    )
+
     # PR-S4-4 (ADR-0023, #159): the PolicyWatcher mtime-poll cadence.
     policy_poll_interval_seconds: float = Field(
         default=1.0,
