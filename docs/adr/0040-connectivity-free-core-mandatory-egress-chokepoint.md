@@ -139,9 +139,9 @@ qualifier — see residual (iii); the Positive framing and residual (iii) must b
   They do not enforce the kernel invariant — the kernel does — but they prevent accidental
   regressions in code review.
 - `Proxy-Authorization` / mTLS authentication of the core-to-proxy connection is a tracked
-  future add (#358, also named in ADR-0042); until then the caller is authenticated by
-  network-membership plus destination allowlist — see residual (iv) for the confused-deputy
-  consequence.
+  future add (#358, also named in ADR-0042); until then the caller is only gated by
+  network-membership plus destination allowlist (no per-caller authentication — see residual
+  (iv) for the confused-deputy consequence).
 
 ## Honest residuals accepted at sign-off
 
@@ -150,7 +150,8 @@ These are recorded, not claimed caught.
 **(i) Discord SNI-spoof-to-cotenant and CDN-cotenant.** An allowlisted CONNECT authority
 can carry a different inner SNI; TLS-passthrough is SNI-blind. Encrypted Client Hello
 (ECH) defeats any SNI-peek attempt. Discord is Cloudflare-fronted; allowlisted hosts share
-a CDN edge with attacker-controlled infrastructure.
+a CDN edge with attacker-controlled infrastructure. Recorded in the adversarial corpus
+(de-2026-016, `out_of_scope`).
 
 **(ii) Mode-(a) provider-prompt exfil is destination-gated only.** TLS terminates at the
 provider: the gateway cannot inspect the prompt or the API key. An instruction in a prompt
@@ -159,10 +160,11 @@ TLS-passthrough — SDK streaming, retry semantics, and prompt confidentiality t
 gateway operator are preserved; payload-blindness is the trade-off. The compensating
 barrier is upstream, not at egress: the privileged orchestrator that composes the provider
 prompt never sees raw T3 content (dual-LLM split, PRD §7.1), so an injected exfil
-instruction is structured-extracted to T2 before it can act; and secrets are
-broker-substituted at the tool-call boundary rather than embedded in the prompt, so no
-plaintext secret sits in the provider prompt to exfiltrate. Destination-gating is the last
-line here, not the only one. This residual is recorded in the adversarial corpus
+instruction is structured-extracted to T2 rather than interpreted as an instruction; and
+secrets are broker-substituted at the tool-call boundary rather than embedded in the prompt,
+so no plaintext secret sits in the provider prompt to exfiltrate. These barriers reduce, not
+eliminate, the risk — see residual (v) for the case they do not cover. Destination-gating is
+the last line here, not the only one. This residual is recorded in the adversarial corpus
 (de-2026-014, `out_of_scope`).
 
 **(iii) Under full gateway compromise the two-layer framing degrades.** The gateway is both
@@ -190,24 +192,27 @@ mode (a)) or into a **tool argument** that egresses to an allowlisted destinatio
 mode-(b) relay. Destination-gating passes it (the destination is legitimately allowlisted),
 and the mode-(b) DLP is shape / known-value / canary matching
 (`src/alfred/security/dlp.py`), which base64, paraphrase, or homoglyph encoding defeats; the
-mode-(a) reply path is TLS-passthrough with no content inspection at all. Destination-gating
-is therefore *not* the control for this class. The controls are upstream and architectural:
-the **dual-LLM quarantine boundary** (the privileged orchestrator never sees raw T3 — an
-injected instruction is structured-extracted to T2 before it can act, PRD §7.1) and the
+mode-(a) reply path is TLS-passthrough with no *gateway-side* content inspection (the
+core-side `OutboundDlp` that does run on the reply is the same defeatable matcher).
+Destination-gating is therefore *not* the control for this class. The controls are upstream
+and architectural: the **dual-LLM quarantine boundary** (the privileged orchestrator never
+sees raw T3 — an injected instruction is structured-extracted to T2 rather than interpreted
+as an instruction, PRD §7.1) and the
 **secret-broker** (secrets are substituted at the tool-call boundary and never enter a
 prompt, so there is no plaintext secret for the model to launder). Where those barriers are
 imperfect — e.g. laundering sensitive context the model legitimately holds rather than a
 broker-held secret — this residual stands. A reply-path-laundering `dlp_egress` corpus entry
-(out-of-scope-residual class, cf. de-2026-014 / de-2026-016) is a tracked candidate.
+(out-of-scope-residual class, cf. de-2026-014 / de-2026-016) is an un-filed corpus candidate.
 
 **(vi) The outbound-canary detector's token set is readable from the gateway environment.**
-`ALFRED_CANARY_TOKENS` and `ALFRED_TOOL_EGRESS_ALLOWLIST` are read from the gateway process
-environment / `docker-compose.yaml` (`src/alfred/gateway/egress_relay.py`), so an attacker
-who can read that environment learns the canary set and can shape an exfiltration payload to
-avoid tripping the mode-(b) outbound-canary *detector*. The canary is defense-in-depth — a
-detector, not a primary control (a hit fails loud and refuses egress) — so this weakens a
-secondary layer, not the destination allowlist or the kernel isolation. The relay code
-records this as accepted.
+`ALFRED_CANARY_TOKENS` is read from the gateway process environment / `docker-compose.yaml`
+(`src/alfred/gateway/egress_relay.py`), so an attacker who can read that environment learns
+the canary set and can shape an exfiltration payload to avoid tripping the mode-(b)
+outbound-canary *detector*. The canary is defense-in-depth — a detector, not a primary
+control (a hit fails loud and refuses egress) — so this weakens a secondary layer, not the
+destination allowlist or the kernel isolation. (`ALFRED_TOOL_EGRESS_ALLOWLIST` is read from
+the same env, but disclosing it carries no weakening — it is a public default-deny policy,
+not a secret.) The relay code records the canary case as accepted.
 
 ## Alternatives considered
 
