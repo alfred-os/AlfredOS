@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
+# Future security config Protocols (e.g. a SecretBroker config surface once #363 resolves the
+# phantom ``Settings.secrets_file`` field) belong in THIS module — don't mint a second one.
+
 
 class CommsAdapterGrantsConfig(Protocol):
     """The config surface ``comms_adapter_load_grants`` reads: the enabled comms adapters.
