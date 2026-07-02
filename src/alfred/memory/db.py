@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from alfred.config.settings import Settings
+from alfred.memory._config_protocols import MemoryDbConfig
 
 # Explicit DSN→engine registry. We dropped the previous `functools.cache`
 # wrapper because `.cache_clear()` only forgets the Python references — it
@@ -33,14 +33,14 @@ def _engine_for_url(url: str) -> AsyncEngine:
     return engine
 
 
-def make_engine(settings: Settings) -> AsyncEngine:
-    """Return a cached async engine for ``settings.database_url``.
+def make_engine(config: MemoryDbConfig) -> AsyncEngine:
+    """Return a cached async engine for ``config.database_url``.
 
     The engine owns a connection pool, so constructing a fresh one per
     ``make_session_factory`` call leaked pools — neither the CLI bootstrap nor
     the smoke test had a sensible place to ``.dispose()`` them. The cache is
-    keyed on the DSN string (Settings itself isn't hashable), so callers with
-    identical database URLs share one engine and its pool.
+    keyed on the DSN string (the config object isn't necessarily hashable), so
+    callers with identical database URLs share one engine and its pool.
 
     Engine disposal is the process-lifetime contract: the engine lives until
     the process exits, when asyncio shutdown closes its pool. Tests / smoke
@@ -48,7 +48,7 @@ def make_engine(settings: Settings) -> AsyncEngine:
     ``functools.cache.cache_clear()`` was insufficient because it only drops
     Python references and leaks the pool's sockets.
     """
-    return _engine_for_url(settings.database_url.unicode_string())
+    return _engine_for_url(config.database_url.unicode_string())
 
 
 async def dispose_all_engines() -> None:
@@ -69,9 +69,9 @@ async def dispose_all_engines() -> None:
         await engine.dispose()
 
 
-def make_session_factory(settings: Settings) -> async_sessionmaker[AsyncSession]:
+def make_session_factory(config: MemoryDbConfig) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(
-        bind=make_engine(settings),
+        bind=make_engine(config),
         expire_on_commit=False,
         class_=AsyncSession,
     )
@@ -94,15 +94,15 @@ async def session_scope(
             raise
 
 
-def build_session_scope(settings: Settings):  # type: ignore[no-untyped-def]
-    """Bind `session_scope` to a settings-derived factory.
+def build_session_scope(config: MemoryDbConfig):  # type: ignore[no-untyped-def]
+    """Bind `session_scope` to a config-derived factory.
 
     Returns a no-arg callable suitable for the orchestrator's `session_scope`
     parameter — `async with session_scope() as session: ...`. Wraps the
-    `make_session_factory(settings)` + `session_scope(factory)` plumbing so
+    `make_session_factory(config)` + `session_scope(factory)` plumbing so
     the orchestrator only needs one zero-arg callable.
     """
-    factory = make_session_factory(settings)
+    factory = make_session_factory(config)
 
     def _scope():  # type: ignore[no-untyped-def]
         return session_scope(factory)
