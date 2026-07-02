@@ -173,6 +173,33 @@ class Provider(Protocol):
     async def complete(self, request: CompletionRequest) -> CompletionResponse: ...
 ```
 
+### Config consumers depend on narrow read-only Protocols
+
+A function that reads config depends on a narrow read-only `Protocol` of exactly the
+fields it reads — never the whole `Settings` god-object (DIP; #351, design at
+`docs/superpowers/specs/2026-07-02-config-protocol-dip-design.md`). Group a subsystem's
+config Protocols in `<subsystem>/_config_protocols.py`; the real `Settings` satisfies
+them structurally (PEP 544), so test doubles are trivial stubs.
+
+```python
+# memory/_config_protocols.py
+from typing import Protocol
+from pydantic import PostgresDsn
+
+class MemoryDbConfig(Protocol):
+    @property
+    def database_url(self) -> PostgresDsn: ...
+```
+
+- Use `@property` getters — read-only intent (compile-time only; `Settings` stays
+  runtime-mutable), satisfied by `Settings`' attribute *and* a plain stub.
+- A `from_settings(...)` that reads ≤k fields is a leaf consumer and narrows too. Only the
+  composition root (`cli/`, `bootstrap/`, the loader, the `Settings` definition) keeps
+  concrete `Settings`.
+- If a consumer's correctness relies on a `Settings` validator/normalizer, retain ≥1
+  real-`Settings` test and docstring the producer invariant on the Protocol — a plain stub
+  bypasses the validator.
+
 ### Type narrowing
 
 Use `TypeGuard` for custom narrowers. Use `assert` for invariants you can't express in the type system.
