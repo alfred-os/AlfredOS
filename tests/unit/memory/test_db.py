@@ -12,6 +12,7 @@ We mock ``create_async_engine`` directly so the suite stays a pure unit test
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,7 +21,7 @@ from alfred.memory import db as db_mod
 
 
 @pytest.fixture(autouse=True)
-async def _isolated_registry(monkeypatch: pytest.MonkeyPatch):
+async def _isolated_registry(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[None, None]:
     """Replace the registry with an empty dict for each test and restore after.
 
     Other tests in the suite may legitimately populate the real registry; we
@@ -77,12 +78,34 @@ class TestEngineRegistry:
         # factory adds nothing here.
         probe_a = AsyncMock(name="engine-a")
         probe_b = AsyncMock(name="engine-b")
-        db_mod._ENGINES["fake-a"] = probe_a  # type: ignore[assignment]
-        db_mod._ENGINES["fake-b"] = probe_b  # type: ignore[assignment]
+        db_mod._ENGINES["fake-a"] = probe_a
+        db_mod._ENGINES["fake-b"] = probe_b
         await db_mod.dispose_all_engines()
         probe_a.dispose.assert_awaited_once()
         probe_b.dispose.assert_awaited_once()
         assert db_mod._ENGINES == {}
+
+
+class TestConsumersAcceptNarrowConfig:
+    async def test_make_engine_reads_only_database_url_from_a_stub(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """make_engine consumes MemoryDbConfig — a plain stub with just database_url."""
+        from pydantic import PostgresDsn
+
+        captured: list[str] = []
+
+        def _fake_engine_for_url(url: str) -> object:
+            captured.append(url)
+            return object()
+
+        monkeypatch.setattr(db_mod, "_engine_for_url", _fake_engine_for_url)
+
+        class _StubCfg:
+            database_url = PostgresDsn("postgresql+asyncpg://alfred:alfred@db:5432/alfred")
+
+        db_mod.make_engine(_StubCfg())  # type-checks iff make_engine takes MemoryDbConfig
+        assert captured == ["postgresql+asyncpg://alfred:alfred@db:5432/alfred"]
 
 
 pytestmark = pytest.mark.asyncio
