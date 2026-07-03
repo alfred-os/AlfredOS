@@ -477,7 +477,15 @@ async def dispatch_web_fetch(
             actor_user_id=user_id,
             subject={**base_subject, "dlp_scan_result": "clean"},
             trust_tier_of_trigger="T0",
-            result="ok",
+            # #328: the web.fetch success row uses the canonical ``success``
+            # disposition (matching the 24+ other success sites — operator_session,
+            # daemon boot, dispatch_loop, supervisor, …), NOT the legacy ``ok``
+            # split that made every web.fetch success invisible to a
+            # ``result = 'success'`` audit-graph/metrics query. Both are in
+            # ``ck_audit_log_result``; dropping the now-unused ``ok`` from the
+            # domain is a deferred follow-up migration (only after the #320 guard
+            # confirms no remaining ``ok`` writer).
+            result="success",
             cost_estimate_usd=0.0,
             trace_id=correlation_id,
         )
