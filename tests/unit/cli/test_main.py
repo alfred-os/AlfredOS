@@ -47,8 +47,10 @@ def test_alfred_status_secrets_config_error_exits_cleanly(
     # `build_broker_or_die` catches it and converts to `typer.Exit(2)`).
     assert not isinstance(result.exception, SecretBrokerConfigError)
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    # The operator sees the actionable secrets message, not a Python traceback.
-    assert "Traceback" not in result.stdout
+    # The operator sees the actionable secrets message (the offending path is
+    # interpolated into t("secrets.path_is_directory", ...)) — a positive check
+    # that build_broker_or_die echoed str(exc), not a vacuous "no Traceback".
+    assert str(bad) in result.stdout
 
 
 def test_alfred_migrate_command_is_registered() -> None:

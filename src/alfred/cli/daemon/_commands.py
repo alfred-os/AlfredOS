@@ -2349,6 +2349,22 @@ async def _start_async() -> None:
                 t3_nonce=t3_nonce,
                 policies_ref=snapshot_ref,
             )
+        except SecretBrokerConfigError:
+            # #368 defense-in-depth: _build_comms_boot_graph builds its own
+            # SecretBroker (build_broker at :820, BEFORE the bwrap spawn, so
+            # nothing is live to reap). The line-~2284 _build_boot_outbound_dlp
+            # guard already refuses boot on a bad secrets file BEFORE this block
+            # (identical construction, runs first), so this arm is unreachable
+            # TODAY — but guarding here makes the refusal LOCAL rather than
+            # dependent on that positional ordering (CLAUDE.md hard rule #7). Same
+            # audited reason: a misconfigured secrets file is boot-infra.
+            await _refuse_boot(
+                audit,
+                BootInfraInstallFailedFailure(),
+                t("daemon.boot.boot_infra_install_failed"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
         except QuarantineChildSpawnError:
             await _refuse_boot(
                 audit,
