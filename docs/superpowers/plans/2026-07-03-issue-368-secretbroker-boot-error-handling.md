@@ -36,3 +36,9 @@
 - Implements the `secrets.py:130` intended-but-missing "catch once + route on subtype". ✓
 - Fixes the PRE-EXISTING gap (env-var/bind-mount trigger), not only the #363-widened host-default one. ✓
 - Excludes the `.git`-walk *narrowing* (that's #366 — an ADR-0012 amendment / genuine design call, held for the maintainer). ✓
+
+## Execution outcome (2026-07-03, PR #369)
+
+- **Daemon mechanism landed as *dedicated* `try/except SecretBrokerConfigError` guards, not an addition to the existing 2188-2205 boot-infra `except` tuple.** Task 1's "Verify the `build_broker` call is inside the guarded region" check found it was NOT — `_build_boot_outbound_dlp` is invoked ~65 lines *after* that tuple closes. So a dedicated guard was wrapped around that call (plus a defense-in-depth guard on the comms-graph call-site, which builds a second broker). Same audited outcome (`_refuse_boot` → exit 2 + `boot_infra_install_failed`), different mechanism than the one-line summary anticipated.
+- **CLI renders `str(exc)`** (the subtype's already-`t()`-rendered, actionable message). The daemon arms *also* pass `str(exc)` as the operator-facing refusal message (devex dx-001) so a secrets misconfig is not misdirected to the generic capability-gate/hook-registry boot-infra text — while the audit row keeps the `boot_infra_install_failed` reason. Zero new i18n strings, zero new failure classes, as constrained.
+- **Deferred to follow-ups (out of #368 scope):** a dedicated `secrets_config_failed` boot-failure reason + audit-subject detail (new failure class — the plan excluded these); wrapping `tomllib.TOMLDecodeError` / bare `OSError` from `SecretBroker` construction in a typed `SecretBrokerConfigError` subtype (a `src/alfred/security/` change this PR kept out of scope); surfacing the resolved secrets-file path in `alfred status`.

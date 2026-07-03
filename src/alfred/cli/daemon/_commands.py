@@ -2277,17 +2277,23 @@ async def _start_async() -> None:
     # the audited refusal every other boot-infra failure uses. Route it through
     # the SAME audited path (exit 2 + a daemon.boot.failed row under the
     # boot_infra_install_failed reason) so a misconfigured secrets file surfaces
-    # like a broken seed/install, not a stack trace. Fail-closed is preserved —
-    # only the surfacing changes. _refuse_boot is NoReturn (raises
-    # _BootRefusedError → exit 2), so control never falls through to a use of an
-    # unbound outbound_dlp.
+    # like a broken seed/install, not a stack trace. The OPERATOR-facing refusal
+    # message is the exception's own str(exc) — already t()-rendered and carrying
+    # the concrete remedy (chmod 600 / move out of the git repo / create the
+    # file) — so the operator is told it is a SECRETS problem, not sent hunting
+    # the capability-gate/hook-registry rows the generic boot_infra message names
+    # (devex dx-001). The subtype messages carry only path/mode/parent, never a
+    # secret value (they raise before the file is read — verified in secrets.py).
+    # Fail-closed is preserved — only the surfacing changes. _refuse_boot is
+    # NoReturn (raises _BootRefusedError → exit 2), so control never falls through
+    # to a use of an unbound outbound_dlp.
     try:
         outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
-    except SecretBrokerConfigError:
+    except SecretBrokerConfigError as exc:
         await _refuse_boot(
             audit,
             BootInfraInstallFailedFailure(),
-            t("daemon.boot.boot_infra_install_failed"),
+            str(exc),
             boot_id=boot_id,
             environment_source=source,
         )
@@ -2349,19 +2355,20 @@ async def _start_async() -> None:
                 t3_nonce=t3_nonce,
                 policies_ref=snapshot_ref,
             )
-        except SecretBrokerConfigError:
+        except SecretBrokerConfigError as exc:
             # #368 defense-in-depth: _build_comms_boot_graph builds its own
-            # SecretBroker (build_broker at :820, BEFORE the bwrap spawn, so
-            # nothing is live to reap). The line-~2284 _build_boot_outbound_dlp
-            # guard already refuses boot on a bad secrets file BEFORE this block
-            # (identical construction, runs first), so this arm is unreachable
-            # TODAY — but guarding here makes the refusal LOCAL rather than
-            # dependent on that positional ordering (CLAUDE.md hard rule #7). Same
-            # audited reason: a misconfigured secrets file is boot-infra.
+            # SecretBroker (via build_broker, BEFORE the bwrap spawn in
+            # _build_comms_inbound_extractor, so nothing is live to reap). The
+            # _build_boot_outbound_dlp guard above already refuses boot on a bad
+            # secrets file (identical construction, runs first), so this arm is
+            # unreachable TODAY — but guarding here makes the refusal LOCAL rather
+            # than dependent on that positional ordering (CLAUDE.md hard rule #7).
+            # Same audited reason (a misconfigured secrets file is boot-infra) and
+            # the same str(exc) operator message (the actionable secrets remedy).
             await _refuse_boot(
                 audit,
                 BootInfraInstallFailedFailure(),
-                t("daemon.boot.boot_infra_install_failed"),
+                str(exc),
                 boot_id=boot_id,
                 environment_source=source,
             )
