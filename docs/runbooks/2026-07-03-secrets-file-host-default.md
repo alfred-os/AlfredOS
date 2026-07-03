@@ -22,8 +22,11 @@ constructor argument → `ALFRED_SECRETS_FILE` → this host default.
 
 1. **If you keep secrets in `~/.config/alfred/secrets.toml`** (as `alfred-setup.sh` intends):
    they are now honoured. Confirm the file is `0600` and owned by you
-   (`chmod 600 ~/.config/alfred/secrets.toml`). A file with group/world bits, wrong owner, or a
-   symlink is **refused at startup** (fail-closed — this is intentional).
+   (`chmod 600 ~/.config/alfred/secrets.toml`), **and** that its parent directory
+   `~/.config/alfred` is not group/world-writable (`chmod 700 ~/.config/alfred`). A file with
+   group/world bits, wrong owner, or a symlink — **or a group/world-writable parent directory**
+   (which would let another user swap the file underneath the broker) — is **refused at startup**
+   (fail-closed — this is intentional).
 
 2. **File-prefer secrets flip.** For `discord_bot_token` and `quarantine_provider_api_key`
    (the `_PREFER_FILE` set), a value in `~/.config/alfred/secrets.toml` now **wins over the
