@@ -30,7 +30,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 import typer
@@ -39,10 +39,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from alfred.audit.audit_row_schemas import (
     COMMS_SOCKET_PEER_REJECTED_FIELDS,
     DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS,
-    DAEMON_BOOT_FAILED_FIELDS,
     DAEMON_BOOT_FIELDS,
     DAEMON_CONTROL_PEER_REJECTED_FIELDS,
-    DAEMON_LIFECYCLE_FIELDS,
 )
 
 # PR-S4-11c-2a0 (#237): mint + register the per-process authorised T3 nonce at
@@ -55,6 +53,15 @@ from alfred.bootstrap.nonce_factory import (
     create_and_register_t3_nonce,
 )
 from alfred.cli.daemon._audit_fallback import build_boot_audit_writer
+from alfred.cli.daemon._boot_audit import (
+    LifecycleBroadcaster,
+    _BootRefusedError,
+    _emit_going_down,
+    _emit_or_quarantine,
+    _emit_ready,
+    _invoke_boot_completed,
+    _refuse_boot,
+)
 from alfred.cli.daemon._daemon_control_server import DaemonControlServer
 from alfred.cli.daemon._daemon_pidfile import (
     DaemonPidFileError,
@@ -89,9 +96,6 @@ from alfred.cli.daemon._failures import (
 # ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
 from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
-    DAEMON_LIFECYCLE_GOING_DOWN,
-    DAEMON_LIFECYCLE_READY,
-    LIFECYCLE_REASON_SHUTDOWN,
 )
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
@@ -104,7 +108,6 @@ from alfred.i18n import t
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_socket_transport import CommsSocketListener
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
-from alfred.plugins.comms_wire import CommsProtocolError
 from alfred.plugins.errors import ManifestError
 from alfred.plugins.manifest import parse_manifest
 
@@ -161,8 +164,6 @@ class _StubOperatorResolver:
 
     async def resolve(self) -> str:
         return _STUB_OPERATOR_ID
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +556,6 @@ async def _emit_durable_intake_ack_loop(
             continue
         await send_notification(DAEMON_COMMS_ACK, {"cumulative_ack": max(ack, 0)})
         last_emitted = ack
-
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -1705,8 +1704,6 @@ def wait_for_shutdown(  # pragma: no cover - real-loop signal glue; unit tests m
 # ---------------------------------------------------------------------------
 # Boot orchestration
 # ---------------------------------------------------------------------------
-
-
 
 
 def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult | None]:
