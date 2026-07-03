@@ -177,10 +177,10 @@ def status() -> None:
     perf-001: ``_bootstrap`` imports lazily — ``alfred --help`` never
     invokes ``status`` and so should not pay the provider chain's cost.
     """
-    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+    from alfred.cli._bootstrap import build_broker_or_die, load_settings_or_die
 
     settings = load_settings_or_die()
-    broker = build_broker(settings)
+    broker = build_broker_or_die(settings)
     set_language(settings.operator_language)
     # The runtime fallback exists iff the broker can mint an Anthropic key
     # (see ``build_router``). Surfacing the configured name as-is would
