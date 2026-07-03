@@ -23,6 +23,7 @@ from collections.abc import Mapping
 import pytest
 from typer.testing import CliRunner
 
+import alfred.cli.daemon._boot_audit as _boot_audit
 import alfred.cli.daemon._commands as _daemon_commands
 from alfred.cli.daemon import daemon_app
 from alfred.cli.daemon._commands import LifecycleBroadcaster
@@ -163,7 +164,9 @@ async def test_broadcast_bounds_a_wedged_sender_with_a_timeout(
     """
     import structlog.testing
 
-    monkeypatch.setattr(_daemon_commands, "_LIFECYCLE_BROADCAST_TIMEOUT_SECONDS", 0.05)
+    # #256 PR-1: the timeout constant + LifecycleBroadcaster moved to _boot_audit;
+    # the broadcaster reads the constant from _boot_audit's globals, so patch it there.
+    monkeypatch.setattr(_boot_audit, "_LIFECYCLE_BROADCAST_TIMEOUT_SECONDS", 0.05)
 
     async def _wedged(_method: str, _params: Mapping[str, object]) -> None:
         await asyncio.sleep(10)  # never returns within the (tiny) timeout
