@@ -140,7 +140,8 @@ conversation turn) and `triggering_user_id`. The `content_handle_id` field
 is `None` on cap-refusal rows — the pre-minted UUID was never written to
 Redis (the refusal happens BEFORE the plugin call). The matching successful
 fetch (the one currently occupying the slot) is found via `triggering_user_id`
-and a recent `tool.web.fetch` row with `result='ok'`.
+and a recent `tool.web.fetch` row with `result='success'` (audit rows written
+before #328 used the legacy `result='ok'`).
 
 ## Related runbooks
 
