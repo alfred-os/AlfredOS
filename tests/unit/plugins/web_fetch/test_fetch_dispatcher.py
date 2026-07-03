@@ -13,7 +13,7 @@ rule). Every branch in
 exercised here against ``AsyncMock`` fakes for the collaborators (extractor,
 dlp, audit, rate_limiter). The branches covered are:
 
-  * Happy ``Extracted`` outcome → returned + ``result="ok"`` / T2 success row.
+  * Happy ``Extracted`` outcome → returned + ``result="success"`` / T2 success row.
   * Soft ``TypedRefusal`` outcome (MIME/size) → returned + ``result="refused"``
     row carrying the payload-blind ``policy_refusal_token``.
   * URL-secret → ``result="refused"`` / ``url_secret_refused`` row + the
@@ -186,7 +186,7 @@ async def _dispatch(**overrides: Any) -> EgressExtractOutcome:
 
 @pytest.mark.asyncio
 async def test_happy_extracted_returns_outcome_and_success_row() -> None:
-    """A fresh ``Extracted`` outcome is returned and a ``result="ok"`` row is
+    """A fresh ``Extracted`` outcome is returned and a ``result="success"`` row is
     written with the upstream status and ``trust_tier_of_result="T2"``."""
     audit = _build_audit()
     outcome = _make_extracted_outcome(status=200)
@@ -199,7 +199,7 @@ async def test_happy_extracted_returns_outcome_and_success_row() -> None:
     assert audit.append_schema.await_count == 1
     call = audit.append_schema.await_args
     assert call.kwargs["event"] == "tool.web.fetch"
-    assert call.kwargs["result"] == "ok"
+    assert call.kwargs["result"] == "success"
     subject = call.kwargs["subject"]
     assert subject["dlp_scan_result"] == "clean"
     assert subject["trust_tier_of_result"] == "T2"
@@ -263,7 +263,7 @@ async def test_success_row_status_code_clamped_to_none_when_implausible() -> Non
     await _dispatch(audit=audit, extractor=extractor)
 
     call = audit.append_schema.await_args
-    assert call.kwargs["result"] == "ok"
+    assert call.kwargs["result"] == "success"
     assert call.kwargs["subject"]["status_code"] is None
 
 
