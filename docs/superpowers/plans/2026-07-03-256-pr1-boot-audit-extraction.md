@@ -295,7 +295,9 @@ In `.github/workflows/ci.yml`, after the "Daemon control-plane trust-boundary 10
       - name: Daemon boot-audit 100% line+branch coverage (combined)
         # #256 PR-1: sibling of the unit-job gate above (two-gates pattern). The
         # extracted daemon boot-audit refusal leaf. Keep BOTH in sync.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_boot_audit.py') != ''
+        # NOTE: the combined coverage-gates job keys on has_coverage_corpus (NOT
+        # has_py — that is the unit job's check output); match the sibling steps.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_boot_audit.py') != ''
         run: |
           uv run coverage report \
             --include='src/alfred/cli/daemon/_boot_audit.py' \
