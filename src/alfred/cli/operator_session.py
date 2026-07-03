@@ -428,7 +428,7 @@ def _build_operator_resolver() -> Any:  # pragma: no cover - integration-covered
     ``OPERATOR_SESSION_REFUSED_FIELDS`` on failure.
     """
     from alfred.audit.log import AuditWriter
-    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+    from alfred.cli._bootstrap import build_broker_or_die, load_settings_or_die
     from alfred.hooks import SYSTEM_ONLY_TIERS
     from alfred.hooks.context import HookContext
     from alfred.hooks.invoke import invoke
@@ -453,7 +453,7 @@ def _build_operator_resolver() -> Any:  # pragma: no cover - integration-covered
 
     return DefaultOperatorSessionResolver(
         session_scope=scope,
-        secret_broker=build_broker(settings),
+        secret_broker=build_broker_or_die(settings),
         machine_id_provider=select_machine_id_provider(),
         audit_writer=AuditWriter(session_factory=scope),
         hook_dispatcher=_dispatch,
@@ -507,7 +507,7 @@ def _build_deps() -> OperatorSessionDeps:  # pragma: no cover - integration-cove
     from sqlalchemy import select, update
 
     from alfred.audit.log import AuditWriter
-    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+    from alfred.cli._bootstrap import build_broker_or_die, load_settings_or_die
     from alfred.hooks import SYSTEM_ONLY_TIERS
     from alfred.hooks.context import HookContext
     from alfred.hooks.invoke import invoke
@@ -516,7 +516,7 @@ def _build_deps() -> OperatorSessionDeps:  # pragma: no cover - integration-cove
     from alfred.memory.models import OperatorSession as OperatorSessionRow
 
     settings = load_settings_or_die()
-    broker = build_broker(settings)
+    broker = build_broker_or_die(settings)
     scope = build_session_scope(settings)
     audit = AuditWriter(session_factory=scope)
 

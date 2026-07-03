@@ -59,7 +59,7 @@ def _build_operator_resolver() -> OperatorResolverProtocol:
     import socket
 
     from alfred.audit.log import AuditWriter
-    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+    from alfred.cli._bootstrap import build_broker_or_die, load_settings_or_die
     from alfred.cli.operator_session import _session_file_path
     from alfred.hooks import SYSTEM_ONLY_TIERS
     from alfred.hooks.context import HookContext
@@ -84,7 +84,7 @@ def _build_operator_resolver() -> OperatorResolverProtocol:
 
     return DefaultOperatorSessionResolver(
         session_scope=scope,
-        secret_broker=build_broker(settings),
+        secret_broker=build_broker_or_die(settings),
         machine_id_provider=select_machine_id_provider(),
         audit_writer=AuditWriter(session_factory=scope),
         hook_dispatcher=_dispatch,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from alfred.cli.main import _build_adapter_dlp_audit_sink, app
+from alfred.security.secrets import SecretBrokerConfigError
 
 runner = CliRunner()
 
@@ -27,6 +29,26 @@ def test_alfred_status_exits_zero(monkeypatch: MonkeyPatch) -> None:
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "deepseek" in result.stdout.lower()
+
+
+def test_alfred_status_secrets_config_error_exits_cleanly(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bad secrets file surfaces as a clean Exit(2), NOT a raw traceback (#368)."""
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    bad = tmp_path / "secrets-is-a-dir.toml"
+    bad.mkdir()  # a directory where a regular file is required
+    monkeypatch.setenv("ALFRED_SECRETS_FILE", str(bad))
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 2
+    # Clean exit — no unhandled SecretBrokerConfigError bubbled to the runner
+    # (the old `build_broker` path let it surface as a raw traceback; #368's
+    # `build_broker_or_die` catches it and converts to `typer.Exit(2)`).
+    assert not isinstance(result.exception, SecretBrokerConfigError)
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    # The operator sees the actionable secrets message, not a Python traceback.
+    assert "Traceback" not in result.stdout
 
 
 def test_alfred_migrate_command_is_registered() -> None:

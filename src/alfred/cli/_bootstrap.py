@@ -49,7 +49,7 @@ from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
 from alfred.security.dlp import OutboundDlp
-from alfred.security.secrets import SecretBroker
+from alfred.security.secrets import SecretBroker, SecretBrokerConfigError
 
 if TYPE_CHECKING:
     from alfred.providers.base import Provider
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 __all__ = [
     "build_adapter_dlp_audit_sink",
     "build_broker",
+    "build_broker_or_die",
     "build_budget_guard",
     "build_orchestrator",
     "build_router",
@@ -109,6 +110,26 @@ def load_settings_or_die() -> Settings:
 def build_broker(settings: Settings) -> SecretBroker:
     """Construct the slice-1 :class:`SecretBroker` from operator settings."""
     return SecretBroker.from_settings(settings)
+
+
+def build_broker_or_die(settings: Settings) -> SecretBroker:
+    """Construct the :class:`SecretBroker` or exit cleanly on a config error.
+
+    CLI sibling of :func:`load_settings_or_die`. ``SecretBroker.from_settings``
+    is fail-closed at the trust boundary: a bad secrets file (insecure perms,
+    a directory where a file is expected, a missing required file, or a file
+    inside a git worktree) raises :class:`SecretBrokerConfigError`. Without
+    this helper that surfaces three layers up as a raw traceback (#368). The
+    subclass already carries a ``t()``-rendered, actionable message (the remedy
+    is in the string), so we echo it as-is and exit 2 — matching every other
+    first-run CLI config error. Fail-closed is preserved: the process still
+    refuses to run; only the surfacing changes.
+    """
+    try:
+        return build_broker(settings)
+    except SecretBrokerConfigError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=2) from exc
 
 
 class _SecretBrokerLike(Protocol):
