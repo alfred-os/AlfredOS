@@ -19,6 +19,11 @@ The boot sequence (core-007 closure — probes at the CLI layer, NOT inside
 
 Every ``append_schema`` on a refusal/completion path is wrapped so an
 audit-write failure quarantines with exit 3 (sec-003).
+
+The audited-refusal + lifecycle-emit MECHANISM this sequence invokes
+(``_refuse_boot`` / ``_emit_or_quarantine`` / ``_emit_ready`` /
+``_emit_going_down`` / ``LifecycleBroadcaster``) lives in
+:mod:`alfred.cli.daemon._boot_audit` (#256 PR-1); this module orchestrates it.
 """
 
 from __future__ import annotations

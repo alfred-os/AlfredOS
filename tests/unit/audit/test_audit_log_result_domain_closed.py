@@ -322,7 +322,10 @@ def test_dynamic_result_sites_are_documented() -> None:
         [
             # --- AuditWriter.append / .append_schema call path ---
             "src/alfred/audit/log.py:180",  # append_schema forwards result -> append
-            "src/alfred/cli/daemon/_commands.py:1831",
+            # #256 PR-1: _emit_or_quarantine moved _commands.py -> _boot_audit.py;
+            # result=result forwards the call sites' closed-vocab literals
+            # ("success" / "refused"), both in-domain (unchanged by the move).
+            "src/alfred/cli/daemon/_boot_audit.py:176",
             "src/alfred/comms_mcp/adapter_credential_resolver.py:288",
             "src/alfred/comms_mcp/adapter_status_observer.py:255",
             "src/alfred/comms_mcp/forwarded_inbound_receiver.py:366",
