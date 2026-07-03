@@ -114,6 +114,7 @@ from alfred.plugins.manifest import parse_manifest
 # boot-wiring unit tests can monkeypatch the spawn seam (``spawn_quarantine_child_io``)
 # without a real subprocess and still raise this through the boot path.
 from alfred.security.quarantine_child_io import QuarantineChildSpawnError
+from alfred.security.secrets import SecretBrokerConfigError
 from alfred.supervisor.core import Supervisor
 
 if TYPE_CHECKING:
@@ -2267,7 +2268,29 @@ async def _start_async() -> None:
     # this scanner before it reaches the ledger (CLAUDE.md #4 — DLP cannot
     # be disabled per-call). Broker + audit sink mirror the orchestrator's
     # outbound-DLP wiring in ``alfred.cli.main``.
-    outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
+    #
+    # #368: SecretBroker.from_settings (inside _build_boot_outbound_dlp) is
+    # fail-closed at the trust boundary — a bad secrets file (insecure perms,
+    # a directory where a file is expected, a missing required file, or a file
+    # inside a git worktree) raises SecretBrokerConfigError. Unguarded, that
+    # crashes uncaught out of _start_async as a raw traceback + exit 1, SKIPPING
+    # the audited refusal every other boot-infra failure uses. Route it through
+    # the SAME audited path (exit 2 + a daemon.boot.failed row under the
+    # boot_infra_install_failed reason) so a misconfigured secrets file surfaces
+    # like a broken seed/install, not a stack trace. Fail-closed is preserved —
+    # only the surfacing changes. _refuse_boot is NoReturn (raises
+    # _BootRefusedError → exit 2), so control never falls through to a use of an
+    # unbound outbound_dlp.
+    try:
+        outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
+    except SecretBrokerConfigError:
+        await _refuse_boot(
+            audit,
+            BootInfraInstallFailedFailure(),
+            t("daemon.boot.boot_infra_install_failed"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
 
     # FIX 4 (PR-S4-11b review): this cut builds ONE shared inbound orchestrator
     # whose outbound sender is bound per-adapter (last-writer-wins), so with two

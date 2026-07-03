@@ -210,6 +210,37 @@ def test_boot_refuses_audited_when_grants_builder_raises_os_error(
     assert _reason(boot_success_env) == "boot_infra_install_failed"
 
 
+def test_boot_refuses_audited_when_outbound_dlp_broker_config_error(
+    monkeypatch: pytest.MonkeyPatch, boot_success_env: FakeAuditWriter
+) -> None:
+    """#368: a SecretBrokerConfigError from the boot-DLP broker build must NOT
+    crash uncaught out of ``_start_async`` as a raw traceback / exit 1. It must
+    run the audited refusal: exit 2 + a ``daemon.boot.failed`` row with the
+    ``boot_infra_install_failed`` reason (same path as a broken seed/install)."""
+    from pathlib import Path
+
+    from alfred.security.secrets import SecretBrokerNotAFileError
+
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
+        _async_return(make_quarantined_extract_chain_gate()),
+    )
+
+    def _raise_broker_config_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise SecretBrokerNotAFileError(
+            "secrets path is a directory", path=Path("/etc/alfred/secrets.toml")
+        )
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands._build_boot_outbound_dlp",
+        _raise_broker_config_error,
+    )
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert _reason(boot_success_env) == "boot_infra_install_failed"
+
+
 def _async_return(value: Any):  # type: ignore[no-untyped-def]
     async def _f(*_args: Any, **_kwargs: Any) -> Any:
         return value
