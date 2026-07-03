@@ -187,3 +187,8 @@ holds `path`; subclasses add their specifics.
   [\_PREFER_FILE](../glossary.md#_prefer_file).
 - `tests/unit/security/test_no_direct_env_reads.py` — broker-only access
   invariant.
+- #363 / PR #367 — completes this ADR: the `Settings.secrets_file` field
+  specified above (layer 3) was added and `from_settings` now reads it, so the
+  host-default `~/.config/alfred/secrets.toml` is finally honoured. Operator
+  upgrade note:
+  [`docs/runbooks/2026-07-03-secrets-file-host-default.md`](../runbooks/2026-07-03-secrets-file-host-default.md).
