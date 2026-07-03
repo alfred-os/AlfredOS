@@ -481,6 +481,13 @@ def build_orchestrator(
     (:func:`build_working_memory_pool`): the orchestrator no longer holds the
     buffer — the adapter brackets acquire/release around each turn.
     """
+    # sec-001 / #370: this builder intentionally keeps the RAW ``build_broker``
+    # (NOT the CLI ``build_broker_or_die``). ``build_orchestrator`` is the daemon
+    # inbound-path construction site (PR-S4-11c-3), where a
+    # ``SecretBrokerConfigError`` must route through the daemon's audited
+    # ``_refuse_boot`` path (exit 2 + a ``daemon.boot.failed`` row) — never the
+    # CLI's ``typer.Exit``. It is unwired today (no live caller); #370 tracks
+    # adding the correct daemon-side guard when it graduates.
     broker = build_broker(settings)
     router = build_router(broker, settings)
     resolver = install_identity_factories_for_settings(settings)
