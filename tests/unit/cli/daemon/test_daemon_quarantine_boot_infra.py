@@ -216,7 +216,10 @@ def test_boot_refuses_audited_when_outbound_dlp_broker_config_error(
     """#368: a SecretBrokerConfigError from the boot-DLP broker build must NOT
     crash uncaught out of ``_start_async`` as a raw traceback / exit 1. It must
     run the audited refusal: exit 2 + a ``daemon.boot.failed`` row with the
-    ``boot_infra_install_failed`` reason (same path as a broken seed/install)."""
+    ``boot_infra_install_failed`` reason (same path as a broken seed/install),
+    and NO boot-completed row. The operator-facing message is the exception's
+    own ``str(exc)`` (the actionable secrets remedy — devex dx-001), not the
+    generic capability-gate/hook-registry boot-infra text."""
     from pathlib import Path
 
     from alfred.security.secrets import SecretBrokerNotAFileError
@@ -239,6 +242,11 @@ def test_boot_refuses_audited_when_outbound_dlp_broker_config_error(
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 2
     assert _reason(boot_success_env) == "boot_infra_install_failed"
+    # The refusal short-circuits boot cleanly — no boot-completed row (CR).
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The operator sees the actionable secrets message, not the generic
+    # boot-infra text that would misdirect them (devex dx-001).
+    assert "secrets path is a directory" in result.output
 
 
 def _async_return(value: Any):  # type: ignore[no-untyped-def]

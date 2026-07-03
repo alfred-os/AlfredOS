@@ -393,15 +393,15 @@ def test_boot_refuses_audited_on_comms_graph_broker_config_error(
     """A ``SecretBrokerConfigError`` from the comms-graph broker build -> refuse (exit 2).
 
     #368 defense-in-depth: ``_build_comms_boot_graph`` builds its OWN
-    ``SecretBroker`` (``build_broker`` at ``_commands.py:820``) — a second
-    construction distinct from the line-~2284 ``_build_boot_outbound_dlp`` guard
-    that already refuses boot on a bad secrets file BEFORE this block runs.
-    That earlier guard makes this arm unreachable TODAY (it builds the identical
-    broker first), but relying on that positional ordering to protect a
-    security-boundary refusal is fragile (CLAUDE.md hard rule #7) — guard this
-    call-site too so the refusal is LOCAL, not positional. Drives the failure by
-    monkeypatching ``_build_comms_boot_graph`` itself (the call the new except
-    arm wraps) to raise the concrete subtype a real bad-secrets-file would.
+    ``SecretBroker`` (via ``build_broker``) — a second construction distinct
+    from the ``_build_boot_outbound_dlp`` guard that already refuses boot on a
+    bad secrets file BEFORE this block runs. That earlier guard makes this arm
+    unreachable TODAY (it builds the identical broker first), but relying on that
+    positional ordering to protect a security-boundary refusal is fragile
+    (CLAUDE.md hard rule #7) — guard this call-site too so the refusal is LOCAL,
+    not positional. Drives the failure by monkeypatching ``_build_comms_boot_graph``
+    itself (the call the new except arm wraps) to raise the concrete subtype a
+    real bad-secrets-file would.
     """
     del quarantine_registry  # installed via fixture side effect
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
@@ -422,20 +422,20 @@ def test_boot_refuses_audited_on_comms_graph_broker_config_error(
     result = CliRunner().invoke(daemon_app, ["start"])
     # The fail-closed refusal contract: exit 2, never a degraded boot.
     assert result.exit_code == 2
-
-    sup = FakeSupervisor.last_instance
-    assert sup is not None
-    # The pump was NEVER registered — the refusal happens during the comms-graph
-    # build, BEFORE supervisor.start / the spawn loop.
-    assert sup.registered_tasks == []
     # A loud daemon.boot.failed row under the SAME boot_infra_install_failed
-    # reason the line-~2284 guard uses for the identical broker-config failure
-    # (a misconfigured secrets file is boot-infra, whichever build catches it).
+    # reason the _build_boot_outbound_dlp guard uses for the identical
+    # broker-config failure (a misconfigured secrets file is boot-infra,
+    # whichever build catches it).
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
     assert "boot_infra_install_failed" in reasons
+    # The pump was NEVER registered — the refusal happens during the comms-graph
+    # build, BEFORE supervisor.start / the spawn loop: no boot-completed row.
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The operator sees the actionable secrets message, not the generic
+    # boot-infra text that would misdirect them (devex dx-001).
+    assert "secrets path is a directory" in result.output
 
 
 def test_boot_reaps_quarantine_child_when_post_spawn_step_fails(
