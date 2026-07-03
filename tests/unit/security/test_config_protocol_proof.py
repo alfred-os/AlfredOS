@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from alfred.config.settings import Settings
 from alfred.security._config_protocols import SecretBrokerConfig
 from alfred.security.secrets import SecretBroker
@@ -36,7 +38,23 @@ def test_plain_stub_satisfies_secret_broker_config() -> None:
     assert cfg.secrets_file == Path("/nonexistent/secrets.toml")
 
 
-def test_from_settings_accepts_a_plain_stub(tmp_path: Path) -> None:
-    """from_settings consumes SecretBrokerConfig — a stub drives the seam end-to-end."""
-    broker = SecretBroker.from_settings(_StubCfg(secrets_file=tmp_path / "does-not-exist.toml"))
-    assert isinstance(broker, SecretBroker)
+def test_from_settings_threads_the_stub_secrets_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The DIP win: from_settings threads a plain stub's secrets_file end-to-end.
+
+    Asserts the actual OUTPUT (a secret loaded from the stub-supplied file), matching the
+    egress/capability_gate proof pattern — not just construction. Clears ``ALFRED_SECRETS_FILE``
+    so the ``_hermetic_secrets_path`` autouse fixture's layer-2 override does not shadow the
+    stub's layer-3 path (pytest tmp_path is outside any git worktree, so the ``.git``-walk and
+    perm checks pass).
+    """
+    monkeypatch.delenv("ALFRED_SECRETS_FILE", raising=False)
+    monkeypatch.delenv("ALFRED_DISCORD_BOT_TOKEN", raising=False)
+    secrets_file = tmp_path / "secrets.toml"
+    secrets_file.write_text('discord_bot_token = "from-stub-file"\n', encoding="utf-8")
+    secrets_file.chmod(0o600)
+
+    broker = SecretBroker.from_settings(_StubCfg(secrets_file=secrets_file))
+
+    assert broker.get("discord_bot_token") == "from-stub-file"

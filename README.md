@@ -154,6 +154,11 @@ workflow for a fresh deploy:
 a known risk; secrets management hardening (containerised secret broker)
 ships in Slice 4 per
 [ADR-0015](docs/adr/0015-slice4-containerised-quarantined-llm.md).
+
+The broker reads this host-default file when `ALFRED_SECRETS_FILE` is unset (completing
+ADR-0012). If you already keep secrets there — or your `~/.config` is a git repo — read the
+[upgrade note](docs/runbooks/2026-07-03-secrets-file-host-default.md) first.
+
 **In the meantime:**
 
 - **macOS:** Docker Desktop maps the host file's uid/gid to the
