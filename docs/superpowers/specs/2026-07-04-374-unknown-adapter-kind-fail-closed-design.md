@@ -199,7 +199,33 @@ this **after the last code edit** (the #256 PR-1 lesson).
 ## Out of scope
 
 - No decomposition or restructuring of `_comms_boot.py`.
-- No change to `classifier_registry.py` or the registry contents.
+- No change to the registry contents (a one-line boot-gate doc note in
+  `classifier_registry.py` was added per review — see the addendum).
 - The `ContentStore`-leak / cleanup-masking items originally bundled under #374
   were already fixed in #256 PR-3 (56b32e4c); #374 is now scoped to the
   unknown-`adapter_kind` hardening only.
+
+## Review addendum — diagnosable refusal (folded in from the `/review-pr` fleet)
+
+The fleet's DevEx reviewer raised a **High** (corroborated by an i18n Medium): the
+original design reused the generic `daemon.boot.comms_adapter_spawn_failed` message
+("missing or malformed manifest"), which is *actively misleading* for a typo'd kind —
+the manifest is valid, only `adapter_kind` is unregistered — and the audit row did not
+carry the offending kind. `_refuse_boot` surfaces its message to the operator
+(`typer.echo(message, err=True)`), so a generic message means the plugin author is
+pointed at a correct-looking manifest with no next step.
+
+Folded in (following the codebase's own "distinct-for-forensics" convention,
+`CommsAdapterBindFailedFailure`):
+
+- New `CommsAdapterUnknownKindFailure` (reason `comms_adapter_unknown_kind`, carrying
+  `adapter_id` + `adapter_kind`) in `_failures.py` + the `DaemonBootFailure` union.
+- New `t()` key `daemon.boot.comms_adapter_unknown_kind` naming the field, the bad
+  value, and the fix.
+- Narrow `except _UnknownAdapterKindError` arms (before the generic arm) at **both**
+  the carrier (`_resolve_adapter_carrier_kind` — the copy that fires in a real boot)
+  and wiring (`_build_comms_adapter_wiring`) refusal sites.
+- Tests: a full-boot carrier witness (`test_boot_refuses_on_unregistered_adapter_kind`),
+  the updated wiring test asserting the distinct reason + kind, and the union closed-vocab
+  pin (`test_daemon_boot_failure_union.py`). This supersedes the original spec's
+  "no new `t()`/failure-class" note.
