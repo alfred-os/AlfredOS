@@ -56,7 +56,7 @@ from typing import Any
 import pytest
 
 from alfred.bootstrap.lifecycle_epoch import mint_boot_epoch, reset_boot_epoch_for_tests
-from alfred.cli.daemon._commands import _resolve_comms_adapter_wire_spec
+from alfred.cli.daemon._comms_boot import _resolve_comms_adapter_wire_spec
 from alfred.cli.gateway._commands import _DEFAULT_DIAL_ADAPTER_ID
 from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.link_state import GatewayLinkState

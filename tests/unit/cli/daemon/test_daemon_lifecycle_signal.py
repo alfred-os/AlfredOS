@@ -285,8 +285,10 @@ def test_boot_path_registers_runner_send_notification_with_broadcaster(
         original_register(self, adapter_id, sender)  # type: ignore[arg-type]
 
     monkeypatch.setattr(_daemon_commands.LifecycleBroadcaster, "register", _spy_register)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _ImmediateAcceptListener)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _SeamRunner)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._comms_boot.CommsSocketListener", _ImmediateAcceptListener
+    )
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _SeamRunner)
     monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
 
     _ImmediateAcceptListener.instances.clear()

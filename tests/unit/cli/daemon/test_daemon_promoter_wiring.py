@@ -36,7 +36,7 @@ import pytest
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
-from alfred.cli.daemon._commands import _build_sub_payload_promoter
+from alfred.cli.daemon._comms_boot import _build_sub_payload_promoter
 from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
 from alfred.comms_mcp.sub_payload_promotion import SubPayloadPromoter
 from alfred.hooks.registry import HookRegistry
@@ -238,7 +238,7 @@ def test_boot_refuses_fail_closed_on_misconfigured_promoter(
     def _none_factory(*, adapter_kind: str, content_store: object) -> None:
         return None
 
-    monkeypatch.setattr("alfred.cli.daemon._commands._build_sub_payload_promoter", _none_factory)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot._build_sub_payload_promoter", _none_factory)
 
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 2, result.output
@@ -266,7 +266,7 @@ async def test_graph_aclose_skips_close_for_non_content_store() -> None:
     guard directly so the teardown contract is pinned, not just the production
     happy-path where the store is always a real ``ContentStore``.
     """
-    from alfred.cli.daemon._commands import _CommsBootGraph
+    from alfred.cli.daemon._comms_boot import _CommsBootGraph
 
     transport_closed: list[int] = []
 

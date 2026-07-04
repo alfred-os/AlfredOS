@@ -132,8 +132,8 @@ def _reset_fakes() -> Iterator[None]:
 
 
 def _patch_socket_seams(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _FakeSocketListener)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _FakeRunner)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsSocketListener", _FakeSocketListener)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _FakeRunner)
 
 
 def test_tui_adapter_binds_listener_and_schedules_accept_task(
@@ -477,8 +477,10 @@ def test_accept_and_pump_returns_promptly_on_shutdown_with_no_peer(
     _CapturingSupervisor.captured.clear()
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _BlockingAcceptListener)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _FakeRunner)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._comms_boot.CommsSocketListener", _BlockingAcceptListener
+    )
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _FakeRunner)
     monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
 
     result = CliRunner().invoke(daemon_app, ["start"])
@@ -570,8 +572,10 @@ def test_accept_and_pump_prefers_shutdown_on_same_tick_race(
     _CapturingSupervisor.captured.clear()
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _SameTickAcceptListener)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _FakeRunner)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._comms_boot.CommsSocketListener", _SameTickAcceptListener
+    )
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _FakeRunner)
     monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
 
     result = CliRunner().invoke(daemon_app, ["start"])

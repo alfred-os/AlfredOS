@@ -146,8 +146,8 @@ def _reset_fakes() -> None:
 
 
 def _patch_comms_seams(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsStdioTransport", _FakeCommsTransport)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _FakeRunner)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsStdioTransport", _FakeCommsTransport)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _FakeRunner)
 
 
 def test_default_empty_adapters_boot_unchanged(
@@ -528,7 +528,7 @@ def test_boot_refuses_on_adapter_manifest_resolution_failure(
     def _boom(_adapter_id: str) -> Any:
         raise ManifestError("manifest broke (fake)")
 
-    monkeypatch.setattr("alfred.cli.daemon._commands._resolve_comms_adapter_wire_spec", _boom)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot._resolve_comms_adapter_wire_spec", _boom)
 
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 2

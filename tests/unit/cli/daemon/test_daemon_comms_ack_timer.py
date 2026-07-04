@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from alfred.cli.daemon._commands import _emit_durable_intake_ack_loop
+from alfred.cli.daemon._comms_boot import _emit_durable_intake_ack_loop
 from alfred.comms_mcp.protocol import DAEMON_COMMS_ACK
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 
