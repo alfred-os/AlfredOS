@@ -35,6 +35,7 @@ from alfred.cli.daemon._comms_boot import (
     _CommsAdapterWireSpec,
     _make_control_reject_auditor,
     _resolve_comms_adapter_wire_spec,
+    _UnknownAdapterKindError,
 )
 
 from .conftest import FakeAuditWriter
@@ -148,6 +149,43 @@ def test_resolve_wire_spec_raises_when_comms_mcp_section_absent(
     assert excinfo.value.field == "adapter_kind"
 
 
+def test_resolve_wire_spec_raises_on_unregistered_adapter_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A present-but-unregistered ``adapter_kind`` refuses fail-closed (#374).
+
+    The manifest declares a syntactically-valid ``adapter_kind`` that is NOT a member
+    of the host's closed vocabulary (``REQUIRED_CLASSIFIERS_BY_KIND``) — a typo'd or
+    unregistered kind. Instead of silently treating it as an empty-classifier kind (a
+    ``None`` promoter, no host classifiers), the resolver raises
+    ``_UnknownAdapterKindError`` (a ``_CommsAdapterManifestError`` subtype the boot's
+    refusal arms catch) so the daemon refuses boot (CLAUDE.md hard rules #5 + #7).
+    """
+    adapter_id = "alfred_comms_test"
+    _seed_manifest(
+        tmp_path,
+        adapter_id,
+        '[plugin]\nid = "alfred.comms-test"\n'
+        '[comms_mcp]\nmodule = "alfred_comms_test.main"\nadapter_kind = "bogus_typo"\n',
+    )
+    monkeypatch.setattr("alfred.cli._launcher_spawn.repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._comms_boot.parse_manifest",
+        lambda _raw: _StubManifest(comms_mcp_module="alfred_comms_test.main"),
+    )
+
+    with pytest.raises(_UnknownAdapterKindError) as excinfo:
+        _resolve_comms_adapter_wire_spec(adapter_id)
+
+    assert excinfo.value.adapter_id == adapter_id
+    assert excinfo.value.adapter_kind == "bogus_typo"
+    assert excinfo.value.field == "adapter_kind"
+    # It IS a _CommsAdapterManifestError, so the existing except arms catch it.
+    assert isinstance(excinfo.value, _CommsAdapterManifestError)
+    assert "bogus_typo" in str(excinfo.value)
+
+
 # ── _build_comms_adapter_wiring _refuse_boot arms (src 826-827, 864) ──
 
 
@@ -252,6 +290,44 @@ async def test_build_wiring_refuses_when_classifier_kind_gets_none_promoter(
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
     assert reasons == {"comms_promoter_misconfigured"}
+
+
+@pytest.mark.asyncio
+async def test_build_wiring_refuses_on_unregistered_adapter_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_audit_writer: FakeAuditWriter,
+) -> None:
+    """An unregistered ``adapter_kind`` routes through the existing audited refusal (#374).
+
+    ``_UnknownAdapterKindError`` is a ``_CommsAdapterManifestError`` subtype, so the
+    existing ``except (OSError, ManifestError, _CommsAdapterManifestError)`` arm in
+    ``_build_comms_adapter_wiring`` catches it and refuses fail-closed (exit 2,
+    ``comms_adapter_spawn_failed``) with NO new wiring — proving the subtype is covered
+    by the established refusal path (CLAUDE.md hard rule #7).
+    """
+
+    def _boom(_adapter_id: str) -> _CommsAdapterWireSpec:
+        raise _UnknownAdapterKindError(_adapter_id, "bogus_typo")
+
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot._resolve_comms_adapter_wire_spec", _boom)
+
+    with pytest.raises(_BootRefusedError) as excinfo:
+        await _build_comms_adapter_wiring(
+            adapter_id="alfred_comms_test",
+            settings=object(),  # type: ignore[arg-type]
+            audit=fake_audit_writer,  # type: ignore[arg-type]
+            gate=object(),
+            supervisor=object(),  # type: ignore[arg-type]
+            graph=object(),  # type: ignore[arg-type]
+            boot_id="boot-374",
+            environment_source="test",
+        )
+
+    assert excinfo.value.code == 2
+    rows = fake_audit_writer.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+    assert rows
+    reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
+    assert reasons == {"comms_adapter_spawn_failed"}
 
 
 # ── _make_control_reject_auditor callback (src 1331-1333) ──
