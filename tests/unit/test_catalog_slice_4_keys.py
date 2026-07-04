@@ -123,6 +123,9 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # Comms-adapter spawn/handshake boot refusals (PR-S4-11b, #237).
     "daemon.boot.comms_adapter_spawn_failed",
     "daemon.boot.comms_adapter_handshake_failed",
+    # #374: a typo'd/unregistered manifest adapter_kind refuses boot with its OWN
+    # diagnosable reason (names the offending kind, not the generic spawn-failed text).
+    "daemon.boot.comms_adapter_unknown_kind",
     # PR-S4-11c-2b go-live flip: the daemon spawns the bwrap quarantined child at
     # boot; a non-Linux / unprovisioned host refuses fail-closed.
     "daemon.boot.quarantine_child_spawn_failed",

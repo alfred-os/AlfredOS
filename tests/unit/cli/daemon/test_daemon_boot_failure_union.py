@@ -14,6 +14,7 @@ from alfred.cli.daemon._failures import (
     CapabilityGateHandshakeFailedFailure,
     CommsAdapterBindFailedFailure,
     CommsAdapterSpawnFailedFailure,
+    CommsAdapterUnknownKindFailure,
     CommsPromoterMisconfiguredFailure,
     EnvironmentNotSetFailure,
     LauncherNotPolicyResolvingFailure,
@@ -39,12 +40,28 @@ from alfred.cli.daemon._failures import (
         (QuarantineChildSpawnFailedFailure, "quarantine_child_spawn_failed"),
         (CommsAdapterSpawnFailedFailure, "comms_adapter_spawn_failed"),
         (CommsAdapterBindFailedFailure, "comms_adapter_bind_failed"),
+        (CommsAdapterUnknownKindFailure, "comms_adapter_unknown_kind"),
         (CommsPromoterMisconfiguredFailure, "comms_promoter_misconfigured"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:
     instance = cls()
     assert instance.failure_reason == reason
+
+
+def test_comms_adapter_unknown_kind_carries_id_and_kind_distinct_from_spawn() -> None:
+    """#374: a typo'd/unregistered adapter_kind carries its OWN reason + the offending
+    kind, distinct from the generic spawn refusal — so forensics (and the operator
+    message) can name the field rather than the misleading "missing/malformed manifest"."""
+    f = CommsAdapterUnknownKindFailure(adapter_id="alfred_discord", adapter_kind="discrod")
+    d = f.model_dump()
+    assert d["failure_reason"] == "comms_adapter_unknown_kind"
+    assert d["adapter_id"] == "alfred_discord"
+    assert d["adapter_kind"] == "discrod"
+    assert (
+        CommsAdapterUnknownKindFailure().failure_reason
+        != CommsAdapterSpawnFailedFailure().failure_reason
+    )
 
 
 def test_comms_adapter_bind_failure_is_distinct_from_spawn() -> None:

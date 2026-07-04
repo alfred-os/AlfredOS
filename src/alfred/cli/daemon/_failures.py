@@ -187,6 +187,28 @@ class CommsAdapterBindFailedFailure(_BootFailureBase):
     adapter_id: str = ""
 
 
+class CommsAdapterUnknownKindFailure(_BootFailureBase):
+    """An enabled comms adapter declares an ``adapter_kind`` the host does not know (#374).
+
+    The manifest's ``[comms_mcp] adapter_kind`` is a non-empty string but not a member
+    of the host's closed vocabulary
+    (:data:`alfred.comms_mcp.classifier_registry.REQUIRED_CLASSIFIERS_BY_KIND`) — a
+    typo'd or unregistered kind. REFUSE fail-closed (CLAUDE.md hard rules #5 + #7):
+    spawning it would wire a ``None`` promoter and no host classifiers, letting raw
+    (T3) sub-payloads reach the orchestrator unpromoted. Distinct from
+    ``comms_adapter_spawn_failed`` so forensics can tell a typo'd/unregistered kind
+    apart from a missing-module / malformed-manifest / handshake refusal in the durable
+    boot row — and so the operator-facing refusal names the offending field + value
+    rather than the misleading generic "missing or malformed manifest" text. Both
+    ``adapter_id`` and ``adapter_kind`` are config-origin tokens from the plugin
+    manifest (never raw content), safe to carry in the audit row.
+    """
+
+    failure_reason: Literal["comms_adapter_unknown_kind"] = "comms_adapter_unknown_kind"
+    adapter_id: str = ""
+    adapter_kind: str = ""
+
+
 class CommsPromoterMisconfiguredFailure(_BootFailureBase):
     """A classifier-bearing comms adapter kind yielded a ``None`` promoter (PR-S4-235-1).
 
@@ -241,6 +263,7 @@ DaemonBootFailure = Annotated[
     | QuarantineChildSpawnFailedFailure
     | CommsAdapterSpawnFailedFailure
     | CommsAdapterBindFailedFailure
+    | CommsAdapterUnknownKindFailure
     | CommsPromoterMisconfiguredFailure
     | CommsMultiAdapterUnsupportedFailure,
     Field(discriminator="failure_reason"),
@@ -250,5 +273,6 @@ ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + PR-S4-11b ``comms_adapter_spawn_failed`` +
 ADR-0031 ``comms_adapter_bind_failed`` +
+#374 ``comms_adapter_unknown_kind`` +
 PR-S4-235-1 ``comms_promoter_misconfigured`` +
 FIX 4 ``comms_multi_adapter_unsupported``)."""

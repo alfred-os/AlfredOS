@@ -299,7 +299,11 @@ is deleted in PR-S4-10.
 > promoter REFUSES boot fail-closed (audited `comms_promoter_misconfigured`),
 > mirroring the inbound M2 guard at boot. (That refusal is defence-in-depth: the
 > factory is deterministic, so it cannot fire on a correct build — it guards against
-> future `REQUIRED_CLASSIFIERS_BY_KIND` / factory drift.) STILL NOT-YET-WIRED (separate #235 PRs):
+> future `REQUIRED_CLASSIFIERS_BY_KIND` / factory drift.) A sibling boot-gate (#374)
+> refuses at manifest resolution when an enabled adapter's `adapter_kind` is not a
+> registered host kind (not a key in `REQUIRED_CLASSIFIERS_BY_KIND`) — audited
+> `comms_adapter_unknown_kind`, naming the offending kind — so a typo'd/unregistered
+> kind never spawns with a `None` promoter and no classifiers. STILL NOT-YET-WIRED (separate #235 PRs):
 > the `BindingEmitter` (`plugins/alfred_discord/binding_emitter.py`, emitting
 > `adapter.binding_request`), the [`OutboundQueue`](../glossary.md#outboundqueue)
 > outbound-path wiring, and the comms-4 addressing-drift detector

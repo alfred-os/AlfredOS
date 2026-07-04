@@ -27,6 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
+from alfred.cli.daemon._comms_boot import _UnknownAdapterKindError
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.security.quarantine import declare_hookpoints
 from tests.helpers.gates import make_quarantined_extract_chain_gate
@@ -539,6 +540,46 @@ def test_boot_refuses_on_adapter_manifest_resolution_failure(
     # No runner was constructed — the refusal happened before spawn.
     assert _FakeRunner.instances == []
     assert boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+
+
+def test_boot_refuses_on_unregistered_adapter_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+) -> None:
+    """A typo'd/unregistered ``adapter_kind`` refuses the FULL boot at carrier selection (#374).
+
+    Witnesses the carrier-path narrow arm end-to-end (the boot loop resolves the carrier
+    kind FIRST, so this is the copy that actually fires for a real unknown kind). The
+    refusal carries the DISTINCT ``comms_adapter_unknown_kind`` reason in the durable boot
+    row — so ``alfred audit log`` forensics tell a typo'd kind apart from a generic spawn
+    refusal (the exact kind reaches the operator via the stderr message + the boot-failed
+    hookpoint; see ``test_build_wiring_refuses_on_unregistered_adapter_kind``).
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    def _boom(_adapter_id: str) -> Any:
+        raise _UnknownAdapterKindError(_adapter_id, "bogus_typo")
+
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot._resolve_comms_adapter_wire_spec", _boom)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2, result.output
+
+    sup = FakeSupervisor.last_instance
+    assert sup is not None
+    assert sup.registered_tasks == []
+    # No runner was constructed — the refusal happened at carrier selection, before spawn.
+    assert _FakeRunner.instances == []
+    rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+    assert rows
+    # Distinct forensic reason in the durable row (#374) — not the generic spawn-failed.
+    reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
+    assert reasons == {"comms_adapter_unknown_kind"}
 
 
 # These two child-reaping tests run LAST in the file: the supervisor-stop case
