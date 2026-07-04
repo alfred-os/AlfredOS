@@ -872,7 +872,15 @@ async def _start_async() -> None:
                 if control_server is not None:
                     with suppress(Exception):
                         await control_server.aclose()
-                if pidfile_path is not None:
+                # ``# pragma: no branch``: the ``pidfile_path is None`` arm is a
+                # #255 leak-guard reached ONLY while an exception unwinds through this
+                # finally (Supervisor construction raised BEFORE ``write_pidfile`` — see
+                # test_daemon_boot_reap_finally). coverage.py can't record a branch
+                # whose not-taken side leaves the block via a propagating exception
+                # rather than clean fall-through, so the arc is unrecordable. The taken
+                # (delete) side is covered by every clean-shutdown test. This is a
+                # cleanup guard, never a fail-closed refuse-decision arm (sec-003).
+                if pidfile_path is not None:  # pragma: no branch
                     delete_pidfile(pidfile_path)
 
 
