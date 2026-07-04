@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-04 20:56+0100\n"
+"POT-Creation-Date: 2026-07-04 21:38+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -320,28 +320,40 @@ msgstr "fallback provider: {provider}"
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:206
+#: src/alfred/cli/main.py:220
+msgid "status.secrets_file_env_only"
+msgstr "secrets file: (none — environment variables only)"
+
+#: src/alfred/cli/main.py:222
+msgid "status.secrets_file"
+msgstr "secrets file: {path}"
+
+#: src/alfred/cli/main.py:224
+msgid "status.secrets_file_absent"
+msgstr "secrets file: {path} (not found — using environment variables)"
+
+#: src/alfred/cli/main.py:225
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:207
+#: src/alfred/cli/main.py:226
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:213
+#: src/alfred/cli/main.py:232
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:216
+#: src/alfred/cli/main.py:235
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:218
+#: src/alfred/cli/main.py:237
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
-#: src/alfred/cli/main.py:365 src/alfred/i18n/_slice_4_reserve.py:154
+#: src/alfred/cli/main.py:384 src/alfred/i18n/_slice_4_reserve.py:154
 msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
 "alfred chat needs the gateway. Start it with: alfred gateway start. If "
@@ -2950,14 +2962,14 @@ msgstr ""
 "'{parent}'); secrets must never be committed. Move it outside any git "
 "repository, or set ALFRED_SECRETS_FILE to a path outside a repo."
 
-#: src/alfred/security/secrets.py:467
+#: src/alfred/security/secrets.py:467 src/alfred/security/secrets.py:684
 msgid "secrets.file_malformed"
 msgstr ""
 "Secrets file '{path}' is not valid TOML. Fix the file's TOML syntax (a "
 "flat table of name = \"value\" entries) and its UTF-8 encoding, then "
 "retry."
 
-#: src/alfred/security/secrets.py:477
+#: src/alfred/security/secrets.py:477 src/alfred/security/secrets.py:690
 msgid "secrets.file_unreadable"
 msgstr ""
 "Secrets file '{path}' could not be read: {reason}. Check the file and its"

@@ -203,6 +203,25 @@ def status() -> None:
     typer.echo(t("status.primary_provider", provider=settings.primary_provider))
     typer.echo(t("status.fallback_provider", provider=fallback_label))
     typer.echo(t("status.anthropic_configured", yes_or_no=yes_no))
+    # #370 item 3: surface WHERE the broker resolved its file backend, grouped
+    # with the credential line above, so a secrets problem doesn't send the
+    # operator to the ADR. The path is a filesystem location, never a secret
+    # value. Qualify by existence: the broker silently falls back to env-only
+    # when a resolved path is ABSENT (a default daemon resolves the XDG default
+    # even with no file), so an unqualified path would read as "loaded" and send
+    # the env-var operator to edit a file that isn't the source (devex HIGH).
+    # Branch outside t() so each literal msgid is extracted (see the yes/no note).
+    secrets_path = broker.secrets_file_path
+    if secrets_path is None:
+        # Defensive: unreachable via ``alfred status`` today — build_broker_or_die
+        # → from_settings passes the non-optional ``Settings.secrets_file`` XDG
+        # default, so a resolved path is always present. Kept so status() stays
+        # total over the accessor's genuine ``Path | None`` contract.
+        typer.echo(t("status.secrets_file_env_only"))
+    elif secrets_path.exists():
+        typer.echo(t("status.secrets_file", path=str(secrets_path)))
+    else:
+        typer.echo(t("status.secrets_file_absent", path=str(secrets_path)))
     typer.echo(t("status.daily_budget", amount=f"{settings.daily_budget_usd:.2f}"))
     typer.echo(t("status.per_call_max", amount=f"{settings.per_call_max_usd:.2f}"))
 

@@ -492,6 +492,21 @@ class SecretBroker:
         """
         return cls(settings_default=config.secrets_file)
 
+    @property
+    def secrets_file_path(self) -> Path | None:
+        """The resolved secrets-file path, or ``None`` for the env-only backend.
+
+        Read-only view of the layer the constructor resolved (constructor arg →
+        ``ALFRED_SECRETS_FILE`` → the ``Settings`` host default). ``None`` only
+        when all three layers are unset. Exposed so ``alfred status`` can report
+        WHERE the broker looks for file-backed secrets (#370 item 3) — this is a
+        filesystem path, never a secret value. It reflects the resolved path even
+        when the file does not exist (a default daemon resolves the
+        ``~/.config/alfred/secrets.toml`` XDG default and falls back to env-only
+        if it is absent).
+        """
+        return self._secrets_file_path
+
     def get(self, name: str) -> str:
         if name not in SUPPORTED_SECRETS:
             raise UnknownSecretError(name)

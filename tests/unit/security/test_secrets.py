@@ -384,6 +384,37 @@ class TestLoadBoundaryTypedErrors:
         assert unreadable.path == Path("/u")
 
 
+class TestSecretsFilePathAccessor:
+    """#370 item 3: the read-only ``secrets_file_path`` accessor ``alfred status`` renders."""
+
+    def test_none_for_env_only_broker(self) -> None:
+        """No file layer set → None (env-only backend)."""
+        assert SecretBroker(env={}).secrets_file_path is None
+
+    def test_returns_resolved_path_for_present_file(self, tmp_path: Path) -> None:
+        """A present, valid file layer → its resolved path."""
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('discord_bot_token = "x"\n')
+        path.chmod(0o600)
+        broker = SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+        assert broker.secrets_file_path == path
+
+    def test_reflects_configured_but_absent_file(self, tmp_path: Path) -> None:
+        """The accessor returns the resolved path even when the file is ABSENT.
+
+        The broker falls back to env-only for a missing file (``require_file=False``)
+        but keeps the resolved path (secrets.py construction returns early WITHOUT
+        nulling it). ``alfred status`` relies on this to report where it looks —
+        and to mark it "not found" (devex). A future refactor that nulled the path
+        in the missing-file branch would silently break the status line, so pin it.
+        """
+        absent = tmp_path / "alfred" / "secrets.toml"  # never created
+        broker = SecretBroker(env={}, secrets_file=absent, allow_inside_git_worktree=True)
+        assert broker.secrets_file_path == absent
+
+
 class TestPermissionsCheck:
     def test_rejects_symlink(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
