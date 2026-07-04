@@ -300,7 +300,10 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult | None]:
 
     try:
         settings = Settings()  # type: ignore[no-untyped-call]  # reason: Settings.__init__ untyped pending task-17
-    except SettingsError as exc:  # pragma: no cover - defensive; env already validated
+    except SettingsError as exc:
+        # Defensive: the env was already validated, but a Settings() failure here
+        # must still surface as the audited environment_not_set refusal, never a raw
+        # traceback (covered by test_settings_error_after_valid_env_refuses).
         raise _EnvironmentNotSetError(loaded) from exc
     return settings, settings.environment_load_result
 

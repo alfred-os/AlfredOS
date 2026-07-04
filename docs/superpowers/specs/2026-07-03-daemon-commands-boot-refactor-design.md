@@ -1,12 +1,37 @@
 # Daemon boot `_commands.py` split — design (#256)
 
-**Status:** design — revised after `/review-pr` (9-reviewer fleet); pending user review
+**Status:** IMPLEMENTED (2026-07-04) — PR-1/2/3 merged; PR-4 closed #256 via a whole-file gate (BootContext decomposition assessed and **deferred** — see Closeout).
 
-**Date:** 2026-07-03
+**Date:** 2026-07-03 (design) · 2026-07-04 (closeout)
 
 **Issue:** [#256](https://github.com/MrReasonable/AlfredOS/issues/256) — *CI: add per-file 100% coverage gate for daemon boot-refusal branches*
 
 **Author:** brainstorming session (AI agent), maintainer-directed
+
+## Closeout (2026-07-04)
+
+Delivered as four PRs: PR-1 `_boot_audit`, PR-2 `_gate_boot`, PR-3 `_comms_boot`
+(all pure-move extractions, each per-file 100%-gated), and PR-4 the #256 closeout.
+
+**PR-4 diverged from this design's plan, on purpose.** The plan (below) framed
+PR-4 as the `BootContext` decomposition of `_start_async` and called it "required
+to fully close #256" — because the refuse-*decision* arms live in `_start_async`
+and needed to move into a gated module. But the spec also committed to *reassess
+that call after the extractions, with data*. The data: after PR-1..3 shrank
+`_commands.py` from 2789 to ~1050 lines, its coverage was **99% with zero missing
+statements** — every `await _refuse_boot(...)` decision arm was already covered by
+the existing boot tests. The only gaps were two defensive reap-`finally` branch
+arcs (one now tested; one an unrecordable exception-exit arc that carries a
+`# pragma: no branch`).
+
+So PR-4 closed #256 the **lower-risk** way: a **whole-file 100% line+branch gate on
+`_commands.py` + `_failures.py`** (the two files #256 named), with **zero
+production-logic movement** — sidestepping the reap-`finally` / bwrap-child-leak
+risk the decomposition carried. The whole-file gate delivers the same intent
+(gating the refuse-decision arms) that the decomposition existed to achieve. No
+ADR (no PRD §5 invariant, CLI, or trust-boundary change). The `BootContext` design
+in this doc is retained as a **possible future refactor** for `_start_async`
+navigability — it is not required for #256 and was not built.
 
 ## Why this exists
 
@@ -259,7 +284,7 @@ The PRs:
   into gated phase functions so `#256`'s core intent is actually delivered. See
   below. Highest risk (the reap `finally`).
 
-`_commands.py` after PR-3 shrinks from 2789 → ~700 lines (orchestrator + CLI
+`_commands.py` after PR-3 shrinks from 2789 → ~1050 lines (the design estimate was ~700; the actual residual is larger) (orchestrator + CLI
 entry + real-infra constructors). Whether PR-4 also whole-file-gates the residual
 `_commands.py` (pragma-ing the real-infra `finally`/drain lines) is decided in
 PR-4.
