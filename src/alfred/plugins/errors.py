@@ -196,6 +196,39 @@ class CommsAdapterSystemTierError(ManifestError):
         self.adapter_id = adapter_id
 
 
+class CommsAdapterManifestEscapeError(ManifestError):
+    """An enabled comms adapter's manifest path resolves OUTSIDE ``plugins/``.
+
+    Sink-local containment defense (DiD, #364): the config-sourced
+    comms-adapter LOAD-grant builder
+    (:func:`alfred.security.capability_gate._comms_adapter_grants.comms_adapter_load_grants`)
+    turns each ``comms_enabled_adapters`` id into a
+    ``plugins/<id>/manifest.toml`` path and reads it. Path-traversal safety
+    otherwise rests entirely on the construction-time
+    ``_validate_comms_enabled_adapters`` validator; a validator-bypassing
+    construction of the real ``Settings`` type (``model_construct`` / a stub
+    ``CommsAdapterGrantsConfig``) could route a traversal-shaped id to the read
+    sink. The builder RE-CHECKS containment at the sink rather than trusting the
+    validator — the same "the tool layer is the perimeter" posture FIX 1 applies
+    to ``subscriber_tier`` — and REFUSES fail-closed with this dedicated leaf
+    (CLAUDE.md hard rule #7). Subclasses :class:`ManifestError` so the daemon's
+    boot ``except`` maps it to the audited ``boot_infra_install_failed`` refusal
+    rather than a raw traceback.
+
+    ``adapter_id`` is the operator-config adapter id — charset-validated by the
+    ``comms_enabled_adapters`` Settings field on the production (validated) path,
+    but ARBITRARY on the validator-bypass path this leaf actually guards (e.g.
+    ``"../../../../etc"``). It rides the ``t()``-built operator refusal message
+    (the redactor covers log paths) and NOT an audit field: the daemon boot's
+    ``_refuse_boot`` projects a FIXED ``boot_infra_install_failed`` audit subject,
+    so no arbitrary id reaches an audit row (spec §5.6).
+    """
+
+    def __init__(self, adapter_id: str) -> None:
+        super().__init__(t("plugin.comms_adapter_manifest_escape_refused", adapter_id=adapter_id))
+        self.adapter_id = adapter_id
+
+
 # ---------------------------------------------------------------------------
 # Transport leaves.
 # ---------------------------------------------------------------------------
@@ -266,6 +299,8 @@ class DlpOutboundRefusedError(PluginTransportError):
 
 
 __all__ = [
+    "CommsAdapterManifestEscapeError",
+    "CommsAdapterSystemTierError",
     "DlpOutboundRefusedError",
     "ManifestError",
     "ManifestSandboxMissingError",

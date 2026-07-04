@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-04 17:30+0100\n"
+"POT-Creation-Date: 2026-07-04 19:00+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2715,19 +2715,28 @@ msgstr ""
 "or user-plugin (see ADR-0027), or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/plugins/errors.py:217
+#: src/alfred/plugins/errors.py:228
+msgid "plugin.comms_adapter_manifest_escape_refused"
+msgstr ""
+"Comms adapter '{adapter_id}' manifest path resolves outside the plugins/ "
+"directory. A comms adapter id must name an in-repo "
+"plugins/<id>/manifest.toml; a path-traversal-shaped id is refused. "
+"Refusing to boot. Fix or unset the id in ALFRED_COMMS_ENABLED_ADAPTERS "
+"(see ADR-0027)."
+
+#: src/alfred/plugins/errors.py:250
 msgid "plugin.protocol_violation"
 msgstr ""
 "Plugin {plugin_id} sent a disallowed JSON-RPC method {method} after the "
 "handshake."
 
-#: src/alfred/plugins/errors.py:237
+#: src/alfred/plugins/errors.py:270
 msgid "supervisor.sandbox.refused.sandbox_info_handshake_mismatch"
 msgstr ""
 "Plugin {plugin_id} reported sandbox kind {reported} but its manifest "
 "declares {declared}. Tearing down."
 
-#: src/alfred/plugins/errors.py:262
+#: src/alfred/plugins/errors.py:295
 msgid "plugin.transport.dlp_outbound_refused"
 msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
