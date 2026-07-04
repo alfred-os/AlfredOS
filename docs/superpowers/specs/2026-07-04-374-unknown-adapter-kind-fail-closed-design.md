@@ -90,8 +90,13 @@ class _UnknownAdapterKindError(_CommsAdapterManifestError):
 - Subclassing means the existing catch arms — `except (OSError, ManifestError,
   _CommsAdapterManifestError)` at L354 (`_resolve_adapter_carrier_kind`) and L846
   (`_build_comms_adapter_wiring`) — catch it **with zero wiring change**, routing
-  it to the existing audited `_refuse_boot(... comms_adapter_spawn_failed ...)`
-  (exit 2). **No new `t()` key, no new failure class, no new audit reason.**
+  it to the existing audited `_refuse_boot(...)` (exit 2).
+  > **Superseded by review** — this section's original "No new `t()` key, no new
+  > failure class, no new audit reason" framing was reversed by the `/review-pr`
+  > fleet: a distinct `CommsAdapterUnknownKindFailure` (`comms_adapter_unknown_kind`)
+  > plus a dedicated `daemon.boot.comms_adapter_unknown_kind` operator message were
+  > folded in via narrow `except` arms for diagnosability. See the **Review addendum**
+  > below for the final contract.
 - It is semantically honest: the base class means "manifest is *missing* a
   required field"; an unregistered-but-present kind is a distinct failure the
   subtype names accurately (its own message + `.adapter_kind` attribute), while

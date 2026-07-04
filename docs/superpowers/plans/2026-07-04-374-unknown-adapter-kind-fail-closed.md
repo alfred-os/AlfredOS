@@ -10,13 +10,21 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-04-374-unknown-adapter-kind-fail-closed-design.md`
 
+> **Superseded by review (read first):** Tasks below reflect the pre-review plan,
+> which reused the generic `comms_adapter_spawn_failed` refusal. The `/review-pr`
+> fleet folded in a **distinct** `CommsAdapterUnknownKindFailure`
+> (`comms_adapter_unknown_kind`) + a dedicated `daemon.boot.comms_adapter_unknown_kind`
+> operator message via narrow `except` arms. Where a Task snippet asserts
+> `comms_adapter_spawn_failed` or says "no new `t()` key", the SHIPPED contract is
+> `comms_adapter_unknown_kind` + the new key — see the spec's **Review addendum**.
+
 ## Global Constraints
 
 - **Branch:** `fix/374-unknown-adapter-kind-fail-closed` (already created, spec committed at `2c2bb69a`).
 - **Every commit subject contains a literal `#374`** (the `Conventional commit format` required check: regex `^[a-z]+(\([^)]+\))?(!)?: .*#[0-9]+.*$`). Never use a digit-containing conventional-commit *type* (e.g. `i18n:`); use it as a scope (`chore(i18n):`).
 - **Every commit ends with the trailer:** `MrReasonable <4990954+MrReasonable@users.noreply.github.com>`.
 - **`_comms_boot.py` has a per-file 100% line+branch gate in BOTH ci.yml jobs.** No `# pragma` on any fail-closed arm. Every new branch must be covered by a test.
-- **No new `t()` key** (reuse `daemon.boot.comms_adapter_spawn_failed`). Added lines shift `#:` location refs → the pybabel catalog MUST be regenerated after the *last* code edit.
+- **i18n** — the pre-review plan reused `daemon.boot.comms_adapter_spawn_failed` (no new key); the review-folded diagnosability change ADDED `daemon.boot.comms_adapter_unknown_kind` (see the spec addendum), so the catalog gains that msgid + a hand-filled English msgstr. Either way, added lines shift `#:` location refs → the pybabel catalog MUST be regenerated after the *last* code edit.
 - **No `--no-verify`, no `--admin` merge.** `make check` before every push.
 
 ---
@@ -139,7 +147,7 @@ async def test_build_wiring_refuses_on_unregistered_adapter_kind(
     rows = fake_audit_writer.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
-    assert reasons == {"comms_adapter_spawn_failed"}
+    assert reasons == {"comms_adapter_unknown_kind"}  # review-folded: distinct reason
 ```
 
 - [ ] **Step 2: Run the new tests — verify they FAIL**

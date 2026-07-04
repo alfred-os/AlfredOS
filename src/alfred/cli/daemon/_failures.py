@@ -197,11 +197,14 @@ class CommsAdapterUnknownKindFailure(_BootFailureBase):
     spawning it would wire a ``None`` promoter and no host classifiers, letting raw
     (T3) sub-payloads reach the orchestrator unpromoted. Distinct from
     ``comms_adapter_spawn_failed`` so forensics can tell a typo'd/unregistered kind
-    apart from a missing-module / malformed-manifest / handshake refusal in the durable
-    boot row — and so the operator-facing refusal names the offending field + value
-    rather than the misleading generic "missing or malformed manifest" text. Both
-    ``adapter_id`` and ``adapter_kind`` are config-origin tokens from the plugin
-    manifest (never raw content), safe to carry in the audit row.
+    apart from a missing-module / malformed-manifest / handshake refusal by the
+    ``failure_reason`` in the durable boot row — and so the operator-facing refusal
+    names the offending field + value rather than the misleading generic "missing or
+    malformed manifest" text. Both ``adapter_id`` and ``adapter_kind`` are config-origin
+    tokens from the plugin manifest (never raw content); they ride this carrier to the
+    ``daemon.boot.failed`` hookpoint payload (``_invoke_boot_failed``), while the audit
+    row itself carries only the ``failure_reason`` (``_refuse_boot``'s fixed subject
+    shape, uniform across all boot failures).
     """
 
     failure_reason: Literal["comms_adapter_unknown_kind"] = "comms_adapter_unknown_kind"
