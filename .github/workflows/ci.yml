@@ -333,13 +333,17 @@ jobs:
         # _comms_boot extractions — it holds ``_start_async`` and every fail-closed
         # refuse-DECISION arm (the ``if failure: await _refuse_boot(...)`` /
         # ``except X: await _refuse_boot(...)`` guards that #256 exists to gate). All
-        # refuse-decision statements are covered; the only pragma sites are the
-        # ``# pragma: no cover`` real-infra constructors (build_boot_session_scope /
-        # _build_boot_outbound_dlp / wait_for_shutdown) + one ``# pragma: no branch``
-        # reap-finally leak-guard whose not-taken arc is only reached during exception
-        # unwinding (coverage.py can't record it). ``_failures.py`` is the
-        # ``DaemonBootFailure`` union. Fully covered by the unit tier. Combined job
-        # names both too (two-gates pattern — keep BOTH in sync).
+        # refuse-decision statements are covered. The pragma sites — NONE of which is
+        # an ``await _refuse_boot(...)`` decision arm — are: three ``# pragma: no cover``
+        # real-infra constructors (build_boot_session_scope / _build_boot_outbound_dlp /
+        # wait_for_shutdown); a ``# pragma: no cover`` on a platform/loop-edge
+        # ``except (NotImplementedError, ValueError)`` in wait_for_shutdown; a
+        # ``# pragma: no cover`` on a dead ``raise AssertionError("unreachable")`` AFTER
+        # a ``NoReturn`` _refuse_boot (the refuse arm itself IS covered); and one
+        # ``# pragma: no branch`` on a reap-finally pidfile leak-guard whose not-taken
+        # arc is only reached during exception unwinding (coverage.py can't record it).
+        # ``_failures.py`` is the ``DaemonBootFailure`` union. Fully covered by the unit
+        # tier. Combined job names both too (two-gates pattern — keep BOTH in sync).
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != ''
         run: |
           uv run coverage report \
