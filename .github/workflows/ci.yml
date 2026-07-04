@@ -316,9 +316,11 @@ jobs:
         # ``_CommsAdapterManifestError`` raises), the forwarded-inbound registry, and the
         # fail-closed refuse-boot arms (bad-manifest / misconfigured-promoter). A coverage
         # hole could ship an un-exercised refusal branch. Fully covered by the unit tier
-        # (``tests/unit/cli/daemon/``); the only ``# pragma: no cover`` sites are the two
-        # post-``_refuse_boot`` ``raise AssertionError("unreachable")`` NoReturn
-        # defence-in-depth lines. The combined ``coverage-gates`` job names it too
+        # (``tests/unit/cli/daemon/``); the only ``# pragma: no cover`` sites are the
+        # five post-``_refuse_boot`` ``raise AssertionError("unreachable")`` NoReturn
+        # defence-in-depth lines + the one ``expected_epoch is None`` real-infra guard —
+        # NONE hides an ``await _refuse_boot(...)`` arm (all are covered + non-pragma'd).
+        # The combined ``coverage-gates`` job names it too
         # (two-gates pattern — keep BOTH in sync).
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_comms_boot.py') != ''
         run: |

@@ -107,10 +107,6 @@ from alfred.cli.daemon._gate_boot import (
     build_boot_handshake,
     build_boot_real_gate_for_daemon,
 )
-
-# PR-S4-11b (#237): module-level so the boot-wiring unit tests monkeypatch these
-# two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
-# ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
     EnvironmentSource,
@@ -118,7 +114,6 @@ from alfred.config._environment_loader import (
 )
 from alfred.hooks.errors import HookError
 from alfred.i18n import t
-from alfred.plugins.comms_socket_transport import CommsSocketListener
 from alfred.plugins.errors import ManifestError
 
 # PR-S4-11c-2b: the comms-graph build spawns the live bwrap quarantined child;
@@ -138,6 +133,13 @@ if TYPE_CHECKING:
 
     from alfred.audit.log import AuditWriter
     from alfred.config.settings import Settings
+
+    # sec-001 (#256 PR-3): annotation-only here (``socket_listeners:
+    # list[CommsSocketListener]`` in _start_async). Kept under TYPE_CHECKING so the
+    # runtime name lives ONLY in _comms_boot — a stray ``_commands.CommsSocketListener``
+    # monkeypatch then AttributeErrors LOUD (like the other repointed seams) instead
+    # of silently no-op'ing.
+    from alfred.plugins.comms_socket_transport import CommsSocketListener
     from alfred.security.dlp import OutboundDlpProtocol
     from alfred.supervisor.core import Supervisor as _SupervisorType
 

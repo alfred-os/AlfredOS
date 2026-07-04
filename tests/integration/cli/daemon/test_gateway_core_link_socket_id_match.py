@@ -142,7 +142,7 @@ async def _faithful_core_carrier(
     """Bind ``comms-{bound_adapter_kind}.sock`` + answer ONE gateway core-leg handshake.
 
     A faithful stand-in for the daemon's socket carrier
-    (:func:`alfred.cli.daemon._commands._listen_socket_comms_adapter`) at exactly the two
+    (:func:`alfred.cli.daemon._comms_boot._listen_socket_comms_adapter`) at exactly the two
     seams this property needs — and NO more — so the test runs without the root-forcing
     daemon graph:
 
