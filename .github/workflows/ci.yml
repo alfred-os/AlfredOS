@@ -294,6 +294,21 @@ jobs:
           uv run coverage report \
             --include='src/alfred/cli/daemon/_boot_audit.py' \
             --fail-under=100
+      - name: Daemon gate-boot 100% line+branch coverage
+        # #256 PR-2: ``_gate_boot.py`` is the extracted daemon capability-gate boot
+        # wiring — the seed-then-load gate build, the Postgres handshake (probe c),
+        # the fail-closed first-party grant assertion (``_first_party_grant_live``),
+        # the boot HookRegistry install, and the no-getattr-fail-open
+        # ``_SupervisorBootGate`` wrapper. A coverage hole could ship an un-exercised
+        # fail-open branch. Fully covered by the unit tier (``tests/unit/cli/daemon/``);
+        # the real-infra ``build_boot_real_gate_for_daemon`` carries the sole allowed
+        # ``# pragma: no cover`` (monkeypatched glue). The combined ``coverage-gates``
+        # job names it too (two-gates pattern — keep BOTH in sync).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_gate_boot.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_gate_boot.py' \
+            --fail-under=100
       - name: Gateway kernel trust-boundary 100% line+branch coverage
         # Spec A G3-3a (#237, ADR-0032): ``src/alfred/gateway/`` is the
         # always-up gateway's stable kernel — the client-facing T1 carrier.
@@ -1614,6 +1629,15 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/cli/daemon/_boot_audit.py' \
+            --fail-under=100
+      - name: Daemon gate-boot 100% line+branch coverage (combined)
+        # #256 PR-2: sibling of the python-job ``Daemon gate-boot`` gate (the
+        # two-gates pattern). The extracted daemon capability-gate boot wiring.
+        # Keep BOTH in sync when this file changes.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_gate_boot.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_gate_boot.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor

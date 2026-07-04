@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from alfred.cli.daemon import _audit_fallback, _commands
+from alfred.cli.daemon import _audit_fallback, _commands, _gate_boot
 from alfred.cli.daemon._daemon_pidfile import DaemonPidFileError, load_pidfile
 
 # --- _audit_fallback -------------------------------------------------------
@@ -99,7 +99,7 @@ def test_supervisor_boot_gate_available_delegates_to_public_method() -> None:
         def is_backing_store_available(self) -> bool:
             return True
 
-    adapter = _commands._SupervisorBootGate(_Gate())
+    adapter = _gate_boot._SupervisorBootGate(_Gate())
     assert adapter.is_backing_store_available() is True
 
 
@@ -108,7 +108,7 @@ def test_supervisor_boot_gate_unavailable_delegates_to_public_method() -> None:
         def is_backing_store_available(self) -> bool:
             return False
 
-    adapter = _commands._SupervisorBootGate(_Gate())
+    adapter = _gate_boot._SupervisorBootGate(_Gate())
     assert adapter.is_backing_store_available() is False
 
 
@@ -125,7 +125,7 @@ def test_supervisor_boot_gate_fails_loud_when_method_absent() -> None:
     class _GateMissingMethod:
         pass
 
-    adapter = _commands._SupervisorBootGate(_GateMissingMethod())  # type: ignore[arg-type]
+    adapter = _gate_boot._SupervisorBootGate(_GateMissingMethod())  # type: ignore[arg-type]
     with pytest.raises(AttributeError):
         adapter.is_backing_store_available()
 
@@ -138,14 +138,14 @@ async def test_boot_handshake_runs_healthcheck(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("alfred.memory.db.healthcheck", _fake_healthcheck)
     sentinel_scope = object()
-    handshake = _commands._BootHandshake(sentinel_scope)  # type: ignore[arg-type]
+    handshake = _gate_boot._BootHandshake(sentinel_scope)  # type: ignore[arg-type]
     assert await handshake.is_backing_store_available() is True
     assert calls == [sentinel_scope]
 
 
 def test_build_boot_handshake_returns_handshake() -> None:
-    h = _commands.build_boot_handshake(lambda: None)  # type: ignore[arg-type]
-    assert isinstance(h, _commands._BootHandshake)
+    h = _gate_boot.build_boot_handshake(lambda: None)  # type: ignore[arg-type, return-value]
+    assert isinstance(h, _gate_boot._BootHandshake)
 
 
 def test_snapshot_failure_helper() -> None:
