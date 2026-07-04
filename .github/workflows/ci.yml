@@ -309,6 +309,22 @@ jobs:
           uv run coverage report \
             --include='src/alfred/cli/daemon/_gate_boot.py' \
             --fail-under=100
+      - name: Daemon comms-boot 100% line+branch coverage
+        # #256 PR-3: ``_comms_boot.py`` is the extracted daemon comms-adapter boot
+        # cluster — the pre-Supervisor comms graph build, per-adapter spawn/socket-listen
+        # wiring, the manifest-derived wire-spec parse (fail-closed
+        # ``_CommsAdapterManifestError`` raises), the forwarded-inbound registry, and the
+        # fail-closed refuse-boot arms (bad-manifest / misconfigured-promoter). A coverage
+        # hole could ship an un-exercised refusal branch. Fully covered by the unit tier
+        # (``tests/unit/cli/daemon/``); the only ``# pragma: no cover`` sites are the two
+        # post-``_refuse_boot`` ``raise AssertionError("unreachable")`` NoReturn
+        # defence-in-depth lines. The combined ``coverage-gates`` job names it too
+        # (two-gates pattern — keep BOTH in sync).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_comms_boot.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_comms_boot.py' \
+            --fail-under=100
       - name: Gateway kernel trust-boundary 100% line+branch coverage
         # Spec A G3-3a (#237, ADR-0032): ``src/alfred/gateway/`` is the
         # always-up gateway's stable kernel — the client-facing T1 carrier.
@@ -1638,6 +1654,15 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/cli/daemon/_gate_boot.py' \
+            --fail-under=100
+      - name: Daemon comms-boot 100% line+branch coverage (combined)
+        # #256 PR-3: sibling of the python-job ``Daemon comms-boot`` gate (the
+        # two-gates pattern). The extracted daemon comms-adapter boot cluster.
+        # Keep BOTH in sync when this file changes.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_comms_boot.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_comms_boot.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
