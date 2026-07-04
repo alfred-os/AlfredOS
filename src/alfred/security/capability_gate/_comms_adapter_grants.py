@@ -46,6 +46,21 @@ riding the boot seed. The builder REFUSES it
 :class:`ManifestError` subclass) so the daemon boot maps it to the audited
 ``boot_infra_install_failed`` refusal (adversarial corpus ``cap-2026-004``).
 
+Sink-local containment (DiD, #364)
+----------------------------------
+Path-traversal safety of the ``comms_enabled_adapters`` -> manifest path rests
+on the construction-time ``_validate_comms_enabled_adapters`` validator. A
+validator-bypassing construction of the real ``Settings`` type
+(``model_construct`` / a stub ``CommsAdapterGrantsConfig``) could route a
+traversal-shaped id to the read sink. The builder RE-CHECKS that the resolved
+manifest path stays under ``plugins/`` before reading — the same "re-check at
+the sink, the tool layer is the perimeter" posture the tier ceiling applies to
+``subscriber_tier`` — and REFUSES fail-closed
+(:class:`alfred.plugins.errors.CommsAdapterManifestEscapeError`, a
+:class:`ManifestError` subclass mapped to the audited
+``boot_infra_install_failed`` refusal). This is the single containment
+property, NOT the 4-check validator copied into the builder.
+
 Fail-closed
 -----------
 The Settings validator guarantees the manifest FILE exists, but not that it
@@ -62,7 +77,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from alfred.plugins.errors import CommsAdapterSystemTierError
+from alfred.plugins.errors import CommsAdapterManifestEscapeError, CommsAdapterSystemTierError
 from alfred.plugins.manifest import parse_manifest
 from alfred.security.capability_gate.policy import GrantRow
 
@@ -118,6 +133,12 @@ def comms_adapter_load_grants(config: CommsAdapterGrantsConfig) -> tuple[GrantRo
             self-escalation riding the boot seed. Refused fail-closed. The leaf
             subclasses :class:`ManifestError`, so the daemon's boot ``except``
             maps it to the audited ``boot_infra_install_failed`` refusal.
+        alfred.plugins.errors.CommsAdapterManifestEscapeError: An enabled
+            adapter's manifest path resolves OUTSIDE ``plugins/`` (a
+            validator-bypassing traversal-shaped id, DiD #364). Refused
+            fail-closed before the read. The leaf subclasses
+            :class:`ManifestError`, so the daemon's boot ``except`` maps it to
+            the audited ``boot_infra_install_failed`` refusal.
         alfred.plugins.errors.ManifestError: An enabled adapter's manifest
             does not parse (corrupt TOML, missing required field, bad tier).
             Surfaced loudly so a broken manifest REFUSES boot rather than
@@ -126,12 +147,29 @@ def comms_adapter_load_grants(config: CommsAdapterGrantsConfig) -> tuple[GrantRo
             builder's repo root. Also surfaced loudly — never a silent skip.
     """
     grants: list[GrantRow] = []
+    # Sink-local containment root (DiD, #364). Computed inside the function
+    # (not a module constant) so it tracks a monkeypatched ``_REPO_ROOT`` and
+    # mirrors how the Settings validator computes ``plugins_root`` in its body.
+    plugins_root = (_REPO_ROOT / "plugins").resolve()
     for adapter_id in config.comms_enabled_adapters:
         manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
+        # Sink-local containment (DiD, #364): re-check the resolved manifest
+        # path stays under ``plugins/`` rather than trusting the construction
+        # validator — the same "re-check at the sink, the tool layer is the
+        # perimeter" posture FIX 1 applies to ``subscriber_tier``. Fires only on
+        # a validator-bypassing construction (model_construct / a stub Config);
+        # refuses fail-closed before the read. NOT the 4-check validator: one
+        # containment property, no charset / no is_file (issue #364). Resolve
+        # ONCE and read the SAME resolved path we contained — reading the
+        # un-resolved ``manifest_path`` after checking the resolved one would
+        # reopen the symlink check/use (TOCTOU) gap the ``resolve()`` closed.
+        resolved_manifest_path = manifest_path.resolve()
+        if not resolved_manifest_path.is_relative_to(plugins_root):
+            raise CommsAdapterManifestEscapeError(adapter_id)
         # Loud on a missing/unreadable file — the Settings validator proved
         # the file existed at construction, but the builder must never seed
         # nothing-and-continue if it cannot read it.
-        raw = manifest_path.read_text(encoding="utf-8")
+        raw = resolved_manifest_path.read_text(encoding="utf-8")
         manifest = parse_manifest(raw)
         # FIX 1 — tier ceiling: a comms adapter is operator/user-plugin by
         # construction. A manifest declaring ``system`` would self-escalate to

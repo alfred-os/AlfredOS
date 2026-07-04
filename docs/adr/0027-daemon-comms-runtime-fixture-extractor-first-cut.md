@@ -71,6 +71,16 @@ audited refusal (exit 2, `quarantine_child_spawn_failed`) with a clear operator
 message — there is **no dev fixture fallback**. The fixture path now lives only in
 the test tiers (in-proc echoing child doubles).
 
+## Amendment — #364 (2026-07-04): sink-local containment defense-in-depth
+
+The tier ceiling (FIX 1) re-checks the manifest `subscriber_tier` at the builder's read sink rather than trusting the construction-time validator — "the tool layer is the perimeter". This amendment extends that same posture to the **path-traversal** property.
+
+`comms_adapter_load_grants` turns each `comms_enabled_adapters` id into a `plugins/<id>/manifest.toml` path and reads it. Path-traversal safety otherwise rests entirely on the construction-time `_validate_comms_enabled_adapters` Settings validator (charset regex, `.`/`..` rejection, containment-under-`plugins/`, `is_file`). The builder's parameter is typed as the `CommsAdapterGrantsConfig` Protocol; typing it `Settings` never implied "validated" — `model_construct` bypasses validators. A validator-bypassing construction of the real `Settings` type carrying a traversal-shaped id (e.g. `"../../../../etc"`) would otherwise route it to the `read_text()` sink.
+
+The builder now RE-CHECKS at the sink that the resolved manifest path stays under `plugins/` (`manifest_path.resolve().is_relative_to((_REPO_ROOT / "plugins").resolve())`) before reading, and **refuses** fail-closed with a dedicated `CommsAdapterManifestEscapeError` (a `ManifestError` subclass, so the daemon boot maps it to the audited `boot_infra_install_failed` refusal — exit 2, identical parentage/rationale to `CommsAdapterSystemTierError`). This is the **single containment property**, NOT the 4-check validator copied into the builder. `.resolve()` follows symlinks, so a symlinked `plugins/<id>` escaping the tree resolves outside `plugins/` and is refused (not passed) — the semantics are byte-identical to the Settings validator's own containment check, deliberate consistency rather than a shared blind spot.
+
+This is **defense-in-depth**: in production the sole caller passes a real, validated `Settings`, so the check never fires (zero behavioral change); the attack requires developer-authored code (a `model_construct` / stub Config), outside the external-content threat model. No coded invariant is weakened. Adversarial corpus `cap-2026-005` drives the real builder with a `model_construct` traversal id (validator bypass) plus a real-adapter positive control, pinning the sink-local defense; a symlink-escape unit test pins `.resolve()`'s symlink-following independently of the lexical case. The refusal message discloses only that the path is "outside the `plugins/` directory" — never the resolved host path.
+
 ## Consequences
 
 ### Positive

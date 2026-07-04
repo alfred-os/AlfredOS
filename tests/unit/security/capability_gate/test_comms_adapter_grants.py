@@ -51,7 +51,11 @@ from __future__ import annotations
 import pytest
 
 from alfred.config.settings import Settings, SettingsError
-from alfred.plugins.errors import CommsAdapterSystemTierError, ManifestError
+from alfred.plugins.errors import (
+    CommsAdapterManifestEscapeError,
+    CommsAdapterSystemTierError,
+    ManifestError,
+)
 from alfred.security.capability_gate._comms_adapter_grants import (
     _COMMS_ADAPTER_PROPOSAL_BRANCH,
     comms_adapter_load_grants,
@@ -256,6 +260,79 @@ def test_builder_refuses_system_tier_comms_adapter(tmp_path, monkeypatch) -> Non
     # Dedicated leaf, but caught by the manifest-family boot ``except``.
     assert isinstance(excinfo.value, ManifestError)
     assert excinfo.value.adapter_id == _ENABLED_ADAPTER
+
+
+@pytest.mark.parametrize(
+    "traversal_id",
+    [
+        "../../../../etc",  # relative traversal escaping the repo
+        "/etc",  # absolute id — pathlib join resets to /etc, outside plugins/
+        "..",  # single-segment traversal — resolves to the repo root
+    ],
+)
+def test_builder_refuses_traversal_shaped_adapter_id(traversal_id: str) -> None:
+    """A traversal-shaped id (validator-bypassed) is REFUSED at the sink.
+
+    Path-traversal safety otherwise rests entirely on the construction-time
+    ``comms_enabled_adapters`` validator. ``Settings.model_construct`` bypasses
+    that validator, so a traversal-shaped id reaches the builder — the
+    sink-local containment assertion (DiD, #364) is the last line of defense.
+    It re-checks that the resolved manifest path stays under ``plugins/``, the
+    same "re-check at the sink" posture FIX 1 applies to ``subscriber_tier``.
+    The refusal leaf subclasses ``ManifestError`` so the daemon boot maps it to
+    the audited ``boot_infra_install_failed`` refusal.
+
+    Parametrized over the lexical escape shapes the single assertion contains:
+    a relative ``..`` traversal, an absolute id (pathlib join resets to the
+    absolute path, escaping ``plugins/``), and a single-segment ``..`` (resolves
+    to the repo root). All fire before the read, so no manifest need exist.
+    """
+    # model_construct bypasses _validate_comms_enabled_adapters — a real
+    # production Settings type carrying an id the validator would have rejected.
+    settings = Settings.model_construct(comms_enabled_adapters=(traversal_id,))
+
+    with pytest.raises(CommsAdapterManifestEscapeError) as excinfo:
+        comms_adapter_load_grants(settings)
+
+    assert isinstance(excinfo.value, ManifestError)
+    assert excinfo.value.adapter_id == traversal_id
+
+
+def test_builder_refuses_symlinked_adapter_dir_escaping_plugins(tmp_path, monkeypatch) -> None:
+    """A charset-clean id whose ``plugins/<id>`` SYMLINKS out of the tree is REFUSED.
+
+    The lexical cases above ("../../../../etc") would also be caught by a cheap
+    lexical ``normpath``/``commonpath``. This case is the one the sink-local
+    check's ``.resolve()`` UNIQUELY defends: a charset-clean id ("evil" — no
+    ``..``, no ``/``) whose ``plugins/<id>`` directory is a symlink pointing OUT
+    of the repo. Only resolving the symlink reveals the escape; a lexical check
+    would pass it and read an out-of-tree manifest. Refactoring the assertion to
+    a lexical check would pass every other test but silently drop THIS defense —
+    so this test pins ``.resolve()``'s symlink-following independently.
+    """
+    repo_root = tmp_path / "repo"
+    (repo_root / "plugins").mkdir(parents=True)
+
+    # A real, parseable manifest OUTSIDE the repo tree — so the refusal is a
+    # containment verdict, not a parse/missing-file failure: without the
+    # containment check the builder would happily read this out-of-tree manifest.
+    outside = tmp_path / "outside"
+    _write_manifest_with_tier(outside, "evil", tier="operator")
+    # plugins/evil -> <tmp>/outside/plugins/evil (charset-clean id, symlinked dir).
+    (repo_root / "plugins" / "evil").symlink_to(
+        outside / "plugins" / "evil", target_is_directory=True
+    )
+    monkeypatch.setattr(
+        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", repo_root
+    )
+
+    settings = Settings.model_construct(comms_enabled_adapters=("evil",))
+
+    with pytest.raises(CommsAdapterManifestEscapeError) as excinfo:
+        comms_adapter_load_grants(settings)
+
+    assert isinstance(excinfo.value, ManifestError)
+    assert excinfo.value.adapter_id == "evil"
 
 
 @pytest.mark.parametrize("tier", ["operator", "user-plugin"])
