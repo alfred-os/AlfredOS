@@ -49,6 +49,44 @@ def test_environment_not_set_refuses_and_audits(
     assert subject["failure_reason"] == "environment_not_set"
 
 
+def test_settings_error_after_valid_env_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ``SettingsError`` from ``Settings()`` — env value present, so past the
+    unset guard — hits the defensive re-raise in ``_load_settings_or_die`` and
+    surfaces as the audited ``environment_not_set`` refusal (exit 2), never a raw
+    traceback. Covers the ``except SettingsError`` arm (#256 PR-4 — dropped its
+    ``# pragma: no cover`` since it is a refusal-chain arm the whole-file gate covers).
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")  # valid → past the unset guard
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    from alfred.config.settings import SettingsError
+
+    def _raise_settings_error() -> object:
+        raise SettingsError("settings blew up after the env was already validated")
+
+    monkeypatch.setattr("alfred.config.settings.Settings", _raise_settings_error)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert appended, "no audit row emitted before exit (sec-001 violated)"
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "environment_not_set"
+
+
 def test_environment_not_set_exits_3_when_audit_unwritable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
