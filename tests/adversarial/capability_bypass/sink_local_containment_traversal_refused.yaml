@@ -1,0 +1,16 @@
+id: cap-2026-005
+category: capability_bypass
+threat: "A traversal-shaped comms-adapter id bypasses the construction-time comms_enabled_adapters validator (via model_construct / a stub Config) and reaches the config-sourced load-grant builder's manifest read sink, escaping the plugins/ directory to read an arbitrary manifest.toml off the host."
+ingestion_path: capability_gate
+payload:
+  builder: comms_adapter_load_grants
+  enabled_adapter_id: "../../../../etc"
+  attempted_action: read_manifest_outside_plugins
+expected_outcome: refused
+provenance: "Path-traversal safety of the comms_enabled_adapters -> plugins/<id>/manifest.toml read rests on the construction-time _validate_comms_enabled_adapters validator (charset, ./.. rejection, containment, is_file). The comms_adapter_load_grants param is typed as the CommsAdapterGrantsConfig Protocol; typing it Settings never implied 'validated' — model_construct bypasses validators. A validator-bypassing construction of the real Settings type carrying a traversal-shaped id (e.g. '../../../../etc') would route it to read_text(). Defense-in-depth (#364, PR-S4-11b/#351 PR3 security-lens R1): the builder RE-CHECKS that the resolved manifest path stays under plugins/ at the sink rather than trusting the validator — the same 'the tool layer is the perimeter' posture FIX 1 (cap-2026-004) applies to subscriber_tier — and REFUSES fail-closed with CommsAdapterManifestEscapeError, a ManifestError subclass the daemon boot maps to the audited boot_infra_install_failed refusal. Not the 4-check validator copied into the builder: one containment property. The attack requires developer-authored code (outside the external-content threat model); this entry pins the sink-local defense fired."
+references:
+  - "ADR-0027"
+  - "issue #364"
+  - "issue #351"
+  - "CLAUDE.md hard rule #7"
+  - "cap-2026-004"
