@@ -10,8 +10,11 @@ loop, and the comms adapter-failure helpers. Built ONLY when an operator opts
 comms adapters in — a default-empty boot constructs none of it.
 
 Depends on ``_boot_audit`` (``_refuse_boot`` / ``_emit_or_quarantine`` /
-``LifecycleBroadcaster``) and ``_failures`` — one-directional, no import of
-``_commands``. ``_start_async`` (in ``_commands``) drives these via the
+``LifecycleBroadcaster``) and ``_failures`` at MODULE scope — one-directional.
+The only ``_commands`` dependency is a CALL-TIME lazy import of the shared
+``build_boot_session_scope`` constructor inside ``_build_comms_boot_graph``
+(breaks the module-load cycle; keeps the ``_commands.build_boot_session_scope``
+test seam live). ``_start_async`` (in ``_commands``) drives these via the
 re-imported names.
 """
 
@@ -32,10 +35,9 @@ from alfred.audit.audit_row_schemas import (
     DAEMON_CONTROL_PEER_REJECTED_FIELDS,
 )
 
-# PR-S4-11c-2a0 (#237): mint + register the per-process authorised T3 nonce at
-# boot. Imported at module scope (not lazily) so the boot-wiring unit tests can
-# monkeypatch the ``alfred.cli.daemon._commands.create_and_register_t3_nonce``
-# seam to count / fault the call without a real subprocess.
+# The per-boot lifecycle epoch the status observer reads at OBSERVE time (the
+# false-liveness defense: a forged/stale epoch is refused). Module-scope so the
+# boot-wiring unit tests can monkeypatch it.
 from alfred.bootstrap.lifecycle_epoch import current_boot_epoch
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
@@ -48,9 +50,11 @@ from alfred.cli.daemon._failures import (
     CommsPromoterMisconfiguredFailure,
 )
 
-# PR-S4-11b (#237): module-level so the boot-wiring unit tests monkeypatch these
-# two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
-# ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
+# PR-S4-11b (#237) / #256 PR-3: module-level so the boot-wiring unit tests
+# monkeypatch these two seams (``alfred.cli.daemon._comms_boot.CommsStdioTransport``
+# / ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
+# (The spawn/listen helpers that read these names now live in THIS module, so the
+# seam is here, not ``_commands``.)
 from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
 )

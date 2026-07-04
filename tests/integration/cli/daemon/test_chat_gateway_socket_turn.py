@@ -9,7 +9,7 @@ This is the FIRST exercise of the full, never-before-connected chain —
                     --> stubbed ack --> back up the same chain to the cohost.
 
 The #274 e2e used a FAKE core; THIS test boots the REAL daemon socket carrier
-(:func:`alfred.cli.daemon._commands._listen_socket_comms_adapter`) so the daemon
+(:func:`alfred.cli.daemon._comms_boot._listen_socket_comms_adapter`) so the daemon
 binds ``comms-tui.sock`` exactly as ``alfred daemon start`` does, and a REAL
 gateway dials it and re-serves it on ``comms-gateway.sock`` for a REAL cohost.
 
