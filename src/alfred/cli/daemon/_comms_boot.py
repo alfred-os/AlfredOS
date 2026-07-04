@@ -197,8 +197,9 @@ def _build_sub_payload_promoter(
     configured promoter so the host promotes raw (T3) sub-payloads to single-use
     ``ContentHandle`` references BEFORE the quarantined extract (CLAUDE.md hard rule
     #5). An EMPTY-set kind (the reference plugin / TUI plain-text path) gets ``None``
-    — promotion is inert there, so the default-empty path stays byte-for-byte
-    unchanged (``frozenset()`` -> ``None`` -> the existing inbound behaviour).
+    — promotion is inert there, so the registered-empty path stays byte-for-byte
+    unchanged (an empty required set -> ``None`` -> the existing inbound behaviour). An
+    UNREGISTERED kind never reaches here — it is refused at manifest resolution (#374).
 
     The ``content_store`` is the daemon-owned, process-lived
     :class:`alfred.plugins.web_fetch.content_store.ContentStore` shared across every
@@ -212,7 +213,7 @@ def _build_sub_payload_promoter(
     from alfred.comms_mcp.inbound_scanner import InboundContentScanner
     from alfred.comms_mcp.sub_payload_promotion import SubPayloadPromoter
 
-    if not REQUIRED_CLASSIFIERS_BY_KIND.get(adapter_kind, frozenset()):
+    if not REQUIRED_CLASSIFIERS_BY_KIND[adapter_kind]:
         return None
     return SubPayloadPromoter(
         adapter_kind=adapter_kind,
@@ -333,7 +334,7 @@ def _build_forwarded_inbound_registry(
             adapter_kind=kind,
             content_store=graph_content_store,
         )
-        if promoter is None and REQUIRED_CLASSIFIERS_BY_KIND.get(kind, frozenset()):
+        if promoter is None and REQUIRED_CLASSIFIERS_BY_KIND[kind]:
             raise _ForwardedInboundRegistryMisconfiguredError(kind)
         registry[kind] = _ForwardedCollaborators(
             sub_payload_promoter=promoter,  # type: ignore[arg-type]
@@ -905,12 +906,13 @@ async def _build_comms_adapter_wiring(
     # factory drift). REFUSE BOOT fail-closed NOW (audited, exit 2) rather than wait
     # for the first inbound message to trip the runtime M2 guard mid-traffic
     # (CLAUDE.md hard rules #5 + #7). The empty-set path (None promoter for a kind
-    # with NO required classifiers) is correct and is NOT refused.
+    # with NO required classifiers) is correct and is NOT refused. Post-#374
+    # ``wire.adapter_kind`` is chokepoint-validated (``_resolve_comms_adapter_wire_spec``
+    # already refused an unregistered kind), so this reads the table by subscript, not
+    # ``.get(..., frozenset())`` — an unknown kind can never silently pass here.
     from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
 
-    if sub_payload_promoter is None and REQUIRED_CLASSIFIERS_BY_KIND.get(
-        wire.adapter_kind, frozenset()
-    ):
+    if sub_payload_promoter is None and REQUIRED_CLASSIFIERS_BY_KIND[wire.adapter_kind]:
         await _refuse_boot(
             audit,
             CommsPromoterMisconfiguredFailure(adapter_id=adapter_id),
