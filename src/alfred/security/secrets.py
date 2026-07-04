@@ -654,4 +654,28 @@ class SecretBroker:
                 # §11a 100% trust-boundary gate is met on substance,
                 # not via a pragma.
                 self._file_secrets = MappingProxyType({})
+            except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+                # Mirror __init__'s typed load boundary on the reload seam
+                # (#370, CR #379): a runtime reload of a now-malformed / non-UTF-8
+                # file fails LOUD with the same typed subtype instead of a raw
+                # traceback. The assignment never completed, so ``_file_secrets``
+                # keeps its last-good value and the redactor cache is NOT bumped
+                # (the ``_bump_redactor_version()`` below is skipped by the
+                # raise) — fail-closed to the prior secrets. FileNotFoundError is
+                # handled above (TOCTOU-as-missing); it is an OSError subclass so
+                # its arm MUST precede the generic ``except OSError`` below. No
+                # str(exc) echoed (see __init__ raise-site comments).
+                raise SecretBrokerMalformedError(
+                    t("secrets.file_malformed", path=str(self._secrets_file_path)),
+                    path=self._secrets_file_path,
+                ) from exc
+            except OSError as exc:
+                raise SecretBrokerUnreadableError(
+                    t(
+                        "secrets.file_unreadable",
+                        path=str(self._secrets_file_path),
+                        reason=exc.strerror or type(exc).__name__,
+                    ),
+                    path=self._secrets_file_path,
+                ) from exc
         self._bump_redactor_version()

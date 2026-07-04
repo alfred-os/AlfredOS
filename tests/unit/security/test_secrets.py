@@ -698,6 +698,53 @@ class TestReload:
         with pytest.raises(UnknownSecretError):
             broker.get("discord_bot_token")
 
+    def test_reload_malformed_file_raises_typed_and_retains_prior(self, tmp_path: Path) -> None:
+        """A now-malformed file on reload → SecretBrokerMalformedError, prior retained.
+
+        #370 / CR #379: the reload seam mirrors __init__'s typed load boundary.
+        The file exists + perms pass but the content is now broken TOML, so
+        reload fails LOUD with the typed subtype (not a raw TOMLDecodeError). The
+        assignment never completes → the prior secrets are retained and the
+        redactor cache is not bumped (fail-closed to last-good).
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('discord_bot_token = "v1"\n')
+        path.chmod(0o600)
+        broker = SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+
+        path.write_text("this is = = not valid toml [\n")
+        path.chmod(0o600)
+        with pytest.raises(SecretBrokerMalformedError):
+            broker.reload()
+
+        # Fail-closed to prior: the last-good value survives the failed reload.
+        assert broker.get("discord_bot_token") == "v1"
+
+    def test_reload_oserror_raises_typed_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError escaping the reload load → SecretBrokerUnreadableError.
+
+        #370 / CR #379: mirrors __init__'s except-OSError arm on the reload seam.
+        FileNotFoundError is handled above (TOCTOU-as-missing); a non-FNF OSError
+        (e.g. EACCES after a mode flip) fails loud with the typed subtype.
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('discord_bot_token = "v1"\n')
+        path.chmod(0o600)
+        broker = SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+
+        def _raise_eacces(_path: Path) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(secrets_module, "_load_toml_file", _raise_eacces)
+        with pytest.raises(SecretBrokerUnreadableError):
+            broker.reload()
+
     def test_reload_toctou_filenotfound_fails_closed_to_empty(
         self,
         tmp_path: Path,
