@@ -241,9 +241,13 @@ class _UnknownAdapterKindError(_CommsAdapterManifestError):
     typo'd or unregistered kind (#374). Refusing boot here (fail-closed, CLAUDE.md hard
     rules #5 + #7) stops the adapter being spawned with a ``None`` promoter and no host
     classifiers, which would let raw (T3) sub-payloads reach the orchestrator
-    unpromoted. A subtype of :class:`_CommsAdapterManifestError` so the existing
-    ``except (OSError, ManifestError, _CommsAdapterManifestError)`` refusal arms catch
-    it unchanged (audited ``comms_adapter_spawn_failed``, exit 2).
+    unpromoted. A subtype of :class:`_CommsAdapterManifestError` so it still unwinds
+    through the manifest-error refusal path, but a dedicated narrow
+    ``except _UnknownAdapterKindError`` arm (BEFORE the generic
+    ``except (OSError, ManifestError, _CommsAdapterManifestError)``) at each refusal
+    site routes it to an audited ``comms_adapter_unknown_kind`` refusal (exit 2) whose
+    operator message names the offending kind — not the generic
+    ``comms_adapter_spawn_failed`` "missing/malformed manifest" text.
     """
 
     def __init__(self, adapter_id: str, adapter_kind: str) -> None:
@@ -1452,8 +1456,12 @@ def _comms_adapter_unknown_kind_failure(
 ) -> CommsAdapterUnknownKindFailure:
     """A loud boot-failure carrier for a typo'd/unregistered ``adapter_kind`` (#374).
 
-    Carries the offending ``adapter_kind`` so the durable boot row (and the
-    operator-facing refusal) names the exact field, rather than the misleading
-    generic ``comms_adapter_spawn_failed`` "missing or malformed manifest" text.
+    The durable ``daemon.boot.failed`` audit row carries the DISTINCT
+    ``failure_reason`` (``comms_adapter_unknown_kind``) — ``_refuse_boot`` projects a
+    fixed subject shape (``failure_reason`` only, not per-failure fields), the same as
+    every other boot failure. The exact offending ``adapter_kind`` this carrier holds
+    is surfaced to the operator via the refusal message and to the
+    ``daemon.boot.failed`` hookpoint payload (``_invoke_boot_failed(failure)``); it is
+    not persisted in the audit-row subject.
     """
     return CommsAdapterUnknownKindFailure(adapter_id=adapter_id, adapter_kind=adapter_kind)
