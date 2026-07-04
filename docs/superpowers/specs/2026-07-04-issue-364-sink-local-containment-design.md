@@ -73,15 +73,26 @@ def comms_adapter_load_grants(config: CommsAdapterGrantsConfig) -> tuple[GrantRo
         # validator — the same "re-check at the sink" posture FIX 1 applies to
         # subscriber_tier. Fires only on a validator-bypassing construction
         # (model_construct / a stub Config); refuses fail-closed.
-        if not manifest_path.resolve().is_relative_to(plugins_root):
+        # Resolve ONCE and read the SAME resolved path we contained — reading
+        # the un-resolved manifest_path after checking the resolved one would
+        # reopen the symlink check/use (TOCTOU) gap the resolve() closed.
+        resolved_manifest_path = manifest_path.resolve()
+        if not resolved_manifest_path.is_relative_to(plugins_root):
             raise CommsAdapterManifestEscapeError(adapter_id)
-        raw = manifest_path.read_text(encoding="utf-8")
+        raw = resolved_manifest_path.read_text(encoding="utf-8")
         ...
 ```
 
 `.resolve()` follows symlinks and `is_relative_to` is a pure lexical check on
 the resolved path — identical semantics to `settings.py:358`. The escaping
 path need not exist: the check fires before any read.
+
+> **Implementation note (as shipped).** In `comms_adapter_load_grants` the
+> builder resolves the manifest path once into `resolved_manifest_path`,
+> validates *that* against `plugins_root`, and reads *that same* resolved path
+> — so the path validated and the path read are identical (no check/use gap).
+> A containment failure raises `CommsAdapterManifestEscapeError`. This matches
+> the shipped code; the snippet above is illustrative, not the source of truth.
 
 ### 2. Error leaf
 
@@ -133,20 +144,39 @@ resolved outside `plugins/`, and refuses boot.
 
 ### Unit (`tests/unit/security/capability_gate/test_comms_adapter_grants.py`)
 
-Add one case covering the new `is_relative_to` **True** branch (escape →
-raise). The **False** branch (contained → proceed) is already covered by every
-existing passing test, so the per-file 100% line+branch gate
-(`ci.yml:196` / `ci.yml:1552`) holds.
+Cover the new `is_relative_to` **True** branch (escape → raise). The **False**
+branch (contained → proceed) is already covered by every existing passing test,
+so the per-file 100% line+branch gate (`ci.yml:196` / `ci.yml:1552`) holds. As
+shipped, two tests exercise the True branch:
+
+1. A **parametrized lexical** test over `{"../../../../etc", "/etc", ".."}` — a
+   relative traversal, an absolute id (pathlib join resets to the absolute
+   path, escaping `plugins/`), and a single-segment `..` (resolves to the repo
+   root). All fire before the read, so no manifest need exist.
+2. A **symlink-escape** test: a charset-clean id (`"evil"`, no `..`/`/`) whose
+   `plugins/<id>` is a symlink pointing OUT of a monkeypatched tmp repo. This is
+   the vector `.resolve()` UNIQUELY defends — a lexical `normpath`/`commonpath`
+   check would pass the symlink and read the out-of-tree manifest. Pinning it
+   means a `.resolve()`→lexical refactor fails a test instead of silently
+   dropping the defense (negative-control verified: lexical-both-sides returns
+   `is_relative_to == True`).
 
 ```python
-def test_builder_refuses_traversal_shaped_adapter_id() -> None:
+@pytest.mark.parametrize("traversal_id", ["../../../../etc", "/etc", ".."])
+def test_builder_refuses_traversal_shaped_adapter_id(traversal_id: str) -> None:
     # Settings.model_construct bypasses the field validator, so a traversal id
     # reaches the builder — the sink-local assertion is the last line of defense.
-    settings = Settings.model_construct(comms_enabled_adapters=("../../../../etc",))
+    settings = Settings.model_construct(comms_enabled_adapters=(traversal_id,))
     with pytest.raises(CommsAdapterManifestEscapeError) as excinfo:
         comms_adapter_load_grants(settings)
     assert isinstance(excinfo.value, ManifestError)
-    assert excinfo.value.adapter_id == "../../../../etc"
+    assert excinfo.value.adapter_id == traversal_id
+
+
+def test_builder_refuses_symlinked_adapter_dir_escaping_plugins(tmp_path, monkeypatch) -> None:
+    # plugins/evil -> <tmp>/outside/plugins/evil (charset-clean id, symlinked dir).
+    # Only .resolve() following the symlink reveals the escape.
+    ...  # monkeypatch _REPO_ROOT to the tmp repo; assert CommsAdapterManifestEscapeError
 ```
 
 ### Adversarial (`tests/adversarial/capability_bypass/`, `cap-2026-005`)
