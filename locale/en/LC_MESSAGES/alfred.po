@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-04 13:56+0100\n"
+"POT-Creation-Date: 2026-07-04 15:20+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1047,7 +1047,7 @@ msgstr ""
 "run `alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:658
-#: src/alfred/cli/daemon/_comms_boot.py:887
+#: src/alfred/cli/daemon/_comms_boot.py:919
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -1120,8 +1120,8 @@ msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
 "incident(s)){latest_crash}"
 
-#: src/alfred/cli/daemon/_comms_boot.py:358
-#: src/alfred/cli/daemon/_comms_boot.py:850
+#: src/alfred/cli/daemon/_comms_boot.py:389
+#: src/alfred/cli/daemon/_comms_boot.py:881
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -1129,18 +1129,18 @@ msgstr ""
 "and re-run `alfred daemon start`, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1087
+#: src/alfred/cli/daemon/_comms_boot.py:1119
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
 "boot. Check `alfred audit log --since 5m` for the adapter's load-refused "
 "/ crash row, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1101
+#: src/alfred/cli/daemon/_comms_boot.py:1133
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1197
+#: src/alfred/cli/daemon/_comms_boot.py:1229
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -1148,7 +1148,7 @@ msgstr ""
 "permissions (it must be owner-only, mode 0700), remove any stale "
 "`comms-*.sock`, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1274
+#: src/alfred/cli/daemon/_comms_boot.py:1306
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -1157,7 +1157,7 @@ msgstr ""
 "day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1334
+#: src/alfred/cli/daemon/_comms_boot.py:1366
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
