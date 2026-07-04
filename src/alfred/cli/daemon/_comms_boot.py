@@ -170,6 +170,11 @@ def _resolve_comms_adapter_wire_spec(adapter_id: str) -> _CommsAdapterWireSpec:
     if not isinstance(adapter_kind, str) or not adapter_kind:
         raise _CommsAdapterManifestError(adapter_id, "adapter_kind")
 
+    from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
+
+    if adapter_kind not in REQUIRED_CLASSIFIERS_BY_KIND:
+        raise _UnknownAdapterKindError(adapter_id, adapter_kind)
+
     return _CommsAdapterWireSpec(
         plugin_id=manifest.plugin_id,
         adapter_kind=adapter_kind,
@@ -223,6 +228,31 @@ class _CommsAdapterManifestError(Exception):
         super().__init__(f"comms adapter {adapter_id!r} manifest missing {field!r}")
         self.adapter_id = adapter_id
         self.field = field
+
+
+class _UnknownAdapterKindError(_CommsAdapterManifestError):
+    """An enabled comms adapter declares an ``adapter_kind`` absent from the host registry.
+
+    The manifest's ``adapter_kind`` is a non-empty string but NOT a member of the
+    host's closed vocabulary
+    (:data:`alfred.comms_mcp.classifier_registry.REQUIRED_CLASSIFIERS_BY_KIND`) — a
+    typo'd or unregistered kind (#374). Refusing boot here (fail-closed, CLAUDE.md hard
+    rules #5 + #7) stops the adapter being spawned with a ``None`` promoter and no host
+    classifiers, which would let raw (T3) sub-payloads reach the orchestrator
+    unpromoted. A subtype of :class:`_CommsAdapterManifestError` so the existing
+    ``except (OSError, ManifestError, _CommsAdapterManifestError)`` refusal arms catch
+    it unchanged (audited ``comms_adapter_spawn_failed``, exit 2).
+    """
+
+    def __init__(self, adapter_id: str, adapter_kind: str) -> None:
+        super().__init__(adapter_id, "adapter_kind")
+        self.adapter_kind = adapter_kind
+        # The parent ctor built a "manifest missing 'adapter_kind'" message, but here
+        # the field is PRESENT and names an unregistered kind — restate accurately.
+        self.args = (
+            f"comms adapter {adapter_id!r} manifest declares unknown adapter_kind "
+            f"{adapter_kind!r} (not in REQUIRED_CLASSIFIERS_BY_KIND)",
+        )
 
 
 # The forwarded-inbound kinds the HOST can re-parse + dispatch behind the gateway
