@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-04 19:00+0100\n"
+"POT-Creation-Date: 2026-07-04 20:56+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2924,31 +2924,45 @@ msgstr ""
 "`quarantine.ingest` is an internal pre-step; only `quarantine.extract` is"
 " dispatched as the extractor-observed method on this path."
 
-#: src/alfred/security/secrets.py:253 src/alfred/security/secrets.py:264
-#: src/alfred/security/secrets.py:280 src/alfred/security/secrets.py:292
+#: src/alfred/security/secrets.py:294 src/alfred/security/secrets.py:305
+#: src/alfred/security/secrets.py:321 src/alfred/security/secrets.py:333
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:274
+#: src/alfred/security/secrets.py:315
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:365 src/alfred/security/secrets.py:376
+#: src/alfred/security/secrets.py:406 src/alfred/security/secrets.py:417
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:389
+#: src/alfred/security/secrets.py:430
 msgid "secrets.file_in_git_repo"
 msgstr ""
 "Secrets file '{path}' is inside a git repository (found '.git' at "
 "'{parent}'); secrets must never be committed. Move it outside any git "
 "repository, or set ALFRED_SECRETS_FILE to a path outside a repo."
+
+#: src/alfred/security/secrets.py:467
+msgid "secrets.file_malformed"
+msgstr ""
+"Secrets file '{path}' is not valid TOML. Fix the file's TOML syntax (a "
+"flat table of name = \"value\" entries) and its UTF-8 encoding, then "
+"retry."
+
+#: src/alfred/security/secrets.py:477
+msgid "secrets.file_unreadable"
+msgstr ""
+"Secrets file '{path}' could not be read: {reason}. Check the file and its"
+" parent directory are readable and owned by the invoking user, then "
+"retry."
 
 # Slice-3 retrospective arch-003 — i18n the four hardcoded English raise
 # paths in alfred.security.tiers. Each error retains all the diagnostic

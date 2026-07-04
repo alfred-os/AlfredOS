@@ -19,8 +19,10 @@ from alfred.security.secrets import (
     SecretBroker,
     SecretBrokerConfigError,
     SecretBrokerFileMissingError,
+    SecretBrokerMalformedError,
     SecretBrokerNotAFileError,
     SecretBrokerPermissionsError,
+    SecretBrokerUnreadableError,
     UnknownSecretError,
     _resolve_secrets_path,
     _walk_for_git_parent,
@@ -141,6 +143,10 @@ class TestConfigErrorHierarchy:
         assert issubclass(SecretBrokerPermissionsError, SecretBrokerConfigError)
         assert issubclass(SecretBrokerFileMissingError, SecretBrokerConfigError)
         assert issubclass(SecretBrokerNotAFileError, SecretBrokerConfigError)
+        # The load-boundary typed wraps (#370 item 1) also root at the base so
+        # the #368 boot/CLI handlers catch them uniformly.
+        assert issubclass(SecretBrokerMalformedError, SecretBrokerConfigError)
+        assert issubclass(SecretBrokerUnreadableError, SecretBrokerConfigError)
         # Base inherits from AlfredError per the conventions doc.
         assert issubclass(SecretBrokerConfigError, AlfredError)
 
@@ -260,6 +266,122 @@ def secure_secrets_file(tmp_path: Path) -> Path:
     path.write_text('discord_bot_token = "from-file"\n')
     path.chmod(0o600)
     return path
+
+
+class TestLoadBoundaryTypedErrors:
+    """#370 item 1: raw ``TOMLDecodeError`` / ``OSError`` at the load boundary
+    become typed ``SecretBrokerConfigError`` subtypes so the #368 boot/CLI
+    handlers catch them uniformly instead of surfacing a raw traceback.
+    """
+
+    def test_malformed_toml_raises_typed_malformed_error(self, tmp_path: Path) -> None:
+        """A valid-perms secrets file with broken TOML → SecretBrokerMalformedError.
+
+        Fail-closed: the broker must NOT proceed with empty/partial secrets when
+        the file exists but cannot be parsed — it refuses loudly. The typed
+        subtype roots at SecretBrokerConfigError so the boot/CLI dispatch catches
+        it uniformly (no raw tomllib.TOMLDecodeError traceback).
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text("this is = = not valid toml [\n")  # broken TOML
+        path.chmod(0o600)
+
+        with pytest.raises(SecretBrokerMalformedError) as exc_info:
+            SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+
+        assert isinstance(exc_info.value, SecretBrokerConfigError)
+        assert exc_info.value.path == path
+
+    def test_unreadable_file_raises_typed_unreadable_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError escaping the load boundary → SecretBrokerUnreadableError.
+
+        A permission/IO failure or a stat/lstat OSError (TOCTOU race, unreadable
+        parent) that escapes the load step becomes the typed
+        SecretBrokerUnreadableError rather than a raw traceback — distinct from
+        the malformed-TOML case so the operator gets the right remediation (fix
+        access, not fix syntax). Deterministic fault injection at the load call
+        (env-independent — a real 0000 file is readable by root, so it can't
+        pin this branch on a root CI lane).
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('discord_bot_token = "x"\n')
+        path.chmod(0o600)
+
+        def _raise_eacces(_path: Path) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        # Validation passes on the real 0600 file; the load then fails with an
+        # escaping OSError, exercising the __init__ except-OSError wrap.
+        monkeypatch.setattr(secrets_module, "_load_toml_file", _raise_eacces)
+
+        with pytest.raises(SecretBrokerUnreadableError) as exc_info:
+            SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+
+        assert isinstance(exc_info.value, SecretBrokerConfigError)
+        assert exc_info.value.path == path
+
+    def test_invalid_utf8_file_raises_typed_malformed_error(self, tmp_path: Path) -> None:
+        """A valid-perms secrets file with invalid UTF-8 → SecretBrokerMalformedError.
+
+        ``tomllib.load`` decodes the file as UTF-8 before parsing, so a corrupt /
+        binary / wrong-encoding file raises ``UnicodeDecodeError`` — a ValueError
+        that is NEITHER TOMLDecodeError NOR OSError. Without the wrap it would
+        escape both arms as a raw traceback on the boot/CLI path this PR hardens
+        (error-reviewer Medium). Invalid encoding is malformed content, so it
+        maps to the same typed Malformed subtype + "fix the file" remediation.
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_bytes(b'token = "\xff\xfe not utf-8"\n')  # invalid UTF-8 byte
+        path.chmod(0o600)
+
+        with pytest.raises(SecretBrokerMalformedError) as exc_info:
+            SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+
+        assert isinstance(exc_info.value, SecretBrokerConfigError)
+        assert exc_info.value.path == path
+
+    def test_validation_phase_oserror_raises_typed_unreadable_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError from the VALIDATION step (stat/lstat) → SecretBrokerUnreadableError.
+
+        #370 explicitly names a stat/lstat OSError as an escape route. The
+        construction try encloses _validate_secrets_file_security, so a stat OSError
+        maps to the same Unreadable subtype. Pinning it here (via a monkeypatch on
+        the validator, mirroring the reload-TOCTOU test) guards the named property
+        against a future refactor that narrows the try scope (test-eng Low).
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('discord_bot_token = "x"\n')
+        path.chmod(0o600)
+
+        def _raise_oserror(_path: Path) -> None:
+            raise OSError(5, "Input/output error")  # e.g. stat on a failing mount
+
+        monkeypatch.setattr(secrets_module, "_validate_secrets_file_security", _raise_oserror)
+
+        with pytest.raises(SecretBrokerUnreadableError) as exc_info:
+            SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+
+        assert isinstance(exc_info.value, SecretBrokerConfigError)
+        assert exc_info.value.path == path
+
+    def test_malformed_and_unreadable_carry_only_path(self) -> None:
+        """Both new subtypes carry just ``path`` (mirrors the missing/not-a-file leaves)."""
+        malformed = SecretBrokerMalformedError("bad toml", path=Path("/m"))
+        unreadable = SecretBrokerUnreadableError("eacces", path=Path("/u"))
+        assert malformed.path == Path("/m")
+        assert unreadable.path == Path("/u")
 
 
 class TestPermissionsCheck:

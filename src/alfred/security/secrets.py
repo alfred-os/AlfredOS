@@ -126,9 +126,13 @@ class UnknownSecretError(KeyError):
 class SecretBrokerConfigError(AlfredError):
     """Base class for SecretBroker configuration failures at construction.
 
-    Subclasses carry the offending ``path`` so the CLI top-level dispatch can
-    catch ``SecretBrokerConfigError`` once and route error-message i18n on the
-    concrete subtype.
+    Subclasses carry the offending ``path``. The realized handlers
+    (``build_broker_or_die`` on the CLI, the daemon boot ``_refuse_boot`` path)
+    catch this base class ONCE and echo ``str(exc)`` — the concrete subtype
+    renders its own i18n message at raise time, so the dispatch never
+    re-branches on the subtype (#370 item 4: docstring reconciled to the
+    realized #368 behaviour). The subtype still carries the structured ``path``
+    for audit/forensics.
     """
 
     __slots__ = ("path",)
@@ -185,6 +189,43 @@ class SecretBrokerNotAFileError(SecretBrokerConfigError):
     Typically this means Docker auto-created a bind-mount directory at the path
     before the host file existed — the remediation is in the i18n template
     (run ``bin/alfred-setup.sh``).
+    """
+
+    __slots__ = ()
+
+
+class SecretBrokerMalformedError(SecretBrokerConfigError):
+    """The resolved secrets file exists and is readable but is not valid TOML.
+
+    #370 item 1: a valid-perms file with broken TOML raises
+    :class:`tomllib.TOMLDecodeError` from :func:`_load_toml_file`. Wrapping it
+    at the construction boundary in this typed subtype means the #368 boot/CLI
+    handlers catch it via the ``SecretBrokerConfigError`` base and refuse
+    fail-closed with an operator message, instead of surfacing a raw
+    ``TOMLDecodeError`` traceback. Distinct from
+    :class:`SecretBrokerUnreadableError` (an I/O failure) so the operator gets
+    the right remediation: fix the file's TOML syntax, not its access.
+    """
+
+    __slots__ = ()
+
+
+class SecretBrokerUnreadableError(SecretBrokerConfigError):
+    """An ``OSError`` escaped while reading/stat-ing the resolved secrets file.
+
+    #370 item 1: an ``OSError`` raised by the stat/lstat in
+    :func:`_validate_secrets_file_security` or the ``open`` in
+    :func:`_load_toml_file` (a TOCTOU race, ``PermissionError``, etc.) at
+    construction. Wrapping it in this typed subtype means the #368 boot/CLI
+    handlers catch it via the ``SecretBrokerConfigError`` base and refuse
+    fail-closed, instead of surfacing a raw ``OSError`` traceback. Distinct from
+    :class:`SecretBrokerMalformedError` (bad content) so the operator gets the
+    right remediation: fix the file's access/ownership, not its syntax.
+
+    Scope note: only OSErrors from the validate/load step are wrapped. An
+    ``OSError`` from the earlier ``exists()`` probe (e.g. an EACCES search on the
+    parent on some platforms) sits before this ``try`` and is out of scope — the
+    boundary this leaf guards is the validate/load pair, not the existence check.
     """
 
     __slots__ = ()
@@ -395,8 +436,50 @@ class SecretBroker:
                     parent=git_parent,
                 )
 
-        _validate_secrets_file_security(self._secrets_file_path)
-        self._file_secrets = _load_toml_file(self._secrets_file_path)
+        # #370 item 1: convert the two raw exceptions the validate/load step can
+        # still leak — malformed TOML and an escaping OSError — into typed
+        # SecretBrokerConfigError subtypes at this boundary, so the #368 boot/CLI
+        # handlers catch them via the base and refuse fail-closed instead of a
+        # raw traceback. The already-typed SecretBrokerConfigError leaves raised
+        # by _validate_secrets_file_security are neither TOMLDecodeError nor
+        # OSError, so they propagate untouched.
+        try:
+            _validate_secrets_file_security(self._secrets_file_path)
+            self._file_secrets = _load_toml_file(self._secrets_file_path)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError: ``tomllib.load`` decodes the file as UTF-8
+            # before parsing, so a corrupt / binary / wrong-encoding secrets
+            # file raises UnicodeDecodeError (a ValueError, NOT a TOMLDecodeError
+            # and NOT an OSError) — invalid encoding is malformed content, so it
+            # maps to the same "fix the file" remediation.
+            #
+            # Defense-in-depth (secret broker, hard rule #1): do NOT echo
+            # str(exc) from a secrets-file PARSE failure into the operator
+            # message. The redactor is not built at a construction failure, so
+            # any echoed detail would be UN-redacted. tomllib's message is
+            # empirically content-free today (a fixed vocabulary + integer
+            # line/column, never a `doc` slice) and UnicodeDecodeError echoes the
+            # raw offending byte, but structured position attrs are not portable
+            # pre-3.14, so we refuse to render free-form exception text from the
+            # secrets file at all. `from exc` preserves the cause for a developer
+            # debugger; tracebacks print only str(), not the parser's `doc`.
+            raise SecretBrokerMalformedError(
+                t("secrets.file_malformed", path=str(self._secrets_file_path)),
+                path=self._secrets_file_path,
+            ) from exc
+        except OSError as exc:
+            # Echo only the OS-provided ``strerror`` (a fixed errno description
+            # such as "Permission denied" — never file content or the path),
+            # not str(exc) (which appends the filename). Same redactor-inactive
+            # reasoning as above.
+            raise SecretBrokerUnreadableError(
+                t(
+                    "secrets.file_unreadable",
+                    path=str(self._secrets_file_path),
+                    reason=exc.strerror or type(exc).__name__,
+                ),
+                path=self._secrets_file_path,
+            ) from exc
 
     @classmethod
     def from_settings(cls, config: SecretBrokerConfig) -> SecretBroker:
