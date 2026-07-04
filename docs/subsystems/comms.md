@@ -289,7 +289,7 @@ is deleted in PR-S4-10.
 > host primitives as TESTED but NOT-YET-WIRED: the five #235 primitives are wired
 > onto the live daemon path one PR at a time. **The `SubPayloadPromoter` is now
 > wired (PR-S4-235-1):** `_spawn_comms_adapter`
-> (`src/alfred/cli/daemon/_commands.py`) builds a per-adapter promoter keyed on the
+> (`src/alfred/cli/daemon/_comms_boot.py`) builds a per-adapter promoter keyed on the
 > wire `adapter_kind` — a configured promoter for a classifier-bearing kind
 > (e.g. `discord`), `None` for an empty-set kind (the reference plugin / TUI
 > plain-text path) — and injects it into the `InboundMessageHandler` so
@@ -362,7 +362,7 @@ the 2c real-LLM quarantine-child egress remains deferred to `#230/#340`. See
 
 The daemon's inbound quarantined extraction is **live in production**. When
 `Settings.comms_enabled_adapters` is non-empty, `_build_comms_boot_graph`
-(`src/alfred/cli/daemon/_commands.py`) builds the real
+(`src/alfred/cli/daemon/_comms_boot.py`) builds the real
 `QuarantineStdioTransport` over a **REAL bwrap-sandboxed quarantined child**
 spawned via `spawn_quarantine_child_io` — the ADR-0027 fixture extractor is gone
 (see the ADR-0027 PR-S4-11c-2b amendment). The boot-minted authorised T3 nonce
