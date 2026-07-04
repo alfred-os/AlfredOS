@@ -35,6 +35,11 @@ from alfred.errors import AlfredError
 # every inbound message. Every ``adapter_kind`` member needs an entry here
 # (completeness is pinned by the test). PR-S4-9 adds the ``"discord"`` entry
 # (``frozenset({"discord_sub_payloads"})``); PR-S4-10 adds ``"tui"``.
+# Membership is ALSO an enforced boot-gate (#374): an enabled comms adapter whose
+# manifest ``adapter_kind`` is not a key here REFUSES daemon boot at manifest
+# resolution (``_resolve_comms_adapter_wire_spec`` -> audited
+# ``comms_adapter_unknown_kind``), so a typo'd/unregistered kind can never spawn with
+# a ``None`` promoter and no classifiers.
 REQUIRED_CLASSIFIERS_BY_KIND: Final[MappingProxyType[str, frozenset[str]]] = MappingProxyType(
     {
         "alfred_comms_test": frozenset(),  # plain-text only — see MARKER below

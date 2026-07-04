@@ -47,6 +47,7 @@ from alfred.cli.daemon._boot_audit import (
 from alfred.cli.daemon._failures import (
     CommsAdapterBindFailedFailure,
     CommsAdapterSpawnFailedFailure,
+    CommsAdapterUnknownKindFailure,
     CommsPromoterMisconfiguredFailure,
 )
 
@@ -382,6 +383,23 @@ async def _resolve_adapter_carrier_kind(
 
     try:
         return _resolve_comms_adapter_wire_spec(adapter_id).adapter_kind
+    except _UnknownAdapterKindError as exc:
+        # #374: name the offending field + value so the operator sees a typo, not the
+        # misleading generic "missing or malformed manifest" spawn-failed text. MUST
+        # precede the generic arm below — this IS a _CommsAdapterManifestError subtype.
+        await _refuse_boot(
+            audit,
+            _comms_adapter_unknown_kind_failure(adapter_id, exc.adapter_kind),
+            t(
+                "daemon.boot.comms_adapter_unknown_kind",
+                adapter_id=adapter_id,
+                adapter_kind=exc.adapter_kind,
+            ),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is NoReturn (raises _BootRefusedError); unreachable defence.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
     except (OSError, ManifestError, _CommsAdapterManifestError) as exc:
         await _refuse_boot(
             audit,
@@ -874,6 +892,24 @@ async def _build_comms_adapter_wiring(
 
     try:
         wire = _resolve_comms_adapter_wire_spec(adapter_id)
+    except _UnknownAdapterKindError as exc:
+        # #374: name the offending field + value (defence-in-depth mirror of the carrier
+        # refusal — the boot loop resolves the carrier kind first, so a real boot refuses
+        # THERE; this copy fires only when the wiring is driven directly). MUST precede
+        # the generic arm — this IS a _CommsAdapterManifestError subtype.
+        await _refuse_boot(
+            audit,
+            _comms_adapter_unknown_kind_failure(adapter_id, exc.adapter_kind),
+            t(
+                "daemon.boot.comms_adapter_unknown_kind",
+                adapter_id=adapter_id,
+                adapter_kind=exc.adapter_kind,
+            ),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is NoReturn (raises _BootRefusedError); unreachable defence.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
     except (OSError, ManifestError, _CommsAdapterManifestError) as exc:
         await _refuse_boot(
             audit,
@@ -1409,3 +1445,15 @@ def _comms_adapter_failure(adapter_id: str) -> CommsAdapterSpawnFailedFailure:
 def _comms_adapter_bind_failure(adapter_id: str) -> CommsAdapterBindFailedFailure:
     """A loud boot-failure carrier for a comms-adapter socket-bind refusal (ADR-0031)."""
     return CommsAdapterBindFailedFailure(adapter_id=adapter_id)
+
+
+def _comms_adapter_unknown_kind_failure(
+    adapter_id: str, adapter_kind: str
+) -> CommsAdapterUnknownKindFailure:
+    """A loud boot-failure carrier for a typo'd/unregistered ``adapter_kind`` (#374).
+
+    Carries the offending ``adapter_kind`` so the durable boot row (and the
+    operator-facing refusal) names the exact field, rather than the misleading
+    generic ``comms_adapter_spawn_failed`` "missing or malformed manifest" text.
+    """
+    return CommsAdapterUnknownKindFailure(adapter_id=adapter_id, adapter_kind=adapter_kind)

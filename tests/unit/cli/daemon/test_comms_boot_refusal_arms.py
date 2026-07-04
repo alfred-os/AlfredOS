@@ -296,14 +296,17 @@ async def test_build_wiring_refuses_when_classifier_kind_gets_none_promoter(
 async def test_build_wiring_refuses_on_unregistered_adapter_kind(
     monkeypatch: pytest.MonkeyPatch,
     fake_audit_writer: FakeAuditWriter,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An unregistered ``adapter_kind`` routes through the existing audited refusal (#374).
+    """An unregistered ``adapter_kind`` refuses via its OWN distinct audited reason (#374).
 
-    ``_UnknownAdapterKindError`` is a ``_CommsAdapterManifestError`` subtype, so the
-    existing ``except (OSError, ManifestError, _CommsAdapterManifestError)`` arm in
-    ``_build_comms_adapter_wiring`` catches it and refuses fail-closed (exit 2,
-    ``comms_adapter_spawn_failed``) with NO new wiring — proving the subtype is covered
-    by the established refusal path (CLAUDE.md hard rule #7).
+    ``_UnknownAdapterKindError`` is a ``_CommsAdapterManifestError`` subtype, but
+    ``_build_comms_adapter_wiring`` catches it in a NARROW arm (before the generic one)
+    and refuses fail-closed (exit 2) with the distinct ``comms_adapter_unknown_kind``
+    reason — so forensics can tell a typo'd kind apart from a generic spawn refusal — AND
+    the operator-facing message names the offending kind rather than the misleading
+    "missing or malformed manifest" text (CLAUDE.md hard rule #7). The narrow arm MUST
+    precede the generic subtype-catching one.
     """
 
     def _boom(_adapter_id: str) -> _CommsAdapterWireSpec:
@@ -327,7 +330,10 @@ async def test_build_wiring_refuses_on_unregistered_adapter_kind(
     rows = fake_audit_writer.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
-    assert reasons == {"comms_adapter_spawn_failed"}
+    assert reasons == {"comms_adapter_unknown_kind"}
+    # The operator-facing refusal (stderr) NAMES the offending kind — not the misleading
+    # generic "missing or malformed manifest" text (#374 devex fix).
+    assert "bogus_typo" in capsys.readouterr().err
 
 
 # ── _make_control_reject_auditor callback (src 1331-1333) ──
