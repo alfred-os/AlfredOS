@@ -53,6 +53,53 @@ def test_alfred_status_secrets_config_error_exits_cleanly(
     assert str(bad) in result.stdout
 
 
+def test_alfred_status_shows_resolved_secrets_path(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """#370 item 3: ``alfred status`` reports WHICH secrets-file path resolved.
+
+    On the happy path the operator otherwise never sees which layer the broker
+    resolved (constructor arg / ALFRED_SECRETS_FILE / the ~/.config default), so
+    a secrets problem means reading the ADR to know where to look. Assert the
+    resolved path appears in the status output.
+    """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    parent = tmp_path / "alfred"
+    parent.mkdir(mode=0o700)
+    secrets = parent / "secrets.toml"
+    secrets.write_text('discord_bot_token = "x"\n')
+    secrets.chmod(0o600)
+    monkeypatch.setenv("ALFRED_SECRETS_FILE", str(secrets))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    # Rendered on the labelled secrets line (not merely present somewhere).
+    assert "secrets file:" in result.stdout.lower()
+    assert str(secrets) in result.stdout
+
+
+def test_alfred_status_marks_absent_secrets_file(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """A configured-but-absent secrets file is marked 'not found', not shown as loaded.
+
+    #370 item 3 / devex HIGH: the broker resolves the path but silently falls
+    back to env-only when the file is absent. Showing the path unqualified would
+    mislead the env-var operator ('why isn't my secret loading?') into editing a
+    file that isn't the source, so status marks it not-found.
+    """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    absent = tmp_path / "alfred" / "secrets.toml"  # never created
+    monkeypatch.setenv("ALFRED_SECRETS_FILE", str(absent))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert str(absent) in result.stdout
+    assert "not found" in result.stdout.lower()
+
+
 def test_alfred_migrate_command_is_registered() -> None:
     # Verifies the subcommand is wired into the Typer app and its docstring
     # mentions alembic/migrations so an operator running ``alfred migrate
