@@ -327,6 +327,24 @@ jobs:
           uv run coverage report \
             --include='src/alfred/cli/daemon/_comms_boot.py' \
             --fail-under=100
+      - name: Daemon boot orchestrator + failures 100% line+branch coverage
+        # #256 PR-4 (closeout): the two files #256 named. ``_commands.py`` is the thin
+        # ~1046-line boot orchestrator that REMAINS after the _boot_audit / _gate_boot /
+        # _comms_boot extractions — it holds ``_start_async`` and every fail-closed
+        # refuse-DECISION arm (the ``if failure: await _refuse_boot(...)`` /
+        # ``except X: await _refuse_boot(...)`` guards that #256 exists to gate). All
+        # refuse-decision statements are covered; the only pragma sites are the
+        # ``# pragma: no cover`` real-infra constructors (build_boot_session_scope /
+        # _build_boot_outbound_dlp / wait_for_shutdown) + one ``# pragma: no branch``
+        # reap-finally leak-guard whose not-taken arc is only reached during exception
+        # unwinding (coverage.py can't record it). ``_failures.py`` is the
+        # ``DaemonBootFailure`` union. Fully covered by the unit tier. Combined job
+        # names both too (two-gates pattern — keep BOTH in sync).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_commands.py,src/alfred/cli/daemon/_failures.py' \
+            --fail-under=100
       - name: Gateway kernel trust-boundary 100% line+branch coverage
         # Spec A G3-3a (#237, ADR-0032): ``src/alfred/gateway/`` is the
         # always-up gateway's stable kernel — the client-facing T1 carrier.
@@ -1665,6 +1683,16 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/cli/daemon/_comms_boot.py' \
+            --fail-under=100
+      - name: Daemon boot orchestrator + failures 100% line+branch coverage (combined)
+        # #256 PR-4 (closeout): sibling of the python-job ``Daemon boot orchestrator +
+        # failures`` gate (the two-gates pattern). ``_commands.py`` (thin orchestrator +
+        # refuse-DECISION arms) + ``_failures.py`` (the DaemonBootFailure union).
+        # Keep BOTH in sync when this file changes.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_commands.py,src/alfred/cli/daemon/_failures.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
