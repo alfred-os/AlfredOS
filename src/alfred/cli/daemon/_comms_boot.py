@@ -613,19 +613,31 @@ async def _build_comms_boot_graph(
         redis_url=settings.redis_url,
         policies_ref=policies_ref,  # type: ignore[arg-type]
     )
-    # ONE single-use staging map shared between the recorder (writer) and the
-    # transport (drainer) — the host owns the raw T3 body between them (ADR-0029).
-    staging = QuarantineStagingMap()
-    # ``_build_boot_outbound_dlp`` always constructs a concrete ``OutboundDlp``
-    # (it is annotated to the Protocol for the Supervisor's narrower consumer);
-    # the extractor's post-stage scan needs the concrete class, so the cast pins
-    # what the runtime already guarantees rather than widening the Wave-2 helper.
-    extractor, quarantine_transport = await _build_comms_inbound_extractor(
-        audit_writer=audit,
-        outbound_dlp=cast("OutboundDlp", outbound_dlp),
-        secret_broker=secret_broker,
-        staging=staging,
-    )
+    # The ContentStore's Redis client is live BEFORE the quarantined child spawns;
+    # if that spawn refuses (``QuarantineChildSpawnError`` on a non-Linux /
+    # unprovisioned host) the graph never returns, so ``_start_async``'s exit-path
+    # teardown never sees the store and the Redis client leaks. Reap it here on a
+    # pre-child-live failure (the post-spawn assembly is reaped by the ``except``
+    # below, which ALSO reaps the now-live transport). Suppressed so the store-close
+    # never masks the original spawn refusal (CLAUDE.md #7).
+    try:
+        # ONE single-use staging map shared between the recorder (writer) and the
+        # transport (drainer) — the host owns the raw T3 body between them (ADR-0029).
+        staging = QuarantineStagingMap()
+        # ``_build_boot_outbound_dlp`` always constructs a concrete ``OutboundDlp``
+        # (it is annotated to the Protocol for the Supervisor's narrower consumer);
+        # the extractor's post-stage scan needs the concrete class, so the cast pins
+        # what the runtime already guarantees rather than widening the Wave-2 helper.
+        extractor, quarantine_transport = await _build_comms_inbound_extractor(
+            audit_writer=audit,
+            outbound_dlp=cast("OutboundDlp", outbound_dlp),
+            secret_broker=secret_broker,
+            staging=staging,
+        )
+    except Exception:
+        with suppress(Exception):
+            await content_store.close()
+        raise
     # The child is now LIVE. Reap it if any of the remaining (synchronous) graph
     # assembly raises before we return the graph — otherwise `_start_async` never
     # receives the graph, so its exit-path teardown can't see the transport and the
@@ -767,10 +779,14 @@ async def _build_comms_boot_graph(
         # Reap BOTH the live bwrap child (via the transport) and the ContentStore's
         # Redis client if any post-spawn assembly raises before the graph returns —
         # otherwise neither reaches the daemon's exit-path teardown and both leak
-        # (CR #255). Isolated so a transport-close failure never skips the store reap.
-        try:
+        # (CR #255). Each reap is ``suppress``-ed so a close failure never REPLACES
+        # the original assembly exception (e.g. _ForwardedInboundRegistryMisconfigured
+        # -> the audited comms_promoter_misconfigured refusal) — a masked refusal
+        # cause would be a fail-loud violation (CLAUDE.md #7). The original ``raise``
+        # below always wins.
+        with suppress(Exception):
             await quarantine_transport.close()
-        finally:
+        with suppress(Exception):
             await content_store.close()
         raise
 
@@ -1171,7 +1187,10 @@ async def _listen_socket_comms_adapter(
         # Binding the daemon's own socket failed (e.g. a foreign inode at the path
         # this listener refuses to unlink). A daemon-owned, boot-time failure —
         # REFUSE fail-closed (audited, exit 2), never park a half-bound adapter.
-        await listener.aclose()
+        # ``suppress`` the listener reap so an aclose failure never REPLACES the
+        # audited bind refusal below (CLAUDE.md #7 — the refusal must surface).
+        with suppress(Exception):
+            await listener.aclose()
         await _refuse_boot(
             audit,
             _comms_adapter_bind_failure(adapter_id),
