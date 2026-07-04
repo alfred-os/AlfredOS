@@ -35,7 +35,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final
 
 import structlog
 import typer
@@ -95,6 +95,13 @@ from alfred.cli.daemon._failures import (
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
 )
+from alfred.cli.daemon._gate_boot import (
+    _first_party_grant_live,
+    _install_quarantine_boot_registry,
+    _SupervisorBootGate,
+    build_boot_handshake,
+    build_boot_real_gate_for_daemon,
+)
 
 # PR-S4-11b (#237): module-level so the boot-wiring unit tests monkeypatch these
 # two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
@@ -145,9 +152,7 @@ if TYPE_CHECKING:
     )
     from alfred.comms_mcp.protocol import OutboundMessageRequest
     from alfred.config.settings import Settings
-    from alfred.hooks.capability import CapabilityGate
     from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
-    from alfred.security.capability_gate._gate import RealGate
     from alfred.security.dlp import OutboundDlpProtocol
     from alfred.security.quarantine_transport import QuarantineStdioTransport
     from alfred.security.tiers import CapabilityGateNonce
@@ -1478,8 +1483,6 @@ def _comms_adapter_failure(adapter_id: str) -> CommsAdapterSpawnFailedFailure:
 def _comms_adapter_bind_failure(adapter_id: str) -> CommsAdapterBindFailedFailure:
     """A loud boot-failure carrier for a comms-adapter socket-bind refusal (ADR-0031)."""
     return CommsAdapterBindFailedFailure(adapter_id=adapter_id)
-
-
 
 
 def read_state_git_head_sha(state_git_path: Path) -> str:
