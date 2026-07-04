@@ -98,9 +98,10 @@ convenience and gits-pushes hours later. The broker fails at construction
 before the secret is read; the operator's deployment never works without
 moving the file, and the secret never reaches the commit history.
 
-### Four typed error subtypes
+### Typed error subtypes
 
-All extend `SecretBrokerConfigError(AlfredError)`:
+All extend `SecretBrokerConfigError(AlfredError)` (except `UnknownSecretError`,
+which is an existing `KeyError`):
 
 - `SecretBrokerPermissionsError` — perms wrong OR `.git`-in-parent
   (sentinel `mode=0`). Carries `path` and `mode`.
@@ -108,11 +109,21 @@ All extend `SecretBrokerConfigError(AlfredError)`:
   path does not exist.
 - `SecretBrokerNotAFileError` — path resolves to a non-file (directory,
   device, …).
+- `SecretBrokerMalformedError` (#370) — the file exists and is readable but
+  is not valid TOML (or is not valid UTF-8). Remediation: fix the file's
+  syntax/encoding.
+- `SecretBrokerUnreadableError` (#370) — an `OSError` (TOCTOU race,
+  `PermissionError`, …) escaped the stat/lstat/open of the validate/load step.
+  Remediation: fix the file's access/ownership.
 - `UnknownSecretError` (existing) — name not in `SUPPORTED_SECRETS`.
 
-The CLI top-level dispatch catches `SecretBrokerConfigError` once and
-routes i18n message rendering on the concrete subtype. The base class
-holds `path`; subclasses add their specifics.
+The realized handlers (`build_broker_or_die` on the CLI, the daemon boot
+`_refuse_boot` path) catch the `SecretBrokerConfigError` base **once** and echo
+`str(exc)`; each concrete subtype renders its own i18n message at raise time, so
+the dispatch never re-branches on the subtype. The base class holds `path`;
+subclasses add their specifics. The two #370 leaves deliberately do **not** echo
+the raw `TOMLDecodeError` / `OSError` text into the operator message (the
+redactor is not built at a construction failure — see the raise-site comments).
 
 ## Implementation reference
 

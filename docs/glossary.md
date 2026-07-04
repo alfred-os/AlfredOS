@@ -884,8 +884,9 @@ Two backends:
   `ALFRED_SECRETS_FILE` points. Fail-closed at construction:
   permissions must be `0600`, owned by the invoking user, parent
   directory must not be group/world-writable, the file must not be a
-  symlink, and no `.git/` may appear in any of the first 12 ancestor
-  directories.
+  symlink, no `.git/` may appear in any of the first 12 ancestor
+  directories, and the file must be readable and valid TOML/UTF-8
+  (malformed or unreadable files refuse construction — #370).
 
 Per-secret precedence is controlled by `_PREFER_FILE`. The broker
 exposes `redact()` for the outbound DLP's stage-1 redaction.
