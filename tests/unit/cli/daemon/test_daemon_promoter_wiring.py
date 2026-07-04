@@ -86,6 +86,21 @@ def test_factory_returns_none_for_empty_set_kind() -> None:
     assert promoter is None
 
 
+def test_factory_fails_loud_on_unregistered_kind() -> None:
+    """The promoter factory fails LOUD on an unregistered kind (#374 defence-in-depth).
+
+    Post-#374 the factory reads ``REQUIRED_CLASSIFIERS_BY_KIND[adapter_kind]`` (a plain
+    subscript, not ``.get(..., frozenset())``), so a kind the manifest chokepoint would
+    already have refused — reachable only if a future caller bypasses that chokepoint —
+    raises ``KeyError`` rather than silently masking the typo as an empty-classifier
+    kind (a ``None`` promoter). The chokepoint (``_resolve_comms_adapter_wire_spec``) is
+    the audited refusal; this subscript is the internal tripwire against drift.
+    """
+    store = _StoreSpy()
+    with pytest.raises(KeyError):
+        _build_sub_payload_promoter(adapter_kind="bogus_unregistered", content_store=store)
+
+
 def test_enabled_empty_set_adapter_wires_none_promoter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
