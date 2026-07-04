@@ -97,8 +97,10 @@ def test_factory_fails_loud_on_unregistered_kind() -> None:
     the audited refusal; this subscript is the internal tripwire against drift.
     """
     store = _StoreSpy()
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as excinfo:
         _build_sub_payload_promoter(adapter_kind="bogus_unregistered", content_store=store)
+    # The loud failure names the offending kind — a real drift tripwire, not incidental.
+    assert "bogus_unregistered" in str(excinfo.value)
 
 
 def test_enabled_empty_set_adapter_wires_none_promoter(

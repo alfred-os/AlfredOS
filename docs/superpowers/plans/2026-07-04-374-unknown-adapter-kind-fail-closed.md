@@ -26,11 +26,13 @@
 - [ ] **Step 0: Verify the behaviour change breaks nothing in-tree**
 
 Run:
+
 ```bash
 cd /Users/iandominey/projects/AlfredOS
 grep -rn 'adapter_kind' plugins/*/manifest.toml | grep -v '^.*#'
 grep -rn 'adapter_kind' tests/ | grep -iE '=\s*"|= "' | grep -viE 'discord|tui|alfred_comms_test|bogus|typo|unknown|unregistered|phantom'
 ```
+
 Expected: the first lists only `alfred_comms_test` / `tui` / `discord` (all registered). The second returns nothing (no test seeds a *present-but-unregistered* `adapter_kind` expecting success). If the second returns a hit, inspect it — a fixture using an unregistered kind on a success path must be updated to a registered kind before proceeding.
 
 ---
@@ -38,10 +40,12 @@ Expected: the first lists only `alfred_comms_test` / `tui` / `discord` (all regi
 ## Task 1: Chokepoint membership check + `_UnknownAdapterKindError` subtype
 
 **Files:**
+
 - Modify: `src/alfred/cli/daemon/_comms_boot.py` (add class after `_CommsAdapterManifestError` ~L225; add check in `_resolve_comms_adapter_wire_spec` after L171)
 - Test: `tests/unit/cli/daemon/test_comms_boot_refusal_arms.py`
 
 **Interfaces:**
+
 - Produces: `_UnknownAdapterKindError(adapter_id: str, adapter_kind: str)` — subtype of `_CommsAdapterManifestError`; attributes `.adapter_id: str`, `.field == "adapter_kind"`, `.adapter_kind: str`.
 - Consumes: existing `_resolve_comms_adapter_wire_spec(adapter_id: str) -> _CommsAdapterWireSpec`, `_build_comms_adapter_wiring(...)`, `_BootRefusedError`, `FakeAuditWriter`, `_seed_manifest`, `_StubManifest`.
 
@@ -141,9 +145,11 @@ async def test_build_wiring_refuses_on_unregistered_adapter_kind(
 - [ ] **Step 2: Run the new tests — verify they FAIL**
 
 Run:
+
 ```bash
 uv run pytest tests/unit/cli/daemon/test_comms_boot_refusal_arms.py::test_resolve_wire_spec_raises_on_unregistered_adapter_kind tests/unit/cli/daemon/test_comms_boot_refusal_arms.py::test_build_wiring_refuses_on_unregistered_adapter_kind -v
 ```
+
 Expected: FAIL — `ImportError: cannot import name '_UnknownAdapterKindError'` (the symbol doesn't exist yet).
 
 - [ ] **Step 3: Add `_UnknownAdapterKindError` + the chokepoint check**
@@ -189,9 +195,11 @@ Then in `_resolve_comms_adapter_wire_spec`, immediately after the existing non-e
 - [ ] **Step 4: Run the new tests — verify they PASS**
 
 Run:
+
 ```bash
 uv run pytest tests/unit/cli/daemon/test_comms_boot_refusal_arms.py -v
 ```
+
 Expected: PASS (all arms, including the two new ones).
 
 - [ ] **Step 5: Commit**
@@ -218,10 +226,12 @@ EOF
 ## Task 2: Convert the three `.get(…, frozenset())` reads to subscripts
 
 **Files:**
+
 - Modify: `src/alfred/cli/daemon/_comms_boot.py` (L210, L306, L881 + the L871-878 comment + the L188-204 docstring parenthetical)
 - Test: `tests/unit/cli/daemon/test_daemon_promoter_wiring.py`
 
 **Interfaces:**
+
 - Consumes: existing `_build_sub_payload_promoter(*, adapter_kind: str, content_store: object) -> object | None`, `_StoreSpy`.
 
 - [ ] **Step 1: Add the failing factory-tripwire test**
@@ -247,9 +257,11 @@ def test_factory_fails_loud_on_unregistered_kind() -> None:
 - [ ] **Step 2: Run it — verify it FAILS**
 
 Run:
+
 ```bash
 uv run pytest tests/unit/cli/daemon/test_daemon_promoter_wiring.py::test_factory_fails_loud_on_unregistered_kind -v
 ```
+
 Expected: FAIL — currently `.get("bogus_unregistered", frozenset())` returns `frozenset()`, so the factory returns `None` (no `KeyError` raised); the test's `pytest.raises(KeyError)` fails with "DID NOT RAISE".
 
 - [ ] **Step 3: Convert the three reads to subscripts + reconcile the nearby prose**
@@ -257,21 +269,25 @@ Expected: FAIL — currently `.get("bogus_unregistered", frozenset())` returns `
 In `src/alfred/cli/daemon/_comms_boot.py`:
 
 **L210** (in `_build_sub_payload_promoter`):
+
 ```python
     if not REQUIRED_CLASSIFIERS_BY_KIND[adapter_kind]:
         return None
 ```
 
 **L306** (in `_build_forwarded_inbound_registry`):
+
 ```python
         if promoter is None and REQUIRED_CLASSIFIERS_BY_KIND[kind]:
             raise _ForwardedInboundRegistryMisconfiguredError(kind)
 ```
 
 **L881** (in `_build_comms_adapter_wiring`):
+
 ```python
     if sub_payload_promoter is None and REQUIRED_CLASSIFIERS_BY_KIND[wire.adapter_kind]:
 ```
+
 (collapse the two-line `.get(\n wire.adapter_kind, frozenset()\n )` call into the single-line subscript).
 
 Reconcile the docstring parenthetical in `_build_sub_payload_promoter` (~L195-196): change "so the default-empty path stays byte-for-byte unchanged (``frozenset()`` -> ``None`` ..." to "so the registered-empty path stays byte-for-byte unchanged (an empty required set -> ``None`` -> the existing inbound behaviour)." — the `.get` default no longer exists; an unregistered kind is refused upstream, and a *registered* empty-set kind still yields `None`.
@@ -281,9 +297,11 @@ Reconcile the comment above L881 (~L871-878): where it explains the guard, ensur
 - [ ] **Step 4: Run the affected suites — verify PASS**
 
 Run:
+
 ```bash
 uv run pytest tests/unit/cli/daemon/test_daemon_promoter_wiring.py tests/unit/cli/daemon/test_comms_boot_refusal_arms.py tests/unit/cli/daemon/test_daemon_comms_spawn.py -v
 ```
+
 Expected: PASS (the new tripwire test raises `KeyError`; every existing promoter/refusal/spawn test still passes — the subscripts see only registered kinds on their live paths).
 
 - [ ] **Step 5: Commit**
@@ -308,11 +326,13 @@ EOF
 ## Task 3: i18n catalog regen (after the last code edit)
 
 **Files:**
+
 - Modify: `locale/en/LC_MESSAGES/alfred.po` (regenerated `#:` location refs; no msgid change)
 
 - [ ] **Step 1: Regenerate the catalog**
 
 The Task 1/2 edits shifted the line numbers of `t()` sites in `_comms_boot.py`, so the catalog's `#:` refs are stale. Run:
+
 ```bash
 cd /Users/iandominey/projects/AlfredOS
 uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
@@ -323,16 +343,20 @@ uv run pybabel compile -d locale -D alfred --statistics
 - [ ] **Step 2: Verify no drift remains (mirror the CI check)**
 
 Run:
+
 ```bash
 uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
 uv run pybabel update --check -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching --ignore-pot-creation-date
 echo "exit: $?"
 ```
+
 Expected: exit 0 (no drift). Also confirm the diff is location-only:
+
 ```bash
 git diff --stat locale/
 git diff locale/ | grep -E '^\+msgid|^\-msgid' || echo "no msgid changes (location-only, as expected)"
 ```
+
 Expected: only `alfred.po` changed; no `msgid` add/remove.
 
 - [ ] **Step 3: Commit**
@@ -358,36 +382,44 @@ EOF
 - [ ] **Step 1: Per-file 100% coverage of `_comms_boot.py`**
 
 Run:
+
 ```bash
 uv run pytest tests/unit/cli/daemon/ \
   --cov=alfred.cli.daemon._comms_boot --cov-branch \
   --cov-report=term-missing --cov-fail-under=100
 ```
+
 Expected: `_comms_boot.py` 100% line + branch, exit 0. If any line/arc is missing, it will be listed — add a covering test (no `# pragma` on fail-closed arms).
 
 - [ ] **Step 2: `make check` (lint + format + type + unit/integration)**
 
 Run:
+
 ```bash
 make check; echo "make check exit: $?"
 ```
+
 Expected: exit 0. (Per project memory, the macOS integration lane can throw false `EE` in untouched capability_gate timing tests under load — if that is the only failure, verify the touched suites pass in isolation and trust CI; do not weaken anything.)
 
 - [ ] **Step 3: Release-blocking adversarial suite (trust-boundary path touched)**
 
 Run:
+
 ```bash
 uv run pytest tests/adversarial -q; echo "adversarial exit: $?"
 ```
+
 Expected: PASS (269+ passed). `_comms_boot.py` is a trust-boundary boot path; keep the adversarial suite green.
 
 - [ ] **Step 4: Confirm the branch is clean and ready**
 
 Run:
+
 ```bash
 git status -sb
 git log --oneline origin/main..HEAD
 ```
+
 Expected: 4 commits ahead (spec + Task 1 + Task 2 + i18n), clean tree.
 
 ---
@@ -404,6 +436,7 @@ Expected: 4 commits ahead (spec + Task 1 + Task 2 + i18n), clean tree.
 ## Self-Review (checklist run against the spec)
 
 **1. Spec coverage:**
+
 - Chokepoint membership check → Task 1. ✓
 - `_UnknownAdapterKindError` subtype reusing `comms_adapter_spawn_failed` → Task 1. ✓
 - Three `.get → []` conversions → Task 2. ✓
