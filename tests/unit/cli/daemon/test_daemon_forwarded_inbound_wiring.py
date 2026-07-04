@@ -32,7 +32,7 @@ import pytest
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
-from alfred.cli.daemon._commands import (
+from alfred.cli.daemon._comms_boot import (
     _build_forwarded_inbound_registry,
     _ForwardedInboundRegistryMisconfiguredError,
 )
@@ -154,7 +154,7 @@ def test_registry_builder_refuses_none_promoter_for_classifier_bearing_kind(
     def _none_factory(*, adapter_kind: str, content_store: object) -> None:
         return None
 
-    monkeypatch.setattr("alfred.cli.daemon._commands._build_sub_payload_promoter", _none_factory)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot._build_sub_payload_promoter", _none_factory)
 
     with pytest.raises(_ForwardedInboundRegistryMisconfiguredError) as excinfo:
         _build_registry()
@@ -226,8 +226,10 @@ def test_gateway_leg_runner_built_with_forwarded_receiver(
     _CapturingSupervisor.captured.clear()
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _ImmediateAcceptListener)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _ReceiverCapturingRunner)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._comms_boot.CommsSocketListener", _ImmediateAcceptListener
+    )
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _ReceiverCapturingRunner)
     monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
 
     # Capture both ack-tracker bindings so the identity invariant can be asserted.
@@ -314,8 +316,10 @@ def test_arm_time_preview_warning_emitted_once(
     _CapturingSupervisor.captured.clear()
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _ImmediateAcceptListener)
-    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _ReceiverCapturingRunner)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._comms_boot.CommsSocketListener", _ImmediateAcceptListener
+    )
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _ReceiverCapturingRunner)
     monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
 
     result = CliRunner().invoke(daemon_app, ["start"])
@@ -364,7 +368,7 @@ def test_boot_refuses_when_forwarded_registry_promoter_misconfigured(
     def _none_factory(*, adapter_kind: str, content_store: object) -> None:
         return None
 
-    monkeypatch.setattr("alfred.cli.daemon._commands._build_sub_payload_promoter", _none_factory)
+    monkeypatch.setattr("alfred.cli.daemon._comms_boot._build_sub_payload_promoter", _none_factory)
 
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 2, result.output

@@ -107,9 +107,9 @@ from sqlalchemy.orm import sessionmaker
 from alfred.audit.log import AuditWriter
 from alfred.bootstrap.lifecycle_epoch import mint_boot_epoch, reset_boot_epoch_for_tests
 from alfred.bootstrap.nonce_factory import _NONCE_LOCK
-from alfred.cli.daemon._commands import (
-    LifecycleBroadcaster,
-    _build_boot_outbound_dlp,
+from alfred.cli.daemon._boot_audit import LifecycleBroadcaster
+from alfred.cli.daemon._commands import _build_boot_outbound_dlp
+from alfred.cli.daemon._comms_boot import (
     _build_comms_boot_graph,
     _CommsBootGraph,
     _listen_socket_comms_adapter,
