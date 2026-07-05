@@ -43,6 +43,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import subprocess
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -279,6 +280,35 @@ def _walk_for_git_parent(path: Path, max_depth: int = _GIT_WALK_MAX_DEPTH) -> Pa
             return None
         current = parent
     return None
+
+
+_GIT_CHECK_IGNORE_TIMEOUT_S: Final[float] = 5.0
+
+
+def _secret_is_gitignored(repo: Path, secrets_path: Path) -> bool:
+    """Return True iff ``secrets_path`` is git-ignored within ``repo`` (#366).
+
+    Authoritative: shells out to ``git check-ignore`` (honours nested
+    ``.gitignore``, ``.git/info/exclude``, ``core.excludesFile``). A hand-rolled
+    ``.gitignore`` parser is deliberately NOT used — a false "ignored" verdict
+    would let a committable secret boot (a security hole). Fail-closed: returns
+    False (→ the caller REFUSES) if git is absent, errors, or times out.
+
+    No ``shell=True`` (args as a list — no injection); ``--`` guards a path that
+    starts with ``-``; git chatter is captured (``capture_output``), never
+    echoed; ``timeout``-bounded so a hung git cannot hang boot. Exit 0 = ignored;
+    1 = not ignored; 128 = fatal (not a repo, etc.) → treated as not-ignored.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "--quiet", "--", str(secrets_path)],
+            capture_output=True,
+            timeout=_GIT_CHECK_IGNORE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _validate_secrets_file_security(path: Path) -> None:

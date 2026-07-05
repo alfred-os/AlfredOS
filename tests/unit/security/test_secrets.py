@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess as _subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -420,6 +421,68 @@ class TestSecretsFilePathAccessor:
         absent = tmp_path / "alfred" / "secrets.toml"  # never created
         broker = SecretBroker(env={}, secrets_file=absent, allow_inside_git_worktree=True)
         assert broker.secrets_file_path == absent
+
+
+def _git_init(repo: Path) -> None:
+    """`git init` a real repo for the gitignore-aware .git-walk tests (#366)."""
+    _subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+
+class TestSecretIsGitignored:
+    """#366: the authoritative `git check-ignore` helper, fail-closed."""
+
+    def test_true_when_gitignored(self, tmp_path: Path) -> None:
+        from alfred.security.secrets import _secret_is_gitignored
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_init(repo)
+        (repo / ".gitignore").write_text("secrets.toml\n")
+        secret = repo / "secrets.toml"
+        secret.write_text("x")
+        assert _secret_is_gitignored(repo, secret) is True
+
+    def test_false_when_not_gitignored(self, tmp_path: Path) -> None:
+        from alfred.security.secrets import _secret_is_gitignored
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_init(repo)
+        secret = repo / "secrets.toml"
+        secret.write_text("x")
+        assert _secret_is_gitignored(repo, secret) is False
+
+    def test_false_when_git_absent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fail-closed: git binary absent → cannot confirm ignored → not-ignored."""
+        from alfred.security import secrets as secrets_module
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(secrets_module.subprocess, "run", _raise)
+        assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
+
+    def test_false_on_timeout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fail-closed: a hung git → timeout → not-ignored (can't hang boot)."""
+        from alfred.security import secrets as secrets_module
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise secrets_module.subprocess.TimeoutExpired(cmd="git", timeout=5.0)
+
+        monkeypatch.setattr(secrets_module.subprocess, "run", _raise)
+        assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
+
+    def test_false_on_git_error_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed: git exit 128 (not a repo / fatal) → not-ignored."""
+        from alfred.security import secrets as secrets_module
+
+        class _R:
+            returncode = 128
+
+        monkeypatch.setattr(secrets_module.subprocess, "run", lambda *_a, **_k: _R())
+        assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
 
 
 class TestPermissionsCheck:
