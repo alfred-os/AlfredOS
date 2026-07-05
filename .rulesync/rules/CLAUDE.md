@@ -74,7 +74,7 @@ AlfredOS/
 - **Language (core):** Python 3.12+
 - **Async runtime:** asyncio
 - **Plugins:** MCP (stdio for in-process, HTTP for remote) — polyglot
-- **Datastores:** Postgres 16 (+ pgvector), Redis 7, Qdrant
+- **Datastores:** Postgres 18 (+ pgvector when semantic memory lands), Redis 8, Qdrant
 - **Containerization:** Docker + Docker Compose
 - **Type system:** Pydantic v2 for data models; `mypy --strict` (primary) + `pyright` (secondary) for the core
 - **Test framework:** pytest + testcontainers + custom adversarial harness

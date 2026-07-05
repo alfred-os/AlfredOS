@@ -315,8 +315,8 @@ internal_clis:                      # optional: route via local CLI subagents
 # docker-compose.yaml (sketch)
 services:
   alfred-core:       # Python core
-  alfred-postgres:   # Postgres 16 + pgvector
-  alfred-redis:      # Redis 7
+  alfred-postgres:   # Postgres 18 (+ pgvector when semantic memory lands)
+  alfred-redis:      # Redis 8
   alfred-qdrant:     # Qdrant
   alfred-reviewer:   # reviewer agent (different API key)
   # one container per containerized plugin (third-party / agent-authored)
