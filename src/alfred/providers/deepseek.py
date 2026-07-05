@@ -7,16 +7,38 @@ Pricing (as of 2026-05; check https://api.deepseek.com/pricing before updating):
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
 import structlog
 from openai import AsyncOpenAI
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionFunctionToolParam,
+    ChatCompletionMessageFunctionToolCallParam,
+    ChatCompletionMessageParam,
+    ChatCompletionMessageToolCallUnion,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionToolChoiceOptionParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionUserMessageParam,
+)
+from openai.types.shared_params import FunctionDefinition
 
+from alfred.i18n import t
 from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
+    ForcedTool,
+    Message,
     ProviderCapability,
+    ProviderMalformedToolArgumentsError,
+    StopReason,
+    ToolCall,
+    ToolChoice,
+    ToolDefinition,
     register_provider,
 )
 
@@ -72,6 +94,83 @@ _DEEPSEEK_MODEL_CAPABILITIES: dict[str, frozenset[ProviderCapability]] = {
     "deepseek-reasoner": frozenset(),
 }
 _DEEPSEEK_DEFAULT_CAPABILITIES: frozenset[ProviderCapability] = frozenset()
+
+# finish_reason -> normalized StopReason. Unknown values fall to "other" at the
+# call site (dict.get default).
+_OPENAI_STOP_REASON: dict[str, StopReason] = {
+    "stop": "end_turn",
+    "tool_calls": "tool_use",
+    "length": "max_tokens",
+}
+
+
+def _openai_tools(tools: tuple[ToolDefinition, ...]) -> list[ChatCompletionFunctionToolParam]:
+    return [
+        ChatCompletionFunctionToolParam(
+            type="function",
+            function=FunctionDefinition(
+                name=tool.name,
+                description=tool.description,
+                parameters=dict(tool.input_schema),
+            ),
+        )
+        for tool in tools
+    ]
+
+
+def _openai_tool_choice(choice: ToolChoice) -> ChatCompletionToolChoiceOptionParam:
+    if isinstance(choice, ForcedTool):
+        return ChatCompletionNamedToolChoiceParam(type="function", function={"name": choice.name})
+    # "auto" | "none" | "required" are native OpenAI string values.
+    return choice
+
+
+def _openai_tool_call_param(call: ToolCall) -> ChatCompletionMessageFunctionToolCallParam:
+    return ChatCompletionMessageFunctionToolCallParam(
+        id=call.id,
+        type="function",
+        function={"name": call.name, "arguments": json.dumps(dict(call.arguments))},
+    )
+
+
+def _openai_message(m: Message) -> ChatCompletionMessageParam:
+    # Per-role serialization: emit tool fields ONLY on the roles that carry them,
+    # so a plain user/system/assistant message never sends tool_calls=[] /
+    # tool_call_id=null (which DeepSeek 400s on) — the arch-005/prov-002 fix.
+    if m.role == "system":
+        return ChatCompletionSystemMessageParam(role="system", content=m.content)
+    if m.role == "user":
+        return ChatCompletionUserMessageParam(role="user", content=m.content)
+    if m.role == "tool":
+        return ChatCompletionToolMessageParam(
+            role="tool", content=m.content, tool_call_id=m.tool_call_id or ""
+        )
+    if m.tool_calls:
+        return ChatCompletionAssistantMessageParam(
+            role="assistant",
+            content=m.content,
+            tool_calls=[_openai_tool_call_param(c) for c in m.tool_calls],
+        )
+    return ChatCompletionAssistantMessageParam(role="assistant", content=m.content)
+
+
+def _parse_openai_tool_calls(
+    raw: list[ChatCompletionMessageToolCallUnion] | None, model: str
+) -> tuple[ToolCall, ...]:
+    if not raw:
+        return ()
+    parsed: list[ToolCall] = []
+    for tc in raw:
+        if tc.type != "function":
+            continue  # custom tools are out of scope for #339
+        try:
+            args = json.loads(tc.function.arguments)
+        except (ValueError, TypeError) as exc:
+            raise ProviderMalformedToolArgumentsError(
+                t("providers.malformed_tool_arguments", provider="deepseek", model=model)
+            ) from exc
+        parsed.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+    return tuple(parsed)
 
 
 @register_provider
@@ -130,12 +229,16 @@ class DeepSeekProvider:
         )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[m.model_dump() for m in request.messages],
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": [_openai_message(m) for m in request.messages],
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+        }
+        if request.tools:
+            kwargs["tools"] = _openai_tools(request.tools)
+            kwargs["tool_choice"] = _openai_tool_choice(request.tool_choice)
+        response = await self._client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
         usage = response.usage
         return CompletionResponse(
@@ -144,4 +247,6 @@ class DeepSeekProvider:
             tokens_out=usage.completion_tokens,
             cost_usd=_estimate_cost(self._model, usage.prompt_tokens, usage.completion_tokens),
             model=self._model,
+            stop_reason=_OPENAI_STOP_REASON.get(response.choices[0].finish_reason, "other"),
+            tool_calls=_parse_openai_tool_calls(msg.tool_calls, self._model),
         )

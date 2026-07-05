@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from alfred.providers.base import CompletionRequest, Message
+from alfred.providers.base import (
+    CompletionRequest,
+    ForcedTool,
+    Message,
+    ProviderMalformedToolArgumentsError,
+    ToolCall,
+    ToolDefinition,
+)
 from alfred.providers.deepseek import DeepSeekProvider
 
 
@@ -71,3 +78,154 @@ def test_from_settings_default_passes_none_http_client(monkeypatch: pytest.Monke
         api_key="k", base_url="https://api.deepseek.com/v1", model="deepseek-chat"
     )
     assert captured["http_client"] is None
+
+
+def _openai_ok_response(content: str = "ok") -> MagicMock:
+    r = MagicMock()
+    r.choices = [
+        MagicMock(message=MagicMock(content=content, tool_calls=None), finish_reason="stop")
+    ]
+    r.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    return r
+
+
+def _openai_toolcall_response(args_json: str) -> MagicMock:
+    tc = MagicMock(id="c1", type="function")
+    tc.function = MagicMock(arguments=args_json)
+    tc.function.name = "web.fetch"  # name= is a reserved MagicMock ctor kwarg; set post-ctor
+    r = MagicMock()
+    r.choices = [
+        MagicMock(message=MagicMock(content=None, tool_calls=[tc]), finish_reason="tool_calls")
+    ]
+    r.usage = MagicMock(prompt_tokens=3, completion_tokens=2)
+    return r
+
+
+@pytest.mark.asyncio
+async def test_plain_messages_serialize_without_tool_keys() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response())
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    await provider.complete(
+        CompletionRequest(
+            messages=[Message(role="system", content="s"), Message(role="user", content="u")]
+        )
+    )
+    kw = fake_client.chat.completions.create.await_args.kwargs
+    # Plain messages MUST NOT carry tool_calls / tool_call_id (would 400 DeepSeek).
+    assert kw["messages"] == [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u"},
+    ]
+    assert "tools" not in kw
+
+
+@pytest.mark.asyncio
+async def test_tools_and_tool_role_serialize_to_openai_shape() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response())
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    call = ToolCall(id="c1", name="web.fetch", arguments={"url": "https://a.test"})
+    req = CompletionRequest(
+        messages=[
+            Message(role="assistant", content="", tool_calls=(call,)),
+            Message(role="tool", content='{"ok": true}', tool_call_id="c1"),
+        ],
+        tools=(td,),
+        tool_choice=ForcedTool(name="web.fetch"),
+    )
+    await provider.complete(req)
+    kw = fake_client.chat.completions.create.await_args.kwargs
+    assert kw["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "web.fetch",
+                "description": "fetch",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    assert kw["tool_choice"] == {"type": "function", "function": {"name": "web.fetch"}}
+    assert kw["messages"][0] == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "web.fetch", "arguments": '{"url": "https://a.test"}'},
+            }
+        ],
+    }
+    assert kw["messages"][1] == {"role": "tool", "content": '{"ok": true}', "tool_call_id": "c1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "choice,expected", [("auto", "auto"), ("required", "required"), ("none", "none")]
+)
+async def test_deepseek_tool_choice_string_variants(choice: str, expected: str) -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response())
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    td = ToolDefinition(name="t", description="d", input_schema={})
+    await provider.complete(
+        CompletionRequest(
+            messages=[Message(role="user", content="x")],
+            tools=(td,),
+            tool_choice=choice,  # type: ignore[arg-type]
+        )
+    )
+    assert fake_client.chat.completions.create.await_args.kwargs["tool_choice"] == expected
+
+
+@pytest.mark.asyncio
+async def test_response_tool_calls_parsed_and_stop_reason_mapped() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(
+        return_value=_openai_toolcall_response('{"url": "https://a.test"}')
+    )
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    res = await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    assert res.stop_reason == "tool_use"
+    assert res.tool_calls == (
+        ToolCall(id="c1", name="web.fetch", arguments={"url": "https://a.test"}),
+    )
+    assert res.content == ""  # content None -> ""
+
+
+@pytest.mark.asyncio
+async def test_plain_text_response_maps_end_turn() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response("hello"))
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    res = await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    assert res.stop_reason == "end_turn"  # back-compat lock
+    assert res.tool_calls == ()
+    assert res.content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_arguments_fail_loud() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(
+        return_value=_openai_toolcall_response("{not json")
+    )
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    with pytest.raises(ProviderMalformedToolArgumentsError):
+        await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish,expected", [("length", "max_tokens"), ("weird", "other")])
+async def test_deepseek_finish_reason_map(finish: str, expected: str) -> None:
+    r = _openai_ok_response("hi")
+    r.choices[0].finish_reason = finish
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=r)
+    res = await DeepSeekProvider(client=fake_client, model="deepseek-chat").complete(
+        CompletionRequest(messages=[Message(role="user", content="x")])
+    )
+    assert res.stop_reason == expected
