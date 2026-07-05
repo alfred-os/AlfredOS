@@ -197,8 +197,8 @@ Once the layer-3 host default (`~/.config/alfred/secrets.toml`, #363) activated,
 the walk also applied there — where a versioned `~/.config` (dotfiles repo:
 chezmoi / yadm / bare-repo / GNU stow) makes the canonical secrets file a real
 commit vector the walk correctly catches, but the walk hard-refused even a
-correctly-`.gitignore`'d file (it checks for a `.git` dir only, never ignore
-status).
+correctly-`.gitignore`'d file (at the time it checked for a `.git` dir only —
+later broadened to dir-or-file in #383 — and never ignore status).
 
 For the **`settings_default` (layer-3) path only**, the refusal is now
 **gitignore-aware**: if the secret is authoritatively gitignored (`git
@@ -230,10 +230,16 @@ layer-3-secret-inside-a-repo path (the common no-`.git`-ancestor boot never
 spawns `git`), is 5s-timeout-bounded, and `check-ignore`'s index-consult means
 an already-tracked secret returns not-ignored → refuse.
 
-**Known limitation (pre-existing, #383).** `_walk_for_git_parent` detects the
-enclosing repo via a `.git`-**dir** check, so a secrets file inside a git
-secondary worktree or submodule (where `.git` is a **file**) escapes the refusal
-on all layers — pre-existing, not introduced by this amendment; tracked in #383.
+**Worktree/submodule marker (#383, resolved).** `_walk_for_git_parent` originally
+detected the enclosing repo via a `.git`-**dir** check, so a secrets file inside a
+git secondary worktree or submodule (where `.git` is a **file**) escaped the refusal
+on all layers. #383 broadened the match to `.git`-**exists** (dir OR file), so those
+shapes are now caught; `git check-ignore` resolves worktrees natively, so the
+layer-3 narrowing composes (a gitignored worktree secret boots, an un-gitignored
+one refuses). Pinned by adversarial `de-2026-018`. `.exists()` follows symlinks
+(same as the prior `.is_dir()`), so a valid symlinked `.git` triggers while a
+broken-symlink `.git` reads False — fail-safe, since an unresolvable pointer is
+not a live repo the operator can commit through.
 
 ## References
 

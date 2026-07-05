@@ -87,8 +87,9 @@ on group/world-readable bits — the verify step in Step 5 surfaces the
 error if it slipped.
 
 > The file MUST live outside any git working tree. The broker walks the
-> path's ancestors looking for `.git/` and refuses if it finds one — a
-> defence-in-depth against accidentally committing the secrets file.
+> path's ancestors looking for a `.git` marker (a directory OR a file — a
+> worktree/submodule `.git` pointer counts too, #383) and refuses if it finds
+> one — a defence-in-depth against accidentally committing the secrets file.
 
 ## Step 4 — Pre-map yourself
 

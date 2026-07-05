@@ -884,9 +884,10 @@ Two backends:
   `ALFRED_SECRETS_FILE` points. Fail-closed at construction:
   permissions must be `0600`, owned by the invoking user, parent
   directory must not be group/world-writable, the file must not be a
-  symlink, no `.git/` may appear in any of the first 12 ancestor
-  directories, and the file must be readable and valid TOML/UTF-8
-  (malformed or unreadable files refuse construction — #370). The
+  symlink, no `.git` marker (a directory OR a file — a worktree/submodule
+  `.git` pointer file also triggers refusal, #383) may appear in any of the
+  first 12 ancestor directories, and the file must be readable and valid
+  TOML/UTF-8 (malformed or unreadable files refuse construction — #370). The
   `.git`-ancestor refusal is **gitignore-aware for the host-default
   (layer-3) path only**: an authoritatively-gitignored secret there boots
   with a warning, otherwise refuses (fail-closed if `git` is unavailable);

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-05 10:14+0100\n"
+"POT-Creation-Date: 2026-07-05 13:43+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -135,55 +135,55 @@ msgstr ""
 msgid "cli.audit.help"
 msgstr "Inspect the audit log; filter the graph swimlane by trust tier."
 
-#: src/alfred/cli/audit.py:177
+#: src/alfred/cli/audit.py:194
 msgid "cli.audit.graph.since_invalid"
 msgstr ""
 "Invalid --since value: {value}. Expected a unit-suffixed duration like "
 "{example}."
 
-#: src/alfred/cli/audit.py:186
+#: src/alfred/cli/audit.py:203
 msgid "cli.audit.log.event_help"
 msgstr ""
 "Restrict to a single event name (e.g. plugin.lifecycle.crashed). Omit to "
 "show every event in the time window."
 
-#: src/alfred/cli/audit.py:190 src/alfred/cli/audit.py:246
+#: src/alfred/cli/audit.py:207 src/alfred/cli/audit.py:266
 msgid "cli.audit.graph.since_help"
 msgstr "Lookback window (unit-suffixed: 24h, 7d, 30m). Bare integers are rejected."
 
-#: src/alfred/cli/audit.py:194
+#: src/alfred/cli/audit.py:211
 msgid "cli.audit.log.reason_help"
 msgstr ""
 "Filter forwarded-inbound drops by reason (unknown_adapter, "
 "envelope_body_mismatch, body_malformed, receive_fault, or poisoned). Omit"
 " to show every row."
 
-#: src/alfred/cli/audit.py:209 src/alfred/cli/audit.py:273
+#: src/alfred/cli/audit.py:226 src/alfred/cli/audit.py:293
 msgid "cli.audit.backend_unavailable"
 msgstr ""
 "alfred audit backend not yet wired (PR-S3-7). Until then the storage-"
 "layer SQL query is unimplemented; running ``alfred audit log`` / ``alfred"
 " audit graph`` cannot return rows. Track the unblock in PR-S3-7."
 
-#: src/alfred/cli/audit.py:224
+#: src/alfred/cli/audit.py:241
 msgid "cli.audit.log.reason_empty"
 msgstr "No audit rows with reason '{reason}' in the last {since}."
 
-#: src/alfred/cli/audit.py:226 src/alfred/cli/audit.py:278
+#: src/alfred/cli/audit.py:243 src/alfred/cli/audit.py:298
 msgid "cli.audit.graph.empty"
 msgstr "No audit rows{tier} in the last {since}."
 
-#: src/alfred/cli/audit.py:242
+#: src/alfred/cli/audit.py:262
 msgid "cli.audit.graph.tier_help"
 msgstr ""
 "Filter to a single trust-tier swimlane (T0, T1, T2, or T3). Omit to show "
 "every tier."
 
-#: src/alfred/cli/audit.py:284
+#: src/alfred/cli/audit.py:304
 msgid "cli.audit.graph.tier_header"
 msgstr "Audit graph — swimlane {tier}"
 
-#: src/alfred/cli/audit.py:286
+#: src/alfred/cli/audit.py:306
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
 
@@ -961,7 +961,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:329
+#: src/alfred/cli/daemon/_commands.py:330
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -969,7 +969,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:332
+#: src/alfred/cli/daemon/_commands.py:333
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -978,7 +978,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:383
+#: src/alfred/cli/daemon/_commands.py:384
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -986,7 +986,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:394
+#: src/alfred/cli/daemon/_commands.py:395
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -995,7 +995,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:410
+#: src/alfred/cli/daemon/_commands.py:411
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1003,7 +1003,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:424
+#: src/alfred/cli/daemon/_commands.py:425
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1011,7 +1011,7 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:465
+#: src/alfred/cli/daemon/_commands.py:466
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1021,7 +1021,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:478
+#: src/alfred/cli/daemon/_commands.py:479
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "First-party DLP-subscriber grant is not live after boot. The quarantined-"
@@ -1029,7 +1029,7 @@ msgstr ""
 "refused. Check `alfred audit log --since 5m` for capability-gate seed or "
 "grant-load errors, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:506
+#: src/alfred/cli/daemon/_commands.py:507
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1040,7 +1040,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:575
+#: src/alfred/cli/daemon/_commands.py:579
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1048,7 +1048,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS to exactly one adapter and re-run `alfred "
 "daemon start`. Multi-adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:641
+#: src/alfred/cli/daemon/_commands.py:646
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1058,7 +1058,7 @@ msgstr ""
 "unset (comms disabled), or provision bwrap + the plugin launcher and re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:658
+#: src/alfred/cli/daemon/_commands.py:663
 #: src/alfred/cli/daemon/_comms_boot.py:959
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
@@ -1068,38 +1068,38 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:808
+#: src/alfred/cli/daemon/_commands.py:813
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:924
+#: src/alfred/cli/daemon/_commands.py:929
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:927
 #: src/alfred/cli/daemon/_commands.py:932
+#: src/alfred/cli/daemon/_commands.py:937
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:934
+#: src/alfred/cli/daemon/_commands.py:939
 #: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:949
+#: src/alfred/cli/daemon/_commands.py:954
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:952
+#: src/alfred/cli/daemon/_commands.py:957
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:960
+#: src/alfred/cli/daemon/_commands.py:965
 #: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
@@ -1108,25 +1108,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1014
-#: src/alfred/cli/daemon/_commands.py:1021
-#: src/alfred/cli/daemon/_commands.py:1032
+#: src/alfred/cli/daemon/_commands.py:1019
+#: src/alfred/cli/daemon/_commands.py:1026
+#: src/alfred/cli/daemon/_commands.py:1037
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1036
+#: src/alfred/cli/daemon/_commands.py:1041
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1038
+#: src/alfred/cli/daemon/_commands.py:1043
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1043
+#: src/alfred/cli/daemon/_commands.py:1048
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1052
+#: src/alfred/cli/daemon/_commands.py:1057
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
@@ -2936,50 +2936,50 @@ msgstr ""
 "`quarantine.ingest` is an internal pre-step; only `quarantine.extract` is"
 " dispatched as the extractor-observed method on this path."
 
-#: src/alfred/security/secrets.py:365 src/alfred/security/secrets.py:376
-#: src/alfred/security/secrets.py:392 src/alfred/security/secrets.py:404
+#: src/alfred/security/secrets.py:372 src/alfred/security/secrets.py:383
+#: src/alfred/security/secrets.py:399 src/alfred/security/secrets.py:411
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:386
+#: src/alfred/security/secrets.py:393
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:479 src/alfred/security/secrets.py:490
+#: src/alfred/security/secrets.py:486 src/alfred/security/secrets.py:497
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:528
+#: src/alfred/security/secrets.py:538
 msgid "secrets.file_in_git_repo_layer3"
 msgstr ""
-"Secrets file '{path}' is inside a git repository (found '.git' at '{parent}') "
-"and is not gitignored; secrets must never be committed. Add '{path}' to a "
-".gitignore in that repository (Alfred will then boot with a warning), move it "
-"outside the repository, or set ALFRED_SECRETS_FILE to a path outside a repo. "
-"(If it IS gitignored, ensure `git` is installed and on PATH — Alfred could not "
-"verify.)"
+"Secrets file '{path}' is inside a git repository (found '.git' at "
+"'{parent}') and is not gitignored; secrets must never be committed. Add "
+"'{path}' to a .gitignore in that repository (Alfred will then boot with a"
+" warning), move it outside the repository, or set ALFRED_SECRETS_FILE to "
+"a path outside a repo. (If it IS gitignored, ensure `git` is installed "
+"and on PATH — Alfred could not verify.)"
 
-#: src/alfred/security/secrets.py:534
+#: src/alfred/security/secrets.py:544
 msgid "secrets.file_in_git_repo"
 msgstr ""
 "Secrets file '{path}' is inside a git repository (found '.git' at "
 "'{parent}'); secrets must never be committed. Move it outside any git "
 "repository, or set ALFRED_SECRETS_FILE to a path outside a repo."
 
-#: src/alfred/security/secrets.py:573 src/alfred/security/secrets.py:790
+#: src/alfred/security/secrets.py:583 src/alfred/security/secrets.py:800
 msgid "secrets.file_malformed"
 msgstr ""
 "Secrets file '{path}' is not valid TOML. Fix the file's TOML syntax (a "
 "flat table of name = \"value\" entries) and its UTF-8 encoding, then "
 "retry."
 
-#: src/alfred/security/secrets.py:583 src/alfred/security/secrets.py:796
+#: src/alfred/security/secrets.py:593 src/alfred/security/secrets.py:806
 msgid "secrets.file_unreadable"
 msgstr ""
 "Secrets file '{path}' could not be read: {reason}. Check the file and its"
