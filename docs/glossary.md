@@ -548,13 +548,15 @@ See [TypedRefusal](#typedrefusal), [QuarantinedExtractor](#quarantinedextractor)
 
 ## ProviderCapability
 
-`StrEnum` declared at `src/alfred/providers/base.py:22`. Closed set of
+`StrEnum` declared at `src/alfred/providers/base.py:33`. Closed set of
 capabilities a provider may declare, consulted by the quarantined-LLM
 dispatch path (spec §6.2) to select the `ExtractionMode`. Values:
 `NATIVE_CONSTRAINED_GENERATION` (Anthropic tool-use, schema-valid by
 construction), `JSON_OBJECT_MODE` (DeepSeek `json_object`, validated
-post-hoc), `TOOL_USE`, `VISION`, `LONG_CONTEXT_1M` (pre-declared for
-future routing per PRD §6.6). Every concrete `Provider` implementation
+post-hoc), `TOOL_USE` (wired in #339 PR1 — declared by tool-capable models
+and enforced by the `ensure_tool_capability` refuse-loud guard in each
+adapter's `complete()`), and `VISION`, `LONG_CONTEXT_1M` (still pre-declared
+for future routing per PRD §6.6). Every concrete `Provider` implementation
 declares its capabilities via the `capabilities() -> frozenset[ProviderCapability]`
 Protocol method; `register_provider` enforces this at decoration time.
 Shipped in PR-S3-4 (#TBD).
