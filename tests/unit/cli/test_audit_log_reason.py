@@ -71,6 +71,24 @@ def poisoned_row() -> dict[str, object]:
     }
 
 
+@pytest.fixture()
+def boot_failed_row() -> dict[str, object]:
+    """A ``daemon.boot.failed`` row — carries ``subject.failure_reason``, NOT
+    ``subject.reason`` (the ``_refuse_boot`` fixed-subject shape)."""
+    return {
+        "event": "daemon.boot.failed",
+        "result": "refused",
+        "actor_user_id": "daemon",
+        "timestamp": "2026-07-05T10:00:00Z",
+        "subject": {
+            "boot_id": "b1",
+            "attempted_at": "2026-07-05T10:00:00Z",
+            "failure_reason": "secrets_config_failed",
+            "environment_source": "env",
+        },
+    }
+
+
 def test_dropped_reason_renders_in_output(
     runner: CliRunner, dropped_row: dict[str, object]
 ) -> None:
@@ -79,6 +97,49 @@ def test_dropped_reason_renders_in_output(
         result = runner.invoke(audit_app, ["log", "--since", "24h"])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert "body_malformed" in result.output
+
+
+def test_boot_failure_reason_renders_in_output(
+    runner: CliRunner, boot_failed_row: dict[str, object]
+) -> None:
+    """#381: a ``daemon.boot.failed`` row renders its ``failure_reason``.
+
+    Was blank — ``_row_reason`` read ``subject.reason`` only, but boot rows carry
+    the discriminator in ``subject.failure_reason``, so ``alfred audit log`` could
+    not show WHAT broke at boot. The fallback closes that gap.
+    """
+    with patch("alfred.cli.audit._query_audit_log", return_value=[boot_failed_row]):
+        result = runner.invoke(audit_app, ["log", "--since", "24h"])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert "secrets_config_failed" in result.output
+
+
+def test_row_reason_prefers_subject_reason_over_failure_reason() -> None:
+    """The forwarded-drop contract is unchanged: ``subject.reason`` wins when
+    both keys are present (only boot rows, which lack ``reason``, hit the fallback)."""
+    row = {"subject": {"reason": "body_malformed", "failure_reason": "secrets_config_failed"}}
+    assert _row_reason(row) == "body_malformed"
+
+
+def test_row_reason_falls_back_to_failure_reason() -> None:
+    """A row with only ``failure_reason`` returns it."""
+    assert _row_reason({"subject": {"failure_reason": "boot_infra_install_failed"}}) == (
+        "boot_infra_install_failed"
+    )
+
+
+def test_row_reason_empty_reason_falls_through_to_failure_reason() -> None:
+    """An empty ``subject.reason`` must NOT short-circuit to a blank cell — it
+    falls through to ``failure_reason`` (CR #381: the truthiness guard)."""
+    assert _row_reason({"subject": {"reason": "", "failure_reason": "secrets_config_failed"}}) == (
+        "secrets_config_failed"
+    )
+
+
+def test_row_reason_empty_when_dict_subject_has_neither_reason_key() -> None:
+    """A dict subject with neither ``reason`` nor ``failure_reason`` on a
+    non-poisoned row falls through to ``""`` (the honest reason-less signal)."""
+    assert _row_reason({"subject": {"boot_id": "x"}, "result": "refused"}) == ""
 
 
 def test_reason_filter_keeps_only_matching_row(

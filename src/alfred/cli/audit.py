@@ -47,13 +47,19 @@ class _TierChoice(StrEnum):
 class _ReasonChoice(StrEnum):
     """Closed set of valid ``--reason`` values for ``alfred audit log``.
 
-    These are EXACTLY the discriminators :func:`_row_reason` can return
-    for the forwarded-drop triage. Accepting an arbitrary string would
-    silently render an empty result for a typo (e.g. ``--reason
-    poisned``) -- exactly the silent-failure pattern CLAUDE.md hard
-    rule #7 forbids. Typer maps the enum's values to a closed CLI choice
-    + raises :class:`typer.BadParameter` on miss, and self-documents the
-    valid values in ``--help``.
+    These are the forwarded-drop triage discriminators. Accepting an
+    arbitrary string would silently render an empty result for a typo
+    (e.g. ``--reason poisned``) -- exactly the silent-failure pattern
+    CLAUDE.md hard rule #7 forbids. Typer maps the enum's values to a
+    closed CLI choice + raises :class:`typer.BadParameter` on miss, and
+    self-documents the valid values in ``--help``.
+
+    Scope note (#381): :func:`_row_reason` ALSO surfaces daemon-boot
+    ``failure_reason`` values (e.g. ``secrets_config_failed``) in the
+    rendered REASON column, but those are not (yet) part of this ``--reason``
+    filter set — filtering boot rows by reason is a tracked follow-up. The
+    column rendering (the operator-visible gap) is fixed here; the filter
+    surface is unchanged.
 
     Mirrors :class:`_TierChoice`: :class:`enum.StrEnum` keeps each
     member's ``str`` identity, so the filter boundary keeps its string
@@ -118,14 +124,25 @@ def _query_audit_log(
 
 
 def _row_reason(row: dict[str, object]) -> str:
-    """The drop reason for triage: subject.reason (receiver terminal drops) else the
-    poisoned discriminator (the poison dead-letter carries no subject.reason — its reason
-    IS the result). Empty string when the row has neither (non-drop rows)."""
+    """The reason discriminator for triage.
+
+    Precedence: ``subject.reason`` (receiver terminal drops) → ``subject.failure_reason``
+    (#381: ``daemon.boot.failed`` rows carry the discriminator here, NOT in
+    ``subject.reason`` — the ``_refuse_boot`` fixed-subject shape — so without this
+    fallback the REASON column rendered blank for every boot refusal) → the
+    poisoned discriminator (the poison dead-letter carries neither — its reason IS
+    the result). Empty string when the row has none (non-drop, non-boot rows)."""
     subject = row.get("subject")
     if isinstance(subject, dict):
+        # Truthiness (not just isinstance): an empty ``reason`` must fall through
+        # to ``failure_reason`` rather than render a blank REASON cell — the same
+        # silent-blank pattern this fallback closes (CR #381).
         reason = subject.get("reason")
-        if isinstance(reason, str):
+        if isinstance(reason, str) and reason:
             return reason
+        failure_reason = subject.get("failure_reason")
+        if isinstance(failure_reason, str) and failure_reason:
+            return failure_reason
     if row.get("result") == "poisoned":
         return "poisoned"
     return ""
@@ -230,7 +247,10 @@ def audit_log(
             f"{row.get('timestamp', '')!s:<25}  "
             f"{row.get('event', '')!s:<40}  "
             f"{row.get('result', '')!s:<12}  "
-            f"{_row_reason(row)!s:<24}  "
+            # width covers the longest daemon-boot failure_reason
+            # (capability_gate_handshake_failed = 32); the forwarded-drop reasons
+            # this column was first sized for top out at 22 (#381).
+            f"{_row_reason(row)!s:<32}  "
             f"{row.get('actor_user_id', '')!s}"
         )
 

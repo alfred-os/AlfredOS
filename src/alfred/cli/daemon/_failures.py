@@ -109,11 +109,9 @@ class SecretsConfigFailedFailure(_BootFailureBase):
     misconfig apart from a capability-gate seed/install fault — both read
     ``boot_infra_install_failed``. This dedicated reason discriminates a secrets
     problem in the durable ``daemon.boot.failed`` audit row (DB-queryable) and
-    the ``daemon.boot.failed`` hookpoint payload (devex dx-001). (The
-    ``alfred audit log`` CLI does not yet render a boot row's ``failure_reason``
-    column — its ``_row_reason`` reads a different subject key — so today the
-    discriminator is observable via the stored JSONB / hookpoint, not that CLI;
-    surfacing it there is tracked in #381.)
+    the ``daemon.boot.failed`` hookpoint payload (devex dx-001). The
+    ``alfred audit log`` CLI renders it in the REASON column too (``_row_reason``
+    falls back to ``subject.failure_reason`` — #381).
 
     The OPERATOR-facing refusal message is UNCHANGED — it stays the exception's
     own ``str(exc)`` carrying the concrete remedy (chmod 600 / move out of the
