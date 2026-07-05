@@ -762,10 +762,16 @@ class TestGitWalk:
         with pytest.raises(SecretBrokerPermissionsError) as exc_info:
             SecretBroker(env={}, secrets_file=path)
         message = str(exc_info.value)
-        assert "inside a git repository" in message
+        # #387: accurate for a .git dir/file/stray marker (not "inside a git
+        # repository", which over-claims for a bare `.git` file).
+        assert "'.git' marker" in message
         assert str(path) in message
         assert str(worktree) in message
         assert "chmod" not in message
+        # CR: this is the kwarg layer → the base message, NOT the layer-3 one
+        # (which offers the gitignore remedy). Pin that distinction so a
+        # regression rendering the wrong .git-marker message is caught.
+        assert ".gitignore" not in message
 
     def test_allow_inside_git_worktree_bypasses(self, tmp_path: Path) -> None:
         worktree = tmp_path / "repo"
