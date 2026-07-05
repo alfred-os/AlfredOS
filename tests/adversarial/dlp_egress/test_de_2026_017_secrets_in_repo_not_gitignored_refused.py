@@ -23,6 +23,7 @@ wiring-smoke.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Final
@@ -33,6 +34,23 @@ from alfred.security.secrets import SecretBroker, SecretBrokerPermissionsError
 from tests.adversarial.payload_schema import AdversarialPayload
 
 _PAYLOAD_ID: Final[str] = "de-2026-017"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic git env for this release-blocking adversarial test (#366, CR #384).
+
+    Both ``git init`` here and the broker's ``git check-ignore`` inherit
+    ``os.environ`` — a contributor's global ``core.excludesFile`` matching
+    ``secrets.toml`` / ``*.toml`` (or a stray ``GIT_DIR`` / ``GIT_WORK_TREE``)
+    could flip the not-gitignored negative control. Pin git's config to
+    ``os.devnull`` and drop any repo overrides so the subprocess sees only the
+    repo-local ``.gitignore``.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
 
 
 @pytest.fixture
