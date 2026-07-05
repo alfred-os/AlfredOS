@@ -10,7 +10,9 @@ from alfred.providers.base import (
     CompletionRequest,
     ForcedTool,
     Message,
+    ProviderCapability,
     ProviderMalformedToolArgumentsError,
+    ProviderToolUnsupportedError,
     ToolCall,
     ToolDefinition,
 )
@@ -229,3 +231,26 @@ async def test_deepseek_finish_reason_map(finish: str, expected: str) -> None:
         CompletionRequest(messages=[Message(role="user", content="x")])
     )
     assert res.stop_reason == expected
+
+
+def test_deepseek_chat_declares_tool_use() -> None:
+    assert ProviderCapability.TOOL_USE in DeepSeekProvider._capabilities_for_model("deepseek-chat")
+
+
+def test_deepseek_reasoner_lacks_tool_use() -> None:
+    assert ProviderCapability.TOOL_USE not in DeepSeekProvider._capabilities_for_model(
+        "deepseek-reasoner"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoner_refuses_loud_when_tools_requested() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock()
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-reasoner")
+    td = ToolDefinition(name="web.fetch", description="f", input_schema={})
+    with pytest.raises(ProviderToolUnsupportedError):
+        await provider.complete(
+            CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+        )
+    fake_client.chat.completions.create.assert_not_awaited()  # refuse BEFORE building the request

@@ -27,12 +27,14 @@ from anthropic.types import (
 )
 from anthropic.types.tool_param import InputSchema
 
+from alfred.i18n import t
 from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
     ForcedTool,
     Message,
     ProviderCapability,
+    ProviderToolUnsupportedError,
     StopReason,
     ToolCall,
     ToolChoice,
@@ -180,7 +182,7 @@ class AnthropicProvider:
     # Class-level constant — no constructor required to read it (prov-007).
     # frozenset so a caller cannot mutate the declared set.
     CAPABILITIES: frozenset[ProviderCapability] = frozenset(
-        {ProviderCapability.NATIVE_CONSTRAINED_GENERATION}
+        {ProviderCapability.NATIVE_CONSTRAINED_GENERATION, ProviderCapability.TOOL_USE}
     )
 
     # `client` is typed Any because tests inject a MagicMock and the real
@@ -220,6 +222,10 @@ class AnthropicProvider:
         )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        if request.tools and ProviderCapability.TOOL_USE not in self.capabilities():
+            raise ProviderToolUnsupportedError(
+                t("providers.tool_use_unsupported", provider=self.name, model=self._model)
+            )
         # Anthropic separates the system prompt from the conversation: it goes
         # on the top-level `system` kwarg, not in `messages`. Strip any system
         # message out of the chat list and pass the first one's content
