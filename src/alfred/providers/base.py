@@ -11,12 +11,23 @@ quarantined-LLM dispatch path. See ``ProviderCapability`` below and the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-Role = Literal["system", "user", "assistant"]
+from alfred.errors import AlfredError
+
+# "tool" carries a tool-call RESULT back to the model (spec §4.2). Added for the
+# #339 tool-calling seam; no existing code path produces it, so widening the
+# Literal is additive.
+Role = Literal["system", "user", "assistant", "tool"]
+
+# Normalized stop reason across providers: Anthropic ``stop_reason`` and
+# OpenAI/DeepSeek ``finish_reason`` both map onto this closed set. ``tool_use``
+# is the value the act-phase loop (PR3) branches on.
+StopReason = Literal["end_turn", "tool_use", "max_tokens", "stop_sequence", "other"]
 
 
 class ProviderCapability(StrEnum):
@@ -81,13 +92,67 @@ def register_provider[ProviderT](cls: type[ProviderT]) -> type[ProviderT]:
     return cls
 
 
+class ToolDefinition(BaseModel):
+    """Provider-neutral tool advertisement (spec §4.2). ``input_schema`` is a
+    JSON Schema; each adapter maps this to its SDK's tool-param shape."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    description: str
+    # JSON object typed ``object`` (not ``Any``) so callers must narrow before use.
+    input_schema: Mapping[str, object]
+
+
+class ToolCall(BaseModel):
+    """A parsed tool-use request from the model, OR its echo in message history."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    name: str
+    arguments: Mapping[str, object]
+
+
+class ForcedTool(BaseModel):
+    """``tool_choice`` variant forcing exactly one named tool (used by #340
+    constrained-generation)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+
+
+# "auto" (model decides) | "none" (no tool call) | "required" (must call some
+# tool) | ForcedTool (must call THIS tool).
+ToolChoice = Literal["auto", "none", "required"] | ForcedTool
+
+
+class ProviderToolUnsupportedError(AlfredError):
+    """A request carries ``tools`` but the resolved provider does not declare
+    ``ProviderCapability.TOOL_USE``. Refuse loud rather than emit a request the
+    provider SDK will 400 on (spec §4.1)."""
+
+
+class ProviderMalformedToolArgumentsError(AlfredError):
+    """A provider returned tool-call arguments that are not valid JSON (DeepSeek
+    returns arguments as a JSON *string*). Fail loud at the boundary; the PR3
+    loop turns this into an error ``tool_result`` (spec §4.3)."""
+
+
 class Message(BaseModel):
     # Frozen so a request can be safely shared / replayed without a caller
     # mutating it mid-flight. extra="forbid" catches typos at the boundary.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: Role
-    content: str
+    content: str = ""
+    # tool_calls populate ONLY on an assistant turn that requested tools;
+    # tool_call_id ONLY on a role="tool" result message (links the result to
+    # the ToolCall.id that produced it). Default-empty so every existing
+    # construction is unchanged.
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
 
 
 class CompletionRequest(BaseModel):
@@ -96,6 +161,11 @@ class CompletionRequest(BaseModel):
     messages: list[Message]
     max_tokens: int = 1024
     temperature: float = 0.7
+    # Default-empty: a request without tools is byte-identical to the pre-#339
+    # shape, so no existing caller changes. The router advertises these to the
+    # provider only when non-empty (spec §4).
+    tools: tuple[ToolDefinition, ...] = ()
+    tool_choice: ToolChoice = "auto"
 
     @field_validator("max_tokens")
     @classmethod
@@ -120,6 +190,11 @@ class CompletionResponse(BaseModel):
     # for the multi-provider fallback case where the response came from the
     # fallback rather than the primary.
     model: str
+    # Default end_turn/empty: a plain text completion is byte-identical to the
+    # pre-#339 shape. stop_reason == "tool_use" + non-empty tool_calls is how
+    # the PR3 act-phase loop detects the model wants to call a tool (spec §4.2).
+    stop_reason: StopReason = "end_turn"
+    tool_calls: tuple[ToolCall, ...] = ()
 
     @field_validator("tokens_in", "tokens_out", "cost_usd")
     @classmethod
