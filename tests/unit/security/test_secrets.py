@@ -210,46 +210,53 @@ class TestSupportedSecretsRegistry:
 
 class TestResolveSecretsPath:
     def test_constructor_override_wins(self) -> None:
-        out = _resolve_secrets_path(
+        path, layer = _resolve_secrets_path(
             constructor_arg=Path("/override"),
             env={"ALFRED_SECRETS_FILE": "/env"},
             settings_default=Path("/settings"),
         )
-        assert out == Path("/override")
+        assert path == Path("/override")
+        assert layer == "constructor"
 
     def test_env_var_overrides_settings_default(self) -> None:
-        out = _resolve_secrets_path(
+        path, layer = _resolve_secrets_path(
             constructor_arg=None,
             env={"ALFRED_SECRETS_FILE": "/env"},
             settings_default=Path("/settings"),
         )
-        assert out == Path("/env")
+        assert path == Path("/env")
+        assert layer == "env"
 
     def test_settings_default_used_when_no_override(self) -> None:
-        out = _resolve_secrets_path(
+        path, layer = _resolve_secrets_path(
             constructor_arg=None,
             env={},
             settings_default=Path("/settings"),
         )
-        assert out == Path("/settings")
+        assert path == Path("/settings")
+        # #366: the settings-default layer is the ONLY one the gitignore-aware
+        # .git-walk narrowing applies to — so its provenance must be reported.
+        assert layer == "settings_default"
 
     def test_returns_none_when_all_layers_empty(self) -> None:
-        out = _resolve_secrets_path(
+        path, layer = _resolve_secrets_path(
             constructor_arg=None,
             env={},
             settings_default=None,
         )
-        assert out is None
+        assert path is None
+        assert layer is None
 
     def test_empty_env_value_is_treated_as_unset(self) -> None:
         # An empty string in the env is operator-error-shaped (`export VAR=`).
         # The pipeline must not treat it as a configured path.
-        out = _resolve_secrets_path(
+        path, layer = _resolve_secrets_path(
             constructor_arg=None,
             env={"ALFRED_SECRETS_FILE": ""},
             settings_default=Path("/settings"),
         )
-        assert out == Path("/settings")
+        assert path == Path("/settings")
+        assert layer == "settings_default"
 
 
 # ---------------------------------------------------------------------------

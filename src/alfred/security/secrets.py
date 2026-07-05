@@ -47,7 +47,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 
@@ -231,26 +231,36 @@ class SecretBrokerUnreadableError(SecretBrokerConfigError):
     __slots__ = ()
 
 
+_SecretsLayer = Literal["constructor", "env", "settings_default"] | None
+
+
 def _resolve_secrets_path(
     constructor_arg: Path | None,
     env: Mapping[str, str],
     settings_default: Path | None,
-) -> Path | None:
-    """Return the resolved secrets-file path, honouring the layered precedence.
+) -> tuple[Path | None, _SecretsLayer]:
+    """Return ``(path, layer)`` honouring the layered precedence.
 
     Pure function (no I/O) — caller is responsible for any subsequent stat or
     open.
 
     Order: constructor arg wins → then ``ALFRED_SECRETS_FILE`` env var → then
-    Settings default. Returns ``None`` if all three are unset, signalling
-    "no file backend; env-only" to the constructor.
+    Settings default. ``path`` is ``None`` if all three are unset (env-only
+    backend). ``layer`` names which layer produced the path
+    (``"constructor"`` / ``"env"`` / ``"settings_default"``) and is ``None``
+    iff ``path`` is ``None``. #366 uses ``layer`` to apply the gitignore-aware
+    ``.git``-walk narrowing to the ``settings_default`` (XDG default) layer
+    only — the kwarg / ``ALFRED_SECRETS_FILE`` layers keep the full
+    always-refuse walk.
     """
     if constructor_arg is not None:
-        return constructor_arg
+        return constructor_arg, "constructor"
     env_value = env.get("ALFRED_SECRETS_FILE")
     if env_value:
-        return Path(env_value)
-    return settings_default
+        return Path(env_value), "env"
+    if settings_default is not None:
+        return settings_default, "settings_default"
+    return None, None
 
 
 def _walk_for_git_parent(path: Path, max_depth: int = _GIT_WALK_MAX_DEPTH) -> Path | None:
@@ -384,7 +394,9 @@ class SecretBroker:
     ) -> None:
         # Inject env for tests; default to os.environ so callers don't have to.
         self._env: Mapping[str, str] = dict(env) if env is not None else dict(os.environ)
-        self._secrets_file_path: Path | None = _resolve_secrets_path(
+        self._secrets_file_path: Path | None
+        self._secrets_path_layer: _SecretsLayer
+        self._secrets_file_path, self._secrets_path_layer = _resolve_secrets_path(
             secrets_file, self._env, settings_default
         )
         self._file_secrets: Mapping[str, str] = MappingProxyType({})
