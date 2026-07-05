@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-04 21:38+0100\n"
+"POT-Creation-Date: 2026-07-05 10:14+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2936,40 +2936,50 @@ msgstr ""
 "`quarantine.ingest` is an internal pre-step; only `quarantine.extract` is"
 " dispatched as the extractor-observed method on this path."
 
-#: src/alfred/security/secrets.py:294 src/alfred/security/secrets.py:305
-#: src/alfred/security/secrets.py:321 src/alfred/security/secrets.py:333
+#: src/alfred/security/secrets.py:365 src/alfred/security/secrets.py:376
+#: src/alfred/security/secrets.py:392 src/alfred/security/secrets.py:404
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:315
+#: src/alfred/security/secrets.py:386
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:406 src/alfred/security/secrets.py:417
+#: src/alfred/security/secrets.py:479 src/alfred/security/secrets.py:490
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:430
+#: src/alfred/security/secrets.py:528
+msgid "secrets.file_in_git_repo_layer3"
+msgstr ""
+"Secrets file '{path}' is inside a git repository (found '.git' at '{parent}') "
+"and is not gitignored; secrets must never be committed. Add '{path}' to a "
+".gitignore in that repository (Alfred will then boot with a warning), move it "
+"outside the repository, or set ALFRED_SECRETS_FILE to a path outside a repo. "
+"(If it IS gitignored, ensure `git` is installed and on PATH — Alfred could not "
+"verify.)"
+
+#: src/alfred/security/secrets.py:534
 msgid "secrets.file_in_git_repo"
 msgstr ""
 "Secrets file '{path}' is inside a git repository (found '.git' at "
 "'{parent}'); secrets must never be committed. Move it outside any git "
 "repository, or set ALFRED_SECRETS_FILE to a path outside a repo."
 
-#: src/alfred/security/secrets.py:467 src/alfred/security/secrets.py:684
+#: src/alfred/security/secrets.py:573 src/alfred/security/secrets.py:790
 msgid "secrets.file_malformed"
 msgstr ""
 "Secrets file '{path}' is not valid TOML. Fix the file's TOML syntax (a "
 "flat table of name = \"value\" entries) and its UTF-8 encoding, then "
 "retry."
 
-#: src/alfred/security/secrets.py:477 src/alfred/security/secrets.py:690
+#: src/alfred/security/secrets.py:583 src/alfred/security/secrets.py:796
 msgid "secrets.file_unreadable"
 msgstr ""
 "Secrets file '{path}' could not be read: {reason}. Check the file and its"

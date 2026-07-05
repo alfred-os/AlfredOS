@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import structlog
 
 from alfred.config.settings import Settings
 from alfred.errors import AlfredError
@@ -26,6 +27,7 @@ from alfred.security.secrets import (
     SecretBrokerUnreadableError,
     UnknownSecretError,
     _resolve_secrets_path,
+    _secret_is_gitignored,
     _walk_for_git_parent,
 )
 
@@ -425,15 +427,28 @@ class TestSecretsFilePathAccessor:
 
 def _git_init(repo: Path) -> None:
     """`git init` a real repo for the gitignore-aware .git-walk tests (#366)."""
-    _subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S603, S607
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate the real-git tests (#366) from the host's global/system git config.
+
+    ``git init`` / ``git check-ignore`` honour ``~/.config/git/ignore`` /
+    ``core.excludesFile`` / system config — a contributor whose global excludes
+    match ``secrets.toml`` or ``*.toml`` would flip the not-gitignored assertions
+    (not-ignored → ignored). Point git at ``os.devnull`` for both scopes so the
+    subprocess sees only the repo-local ``.gitignore`` (test-eng review). Harmless
+    for the non-git tests in this module.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
 
 
 class TestSecretIsGitignored:
     """#366: the authoritative `git check-ignore` helper, fail-closed."""
 
     def test_true_when_gitignored(self, tmp_path: Path) -> None:
-        from alfred.security.secrets import _secret_is_gitignored
-
         repo = tmp_path / "repo"
         repo.mkdir()
         _git_init(repo)
@@ -443,8 +458,6 @@ class TestSecretIsGitignored:
         assert _secret_is_gitignored(repo, secret) is True
 
     def test_false_when_not_gitignored(self, tmp_path: Path) -> None:
-        from alfred.security.secrets import _secret_is_gitignored
-
         repo = tmp_path / "repo"
         repo.mkdir()
         _git_init(repo)
@@ -452,19 +465,34 @@ class TestSecretIsGitignored:
         secret.write_text("x")
         assert _secret_is_gitignored(repo, secret) is False
 
-    def test_false_when_git_absent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Fail-closed: git binary absent → cannot confirm ignored → not-ignored."""
-        from alfred.security import secrets as secrets_module
+    def test_false_for_gitignore_negation(self, tmp_path: Path) -> None:
+        """The trap the authoritative check beats: `*.toml` then `!secrets.toml`
+        un-ignores the secret → git exit 1 → not-ignored → refuse (a naive parser
+        that saw the `*.toml` line and stopped would wrongly report ignored)."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_init(repo)
+        (repo / ".gitignore").write_text("*.toml\n!secrets.toml\n")
+        secret = repo / "secrets.toml"
+        secret.write_text("x")
+        assert _secret_is_gitignored(repo, secret) is False
+
+    def test_false_when_git_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Fail-closed AND loud: git absent → not-ignored + a diagnostic event."""
 
         def _raise(*_a: object, **_k: object) -> object:
             raise FileNotFoundError("git not found")
 
         monkeypatch.setattr(secrets_module.subprocess, "run", _raise)
-        assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
+        with structlog.testing.capture_logs() as logs:
+            assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
+        events = [e for e in logs if e.get("event") == "secrets.gitignore_check_failed"]
+        assert events and events[0]["reason"] == "git_unavailable"
 
     def test_false_on_timeout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fail-closed: a hung git → timeout → not-ignored (can't hang boot)."""
-        from alfred.security import secrets as secrets_module
 
         def _raise(*_a: object, **_k: object) -> object:
             raise secrets_module.subprocess.TimeoutExpired(cmd="git", timeout=5.0)
@@ -472,17 +500,78 @@ class TestSecretIsGitignored:
         monkeypatch.setattr(secrets_module.subprocess, "run", _raise)
         assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
 
-    def test_false_on_git_error_exit(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_false_on_git_error_exit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fail-closed: git exit 128 (not a repo / fatal) → not-ignored."""
-        from alfred.security import secrets as secrets_module
 
         class _R:
             returncode = 128
 
         monkeypatch.setattr(secrets_module.subprocess, "run", lambda *_a, **_k: _R())
         assert secrets_module._secret_is_gitignored(tmp_path, tmp_path / "s.toml") is False
+
+
+class TestGitWalkNarrowing:
+    """#366: the .git-walk refusal is gitignore-aware for the layer-3 path ONLY."""
+
+    def _repo_with_secret(self, tmp_path: Path, *, gitignored: bool) -> Path:
+        repo = tmp_path / "dotfiles"
+        repo.mkdir(mode=0o700)
+        _git_init(repo)
+        if gitignored:
+            (repo / ".gitignore").write_text("secrets.toml\n")
+        secret = repo / "secrets.toml"
+        secret.write_text('discord_bot_token = "x"\n')
+        secret.chmod(0o600)
+        return secret
+
+    def test_layer3_gitignored_boots_with_warning(self, tmp_path: Path) -> None:
+        """A layer-3 secret that IS gitignored boots AND emits the warn event."""
+        secret = self._repo_with_secret(tmp_path, gitignored=True)
+        with structlog.testing.capture_logs() as logs:
+            broker = SecretBroker(env={}, settings_default=secret)
+        assert broker.secrets_file_path == secret  # booted, did not raise
+        assert broker.get("discord_bot_token") == "x"  # the file WAS loaded
+        # The loosened path's ONLY operator signal — pin the event + its fields so
+        # a rename/drop of the sole defence-in-depth warning can't ship green.
+        warns = [e for e in logs if e.get("event") == "secrets.file_in_git_repo_but_ignored"]
+        assert len(warns) == 1
+        assert warns[0]["path"] == str(secret)
+        assert "residual_risk" in warns[0]
+
+    def test_layer3_not_gitignored_refuses_and_names_gitignore(self, tmp_path: Path) -> None:
+        """A layer-3 secret NOT gitignored refuses with a message naming the remedy."""
+        secret = self._repo_with_secret(tmp_path, gitignored=False)
+        with pytest.raises(SecretBrokerPermissionsError) as exc_info:
+            SecretBroker(env={}, settings_default=secret)
+        # devex: the layer-3 refusal names the gitignore remedy this PR enables.
+        assert ".gitignore" in str(exc_info.value)
+
+    def test_kwarg_layer_refuses_without_gitignore_remedy(self, tmp_path: Path) -> None:
+        """The narrowing is layer-3 ONLY — an explicit kwarg path still refuses, and
+        does NOT offer the gitignore remedy (gitignoring a named path does not help)."""
+        secret = self._repo_with_secret(tmp_path, gitignored=True)
+        with pytest.raises(SecretBrokerPermissionsError) as exc_info:
+            SecretBroker(env={}, secrets_file=secret)
+        assert ".gitignore" not in str(exc_info.value)
+
+    def test_env_layer_refuses_even_if_gitignored(self, tmp_path: Path) -> None:
+        """ALFRED_SECRETS_FILE layer keeps the full always-refuse walk."""
+        secret = self._repo_with_secret(tmp_path, gitignored=True)
+        with pytest.raises(SecretBrokerPermissionsError):
+            SecretBroker(env={"ALFRED_SECRETS_FILE": str(secret)})
+
+    def test_layer3_git_absent_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed: git absent → cannot confirm ignored → refuse."""
+        secret = self._repo_with_secret(tmp_path, gitignored=True)
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(secrets_module.subprocess, "run", _raise)
+        with pytest.raises(SecretBrokerPermissionsError):
+            SecretBroker(env={}, settings_default=secret)
 
 
 class TestPermissionsCheck:
