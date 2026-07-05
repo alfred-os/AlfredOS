@@ -11,7 +11,7 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from alfred.cli.main import _build_adapter_dlp_audit_sink, app
-from alfred.security.secrets import SecretBrokerConfigError
+from alfred.security.secrets import SecretBroker, SecretBrokerConfigError
 
 runner = CliRunner()
 
@@ -98,6 +98,30 @@ def test_alfred_status_marks_absent_secrets_file(monkeypatch: MonkeyPatch, tmp_p
     assert result.exit_code == 0
     assert str(absent) in result.stdout
     assert "not found" in result.stdout.lower()
+
+
+def test_alfred_status_env_only_when_no_file_layer(monkeypatch: MonkeyPatch) -> None:
+    """The env-only status branch (``secrets_file_path is None``) is exercised.
+
+    That branch is defensive/unreachable through the real ``alfred status`` today
+    (``build_broker_or_die`` → ``from_settings`` passes the non-optional
+    ``Settings.secrets_file`` XDG default), so we inject an env-only broker whose
+    accessor returns ``None`` to pin the env-only render. If ``Settings.secrets_file``
+    ever becomes optional, this keeps the branch from silently losing coverage (CR).
+    """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    env_only = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "test"})
+    assert env_only.secrets_file_path is None  # precondition: no file layer
+    monkeypatch.setattr(
+        "alfred.cli._bootstrap.build_broker_or_die",
+        lambda _settings: env_only,
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "environment variables only" in result.stdout.lower()
 
 
 def test_alfred_migrate_command_is_registered() -> None:
