@@ -254,3 +254,56 @@ async def test_reasoner_refuses_loud_when_tools_requested() -> None:
             CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
         )
     fake_client.chat.completions.create.assert_not_awaited()  # refuse BEFORE building the request
+
+
+@pytest.mark.asyncio
+async def test_non_object_json_args_fail_loud() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_toolcall_response("[]"))
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    with pytest.raises(ProviderMalformedToolArgumentsError):
+        await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+
+
+@pytest.mark.asyncio
+async def test_empty_string_args_become_empty_dict() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_toolcall_response(""))
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    res = await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    assert res.tool_calls == (ToolCall(id="c1", name="web.fetch", arguments={}),)
+
+
+@pytest.mark.asyncio
+async def test_non_function_tool_calls_dropped_and_stop_reason_downgraded() -> None:
+    tc = MagicMock(id="c1", type="custom")  # a non-function (custom) tool call
+    r = MagicMock()
+    r.choices = [
+        MagicMock(message=MagicMock(content=None, tool_calls=[tc]), finish_reason="tool_calls")
+    ]
+    r.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=r)
+    res = await DeepSeekProvider(client=fake_client, model="deepseek-chat").complete(
+        CompletionRequest(messages=[Message(role="user", content="x")])
+    )
+    assert res.tool_calls == ()
+    assert res.stop_reason == "other"  # downgraded — no callable tool remained
+
+
+@pytest.mark.asyncio
+async def test_plain_assistant_history_serializes_without_tool_calls() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response())
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    await provider.complete(
+        CompletionRequest(
+            messages=[
+                Message(role="user", content="hi"),
+                Message(role="assistant", content="hello"),
+                Message(role="user", content="again"),
+            ]
+        )
+    )
+    msgs = fake_client.chat.completions.create.await_args.kwargs["messages"]
+    assert msgs[1] == {"role": "assistant", "content": "hello"}  # no stray tool_calls key

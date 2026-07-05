@@ -8,6 +8,7 @@ Pricing (as of 2026-05; check https://api.deepseek.com/pricing before updating):
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -35,11 +36,11 @@ from alfred.providers.base import (
     Message,
     ProviderCapability,
     ProviderMalformedToolArgumentsError,
-    ProviderToolUnsupportedError,
     StopReason,
     ToolCall,
     ToolChoice,
     ToolDefinition,
+    ensure_tool_capability,
     register_provider,
 )
 
@@ -143,8 +144,11 @@ def _openai_message(m: Message) -> ChatCompletionMessageParam:
     if m.role == "user":
         return ChatCompletionUserMessageParam(role="user", content=m.content)
     if m.role == "tool":
+        # The Message validator guarantees tool_call_id is set for role="tool";
+        # assert narrows the type and fails loud if that invariant is ever broken.
+        assert m.tool_call_id is not None
         return ChatCompletionToolMessageParam(
-            role="tool", content=m.content, tool_call_id=m.tool_call_id or ""
+            role="tool", content=m.content, tool_call_id=m.tool_call_id
         )
     if m.tool_calls:
         return ChatCompletionAssistantMessageParam(
@@ -155,6 +159,27 @@ def _openai_message(m: Message) -> ChatCompletionMessageParam:
     return ChatCompletionAssistantMessageParam(role="assistant", content=m.content)
 
 
+def _parse_tool_arguments(raw: str, *, model: str, tool: str) -> Mapping[str, object]:
+    # DeepSeek returns tool-call arguments as a JSON *string*. An empty string
+    # (some OpenAI-compatible backends) means "no arguments" -> {}. A value that
+    # parses but is not a JSON object (e.g. "[]") is still malformed for our
+    # tool schema, so both the parse failure AND the non-object case fail loud
+    # via the SAME typed error the act-phase loop (#339 PR3) keys on.
+    if raw == "":
+        return {}
+    try:
+        args = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise ProviderMalformedToolArgumentsError(
+            t("providers.malformed_tool_arguments", provider="deepseek", model=model, tool=tool)
+        ) from exc
+    if not isinstance(args, dict):
+        raise ProviderMalformedToolArgumentsError(
+            t("providers.malformed_tool_arguments", provider="deepseek", model=model, tool=tool)
+        )
+    return args
+
+
 def _parse_openai_tool_calls(
     raw: list[ChatCompletionMessageToolCallUnion] | None, model: str
 ) -> tuple[ToolCall, ...]:
@@ -163,13 +188,11 @@ def _parse_openai_tool_calls(
     parsed: list[ToolCall] = []
     for tc in raw:
         if tc.type != "function":
-            continue  # custom tools are out of scope for #339
-        try:
-            args = json.loads(tc.function.arguments)
-        except (ValueError, TypeError) as exc:
-            raise ProviderMalformedToolArgumentsError(
-                t("providers.malformed_tool_arguments", provider="deepseek", model=model)
-            ) from exc
+            # Custom tools are out of scope for #339; log (no payload) so
+            # provider drift is observable rather than a silent drop.
+            _log.debug("deepseek.tool_call_dropped_non_function", model=model, tool_type=tc.type)
+            continue
+        args = _parse_tool_arguments(tc.function.arguments, model=model, tool=tc.function.name)
         parsed.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
     return tuple(parsed)
 
@@ -230,10 +253,15 @@ class DeepSeekProvider:
         )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
-        if request.tools and ProviderCapability.TOOL_USE not in self.capabilities():
-            raise ProviderToolUnsupportedError(
-                t("providers.tool_use_unsupported", provider=self.name, model=self._model)
-            )
+        ensure_tool_capability(
+            has_tools=bool(request.tools),
+            capabilities=self.capabilities(),
+            provider_name=self.name,
+            model=self._model,
+        )
+        # kwargs is dict[str, Any] (not a typed CompletionCreateParams) because
+        # tools/tool_choice are added conditionally; each value is an official
+        # SDK param type built by a typed helper, so the wire shape stays checked.
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": [_openai_message(m) for m in request.messages],
@@ -246,12 +274,20 @@ class DeepSeekProvider:
         response = await self._client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
         usage = response.usage
+        tool_calls = _parse_openai_tool_calls(msg.tool_calls, self._model)
+        stop_reason: StopReason = _OPENAI_STOP_REASON.get(
+            response.choices[0].finish_reason, "other"
+        )
+        if stop_reason == "tool_use" and not tool_calls:
+            # Every returned tool call was non-function (dropped) — keep the
+            # response consistent for the CompletionResponse tool-use invariant.
+            stop_reason = "other"
         return CompletionResponse(
             content=msg.content or "",
             tokens_in=usage.prompt_tokens,
             tokens_out=usage.completion_tokens,
             cost_usd=_estimate_cost(self._model, usage.prompt_tokens, usage.completion_tokens),
             model=self._model,
-            stop_reason=_OPENAI_STOP_REASON.get(response.choices[0].finish_reason, "other"),
-            tool_calls=_parse_openai_tool_calls(msg.tool_calls, self._model),
+            stop_reason=stop_reason,
+            tool_calls=tool_calls,
         )
