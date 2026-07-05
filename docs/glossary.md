@@ -886,7 +886,12 @@ Two backends:
   directory must not be group/world-writable, the file must not be a
   symlink, no `.git/` may appear in any of the first 12 ancestor
   directories, and the file must be readable and valid TOML/UTF-8
-  (malformed or unreadable files refuse construction — #370).
+  (malformed or unreadable files refuse construction — #370). The
+  `.git`-ancestor refusal is **gitignore-aware for the host-default
+  (layer-3) path only**: an authoritatively-gitignored secret there boots
+  with a warning, otherwise refuses (fail-closed if `git` is unavailable);
+  the `ALFRED_SECRETS_FILE` / constructor-arg layers keep the full
+  always-refuse walk (#366, see [ADR-0012](adr/0012-file-backed-secret-broker.md)).
 
 Per-secret precedence is controlled by `_PREFER_FILE`. The broker
 exposes `redact()` for the outbound DLP's stage-1 redaction.
