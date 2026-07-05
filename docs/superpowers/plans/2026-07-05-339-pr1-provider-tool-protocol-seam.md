@@ -79,10 +79,12 @@ class ProviderMalformedToolArgumentsError(AlfredError): ...   # provider returne
 ### Task 1: Neutral tool-protocol models + frozen-contract extension
 
 **Files:**
+
 - Modify: `src/alfred/providers/base.py`
 - Test: `tests/unit/providers/test_base.py`
 
 **Interfaces:**
+
 - Consumes: existing `Message`, `CompletionRequest`, `CompletionResponse`, `Role`, `AlfredError` (`from alfred.errors import AlfredError`).
 - Produces: the neutral-model reference block above, importable from `alfred.providers.base`.
 
@@ -254,10 +256,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 2: DeepSeek — per-role request serialization + tools/tool_choice
 
 **Files:**
+
 - Modify: `src/alfred/providers/deepseek.py`
 - Test: `tests/unit/providers/test_deepseek.py`
 
 **Interfaces:**
+
 - Consumes: Task 1 models; existing `DeepSeekProvider`.
 - Produces: `DeepSeekProvider.complete` now sends `tools`/`tool_choice` and per-role-serialized messages (no stray `tool_calls=[]`/`tool_call_id=null` on plain messages).
 
@@ -381,10 +385,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 3: DeepSeek — response tool_calls / finish_reason parse (loud on malformed args)
 
 **Files:**
+
 - Modify: `src/alfred/providers/deepseek.py`
 - Test: `tests/unit/providers/test_deepseek.py`
 
 **Interfaces:**
+
 - Consumes: Task 1 models + `ProviderMalformedToolArgumentsError`.
 - Produces: `complete` returns `CompletionResponse` with `stop_reason` mapped from `finish_reason` and `tool_calls` parsed (JSON-string args → dict; malformed → raise).
 
@@ -504,10 +510,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 4: Anthropic — request mapping (tools/tool_choice + tool-history packing)
 
 **Files:**
+
 - Modify: `src/alfred/providers/anthropic_native.py`
 - Test: `tests/unit/providers/test_anthropic.py`
 
 **Interfaces:**
+
 - Consumes: Task 1 models.
 - Produces: `AnthropicProvider.complete` sends `tools`/`tool_choice` and packs `role="tool"` history into `user`+`tool_result` blocks and assistant `tool_calls` into `tool_use` blocks.
 
@@ -654,10 +662,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 5: Anthropic — response tool_use-block parse + stop_reason
 
 **Files:**
+
 - Modify: `src/alfred/providers/anthropic_native.py`
 - Test: `tests/unit/providers/test_anthropic.py`
 
 **Interfaces:**
+
 - Consumes: Task 1 models.
 - Produces: `complete` returns `CompletionResponse` with `stop_reason` mapped and `tool_calls` parsed from `tool_use` blocks (stops discarding them); text still concatenated from text blocks.
 
@@ -755,10 +765,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 6: Wire TOOL_USE capability + refuse-loud guard + router non-fallback + i18n
 
 **Files:**
+
 - Modify: `src/alfred/providers/deepseek.py`, `src/alfred/providers/anthropic_native.py`, `src/alfred/providers/router.py`, `locale/en/LC_MESSAGES/alfred.po`
 - Test: `tests/unit/providers/test_deepseek.py`, `test_anthropic.py`, `test_router.py`
 
 **Interfaces:**
+
 - Consumes: Task 1 `ProviderToolUnsupportedError` + `ProviderCapability.TOOL_USE`.
 - Produces: capability tables declare `TOOL_USE`; each adapter's `complete` raises `ProviderToolUnsupportedError` if `request.tools` and TOOL_USE absent; router re-raises it (no fallback).
 
@@ -935,6 +947,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 7: ADR-0045 + full quality gate
 
 **Files:**
+
 - Create: `docs/adr/0045-provider-tool-protocol.md`
 
 - [ ] **Step 1: Write the ADR.** Use the repo's ADR shape (Context / Decision / Consequences / Alternatives). Content anchors:
@@ -1052,6 +1065,7 @@ async def test_anthropic_stop_reason_map(stop: str, expected: str) -> None:
 ## Self-review
 
 **Spec coverage (§4/§11 PR1 row):**
+
 - Neutral models — Task 1. ✓
 - Additive frozen-field extension — Task 1. ✓
 - Per-role wire serialization (the arch-005/prov-002 400 fix) — Task 2 (DeepSeek) + Task 4 (Anthropic). ✓

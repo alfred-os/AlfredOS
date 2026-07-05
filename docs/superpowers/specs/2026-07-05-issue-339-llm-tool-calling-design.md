@@ -44,6 +44,7 @@ real-LLM smoke test in `tests/smoke/`. It does NOT wire the live comms turn
 **#340**).
 
 Release-gate discipline (plan-review, test/security lens):
+
 - The **deterministic fixture + adversarial suite is the merge gate**. The
   real-LLM smoke test is **nightly / retry-tolerant**, runs on a **cheap-tier
   model under the budget guard**, and is NOT a per-commit gate (a live model's
@@ -93,6 +94,7 @@ wiring it is "supply real values," not "rebuild the plumbing."
 **Result-tier routing (fail-closed — security finding sec-001/rev-002):** a
 tool's result tier is NOT trusted from an arbitrary plugin manifest. The threat
 model says MCP / plugin / file / web outputs are **T3**. Therefore:
+
 - `result_tier` **defaults to T3** (quarantine-extract path) for every tool.
 - Only a **hardcoded first-party allowlist** of tools may declare `result_tier
   ≤ T2` (direct path), and the test suite **verifies the ≤T2 claim** (mirrors
@@ -105,7 +107,7 @@ model says MCP / plugin / file / web outputs are **T3**. Therefore:
 ### 4.1 Two wire shapes to bridge
 
 | | Anthropic (fallback provider) | OpenAI/DeepSeek (**primary** provider) |
-|---|---|---|
+| --- | --- | --- |
 | request tools | `tools=[{name, description, input_schema}]`, `tool_choice={type: auto\|any\|tool}` | `tools=[{type:function, function:{name, description, parameters}}]`, `tool_choice="auto"\|"none"\|"required"\|{type:function,function:{name}}` |
 | model asks for a tool | `content` block `{type:tool_use, id, name, input}`; `stop_reason="tool_use"` | `message.tool_calls=[{id, type:function, function:{name, arguments:<JSON string>}}]`; `finish_reason="tool_calls"` |
 | sending a result back | `user` message with `{type:tool_result, tool_use_id, content}` block | `role:"tool"` message `{tool_call_id, content}` |
@@ -113,14 +115,15 @@ model says MCP / plugin / file / web outputs are **T3**. Therefore:
 **Provider capability reality (plan-review, provider lens):** deepseek-chat
 (the default `settings.deepseek_model`, V3) **does support OpenAI-style
 function-calling** — the primary path can tool-call, so the flat shape (§4.2) is
-justified. But **deepseek-reasoner does NOT support function-calling**. Since
-#339 keeps the router as primary→fallback with no capability routing, a
+justified. But **deepseek-reasoner does NOT support function-calling**. Since #339
+keeps the router as primary→fallback with no capability routing, a
 reasoner-primary config would silently 400 every tool turn. Therefore:
+
 - PR1 **wires `TOOL_USE`** into the capability tables: deepseek-chat gains
   `TOOL_USE`; Anthropic declares `TOOL_USE` (model-invariant today).
 - The tool-advertising path **gates on `TOOL_USE`**: if the resolved primary
-  provider lacks `TOOL_USE`, the orchestrator **refuses loudly** (typed refusal
-  + audit) rather than emitting a request the provider will 400 on.
+  provider lacks `TOOL_USE`, the orchestrator **refuses loudly** (typed refusal +
+  audit) rather than emitting a request the provider will 400 on.
 
 ### 4.2 Neutral internal representation (flat tool-role shape)
 
@@ -203,8 +206,8 @@ them. `extra="forbid"` is preserved.
 in the **quarantine child** (separate process, unwired, echo today; the real
 child is **#340**). Under this seam, constrained generation becomes
 `complete()` with `tools=(one ToolDefinition,)` + `tool_choice=ForcedTool(name)`,
-reading `response.tool_calls[0].arguments`. **#339 defines the unified seam;
-#340 ports `provider_dispatch` onto it.** #339 does not touch the child.
+reading `response.tool_calls[0].arguments`. **#339 defines the unified seam; #340
+ports `provider_dispatch` onto it.** #339 does not touch the child.
 
 `response_format` / DeepSeek JSON-object mode (structured output WITHOUT tools)
 is **out of scope** for #339 — the agentic loop uses `tools`, and constrained
@@ -229,6 +232,7 @@ completion order), assigned *before* dispatch. The loop dispatches sequentially
 **What the ledger does and does NOT guarantee (plan-review Critical mem-001,
 confirmed against the ledger code — corroborated by arch-001/sec-003/prov-003/
 core-001):**
+
 - The body-hash integrity check fires **only on an `egress_id` conflict** (same
   `call_index`). It catches a *divergent* request replayed at the **same slot**
   — loudly, via `EgressIdIntegrityError`.
@@ -244,6 +248,7 @@ core-001):**
 and there is no live comms resume, so this is not reachable. But the design must
 not carry a false at-most-once claim into #338. **Deterministic replay is a
 hard #338 prerequisite:**
+
 1. **Journal the committed ordered dispatch sequence** for the turn (tool name +
    args + assigned `call_index`, per dispatch). Spec-A resume **replays the
    journal** — it does NOT re-ask a fresh (stochastic) planner — so every
@@ -297,6 +302,7 @@ persist final assistant answer (as today); return final
 ```
 
 `dispatch_tool` — every branch emits an audit row (§10):
+
 - Resolve `registry[call.name]`; **unknown name → error tool_result + audit**
   (recoverable).
 - **Validate `call.arguments` against the tool's `input_schema`; invalid →
@@ -312,6 +318,7 @@ persist final assistant answer (as today); return final
 **Failure classification (plan-review sec-002/core-002 — canary must NOT be
 swallowed):** `dispatch_tool` classifies dispatch exceptions rather than
 blanket-catching:
+
 - **Escalation → propagate + quarantine + loud audit:** `InboundCanaryTripped`
   (HARD rule #7 — halt the turn, do NOT feed a tool_result and continue), DLP
   scan failures.
@@ -337,6 +344,7 @@ never lands in episodic storage.
 
 `check_and_charge` is additive and already correct across N calls. The gaps and
 fixes (plan-review §7, mem-002/mem-003/core-004):
+
 - **Per-iteration pre-check** inside the loop (`would_exceed` before each
   completion), replacing the single pre-flight check.
 - **`max_iterations`** hard cap (config) bounds the number of completions;
@@ -365,6 +373,7 @@ estimation remains a separate future PR.
 A `ToolRegistry` maps `name → (ToolDefinition, dispatch, result_tier,
 extraction_schema)`. It builds the `tools` list for each `CompletionRequest` and
 routes dispatch. For #339 the registry ships **two** tools:
+
 - **`web.fetch`** — the first real external (T3) tool, closing the zero-callers
   gap and exercising the full T3→quarantine→downgrade leg.
 - **one internal first-party ≤T2 demo tool** — **mandatory, not optional**
@@ -496,6 +505,7 @@ CodeRabbit → resolve threads → non-admin `--rebase --auto`.
 A 7-reviewer plan-review (architect, cross-cutting reviewer, security, test,
 provider-, core-, memory-engineer) ran against rev. 1. All six §14 decisions
 were endorsed; the direction was not challenged. Rev. 2 folds in:
+
 - **1 Critical** — the §5 silent-double-fire on resume (mem-001, confirmed
   against the ledger code): §5 fully reframed; deterministic-replay journaling +
   temp=0 made an explicit #338 prerequisite + ADR.
