@@ -20,6 +20,21 @@
   `MrReasonable <4990954+MrReasonable@users.noreply.github.com>`
 - **Owner agent:** `alfred-provider-engineer`. Branch: `339-pr1-provider-tool-protocol-seam` (already created; spec already committed as `5b523543`).
 
+## Implementation convention — official SDK types (maintainer directive)
+
+**Use the official SDK clients AND their typed param/response types — not hand-rolled dicts or `getattr` duck-typing.** The code blocks below show the *runtime* wire shapes (still accurate); construct them via the official TypedDicts, and type the parse helpers with the official response types. This SUPERSEDES the earlier "type parse helpers `Any`" note. Verified against **openai 2.44.0** and **anthropic 0.116.0**.
+
+Key fact that makes this free: the request-param types are **TypedDicts** → constructing via them returns plain runtime dicts, so every MagicMock dict-equality assertion in the tasks below stays valid. And because `self._client` is typed `Any`, the SDK response object is `Any` at the call site → assignable to an official-typed helper param, so the helper's internals are fully typed with **no call-site cast**.
+
+- **DeepSeek/OpenAI** (`from openai.types.chat import ...`):
+  - request: `ChatCompletionFunctionToolParam` (tool), `ChatCompletionToolChoiceOptionParam` / `ChatCompletionNamedToolChoiceParam` (tool_choice), and role messages `ChatCompletionSystemMessageParam` / `ChatCompletionUserMessageParam` / `ChatCompletionAssistantMessageParam` (with `ChatCompletionMessageFunctionToolCallParam` in `tool_calls`) / `ChatCompletionToolMessageParam`. `function` payloads use `from openai.types.shared_params import FunctionDefinition` and the tool-call `Function` param.
+  - response: `_parse_openai_tool_calls(raw: list[ChatCompletionMessageFunctionToolCall] | None, model)` — import `from openai.types.chat import ChatCompletionMessageFunctionToolCall`; narrow `if tc.type == "function"` before reading `tc.function.name` / `tc.function.arguments`.
+- **Anthropic** (`from anthropic.types import ...`):
+  - request: `ToolParam`, `ToolChoiceToolParam` / `ToolChoiceAnyParam` / `ToolChoiceAutoParam`, `MessageParam`, and content blocks `TextBlockParam` / `ToolUseBlockParam` / `ToolResultBlockParam`.
+  - response: `_parse_anthropic_content(blocks: list[ContentBlock])` — import `from anthropic.types import ContentBlock`; iterate and narrow the discriminated union on `block.type` (`"tool_use"` → `ToolUseBlock` fields `.id/.name/.input`; `"text"` → `TextBlock.text`); ignore other block types.
+
+If a construction can't be expressed cleanly with an official type without contorting the code, fall back to a plain dict for THAT spot and leave a one-line comment saying why — "where possible," not dogmatically.
+
 ## File structure
 
 - `src/alfred/providers/base.py` — MODIFY. Add neutral models (`ToolDefinition`, `ToolCall`, `ForcedTool`, `ToolChoice`, `StopReason`), extend `Role`/`Message`/`CompletionRequest`/`CompletionResponse`, add `ProviderToolUnsupportedError` + `ProviderMalformedToolArgumentsError`, add `_openai_tools`/`_openai_message`/`_anthropic_tools`/`_anthropic_messages`/`_map_stop_reason` helpers OR keep adapter-local (decided per task below — serializers live in each adapter module to keep base.py wire-shape-agnostic; only the shared stop-reason and the errors + models live in base.py).
