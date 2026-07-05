@@ -423,14 +423,14 @@ def test_boot_refuses_audited_on_comms_graph_broker_config_error(
     result = CliRunner().invoke(daemon_app, ["start"])
     # The fail-closed refusal contract: exit 2, never a degraded boot.
     assert result.exit_code == 2
-    # A loud daemon.boot.failed row under the SAME boot_infra_install_failed
+    # A loud daemon.boot.failed row under the SAME dedicated secrets_config_failed
     # reason the _build_boot_outbound_dlp guard uses for the identical
-    # broker-config failure (a misconfigured secrets file is boot-infra,
-    # whichever build catches it).
+    # broker-config failure (#370 item 2 — a misconfigured secrets file is a
+    # secrets problem, whichever build catches it).
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
-    assert "boot_infra_install_failed" in reasons
+    assert "secrets_config_failed" in reasons
     # The pump was NEVER registered — the refusal happens during the comms-graph
     # build, BEFORE supervisor.start / the spawn loop: no boot-completed row.
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []

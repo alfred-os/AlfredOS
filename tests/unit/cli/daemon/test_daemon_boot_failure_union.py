@@ -20,6 +20,7 @@ from alfred.cli.daemon._failures import (
     LauncherNotPolicyResolvingFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
+    SecretsConfigFailedFailure,
     SnapshotRefInitFailedFailure,
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
@@ -36,6 +37,7 @@ from alfred.cli.daemon._failures import (
         (CapabilityGateHandshakeFailedFailure, "capability_gate_handshake_failed"),
         (QuarantineGrantMissingFailure, "quarantine_grant_missing"),
         (BootInfraInstallFailedFailure, "boot_infra_install_failed"),
+        (SecretsConfigFailedFailure, "secrets_config_failed"),
         (T3NonceRegistrationFailedFailure, "t3_nonce_registration_failed"),
         (QuarantineChildSpawnFailedFailure, "quarantine_child_spawn_failed"),
         (CommsAdapterSpawnFailedFailure, "comms_adapter_spawn_failed"),
@@ -90,6 +92,18 @@ def test_boot_infra_install_failure_is_distinct_from_grant_missing() -> None:
         BootInfraInstallFailedFailure().failure_reason
         != QuarantineGrantMissingFailure().failure_reason
     )
+
+
+def test_secrets_config_failed_is_distinct_from_boot_infra_install() -> None:
+    """#370 item 2: a secrets-file misconfig carries its OWN failure_reason,
+    distinct from a capability-gate seed/install fault — so ``alfred audit log``
+    can tell a secrets problem apart from broken boot infra (both previously read
+    ``boot_infra_install_failed``)."""
+    assert (
+        SecretsConfigFailedFailure().failure_reason
+        != BootInfraInstallFailedFailure().failure_reason
+    )
+    assert SecretsConfigFailedFailure().model_dump() == {"failure_reason": "secrets_config_failed"}
 
 
 def test_environment_not_set_carries_no_extra_fields() -> None:

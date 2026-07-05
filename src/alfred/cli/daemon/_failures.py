@@ -5,10 +5,12 @@ CLI-layer concepts (the probes run at the CLI layer, not inside
 ``Supervisor.start()``), so the union lives here rather than in
 ``alfred.supervisor.protocols``.
 
-Each member maps 1:1 to a spec §3.4 ``failure_reason`` Literal. The
-discriminated union lets the CLI's refusal path pattern-match on
-``failure_reason`` and lets PR-S4-6 extend the union with
-launcher-specific failure detail without re-touching the probes.
+Each member carries a unique ``failure_reason`` Literal — the original set
+was seeded by spec §3.4; later members (most of the union) postdate it and
+are recorded via the union type's provenance-chain docstring below rather
+than the spec. The discriminated union lets the CLI's refusal path
+pattern-match on ``failure_reason`` and lets later slices extend the union
+with failure-specific detail without re-touching the probes.
 """
 
 from __future__ import annotations
@@ -93,6 +95,35 @@ class BootInfraInstallFailedFailure(_BootFailureBase):
     """
 
     failure_reason: Literal["boot_infra_install_failed"] = "boot_infra_install_failed"
+
+
+class SecretsConfigFailedFailure(_BootFailureBase):
+    """A ``SecretBrokerConfigError`` at boot: the secrets file is misconfigured (#370 item 2).
+
+    The daemon boot builds a :class:`alfred.security.secrets.SecretBroker` (in
+    ``_build_boot_outbound_dlp``, and again in ``_build_comms_boot_graph``); an
+    insecure / malformed / unreadable / missing-required / in-git-worktree
+    secrets file raises :class:`alfred.security.secrets.SecretBrokerConfigError`.
+    Previously both arms routed through :class:`BootInfraInstallFailedFailure`,
+    so the durable ``daemon.boot.failed`` audit row could not tell a SECRETS
+    misconfig apart from a capability-gate seed/install fault — both read
+    ``boot_infra_install_failed``. This dedicated reason discriminates a secrets
+    problem in the durable ``daemon.boot.failed`` audit row (DB-queryable) and
+    the ``daemon.boot.failed`` hookpoint payload (devex dx-001). (The
+    ``alfred audit log`` CLI does not yet render a boot row's ``failure_reason``
+    column — its ``_row_reason`` reads a different subject key — so today the
+    discriminator is observable via the stored JSONB / hookpoint, not that CLI;
+    surfacing it there is tracked in #381.)
+
+    The OPERATOR-facing refusal message is UNCHANGED — it stays the exception's
+    own ``str(exc)`` carrying the concrete remedy (chmod 600 / move out of the
+    git repo / fix the TOML syntax); only the audit ``failure_reason`` changes
+    (``_refuse_boot``'s fixed-subject discriminator, #374). No extra fields: the
+    subtype detail (path / mode / parent) rides the operator message, never the
+    audit row (spec §5.6 — an audit field could echo a filesystem fragment).
+    """
+
+    failure_reason: Literal["secrets_config_failed"] = "secrets_config_failed"
 
 
 class QuarantineGrantMissingFailure(_BootFailureBase):
@@ -262,6 +293,7 @@ DaemonBootFailure = Annotated[
     | CapabilityGateHandshakeFailedFailure
     | QuarantineGrantMissingFailure
     | BootInfraInstallFailedFailure
+    | SecretsConfigFailedFailure
     | T3NonceRegistrationFailedFailure
     | QuarantineChildSpawnFailedFailure
     | CommsAdapterSpawnFailedFailure
@@ -273,6 +305,7 @@ DaemonBootFailure = Annotated[
 ]
 """Discriminated union over the daemon-boot refusal modes (spec §3.4 +
 ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
+#370 item 2 ``secrets_config_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + PR-S4-11b ``comms_adapter_spawn_failed`` +
 ADR-0031 ``comms_adapter_bind_failed`` +
