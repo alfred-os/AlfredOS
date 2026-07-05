@@ -12,7 +12,7 @@ from alfred.memory.models import Base
 
 @pytest.mark.integration
 async def test_schema_creates_episodes_and_audit_log() -> None:
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url, future=True)
         # try/finally so engine.dispose() always runs, even if create_all or

@@ -73,7 +73,7 @@ from alfred.security.tiers import T2, tag
 @pytest.mark.smoke
 async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     """One full turn through real Postgres + real migrations + PR-B wiring."""
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         # testcontainers returns a psycopg2 URL by default; convert to asyncpg
         # for SQLAlchemy's async engine, and override the Settings env vars
         # alembic/env.py reads from (env.py uses Settings().database_url, not

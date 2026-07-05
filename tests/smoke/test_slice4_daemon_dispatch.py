@@ -17,7 +17,7 @@ testcontainer (``.github/workflows/ci.yml``). The earlier compose approach
 was wrong on two counts: the service is named ``alfred-postgres`` (not
 ``alfred-pg``), and there is no stack to ``up`` in CI at all. We mirror the
 proven pattern in ``tests/smoke/test_hello_alfred.py``: a
-``PostgresContainer("postgres:16")`` context that testcontainers maps to a
+``PostgresContainer("postgres:18")`` context that testcontainers maps to a
 random ``localhost`` port. The daemon subprocess runs on the SAME host, so
 it reaches the container at that mapped port.
 
@@ -81,7 +81,7 @@ _PROPOSAL_PATH = f"policies/breaker-resets/{_PROPOSAL_ID}.json"
 @pytest.mark.smoke
 def test_daemon_boots_and_dispatches(tmp_path: Path) -> None:
     """End-to-end: alfred daemon start → merge proposal to main → dispatch fires."""
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         # testcontainers returns a SQLAlchemy-style URL
         # (``postgresql+psycopg2://...``). The daemon + ``alfred migrate``
         # need the asyncpg async-driver URL (see module docstring).

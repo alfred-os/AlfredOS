@@ -49,7 +49,7 @@ _INJECTION = "embedded T3 sub-payload content"
 
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:
-    with RedisContainer("redis:7") as container:
+    with RedisContainer("redis:8") as container:
         host = container.get_container_host_ip()
         port = container.get_exposed_port(6379)
         yield f"redis://{host}:{port}/0"

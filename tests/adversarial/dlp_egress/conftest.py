@@ -55,7 +55,7 @@ def postgres_url() -> Iterator[str]:
     the testcontainers default psycopg2 driver token to asyncpg so
     ``create_async_engine`` accepts the URL verbatim.
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         yield url
 

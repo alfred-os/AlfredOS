@@ -76,7 +76,7 @@ async def pg_engine() -> AsyncIterator[AsyncEngine]:
     immune to migration-shape drift; the migration-specific integration
     tests cover that axis separately.
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url)
         try:

@@ -101,7 +101,7 @@ async def test_build_orchestrator_drives_one_turn(
     monkeypatch: pytest.MonkeyPatch, recorded_router: MagicMock
 ) -> None:
     """``build_orchestrator`` → full graph → one real turn → non-empty reply."""
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         async_url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         sync_url = async_url.replace("+asyncpg", "+psycopg")
 

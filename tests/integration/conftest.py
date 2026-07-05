@@ -32,7 +32,7 @@ def postgres_url() -> Iterator[str]:
     async engine). Tests that need a sync handle use ``postgres_engine``
     below, which builds its own psycopg2-backed engine from the raw URL.
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         yield url
 

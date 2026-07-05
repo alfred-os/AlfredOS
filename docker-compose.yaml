@@ -17,7 +17,7 @@
 
 services:
   alfred-postgres:
-    image: postgres:16
+    image: postgres:18
     restart: unless-stopped
     # Credentials come from `.env` (see `.env.example`). Slice-1 default values
     # land via `${VAR:-default}` so a fresh checkout still boots locally; an
@@ -54,7 +54,7 @@ services:
   # performance cost of appendfsync always. Document this in the operator
   # runbook.
   alfred-redis:
-    image: redis:7
+    image: redis:8
     restart: unless-stopped
     command: >
       redis-server

@@ -97,7 +97,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -673,7 +673,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python arm64 job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -792,7 +792,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python cross-OS job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -851,7 +851,7 @@ jobs:
       # GHA service blocks, and (c) digest-pinning here would block
       # patch-level postgres/redis updates we want for security.
       postgres:
-        image: postgres:16  # zizmor: ignore[unpinned-images]
+        image: postgres:18  # zizmor: ignore[unpinned-images]
         env:
           POSTGRES_PASSWORD: postgres
         options: >-
@@ -861,7 +861,7 @@ jobs:
           --health-retries 10
         ports: ["5432:5432"]
       redis:
-        image: redis:7  # zizmor: ignore[unpinned-images]
+        image: redis:8  # zizmor: ignore[unpinned-images]
         ports: ["6379:6379"]
       qdrant:
         image: qdrant/qdrant:v1.12.4  # zizmor: ignore[unpinned-images]
@@ -884,7 +884,7 @@ jobs:
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/integration/**/*.py missing — skipping Integration job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
         run: uv sync --frozen --dev
@@ -1024,7 +1024,7 @@ jobs:
       # the patch-level postgres/redis security updates we want). All three
       # publish multi-arch manifests, so the arm64 variant is pulled here.
       postgres:
-        image: postgres:16  # zizmor: ignore[unpinned-images]
+        image: postgres:18  # zizmor: ignore[unpinned-images]
         env:
           POSTGRES_PASSWORD: postgres
         options: >-
@@ -1034,7 +1034,7 @@ jobs:
           --health-retries 10
         ports: ["5432:5432"]
       redis:
-        image: redis:7  # zizmor: ignore[unpinned-images]
+        image: redis:8  # zizmor: ignore[unpinned-images]
         ports: ["6379:6379"]
       qdrant:
         image: qdrant/qdrant:v1.12.4  # zizmor: ignore[unpinned-images]
@@ -1055,7 +1055,7 @@ jobs:
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/integration/**/*.py missing — skipping Integration arm64 job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
         run: uv sync --frozen --dev
@@ -1099,7 +1099,7 @@ jobs:
     #
     # APPROACH — `sudo`, NOT a `container:` job. The root-gated spawn legs
     # (`test_daemon_comms_inbound_turn.py`, `test_slice4_daemon_comms_spawn.py`)
-    # boot a `PostgresContainer("postgres:16")` via **testcontainers**, which
+    # boot a `PostgresContainer("postgres:18")` via **testcontainers**, which
     # needs the host Docker daemon. A `container:` job would sever access to the
     # runner's Docker socket (docker-in-docker is not set up), so testcontainers
     # would fail to start Postgres. Instead we stay on the bare `ubuntu-latest`
@@ -1155,7 +1155,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_spawn == 'true'
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv python install 3.14
@@ -1488,7 +1488,7 @@ jobs:
             echo "has_coverage_corpus=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/unit or tests/integration missing — skipping coverage-gates job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_coverage_corpus == 'true'
       - if: steps.check.outputs.has_coverage_corpus == 'true'
         run: uv python install 3.14
@@ -1922,7 +1922,7 @@ jobs:
             echo "has_smoke=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/smoke/**/*.py missing — skipping Smoke job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_smoke == 'true'
       - if: steps.check.outputs.has_smoke == 'true'
         run: uv python install 3.14

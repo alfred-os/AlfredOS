@@ -103,7 +103,7 @@ async def _applied_rows(sm: async_sessionmaker[AsyncSession]) -> list[AuditEntry
 
 async def test_every_partition_refuses_hot_reload(tmp_path: Path) -> None:
     """ADR-0023 §5: rate-limit, handle-cap, AND high-blast edits all refuse."""
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url, future=True)
         try:
