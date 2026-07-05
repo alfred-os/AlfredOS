@@ -300,15 +300,46 @@ def _secret_is_gitignored(repo: Path, secrets_path: Path) -> bool:
     1 = not ignored; 128 = fatal (not a repo, etc.) → treated as not-ignored.
     """
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "check-ignore", "--quiet", "--", str(secrets_path)],
+        # ruff S603/S607: fixed-literal git argv, no shell, no untrusted input —
+        # ``repo`` + ``secrets_path`` are operator-config paths (not T3 content),
+        # ``--`` guards a leading-dash path, and PATH-resolved ``git`` is the
+        # standard invocation (its absolute path is platform-variable). The
+        # suppression is scoped inline (NOT a per-file ignore) so a future
+        # subprocess in this security-critical module is still flagged.
+        result = subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), "check-ignore", "--quiet", "--", str(secrets_path)],  # noqa: S607
             capture_output=True,
             timeout=_GIT_CHECK_IGNORE_TIMEOUT_S,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        # Fail-closed, but LOUD (CLAUDE.md hard rule #7): a silent False here would
+        # surface as the generic "gitignore/move it" refusal with no hint git
+        # itself hung — misdirecting an operator who DID gitignore the secret.
+        _log.warning("secrets.gitignore_check_failed", reason="timeout", repo=str(repo))
         return False
-    return result.returncode == 0
+    except OSError as exc:
+        # git binary absent (FileNotFoundError) or another I/O failure invoking it.
+        _log.warning(
+            "secrets.gitignore_check_failed",
+            reason="git_unavailable",
+            detail=exc.strerror or type(exc).__name__,
+            repo=str(repo),
+        )
+        return False
+    if result.returncode == 0:
+        return True
+    if result.returncode != 1:
+        # exit 128 (fatal — not a repo, bad object, …) is distinct from a clean
+        # exit-1 "not ignored"; the latter is the normal refuse (the caller's
+        # refusal message covers it), so only the anomalous exit is logged.
+        _log.warning(
+            "secrets.gitignore_check_failed",
+            reason="git_error",
+            returncode=result.returncode,
+            repo=str(repo),
+        )
+    return False
 
 
 def _validate_secrets_file_security(path: Path) -> None:
@@ -467,16 +498,52 @@ class SecretBroker:
         if not allow_inside_git_worktree:
             git_parent = _walk_for_git_parent(self._secrets_file_path)
             if git_parent is not None:
-                raise SecretBrokerPermissionsError(
-                    t(
-                        "secrets.file_in_git_repo",
+                is_layer3 = self._secrets_path_layer == "settings_default"
+                if is_layer3 and _secret_is_gitignored(git_parent, self._secrets_file_path):
+                    # #366: the layer-3 canonical XDG default whose secret is
+                    # AUTHORITATIVELY gitignored — safe from accidental
+                    # ``git add -A``. Proceed, but WARN (defence-in-depth): a
+                    # future ``git add -f`` or a ``.gitignore`` edit could still
+                    # commit it. Only the settings-default layer reaches this
+                    # branch; kwarg / ALFRED_SECRETS_FILE keep the full
+                    # always-refuse walk (the operator explicitly named the path,
+                    # where a repo-clone drop is the real threat). Fail-closed: a
+                    # non-ignored secret, or git absent/error/timeout, falls to
+                    # the refusal below (``_secret_is_gitignored`` returns False).
+                    _log.warning(
+                        "secrets.file_in_git_repo_but_ignored",
                         path=str(self._secrets_file_path),
                         parent=str(git_parent),
-                    ),
-                    path=self._secrets_file_path,
-                    mode=0,
-                    parent=git_parent,
-                )
+                        residual_risk=(
+                            "gitignored now; a `git add -f` or a .gitignore edit "
+                            "could still commit it"
+                        ),
+                    )
+                else:
+                    # Branch the message by layer so each literal msgid is
+                    # extracted (pybabel takes the FIRST arg of ``t()`` as a
+                    # literal): the layer-3 refusal names the gitignore remedy
+                    # this narrowing enables; the kwarg / ALFRED_SECRETS_FILE
+                    # refusal does NOT (gitignoring an explicitly-named path does
+                    # not help — the operator chose that location).
+                    if is_layer3:
+                        message = t(
+                            "secrets.file_in_git_repo_layer3",
+                            path=str(self._secrets_file_path),
+                            parent=str(git_parent),
+                        )
+                    else:
+                        message = t(
+                            "secrets.file_in_git_repo",
+                            path=str(self._secrets_file_path),
+                            parent=str(git_parent),
+                        )
+                    raise SecretBrokerPermissionsError(
+                        message,
+                        path=self._secrets_file_path,
+                        mode=0,
+                        parent=git_parent,
+                    )
 
         # #370 item 1: convert the two raw exceptions the validate/load step can
         # still leak — malformed TOML and an escaping OSError — into typed
