@@ -69,7 +69,7 @@ ScannerFactory = Callable[..., InboundCanaryScanner]
 
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:
-    with RedisContainer("redis:7-alpine") as r:
+    with RedisContainer("redis:8-alpine") as r:
         yield f"redis://{r.get_container_host_ip()}:{r.get_exposed_port(6379)}"
 
 

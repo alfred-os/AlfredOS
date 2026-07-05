@@ -66,7 +66,7 @@ def postgres_sync_engine() -> Iterator[tuple[Engine, str]]:
     because the CLI is synchronous; the production async runtime uses
     a different URL prefix.
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         # testcontainers default URL uses ``postgresql+psycopg2``; the
         # production CLI consumes ``postgresql+psycopg`` (psycopg 3). The
         # sync driver shape parity matters: ``_list_breaker_states`` will

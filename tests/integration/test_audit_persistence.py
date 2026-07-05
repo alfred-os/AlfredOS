@@ -133,7 +133,7 @@ async def test_provider_failure_audit_row_survives_rollback() -> None:
     is the canonical English key ``"provider_call"`` (operator-readable
     even under a non-English operator language).
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url, future=True)
         try:
@@ -225,7 +225,7 @@ async def test_budget_block_audit_row_survives_rollback() -> None:
     ``language`` and ``actor_persona='alfred'``; ``subject["phase"]``
     stays ``"budget_pre_check"`` (canonical English key).
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url, future=True)
         try:

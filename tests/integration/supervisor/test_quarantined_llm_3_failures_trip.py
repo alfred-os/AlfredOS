@@ -64,7 +64,7 @@ async def async_session() -> AsyncIterator[AsyncSession]:
     test (``test_migration_0010_round_trip.py``) covers the alembic axis
     separately.
     """
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url, echo=False)
         try:

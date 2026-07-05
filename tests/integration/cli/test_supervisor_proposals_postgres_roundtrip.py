@@ -48,7 +48,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def postgres_sync_engine() -> Iterator[tuple[Engine, str]]:
     """Spin up Postgres; yield the sync engine + the asyncpg-rewritten URL."""
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         raw_url = pg.get_connection_url()
         sync_url = raw_url.replace("postgresql+psycopg2", "postgresql+psycopg")
         engine = create_engine(sync_url, future=True)

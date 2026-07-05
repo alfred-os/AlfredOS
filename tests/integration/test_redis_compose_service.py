@@ -19,7 +19,7 @@ from testcontainers.redis import RedisContainer
 
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:
-    with RedisContainer("redis:7") as r:
+    with RedisContainer("redis:8") as r:
         yield f"redis://{r.get_container_host_ip()}:{r.get_exposed_port(6379)}"
 
 

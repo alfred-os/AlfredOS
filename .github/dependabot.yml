@@ -24,7 +24,15 @@ updates:
         exclude-patterns: ["pydantic*", "mcp*"]
 
   - package-ecosystem: docker
-    directory: "/"
+    # "/" catches docker-compose.yaml (postgres/redis); "/docker" catches
+    # alfred-core.Dockerfile's `FROM debian:bookworm-slim` base — previously
+    # untracked because the Dockerfile lives under docker/, not the repo root.
+    directories:
+      - "/"
+      - "/docker"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      docker:
+        patterns: ["*"]

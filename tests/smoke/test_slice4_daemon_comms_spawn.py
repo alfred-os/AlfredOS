@@ -26,7 +26,7 @@ real assertion.
 Why a Postgres testcontainer (NOT ``docker compose``)
 -----------------------------------------------------
 Mirrors ``tests/smoke/test_slice4_daemon_dispatch.py``: the CI Smoke job has no
-compose stack, so a ``PostgresContainer("postgres:16")`` is mapped to a random
+compose stack, so a ``PostgresContainer("postgres:18")`` is mapped to a random
 ``localhost`` port the same-host daemon subprocess reaches. The daemon + ``alfred
 migrate`` consume the asyncpg URL; the test's direct audit probe is a short-lived
 psycopg2 connection.
@@ -113,7 +113,7 @@ _DAEMON_REQUIRES_QUARANTINE_SPAWN = not _HAS_BWRAP or not _IS_LINUX_ROOT or not 
 )
 def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
     """End-to-end: alfred daemon start with comms enabled -> adapter loaded row."""
-    with PostgresContainer("postgres:16") as pg:
+    with PostgresContainer("postgres:18") as pg:
         sa_url = pg.get_connection_url()
         async_url = sa_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
         psycopg2_url = sa_url.replace("postgresql+psycopg2://", "postgresql://")

@@ -7,7 +7,7 @@ Docker `internal: true` PRIMITIVE actually blocks egress + DNS while leaving the
 plane reachable — the two together close the chain "the core cannot egress."
 
 Deterministic by construction (required-lane flake discipline, rev-003): reuses the
-already-present `postgres:16` image (no anonymous Docker Hub pull), drives probes with
+already-present `postgres:18` image (no anonymous Docker Hub pull), drives probes with
 bash primitives, bounds every probe with `timeout`, and tears down in a finally.
 """
 
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-_IMAGE = "postgres:16"  # already pulled by testcontainers in the Integration lane
+_IMAGE = "postgres:18"  # already pulled by testcontainers in the Integration lane
 
 
 def _run(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -40,7 +40,7 @@ def _run(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
 def test_internal_network_blocks_egress_and_dns() -> None:
     # Ensure the image is present before we create the --internal network.
     # Without this pull, if this test runs before any testcontainers fixture has
-    # pulled postgres:16, the --internal network is already up and Docker cannot
+    # pulled postgres:18, the --internal network is already up and Docker cannot
     # reach Docker Hub to fetch the image (no route out), causing a collection-order
     # flake.  The network does not exist yet at this point, so the pull always
     # succeeds on the host-side daemon regardless of any later --internal flag.
