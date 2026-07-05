@@ -98,6 +98,10 @@ convenience and gits-pushes hours later. The broker fails at construction
 before the secret is read; the operator's deployment never works without
 moving the file, and the secret never reaches the commit history.
 
+> **Amended by #366** (see the amendment below): for the layer-3 host-default
+> path only, this refusal is now gitignore-aware — a provably-gitignored secret
+> boots with a warning; every other case (incl. git absent/error) still refuses.
+
 ### Typed error subtypes
 
 All extend `SecretBrokerConfigError(AlfredError)` (except `UnknownSecretError`,
@@ -185,6 +189,51 @@ redactor is not built at a construction failure — see the raise-site comments)
   will read + decrypt on every `get()` — comparable cost. Neither
   backend caches plaintext at the broker level (the `redact()` redactor
   cache is over derived patterns, not over decrypted plaintext).
+
+## Amendment — #366 (2026-07-05): gitignore-aware `.git`-walk for the layer-3 path
+
+The `### .git-in-parent refusal` above is an anti-accidental-commit defence.
+Once the layer-3 host default (`~/.config/alfred/secrets.toml`, #363) activated,
+the walk also applied there — where a versioned `~/.config` (dotfiles repo:
+chezmoi / yadm / bare-repo / GNU stow) makes the canonical secrets file a real
+commit vector the walk correctly catches, but the walk hard-refused even a
+correctly-`.gitignore`'d file (it checks for a `.git` dir only, never ignore
+status).
+
+For the **`settings_default` (layer-3) path only**, the refusal is now
+**gitignore-aware**: if the secret is authoritatively gitignored (`git
+check-ignore` — never a hand-rolled parser, whose false "ignored" verdict would
+be a security hole), the broker proceeds with a
+`secrets.file_in_git_repo_but_ignored` structlog WARNING (a future `git add -f`
+or `.gitignore` edit could still commit it); otherwise it refuses.
+**Fail-closed**: git absent / error / timeout → treat as not-ignored → refuse.
+The **constructor-kwarg** and **`ALFRED_SECRETS_FILE`** layers are UNCHANGED —
+full always-refuse walk (the operator explicitly named the path; a repo-clone
+drop is the real threat there).
+
+No case weakens the defence: an un-gitignored secret still refuses on every
+layer; the only behaviour change is allowing a **provably-gitignored** layer-3
+secret. This corrects the #366 "zero coverage" framing (the dotfiles-repo commit
+vector is real); options (a) stop-at-XDG-root and (b) warn-not-refuse were
+rejected because both drop the dotfiles-repo protection. Adversarial coverage:
+the `dlp_egress` corpus entry for a not-gitignored secret in a versioned repo.
+
+**New surface / consequences.** This adds the SecretBroker's first-ever
+subprocess dependency: `git` becomes a **soft, boot-time dependency on the
+layer-3 `.git`-ancestor path** (its absence is fail-closed → refuse, so it is
+never required to boot, but it IS the difference between refuse and
+gitignore-aware-allow there). The subprocess inherits `os.environ`, so `git`
+honours `GIT_CONFIG_*` / `core.excludesFile` / `GIT_DIR` — which is **correct**:
+it mirrors exactly what a real `git add` in that repo would (or would not)
+commit, i.e. the threat being modelled. The check fires only on the rare
+layer-3-secret-inside-a-repo path (the common no-`.git`-ancestor boot never
+spawns `git`), is 5s-timeout-bounded, and `check-ignore`'s index-consult means
+an already-tracked secret returns not-ignored → refuse.
+
+**Known limitation (pre-existing, #383).** `_walk_for_git_parent` detects the
+enclosing repo via a `.git`-**dir** check, so a secrets file inside a git
+secondary worktree or submodule (where `.git` is a **file**) escapes the refusal
+on all layers — pre-existing, not introduced by this amendment; tracked in #383.
 
 ## References
 

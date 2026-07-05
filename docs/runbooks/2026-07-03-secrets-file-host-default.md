@@ -36,15 +36,21 @@ constructor argument → `ALFRED_SECRETS_FILE` → this host default.
    the file value, to keep env-supplied tokens authoritative.
 
 3. **If `$HOME` (or `~/.config`) is a git repository** (e.g. a dotfiles repo): the broker
-   **refuses to start** when the resolved secrets file is inside a git working tree — a
-   defence against committing secrets. This now applies to the host-default path. Remedies:
+   guards against committing the secrets file. For the **host-default path**
+   (`~/.config/alfred/secrets.toml`), this is now **gitignore-aware** (#366, ADR-0012
+   amendment): if the file is authoritatively gitignored (`git check-ignore`) the broker
+   **boots** (with a `secrets.file_in_git_repo_but_ignored` warning); otherwise it **refuses**.
+   Remedies when refused:
+   - **add `~/.config/alfred/secrets.toml` to a `.gitignore`** in that repo (Alfred then boots
+     with a warning — the recommended fix for a dotfiles setup), **or**
    - set `ALFRED_SECRETS_FILE=<path outside any git repo>` (e.g. `/etc/alfred/secrets.toml`), **or**
    - remove `~/.config/alfred/secrets.toml`.
 
-   Note: adding the file to `.gitignore` does **not** satisfy the check — the guard refuses on
-   the presence of a `.git` directory in any ancestor, not on tracked-ness. (A follow-up,
-   [#366](https://github.com/alfred-os/AlfredOS/issues/366), proposes narrowing this walk for
-   the canonical XDG path.)
+   Notes: the narrowing is **fail-closed** — if `git` is absent / errors / times out, the broker
+   cannot confirm the ignore status and **refuses** (install `git`, or use one of the other
+   remedies). It applies **only** to the host-default path: a secrets file you point at explicitly
+   via `ALFRED_SECRETS_FILE` or a constructor arg keeps the full always-refuse walk (gitignoring an
+   explicitly-named path does not help — the operator chose that location).
 
 ## If you do not use the host-default file
 
