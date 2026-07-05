@@ -79,62 +79,17 @@ benchmark.json
 # the canonical content lives in .rulesync/rules/CLAUDE.md. Run
 # `rulesync generate -t '*' -f '*'` after cloning to populate locally.
 .memsearch/
-# Claude Code + generic agent files
 .claude/
 .mcp.json
 CLAUDE.md
 AGENTS.md
-# Per-tool outputs from `rulesync generate -t '*'`. Each block is one tool;
-# the .github/* entries are scoped on purpose — never blanket-ignore .github/,
-# which holds tracked workflows, CODEOWNERS, dependabot, and templates.
-.agent/
-.agents/
-.amp/
-.antigravity/
-.augment/
-.cline/
-.clinerules
-.codex/
-.copilot/
-.cursor/
-.cursorrules
-.deepagents/
-.devin/
-.factory/
+.github/copilot-instructions.md
 .gemini/
 GEMINI.md
-.github/agents/
-.github/copilot-instructions.md
-.github/hooks/
-.github/prompts/
-.github/skills/
-.goose/
-.goosehints
-.grok/
-.junie/
-.kilo/
-kilo.jsonc
-.kiro/
-.opencode/
-.opencode.json
-opencode.jsonc
-.pi/
-.qoder/
-QODER.md
-.qwen/
-QWEN.md
-.roo/
-.roomodes
-.rovodev/
-.rules
-.takt/
-.vibe/
-.warp/
-replit.md
-.windsurf/
-.windsurfrules
-WARP.md
-.zed/
+# Other AI tool outputs (uncomment / add if you start generating them locally)
+# .cursorrules
+# .cursor/
+# .clinerules
 
 # Secrets — never commit; see ADR-0012. The file-backed SecretBroker reads
 # from ~/.config/alfred/secrets.toml (host) or /etc/alfred/secrets.toml
@@ -143,9 +98,3 @@ WARP.md
 secrets.toml
 secrets.*.toml
 **/secrets.toml
-# Added by code-review-graph
-.code-review-graph/
-
-# graphify knowledge-graph output — regenerated locally via `graphify update .`.
-# The .graphifyignore / .code-review-graphignore config files stay tracked.
-graphify-out/
