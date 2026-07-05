@@ -111,3 +111,26 @@ def test_tool_models_are_frozen_and_forbid_extra() -> None:
         ToolDefinition(name="t", description="d", input_schema={}, bogus=1)  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
         td.name = "other"  # type: ignore[misc]
+
+
+def test_message_tool_role_requires_call_id() -> None:
+    with pytest.raises(ValidationError):
+        Message(role="tool", content="{}")  # missing tool_call_id
+
+
+def test_message_tool_call_id_only_on_tool_role() -> None:
+    with pytest.raises(ValidationError):
+        Message(role="user", content="x", tool_call_id="c1")
+
+
+def test_message_tool_calls_only_on_assistant() -> None:
+    call = ToolCall(id="c1", name="t", arguments={})
+    with pytest.raises(ValidationError):
+        Message(role="user", content="x", tool_calls=(call,))
+
+
+def test_completion_response_tool_use_requires_tool_calls() -> None:
+    with pytest.raises(ValidationError):
+        CompletionResponse(
+            content="", tokens_in=1, tokens_out=1, cost_usd=0.0, model="x", stop_reason="tool_use"
+        )

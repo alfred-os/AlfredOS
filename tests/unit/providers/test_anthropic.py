@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,6 +12,7 @@ from alfred.providers.base import (
     ForcedTool,
     Message,
     ProviderCapability,
+    ProviderToolUnsupportedError,
     ToolCall,
     ToolDefinition,
 )
@@ -197,3 +198,48 @@ async def test_anthropic_stop_reason_map(stop: str, expected: str) -> None:
 def test_anthropic_declares_tool_use() -> None:
     provider = AnthropicProvider(client=MagicMock(), model="claude-sonnet-4-6")
     assert ProviderCapability.TOOL_USE in provider.capabilities()
+
+
+@pytest.mark.asyncio
+async def test_plain_assistant_history_stays_a_string() -> None:
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=_anthropic_text_response())
+    provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
+    await provider.complete(
+        CompletionRequest(
+            messages=[
+                Message(role="user", content="hi"),
+                Message(role="assistant", content="hello"),
+                Message(role="user", content="again"),
+            ]
+        )
+    )
+    msgs = fake_client.messages.create.await_args.kwargs["messages"]
+    assert msgs[1] == {"role": "assistant", "content": "hello"}  # plain string, not a block list
+
+
+@pytest.mark.asyncio
+async def test_no_system_message_omits_system_kwarg() -> None:
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=_anthropic_text_response())
+    provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
+    await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    assert "system" not in fake_client.messages.create.await_args.kwargs  # not system=null
+
+
+@pytest.mark.asyncio
+async def test_anthropic_refuses_loud_when_model_lacks_tool_use() -> None:
+    # The guard is structurally unreachable today (Anthropic always declares
+    # TOOL_USE); patch capabilities() to pin the refuse-loud branch anyway.
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock()
+    provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
+    td = ToolDefinition(name="t", description="d", input_schema={})
+    with (
+        patch.object(provider, "capabilities", return_value=frozenset()),
+        pytest.raises(ProviderToolUnsupportedError),
+    ):
+        await provider.complete(
+            CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+        )
+    fake_client.messages.create.assert_not_awaited()  # refuse BEFORE building the request

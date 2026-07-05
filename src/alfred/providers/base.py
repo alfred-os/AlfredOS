@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from alfred.errors import AlfredError
 
@@ -136,8 +136,31 @@ class ProviderToolUnsupportedError(AlfredError):
 
 class ProviderMalformedToolArgumentsError(AlfredError):
     """A provider returned tool-call arguments that are not valid JSON (DeepSeek
-    returns arguments as a JSON *string*). Fail loud at the boundary; the PR3
-    loop turns this into an error ``tool_result`` (spec §4.3)."""
+    returns arguments as a JSON *string*). Fail loud at the boundary; the
+    act-phase loop (#339 PR3) turns this into an error ``tool_result``
+    (spec §4.3)."""
+
+
+def ensure_tool_capability(
+    *,
+    has_tools: bool,
+    capabilities: frozenset[ProviderCapability],
+    provider_name: str,
+    model: str,
+) -> None:
+    """Refuse loud when a request carries tools but the provider lacks TOOL_USE.
+
+    Shared by every adapter's ``complete()`` so this security-relevant
+    refuse-loud check (and its ``t()`` key) cannot drift between adapters
+    (spec §4.1). Raises before the request is built, so no un-answerable
+    request reaches the provider SDK.
+    """
+    if has_tools and ProviderCapability.TOOL_USE not in capabilities:
+        from alfred.i18n import t
+
+        raise ProviderToolUnsupportedError(
+            t("providers.tool_use_unsupported", provider=provider_name, model=model)
+        )
 
 
 class Message(BaseModel):
@@ -153,6 +176,19 @@ class Message(BaseModel):
     # construction is unchanged.
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
+
+    @model_validator(mode="after")
+    def _check_role_tool_fields(self) -> Message:
+        # Enforce the seam's linkage invariants at construction so a malformed
+        # Message fails loud here, not as an opaque provider 400 downstream
+        # (spec §4.2 result linkage). tool_call_id links a result to its call.
+        if self.role == "tool" and self.tool_call_id is None:
+            raise ValueError('a role="tool" message requires tool_call_id')
+        if self.role != "tool" and self.tool_call_id is not None:
+            raise ValueError('tool_call_id is only valid on a role="tool" message')
+        if self.tool_calls and self.role != "assistant":
+            raise ValueError("tool_calls are only valid on an assistant message")
+        return self
 
 
 class CompletionRequest(BaseModel):
@@ -195,6 +231,16 @@ class CompletionResponse(BaseModel):
     # the PR3 act-phase loop detects the model wants to call a tool (spec §4.2).
     stop_reason: StopReason = "end_turn"
     tool_calls: tuple[ToolCall, ...] = ()
+
+    @model_validator(mode="after")
+    def _tool_use_consistency(self) -> CompletionResponse:
+        # stop_reason="tool_use" with no tool_calls is the inconsistent state the
+        # act-phase loop (#339 PR3) branches on — reject it so a buggy adapter
+        # parse cannot produce it silently (spec §4.2). Adapters downgrade
+        # stop_reason to "other" when every tool_call was dropped.
+        if self.stop_reason == "tool_use" and not self.tool_calls:
+            raise ValueError('stop_reason="tool_use" requires non-empty tool_calls')
+        return self
 
     @field_validator("tokens_in", "tokens_out", "cost_usd")
     @classmethod

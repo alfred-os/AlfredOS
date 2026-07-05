@@ -92,3 +92,17 @@ async def test_router_does_not_fall_back_on_tool_unsupported() -> None:
             )
         )
     fallback.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_fall_back_on_malformed_tool_args() -> None:
+    from alfred.providers.base import ProviderMalformedToolArgumentsError
+
+    primary = MagicMock(name="primary")
+    primary.complete = AsyncMock(side_effect=ProviderMalformedToolArgumentsError("bad json"))
+    fallback = MagicMock(name="fallback")
+    fallback.complete = AsyncMock()
+    router = ProviderRouter(primary=primary, fallback=fallback)
+    with pytest.raises(ProviderMalformedToolArgumentsError):
+        await router.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    fallback.complete.assert_not_awaited()

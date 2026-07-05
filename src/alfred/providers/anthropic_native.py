@@ -27,18 +27,17 @@ from anthropic.types import (
 )
 from anthropic.types.tool_param import InputSchema
 
-from alfred.i18n import t
 from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
     ForcedTool,
     Message,
     ProviderCapability,
-    ProviderToolUnsupportedError,
     StopReason,
     ToolCall,
     ToolChoice,
     ToolDefinition,
+    ensure_tool_capability,
     register_provider,
 )
 
@@ -140,9 +139,12 @@ def _anthropic_messages(messages: list[Message]) -> list[MessageParam]:
 
     for m in messages:
         if m.role == "tool":
+            # The Message validator guarantees tool_call_id is set for role="tool";
+            # assert narrows the type and fails loud if that invariant is broken.
+            assert m.tool_call_id is not None
             pending.append(
                 ToolResultBlockParam(
-                    type="tool_result", tool_use_id=m.tool_call_id or "", content=m.content
+                    type="tool_result", tool_use_id=m.tool_call_id, content=m.content
                 )
             )
             continue
@@ -163,6 +165,10 @@ def _parse_anthropic_content(blocks: list[ContentBlock]) -> tuple[str, tuple[Too
             calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input))
         elif block.type == "text":
             text_parts.append(block.text)
+        else:
+            # thinking / other block types are not part of the tool-calling seam;
+            # log (no payload) so provider drift is observable, not a silent drop.
+            _log.debug("anthropic.content_block_ignored", block_type=block.type)
     return "".join(text_parts), tuple(calls)
 
 
@@ -222,23 +228,29 @@ class AnthropicProvider:
         )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
-        if request.tools and ProviderCapability.TOOL_USE not in self.capabilities():
-            raise ProviderToolUnsupportedError(
-                t("providers.tool_use_unsupported", provider=self.name, model=self._model)
-            )
+        ensure_tool_capability(
+            has_tools=bool(request.tools),
+            capabilities=self.capabilities(),
+            provider_name=self.name,
+            model=self._model,
+        )
         # Anthropic separates the system prompt from the conversation: it goes
         # on the top-level `system` kwarg, not in `messages`. Strip any system
-        # message out of the chat list and pass the first one's content
-        # through. None is a valid value when there is no system prompt.
+        # message out of the chat list and pass the first one's content through.
         system = next((m.content for m in request.messages if m.role == "system"), None)
         chat = _anthropic_messages([m for m in request.messages if m.role != "system"])
+        # kwargs is dict[str, Any] because tools/tool_choice/system are added
+        # conditionally; each value is an official anthropic param type.
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "system": system,
             "messages": chat,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
         }
+        # Omit `system` entirely when absent — the SDK contract is to leave it
+        # off, not to send `system: null`.
+        if system is not None:
+            kwargs["system"] = system
         # tool_choice="none" omits tools entirely (Anthropic has no first-class
         # "none"; not advertising the tools is the equivalent).
         if request.tools and request.tool_choice != "none":
@@ -248,12 +260,16 @@ class AnthropicProvider:
         # Parse text + tool_use blocks (no longer discards non-text blocks).
         text, tool_calls = _parse_anthropic_content(response.content)
         usage = response.usage
+        stop_reason: StopReason = _ANTHROPIC_STOP_REASON.get(response.stop_reason, "other")
+        if stop_reason == "tool_use" and not tool_calls:
+            # Defensive: keep the response consistent for the tool-use invariant.
+            stop_reason = "other"
         return CompletionResponse(
             content=text,
             tokens_in=usage.input_tokens,
             tokens_out=usage.output_tokens,
             cost_usd=_estimate_cost(self._model, usage.input_tokens, usage.output_tokens),
             model=self._model,
-            stop_reason=_ANTHROPIC_STOP_REASON.get(response.stop_reason, "other"),
+            stop_reason=stop_reason,
             tool_calls=tool_calls,
         )

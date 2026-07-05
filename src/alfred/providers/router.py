@@ -8,10 +8,15 @@ from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
     Provider,
+    ProviderMalformedToolArgumentsError,
     ProviderToolUnsupportedError,
 )
 
 _log = structlog.get_logger()
+
+# Provider tool-protocol errors are NOT transient provider failures, so the
+# router must NOT try the fallback on them (that would mask the real cause).
+_TOOL_PROTOCOL_ERRORS = (ProviderToolUnsupportedError, ProviderMalformedToolArgumentsError)
 
 
 class ProviderRouter:
@@ -24,11 +29,16 @@ class ProviderRouter:
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         try:
             return await self._primary.complete(request)
-        except ProviderToolUnsupportedError:
-            # A capability refusal is a loud operator-misconfiguration signal,
-            # NOT a transient failure — do NOT silently paper over it by using
-            # the fallback for every tool turn (spec §4.1; "no capability
-            # routing"). Re-raise so the caller sees the misconfiguration.
+        except _TOOL_PROTOCOL_ERRORS as tool_exc:
+            # A capability refusal is operator misconfiguration; a malformed
+            # tool-call response must reach the act-phase loop (#339 PR3) as an
+            # error tool_result. Blindly falling back would mask both (spec §4.1,
+            # §4.3). Log loud and re-raise rather than trying the fallback.
+            _log.warning(
+                "provider.tool_protocol_error",
+                primary=self._primary.name,
+                error_type=type(tool_exc).__name__,
+            )
             raise
         # Broad except is intentional at the fallback boundary: provider SDKs
         # raise different exception hierarchies across versions, and slice 1's

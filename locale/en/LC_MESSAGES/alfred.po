@@ -2867,18 +2867,19 @@ msgstr ""
 "Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h"
 " (look for dlp_scan_result=url_secret_refused)."
 
-#: src/alfred/providers/anthropic_native.py:227
-#: src/alfred/providers/deepseek.py:235
+#: src/alfred/providers/base.py:162
 msgid "providers.tool_use_unsupported"
 msgstr ""
 "Provider {provider} (model {model}) does not support tool use; refusing "
-"to advertise tools. Configure a tool-capable primary provider."
+"to advertise tools. Set a tool-capable primary provider in the routing "
+"config (for example an Anthropic model, or deepseek-chat rather than "
+"deepseek-reasoner)."
 
-#: src/alfred/providers/deepseek.py:171
+#: src/alfred/providers/deepseek.py:174 src/alfred/providers/deepseek.py:178
 msgid "providers.malformed_tool_arguments"
 msgstr ""
-"Provider {provider} (model {model}) returned tool-call arguments that are"
-" not valid JSON."
+"Provider {provider} (model {model}) returned malformed arguments (not a "
+"JSON object) for tool {tool}."
 
 #: src/alfred/security/_extract_dlp_subscriber.py:368
 msgid "security.quarantine.dlp_subscriber_registration_denied"
