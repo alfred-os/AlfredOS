@@ -77,7 +77,7 @@ Each criterion is binary; all must pass for v0.1.
         └──────────────────────────┬─────────────────────────────┘
                                    │ gateway socket transport (Spec A/B)
         ┌──────────────────────────▼─────────────────────────────┐
-        │             AGENTIC CORE (Python 3.12+)                 │
+        │             AGENTIC CORE (Python 3.14+)                 │
         │                                                         │
         │  ┌──────────────────────────────────────────────────┐   │
         │  │   PERSONA ROUTER (addressing / group session)    │   │
@@ -606,7 +606,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 
 Decisions captured during design (2026-05-24):
 
-- **DEC-001:** Core in Python 3.12+. Plugins polyglot via MCP.
+- **DEC-001:** Core in Python 3.14+ (pyproject floor `>=3.14.6`). Plugins polyglot via MCP.
 - **DEC-002:** Postgres + Redis + Qdrant as default datastores.
 - **DEC-003:** Hybrid plugin isolation — trusted in-process subprocess, untrusted in container.
 - **DEC-004:** Tiered routing with capability fallback; reviewer on a different provider.
