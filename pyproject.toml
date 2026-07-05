@@ -31,9 +31,9 @@ dependencies = [
   # pins the message-attribute + client-kwarg shape the adapter touches, so a
   # breaking minor trips immediately in CI. No upper cap (the lock tracks latest)
   # — but a discord.py 3.x major would need a coordinated adapter rewrite, so
-  # review that bump deliberately when CI surfaces it. NO
-  # ``[voice]`` extra — that pulls in PyNaCl + libsodium, which we don't need for
-  # DMs and which complicates the slim-wheel container.
+  # review that bump deliberately when CI surfaces it. No ``[voice]`` extra — it
+  # pulls in PyNaCl + libsodium, which we don't need for DMs and which
+  # complicates the slim-wheel container.
   "discord.py>=2.7.1",
   # PR D2 audit-DoS mitigation: per-snowflake LRU dedup of the unknown-DM
   # audit row uses cachetools.TTLCache. Slice-3+ may swap to a Redis-backed
