@@ -41,8 +41,10 @@ dependencies = [
   # shape.
   "cachetools>=7.1.4",
   # redis>=4.2 ships asyncio support in ``redis.asyncio`` natively (no extra
-  # needed); the GETDEL primitive exercised by ContentStore (spec §7.2, PR-S3-5)
-  # needs >=6.2. Floor kept at >=8.0.0 (latest major); no upper cap.
+  # needed). ContentStore (spec §7.2, PR-S3-5) uses the GETDEL command, which
+  # needs a Redis SERVER >=6.2 (the redis-py client method landed earlier); the
+  # deployed server is redis:8. Client floor kept at >=8.0.0 (latest major); no
+  # upper cap (the lock tracks latest).
   "redis>=8.0.0",
   # PR-S3-3a: transport-layer Prometheus histograms (spec §7a.1 — perf-002 /
   # perf-009). Four histograms cover the four p99 budgets the supervisor
@@ -52,8 +54,9 @@ dependencies = [
   "prometheus-client>=0.25.0",
   # PR-S3-5 (web.fetch): aiohttp is the HTTP client used by the
   # alfred-web-fetch plugin subprocess (plugins/alfred-web-fetch/
-  # web_fetch_plugin.py). Pinned >=3.9 because the plugin uses
-  # ``ClientTimeout(connect=..., sock_read=...)`` which landed in 3.9.
+  # web_fetch_plugin.py). The plugin needs >=3.9 for
+  # ``ClientTimeout(connect=..., sock_read=...)``; floor raised to >=3.14.1
+  # (latest) in this deps refresh. No upper cap (the lock tracks latest).
   "aiohttp>=3.14.1",
   # PR-S3-6 (err-002): GitPython powers the state.git grant-policy parser
   # (alfred.security.capability_gate._state_git_parser). The parser reads
@@ -148,6 +151,10 @@ testpaths = ["tests"]
 pythonpath = [".", "plugins/alfred_tui/src"]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
+# pytest-asyncio 1.x changed the UNSET default async-fixture loop scope to
+# function-scope. Pin it explicitly so a future broad-scope async fixture binds
+# deterministically under the new major (inert today — the DB fixtures are sync).
+asyncio_default_fixture_loop_scope = "function"
 markers = [
   "smoke: end-to-end smoke tests (require running stack)",
   "integration: integration tests requiring testcontainers",

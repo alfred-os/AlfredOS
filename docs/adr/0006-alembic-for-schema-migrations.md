@@ -43,5 +43,5 @@ The smoke test and the integration test **both** run `alembic upgrade head` agai
 
 ## Slice-2+ implications
 
-- pgvector usage (semantic memory in slice 4+) adds the `vector` extension via a migration: `CREATE EXTENSION IF NOT EXISTS vector;`. Test fixtures must boot a Postgres image with pgvector available (testcontainers' `pgvector/pgvector:pg16` image, not the vanilla `postgres:16` image).
+- pgvector usage (semantic memory in slice 4+) adds the `vector` extension via a migration: `CREATE EXTENSION IF NOT EXISTS vector;`. When that lands, test fixtures must boot a Postgres image with pgvector available (testcontainers' `pgvector/pgvector:pg18` image, not the vanilla `postgres:18` image). The current schema is pgvector-free, so the fixtures use vanilla `postgres:18` (base image bumped 16→18 per the 2026-07-05 upgrade runbook).
 - The audit log will grow large. Partitioning by month is a slice-5+ decision; document it in its own ADR when the time comes.

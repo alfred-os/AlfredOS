@@ -36,3 +36,12 @@ updates:
     groups:
       docker:
         patterns: ["*"]
+    ignore:
+      # Datastore MAJOR bumps are operator data-migration events (pg_upgrade /
+      # dump+restore; PGDATA-layout changes — see the postgres 16->18 runbook),
+      # not auto-mergeable. Keep them manual + runbook-gated. Patch/minor still
+      # flow through the weekly PR for security pickup.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]
