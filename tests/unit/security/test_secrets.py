@@ -430,6 +430,43 @@ def _git_init(repo: Path) -> None:
     _subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S603, S607
 
 
+def _git_c(cwd: Path, *args: str) -> None:
+    """Run ``git -C <cwd> <args>`` — the S603/S607 noqa site for fixture ``git -C``
+    calls (``git init`` / ``_git_init`` take no ``-C`` and keep their own noqa)."""
+    _subprocess.run(["git", "-C", str(cwd), *args], check=True)  # noqa: S603, S607
+
+
+def _worktree_with_secret(tmp_path: Path, *, gitignored: bool) -> Path:
+    """A real git SECONDARY WORKTREE (its ``.git`` is a FILE, not a dir) holding a
+    secret — the #383 shape the old ``.git``-dir-only walk missed. ``worktree add``
+    needs a commit; the inline ``-c user.*`` identity survives the devnull global
+    config the autouse fixture pins."""
+    main = tmp_path / "main"
+    main.mkdir()
+    _git_init(main)
+    _git_c(
+        main,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "init",
+    )
+    wt = tmp_path / "wt"
+    _git_c(main, "worktree", "add", "-q", str(wt))
+    assert (wt / ".git").is_file()  # the shape under test: .git is a FILE here
+    if gitignored:
+        (wt / ".gitignore").write_text("secrets.toml\n")
+    secret = wt / "secrets.toml"
+    secret.write_text('discord_bot_token = "x"\n')
+    secret.chmod(0o600)
+    return secret
+
+
 @pytest.fixture(autouse=True)
 def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate the real-git tests (#366) from the host's global/system git config.
@@ -577,6 +614,58 @@ class TestGitWalkNarrowing:
             SecretBroker(env={}, settings_default=secret)
 
 
+class TestGitFileWorktreeNarrowing:
+    """#383: a secret inside a git SECONDARY WORKTREE (``.git`` is a FILE) is now
+    caught by the walk and gets the #366 layer-3 gitignore-aware treatment —
+    proving the .git-FILE detection composes with the check-ignore narrowing."""
+
+    def test_layer3_gitignored_worktree_secret_boots(self, tmp_path: Path) -> None:
+        """A gitignored secret in a worktree boots — `git check-ignore` resolves
+        the worktree natively, so the layer-3 narrowing applies here too."""
+        secret = _worktree_with_secret(tmp_path, gitignored=True)
+        broker = SecretBroker(env={}, settings_default=secret)
+        assert broker.get("discord_bot_token") == "x"
+
+    def test_layer3_not_gitignored_worktree_secret_refuses(self, tmp_path: Path) -> None:
+        """A NOT-gitignored worktree secret refuses — the exact accidental-commit
+        vector that escaped the .git-dir-only walk before #383."""
+        secret = _worktree_with_secret(tmp_path, gitignored=False)
+        with pytest.raises(SecretBrokerPermissionsError) as exc_info:
+            SecretBroker(env={}, settings_default=secret)
+        # CR: pin the REASON (the .git-repo refusal), not just the exception type —
+        # a mode/ownership check firing first would be a false pass. The layer-3
+        # message names the gitignore remedy; a perms failure would not.
+        assert ".gitignore" in str(exc_info.value)
+
+    def test_kwarg_worktree_refuses_even_if_gitignored(self, tmp_path: Path) -> None:
+        """Parity with TestGitWalkNarrowing for the .git-FILE shape: the narrowing
+        is layer-3 ONLY, so an explicit kwarg path in a worktree still refuses even
+        gitignored — proving the always-refuse walk fires for a worktree too."""
+        secret = _worktree_with_secret(tmp_path, gitignored=True)
+        with pytest.raises(SecretBrokerPermissionsError):
+            SecretBroker(env={}, secrets_file=secret)
+
+    def test_env_worktree_refuses_even_if_gitignored(self, tmp_path: Path) -> None:
+        """ALFRED_SECRETS_FILE keeps the full always-refuse walk for a worktree."""
+        secret = _worktree_with_secret(tmp_path, gitignored=True)
+        with pytest.raises(SecretBrokerPermissionsError):
+            SecretBroker(env={"ALFRED_SECRETS_FILE": str(secret)})
+
+    def test_layer3_git_absent_worktree_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed for the worktree shape too: build the worktree first, then
+        git absent → check-ignore cannot confirm → refuse."""
+        secret = _worktree_with_secret(tmp_path, gitignored=True)
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(secrets_module.subprocess, "run", _raise)
+        with pytest.raises(SecretBrokerPermissionsError):
+            SecretBroker(env={}, settings_default=secret)
+
+
 class TestPermissionsCheck:
     def test_rejects_symlink(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
@@ -696,6 +785,26 @@ class TestGitWalk:
         path.parent.mkdir(parents=True)
         path.touch()
         assert _walk_for_git_parent(path) is None
+
+    def test_walk_for_git_parent_detects_git_file_worktree(self, tmp_path: Path) -> None:
+        """#383: a git secondary worktree / submodule has a ``.git`` FILE (a
+        ``gitdir:`` pointer), not a directory. The walk must still detect it —
+        otherwise a secret inside a worktree escapes the accidental-commit
+        refusal on every layer."""
+        path = tmp_path / "worktree" / "secrets.toml"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        # A real secondary-worktree .git file points at the shared gitdir.
+        (tmp_path / "worktree" / ".git").write_text("gitdir: /repo/.git/worktrees/wt\n")
+        assert _walk_for_git_parent(path) == tmp_path / "worktree"
+
+    def test_walk_for_git_parent_still_detects_git_dir(self, tmp_path: Path) -> None:
+        """Regression: the ordinary ``.git`` DIRECTORY case still resolves."""
+        path = tmp_path / "repo" / "secrets.toml"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        (tmp_path / "repo" / ".git").mkdir()
+        assert _walk_for_git_parent(path) == tmp_path / "repo"
 
     def test_walk_for_git_parent_bounded_by_max_depth(self, tmp_path: Path) -> None:
         # If the .git directory is deeper than max_depth ancestors, the walk

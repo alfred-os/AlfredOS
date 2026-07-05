@@ -265,14 +265,21 @@ def _resolve_secrets_path(
 
 
 def _walk_for_git_parent(path: Path, max_depth: int = _GIT_WALK_MAX_DEPTH) -> Path | None:
-    """Return the first ancestor of ``path`` containing a ``.git`` dir, or None.
+    """Return the first ancestor of ``path`` containing a ``.git`` marker, or None.
+
+    ``.git`` is matched by EXISTENCE, not directory-ness (#383): a git secondary
+    worktree or submodule has a ``.git`` *file* (a ``gitdir:`` pointer), not a
+    directory, and a secret dropped inside one is just as committable — so the
+    accidental-commit refusal must catch it too. ``git check-ignore`` (the #366
+    gitignore-aware narrowing) resolves worktrees natively, so the layer-3
+    narrowing composes correctly here.
 
     The bound on ``max_depth`` defends against pathological symlink loops.
     Stops at the filesystem root. Iterative (not recursive) for clarity.
     """
     current = path.parent
     for _ in range(max_depth):
-        if (current / ".git").is_dir():
+        if (current / ".git").exists():
             return current
         parent = current.parent
         if parent == current:
