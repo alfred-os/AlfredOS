@@ -71,7 +71,7 @@ AlfredOS/
 
 ## Tech stack
 
-- **Language (core):** Python 3.12+
+- **Language (core):** Python 3.14+ (pyproject floor `>=3.14.6` — see the CPython frozen-dataclass regression note there)
 - **Async runtime:** asyncio
 - **Plugins:** MCP (stdio for in-process, HTTP for remote) — polyglot
 - **Datastores:** Postgres 18 (+ pgvector when semantic memory lands), Redis 8, Qdrant
@@ -133,7 +133,7 @@ are aspirational on overall command surface).
 
 ### Coding conventions
 
-**Python work — use the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent.** It applies the full conventions in [`docs/python-conventions.md`](./docs/python-conventions.md) without being asked: modern Python 3.12+ idioms, SOLID + FP, Pydantic v2, SQLAlchemy 2.0 typed, async-first, strong typing (mypy strict + pyright), hypothesis property tests, structlog with redaction.
+**Python work — use the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent.** It applies the full conventions in [`docs/python-conventions.md`](./docs/python-conventions.md) without being asked: modern Python 3.14+ idioms, SOLID + FP, Pydantic v2, SQLAlchemy 2.0 typed, async-first, strong typing (mypy strict + pyright), hypothesis property tests, structlog with redaction.
 
 The headline rules — restated here so they're impossible to miss:
 
@@ -141,7 +141,7 @@ The headline rules — restated here so they're impossible to miss:
 - **DRY across skills/plugins** via shared utilities. Reviewer rejects copy-paste reimplementations.
 - **SOLID applied with judgment** — no premature abstractions; refactor on the second duplication, not the first.
 - **Strong typing.** No `Any` without justification. Pydantic models at all serialization boundaries. `mypy --strict` + `pyright`.
-- **Modern Python 3.12+.** PEP 604 unions (`X | Y`), PEP 585 built-in generics, PEP 695 generic syntax. Never `Optional[X]` or `typing.List`.
+- **Modern Python 3.14+.** PEP 604 unions (`X | Y`), PEP 585 built-in generics, PEP 695 generic syntax. Never `Optional[X]` or `typing.List`.
 - **Immutability by default.** Frozen dataclasses, frozen Pydantic, `Mapping` over `dict` for read-only inputs.
 - **Pure functions for transformations; classes for stateful machines.** Functional core, imperative shell.
 - **Async-first** in the core. Avoid blocking calls in async code. Structured concurrency via `asyncio.TaskGroup`.
