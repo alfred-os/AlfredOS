@@ -48,9 +48,14 @@ constructor argument → `ALFRED_SECRETS_FILE` → this host default.
 
    Notes: the narrowing is **fail-closed** — if `git` is absent / errors / times out, the broker
    cannot confirm the ignore status and **refuses** (install `git`, or use one of the other
-   remedies). It applies **only** to the host-default path: a secrets file you point at explicitly
-   via `ALFRED_SECRETS_FILE` or a constructor arg keeps the full always-refuse walk (gitignoring an
-   explicitly-named path does not help — the operator chose that location).
+   remedies). The refusal message says "could not confirm it is gitignored"; the precise reason
+   (`git_unavailable` / `timeout` / `git_error`) is in the `secrets.gitignore_check_failed` log.
+   The `.git` marker is matched as a **directory OR a file**, so a `~/.config` kept as a git
+   **worktree or submodule** (`.git` is a pointer file) is covered too (#383) — an upgrade from a
+   pre-#383 build may newly refuse such a setup until the secret is gitignored. It applies **only**
+   to the host-default path: a secrets file you point at explicitly via `ALFRED_SECRETS_FILE` or a
+   constructor arg keeps the full always-refuse walk (gitignoring an explicitly-named path does not
+   help — the operator chose that location).
 
 ## If you do not use the host-default file
 
