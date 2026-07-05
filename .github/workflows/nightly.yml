@@ -38,7 +38,7 @@ jobs:
             echo "has_e2e=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/e2e/conftest.py missing — skipping E2E job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_e2e == 'true'
       - if: steps.check.outputs.has_e2e == 'true'
         run: uv sync --frozen --dev
@@ -97,7 +97,7 @@ jobs:
             echo "has_adversarial=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/adversarial/conftest.py missing — skipping adversarial job."
           fi
-      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v3 latest
         if: steps.check.outputs.has_adversarial == 'true'
       - if: steps.check.outputs.has_adversarial == 'true'
         run: uv sync --frozen --dev
