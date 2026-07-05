@@ -63,6 +63,15 @@ This resolves the issue's apparent circular dependency ("#339 blocked-by
 real-turn-graduation" vs. "MVP: #338 depends on #339"): #339 builds the
 mechanism proven by fixtures; #338 does the live cutover.
 
+**Build order vs go-live order (these differ — do not conflate them).** The MVP
+scorecard's "#339 → #338 → #340" is a *criteria-unlock* ordering (which epic
+lights up which acceptance criterion), not a deploy sequence. The *go-live*
+constraint is the binding one: #339 lands first (mechanism), and #340's real
+quarantine child must be live **before** #338's live comms cutover, because a
+live tool turn routes T3 results through the quarantined LLM (§3) — shipping #338
+against the echo extractor would expose the very injection surface #340 closes. #338 and #340 may be *built* in either order after #339; only the
+cutover is ordered (#340 before #338). §12 and §15 restate this constraint.
+
 ## 3. The crux: the dual-LLM tool-result flow
 
 The textbook agentic loop feeds a raw tool result back to the planner. **We

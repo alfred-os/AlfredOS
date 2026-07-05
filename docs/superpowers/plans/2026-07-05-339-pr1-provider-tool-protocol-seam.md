@@ -457,6 +457,9 @@ _OPENAI_STOP_REASON: dict[str, StopReason] = {
 
 
 def _parse_openai_tool_calls(raw: Any, model: str) -> tuple[ToolCall, ...]:
+    # NOTE: SUPERSEDED by the official-SDK-types convention above — the shipped
+    # code types ``raw`` as ``list[ChatCompletionMessageToolCallUnion] | None``.
+    # The ``Any`` sketch below is retained only as the pre-directive fallback.
     # raw is Any: the OpenAI SDK response flows through ``self._client`` (typed
     # Any, no pinnable Protocol) — same justification as the ctor's ``client:
     # Any``. Typing it ``object`` here would break iteration/attr access under
@@ -718,6 +721,8 @@ _ANTHROPIC_STOP_REASON: dict[str, StopReason] = {
 
 
 def _parse_anthropic_content(blocks: Any) -> tuple[str, tuple[ToolCall, ...]]:
+    # NOTE: SUPERSEDED by the official-SDK-types convention above — the shipped
+    # code types ``blocks`` as ``list[ContentBlock]`` and narrows on ``block.type``.
     # blocks is Any for the same reason as _parse_openai_tool_calls: the SDK
     # response is Any via ``self._client``. Return type is concrete.
     text_parts: list[str] = []

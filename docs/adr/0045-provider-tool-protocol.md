@@ -69,6 +69,9 @@ structural invariant (the frozen provider contract), hence an ADR.
   here; it remains #340's concern.
 - No orchestrator/loop, tool-registry, or web.fetch wiring lands in PR1 — those
   are PR2/PR3 of the epic.
+- The live comms cutover (**#338**) is a separate epic, gated on #340's real
+  quarantine child before go-live (design spec §2); this seam neither blocks nor
+  unblocks it.
 
 ## Alternatives considered
 
