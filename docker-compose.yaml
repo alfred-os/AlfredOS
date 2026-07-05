@@ -30,6 +30,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-alfred}
       POSTGRES_USER: ${POSTGRES_USER:-alfred}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alfred}
+      # postgres:18 relocated the default PGDATA to /var/lib/postgresql/18/docker
+      # and moved its VOLUME up to /var/lib/postgresql. Pin PGDATA back to the
+      # mounted path so the named `alfred_pg_data` volume actually holds the
+      # cluster (otherwise pg18 writes to an anonymous volume — silent data loss
+      # on recreate) AND so pg18 sees an existing pg16 cluster here and refuses
+      # to boot (`database files are incompatible`) instead of initdb'ing a fresh
+      # empty one — the loud guard the upgrade runbook relies on.
+      PGDATA: /var/lib/postgresql/data
     ports:
       - "5432:5432"
     volumes:
