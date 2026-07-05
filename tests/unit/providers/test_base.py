@@ -10,7 +10,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from alfred.providers.base import CompletionRequest, CompletionResponse, Message
+from alfred.providers.base import (
+    CompletionRequest,
+    CompletionResponse,
+    ForcedTool,
+    Message,
+    ToolCall,
+    ToolDefinition,
+)
 
 
 class TestCompletionRequestValidators:
@@ -62,3 +69,45 @@ class TestCompletionResponseValidators:
         # Defends the budget guard: a negative cost would refund past spend.
         with pytest.raises(ValidationError, match="must be >= 0"):
             CompletionResponse(**self._ok_kwargs(cost_usd=-0.01))  # type: ignore[arg-type]
+
+
+def test_backcompat_plain_message_and_request_unchanged() -> None:
+    # Existing construction must be untouched: defaults fill the new fields.
+    m = Message(role="user", content="hi")
+    assert m.tool_calls == ()
+    assert m.tool_call_id is None
+    req = CompletionRequest(messages=[m])
+    assert req.tools == ()
+    assert req.tool_choice == "auto"
+    res = CompletionResponse(content="ok", tokens_in=1, tokens_out=1, cost_usd=0.0, model="x")
+    assert res.stop_reason == "end_turn"
+    assert res.tool_calls == ()
+
+
+def test_tool_role_and_tool_call_models() -> None:
+    call = ToolCall(id="c1", name="web.fetch", arguments={"url": "https://a.test"})
+    tool_msg = Message(role="tool", content='{"ok": true}', tool_call_id="c1")
+    asst = Message(role="assistant", content="", tool_calls=(call,))
+    assert tool_msg.role == "tool"
+    assert asst.tool_calls[0].name == "web.fetch"
+
+
+def test_request_carries_tools_and_forced_choice() -> None:
+    td = ToolDefinition(
+        name="web.fetch", description="fetch a URL", input_schema={"type": "object"}
+    )
+    req = CompletionRequest(
+        messages=[Message(role="user", content="x")],
+        tools=(td,),
+        tool_choice=ForcedTool(name="web.fetch"),
+    )
+    assert req.tools[0].name == "web.fetch"
+    assert isinstance(req.tool_choice, ForcedTool)
+
+
+def test_tool_models_are_frozen_and_forbid_extra() -> None:
+    td = ToolDefinition(name="t", description="d", input_schema={})
+    with pytest.raises(ValidationError):
+        ToolDefinition(name="t", description="d", input_schema={}, bogus=1)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        td.name = "other"  # type: ignore[misc]
