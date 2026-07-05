@@ -438,11 +438,14 @@ def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     ``core.excludesFile`` / system config — a contributor whose global excludes
     match ``secrets.toml`` or ``*.toml`` would flip the not-gitignored assertions
     (not-ignored → ignored). Point git at ``os.devnull`` for both scopes so the
-    subprocess sees only the repo-local ``.gitignore`` (test-eng review). Harmless
+    subprocess sees only the repo-local ``.gitignore`` (test-eng review). Also
+    drops any ``GIT_DIR`` / ``GIT_WORK_TREE`` repo override (CR #384). Harmless
     for the non-git tests in this module.
     """
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
 
 
 class TestSecretIsGitignored:
