@@ -97,6 +97,7 @@ from alfred.cli.daemon._failures import (
     EnvironmentNotSetFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
+    SecretsConfigFailedFailure,
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
 )
@@ -537,10 +538,13 @@ async def _start_async() -> None:
     # inside a git worktree) raises SecretBrokerConfigError. Unguarded, that
     # crashes uncaught out of _start_async as a raw traceback + exit 1, SKIPPING
     # the audited refusal every other boot-infra failure uses. Route it through
-    # the SAME audited path (exit 2 + a daemon.boot.failed row under the
-    # boot_infra_install_failed reason) so a misconfigured secrets file surfaces
-    # like a broken seed/install, not a stack trace. The OPERATOR-facing refusal
-    # message is the exception's own str(exc) — already t()-rendered and carrying
+    # the SAME audited path (exit 2 + a daemon.boot.failed row) under a DEDICATED
+    # secrets_config_failed reason (#370 item 2) so the durable audit row + the
+    # daemon.boot.failed hookpoint tell a secrets misconfig apart from a
+    # capability-gate seed/install fault, and so a misconfigured secrets file
+    # surfaces like a broken seed/install, not a stack trace. The OPERATOR-facing
+    # refusal message is the exception's own str(exc) — already t()-rendered and
+    # carrying
     # the concrete remedy (chmod 600 / move out of the git repo / create the
     # file) — so the operator is told it is a SECRETS problem, not sent hunting
     # the capability-gate/hook-registry rows the generic boot_infra message names
@@ -554,7 +558,7 @@ async def _start_async() -> None:
     except SecretBrokerConfigError as exc:
         await _refuse_boot(
             audit,
-            BootInfraInstallFailedFailure(),
+            SecretsConfigFailedFailure(),
             str(exc),
             boot_id=boot_id,
             environment_source=source,
@@ -625,11 +629,12 @@ async def _start_async() -> None:
             # secrets file (identical construction, runs first), so this arm is
             # unreachable TODAY — but guarding here makes the refusal LOCAL rather
             # than dependent on that positional ordering (CLAUDE.md hard rule #7).
-            # Same audited reason (a misconfigured secrets file is boot-infra) and
-            # the same str(exc) operator message (the actionable secrets remedy).
+            # Same dedicated secrets_config_failed reason as the outbound-dlp guard
+            # (a misconfigured secrets file is a secrets problem whichever build
+            # catches it) and the same str(exc) operator message (#370 item 2).
             await _refuse_boot(
                 audit,
-                BootInfraInstallFailedFailure(),
+                SecretsConfigFailedFailure(),
                 str(exc),
                 boot_id=boot_id,
                 environment_source=source,
