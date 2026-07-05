@@ -799,11 +799,13 @@ All terminal drop dispositions (admission failures and malformed bodies) share t
 
 `alfred audit log` now renders the drop reason and accepts a `--reason <value>` filter
 covering all forwarded-drop reasons. The `_row_reason` helper in `src/alfred/cli/audit.py`
-reads `subject.reason` for the receiver terminal drops; for the poison dead-letter it reads
-the `result` discriminator instead (`result="poisoned"` — the `comms.inbound.poisoned` row
-carries no `subject.reason`). The render and filter logic shipped in G6-7-5; the operator
-sees the full benefit once PR-S3-7 wires the `_query_audit_log` backend (currently a stub
-that raises rather than returning false-empty rows).
+reads `subject.reason` for the receiver terminal drops; falls back to `subject.failure_reason`
+for `daemon.boot.failed` rows (the `_refuse_boot` fixed-subject shape — #381); for the poison
+dead-letter it reads the `result` discriminator instead (`result="poisoned"` — the
+`comms.inbound.poisoned` row carries no `subject.reason`). The boot `failure_reason`s render in
+the REASON column but are not (yet) part of the `--reason` filter's closed set. The render and
+filter logic shipped in G6-7-5; the operator sees the full benefit once PR-S3-7 wires the
+`_query_audit_log` backend (currently a stub that raises rather than returning false-empty rows).
 
 #### Poison ceiling (item 4b)
 
