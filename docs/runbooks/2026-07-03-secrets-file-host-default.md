@@ -47,9 +47,11 @@ constructor argument → `ALFRED_SECRETS_FILE` → this host default.
    - remove `~/.config/alfred/secrets.toml`.
 
    Notes: the narrowing is **fail-closed** — if `git` is absent / errors / times out, the broker
-   cannot confirm the ignore status and **refuses** (install `git`, or use one of the other
-   remedies). The refusal message says "could not confirm it is gitignored"; the precise reason
-   (`git_unavailable` / `timeout` / `git_error`) is in the `secrets.gitignore_check_failed` log.
+   cannot confirm the ignore status and **refuses**. The refusal message says "could not confirm it
+   is gitignored"; check the `secrets.gitignore_check_failed` log for the precise reason and match
+   the remedy to it — `git_unavailable` → install `git` and retry; `timeout` / `git_error` → the
+   enclosing repo or git invocation failed (installing `git` won't help), so gitignore the file and
+   retry, or use another remedy (move it, or set `ALFRED_SECRETS_FILE`).
    The `.git` marker is matched as a **directory OR a file**, so a `~/.config` kept as a git
    **worktree or submodule** (`.git` is a pointer file) is covered too (#383) — an upgrade from a
    pre-#383 build may newly refuse such a setup until the secret is gitignored. It applies **only**
