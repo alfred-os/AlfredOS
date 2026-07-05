@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from alfred.providers.base import CompletionRequest, CompletionResponse, Message
+from alfred.providers.base import (
+    CompletionRequest,
+    CompletionResponse,
+    Message,
+    ProviderToolUnsupportedError,
+    ToolDefinition,
+)
 from alfred.providers.router import ProviderRouter
 
 
@@ -66,3 +72,23 @@ async def test_no_fallback_means_primary_errors_propagate() -> None:
     router = ProviderRouter(primary=primary, fallback=None)
     with pytest.raises(RuntimeError, match="upstream"):
         await router.complete(CompletionRequest(messages=[Message(role="user", content="hi")]))
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_fall_back_on_tool_unsupported() -> None:
+    # A capability refusal is a loud operator-misconfiguration signal, NOT a
+    # transient failure — the router must re-raise it, not silently use the
+    # fallback for every tool turn (spec §4.1; "no capability routing").
+    primary = MagicMock(name="primary")
+    primary.complete = AsyncMock(side_effect=ProviderToolUnsupportedError("no tools"))
+    fallback = MagicMock(name="fallback")
+    fallback.complete = AsyncMock()
+    router = ProviderRouter(primary=primary, fallback=fallback)
+    with pytest.raises(ProviderToolUnsupportedError):
+        await router.complete(
+            CompletionRequest(
+                messages=[Message(role="user", content="x")],
+                tools=(ToolDefinition(name="t", description="d", input_schema={}),),
+            )
+        )
+    fallback.complete.assert_not_awaited()

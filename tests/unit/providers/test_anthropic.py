@@ -11,6 +11,7 @@ from alfred.providers.base import (
     CompletionRequest,
     ForcedTool,
     Message,
+    ProviderCapability,
     ToolCall,
     ToolDefinition,
 )
@@ -191,3 +192,8 @@ async def test_anthropic_stop_reason_map(stop: str, expected: str) -> None:
         CompletionRequest(messages=[Message(role="user", content="x")])
     )
     assert res.stop_reason == expected
+
+
+def test_anthropic_declares_tool_use() -> None:
+    provider = AnthropicProvider(client=MagicMock(), model="claude-sonnet-4-6")
+    assert ProviderCapability.TOOL_USE in provider.capabilities()

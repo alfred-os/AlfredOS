@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-05 15:04+0100\n"
+"POT-Creation-Date: 2026-07-05 23:27+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2866,6 +2866,19 @@ msgstr ""
 "secret-bearing URL or sending a redacted URL the gateway cannot fetch. "
 "Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h"
 " (look for dlp_scan_result=url_secret_refused)."
+
+#: src/alfred/providers/anthropic_native.py:227
+#: src/alfred/providers/deepseek.py:235
+msgid "providers.tool_use_unsupported"
+msgstr ""
+"Provider {provider} (model {model}) does not support tool use; refusing to "
+"advertise tools. Configure a tool-capable primary provider."
+
+#: src/alfred/providers/deepseek.py:171
+msgid "providers.malformed_tool_arguments"
+msgstr ""
+"Provider {provider} (model {model}) returned tool-call arguments that are not "
+"valid JSON."
 
 #: src/alfred/security/_extract_dlp_subscriber.py:368
 msgid "security.quarantine.dlp_subscriber_registration_denied"

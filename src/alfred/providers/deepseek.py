@@ -35,6 +35,7 @@ from alfred.providers.base import (
     Message,
     ProviderCapability,
     ProviderMalformedToolArgumentsError,
+    ProviderToolUnsupportedError,
     StopReason,
     ToolCall,
     ToolChoice,
@@ -90,7 +91,7 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
 # ``prompt_embedded_fallback`` — the most-defensive branch and the same
 # fail-closed pattern the cost-pricing fallback above already uses.
 _DEEPSEEK_MODEL_CAPABILITIES: dict[str, frozenset[ProviderCapability]] = {
-    "deepseek-chat": frozenset({ProviderCapability.JSON_OBJECT_MODE}),
+    "deepseek-chat": frozenset({ProviderCapability.JSON_OBJECT_MODE, ProviderCapability.TOOL_USE}),
     "deepseek-reasoner": frozenset(),
 }
 _DEEPSEEK_DEFAULT_CAPABILITIES: frozenset[ProviderCapability] = frozenset()
@@ -229,6 +230,10 @@ class DeepSeekProvider:
         )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        if request.tools and ProviderCapability.TOOL_USE not in self.capabilities():
+            raise ProviderToolUnsupportedError(
+                t("providers.tool_use_unsupported", provider=self.name, model=self._model)
+            )
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": [_openai_message(m) for m in request.messages],
