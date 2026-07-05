@@ -2871,14 +2871,14 @@ msgstr ""
 #: src/alfred/providers/deepseek.py:235
 msgid "providers.tool_use_unsupported"
 msgstr ""
-"Provider {provider} (model {model}) does not support tool use; refusing to "
-"advertise tools. Configure a tool-capable primary provider."
+"Provider {provider} (model {model}) does not support tool use; refusing "
+"to advertise tools. Configure a tool-capable primary provider."
 
 #: src/alfred/providers/deepseek.py:171
 msgid "providers.malformed_tool_arguments"
 msgstr ""
-"Provider {provider} (model {model}) returned tool-call arguments that are not "
-"valid JSON."
+"Provider {provider} (model {model}) returned tool-call arguments that are"
+" not valid JSON."
 
 #: src/alfred/security/_extract_dlp_subscriber.py:368
 msgid "security.quarantine.dlp_subscriber_registration_denied"
