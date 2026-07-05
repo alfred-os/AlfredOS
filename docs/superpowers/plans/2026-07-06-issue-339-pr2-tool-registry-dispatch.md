@@ -52,9 +52,81 @@ Copied verbatim from CLAUDE.md / the epic spec (`docs/superpowers/specs/2026-07-
 
 ---
 
+## Plan-review fixes (2026-07-06) — FOLD THESE FIRST; they OVERRIDE the task bodies below
+
+A 6-reviewer plan-review fleet (architect, cross-cutting reviewer, test-engineer, security-engineer, core-engineer, provider-engineer) ran against this plan. **No Critical; the core HARD-#5 trust-boundary invariant is correct** (planner sees only the downgraded + DLP-scanned T2; the registry genuinely rejects off-allowlist ≤T2 specs; the gate is a real `RealGate` fixture, not a shim; `cap-2026-006` drives the REAL allowlist refusal). Apply the fixes below as you implement each task.
+
+**Open questions — RESOLVED (all reviewer-endorsed):** Q1 single `tool.dispatch` hookpoint → **YES** (per-tool GRANT granularity is a follow-up; web.fetch egress is separately bounded by its three-way allowlist). Q2 gate-deny recoverable → **YES** (authz-config state, not a boundary attack). Q3 echo-compatible `WebFetchExtraction({text, intent})` → **YES**; do NOT reuse `CommsBodyExtraction` (cross-subsystem coupling); keep the `TODO(#340)`. Q4 downgrade-denial escalation → **YES** (the second content-clearance gate saying no is a security refusal, symmetric with canary).
+
+**FIX-1 (High, Task 1 — hookpoint declaration).** `register_hookpoint(carrier_tier=None)` raises `HookError` for a non-meta hookpoint (`registry.py:715` — non-meta MUST set `carrier_tier`; only `_META_HOOKPOINT_NAMES` may be `None`). Do NOT mirror `declare_meta_hookpoints`. Mirror `security/capability_gate/proposals.py:declare_hookpoints`:
+```python
+# src/alfred/orchestrator/tool_hookpoints.py
+from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry, get_registry  # get_registry, NOT get_hook_registry
+from alfred.security.tiers import T0
+
+TOOL_DISPATCH_HOOKPOINT: Final[str] = "tool.dispatch"
+TOOL_DISPATCH_PLUGIN_ID: Final[str] = "alfred.orchestrator.tool_dispatch"
+
+def declare_tool_hookpoints(registry: HookRegistry | None = None) -> None:
+    target = registry if registry is not None else get_registry()
+    target.register_hookpoint(
+        name=TOOL_DISPATCH_HOOKPOINT,
+        subscribable_tiers=SYSTEM_ONLY_TIERS,
+        refusable_tiers=SYSTEM_ONLY_TIERS,
+        fail_closed=True,
+        carrier_tier=T0,   # system-internal dispatch gating — T0, matching proposals.py (NOT None, NOT T2)
+    )
+
+declare_tool_hookpoints()   # module-init eager registration (mirrors proposals.py:411) so the KNOWN_HOOKPOINTS import-sweep sync test passes
+```
+Task-1 Step 5: the `KNOWN_HOOKPOINTS` sync test passes via the eager `declare_tool_hookpoints()` call + the manifest entry (add `tool.dispatch` under `"alfred.orchestrator.tool_hookpoints"`); it is NOT an inline-expected-manifest edit. Verify the `HookRegistry(...)` ctor arg you pass in the Task-1 test against the real signature.
+
+**FIX-2 (High, Tasks 6/7/8 — audit-capture double).** `make_capturing_audit_writer`/`tests.helpers.audit` does NOT exist. Use `_CapturingAuditWriter` from `tests/helpers/egress_doubles.py` (its `append_schema(**kwargs)` appends `dict(kwargs)` to `.rows`). Assertions become `writer.rows[-1]["subject"]["dispatch_outcome"]` and `writer.rows[-1]["result"]` — NOT `cap.last.subject`/`cap.last.result`. Rewrite `_run` and every audit assertion in Tasks 6/7/8 accordingly.
+
+**FIX-3 (High, Tasks 6/7/8 — gate composition + production grant-seed).** `dispatch_tool`'s T3 Extracted branch crosses TWO gate surfaces: `gate.check(plugin_id=TOOL_DISPATCH_PLUGIN_ID, hookpoint="tool.dispatch", requested_tier="system")` AND (inside `downgrade_to_orchestrator`) `gate.check_content_clearance(plugin_id="t3.downgrade_to_orchestrator", hookpoint="t3.downgrade_to_orchestrator", content_tier="T3")`. `make_allow_system_gate` seeds only the first → the `dispatched`(T3) and `dlp_canary` branches wrongly route to `downgrade_denied`, killing 100% coverage. **Do NOT "fix" this with `make_permissive_fixture_gate`/an always-allow shim — that is a HARD-#2 gate-bypass (sec-001).** Add a composed helper to `tests/helpers/gates.py`:
+```python
+def make_tool_dispatch_gate(*, grant_downgrade: bool = True) -> CapabilityGate:
+    grants = {
+        GrantRow(plugin_id="alfred.orchestrator.tool_dispatch", subscriber_tier="system",
+                 hookpoint="tool.dispatch", content_tier=None, proposal_branch="test-fixture"),
+    }
+    if grant_downgrade:
+        grants.add(GrantRow(plugin_id="t3.downgrade_to_orchestrator", subscriber_tier="system",
+                            hookpoint="t3.downgrade_to_orchestrator", content_tier="T3",
+                            proposal_branch="test-fixture"))
+    return RealGate(policy=GatePolicy(grants=frozenset(grants)),
+                    backend=_make_in_memory_backend(grants=grants), audit_sink=_make_no_op_audit_sink())
+```
+Use `make_tool_dispatch_gate()` (both grants) for the T3 happy-path, dlp-canary, and Task-7 integration tests; `make_tool_dispatch_gate(grant_downgrade=False)` for a NEW `test_downgrade_denied_escalates` (grants dispatch, denies the downgrade clearance → `downgrade_denied` + escalation); `make_deny_all_gate()` for the gate-deny test.
+**PRODUCTION obligation (defer to PR3/#338, tracked WITH the #347 blockers):** `FIRST_PARTY_SYSTEM_GRANTS` (`_bootstrap_grants.py`) seeds ONLY `security.quarantined.extract` — NOT `tool.dispatch` NOR `t3.downgrade_to_orchestrator`. The live T3 path therefore fails-closed (loud `downgrade_denied` audit — not silent) until PR3 seeds BOTH first-party grants. PR2 is fixture-tested only, so this defers; the deferred-obligations list below names it and PR3's integration test MUST prove the seeded prod gate.
+
+**FIX-4 (High, Task 6 — escalation tests assert the audit row).** The canary / dlp-canary / downgrade-denied escalation tests currently only `pytest.raises`. Add the loud pre-raise audit-row assertion to each (the exact HARD-#7 property), e.g. after `pytest.raises(OutboundCanaryTripped)`: assert `writer.rows[-1]["subject"]["dispatch_outcome"] == "dlp_canary"` and `writer.rows[-1]["result"] == "quarantined"`.
+
+**FIX-5 (Medium, Task 6 — defensive escalating arm, sec-003).** An unexpected exception from `spec.dispatch` (a bug, a new error type, an un-enumerated canary) escapes `dispatch_tool` unaudited today. Add a final defensive arm to the dispatch `try` (placed LAST, after the specific recoverable/escalation arms) so HARD-#7 holds:
+```python
+    except Exception:
+        await _audit(dispatch_outcome="unexpected_error", result="fault", tool_name=spec.name, result_tier="T3")
+        raise
+```
+Add `"unexpected_error"` to `ToolDispatchOutcome` (Task 2); `result="fault"` is already in the closed vocab (no migration). A unit test drives a dispatch raising a novel exception and asserts the audited re-raise.
+
+**FIX-6 (Medium — `phase` audit-graph join, arch-002/§10).** §10 disambiguates dispatch rows by the `subject.phase` convention (`tool_dispatch:{tool}:{call_index}`). Add `"phase"` to `TOOL_DISPATCH_FIELDS` (Task 2 → 8 keys) and to the Task-6 `_audit` subject: `"phase": f"tool_dispatch:{tool_name}:{call_index}"`. Update the Task-2 closed-set test to expect 8 keys.
+
+**FIX-7 (Medium — constructor / path corrections).** `WebFetchDomainNotAllowed(domain="attacker.example.net")` — the ctor kwarg is `domain`, NOT `bucket` (`WebFetchRateLimited(bucket=...)` IS correct, `RateLimitBucket` literal). The CI gate file is `.github/workflows/ci.yml`, not `ci.yml`.
+
+**FIX-8 (Medium/Low — ADR + layering + test-double hygiene).** (a) ADR-0046 MUST frame the internal ≤T2 tool's DLP-skip under HARD-#4 (why a first-party ≤T2 tool output is trusted un-DLP-scanned while the T3-extracted path is always DLP-scanned). (b) `dispatch_tool` importing web_fetch-plugin-specific exceptions is a layering inversion acceptable for a one-tool PR — record a follow-up to a common tool-error taxonomy (arch-003). (c) The `_Schema`/test-double `ExtractionSchema` subclasses must use a real module-level `class …(ExtractionSchema): schema_version: ClassVar[Literal[1]] = 1` (not an in-body `from typing import` + stringized annotation) — mirror `CommsBodyExtraction` (prov-004/rev-008). (d) The `except AlfredError` around `downgrade_to_orchestrator` is tightly scoped to the downgrade call only (downgrade raises bare `AlfredError` SOLELY on clearance-deny per `quarantine.py:1498`) — add a one-line comment noting the deliberate breadth (sec-004).
+
+**Deferred obligations (carry to PR3/#338, alongside the #347 blockers):** seed the `tool.dispatch` + `t3.downgrade_to_orchestrator` first-party grants (FIX-3); source `User.language` onto the audit/T2 rows (#347-3); the live-relay `TimeoutError`/`in_doubt` cross-layer audit test (#347-2); the per-user resource bound (#347-1); broker auth (#347-4).
+
+**M4 security verdict (sec-005, requires_human_judgment):** PR2 is **NOT** the first live `dispatch_web_fetch` caller (no production wiring of `build_tool_registry`; `dispatch_web_fetch` still has zero prod callers), so #347 blockers 1-4 correctly defer to PR3/#338 — contingent on (a) PR-time re-verification that nothing wired it live, and (b) PR3 carrying the `in_doubt`/language/downgrade-grant-seed obligations. Obtain the one-line human M4 sign-off before merge.
+
+**Low / notes:** flat 5-module layout under `orchestrator/` is retained (mirrors `burst_limiter.py`; a `tools/` subpackage is a Low arch-004 nicety, deferred); `language` is threaded through `dispatch_tool` but intentionally NOT in the PR2 audit row (PR3 sources `User.language`); `WebFetchExtraction`'s `_schema_identity` folds name+version not fields — a latent #340 dedup-identity note (prov-003).
+
+---
+
 ## File Structure
 
-New modules (all under `src/alfred/orchestrator/`, sibling to `core.py` per the placement analysis — start flat, graduate to a package only if it grows):
+New modules (all under `src/alfred/orchestrator/`, sibling to `core.py` — mirrors the focused-helper `burst_limiter.py`; start flat, graduate to a `tools/` subpackage only if it grows):
 
 - `tool_hookpoints.py` — `TOOL_DISPATCH_HOOKPOINT`, `TOOL_DISPATCH_PLUGIN_ID`, `declare_tool_hookpoints()` (mirrors `security/capability_gate/proposals.py:declare_hookpoints`).
 - `tool_registry.py` — `ToolInvocation`, `ExternalToolSpec`, `InternalToolSpec`, `ToolSpec` (union), `ToolRegistry`, `FIRST_PARTY_LE_T2_TOOL_ALLOWLIST`, `arguments_conform()`.
