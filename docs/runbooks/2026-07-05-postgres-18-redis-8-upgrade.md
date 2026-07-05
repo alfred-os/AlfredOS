@@ -54,9 +54,13 @@ pulling the new image.
 #    (compose prefixes the project dir) and verify it before deleting — a
 #    substring match could hit another project's volume:
 docker compose down
-vol="$(docker compose config --volumes | grep -x alfred_pg_data \
-  && basename "$(pwd)")_alfred_pg_data"      # e.g. alfredos_alfred_pg_data
-docker volume ls --format '{{.Name}}' | grep -Fx "$vol"   # confirm it prints exactly this one
+# Confirm the compose volume is declared, then build the EXACT project-prefixed
+# name (compose prefixes with the project dir) as a separate step — do not fold
+# the check into the assignment:
+docker compose config --volumes | grep -qx alfred_pg_data \
+  || { echo "no 'alfred_pg_data' volume in this compose project — aborting"; exit 1; }
+vol="$(basename "$(pwd)")_alfred_pg_data"                  # e.g. alfredos_alfred_pg_data
+docker volume ls --format '{{.Name}}' | grep -Fx "$vol"   # prints exactly this one volume
 docker volume rm "$vol"
 
 # 3. Pull postgres:18 and start ONLY the DB so initdb builds a fresh pg18 cluster:
