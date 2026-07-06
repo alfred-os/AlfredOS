@@ -143,6 +143,17 @@ for the operator-facing runbook.
 > The `handle_cap.py` module remains in-tree for its `canary_scanner.py` consumer;
 > the runbook below applies to any remaining non-`web.fetch` consumers of `HandleCap`.
 
+> **[2026-07-06 — #339 PR4a update]** Both residuals above are now closed (re-purposed,
+> not reverted — see ADR-0047). `HandleCap` is re-attached to `dispatch_web_fetch` as a
+> per-user *concurrency* bound: the dispatcher reserves a slot before the network fire
+> and releases it in a `finally` on every exit path. Separately, the inbound-reflection
+> canary is now armed by default: a core-side token source,
+> `Settings.web_fetch_canary_tokens` (env `ALFRED_WEB_FETCH_CANARY_TOKENS` — distinct
+> from the gateway's outbound `ALFRED_CANARY_TOKENS`, which stays hard-forbidden on the
+> core container), feeds `build_web_fetch_egress_extractor`'s `ResponsePolicy.canary`,
+> which is never `None` for a factory-built extractor. See
+> [ADR-0047](../adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md).
+
 **Audit vocabulary widening (handle-cap + dispatch-params PRs).** Closed
 vocabularies on `WEB_FETCH_FIELDS` widened across two trust-boundary PRs —
 operators with SIEM filters MUST extend their allow-lists:

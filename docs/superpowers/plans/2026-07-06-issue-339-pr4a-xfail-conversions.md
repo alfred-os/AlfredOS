@@ -216,10 +216,12 @@ A 4-lens focused plan-review (security / test / error / cross-cutting) ran again
 ### Task A1: `Settings.web_fetch_canary_tokens` core-side token source
 
 **Files:**
+
 - Modify: `src/alfred/config/settings.py` (field near `redis_url` line 120; validator near the `_normalize_egress_relay_url` block line 380-393)
 - Test: `tests/unit/config/test_settings.py` (confirm the exact settings unit-test path first — `ls tests/unit/config/`; if none, create `tests/unit/config/test_settings_canary_tokens.py`)
 
 **Interfaces:**
+
 - Produces: `Settings.web_fetch_canary_tokens: tuple[str, ...]` (default `()`), env `ALFRED_WEB_FETCH_CANARY_TOKENS` parsed as a comma-separated list (blanks skipped). Consumed by Task A2's `_resolve_web_fetch_canary`.
 
 - [ ] **Step 1: Write the failing test**
@@ -313,10 +315,12 @@ git commit -m "feat(config): add ALFRED_WEB_FETCH_CANARY_TOKENS core-side canary
 ### Task A2: Factory derives a non-`None` `CanaryMatcher` from settings
 
 **Files:**
+
 - Modify: `src/alfred/plugins/web_fetch/assembly.py` (imports; new `_resolve_web_fetch_canary`; the `response_policy` build at lines 174-183; the docstring residual block lines 130-153, 177-181)
 - Test: `tests/unit/plugins/web_fetch/test_assembly.py` (confirm the exact path — `ls tests/unit/plugins/web_fetch/`; if none, create `tests/unit/plugins/web_fetch/test_assembly_canary.py`)
 
 **Interfaces:**
+
 - Consumes: `Settings.web_fetch_canary_tokens` (Task A1); `CanaryMatcher` / `CanaryToken` from `alfred.security.canary_matcher`.
 - Produces: `build_web_fetch_egress_extractor(...)` now yields an `EgressResponseExtractor` whose `_response_policy.canary` is ALWAYS non-`None` (empty no-op matcher when no tokens; populated when tokens set). `_resolve_web_fetch_canary(settings) -> CanaryMatcher` is a module function.
 
@@ -471,10 +475,12 @@ git commit -m "feat(web-fetch): derive inbound canary from settings; arm the Res
 ### Task A3: Convert the `de-2026-012` xfail → in-process reflected-canary test
 
 **Files:**
+
 - Modify: `tests/adversarial/dlp_egress/test_de_egress_inbound_canary_unwired.py` (the xfail stub `test_inbound_canary_unwired_deferred_to_339`, lines 76-167)
 - Modify: `tests/adversarial/dlp_egress/de_egress_inbound_canary_unwired.yaml` (`payload.deferred_property.merge_blocker`)
 
 **Interfaces:**
+
 - Consumes: `EgressResponseExtractor`, `ResponsePolicy`, `CanaryMatcher`/`CanaryToken`, the `_StubRelayClient` / `_StubLedger` in-process double pattern from `test_egress_no_orphan_and_inflight.py`, `make_quarantined_extract_chain_gate`, `T3BodyRecorder`/`QuarantineStagingMap`, `authorized_t3_nonce`.
 
 Background (read before writing): the pre-extract seam in `EgressResponseExtractor.handle` runs `inspect_response` on the fetched body when `_response_policy is not None`; a `_CanaryHit` records a terminal `TypedRefusal(reason="refused_by_safety")` to the ledger, then raises `InboundCanaryTripped` — the quarantined extractor is NEVER awaited (canary is pre-extract). Corpus token to reuse: `ALFRED-CANARY-TEST-TOKEN-8675309` (already in the YAML at line 48).
@@ -596,9 +602,11 @@ git commit -m "test(adversarial): convert de-2026-012 xfail to real reflected-ca
 ### Task A4: Factory-wiring integration proof (settings token → real relay → trip)
 
 **Files:**
+
 - Create: `tests/integration/egress/test_web_fetch_canary_wiring.py`
 
 **Interfaces:**
+
 - Consumes: `build_web_fetch_egress_extractor` (Task A2), the loopback-relay harness pattern from `tests/integration/egress/test_web_fetch_assembly.py` (boot at lines 129-159; `_query_row` at 105-116; `_settings` at 99-103), the `fake_external_world` fixture + its mutable `canned` body holder, `migrated_url`, `authorized_t3_nonce`.
 
 Rationale: Task A3 proves the canary-scan *behaviour* with a hand-built policy; A4 proves the *production wiring* — that a token in `Settings.web_fetch_canary_tokens` reaches the factory-built `ResponsePolicy.canary` and trips over a real loopback relay + real Postgres ledger. This is the "test is the proof" closure for the settings→factory path (#338 wires the live caller).
@@ -680,10 +688,12 @@ git commit -m "test(egress): prove settings-derived web.fetch canary trips over 
 ### Task B1: Re-add `handle_cap_exceeded` to the audit vocab
 
 **Files:**
+
 - Modify: `src/alfred/audit/audit_row_schemas.py` (`DlpScanResult` Literal, lines 50-70)
 - Modify: `tests/unit/audit/test_audit_row_schemas.py` (`test_dlp_scan_result_literal_includes_new_values`, the set at lines 375-392)
 
 **Interfaces:**
+
 - Produces: `"handle_cap_exceeded"` is a legal `DlpScanResult` token again (Task B3's Step 3b refusal audit uses it). `RateLimitBucket` already includes `"handle_cap"` (line 44) — no change there.
 
 - [ ] **Step 1: Write the failing test**
@@ -729,9 +739,11 @@ git commit -m "feat(audit): re-add handle_cap_exceeded dlp_scan_result token (#3
 ### Task B2: Reservation-TTL backstop constant
 
 **Files:**
+
 - Modify: `src/alfred/plugins/web_fetch/constants.py`
 
 **Interfaces:**
+
 - Produces: `_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS: Final[int]` — the ZSET member self-heal TTL Task B3 passes to `HandleCap.try_reserve`.
 
 - [ ] **Step 1: Add the constant + export**
@@ -768,10 +780,12 @@ git commit -m "feat(web-fetch): add handle-cap reservation TTL backstop constant
 ### Task B3: Reinstate the per-user reserve/release in `dispatch_web_fetch`
 
 **Files:**
+
 - Modify: `src/alfred/plugins/web_fetch/fetch_dispatcher.py` (imports; signature line 182-197; Step 3b insert after line 395; wrap Step 4+5 lines 397-520 in `try/finally`)
 - Test: `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py`
 
 **Interfaces:**
+
 - Consumes: `HandleCap` (`alfred.plugins.web_fetch.handle_cap`), `_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS` (Task B2), `handle_cap_exceeded` (Task B1).
 - Produces: `dispatch_web_fetch(..., handle_cap: HandleCap, ...)` — reserves a per-user slot before the network fire and releases it on every exit path. On `WebFetchRateLimited("handle_cap")` from `try_reserve`, emits a `WEB_FETCH_FIELDS` audit row (`rate_limit_bucket="handle_cap"`, `dlp_scan_result="handle_cap_exceeded"`, `result="rate_limited"`) then re-raises pre-network.
 
@@ -927,11 +941,13 @@ git commit -m "feat(web-fetch): reinstate per-user handle_cap reserve/release in
 ### Task B4: Thread `handle_cap` through the assembly
 
 **Files:**
+
 - Modify: `src/alfred/orchestrator/builtin_tools.py` (`build_web_fetch_tool`, lines 68-108; imports)
 - Modify: `src/alfred/orchestrator/tool_assembly.py` (`build_tool_registry`, lines 66-130; imports)
 - Test: extend the existing unit tests for `build_web_fetch_tool` / `build_tool_registry` (find them: `grep -rl build_web_fetch_tool tests/unit`)
 
 **Interfaces:**
+
 - Consumes: `HandleCap`, Task B3's `dispatch_web_fetch(handle_cap=...)`.
 - Produces: `build_web_fetch_tool(..., handle_cap: HandleCap, ...)` forwards to `dispatch_web_fetch`; `build_tool_registry(..., handle_cap: HandleCap, ...)` forwards to `build_web_fetch_tool` (mirrors the existing `rate_limiter` parameter exactly).
 
@@ -979,10 +995,12 @@ git commit -m "feat(orchestrator): thread handle_cap through build_tool_registry
 ### Task B5: Convert the `de-2026-004` per-user-exhaustion xfail → real in-process refusal test
 
 **Files:**
+
 - Modify: `tests/adversarial/dlp_egress/test_egress_no_orphan_and_inflight.py` (`test_per_user_exhaustion_refusal_deferred_to_339`, lines 453-513)
 - Modify: `tests/adversarial/dlp_egress/egress_inflight_and_no_orphan.yaml` (`deferred_property.merge_blocker`; confirm the exact key path with `grep -n merge_blocker` on the file)
 
 **Interfaces:**
+
 - Consumes: `dispatch_web_fetch` (Task B3), a fake HandleCap (the xfail docstring sanctions "a real OR fake Redis handle-cap"), a fire-spy extractor that raises if called, `WebFetchRateLimited`, `WEB_FETCH_FIELDS` audit tokens.
 
 Rationale: this adversarial file is deliberately dependency-free (no Postgres/Docker — see its module docstring). Keep it so: prove the *refusal path* deterministically with a fake HandleCap that refuses the Nth reserve; the Redis-atomicity proof lives in Task B6 (integration). Both are release-blocking; both need `alfred-security-engineer` sign-off.
@@ -1052,9 +1070,11 @@ git commit -m "test(adversarial): convert de-2026-004 xfail to real per-user han
 ### Task B6: Redis-backed per-user exhaustion atomicity proof
 
 **Files:**
+
 - Create: `tests/integration/egress/test_handle_cap_exhaustion.py`
 
 **Interfaces:**
+
 - Consumes: the real `HandleCap(redis_url=...)` (`alfred.plugins.web_fetch.handle_cap`), the `redis_url` testcontainers fixture pattern (`tests/integration/orchestrator/conftest.py:76-79` — `RedisContainer("redis:8-alpine")`).
 
 Rationale: Task B5 proves the dispatcher's refusal path with a fake cap; B6 proves the REAL Lua-atomic per-user bound holds under concurrency against a live Redis 8 — the property the fake cannot prove (that 5 concurrent `try_reserve` succeed and the 6th is refused atomically, and `release` frees a slot).
@@ -1126,6 +1146,7 @@ git commit -m "test(egress): Redis-backed per-user handle_cap exhaustion atomici
 ## Task Y: ADR — record the ADR-0041 reversal (FIX-4)
 
 **Files:**
+
 - Create: `docs/adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md` (or, if the maintainer prefers, a dated factual amendment appended to `docs/adr/0041-web-fetch-fused-fetch-extract-contract.md` — decide at PR time with the architect).
 
 **Interfaces:** none (documentation of a structural-invariant change). ADRs are NOT human-gated (only `CLAUDE.md`/`PRD.md` are — self-improvement rule #4), so authoring this is in-remit; but the structural change itself wants architect/user sign-off at PR time.
@@ -1133,6 +1154,7 @@ git commit -m "test(egress): Redis-backed per-user handle_cap exhaustion atomici
 - [ ] **Step 1: Write the ADR**
 
 Record two coupled decisions, both landed by #339 PR4a:
+
 1. **`HandleCap` is re-attached to `dispatch_web_fetch`** — this REVERSES ADR-0041 Decision 2 (lines 56-59: "HandleCap is detached ... no longer reserved or released by `dispatch_web_fetch`"). Frame it as a **re-purpose, not a straight undo**: the reserve is now a pure per-user *concurrency* bound in the fused fetch+extract model (the T3 body stages in-memory transiently, not as a Redis ContentHandle), whereas Decision 2 detached a *parked-body* handle bound. Context: #347 blocker 1 restored per-user fairness (the `alfred-security-engineer` D3 dissent was reconciled by G7-2.5's zero-exposure window, not by solving the property; PR4a solves it). Consequence: `handle_id` is a synthetic ZSET member; the old host-side handle_id-equality / `WebFetchHandleIdMismatch` check does not return.
 2. **The inbound-reflection canary residual (ADR-0041 lines 117-122) is closed** — the core-side `ALFRED_WEB_FETCH_CANARY_TOKENS` source + `_resolve_web_fetch_canary` make `ResponsePolicy.canary` non-`None` from the factory; the gateway keeps its distinct outbound scanner (`ALFRED_CANARY_TOKENS`).
 
@@ -1154,10 +1176,12 @@ git commit -m "docs(adr): ADR-0047 handle_cap re-attach + inbound canary; amend 
 ## Task Z: Full verification, i18n drift, integration-caller fixups, docs
 
 **Files:**
+
 - Modify: `tests/integration/orchestrator/test_tool_assembly.py`, `tests/integration/orchestrator/test_act_loop_real_chain.py` (add the `handle_cap=` arg to their `build_tool_registry(...)` calls — construct a real `HandleCap(redis_url=redis_url)` from the existing `redis_url` fixture, or a permissive fake if those tests don't exercise the cap)
 - Modify: `docs/subsystems/security.md` and/or `docs/subsystems/comms.md` — a factual note that the web.fetch inbound canary + per-user handle_cap are wired (not a status flip; keep human-gated docs untouched — CLAUDE.md/PRD/ADR status changes are human-gated)
 
 **Interfaces:**
+
 - Consumes: everything above.
 
 - [ ] **Step 1: Fix the `build_tool_registry` integration callers**
@@ -1187,6 +1211,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy src/ && uv run pyright src/
 uv run pytest tests/unit -q
 ```
+
 Expected: all clean. (Full `tests/unit` — the audit AST/lockstep guards and any tree-wide assertion on the `DlpScanResult` shape only surface in the full unit run, not a scoped subset.)
 
 - [ ] **Step 4: Adversarial suite (release-blocking — two corpus entries converted)**
@@ -1194,6 +1219,7 @@ Expected: all clean. (Full `tests/unit` — the audit AST/lockstep guards and an
 ```bash
 uv run pytest tests/adversarial -q
 ```
+
 Expected: PASS, with the two converted entries now green (no XFAIL/XPASS). If Docker-gated integration adversarial entries skip locally, note it and rely on CI.
 
 - [ ] **Step 5: `make check`**
@@ -1201,6 +1227,7 @@ Expected: PASS, with the two converted entries now green (no XFAIL/XPASS). If Do
 ```bash
 make check; echo "exit=$?"
 ```
+
 Expected: `exit=0`. (macOS integration lane can be flaky under load — verify any suspect in isolation, trust Linux CI.)
 
 - [ ] **Step 6: Docs note + commit**
@@ -1217,6 +1244,7 @@ git commit -m "test(egress): thread handle_cap into integration callers; wiring 
 ## Self-Review
 
 **Spec coverage (against #347 blockers 1 & 5 + the two xfails):**
+
 - Blocker 5 / `de-2026-012` canary: core-side token source (A1) → factory derivation (A2) → xfail conversion (A3) → wiring proof (A4). ✔
 - Blocker 1 / `de-2026-004` handle_cap: audit token (B1) → TTL constant (B2) → dispatcher reserve/release (B3) → assembly threading (B4) → xfail conversion (B5) → Redis atomicity proof (B6). ✔
 - Both YAML `merge_blocker` flags flipped (A3, B5). ✔
@@ -1227,6 +1255,7 @@ git commit -m "test(egress): thread handle_cap into integration callers; wiring 
 **Type consistency:** `handle_cap: HandleCap` param name is identical across `dispatch_web_fetch` (B3), `build_web_fetch_tool` (B4), `build_tool_registry` (B4). `_resolve_web_fetch_canary(settings) -> CanaryMatcher` and `Settings.web_fetch_canary_tokens: tuple[str, ...]` are consistent A1↔A2. `handle_cap_exceeded` token identical across B1 (schema), B3 (emit), B5 (assert).
 
 **Open risks flagged for plan-review:**
+
 1. The B5 in-process "hold 5 slots then refuse the 6th" needs the `asyncio.gather` + gated-extractor structure (a sequential loop would release each slot in `finally` before the next reserves). Called out inline.
 2. The reservation TTL (120s) is a judgement value — plan-review/security should sanity-check it against the 30s action deadline.
 3. A4 asserts `"refused_by_safety" in row["response"]` — confirm the canary path stores the `TypedRefusal` JSON in the ledger `response` column (verified against agent grounding: terminal `refused_by_safety` recorded before raise) before relying on the substring.
