@@ -433,8 +433,13 @@ class TestActLoopFanoutCap:
 
 
 class TestActLoopMaxIterations:
-    """The for-else + monotonic ``call_index`` across iterations are now
-    REACHABLE now that dispatch actually runs (Task 3)."""
+    """The monotonic ``call_index`` across iterations is REACHABLE now that
+    dispatch actually runs (Task 3). The terminal iteration (``iteration ==
+    MAX_TOOL_ITERATIONS - 1``) is guarded to stop BEFORE dispatch — a further
+    tool request on that iteration can never be fed back to a re-completion,
+    so dispatching would be wasted egress/spend/call_index (PR3 fix2 batch,
+    #399). This replaced the old trailing ``for...else`` clause, which is now
+    unreachable and has been removed."""
 
     async def test_max_iterations_reached(self, monkeypatch: Any) -> None:
         monkeypatch.setattr(loop_constants, "MAX_TOOL_ITERATIONS", 2)
@@ -442,7 +447,10 @@ class TestActLoopMaxIterations:
         router = MagicMock()
         router.complete = AsyncMock(return_value=forever)
 
+        dispatch_calls: list[ToolCall] = []
+
         async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            dispatch_calls.append(call)
             return "r"
 
         monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
@@ -457,7 +465,42 @@ class TestActLoopMaxIterations:
         reply = await _drive_turn(orch)
 
         assert reply == t("orchestrator.tool.max_iterations_reached")
+        # Both iterations still complete (0 and the terminal iteration 1) —
+        # the guard stops dispatch, not the completion itself.
         assert router.complete.await_count == 2
+        # Iteration 0 dispatches; iteration 1 (MAX_TOOL_ITERATIONS - 1, the
+        # terminal iteration) does NOT — its results could never be fed back.
+        assert len(dispatch_calls) == 1
+
+    async def test_max_iterations_one_never_dispatches(self, monkeypatch: Any) -> None:
+        """``MAX_TOOL_ITERATIONS=1``: iteration 0 IS the terminal iteration —
+        the guard fires before ANY dispatch on the model's very first
+        tool-use request, so ``dispatch_tool`` is never called at all."""
+        monkeypatch.setattr(loop_constants, "MAX_TOOL_ITERATIONS", 1)
+        forever = _tool_use_response(ToolCall(id="c", name="clock.now", arguments={}))
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=forever)
+
+        dispatch_calls: list[ToolCall] = []
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            dispatch_calls.append(call)
+            return "r"
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+        )
+
+        reply = await _drive_turn(orch)
+
+        assert reply == t("orchestrator.tool.max_iterations_reached")
+        assert router.complete.await_count == 1
+        assert dispatch_calls == []
 
 
 class TestActLoopSyntheticRefusalEpisodicCost:

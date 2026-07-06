@@ -280,10 +280,13 @@ each iteration's tool dispatch runs through this same `dispatch_tool` chokepoint
 proven by the fixture unit tests plus a live integration test
 (`tests/integration/orchestrator/test_act_loop_real_chain.py`, real Postgres +
 Redis). Production `_bootstrap.py`/`build_orchestrator` does not yet wire the
-registry into the daemon's live-turn assembly — #338 does that. The three
-first-party grants this flow needs (`tool.dispatch`, `quarantine.dereference`,
-`t3.downgrade_to_orchestrator`) are seeded at boot by
-`src/alfred/security/capability_gate/_bootstrap_grants.py`.
+registry into the daemon's live-turn assembly — #338 does that. Three
+ADDITIONAL first-party grants this flow needs (`tool.dispatch`,
+`quarantine.dereference`, `t3.downgrade_to_orchestrator`) are seeded at boot
+by `src/alfred/security/capability_gate/_bootstrap_grants.py`, alongside
+the pre-existing `security.quarantined.extract` DLP-subscriber grant
+(issue #158) — the module seeds four first-party grants in total, not
+three.
 
 See [docs/subsystems/plugins.md](plugins.md) for the quarantined LLM
 transport and process isolation contract.

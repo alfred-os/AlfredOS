@@ -37,8 +37,9 @@ from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.hooks.capability import CapabilityGate
 from alfred.security.canary_matcher import CanaryMatcher
+from alfred.security.capability_gate._bootstrap_grants import FIRST_PARTY_SYSTEM_GRANTS
 from alfred.security.capability_gate._gate import RealGate
-from alfred.security.capability_gate.policy import GatePolicy, GrantRow
+from alfred.security.capability_gate.policy import GatePolicy
 from alfred.security.dlp import OutboundDlp
 from tests.helpers.egress_doubles import (
     _await_relay_ready,
@@ -109,19 +110,28 @@ def _assembly_gate() -> CapabilityGate:
     ``make_tool_dispatch_gate()`` returns (no re-derivation / drift risk) plus
     one additional ``GrantRow``, mirroring the composed-gate precedent in
     ``tests/integration/cli/daemon/test_chat_gateway_socket_turn.py``.
+
+    The third grant (``quarantine.dereference``) is DERIVED from
+    ``FIRST_PARTY_SYSTEM_GRANTS`` rather than hand-rolled — that constant now
+    seeds the exact same row at boot (see
+    ``src/alfred/security/capability_gate/_bootstrap_grants.py``), so
+    sourcing it here means the test fixture and production seed can never
+    drift apart on ``plugin_id`` / ``subscriber_tier`` / ``hookpoint`` /
+    ``content_tier`` (the fields the gate actually matches on —
+    ``proposal_branch`` is an audit-trail field only, so borrowing
+    production's value here is harmless).
     """
     base = make_tool_dispatch_gate()
     assert isinstance(base, RealGate)
-    grants = set(base._policy.grants)
-    grants.add(
-        GrantRow(
-            plugin_id="alfred.quarantined-llm",
-            subscriber_tier="system",
-            hookpoint="quarantine.dereference",
-            content_tier="T3",
-            proposal_branch="test-fixture",
-        )
+    dereference_grant = next(
+        (g for g in FIRST_PARTY_SYSTEM_GRANTS if g.hookpoint == "quarantine.dereference"),
+        None,
     )
+    assert dereference_grant is not None, (
+        "quarantine.dereference grant missing from FIRST_PARTY_SYSTEM_GRANTS"
+    )
+    grants = set(base._policy.grants)
+    grants.add(dereference_grant)
     frozen_grants = frozenset(grants)
     return RealGate(
         policy=GatePolicy(grants=frozen_grants),

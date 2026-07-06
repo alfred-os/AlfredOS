@@ -327,7 +327,13 @@ def test_dynamic_result_sites_are_documented() -> None:
       task 6 shifted both line numbers again by pre-initializing
       ``estimate: float = 0.0`` immediately before the loop (a pyright
       possibly-unbound fix, no behavioural change) — the site shapes are
-      still unchanged.
+      still unchanged. The PR3 fix2 batch (#399 second review batch) added a
+      terminal-iteration guard between the fan-out cap check and the tool
+      dispatch (so the final iteration stops instead of dispatching
+      un-feedable results) and removed the now-unreachable trailing
+      ``for...else`` clause — a net +9 lines ABOVE the completed-row site
+      only (the provider_call:{iteration} site sits above the new guard and
+      is unaffected); the site shapes themselves are still unchanged.
     * all others route through enumerated lookups / ``IfExp`` over in-domain
       constants / forwarded typed params.
 
@@ -375,8 +381,12 @@ def test_dynamic_result_sites_are_documented() -> None:
             # again (1013 -> 1034) by widening the truncation helper, adding the
             # `answer_from_provider` episodic-cost gate, and replacing the three
             # narrowing asserts with one explicit `if ... raise` — the site
-            # itself is unchanged.
-            "src/alfred/orchestrator/core.py:1034",
+            # itself is unchanged. The PR3 fix2 batch (#399 second review
+            # batch) shifted it again (1034 -> 1043) by inserting the
+            # terminal-iteration dispatch guard above it and deleting the
+            # now-unreachable trailing `for...else` clause (net +9 lines) —
+            # the site itself is still unchanged.
+            "src/alfred/orchestrator/core.py:1043",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already

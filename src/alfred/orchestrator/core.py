@@ -925,6 +925,20 @@ class Orchestrator:
                 final_exit_reason = "too_many_tool_calls"
                 break
 
+            # --- FINAL iteration: a further tool request cannot be fed back
+            #     (there is no next completion to consume the results), so
+            #     dispatching here would incur real egress + spend + a
+            #     consumed call_index for results we would then have to
+            #     discard. Stop now instead (spec §9 max-iterations bound).
+            #     This guard makes the trailing `for...else` unreachable —
+            #     every path through the loop body now breaks — so that
+            #     clause is REMOVED below rather than left as dead code. ---
+            if iteration == loop_constants.MAX_TOOL_ITERATIONS - 1:
+                final_content = t("orchestrator.tool.max_iterations_reached")
+                final_result_token = "refused"  # noqa: S105 -- FIX-1: in-domain (NOT "max_iterations_reached")
+                final_exit_reason = "max_iterations_reached"
+                break
+
             # --- echo the assistant's tool-request turn into the EPHEMERAL
             #     local transcript (discarded after the turn; never persisted
             #     to working memory or episodic — only the final answer is). ---
@@ -971,11 +985,6 @@ class Orchestrator:
                         content=_truncate_tool_result(result_t2),
                     )
                 )
-        else:
-            # Loop exhausted MAX_TOOL_ITERATIONS without a terminal answer.
-            final_content = t("orchestrator.tool.max_iterations_reached")
-            final_result_token = "refused"  # noqa: S105 -- FIX-1: in-domain (NOT "max_iterations_reached")
-            final_exit_reason = "max_iterations_reached"
 
         # final_response is None ONLY on the iteration-0 pre-check raise / provider
         # failure paths, which do not reach here (they raise). So it is populated
