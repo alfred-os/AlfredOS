@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-06 15:33+0100\n"
+"POT-Creation-Date: 2026-07-06 19:23+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2914,7 +2914,7 @@ msgstr ""
 "the host-side reservation. This indicates a plugin defect. Inspect the "
 "audit log: alfred audit log --event tool.web.fetch --since 1h."
 
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:294
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:313
 msgid "web.fetch.error.url_secret_refused"
 msgstr ""
 "web.fetch refused: the request URL was redacted by the outbound DLP scan "
