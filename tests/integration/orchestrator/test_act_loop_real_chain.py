@@ -345,6 +345,15 @@ async def test_loop_drives_real_web_fetch_then_clock_then_answers(
             # test_tool_assembly.py's proof uses.
             mock_extractor.extract.assert_awaited_once()
     finally:
-        await rate_limiter.close()
-        await handle_cap.aclose()
-        await engine.dispose()
+        # CR trivial: guard each close INDEPENDENTLY — a failure in
+        # ``rate_limiter.close()`` must not skip ``handle_cap.aclose()`` /
+        # ``engine.dispose()`` (nested try/finally mirrors the
+        # shutdown/serve_task + engine.dispose() nesting in
+        # ``test_web_fetch_assembly.py``).
+        try:
+            await rate_limiter.close()
+        finally:
+            try:
+                await handle_cap.aclose()
+            finally:
+                await engine.dispose()

@@ -23,6 +23,8 @@ invariants are the production wiring + the gate-first crossing, not the LLM call
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -46,7 +48,7 @@ from alfred.security.quarantine import Extracted, ExtractionSchema, T3DerivedDat
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.dlp import identity_outbound_dlp
-from tests.helpers.egress_doubles import _await_relay_ready, _NullAuditWriter
+from tests.helpers.egress_doubles import _await_relay_ready, _FakeClient, _NullAuditWriter
 from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
 
 pytestmark = pytest.mark.integration
@@ -117,23 +119,32 @@ async def _query_row(migrated_url: str, egress_id: str) -> dict[str, Any] | None
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
-    migrated_url: str,
-    authorized_t3_nonce: CapabilityGateNonce,
-    monkeypatch: pytest.MonkeyPatch,
-    fake_external_world: tuple[Any, Any, Any],
-) -> None:
-    """The factory-assembled extractor fetch+extracts → Extracted, reusing the graph."""
-    open_client_factory, fire_counter, _canned = fake_external_world
+@asynccontextmanager
+async def _loopback_relay(
+    open_client_factory: Callable[[], _FakeClient],
+) -> AsyncIterator[int]:
+    """Boot a real loopback ``EgressRelay`` (upstream faked via
+    ``open_client_factory``) bound to this module's ``_FAKE_ALLOWLIST``.
 
-    # --- Boot a real loopback gateway EgressRelay (upstream faked). -----------
+    Reviewer-fix DRY extraction (#339 PR4a): the three tests below each
+    inlined an ~35-line copy of this boot + teardown dance. Models
+    ``boot_loopback_relay`` in ``tests/integration/orchestrator/conftest.py``,
+    trimmed to what THIS module's tests need — ``open_client_factory`` /
+    ``fire_counter`` / ``canned`` already arrive from the shared
+    ``fake_external_world`` fixture (unlike the orchestrator conftest helper,
+    which calls ``make_fake_external_world()`` itself), so only the bound
+    ``port`` need be yielded here.
+
+    Tears the relay down on exit (including when an exception propagates
+    through the ``async with`` block): signals ``shutdown``, then awaits
+    ``serve_task`` with a 5s timeout — identical teardown semantics to the
+    inline versions this replaces.
+    """
     srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
     port: int = srv.sockets[0].getsockname()[1]
     srv.close()
     await srv.wait_closed()
 
-    # No canary tokens on the gateway DLP — the benign body must forward cleanly.
     gateway_dlp = OutboundDlp(
         broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
     )
@@ -150,14 +161,29 @@ async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
     )
     shutdown = asyncio.Event()
     serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
-    # Tear the serve task down if readiness times out / the relay fails at startup
-    # — otherwise ``shutdown`` is never set below and ``serve_task`` leaks.
     try:
         await _await_relay_ready(port, serve_task)
     except BaseException:
         shutdown.set()
         await asyncio.wait_for(serve_task, timeout=5)
         raise
+
+    try:
+        yield port
+    finally:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
+    migrated_url: str,
+    authorized_t3_nonce: CapabilityGateNonce,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_external_world: tuple[Any, Any, Any],
+) -> None:
+    """The factory-assembled extractor fetch+extracts → Extracted, reusing the graph."""
+    open_client_factory, fire_counter, _canned = fake_external_world
 
     # --- The daemon quarantine-graph components (reused, never re-spawned). ----
     staging = QuarantineStagingMap()
@@ -178,68 +204,65 @@ async def test_assembled_extractor_completes_fetch_extract_reusing_graph(
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     try:
-        assembled = build_web_fetch_egress_extractor(
-            settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
-            gate=gate,
-            extractor=mock_extractor,
-            recorder=recorder,
-            outbound_dlp=identity_outbound_dlp(),
-            audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
-            session_scope=lambda: session_scope(factory),
-        )
+        async with _loopback_relay(open_client_factory) as port:
+            assembled = build_web_fetch_egress_extractor(
+                settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
+                gate=gate,
+                extractor=mock_extractor,
+                recorder=recorder,
+                outbound_dlp=identity_outbound_dlp(),
+                audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
+                session_scope=lambda: session_scope(factory),
+            )
 
-        # The factory built a REAL relay client + ledger, REUSING the graph.
-        assert assembled._extractor is mock_extractor
-        assert assembled._gate is gate
-        assert assembled._recorder is recorder
-        assert isinstance(assembled._relay_client.ledger, PostgresEgressIdempotencyStore)
+            # The factory built a REAL relay client + ledger, REUSING the graph.
+            assert assembled._extractor is mock_extractor
+            assert assembled._gate is gate
+            assert assembled._recorder is recorder
+            assert isinstance(assembled._relay_client.ledger, PostgresEgressIdempotencyStore)
 
-        ctx = TurnEgressContext(adapter_id="ada-asm", inbound_id="in-asm", session_id="sess-asm")
-        from alfred.egress.relay_protocol import _RawToolRequest
+            ctx = TurnEgressContext(
+                adapter_id="ada-asm", inbound_id="in-asm", session_id="sess-asm"
+            )
+            from alfred.egress.relay_protocol import _RawToolRequest
 
-        raw_request = _RawToolRequest(
-            method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
-        )
+            raw_request = _RawToolRequest(
+                method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
+            )
 
-        outcome = await assembled.handle(
-            raw_request=raw_request,
-            ctx=ctx,
-            call_index=0,
-            schema=_TestSchema,
-            language="en",
-        )
+            outcome = await assembled.handle(
+                raw_request=raw_request,
+                ctx=ctx,
+                call_index=0,
+                schema=_TestSchema,
+                language="en",
+            )
 
-        # The end-to-end outcome is a fresh T2 Extracted (production wiring works).
-        assert isinstance(outcome, EgressExtractOutcome)
-        assert outcome.deduplicated is False
-        assert isinstance(outcome.result, Extracted)
-        assert outcome.result.data == extracted.data
-        assert outcome.status == 200
+            # The end-to-end outcome is a fresh T2 Extracted (production wiring works).
+            assert isinstance(outcome, EgressExtractOutcome)
+            assert outcome.deduplicated is False
+            assert isinstance(outcome.result, Extracted)
+            assert outcome.result.data == extracted.data
+            assert outcome.status == 200
 
-        # The upstream fired exactly once through the real relay (no live egress —
-        # the fake world counts it).
-        assert fire_counter.value == 1
+            # The upstream fired exactly once through the real relay (no live egress —
+            # the fake world counts it).
+            assert fire_counter.value == 1
 
-        # No second quarantine child: the extraction routed through the SAME
-        # extractor instance handed to the factory.
-        mock_extractor.extract.assert_awaited_once()
+            # No second quarantine child: the extraction routed through the SAME
+            # extractor instance handed to the factory.
+            mock_extractor.extract.assert_awaited_once()
 
-        # The factory's ledger persisted the post-extraction T2 (terminal row).
-        from alfred.egress.egress_id import compute_egress_id
+            # The factory's ledger persisted the post-extraction T2 (terminal row).
+            from alfred.egress.egress_id import compute_egress_id
 
-        egress_id = compute_egress_id(ctx, call_index=0)
-        row = await _query_row(migrated_url, egress_id)
-        assert row is not None
-        assert row["state"] == "committed_with_response"
-        assert row["response"] == extracted.model_dump_json()
+            egress_id = compute_egress_id(ctx, call_index=0)
+            row = await _query_row(migrated_url, egress_id)
+            assert row is not None
+            assert row["state"] == "committed_with_response"
+            assert row["response"] == extracted.model_dump_json()
     finally:
-        # Nest the relay teardown inside ``try`` so a re-raise from
-        # ``wait_for(serve_task)`` cannot skip ``engine.dispose()`` (async-engine leak).
-        try:
-            shutdown.set()
-            await asyncio.wait_for(serve_task, timeout=5)
-        finally:
-            await engine.dispose()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -272,35 +295,6 @@ async def test_assembled_extractor_refuses_on_gate_deny(
     """
     open_client_factory, fire_counter, _canned = fake_external_world
 
-    # --- Boot the same loopback gateway EgressRelay (upstream faked). ---------
-    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-    port: int = srv.sockets[0].getsockname()[1]
-    srv.close()
-    await srv.wait_closed()
-
-    gateway_dlp = OutboundDlp(
-        broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
-    )
-    relay = EgressRelay(
-        tool_allowlist=_FAKE_ALLOWLIST,
-        dlp=gateway_dlp,
-        audit=record_egress_relay,
-        bind_host="127.0.0.1",
-        port=port,
-        resolve=lambda _h: "1.1.1.1",
-        open_client=open_client_factory,
-        response_byte_cap=4096,
-        upstream_deadline_s=10.0,
-    )
-    shutdown = asyncio.Event()
-    serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
-    try:
-        await _await_relay_ready(port, serve_task)
-    except BaseException:
-        shutdown.set()
-        await asyncio.wait_for(serve_task, timeout=5)
-        raise
-
     # --- DENY gate: every content-clearance check returns False (RealGate, no
     #     grants) — never a permissive shim (CLAUDE.md hard rule #2). ----------
     staging = QuarantineStagingMap()
@@ -313,49 +307,48 @@ async def test_assembled_extractor_refuses_on_gate_deny(
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     try:
-        assembled = build_web_fetch_egress_extractor(
-            settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
-            gate=deny_gate,
-            extractor=mock_extractor,
-            recorder=recorder,
-            outbound_dlp=identity_outbound_dlp(),
-            audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
-            session_scope=lambda: session_scope(factory),
-        )
-
-        ctx = TurnEgressContext(adapter_id="ada-deny", inbound_id="in-deny", session_id="sess-deny")
-        from alfred.egress.relay_protocol import _RawToolRequest
-
-        raw_request = _RawToolRequest(
-            method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
-        )
-
-        # The deny propagates as a loud AlfredError — the orchestrator gets no T2.
-        with pytest.raises(AlfredError):
-            await assembled.handle(
-                raw_request=raw_request,
-                ctx=ctx,
-                call_index=0,
-                schema=_TestSchema,
-                language="en",
+        async with _loopback_relay(open_client_factory) as port:
+            assembled = build_web_fetch_egress_extractor(
+                settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
+                gate=deny_gate,
+                extractor=mock_extractor,
+                recorder=recorder,
+                outbound_dlp=identity_outbound_dlp(),
+                audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
+                session_scope=lambda: session_scope(factory),
             )
 
-        # Gate-first: the quarantine child was bypassed — it never saw the T3 body.
-        mock_extractor.extract.assert_not_awaited()
-        # C9 no-orphan at the composition root: the staged T3 body was discarded.
-        assert len(staging._staged) == 0, (
-            "No-orphan BREACH: staging map non-empty after gate-deny AlfredError — "
-            f"discard_staged was not called: {staging._staged!r}"
-        )
-        # The request did reach the (faked) upstream once — the deny is on the
-        # inbound T3→T2 crossing, not on the outbound egress (see docstring).
-        assert fire_counter.value == 1
+            ctx = TurnEgressContext(
+                adapter_id="ada-deny", inbound_id="in-deny", session_id="sess-deny"
+            )
+            from alfred.egress.relay_protocol import _RawToolRequest
+
+            raw_request = _RawToolRequest(
+                method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
+            )
+
+            # The deny propagates as a loud AlfredError — the orchestrator gets no T2.
+            with pytest.raises(AlfredError):
+                await assembled.handle(
+                    raw_request=raw_request,
+                    ctx=ctx,
+                    call_index=0,
+                    schema=_TestSchema,
+                    language="en",
+                )
+
+            # Gate-first: the quarantine child was bypassed — it never saw the T3 body.
+            mock_extractor.extract.assert_not_awaited()
+            # C9 no-orphan at the composition root: the staged T3 body was discarded.
+            assert len(staging._staged) == 0, (
+                "No-orphan BREACH: staging map non-empty after gate-deny AlfredError — "
+                f"discard_staged was not called: {staging._staged!r}"
+            )
+            # The request did reach the (faked) upstream once — the deny is on the
+            # inbound T3→T2 crossing, not on the outbound egress (see docstring).
+            assert fire_counter.value == 1
     finally:
-        try:
-            shutdown.set()
-            await asyncio.wait_for(serve_task, timeout=5)
-        finally:
-            await engine.dispose()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -381,37 +374,6 @@ async def test_factory_canary_from_settings_trips_over_real_relay(
     token = "ALFRED-CANARY-TEST-TOKEN-8675309"  # noqa: S105 -- canary sentinel, not a credential
     canned.body = f"upstream page reflecting {token}".encode()
 
-    # --- Boot a real loopback gateway EgressRelay (upstream faked). -----------
-    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-    port: int = srv.sockets[0].getsockname()[1]
-    srv.close()
-    await srv.wait_closed()
-
-    # No canary tokens on the gateway DLP — we are testing the CORE inbound
-    # canary (web.fetch's own ResponsePolicy), not the gateway's outbound DLP.
-    gateway_dlp = OutboundDlp(
-        broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
-    )
-    relay = EgressRelay(
-        tool_allowlist=_FAKE_ALLOWLIST,
-        dlp=gateway_dlp,
-        audit=record_egress_relay,
-        bind_host="127.0.0.1",
-        port=port,
-        resolve=lambda _h: "1.1.1.1",
-        open_client=open_client_factory,
-        response_byte_cap=4096,
-        upstream_deadline_s=10.0,
-    )
-    shutdown = asyncio.Event()
-    serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
-    try:
-        await _await_relay_ready(port, serve_task)
-    except BaseException:
-        shutdown.set()
-        await asyncio.wait_for(serve_task, timeout=5)
-        raise
-
     # --- The daemon quarantine-graph components (reused, never re-spawned). ----
     staging = QuarantineStagingMap()
     recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
@@ -426,60 +388,59 @@ async def test_factory_canary_from_settings_trips_over_real_relay(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
-    settings = Settings(
-        egress_relay_url=f"tcp://127.0.0.1:{port}",
-        web_fetch_canary_tokens=(token,),
-    )
     try:
-        assembled = build_web_fetch_egress_extractor(
-            settings=settings,
-            gate=gate,
-            extractor=mock_extractor,
-            recorder=recorder,
-            outbound_dlp=identity_outbound_dlp(),
-            audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
-            session_scope=lambda: session_scope(factory),
-        )
-
-        # The factory derived a non-None canary matcher from Settings — this is
-        # the de-2026-012 wiring closure under test, not a re-check of A3's
-        # in-process assertion.
-        assert assembled._response_policy is not None
-        assert assembled._response_policy.canary is not None
-
-        ctx = TurnEgressContext(adapter_id="ada-cn", inbound_id="in-cn", session_id="sess-cn")
-        from alfred.egress.relay_protocol import _RawToolRequest
-
-        raw_request = _RawToolRequest(
-            method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
-        )
-
-        with pytest.raises(InboundCanaryTripped):
-            await assembled.handle(
-                raw_request=raw_request,
-                ctx=ctx,
-                call_index=0,
-                schema=_TestSchema,
-                language="en",
+        async with _loopback_relay(open_client_factory) as port:
+            # No canary tokens on the gateway DLP — we are testing the CORE inbound
+            # canary (web.fetch's own ResponsePolicy), not the gateway's outbound DLP.
+            settings = Settings(
+                egress_relay_url=f"tcp://127.0.0.1:{port}",
+                web_fetch_canary_tokens=(token,),
+            )
+            assembled = build_web_fetch_egress_extractor(
+                settings=settings,
+                gate=gate,
+                extractor=mock_extractor,
+                recorder=recorder,
+                outbound_dlp=identity_outbound_dlp(),
+                audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
+                session_scope=lambda: session_scope(factory),
             )
 
-        # Gate-first / pre-extract: the quarantine child never saw the T3 body.
-        mock_extractor.extract.assert_not_awaited()
-        # The request DID reach the (faked) upstream once through the real relay
-        # — the canary lives in the REFLECTED response body, not the outbound
-        # request.
-        assert fire_counter.value == 1
+            # The factory derived a non-None canary matcher from Settings — this is
+            # the de-2026-012 wiring closure under test, not a re-check of A3's
+            # in-process assertion.
+            assert assembled._response_policy is not None
+            assert assembled._response_policy.canary is not None
 
-        # C8 invariant: a terminal committed_with_response row lands BEFORE the
-        # raise — a replay must never re-fire at the flagged-hostile destination.
-        egress_id = compute_egress_id(ctx, call_index=0)
-        row = await _query_row(migrated_url, egress_id)
-        assert row is not None
-        assert row["state"] == "committed_with_response"
-        assert "refused_by_safety" in row["response"]
+            ctx = TurnEgressContext(adapter_id="ada-cn", inbound_id="in-cn", session_id="sess-cn")
+            from alfred.egress.relay_protocol import _RawToolRequest
+
+            raw_request = _RawToolRequest(
+                method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
+            )
+
+            with pytest.raises(InboundCanaryTripped):
+                await assembled.handle(
+                    raw_request=raw_request,
+                    ctx=ctx,
+                    call_index=0,
+                    schema=_TestSchema,
+                    language="en",
+                )
+
+            # Gate-first / pre-extract: the quarantine child never saw the T3 body.
+            mock_extractor.extract.assert_not_awaited()
+            # The request DID reach the (faked) upstream once through the real relay
+            # — the canary lives in the REFLECTED response body, not the outbound
+            # request.
+            assert fire_counter.value == 1
+
+            # C8 invariant: a terminal committed_with_response row lands BEFORE the
+            # raise — a replay must never re-fire at the flagged-hostile destination.
+            egress_id = compute_egress_id(ctx, call_index=0)
+            row = await _query_row(migrated_url, egress_id)
+            assert row is not None
+            assert row["state"] == "committed_with_response"
+            assert "refused_by_safety" in row["response"]
     finally:
-        try:
-            shutdown.set()
-            await asyncio.wait_for(serve_task, timeout=5)
-        finally:
-            await engine.dispose()
+        await engine.dispose()

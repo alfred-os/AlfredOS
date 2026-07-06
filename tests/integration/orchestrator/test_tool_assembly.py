@@ -209,6 +209,15 @@ async def test_build_tool_registry_end_to_end(
             assert rows[0].result == "refused"
             assert rows[0].subject["dispatch_outcome"] == "domain_not_allowed"
     finally:
-        await rate_limiter.close()
-        await handle_cap.aclose()
-        await engine.dispose()
+        # CR trivial: guard each close INDEPENDENTLY — a failure in
+        # ``rate_limiter.close()`` must not skip ``handle_cap.aclose()`` /
+        # ``engine.dispose()`` (nested try/finally mirrors the
+        # shutdown/serve_task + engine.dispose() nesting in
+        # ``test_web_fetch_assembly.py``).
+        try:
+            await rate_limiter.close()
+        finally:
+            try:
+                await handle_cap.aclose()
+            finally:
+                await engine.dispose()
