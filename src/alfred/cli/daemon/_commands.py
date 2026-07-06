@@ -102,6 +102,7 @@ from alfred.cli.daemon._failures import (
     UnsandboxedEnvInProductionFailure,
 )
 from alfred.cli.daemon._gate_boot import (
+    _first_missing_first_party_grant,
     _first_party_grant_live,
     _install_quarantine_boot_registry,
     _SupervisorBootGate,
@@ -473,6 +474,19 @@ async def _start_async() -> None:
     # drift. A False result is a structurally-broken trust boundary —
     # refuse boot (exit 2 + audit row), never silently continue.
     if not _first_party_grant_live(real_gate):
+        # devex follow-up (#339 PR3 review): name the ACTUAL failing grant in
+        # the log line so an operator debugging (say) a missing
+        # `tool.dispatch` grant isn't misled by a DLP-subscriber-only framed
+        # message. This is purely diagnostic — it does not touch the audited
+        # `failure_reason` token (stays `quarantine_grant_missing`, an
+        # existing test-pinned contract) or the closed
+        # `DAEMON_BOOT_FAILED_FIELDS` audit schema.
+        missing_grant = _first_missing_first_party_grant(real_gate)
+        log.error(
+            "daemon.boot.quarantine_grant_missing",
+            missing_grant_plugin_id=missing_grant.plugin_id if missing_grant else None,
+            missing_grant_hookpoint=missing_grant.hookpoint if missing_grant else None,
+        )
         await _refuse_boot(
             audit,
             QuarantineGrantMissingFailure(),

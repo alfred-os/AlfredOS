@@ -360,16 +360,23 @@ def test_dynamic_result_sites_are_documented() -> None:
             # dispatch block below it; the site itself is unchanged. Task 6
             # shifted it again (882 -> 890) by pre-initializing `estimate`
             # above the loop to satisfy pyright (reportPossiblyUnboundVariable);
-            # still no behavioural change.
-            "src/alfred/orchestrator/core.py:890",
+            # still no behavioural change. The PR3 review-fix batch (#399 A4)
+            # shifted it again (890 -> 900) by hoisting `ctx =
+            # self._synthesize_egress_context(...)` above the loop — the site
+            # itself is unchanged.
+            "src/alfred/orchestrator/core.py:900",
             # #339 PR3 task 2 — the NEW terminal `completed` row forwards
             # final_result_token, a closed-vocab local (success/budget_blocked/
             # budget_overrun/refused, all in-domain). Task 3 added
             # "too_many_tool_calls" as a new final_exit_reason (subject field,
             # not the result= value) and shifted the line number (943 -> 1005).
             # Task 6 shifted it again (1005 -> 1013) for the same pyright
-            # pre-init reason.
-            "src/alfred/orchestrator/core.py:1013",
+            # pre-init reason. The PR3 review-fix batch (#399 A1/A3) shifted it
+            # again (1013 -> 1034) by widening the truncation helper, adding the
+            # `answer_from_provider` episodic-cost gate, and replacing the three
+            # narrowing asserts with one explicit `if ... raise` — the site
+            # itself is unchanged.
+            "src/alfred/orchestrator/core.py:1034",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already

@@ -274,11 +274,15 @@ T3 for every tool; only a hardcoded first-party allowlist may claim ≤T2 and sk
 both crossings. See [ADR-0046](../adr/0046-dual-llm-tool-result-flow.md) for the
 full invariant.
 
-**Live driver (#339 PR3).** The agentic act-phase loop
-(`src/alfred/orchestrator/`) is the live driver of the ADR-0046 invariant above —
-each iteration's tool dispatch runs through this same `dispatch_tool` chokepoint.
-The three first-party grants this flow needs (`tool.dispatch`,
-`quarantine.dereference`, `t3.downgrade_to_orchestrator`) are seeded at boot by
+**Act-phase loop (#339 PR3).** The agentic act-phase loop
+(`src/alfred/orchestrator/`) is the driver of the ADR-0046 invariant above —
+each iteration's tool dispatch runs through this same `dispatch_tool` chokepoint,
+proven by the fixture unit tests plus a live integration test
+(`tests/integration/orchestrator/test_act_loop_real_chain.py`, real Postgres +
+Redis). Production `_bootstrap.py`/`build_orchestrator` does not yet wire the
+registry into the daemon's live-turn assembly — #338 does that. The three
+first-party grants this flow needs (`tool.dispatch`, `quarantine.dereference`,
+`t3.downgrade_to_orchestrator`) are seeded at boot by
 `src/alfred/security/capability_gate/_bootstrap_grants.py`.
 
 See [docs/subsystems/plugins.md](plugins.md) for the quarantined LLM

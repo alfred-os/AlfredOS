@@ -94,14 +94,19 @@ rehydrate.
 
 ## Consequences
 
-- **Production wiring needs three first-party grants PR2 does not seed.** The live path
+- **Production wiring needs three first-party grants PR2 did not seed.** The live path
   requires `tool.dispatch` (subscriber-tier, `TOOL_DISPATCH_PLUGIN_ID`),
   `quarantine.dereference` (content-tier T3), and `t3.downgrade_to_orchestrator`
   (content-tier T3) all approved. PR2 is fixture-tested only (`make_allow_system_gate`
-  and similar test helpers) and is deliberately **not** the first live caller. Until PR3
-  seeds these three grants (or an operator/reviewer-issued equivalent), a real turn
-  attempting to dispatch a tool fails loud at the gate rather than silently succeeding
-  with an unintended trust posture.
+  and similar test helpers) and is deliberately **not** the first live caller. PR3
+  (#399) now seeds all three grants at boot in `FIRST_PARTY_SYSTEM_GRANTS`
+  (`src/alfred/security/capability_gate/_bootstrap_grants.py`), and the daemon's
+  post-install grant assertion checks the same constant with an axis-faithful
+  liveness check (subscriber-tier `tool.dispatch` via `gate.check`; content-tier
+  `quarantine.dereference` / `t3.downgrade_to_orchestrator` via
+  `gate.check_content_clearance`) before accepting boot — the trust boundary is
+  live, not pending. A missing grant still fails loud at the gate rather than
+  silently succeeding with an unintended trust posture.
 - **`dispatch_tool` imports `web_fetch`-plugin-specific exception types**
   (`WebFetchDomainNotAllowed`, `WebFetchError`, `WebFetchRateLimited`) directly. This is a
   deliberate one-tool layering inversion, acceptable while `web.fetch` is the only T3

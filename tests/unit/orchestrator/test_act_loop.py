@@ -308,7 +308,11 @@ async def _drive_turn_capturing_episodic(
 class TestTruncateToolResult:
     """``_truncate_tool_result`` bounds a tool_result fed back to the planner
     (spec §6, TOOL_RESULT_MAX_CHARS) — a pathological or verbose tool must not
-    balloon the next completion's context."""
+    balloon the next completion's context.
+
+    A2 (CR Minor, real bug): the marker itself must count against the cap —
+    appending it AFTER slicing to the full limit let the result exceed
+    ``TOOL_RESULT_MAX_CHARS`` by the marker's length."""
 
     def test_result_at_or_under_the_cap_passes_through_unchanged(self) -> None:
         text = "x" * loop_constants.TOOL_RESULT_MAX_CHARS
@@ -316,10 +320,23 @@ class TestTruncateToolResult:
         assert _truncate_tool_result("short") == "short"
 
     def test_result_over_the_cap_truncates_with_ellipsis_marker(self, monkeypatch: Any) -> None:
-        monkeypatch.setattr(loop_constants, "TOOL_RESULT_MAX_CHARS", 10)
+        monkeypatch.setattr(loop_constants, "TOOL_RESULT_MAX_CHARS", 20)
+        marker = "…[truncated]"
+        result = _truncate_tool_result("x" * 40)
+        assert result == ("x" * (20 - len(marker))) + marker
+        assert result.startswith("x")  # truncates on the character boundary
+        assert len(result) <= loop_constants.TOOL_RESULT_MAX_CHARS  # A2: never exceeds the cap
+
+    def test_result_over_the_cap_never_exceeds_the_cap_even_when_marker_alone_overflows_it(
+        self, monkeypatch: Any
+    ) -> None:
+        """Pathological config: a cap smaller than the marker itself. The
+        function must degrade gracefully (clip the marker) rather than
+        exceed the cap."""
+        monkeypatch.setattr(loop_constants, "TOOL_RESULT_MAX_CHARS", 5)
         result = _truncate_tool_result("x" * 20)
-        assert result == ("x" * 10) + "…[truncated]"
-        assert result.startswith("x" * 10)  # truncates on the character boundary
+        assert result == "…[truncated]"[:5]
+        assert len(result) <= 5
 
 
 class TestActLoopOrderedDispatch:
@@ -441,6 +458,64 @@ class TestActLoopMaxIterations:
 
         assert reply == t("orchestrator.tool.max_iterations_reached")
         assert router.complete.await_count == 2
+
+
+class TestActLoopSyntheticRefusalEpisodicCost:
+    """A1 (CR Major, real bug): a synthetic refusal (``final_exit_reason`` set)
+    is a local i18n string, not a provider completion. Its episodic row must
+    carry ZERO provider tokens/cost — charging it ``final_response``'s
+    tokens/cost (the PRIOR completion that triggered the refusal) would
+    misattribute that completion's spend to the refusal string AND
+    double-count cost already logged on a ``provider_call:*`` audit row."""
+
+    async def test_max_iterations_refusal_episodic_row_carries_zero_cost(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(loop_constants, "MAX_TOOL_ITERATIONS", 1)
+        # Nonzero tokens/cost on the ONLY completion — proves the fix actually
+        # zeroes them out on the synthetic-refusal row rather than the values
+        # coincidentally already being zero.
+        forever = _tool_use_response(ToolCall(id="c", name="clock.now", arguments={}), cost=0.42)
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=forever)
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            return "r"
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+
+        episodic_rows = await _drive_turn_capturing_episodic(
+            router=router,
+            tool_registry=_fake_registry("clock.now"),
+        )
+
+        assistant_rows = [r for r in episodic_rows if r["role"] == "assistant"]
+        assert len(assistant_rows) == 1
+        refusal_row = assistant_rows[0]
+        assert refusal_row["content"] == t("orchestrator.tool.max_iterations_reached")
+        assert refusal_row["cost_usd"] == 0.0
+        assert refusal_row["tokens_in"] == 0
+        assert refusal_row["tokens_out"] == 0
+
+    async def test_terminal_answer_from_provider_keeps_its_real_cost(self) -> None:
+        """The discriminator's other side: when the answer DOES come straight
+        from the provider (no synthetic refusal — ``final_exit_reason`` stays
+        ``None``), the episodic row keeps the real tokens/cost unchanged."""
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=_text_response("final answer", cost=0.07))
+
+        episodic_rows = await _drive_turn_capturing_episodic(
+            router=router,
+            tool_registry=None,
+        )
+
+        assistant_rows = [r for r in episodic_rows if r["role"] == "assistant"]
+        assert len(assistant_rows) == 1
+        answer_row = assistant_rows[0]
+        assert answer_row["content"] == "final answer"
+        assert answer_row["cost_usd"] == pytest.approx(0.07)
+        assert answer_row["tokens_in"] == 5
+        assert answer_row["tokens_out"] == 3
 
 
 class TestActLoopNegativePersistence:
