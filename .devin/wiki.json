@@ -33,7 +33,7 @@
       "author": "AlfredOS maintainers"
     },
     {
-      "content": "Trust tiers are provenance, not capability; do not conflate the two tier axes. A plugin's subscriber-capability tier (system/operator/user-plugin) is orthogonal to a content trust tier (T0-T3). A plugin is never 'T2'; content is. Conflating them is a named bug class (tier-laundering) — keep the axes separate in all prose. (Highest-risk fidelity item; matches `capability_gate/policy.py`.)",
+      "content": "Trust tiers are provenance, not capability; do not conflate the two tier axes. A plugin's subscriber-capability tier (system/operator/user-plugin) is orthogonal to a content trust tier (T0-T3). A plugin is never 'T2'; content is. Conflating them is a named bug class (tier-laundering) — keep the axes separate in all prose. (Highest-risk fidelity item; matches `src/alfred/security/capability_gate/policy.py`.)",
       "author": "AlfredOS maintainers"
     },
     {
