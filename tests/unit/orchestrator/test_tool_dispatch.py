@@ -14,15 +14,20 @@ regression at either.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from typing import ClassVar, Literal
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
+from alfred.audit.log import AuditWriter
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.egress_response_extract import EgressExtractOutcome
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.errors import AlfredError
 from alfred.hooks.capability import CapabilityGate
+from alfred.orchestrator import tool_dispatch as tool_dispatch_module
 from alfred.orchestrator.tool_dispatch import dispatch_tool
 from alfred.orchestrator.tool_registry import (
     ExternalToolSpec,
@@ -335,3 +340,72 @@ async def test_unexpected_error_escalates_and_is_audited() -> None:
         )
     assert writer.rows[-1]["subject"]["dispatch_outcome"] == "unexpected_error"
     assert writer.rows[-1]["result"] == "fault"
+
+
+async def test_non_serializable_downgrade_output_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3 SUCCESS-path totality (HARD #7): a non-JSON-serialisable downgraded
+    value makes ``json.dumps`` raise ``TypeError`` OUTSIDE the two specific
+    security arms — the defensive region guard must still write a terminal
+    ``unexpected_error``/``fault`` row before the ``TypeError`` propagates."""
+
+    async def _fake_downgrade(
+        _data: object, *, gate: object, audit_writer: object
+    ) -> dict[str, object]:
+        return {"x": object()}  # object() is not JSON-serialisable
+
+    monkeypatch.setattr(tool_dispatch_module, "downgrade_to_orchestrator", _fake_downgrade)
+    writer = _CapturingAuditWriter()
+    with pytest.raises(TypeError):
+        await _dispatch(
+            _url_call(),
+            _ext_spec(returns=_extracted_outcome()),
+            gate=make_tool_dispatch_gate(),
+            dlp=_NoopDlp(),
+            writer=writer,
+        )
+    assert writer.rows[-1]["subject"]["dispatch_outcome"] == "unexpected_error"
+    assert writer.rows[-1]["result"] == "fault"
+
+
+def _real_audit_writer() -> tuple[AuditWriter, AsyncMock]:
+    """A REAL :class:`AuditWriter` over a spy session, so ``append_schema``'s
+    symmetric key-set validation actually runs (the ``_CapturingAuditWriter``
+    double bypasses it). A ``_audit`` subject that drifts from the 8-key
+    ``TOOL_DISPATCH_FIELDS`` would raise ``ValueError`` here at runtime."""
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    @asynccontextmanager
+    async def _scope():
+        yield session
+
+    return AuditWriter(session_factory=_scope), session
+
+
+async def test_audit_subject_satisfies_real_writer_symmetric_validation() -> None:
+    """Drive a representative branch (internal dispatched) through the REAL
+    ``AuditWriter.append_schema`` symmetric-key gate — it must NOT raise, and
+    the persisted subject's keys must EXACTLY equal ``TOOL_DISPATCH_FIELDS``."""
+    writer, session = _real_audit_writer()
+    registry = ToolRegistry([_int_spec()])
+    out = await dispatch_tool(
+        ToolCall(id="1", name="clock.now", arguments={}),
+        0,
+        ctx=_CTX,
+        registry=registry,
+        gate=make_tool_dispatch_gate(),
+        dlp=_NoopDlp(),  # type: ignore[arg-type]
+        audit=writer,
+        user_id="u",
+        correlation_id="c",
+        language="en",
+    )
+    assert out == "13:00Z"
+    # append_schema did not raise ⇒ the subject key-set matched the schema.
+    session.add.assert_called_once()
+    persisted = session.add.call_args[0][0]
+    assert set(persisted.subject.keys()) == set(TOOL_DISPATCH_FIELDS)
+    assert persisted.subject["dispatch_outcome"] == "dispatched"
