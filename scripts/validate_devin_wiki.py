@@ -8,10 +8,12 @@ git-tracked tree, and a secret-shape scan. Exit 0 when clean, 1 on any error.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
-from collections.abc import Mapping
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -256,3 +258,64 @@ def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
                 elif a.kind == "glossary" and slugify(a.value) not in glossary_slugs:
                     errs.append(f"page {title!r}: glossary.md#{a.value} resolves to no heading")
     return errs
+
+
+# Token shapes we never want pasted into steering text. Deliberately narrow to
+# avoid false positives on prose: provider key prefixes + long base64-ish runs.
+_SECRET_RES = (
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+)
+
+
+def check_secret_shapes(data: Mapping[str, object]) -> list[str]:
+    """Flag token-shaped literals in note text (guardrail C in-repo backstop).
+
+    Repo-wide secret hygiene is gitleaks' job; this is narrowly scoped to the
+    steering file's own free text, which gitleaks doesn't specially inspect.
+    """
+    errs: list[str] = []
+    for j, note in enumerate(_all_notes(data)):
+        for rx in _SECRET_RES:
+            if rx.search(note):
+                errs.append(
+                    f"note[{j}]: token-shaped literal matched {rx.pattern!r} — "
+                    "remove it (guardrail C)"
+                )
+    return errs
+
+
+def validate_file(path: Path, repo_root: Path) -> list[str]:
+    """Load `.devin/wiki.json` and run every check, in order, against it."""
+    data = load_wiki(path)
+    return [
+        *check_structure_and_limits(data),
+        *check_references(data),
+        *check_anchors(data, repo_root),
+        *check_secret_shapes(data),
+    ]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", type=Path, help="Path to .devin/wiki.json")
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    args = parser.parse_args(argv)
+    try:
+        errs = validate_file(args.path, args.repo_root.resolve())
+    except WikiError as exc:
+        print(f"devin-wiki-check: {exc}", file=sys.stderr)
+        return 1
+    if errs:
+        print(f"devin-wiki-check: {len(errs)} problem(s) in {args.path}:", file=sys.stderr)
+        for e in errs:
+            print(f"  {e}", file=sys.stderr)
+        return 1
+    print(f"devin-wiki-check: OK ({args.path})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
