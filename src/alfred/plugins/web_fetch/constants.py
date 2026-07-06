@@ -23,5 +23,17 @@ from typing import Final
 # module importing the other. ``content_store.py`` imports it from here.
 _DEFAULT_ACTION_DEADLINE_SECONDS: Final[int] = 30
 
+# #339 PR4a (blocker 1 / #347): the per-user concurrency-reservation self-heal TTL.
+# G7-2.5 fused fetch+extract, so a reservation is held only for one dispatch —
+# bounded by ``_DEFAULT_ACTION_DEADLINE_SECONDS`` (30s). The dispatcher releases the
+# slot in a ``finally`` on every exit path; this TTL is a BACKSTOP so a leaked slot
+# (a release() that no-ops on a Redis transient) self-frees via passive
+# ``ZREMRANGEBYSCORE`` eviction. Comfortably above the action deadline so a
+# slow-but-live fetch is never evicted mid-flight while still counting.
+_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS: Final[int] = 120
 
-__all__ = ["_DEFAULT_ACTION_DEADLINE_SECONDS"]
+
+__all__ = [
+    "_DEFAULT_ACTION_DEADLINE_SECONDS",
+    "_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS",
+]
