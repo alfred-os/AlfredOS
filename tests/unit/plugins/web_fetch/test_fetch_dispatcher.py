@@ -36,6 +36,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.egress_response_extract import (
@@ -159,6 +160,32 @@ def _build_extractor(
     return ext
 
 
+class _SpyHandleCap:
+    """Fake :class:`~alfred.plugins.web_fetch.handle_cap.HandleCap` (#339 PR4a).
+
+    Permissive by default (``raise_on_reserve=False``) so every existing
+    dispatcher test — none of which cares about the per-user concurrency
+    bound — keeps passing once ``handle_cap`` becomes a required kwarg.
+    Records reserved/released handle ids in call order so the new tests can
+    assert reserve-precedes-network and release-on-every-exit-path.
+    """
+
+    def __init__(self, *, raise_on_reserve: bool = False) -> None:
+        self.reserved: list[str] = []
+        self.released: list[str] = []
+        self._raise = raise_on_reserve
+
+    async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
+        if self._raise:
+            raise WebFetchRateLimited("handle_cap")
+        self.reserved.append(handle_id)
+
+    async def release(
+        self, *, user_id: str, handle_id: str, correlation_id: str | None = None
+    ) -> None:
+        self.released.append(handle_id)
+
+
 async def _dispatch(**overrides: Any) -> EgressExtractOutcome:
     """Call ``dispatch_web_fetch`` with sensible defaults, overridable per-test."""
     kwargs: dict[str, Any] = {
@@ -174,6 +201,7 @@ async def _dispatch(**overrides: Any) -> EgressExtractOutcome:
         "outbound_dlp": _build_dlp(),
         "audit": _build_audit(),
         "extractor": _build_extractor(outcome=_make_extracted_outcome()),
+        "handle_cap": _SpyHandleCap(),
     }
     kwargs.update(overrides)
     return await dispatch_web_fetch(**kwargs)
@@ -701,3 +729,170 @@ async def test_extractor_typed_refusal_reason_surfaced_in_audit() -> None:
     call = audit.append_schema.await_args
     assert call.kwargs["result"] == "refused"
     assert call.kwargs["subject"]["dlp_scan_result"] == "refused_by_safety"
+
+
+# ---------------------------------------------------------------------------
+# #339 PR4a — per-user HandleCap reserve/release re-threaded into dispatch
+# (Step 3b reserve-before-network gate + try/finally release-on-every-exit)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_before_network_and_release_on_success() -> None:
+    """The per-user slot is reserved BEFORE the extractor fires — proven by the
+    extractor's own assertion at fire time, not just by call ordering on the
+    spy — and released on the plain success exit path."""
+    spy = _SpyHandleCap()
+
+    async def _handle(**_kwargs: Any) -> EgressExtractOutcome:
+        assert len(spy.reserved) == 1
+        return _make_extracted_outcome()
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _handle
+
+    await _dispatch(extractor=extractor, handle_cap=spy)
+
+    assert len(spy.reserved) == 1
+    assert spy.released == spy.reserved
+
+
+@pytest.mark.asyncio
+async def test_release_on_soft_refusal() -> None:
+    """A soft ``TypedRefusal`` outcome (MIME/size) still releases the reserved
+    slot — the ``finally`` covers the Step-5 soft-refusal branch, not only the
+    ``Extracted`` success branch."""
+    spy = _SpyHandleCap()
+    extractor = _build_extractor(outcome=_make_soft_refusal_outcome())
+
+    await _dispatch(extractor=extractor, handle_cap=spy)
+
+    assert len(spy.released) == 1
+    assert spy.released == spy.reserved
+
+
+@pytest.mark.asyncio
+async def test_release_on_canary_trip() -> None:
+    """An ``InboundCanaryTripped`` re-raise still releases the reserved slot —
+    the ``finally`` wraps the ``except InboundCanaryTripped`` re-raise too."""
+    spy = _SpyHandleCap()
+    tripped = InboundCanaryTripped(destination="example.com", egress_id="deadbeef")
+    extractor = _build_extractor(raises=tripped)
+
+    with pytest.raises(InboundCanaryTripped):
+        await _dispatch(extractor=extractor, handle_cap=spy)
+
+    assert len(spy.released) == 1
+    assert spy.released == spy.reserved
+
+
+@pytest.mark.asyncio
+async def test_release_on_timeout() -> None:
+    """An action-deadline expiry (``TimeoutError``) still releases the reserved
+    slot."""
+    spy = _SpyHandleCap()
+
+    async def _slow_handle(**_kwargs: Any) -> EgressExtractOutcome:
+        await asyncio.sleep(10)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _slow_handle
+
+    with pytest.raises(TimeoutError):
+        await _dispatch(extractor=extractor, handle_cap=spy, action_deadline_seconds=0.01)
+
+    assert len(spy.released) == 1
+    assert spy.released == spy.reserved
+
+
+@pytest.mark.asyncio
+async def test_release_on_generic_transport_error() -> None:
+    """FIX-7a: a generic transport-shaped error propagating out of the
+    extractor (not one of the two typed arms) still releases the reserved
+    slot — the ``finally`` is unconditional, not per-exception-type."""
+    spy = _SpyHandleCap()
+    extractor = _build_extractor(raises=WebFetchError("boom"))
+
+    with pytest.raises(WebFetchError):
+        await _dispatch(extractor=extractor, handle_cap=spy)
+
+    assert len(spy.released) == 1
+    assert spy.released == spy.reserved
+
+
+@pytest.mark.asyncio
+async def test_handle_cap_exceeded_refuses_pre_network_with_audit() -> None:
+    """A cap-exceeded reserve refuses BEFORE the network fire: the extractor is
+    never awaited, and exactly one ``handle_cap_exceeded`` / ``handle_cap``
+    audit row is written matching the ``WEB_FETCH_FIELDS`` Step-3 shape."""
+    audit = _build_audit()
+    spy = _SpyHandleCap(raise_on_reserve=True)
+    fired: list[bool] = []
+
+    async def _handle(**_kwargs: Any) -> EgressExtractOutcome:
+        fired.append(True)
+        raise AssertionError("extractor must not be awaited on cap-exceeded")
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _handle
+
+    with pytest.raises(WebFetchRateLimited):
+        await _dispatch(audit=audit, extractor=extractor, handle_cap=spy)
+
+    assert fired == []
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "rate_limited"
+    subject = call.kwargs["subject"]
+    assert subject["dlp_scan_result"] == "handle_cap_exceeded"
+    assert subject["rate_limit_bucket"] == "handle_cap"
+
+
+@pytest.mark.asyncio
+async def test_early_refusal_does_not_reserve() -> None:
+    """FIX-7b: a refusal EARLIER than Step 3b (domain not allowed) never
+    reserves — and therefore never needs a release — a per-user slot."""
+    spy = _SpyHandleCap()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    with pytest.raises(WebFetchDomainNotAllowed):
+        await _dispatch(extractor=extractor, handle_cap=spy, url="https://evil.com/page")
+
+    extractor.handle.assert_not_awaited()
+    assert spy.reserved == []
+    assert spy.released == []
+
+
+@pytest.mark.asyncio
+async def test_release_fault_does_not_mask_exception() -> None:
+    """FIX-8: a ``release()`` fault (a non-``RedisError`` bug — the real
+    ``HandleCap.release`` already swallows ``RedisError`` itself) must never
+    mask the in-flight security exception. The propagating exception is still
+    ``InboundCanaryTripped``, not the release fault."""
+
+    class _FaultyReleaseHandleCap:
+        async def try_reserve(
+            self, *, user_id: str, handle_id: str, handle_ttl_seconds: int
+        ) -> None:
+            return None
+
+        async def release(
+            self, *, user_id: str, handle_id: str, correlation_id: str | None = None
+        ) -> None:
+            raise RuntimeError("release exploded")
+
+    tripped = InboundCanaryTripped(destination="example.com", egress_id="deadbeef")
+    extractor = _build_extractor(raises=tripped)
+
+    with structlog.testing.capture_logs() as caps, pytest.raises(InboundCanaryTripped):
+        await _dispatch(extractor=extractor, handle_cap=_FaultyReleaseHandleCap())
+
+    # Assert that the loud log fired with the required fields (Finding 1).
+    release_logs = [c for c in caps if c.get("event") == "web_fetch.handle_cap.release_unexpected"]
+    assert len(release_logs) == 1
+    release_log = release_logs[0]
+    assert "error_type" in release_log
+    assert release_log["error_type"] == "RuntimeError"
+    assert "correlation_id" in release_log
+    assert release_log["correlation_id"] == "corr-1"

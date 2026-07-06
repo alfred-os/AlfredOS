@@ -205,15 +205,18 @@ class HandleCap:
     --------------------------------------
     * :meth:`try_reserve` fails CLOSED on any
       :class:`~redis.exceptions.RedisError` subtype (Timeout, Connection,
-      Response, BusyLoading, …). The exception propagates so the
-      dispatcher's ``transport_error`` audit arm fires and the
-      conversation turn aborts.
+      Response, BusyLoading, …). The exception propagates uncaught out of
+      the dispatcher's Step 3b reserve gate (#339 PR4a) — there is no
+      dedicated dispatcher ``transport_error`` audit arm for this path;
+      the fault is audited LOUD one layer up by the ``dispatch_tool``
+      chokepoint's ``except Exception -> unexpected_error/fault`` catch-all,
+      and the conversation turn aborts.
     * :meth:`release` fails LOUD-BUT-QUIET on the same subtypes. The
       caller is already past the conversation turn; re-raising would
       only confuse the caller while the slot is lost either way. Instead
       a LOUD :func:`structlog.get_logger.error` event
       ``web_fetch.handle_cap.release_failed`` fires; passive TTL
-      eviction frees the slot within ~80s.
+      eviction frees the slot within ~120s.
 
     The structlog event IS the security signal — there is no dedicated
     typed exception class for this case. This is the *structlog-only
@@ -395,7 +398,7 @@ class HandleCap:
         caller while losing the slot anyway). Instead a LOUD
         ``web_fetch.handle_cap.release_failed`` structlog event fires so
         operators see the stuck reservation; passive TTL eviction will free
-        the slot within ~80s. The user's effective cap is reduced by 1
+        the slot within ~120s. The user's effective cap is reduced by 1
         between the failed ZREM and the eviction.
 
         ``correlation_id`` is optional but the dispatcher always supplies
@@ -428,7 +431,7 @@ class HandleCap:
                 correlation_id=correlation_id,
                 exception_type=type(exc).__name__,
                 note=(
-                    "ZREM failed; cap slot held until passive TTL (~80s). "
+                    "ZREM failed; cap slot held until passive TTL (~120s). "
                     "User's effective cap is reduced by 1 until eviction."
                 ),
             )

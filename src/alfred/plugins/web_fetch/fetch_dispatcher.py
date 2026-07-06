@@ -19,7 +19,11 @@ seam — the orchestrator never sees raw T3 bytes.
 ``web.fetch`` is therefore now a **fused fetch+extract unit** returning T2, not a
 fetch-then-defer-extraction contract (ADR-0041 records the three coupled
 decisions: the T3-handle→T2 contract, the ``HandleCap`` removal, and the
-de-2026-004 re-target). Kept core-side: outbound DLP (URL refuse-on-secret +
+de-2026-004 re-target). #339 PR4a (ADR-0047 / amended ADR-0041) RE-ATTACHES
+``HandleCap`` — not as the old ContentHandle-count guard, but as a pure
+per-user concurrency bound: reserve one slot before the network fire, release
+it in a ``finally`` on every exit path (see Step 3b below), superseding the
+G7-2.5 removal. Kept core-side: outbound DLP (URL refuse-on-secret +
 header redaction), the three-way path-prefix allowlist + broadening cap, the
 per-domain rate limiter, and the success/refusal audit rows. Removed core-side
 (now the gateway's structural job): the SSRF host-IP guard, redirect refusal,
@@ -30,9 +34,11 @@ allowlist + inbound-canary scan move to the C2 pre-extract seam
 :func:`alfred.plugins.web_fetch.assembly.build_web_fetch_egress_extractor`.
 
 Residual (ADR-0041 / §7, tracked #339): no live ``dispatch_web_fetch`` caller
-exists until #339 wires the tool-calling loop (after G7-3); the per-user
-fairness bound, the ``language`` source (HARD rule #3), and broker
-secret-injection for authenticated fetch land there too.
+exists until #339 wires the tool-calling loop (after G7-3). The ``language``
+source (HARD rule #3) landed in PR3; the per-user fairness bound lands here in
+PR4a (this change — the reserve-before-network gate + release-in-``finally``
+below). Broker secret-injection for authenticated fetch is still deferred —
+that is PR4b, not this change.
 
 Core-side responsibilities (in order):
 
@@ -63,9 +69,12 @@ re-raises.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlparse
+
+import structlog
 
 from alfred.audit.audit_row_schemas import (
     WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS,
@@ -75,7 +84,10 @@ from alfred.egress.relay_protocol import _RawToolRequest
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.i18n import t
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry, AllowlistIntersection
-from alfred.plugins.web_fetch.constants import _DEFAULT_ACTION_DEADLINE_SECONDS
+from alfred.plugins.web_fetch.constants import (
+    _DEFAULT_ACTION_DEADLINE_SECONDS,
+    _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
+)
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
@@ -91,8 +103,11 @@ if TYPE_CHECKING:
         EgressExtractOutcome,
         EgressResponseExtractor,
     )
+    from alfred.plugins.web_fetch.handle_cap import HandleCap
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import ExtractionSchema
+
+_log = structlog.get_logger(__name__)
 
 # Slice-3 depth=1 invariant (spec §7.9): every fetch is depth=1. A depth>1 fetch
 # would let a quarantined-LLM extract chain re-fetch the T3 content via the
@@ -190,6 +205,7 @@ async def dispatch_web_fetch(
     schema: type[ExtractionSchema],
     config: FetchDispatchConfig,
     rate_limiter: RateLimiter,
+    handle_cap: HandleCap,
     outbound_dlp: OutboundDlp,
     audit: AuditWriter,
     extractor: EgressResponseExtractor,
@@ -204,7 +220,10 @@ async def dispatch_web_fetch(
     * :class:`WebFetchError` — a secret in the URL (refuse-on-secret) or a
       DLP-scan failure.
     * :class:`WebFetchDomainNotAllowed` — URL outside the three-way allowlist.
-    * :class:`WebFetchRateLimited` — rate-limit refusal (carries the bucket).
+    * :class:`WebFetchRateLimited` — rate-limit refusal (carries the bucket);
+      includes the pre-network ``"handle_cap"`` bucket (#339 PR4a, Step 3b) —
+      the per-user concurrency reservation refused BEFORE the extractor fires,
+      audited as ``dlp_scan_result="handle_cap_exceeded"``.
     * :class:`~alfred.egress.response_inspection.InboundCanaryTripped` — an
       inbound canary was reflected in the response (after a loud audit row).
     * :class:`TimeoutError` — the extract overran ``action_deadline_seconds``.
@@ -394,28 +413,28 @@ async def dispatch_web_fetch(
         )
         raise
 
-    # Step 4: build the relay request (REAL url + REDACTED headers) and fire it
-    # through the gateway egress relay under the per-action deadline (C13).
-    raw_request = _RawToolRequest(
-        method="GET", url=url, headers=clean_headers, body="", idempotent=True
-    )
+    # Step 3b: reserve one per-user concurrency slot BEFORE the network fire
+    # (#339 PR4a blocker 1 / #347; spec §7.10). G7-2.5 removed the ContentHandle
+    # cap when web.fetch fused fetch+extract; #339 reinstates it as a pure per-user
+    # concurrency bound — the T3 body now stages in-memory transiently (not a Redis
+    # ContentHandle), so ``handle_id`` is a synthetic ZSET member and the old
+    # host-side handle_id-equality check is gone. The slot is released in the
+    # ``finally`` below on EVERY Step-4/5 exit path.
+    #
+    # FIX-9: only ``WebFetchRateLimited`` (cap exceeded) is audited-and-reraised
+    # here, mirroring the Step-3 rate-limiter above. A reserve transport fault
+    # (RedisError / ValueError / RuntimeError) propagates uncaught and is audited
+    # LOUD one layer up by the ``dispatch_tool`` chokepoint's
+    # ``except Exception -> unexpected_error/fault`` arm (HARD rule #7 satisfied by
+    # the outer totality — a second dispatcher arm would double-audit).
+    handle_id = str(uuid.uuid4())
     try:
-        async with asyncio.timeout(action_deadline_seconds):
-            outcome = await extractor.handle(
-                raw_request=raw_request,
-                ctx=egress_ctx,
-                call_index=call_index,
-                schema=schema,
-                # C11b residual: the turn-user's language is not reachable from
-                # this call site yet — the per-user turn context lands with the
-                # LLM tool-calling subsystem.
-                language=None,  # TODO: #339
-            )
-    except InboundCanaryTripped:
-        # HARD rule #7 (plan-review SEC-2): the canary trip raises out of C2,
-        # which holds no AuditWriter — the dispatcher writes the loud,
-        # non-skippable audit row here BEFORE re-raising. C2 already recorded the
-        # terminal ledger refusal (Task 4).
+        await handle_cap.try_reserve(
+            user_id=user_id,
+            handle_id=handle_id,
+            handle_ttl_seconds=_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
+        )
+    except WebFetchRateLimited as e:
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
             schema_name="WEB_FETCH_FIELDS",
@@ -427,97 +446,170 @@ async def dispatch_web_fetch(
                 "status_code": None,
                 "content_handle_id": None,
                 "fetch_depth": _FETCH_DEPTH,
-                "rate_limit_bucket": None,
+                "rate_limit_bucket": e.bucket,  # "handle_cap"
                 "manifest_commit_hash": config.manifest_commit_hash,
-                # T3: a canary reflection means hostile T3 content came back; no
-                # T2 was produced for the orchestrator.
                 "trust_tier_of_result": "T3",
-                "dlp_scan_result": "inbound_canary_tripped",
-                "canary_tripped": True,
+                "dlp_scan_result": "handle_cap_exceeded",
+                "canary_tripped": False,
                 "triggering_user_id": user_id,
                 "correlation_id": correlation_id,
             },
             trust_tier_of_trigger="T0",
-            result="quarantined",
+            result="rate_limited",
             cost_estimate_usd=0.0,
             trace_id=correlation_id,
         )
         raise
 
-    # Step 5: success / soft-refusal audit row (C3) with the real status (C7).
+    # Step 4: build the relay request (REAL url + REDACTED headers) and fire it
+    # through the gateway egress relay under the per-action deadline (C13).
     #
-    # ``trust_tier_of_result="T2"`` — the orchestrator now receives an extracted
-    # T2 outcome (was T3 in the handle-returning era). The status is the upstream
-    # HTTP code; validate it is a plausible code (100-599) else None (a
-    # deduplicated replay carries status=None, and a malformed code would corrupt
-    # the audit graph).
-    if outcome.status is not None and 100 <= outcome.status <= 599:
-        status_code: int | None = outcome.status
-    else:
-        status_code = None
-
-    base_subject: dict[str, object | None] = {
-        "url": clean_url,
-        "domain": domain,
-        "status_code": status_code,
-        "content_handle_id": None,
-        "fetch_depth": _FETCH_DEPTH,
-        "rate_limit_bucket": None,
-        "manifest_commit_hash": config.manifest_commit_hash,
-        "trust_tier_of_result": "T2",
-        "canary_tripped": False,
-        "triggering_user_id": user_id,
-        "correlation_id": correlation_id,
-    }
-    if isinstance(outcome.result, Extracted):
-        await audit.append_schema(
-            fields=WEB_FETCH_FIELDS,
-            schema_name="WEB_FETCH_FIELDS",
-            event="tool.web.fetch",
-            actor_user_id=user_id,
-            subject={**base_subject, "dlp_scan_result": "clean"},
-            trust_tier_of_trigger="T0",
-            # #328: the web.fetch success row uses the canonical ``success``
-            # disposition (matching the 24+ other success sites — operator_session,
-            # daemon boot, dispatch_loop, supervisor, …), NOT the legacy ``ok``
-            # split that made every web.fetch success invisible to a
-            # ``result = 'success'`` audit-graph/metrics query. Both are in
-            # ``ck_audit_log_result``; dropping the now-unused ``ok`` from the
-            # domain is a deferred follow-up migration (only after the #320 guard
-            # confirms no remaining ``ok`` writer).
-            result="success",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
+    # #339 PR4a (FIX-8): Step 4 + Step 5 are wrapped in a try/finally so the
+    # per-user slot reserved above is released on EVERY exit path — success,
+    # soft refusal, InboundCanaryTripped re-raise, TimeoutError, or a generic
+    # transport error. See the ``finally`` block below for the release itself.
+    try:
+        raw_request = _RawToolRequest(
+            method="GET", url=url, headers=clean_headers, body="", idempotent=True
         )
-    else:
-        # A soft TypedRefusal from the pre-extract MIME/size seam (the
-        # payload-blind ``policy_refusal_token`` — NEVER the raw Content-Type),
-        # or a quarantined-LLM extract refusal. Either way ``result="refused"``.
+        try:
+            async with asyncio.timeout(action_deadline_seconds):
+                outcome = await extractor.handle(
+                    raw_request=raw_request,
+                    ctx=egress_ctx,
+                    call_index=call_index,
+                    schema=schema,
+                    # C11b residual: the turn-user's language is not reachable from
+                    # this call site yet — the per-user turn context lands with the
+                    # LLM tool-calling subsystem.
+                    language=None,  # TODO: #339
+                )
+        except InboundCanaryTripped:
+            # HARD rule #7 (plan-review SEC-2): the canary trip raises out of C2,
+            # which holds no AuditWriter — the dispatcher writes the loud,
+            # non-skippable audit row here BEFORE re-raising. C2 already recorded the
+            # terminal ledger refusal (Task 4).
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={
+                    "url": clean_url,
+                    "domain": domain,
+                    "status_code": None,
+                    "content_handle_id": None,
+                    "fetch_depth": _FETCH_DEPTH,
+                    "rate_limit_bucket": None,
+                    "manifest_commit_hash": config.manifest_commit_hash,
+                    # T3: a canary reflection means hostile T3 content came back; no
+                    # T2 was produced for the orchestrator.
+                    "trust_tier_of_result": "T3",
+                    "dlp_scan_result": "inbound_canary_tripped",
+                    "canary_tripped": True,
+                    "triggering_user_id": user_id,
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result="quarantined",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+            raise
+
+        # Step 5: success / soft-refusal audit row (C3) with the real status (C7).
         #
-        # M2 / CR-cloud-6: when the pre-extract seam did NOT fire
-        # (``policy_refusal_token is None``) the refusal came from the quarantined
-        # LLM itself — surface its closed-vocab ``TypedRefusal.reason``
-        # (``cannot_extract`` / ``refused_by_safety``) so the SECURITY signal of a
-        # ``refused_by_safety`` extraction is not dropped from the audit pivot.
-        # ``reason`` is closed-vocab + payload-blind (no T3 fragment). In this
-        # ``else`` branch ``outcome.result`` is narrowed to ``TypedRefusal`` (the
-        # ``Extracted`` arm returned above), so ``.reason`` is always present.
-        dlp_scan_result: str | None = outcome.policy_refusal_token
-        if dlp_scan_result is None:
-            dlp_scan_result = outcome.result.reason
-        await audit.append_schema(
-            fields=WEB_FETCH_FIELDS,
-            schema_name="WEB_FETCH_FIELDS",
-            event="tool.web.fetch",
-            actor_user_id=user_id,
-            subject={**base_subject, "dlp_scan_result": dlp_scan_result},
-            trust_tier_of_trigger="T0",
-            result="refused",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
-        )
+        # ``trust_tier_of_result="T2"`` — the orchestrator now receives an extracted
+        # T2 outcome (was T3 in the handle-returning era). The status is the upstream
+        # HTTP code; validate it is a plausible code (100-599) else None (a
+        # deduplicated replay carries status=None, and a malformed code would corrupt
+        # the audit graph).
+        if outcome.status is not None and 100 <= outcome.status <= 599:
+            status_code: int | None = outcome.status
+        else:
+            status_code = None
 
-    return outcome
+        base_subject: dict[str, object | None] = {
+            "url": clean_url,
+            "domain": domain,
+            "status_code": status_code,
+            "content_handle_id": None,
+            "fetch_depth": _FETCH_DEPTH,
+            "rate_limit_bucket": None,
+            "manifest_commit_hash": config.manifest_commit_hash,
+            "trust_tier_of_result": "T2",
+            "canary_tripped": False,
+            "triggering_user_id": user_id,
+            "correlation_id": correlation_id,
+        }
+        if isinstance(outcome.result, Extracted):
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={**base_subject, "dlp_scan_result": "clean"},
+                trust_tier_of_trigger="T0",
+                # #328: the web.fetch success row uses the canonical ``success``
+                # disposition (matching the 24+ other success sites — operator_session,
+                # daemon boot, dispatch_loop, supervisor, …), NOT the legacy ``ok``
+                # split that made every web.fetch success invisible to a
+                # ``result = 'success'`` audit-graph/metrics query. Both are in
+                # ``ck_audit_log_result``; dropping the now-unused ``ok`` from the
+                # domain is a deferred follow-up migration (only after the #320 guard
+                # confirms no remaining ``ok`` writer).
+                result="success",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+        else:
+            # A soft TypedRefusal from the pre-extract MIME/size seam (the
+            # payload-blind ``policy_refusal_token`` — NEVER the raw Content-Type),
+            # or a quarantined-LLM extract refusal. Either way ``result="refused"``.
+            #
+            # M2 / CR-cloud-6: when the pre-extract seam did NOT fire
+            # (``policy_refusal_token is None``) the refusal came from the quarantined
+            # LLM itself — surface its closed-vocab ``TypedRefusal.reason``
+            # (``cannot_extract`` / ``refused_by_safety``) so the SECURITY signal of a
+            # ``refused_by_safety`` extraction is not dropped from the audit pivot.
+            # ``reason`` is closed-vocab + payload-blind (no T3 fragment). In this
+            # ``else`` branch ``outcome.result`` is narrowed to ``TypedRefusal`` (the
+            # ``Extracted`` arm returned above), so ``.reason`` is always present.
+            dlp_scan_result: str | None = outcome.policy_refusal_token
+            if dlp_scan_result is None:
+                dlp_scan_result = outcome.result.reason
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={**base_subject, "dlp_scan_result": dlp_scan_result},
+                trust_tier_of_trigger="T0",
+                result="refused",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+
+        return outcome
+    finally:
+        # Release the per-user slot on EVERY exit path (#339 PR4a): success, soft
+        # refusal, InboundCanaryTripped re-raise, TimeoutError, transport error.
+        # FIX-8: wrap in try/except Exception (NOT BaseException, so CancelledError
+        # still propagates) so a non-RedisError from release() can never MASK the
+        # in-flight security exception. release() already swallows RedisError
+        # (structlog-only); this guards the rarer non-RedisError path.
+        try:
+            await handle_cap.release(
+                user_id=user_id, handle_id=handle_id, correlation_id=correlation_id
+            )
+        except Exception as exc:  # never let a release fault mask the in-flight security exception
+            _log.error(
+                "web_fetch.handle_cap.release_unexpected",
+                user_id=user_id,
+                handle_id=handle_id,
+                error_type=type(exc).__name__,
+                correlation_id=correlation_id,
+            )
 
 
 __all__ = ["FetchDispatchConfig", "dispatch_web_fetch"]
