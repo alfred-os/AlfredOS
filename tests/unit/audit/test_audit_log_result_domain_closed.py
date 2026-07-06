@@ -319,7 +319,11 @@ def test_dynamic_result_sites_are_documented() -> None:
       terminal ``completed`` row's ``result=final_result_token`` forwards a
       closed-vocab local that is only ever assigned one of "success" /
       "budget_blocked" / "budget_overrun" / "refused" — all already in
-      ``ck_audit_log_result`` (no migration).
+      ``ck_audit_log_result`` (no migration). #339 PR3 task 3 (ordered tool
+      dispatch) added a NEW ``final_result_token = "refused"`` assignment site
+      (the fan-out-over-cap arm) but no new reachable VALUE — the site shape
+      and the guard's expected set are unchanged; only the two line numbers
+      shifted (the dispatch block was inserted above both sites).
     * all others route through enumerated lookups / ``IfExp`` over in-domain
       constants / forwarded typed params.
 
@@ -348,11 +352,15 @@ def test_dynamic_result_sites_are_documented() -> None:
             # #339 PR3 task 2 — provider_call:{iteration} row's IfExp over
             # charge_result (moved from the old single-completion "completed"
             # row's line 857; reachable values unchanged: success/budget_overrun).
-            "src/alfred/orchestrator/core.py:872",
+            # Task 3 shifted the line number (872 -> 882) by inserting the
+            # dispatch block below it; the site itself is unchanged.
+            "src/alfred/orchestrator/core.py:882",
             # #339 PR3 task 2 — the NEW terminal `completed` row forwards
             # final_result_token, a closed-vocab local (success/budget_blocked/
-            # budget_overrun/refused, all in-domain).
-            "src/alfred/orchestrator/core.py:943",
+            # budget_overrun/refused, all in-domain). Task 3 added
+            # "too_many_tool_calls" as a new final_exit_reason (subject field,
+            # not the result= value) and shifted the line number (943 -> 1005).
+            "src/alfred/orchestrator/core.py:1005",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
