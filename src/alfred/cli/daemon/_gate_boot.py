@@ -145,10 +145,26 @@ def _first_party_grant_live(gate: CapabilityGate) -> bool:
 
     ADR-0026: drives the assertion off the SAME
     :data:`FIRST_PARTY_SYSTEM_GRANTS` constant the seed uses, so the seed
-    and the liveness check can never drift. A ``False`` from any
-    :meth:`RealGate.check` means the seed-then-load did not project the
-    grant into the in-memory policy — a structurally-broken trust boundary
-    (the :class:`QuarantinedExtractor` could not register its DLP scan).
+    and the liveness check can never drift. A ``False`` means the
+    seed-then-load did not project a grant into the in-memory policy — a
+    structurally-broken trust boundary (e.g. the
+    :class:`QuarantinedExtractor` could not register its DLP scan, or a
+    real turn's tool dispatch would fail loud at the T3 content-clearance
+    boundary).
+
+    #339 PR3: :class:`GrantRow` carries TWO ORTHOGONAL axes (spec §4.3) —
+    ``subscriber_tier`` (capability) and ``content_tier`` (trust). Each is
+    verified on its OWN axis, matching how the production call sites gate:
+    a ``content_tier is None`` row is a subscriber-tier-only grant (e.g. the
+    DLP subscriber, ``tool.dispatch``) verified via :meth:`RealGate.check`;
+    a row carrying a ``content_tier`` (e.g. ``quarantine.dereference``,
+    ``t3.downgrade_to_orchestrator``) is verified via
+    :meth:`RealGate.check_content_clearance`, which matches on
+    ``content_tier`` and ignores ``subscriber_tier`` entirely. Checking a
+    content-tier grant with :meth:`check` instead would silently pass
+    (``check`` ignores ``content_tier``) without proving the content-tier
+    boundary is actually clear — this branch is what makes the assertion
+    faithful to what the runtime dispatch/quarantine call sites query.
     """
     from alfred.security.capability_gate._bootstrap_grants import (
         FIRST_PARTY_SYSTEM_GRANTS,
@@ -160,10 +176,18 @@ def _first_party_grant_live(gate: CapabilityGate) -> bool:
     if not FIRST_PARTY_SYSTEM_GRANTS:
         return False
     return all(
-        gate.check(
-            plugin_id=grant.plugin_id,
-            hookpoint=grant.hookpoint,
-            requested_tier=grant.subscriber_tier,
+        (
+            gate.check_content_clearance(
+                plugin_id=grant.plugin_id,
+                hookpoint=grant.hookpoint,
+                content_tier=grant.content_tier,
+            )
+            if grant.content_tier is not None
+            else gate.check(
+                plugin_id=grant.plugin_id,
+                hookpoint=grant.hookpoint,
+                requested_tier=grant.subscriber_tier,
+            )
         )
         for grant in FIRST_PARTY_SYSTEM_GRANTS
     )

@@ -1,10 +1,14 @@
-"""Daemon quarantine boot infra wiring (PR-S4-11b0 / ADR-0026).
+"""Daemon quarantine boot infra wiring (PR-S4-11b0 / ADR-0026 / #339 PR3).
 
 The daemon, after probe (c), builds a RAW seeded :class:`RealGate`,
 installs the boot :class:`HookRegistry` over it (so a production
 :class:`QuarantinedExtractor` can register its DLP subscriber), and
-ASSERTS the seeded first-party grant is live — refusing boot fail-closed
-(exit 2 + audit row) if it is not.
+ASSERTS every seeded first-party grant is live — refusing boot fail-closed
+(exit 2 + audit row) if any is not. #339 PR3 grew
+:data:`FIRST_PARTY_SYSTEM_GRANTS` from the one DLP-subscriber row to four
+(+ tool.dispatch, quarantine.dereference, t3.downgrade_to_orchestrator);
+the assertion now verifies each row on its OWN axis — subscriber-tier rows
+via ``check``, content-tier rows via ``check_content_clearance``.
 
 These tests drive the small pure helpers that make the wiring testable
 without Postgres, plus the refusal arm through the CLI command path.
@@ -20,17 +24,56 @@ from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
 from alfred.hooks.errors import HookError
-from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
+from alfred.security.capability_gate._bootstrap_grants import FIRST_PARTY_SYSTEM_GRANTS
+from tests.helpers.gates import (
+    make_comms_adapter_load_gate,
+    make_deny_all_gate,
+    make_quarantined_extract_chain_gate,
+)
 
 from .conftest import FakeAuditWriter
 
 
 def test_first_party_grant_live_true_when_seeded() -> None:
-    """A gate carrying the first-party DLP grant reports it live."""
+    """A gate carrying ALL FOUR first-party grants reports live.
+
+    #339 PR3: :data:`FIRST_PARTY_SYSTEM_GRANTS` grew from one row (the DLP
+    subscriber) to four (+ tool.dispatch, quarantine.dereference,
+    t3.downgrade_to_orchestrator). ``make_comms_adapter_load_gate`` seeds a
+    real :class:`RealGate` with EXACTLY the production constant's rows — not
+    a permissive shim (CLAUDE.md hard rule #2) — so this proves
+    ``_first_party_grant_live`` verifies every row, on its own axis, against
+    the real grant-policy evaluator.
+    """
     from alfred.cli.daemon._commands import _first_party_grant_live
 
-    gate = make_quarantined_extract_chain_gate()
+    gate = make_comms_adapter_load_gate(FIRST_PARTY_SYSTEM_GRANTS)
     assert _first_party_grant_live(gate) is True
+
+
+def test_first_party_grant_live_false_when_missing_one_content_grant() -> None:
+    """A gate missing ONE content-tier grant reports NOT live.
+
+    FIX-13: proves the content-clearance axis is ACTUALLY consulted, not
+    vacuously satisfied. Seeds every first-party grant EXCEPT
+    ``quarantine.dereference`` (a ``content_tier="T3"`` row) — the
+    subscriber-tier rows (DLP subscriber, ``tool.dispatch``) are still live,
+    so a version of ``_first_party_grant_live`` that only exercised the
+    ``check`` branch (ignoring ``content_tier``) would wrongly report
+    ``True`` here. The dependency on ``check_content_clearance`` for
+    content-bearing rows is exactly what fails this gate to ``False``.
+    """
+    from alfred.cli.daemon._commands import _first_party_grant_live
+
+    partial = tuple(
+        grant for grant in FIRST_PARTY_SYSTEM_GRANTS if grant.hookpoint != "quarantine.dereference"
+    )
+    # Sanity: the omission actually dropped a row (guards against a future
+    # hookpoint rename silently turning this into a no-op tautology).
+    assert len(partial) == len(FIRST_PARTY_SYSTEM_GRANTS) - 1
+
+    gate = make_comms_adapter_load_gate(partial)
+    assert _first_party_grant_live(gate) is False
 
 
 def test_first_party_grant_live_false_on_empty_grant_gate() -> None:
@@ -103,12 +146,17 @@ def test_boot_refuses_when_first_party_grant_missing(
 def test_boot_proceeds_when_first_party_grant_live(
     monkeypatch: pytest.MonkeyPatch, boot_success_env: FakeAuditWriter
 ) -> None:
-    """The happy arm: a seeded RealGate passes the assertion and boot
-    reaches the completion row."""
+    """The happy arm: a gate seeded with every first-party grant passes the
+    assertion and boot reaches the completion row.
+
+    #339 PR3: the boot-success env's default (``boot_success_env`` fixture)
+    already seeds this same full set; this test re-patches it explicitly so
+    the "boot proceeds" property stays visible without relying on the
+    conftest default."""
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
-        _async_return(make_quarantined_extract_chain_gate()),
+        _async_return(make_comms_adapter_load_gate(FIRST_PARTY_SYSTEM_GRANTS)),
     )
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 0
@@ -226,9 +274,14 @@ def test_boot_refuses_audited_when_outbound_dlp_broker_config_error(
     from alfred.security.secrets import SecretBrokerNotAFileError
 
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    # The seed-gate build + the grant-assertion must BOTH succeed here so the
+    # SecretBrokerConfigError raised further down the boot path is what
+    # actually trips the refusal — a gate missing any of the four #339 PR3
+    # first-party grants would refuse EARLIER with quarantine_grant_missing,
+    # never reaching _build_boot_outbound_dlp.
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
-        _async_return(make_quarantined_extract_chain_gate()),
+        _async_return(make_comms_adapter_load_gate(FIRST_PARTY_SYSTEM_GRANTS)),
     )
 
     def _raise_broker_config_error(*_args: Any, **_kwargs: Any) -> Any:
