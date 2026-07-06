@@ -1,0 +1,12 @@
+{
+  "repo_notes": [],
+  "pages": [
+    {
+      "title": "Compound ADR",
+      "purpose": "p",
+      "page_notes": [
+        "See ADR-0040/9999 for the egress topology decision."
+      ]
+    }
+  ]
+}
