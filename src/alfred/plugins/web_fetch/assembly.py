@@ -45,6 +45,7 @@ from alfred.egress.egress_response_extract import EgressResponseExtractor
 from alfred.egress.relay_client import RelayEgressClient
 from alfred.egress.response_inspection import ResponsePolicy
 from alfred.memory.egress_idempotency import PostgresEgressIdempotencyStore
+from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,7 +56,6 @@ if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
-    from alfred.security.canary_matcher import CanaryMatcher
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import QuarantinedExtractor
     from alfred.security.quarantine_transport import T3BodyRecorder
@@ -88,6 +88,20 @@ _WEB_FETCH_MIME_ALLOWLIST: Final[frozenset[str]] = frozenset(
 # #339 with the real turn-user (§7 residual); until then this caps concurrent
 # mode-(b) fires so a burst cannot head-of-line the comms relay.
 _DEFAULT_RELAY_CONCURRENCY: Final[int] = 8
+
+
+def _resolve_web_fetch_canary(settings: Settings) -> CanaryMatcher:
+    """Build the web.fetch INBOUND-reflection canary matcher from settings.
+
+    The core-side counterpart to the gateway's ``resolve_canary_tokens`` (#339
+    blocker 5 / #347). ALWAYS returns a NON-``None`` matcher: an empty token list
+    yields a no-op matcher (``first_match`` always ``None``) so the
+    ``ResponsePolicy`` canary seam is uniformly ARMED — populated when the operator
+    sets ``ALFRED_WEB_FETCH_CANARY_TOKENS``, a no-op otherwise. Never ``None`` —
+    that was the pre-#339 unwired state the ``de-2026-012`` merge-blocker enforces
+    against.
+    """
+    return CanaryMatcher(tokens=[CanaryToken(token) for token in settings.web_fetch_canary_tokens])
 
 
 def build_web_fetch_egress_extractor(
@@ -127,9 +141,10 @@ def build_web_fetch_egress_extractor(
         session_scope: The async session scope the Postgres idempotency ledger
             commits intents / records T2 through.
         concurrency: The relay client's in-flight semaphore bound.
-        canary: Optional inbound-canary matcher for the pre-extract seam. ``None``
-            (default) skips the inbound-canary scan for web.fetch — see the
-            tracked #339 residual below.
+        canary: Optional inbound-canary matcher for the pre-extract seam. When
+            ``None`` (default), derived from ``settings.web_fetch_canary_tokens``
+            — always a non-``None`` matcher (empty tokens yield a no-op matcher).
+            An explicit matcher overrides the settings-derived one (#339 PR4a).
 
     Returns:
         A wired ``EgressResponseExtractor`` ready for ``dispatch_web_fetch``.
@@ -142,15 +157,13 @@ def build_web_fetch_egress_extractor(
             connectivity-free core has no direct tool-egress fallback — HARD
             rule #9). Mirrors ``RelayEgressClient``'s own URL contract.
 
-    Residual (tracked, #339): ``canary`` defaults to ``None`` because web.fetch's
-    inbound-canary token vocabulary is not reachable from this assembly point —
-    the only ``resolve_canary_tokens()`` source reads the gateway-only
-    ``ALFRED_CANARY_TOKENS`` env and lives in ``alfred.gateway.egress_relay``
-    (importing it core-side would be a layering inversion AND the env is not set
-    on the core). The gateway already runs its OUTBOUND canary scan; the
-    web.fetch INBOUND-reflection canary is wired here by #339 once a core-side
-    token source exists. ``record_response`` / size / MIME enforcement are
-    unaffected by ``canary=None``.
+    (#339 PR4a wiring, blocker 5 / #347): The inbound-reflection canary seam is
+    now ALWAYS ARMED. An explicit ``canary`` (e.g. for testing) is honoured;
+    otherwise the matcher is derived from ``ALFRED_WEB_FETCH_CANARY_TOKENS``
+    (settings.web_fetch_canary_tokens). A non-``None`` matcher is GUARANTEED
+    even with zero tokens (a no-op matcher). Closes the ``de-2026-012``
+    merge-blocker: ``policy.canary`` is never ``None`` for a factory-built
+    extractor.
     """
     relay_url = settings.egress_relay_url
     if relay_url is None:
@@ -171,15 +184,17 @@ def build_web_fetch_egress_extractor(
         audit_writer=audit_writer,
         concurrency=concurrency,
     )
+    # #339 PR4a (blocker 5, #347): the inbound-reflection canary seam is now
+    # ALWAYS armed. An explicit ``canary`` (e.g. a test) is honoured; otherwise
+    # derive the matcher from the core-side token source
+    # (``ALFRED_WEB_FETCH_CANARY_TOKENS``) — non-``None`` even with zero tokens (a
+    # no-op matcher). Closes the ``de-2026-012`` strict-xfail merge-blocker:
+    # ``policy.canary`` is never ``None`` for a factory-built extractor.
+    resolved_canary = canary if canary is not None else _resolve_web_fetch_canary(settings)
     response_policy = ResponsePolicy(
         mime_allowlist=_WEB_FETCH_MIME_ALLOWLIST,
         max_bytes=_WEB_FETCH_RESPONSE_MAX_BYTES,
-        # TRACKED RESIDUAL (#339): ``canary`` is ``None`` today — there is no
-        # core-side canary-token source (``resolve_canary_tokens`` is gateway-only;
-        # see the "Residual (tracked, #339)" docstring block above). #339 threads a
-        # real ``CanaryMatcher`` here so a reflected canary in the upstream RESPONSE
-        # trips. The de-2026-012 strict-xfail merge-blocker enforces that wiring.
-        canary=canary,
+        canary=resolved_canary,
     )
     return EgressResponseExtractor(
         relay_client=relay_client,
@@ -190,4 +205,4 @@ def build_web_fetch_egress_extractor(
     )
 
 
-__all__ = ["build_web_fetch_egress_extractor"]
+__all__ = ["_resolve_web_fetch_canary", "build_web_fetch_egress_extractor"]
