@@ -337,6 +337,11 @@ def test_dynamic_result_sites_are_documented() -> None:
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
             "src/alfred/orchestrator/core.py:842",  # IfExp over charge_result
+            # #339 PR2 — dispatch_tool._audit forwards its result= param; the
+            # reachable values are the closed-vocab literals "success" /
+            # "refused" / "quarantined" / "rate_limited" / "fault", all already
+            # in ck_audit_log_result (no migration).
+            "src/alfred/orchestrator/tool_dispatch.py:114",
             # web_fetch/fetch_dispatcher.py: the G7-2.5 re-home (#333) deleted the
             # dynamic ``result=dlp_result`` site (the plugin-payload-derived value
             # tracked as #326). Every result= site in the re-homed dispatcher is
