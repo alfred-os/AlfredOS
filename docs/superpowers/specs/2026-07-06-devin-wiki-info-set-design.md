@@ -13,9 +13,10 @@ honest about what is shipped vs. scaffolded. Authored fresh; none exists today.
 
 ## Scope & deliverables
 
-Three deliverables (widened from "wiki file only" after the review found the
-first depends on the second, and the third removes a stale anchor the wiki would
-otherwise inherit):
+Four deliverables (widened from "wiki file only" after the review found the
+first depends on the second, the third removes a stale anchor the wiki would
+otherwise inherit, and the fourth is the only zero-effort auto-refresh lever —
+see *Regeneration lifecycle*):
 
 1. **`.devin/wiki.json`** — the steering file: explicit page tree + global
    `repo_notes`.
@@ -26,6 +27,10 @@ otherwise inherit):
 3. **De-stale `docs/ARCHITECTURE.md`** — fix its Spec B/C status table (both
    merged: #288, #333) so the doc the wiki's Architecture spine anchors to does
    not contradict `repo_notes` #5. `ARCHITECTURE.md` is **not** human-gated.
+4. **DeepWiki README badge** — add the official DeepWiki badge to `README.md`.
+   It is the only documented *set-and-forget* refresh automation (~weekly
+   auto-regeneration) and doubles as discoverability. `README.md` is not
+   human-gated.
 
 ### Non-goals
 
@@ -298,6 +303,29 @@ both are merged (#288, #333 closed). Because the Architecture root and the
 Egress page anchor to it, and `repo_notes` #2/#6 assert those specs are
 complete, the anchor must be corrected in-branch. Small edit; not human-gated.
 
+## Regeneration lifecycle (how the wiki picks up changes)
+
+`.devin/wiki.json` is read **during wiki generation** — there is no separate
+"config changed" trigger, and (confirmed against Devin's docs, 2026-07-06) **no
+webhook, GitHub Action, or public API to re-scrape on push to `main`**. The new
+page tree / `repo_notes` take effect on the *next* regeneration, whichever fires
+first:
+
+- **Scheduled** — Cognition regenerates on its own cadence; an active repo can
+  lag `main` by hours to days. Baseline, no action.
+- **README badge (deliverable 4)** — ~weekly auto-regeneration; the only
+  documented set-and-forget lever.
+- **Manual on-demand** — an authenticated Devin user re-triggers generation from
+  the repo's DeepWiki page. This is the **post-merge verification step**: after
+  merging `wiki.json`, regenerate once and eyeball that the page tree + steering
+  landed, rather than waiting for the schedule.
+
+So the operational loop is: merge → manual regenerate once to verify → badge +
+schedule handle steady state. A tighter "on every significant change" refresh is
+not a first-class feature; if it's ever wanted, the only avenue is a Devin API
+v3 generate endpoint (plan-dependent, not publicly documented) driven from CI —
+recorded as a follow-up, not built here.
+
 ## Follow-ups (recorded, not done here)
 
 - **Deep-doc backfill** — write deep-docs for the highest-priority of the
@@ -308,6 +336,10 @@ complete, the anchor must be corrected in-branch. Small edit; not human-gated.
   egress plane, capability grant, audit graph** (Persona, OODA loop, Gateway,
   trust tier, dual-LLM split already exist — verified). Then `repo_notes` #10's
   gap fail-safe can be tightened.
+- **CI-driven refresh** — if a tighter-than-weekly refresh is ever wanted, a
+  push-to-`main` GitHub Action calling a Devin API v3 generate endpoint
+  (plan-dependent, not publicly documented) is the only avenue; confirm against
+  the Cognition plan first. See *Regeneration lifecycle*.
 
 ## Review incorporated (5-agent `/review-plan`, issue #398)
 
