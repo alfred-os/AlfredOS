@@ -384,9 +384,10 @@ def test_dynamic_result_sites_are_documented() -> None:
             # itself is unchanged. The PR3 fix2 batch (#399 second review
             # batch) shifted it again (1034 -> 1043) by inserting the
             # terminal-iteration dispatch guard above it and deleting the
-            # now-unreachable trailing `for...else` clause (net +9 lines) —
-            # the site itself is still unchanged.
-            "src/alfred/orchestrator/core.py:1043",
+            # now-unreachable trailing `for...else` clause (net +9 lines), then
+            # the t()'d dispatch-seams-unwired raise shifted it -1 — the site
+            # itself is still unchanged.
+            "src/alfred/orchestrator/core.py:1042",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
