@@ -23,6 +23,7 @@
 ### Task 1: Validator — structure & limits
 
 **Files:**
+
 - Create: `scripts/validate_devin_wiki.py`
 - Create: `tests/unit/test_devin_wiki_validator.py`
 - Create: `tests/unit/fixtures/devin_wiki/valid_minimal.json`
@@ -30,6 +31,7 @@
 - Create: `tests/unit/fixtures/devin_wiki/bad_too_many_pages.json`
 
 **Interfaces:**
+
 - Produces: `load_wiki(path: Path) -> dict[str, object]` (raises `WikiError` on invalid JSON); `check_structure_and_limits(data: Mapping[str, object]) -> list[str]` (returns human-readable error strings, empty = OK); `class WikiError(Exception)`.
 
 - [ ] **Step 1: Write the failing test**
@@ -242,6 +244,7 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 ### Task 2: Validator — referential integrity (parent + cycles)
 
 **Files:**
+
 - Modify: `scripts/validate_devin_wiki.py`
 - Modify: `tests/unit/test_devin_wiki_validator.py`
 - Create: `tests/unit/fixtures/devin_wiki/bad_dangling_parent.json`
@@ -249,6 +252,7 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 - Create: `tests/unit/fixtures/devin_wiki/bad_parent_cycle.json`
 
 **Interfaces:**
+
 - Produces: `check_references(data: Mapping[str, object]) -> list[str]` — flags dangling `parent`, self-parent, and any parent cycle.
 
 - [ ] **Step 1: Write the failing test**
@@ -362,17 +366,20 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 This is the drift guard: it extracts anchor tokens from free-text `page_notes` and resolves each against the **git-tracked** tree (so a gitignored file fails), reusing `docs_check.py`'s slugifier for `PRD §N` / glossary `#slug` heading resolution.
 
 **Anchor-extraction contract** (this is the `test-003` contract the spec deferred here — `page_notes` are authored to follow it):
+
 - **Repo path** — any backtick-quoted token ending in a known extension (`.md .py .yaml .yml .json .toml`) or ending in `/` (a directory). Resolve: `git ls-files --error-unmatch <path>` must succeed (tracked = Devin-visible).
-- **ADR** — `ADR-NNNN` → a tracked file matching `docs/adr/NNNN-*.md` must exist.
-- **PRD section** — `PRD.md §X` or `PRD.md §X.Y` → `PRD.md` must have an ATX heading whose text (after stripping a leading `§`) starts with `X` / `X.Y`.
+- **ADR** — `ADR-NNNN`, or a slash-compound reference chaining multiple ADR numbers onto one token (e.g. `ADR-0040/0042/0043`) → every ADR number in the reference is split out and resolved independently against a tracked file matching `docs/adr/NNNN-*.md`.
+- **PRD section** — `` `PRD.md` §X `` / `` `PRD.md` §X.Y `` (backtick-wrapped, the real authoring form) or the bare `PRD §X` form, optionally chained into a compound tail via `/`, a hyphen, or an en dash (e.g. `` `PRD.md` §6.5/§6.6 `` or `` `PRD.md` §1–§2 ``) → every section number in the compound is resolved independently: `PRD.md` must have an ATX heading whose text (after stripping a leading `§`) starts with that number.
 - **Glossary slug** — `glossary.md#slug` → `slug` must be in `extract_headings(docs/glossary.md)`.
 
 **Files:**
+
 - Modify: `scripts/validate_devin_wiki.py`
 - Modify: `tests/unit/test_devin_wiki_validator.py`
 - Create: `tests/unit/fixtures/devin_wiki/bad_gitignored_anchor.json`
 
 **Interfaces:**
+
 - Consumes: `docs_check.slugify`, `docs_check.extract_headings` (both already in `scripts/docs_check.py`).
 - Produces: `extract_anchors(note: str) -> list[Anchor]` (`Anchor` = frozen dataclass `{kind: str, value: str}`); `check_anchors(data, repo_root: Path) -> list[str]`.
 
@@ -534,10 +541,12 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 Disclosure guardrail C's in-repo backstop: scan the steering file's own note text for token-shaped literals (repo-wide secret hygiene stays gitleaks' job). Then wire the CLI.
 
 **Files:**
+
 - Modify: `scripts/validate_devin_wiki.py`
 - Modify: `tests/unit/test_devin_wiki_validator.py`
 
 **Interfaces:**
+
 - Produces: `check_secret_shapes(data) -> list[str]`; `validate_file(path: Path, repo_root: Path) -> list[str]` (runs all checks); `main(argv: list[str] | None = None) -> int`.
 
 - [ ] **Step 1: Write the failing test**
@@ -649,11 +658,13 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 The steering file is transcribed verbatim from the spec. The "validate the real file" test runs under the already-required `Python (lint, types, unit)` check — this is what gates the merge button.
 
 **Files:**
+
 - Create: `.devin/wiki.json`
 - Modify: `tests/unit/test_devin_wiki_validator.py`
 - Modify: `Makefile`
 
 **Interfaces:**
+
 - Consumes: `validate_file` (Task 4).
 
 - [ ] **Step 1: Write the failing gating test**
@@ -719,7 +730,7 @@ In `Makefile`, next to the `docs-check` target, add:
 
 ```makefile
 wiki-check: ## Validate .devin/wiki.json (schema, limits, anchor resolution, secret shapes).
-	python3 scripts/validate_devin_wiki.py .devin/wiki.json --repo-root "$(CURDIR)"
+ python3 scripts/validate_devin_wiki.py .devin/wiki.json --repo-root "$(CURDIR)"
 ```
 
 Run: `make wiki-check`
@@ -741,6 +752,7 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 `ARCHITECTURE.md` is the wiki's Architecture-spine anchor but still presents Spec B as "in progress" and Spec C as "future"; both are merged (#288, #333). Update the status claims (not a full narrative rewrite) so the anchor stops contradicting `repo_notes` #2/#6.
 
 **Files:**
+
 - Modify: `docs/ARCHITECTURE.md`
 
 - [ ] **Step 1: Read the stale regions**
@@ -751,6 +763,7 @@ Note every line that asserts Spec B/C is incomplete (the roadmap table rows ~56-
 - [ ] **Step 2: Update the status markers**
 
 Edit each noted region so it reads as complete:
+
 - Roadmap table: Spec B status cell → `Complete (#288)`; Spec C status cell → `Complete (#333)`.
 - Inline "(in progress)" / "Future, gated on B" → past tense ("merged").
 - Collapse the "Spec B (G6) progress" / "Still ahead: G6-3 … G6-6" detail into a one-paragraph "Spec B complete (G6-0…G6-7, #288); Spec C complete (G7, #333). The PRD §5 egress-invariant rewrite has landed." Remove the "Still ahead" bullet list (that work is done).
@@ -784,6 +797,7 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 The one set-and-forget refresh lever (~weekly auto-regeneration) + discoverability.
 
 **Files:**
+
 - Modify: `README.md:3` (immediately after the existing Discord badge line)
 
 - [ ] **Step 1: Add the badge**
@@ -817,6 +831,7 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 Validation gates via the **existing** `Python (lint, types, unit)` required check (it runs `tests/unit/`, which now includes `test_real_devin_wiki_file_is_valid`). No new GitHub context is emitted, so **no new required-checks row and no branch-protection change** — adding a phantom context would block all PRs (per the manifest's own warning). Record the coverage in prose so the gating is auditable.
 
 **Files:**
+
 - Modify: `docs/ci/required-checks.md`
 
 - [ ] **Step 1: Add a prose note under "Currently required"**
@@ -847,6 +862,7 @@ $(printf 'MrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 ## Self-Review
 
 **Spec coverage:**
+
 - Deliverable 1 (`.devin/wiki.json`) → Task 5. ✅
 - Deliverable 2 (tested validator + required check) → Tasks 1–4 (validator + fixtures + red-path tests), Task 5 (gating test + make target), Task 8 (manifest note + gating via existing required check). ✅ Resolves test-001 (fixtures), test-002/arch-009 (anchor resolution), test-004 (real required check, not paper), test-005 (cycle/non-empty), test-003 (extraction contract defined in Task 3). ✅
 - Deliverable 3 (`ARCHITECTURE.md` de-stale) → Task 6 (arch-004/docs-003/rev-001). ✅
