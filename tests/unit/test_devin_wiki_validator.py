@@ -105,6 +105,17 @@ def test_extract_anchors_prd_bare_form_still_resolves() -> None:
     assert values == {"5"}
 
 
+def test_extract_anchors_splits_compound_prd_refs() -> None:
+    # `.devin/wiki.json` chains multiple PRD sections onto one reference using
+    # a mix of separators: a slash ("6.5/6.6") and an en dash range (U+2013,
+    # visually near-identical to a hyphen-minus, hence the noqa below). Every
+    # section number in a compound must resolve, not just the first - the
+    # same completeness gap already fixed for the ADR slash-compound form.
+    note = "Ground in `PRD.md` §6.5/§6.6 and `PRD.md` §1–§2"  # noqa: RUF001
+    values = {a.value for a in vw.extract_anchors(note) if a.kind == "prd"}
+    assert values == {"6.5", "6.6", "1", "2"}
+
+
 def test_extract_anchors_splits_slash_compound_adr() -> None:
     # `.devin/wiki.json` writes multi-ADR references as a single
     # slash-compound token, e.g. "ADR-0040/0042/0043" — every ADR number in
