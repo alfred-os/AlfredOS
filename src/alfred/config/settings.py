@@ -122,8 +122,8 @@ class Settings(BaseSettings):
     # #339 PR4a (blocker 5, #347): the core-side INBOUND-reflection canary token
     # source for web.fetch. The gateway runs the OUTBOUND exfil scan from
     # ALFRED_CANARY_TOKENS; this is the DISTINCT core env for the inbound tripwire
-    # (a seeded canary reflected in a fetched RESPONSE body). A NEW env name —
-    # ALFRED_CANARY_TOKENS is hard-forbidden on the core container
+    # (a seeded canary reflected in a fetched RESPONSE body). A NEW env name is
+    # needed because ALFRED_CANARY_TOKENS is hard-forbidden on the core container
     # (tests/unit/test_compose_invariants.py). Default () arms the ResponsePolicy
     # canary seam with an empty (no-op) matcher; operators populate it to enable
     # the reflection tripwire. Override via ALFRED_WEB_FETCH_CANARY_TOKENS

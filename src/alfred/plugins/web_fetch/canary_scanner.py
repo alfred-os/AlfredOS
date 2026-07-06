@@ -237,7 +237,7 @@ class InboundCanaryScanner:
                 slot — the body is confirmed gone from Redis, so the
                 user is no longer holding the resource. ``None``
                 (default) skips the release; the slot is freed by
-                passive TTL eviction within ~80s. The optional shape
+                passive TTL eviction within ~120s. The optional shape
                 preserves back-compat for hosts that wire the scanner
                 without :class:`HandleCap` (e.g. a Slice-2.5 host
                 bootstrapping without Slice-3's cap).
@@ -351,7 +351,7 @@ class InboundCanaryScanner:
            ``RedisError`` arm) would let a user reset their cap by
            serving canary-tripped content, which is a perverse
            incentive against the cap's purpose (bounding Redis memory
-           pressure). Passive TTL eviction (~80s) frees both the body
+           pressure). Passive TTL eviction (~120s) frees both the body
            and the cap slot together in the HOLD path.
         4. Raise :class:`WebFetchCanaryTripped` regardless of the
            quarantine / release decisions. The release affects cap
@@ -498,7 +498,7 @@ class InboundCanaryScanner:
                         "exception STILL raised so orchestrator's "
                         "canary arm fires and audit row is emitted; "
                         "cap slot HELD (passive TTL eviction within "
-                        "~80s frees both body and slot atomically)"
+                        "~120s frees both body and slot atomically)"
                     ),
                 )
             else:
@@ -523,14 +523,14 @@ class InboundCanaryScanner:
                 # arm would never fire, and the typed audit row
                 # would not be emitted. The security event MUST
                 # propagate; the cap slot is freed by passive TTL
-                # within ~80s on a release failure.
+                # within ~120s on a release failure.
                 if self._handle_cap is not None:
                     try:
                         # CR-156-r1 (T13) shield: if the hosting task is
                         # cancelled mid-release, the ZREM must still run.
                         # Without shield, the CancelledError propagates
                         # INTO ``release()`` and the cap slot is held until
-                        # ~80s passive TTL despite the canary trip having
+                        # ~120s passive TTL despite the canary trip having
                         # confirmed a ``store.delete`` succeeded. The
                         # dispatcher's finally-arm uses the same pattern;
                         # see fetch_dispatcher.py line 736 region.
@@ -563,7 +563,7 @@ class InboundCanaryScanner:
                                 "canary-trip cleanup; typed "
                                 "WebFetchCanaryTripped still "
                                 "propagates; passive TTL will free "
-                                "slot within ~80s"
+                                "slot within ~120s"
                             ),
                         )
             raise WebFetchCanaryTripped(source_url=source_url, handle_id=handle_id)
