@@ -74,16 +74,26 @@ def _pages(data: Mapping[str, object]) -> list[dict[str, object]]:
     flags the dropped (malformed) entries; every other check is free to
     build on this filtered view without re-checking shape itself.
     """
+    return [p for _, p in _indexed_pages(data)]
+
+
+def _indexed_pages(data: Mapping[str, object]) -> list[tuple[int, dict[str, object]]]:
+    """Every well-formed page object, paired with its RAW index in `data["pages"]`.
+
+    Enumerating the raw array (not a `_pages()`-filtered list) and skipping
+    non-dict entries via list-comprehension filtering keeps every `page[i]`
+    label anchored to the SAME physical position `check_shapes` uses for its
+    own `page[i]: must be an object` error. Enumerating a filtered list
+    instead would drift: a malformed entry earlier in the array shifts every
+    later page's filtered-list position out of step with its raw index, so
+    two different physical entries could surface under the same `page[i]`
+    label. `check_shapes` LOUDLY flags the dropped (malformed) entries
+    separately; every index-based check here just skips them.
+    """
     raw = data.get("pages", [])
-    return [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
-
-
-def _page_label(page: Mapping[str, object]) -> str:
-    """A human-locatable label for a page: its title, or `"?"` if malformed
-    (title-shape is `check_shapes`'/`check_structure_and_limits`' concern,
-    not this helper's)."""
-    title = page.get("title")
-    return title if isinstance(title, str) and title.strip() else "?"
+    if not isinstance(raw, list):
+        return []
+    return [(i, p) for i, p in enumerate(raw) if isinstance(p, dict)]
 
 
 @dataclass(frozen=True)
@@ -93,8 +103,15 @@ class _Note:
     A flat `list[str]` (the prior shape of `_all_notes`) loses which
     repo_notes entry or which page's page_notes a given string came from —
     every downstream error read back as an opaque `note[7]`. `source` is
-    that context, e.g. `"repo_notes[2]"` or `'page "Security Model"
-    page_notes[0]'`.
+    that context, e.g. `"repo_notes[2]"` or `"page[3] page_notes[0]"`.
+
+    `source` is deliberately built from the page's RAW positional index, never
+    its title — a page's `title` is untrusted free text a secret can be
+    pasted into, and this label is echoed verbatim in every error string this
+    note's content produces. Echoing the title here would defeat the "never
+    echo a matched secret" guarantee `check_secret_shapes` gives: a SIBLING
+    finding on the same note (e.g. "content is empty") would leak the title's
+    secret even though the secret scan itself never printed it.
     """
 
     source: str
@@ -109,12 +126,11 @@ def _all_notes(data: Mapping[str, object]) -> list[_Note]:
         for k, n in enumerate(repo_notes):
             if isinstance(n, dict) and isinstance(n.get("content"), str):
                 notes.append(_Note(f"repo_notes[{k}]", n["content"]))
-    for page in _pages(data):
-        label = _page_label(page)
+    for i, page in _indexed_pages(data):
         pnotes = page.get("page_notes", [])
         if isinstance(pnotes, list):
             notes.extend(
-                _Note(f"page {label!r} page_notes[{m}]", x)
+                _Note(f"page[{i}] page_notes[{m}]", x)
                 for m, x in enumerate(pnotes)
                 if isinstance(x, str)
             )
@@ -142,18 +158,14 @@ def check_shapes(data: Mapping[str, object]) -> list[str]:
             if not isinstance(page, dict):
                 errs.append(f"page[{i}]: must be an object, got {type(page).__name__}")
                 continue
-            label = _page_label(page)
             pnotes = page.get("page_notes", [])
             if not isinstance(pnotes, list):
-                errs.append(
-                    f"page[{i}] ({label!r}): page_notes must be a list, got {type(pnotes).__name__}"
-                )
+                errs.append(f"page[{i}]: page_notes must be a list, got {type(pnotes).__name__}")
                 continue
             for j, note in enumerate(pnotes):
                 if not isinstance(note, str):
                     errs.append(
-                        f"page[{i}] ({label!r}) page_notes[{j}]: must be a string, "
-                        f"got {type(note).__name__}"
+                        f"page[{i}] page_notes[{j}]: must be a string, got {type(note).__name__}"
                     )
 
     raw_repo_notes = data.get("repo_notes", [])
@@ -165,27 +177,31 @@ def check_shapes(data: Mapping[str, object]) -> list[str]:
 
 def check_structure_and_limits(data: Mapping[str, object]) -> list[str]:
     errs: list[str] = []
-    pages = _pages(data)
+    indexed_pages = _indexed_pages(data)
 
-    if len(pages) > MAX_PAGES:
-        errs.append(f"too many pages: {len(pages)} > {MAX_PAGES}")
+    if len(indexed_pages) > MAX_PAGES:
+        errs.append(f"too many pages: {len(indexed_pages)} > {MAX_PAGES}")
 
-    titles: list[str] = []
-    for i, page in enumerate(pages):
+    # (index, title) pairs only — never the bare title list — so a duplicate
+    # can be reported by position without ever re-printing the title text
+    # (title is untrusted free text a secret can be pasted into; see `_Note`).
+    titled: list[tuple[int, str]] = []
+    for i, page in indexed_pages:
         title = page.get("title")
         purpose = page.get("purpose")
         if not isinstance(title, str) or not title.strip():
             errs.append(f"page[{i}]: title is missing or empty")
         else:
-            titles.append(title)
+            titled.append((i, title))
         if not isinstance(purpose, str) or not purpose.strip():
-            errs.append(f"page[{i}] ({title!r}): purpose is missing or empty")
+            errs.append(f"page[{i}]: purpose is missing or empty")
 
-    seen: set[str] = set()
-    for t in titles:
-        if t in seen:
-            errs.append(f"duplicate page title: {t!r}")
-        seen.add(t)
+    first_index_by_title: dict[str, int] = {}
+    for i, t in titled:
+        if t in first_index_by_title:
+            errs.append(f"duplicate page title at page[{first_index_by_title[t]}] and page[{i}]")
+        else:
+            first_index_by_title[t] = i
 
     notes = _all_notes(data)
     if len(notes) > MAX_NOTES:
@@ -376,8 +392,7 @@ def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
     adr_dir = repo_root / "docs/adr"
     tracked = _tracked_files(repo_root)
 
-    for page in _pages(data):
-        title = page.get("title")
+    for i, page in _indexed_pages(data):
         pnotes = page.get("page_notes", [])
         if not isinstance(pnotes, list):
             continue
@@ -386,19 +401,17 @@ def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
                 if a.kind == "path":
                     if not _is_tracked(tracked, a.value):
                         errs.append(
-                            f"page {title!r}: `{a.value}` is not tracked "
+                            f"page[{i}]: `{a.value}` is not tracked "
                             "(gitignored/absent — Devin cannot see it)"
                         )
                 elif a.kind == "adr":
                     if not any(adr_dir.glob(f"{a.value}-*.md")):
-                        errs.append(f"page {title!r}: ADR-{a.value} has no file under docs/adr/")
+                        errs.append(f"page[{i}]: ADR-{a.value} has no file under docs/adr/")
                 elif a.kind == "prd":
                     if not any(n == a.value or n.startswith(a.value + ".") for n in prd_nums):
-                        errs.append(
-                            f"page {title!r}: PRD §{a.value} resolves to no heading in PRD.md"
-                        )
+                        errs.append(f"page[{i}]: PRD §{a.value} resolves to no heading in PRD.md")
                 elif a.kind == "glossary" and slugify(a.value) not in glossary_slugs:
-                    errs.append(f"page {title!r}: glossary.md#{a.value} resolves to no heading")
+                    errs.append(f"page[{i}]: glossary.md#{a.value} resolves to no heading")
     return errs
 
 
@@ -436,12 +449,15 @@ def check_secret_shapes(data: Mapping[str, object]) -> list[str]:
     specially inspect. The matched literal itself is never echoed back, only
     a human-readable label for which pattern tripped.
     """
-    # Deliberately locate a title/purpose finding by page INDEX only, never by
-    # the page's own title — the title is exactly what may be carrying the
-    # secret this loop is scanning `title` for, and echoing it as the label
-    # would defeat the "never echo the matched secret" guarantee below.
+    # Deliberately locate a title/purpose finding by page RAW INDEX only,
+    # never by the page's own title — the title is exactly what may be
+    # carrying the secret this loop is scanning `title` for, and echoing it
+    # as the label would defeat the "never echo the matched secret" guarantee
+    # below. `_indexed_pages` (not `enumerate(_pages(data))`) so this index
+    # is anchored to the same raw `data["pages"]` position every other
+    # index-based check uses — see `_indexed_pages`'s docstring.
     errs: list[str] = []
-    for i, page in enumerate(_pages(data)):
+    for i, page in _indexed_pages(data):
         for field in ("title", "purpose"):
             value = page.get(field)
             if isinstance(value, str):

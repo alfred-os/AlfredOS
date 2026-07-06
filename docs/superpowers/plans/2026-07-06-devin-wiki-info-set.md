@@ -367,7 +367,7 @@ This is the drift guard: it extracts anchor tokens from free-text `page_notes` a
 
 **Anchor-extraction contract** (this is the `test-003` contract the spec deferred here — `page_notes` are authored to follow it):
 
-- **Repo path** — any backtick-quoted token ending in a known extension (`.md .py .yaml .yml .json .toml`) or ending in `/` (a directory). Resolve: `git ls-files --error-unmatch <path>` must succeed (tracked = Devin-visible).
+- **Repo path** — any backtick-quoted token ending in a known extension (`.md .py .yaml .yml .json .toml`) or ending in `/` (a directory). Resolve: `check_anchors` preloads the full git-tracked file set ONCE per validation run (a single `git ls-files -z` call, parsed into a `frozenset[str]`) and resolves each path anchor by set membership — a directory anchor (trailing `/`) is tracked iff any tracked path starts with it — rather than a `git ls-files --error-unmatch <path>` subprocess call per anchor.
 - **ADR** — `ADR-NNNN`, or a slash-compound reference chaining multiple ADR numbers onto one token (e.g. `ADR-0040/0042/0043`) → every ADR number in the reference is split out and resolved independently against a tracked file matching `docs/adr/NNNN-*.md`.
 - **PRD section** — `` `PRD.md` §X `` / `` `PRD.md` §X.Y `` (backtick-wrapped, the real authoring form) or the bare `PRD §X` form, optionally chained into a compound tail via `/`, a hyphen, or an en dash (e.g. `` `PRD.md` §6.5/§6.6 `` or `` `PRD.md` §1–§2 ``) → every section number in the compound is resolved independently: `PRD.md` must have an ATX heading whose text (after stripping a leading `§`) starts with that number.
 - **Glossary slug** — `glossary.md#slug` → `slug` must be in `extract_headings(docs/glossary.md)`.
