@@ -35,8 +35,16 @@ _PATH_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:md|py|ya?ml|json|t
 _ADR_RE = re.compile(r"\bADR-(\d{4}(?:/\d{4})*)\b")
 # `.devin/wiki.json` always backtick-wraps the path, e.g. `` `PRD.md` §7.1 ``
 # — the optional closing backtick sits between ".md" and the section marker.
-# Also tolerates the bare "PRD §N" form with no path at all.
-_PRD_RE = re.compile(r"PRD(?:\.md)?`?\s+§(\d+(?:\.\d+)?)")
+# Also tolerates the bare "PRD §N" form with no path at all, and a compound
+# tail of further sections chained onto the first one, e.g. "§6.5/§6.6",
+# "§1-§2", "§9/§10" — separators seen in practice are "/", a hyphen-minus, or
+# an en dash (U+2013, used as a range dash, visually near-identical to a
+# hyphen-minus so it's excluded from the ambiguous-character lint below).
+# `group(1)` captures the *whole* compound tail (first section plus every
+# chained one), and `extract_anchors` pulls every `\d+(?:\.\d+)?` run out of
+# it so each section in the compound is resolved individually, not just the
+# first.
+_PRD_RE = re.compile(r"PRD(?:\.md)?`?\s+§(\d+(?:\.\d+)?(?:[/\-–]§?\d+(?:\.\d+)?)*)")  # noqa: RUF001
 _GLOSSARY_RE = re.compile(r"glossary(?:\.md)?#([a-z0-9_-]+)")
 
 
@@ -173,7 +181,14 @@ def extract_anchors(note: str) -> list[Anchor]:
     out += [
         Anchor("adr", adr_num) for m in _ADR_RE.finditer(note) for adr_num in m.group(1).split("/")
     ]
-    out += [Anchor("prd", m.group(1)) for m in _PRD_RE.finditer(note)]
+    # `m.group(1)` is the whole compound tail (e.g. "6.5/§6.6" or "1-§2");
+    # pull every section number out of it independently, mirroring the ADR
+    # slash-compound handling above.
+    out += [
+        Anchor("prd", num)
+        for m in _PRD_RE.finditer(note)
+        for num in re.findall(r"\d+(?:\.\d+)?", m.group(1))
+    ]
     out += [Anchor("glossary", m.group(1)) for m in _GLOSSARY_RE.finditer(note)]
     return out
 
