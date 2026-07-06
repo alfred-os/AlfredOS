@@ -1,6 +1,7 @@
 # tests/unit/test_devin_wiki_validator.py
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -281,6 +282,19 @@ def test_secret_in_page_title_or_purpose_is_flagged() -> None:
     assert any("title" in e and "AWS access key" in e for e in errs)
 
 
+def test_secret_in_purpose_is_flagged() -> None:
+    # `purpose` (not `title`) carries the secret this time — guardrail C must
+    # scan both fields, and the finding must still never echo the match.
+    token = "AKIA" + "H" * 16
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": "Clean Title", "purpose": f"Leaky {token}"}],
+    }
+    errs = vw.check_secret_shapes(data)
+    assert any("purpose" in e and "AWS access key" in e for e in errs)
+    assert not any(token in e for e in errs)
+
+
 def test_secret_error_does_not_echo_the_matched_token() -> None:
     token = "AKIA" + "C" * 16
     data = {"repo_notes": [{"content": f"example {token}"}], "pages": []}
@@ -302,6 +316,51 @@ def test_secret_in_page_title_does_not_echo_the_title() -> None:
     assert not any(token in e for e in errs)
 
 
+def test_secret_in_title_not_echoed_via_sibling_note_finding(tmp_path: Path) -> None:
+    # Repro for the sibling-echo regression: a page's TITLE carries a secret,
+    # and the SAME page's page_notes independently carries a DIFFERENT
+    # secret. `check_secret_shapes`'s own finding for the note secret is
+    # already safe (it labels by index) — but before the fix, `_all_notes`
+    # built that finding's locator from the raw TITLE, leaking the AWS key
+    # even though the message only ever named the GitHub-token match.
+    aws_key = "AKIA" + "E" * 16
+    gh_token = "ghp_" + "e" * 36
+    data = {
+        "pages": [
+            {
+                "title": f"Leaky {aws_key}",
+                "purpose": "p",
+                "page_notes": [f"here is {gh_token}"],
+            }
+        ]
+    }
+    errs = vw.check_secret_shapes(data)
+    assert errs
+    assert not any(aws_key in e for e in errs)
+
+    # Same guarantee must hold end-to-end through `validate_file`, not just
+    # the single check function in isolation.
+    wiki_path = tmp_path / "wiki.json"
+    wiki_path.write_text(json.dumps(data), encoding="utf-8")
+    file_errs = vw.validate_file(wiki_path, _REPO_ROOT)
+    assert not any(aws_key in e for e in file_errs)
+
+
+def test_secret_in_title_not_echoed_via_empty_note_error() -> None:
+    # Repro for the sibling-echo regression via a DIFFERENT check function:
+    # the page_notes entry here carries NO secret at all — it trips a plain
+    # structural finding (empty content). Before the fix,
+    # `check_structure_and_limits` still built that finding's locator from
+    # the raw title, leaking the AWS key from an entirely unrelated error.
+    aws_key = "AKIA" + "F" * 16
+    data = {
+        "pages": [{"title": f"Leaky {aws_key}", "purpose": "p", "page_notes": [""]}],
+    }
+    errs = vw.check_structure_and_limits(data)
+    assert errs
+    assert not any(aws_key in e for e in errs)
+
+
 def test_note_error_locates_repo_note_source() -> None:
     data = {"repo_notes": [{"content": ""}], "pages": []}
     errs = vw.check_structure_and_limits(data)
@@ -309,12 +368,16 @@ def test_note_error_locates_repo_note_source() -> None:
 
 
 def test_note_error_locates_page_note_source() -> None:
+    # `Sec` (the title) must NOT appear in the label — page_notes errors are
+    # located by raw positional index only, so a secret pasted into a page's
+    # title can never leak via a sibling page_notes finding.
     data = {
         "repo_notes": [],
         "pages": [{"title": "Sec", "purpose": "p", "page_notes": [""]}],
     }
     errs = vw.check_structure_and_limits(data)
-    assert any("Sec" in e and "page_notes[0]" in e for e in errs)
+    assert any("page[0] page_notes[0]" in e for e in errs)
+    assert not any("Sec" in e for e in errs)
 
 
 def test_clean_notes_have_no_secret_findings() -> None:
