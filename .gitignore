@@ -99,7 +99,13 @@ AGENTS.md
 .cursor/
 .cursorrules
 .deepagents/
-.devin/
+# .devin/ is also rulesync's Devin-agent-config output dir, BUT .devin/wiki.json
+# is the committed Devin DeepWiki steering file (see
+# docs/superpowers/specs/2026-07-06-devin-wiki-info-set-design.md) — Devin's
+# DeepWiki reads it from the git-tracked tree, so it must not be gitignored.
+# `.devin/*` (not `.devin/`) so the negation below can re-include one file.
+.devin/*
+!.devin/wiki.json
 .factory/
 .gemini/
 GEMINI.md
