@@ -289,7 +289,8 @@ ToolDispatchOutcome = Literal[
 """Granular per-dispatch outcome recorded in
 ``TOOL_DISPATCH_FIELDS['dispatch_outcome']`` (spec §10). The closed ``result``
 column on the audit row reuses the existing vocab (success/refused/quarantined/
-rate_limited) — this Literal is a finer-grained companion, not a replacement."""
+rate_limited/fault — the last emitted by the defensive ``unexpected_error``
+arms) — this Literal is a finer-grained companion, not a replacement."""
 
 TOOL_DISPATCH_FIELDS: Final[frozenset[str]] = frozenset(
     {

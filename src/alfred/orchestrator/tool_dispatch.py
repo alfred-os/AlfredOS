@@ -155,7 +155,18 @@ async def dispatch_tool(
     )
 
     if isinstance(spec, InternalToolSpec):
-        content = await spec.dispatch(invocation)
+        try:
+            content = await spec.dispatch(invocation)
+        except Exception:
+            # sec-003 totality (mirrors the external T3 arm): an internal tool
+            # raising must NOT escape the chokepoint unaudited (HARD #7).
+            await _audit(
+                dispatch_outcome="unexpected_error",
+                result="fault",
+                tool_name=spec.name,
+                result_tier="T2",
+            )
+            raise
         await _audit(
             dispatch_outcome="dispatched", result="success", tool_name=spec.name, result_tier="T2"
         )
@@ -229,7 +240,7 @@ async def dispatch_tool(
             tool_name=external.name,
             result_tier="T3",
         )
-        return t("orchestrator.tool.refused", reason=result.reason)
+        return t("orchestrator.tool.refused", tool=external.name, reason=result.reason)
 
     # ``result`` is Extracted — cross the SECOND boundary into the planner.
     #

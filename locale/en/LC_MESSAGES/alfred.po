@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-06 01:45+0100\n"
+"POT-Creation-Date: 2026-07-06 08:17+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2495,7 +2495,7 @@ msgstr ""
 
 #: src/alfred/orchestrator/tool_dispatch.py:124
 msgid "orchestrator.tool.unknown_tool"
-msgstr "Unknown tool: {tool}"
+msgstr "Unknown tool: {tool}."
 
 #: src/alfred/orchestrator/tool_dispatch.py:133
 msgid "orchestrator.tool.invalid_arguments"
@@ -2505,25 +2505,25 @@ msgstr "Invalid arguments for {tool}."
 msgid "orchestrator.tool.not_permitted"
 msgstr "Tool {tool} is not permitted."
 
-#: src/alfred/orchestrator/tool_dispatch.py:186
+#: src/alfred/orchestrator/tool_dispatch.py:197
 msgid "orchestrator.tool.rate_limited"
 msgstr "Tool {tool} is rate limited."
 
-#: src/alfred/orchestrator/tool_dispatch.py:194
+#: src/alfred/orchestrator/tool_dispatch.py:205
 msgid "orchestrator.tool.domain_not_allowed"
 msgstr "Tool {tool} refused: destination not allowed."
 
-#: src/alfred/orchestrator/tool_dispatch.py:202
+#: src/alfred/orchestrator/tool_dispatch.py:213
 msgid "orchestrator.tool.error"
 msgstr "Tool {tool} failed."
 
-#: src/alfred/orchestrator/tool_dispatch.py:212
+#: src/alfred/orchestrator/tool_dispatch.py:223
 msgid "orchestrator.tool.timeout"
 msgstr "Tool {tool} timed out."
 
-#: src/alfred/orchestrator/tool_dispatch.py:232
+#: src/alfred/orchestrator/tool_dispatch.py:243
 msgid "orchestrator.tool.refused"
-msgstr "Tool refused: {reason}."
+msgstr "Tool {tool} refused: {reason}."
 
 # Slice-3 retrospective fix DEVEX-001 — bare i18n keys emitted by
 # bin/alfred-plugin-launcher.sh on stderr. The supervisor renders these
