@@ -624,6 +624,21 @@ jobs:
           uv run coverage report \
             --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py,src/alfred/egress/adapter_proxy_shim.py' \
             --fail-under=100
+      - name: Tool-dispatch chokepoint per-file 100% line+branch coverage (unit)
+        # #339 PR2: ``dispatch_tool`` is the single trust-boundary chokepoint
+        # every tool call flows through (resolve → validate → capability-gate →
+        # dispatch → downgrade → DLP → classify). Every branch MUST emit an
+        # audit row (HARD rule #7) and the planner MUST never see raw T3 (HARD
+        # rule #5), so an un-exercised branch is an un-audited dispatch or an
+        # unguarded trust crossing — it gates at 100% line+branch. Fully proven
+        # by unit data, so it gates here in the unit job too. The TWO-GATES
+        # pattern: keep this ``--include`` in sync with the matching (combined)
+        # step in the ``coverage-gates`` job below.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/orchestrator/tool_dispatch.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/orchestrator/tool_dispatch.py' \
+            --fail-under=100
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
@@ -1887,6 +1902,18 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/egress/byte_splice.py,src/alfred/egress/adapter_egress_addr.py,src/alfred/gateway/adapter_egress_listener.py,src/alfred/egress/adapter_proxy_shim.py' \
+            --fail-under=100
+      - name: Tool-dispatch chokepoint per-file 100% line+branch coverage (combined)
+        # Combined-data mirror of the ``python`` job's tool-dispatch gate
+        # (#339 PR2 — the two-gates pattern). ``dispatch_tool`` is 100%
+        # line+branch proven by unit data; this mirror exists for parity so a
+        # future integration test that reaches the chokepoint contributes to
+        # the gate. Keep this ``--include`` in sync with the python-job
+        # ``(unit)`` step.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/orchestrator/tool_dispatch.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/orchestrator/tool_dispatch.py' \
             --fail-under=100
 
   smoke:
