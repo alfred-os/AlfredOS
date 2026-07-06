@@ -896,3 +896,84 @@ async def test_release_fault_does_not_mask_exception() -> None:
     assert release_log["error_type"] == "RuntimeError"
     assert "correlation_id" in release_log
     assert release_log["correlation_id"] == "corr-1"
+
+
+@pytest.mark.asyncio
+async def test_reserve_transport_fault_propagates_no_release_no_audit() -> None:
+    """FIX-9 totality (CR #4 + error-reviewer + security-engineer): a reserve
+    TRANSPORT fault — a non-``WebFetchRateLimited`` exception out of
+    ``handle_cap.try_reserve`` (e.g. a Redis connection blip), as distinct from
+    the cap-exceeded ``WebFetchRateLimited`` arm covered by
+    ``test_handle_cap_exceeded_refuses_pre_network_with_audit`` — PROPAGATES
+    uncaught rather than being swallowed or mis-typed.
+
+    The reserve call (Step 3b) sits BEFORE the Step-4/5 ``try/finally`` that
+    guards the release — nothing was held yet when the fault fires, so:
+
+    * ``release()`` is NEVER called (there is no reservation to release);
+    * NO local ``tool.web.fetch`` audit row is written here — only the
+      ``except WebFetchRateLimited`` arm audits at this layer; a transport
+      fault is audited ONE LAYER UP by ``dispatch_tool``'s catch-all
+      (``except Exception -> unexpected_error/fault``), so a second audit arm
+      here would double-audit the same fault (module docstring FIX-9 note).
+    """
+    audit = _build_audit()
+
+    class _FaultyReserveHandleCap:
+        """A ``handle_cap``-shaped fake whose ``try_reserve`` raises a
+        transport-shaped, NON-``WebFetchRateLimited`` exception — e.g. what a
+        real Redis connection reset would surface, distinct from the
+        deliberate cap-exceeded refusal ``_SpyHandleCap(raise_on_reserve=True)``
+        models."""
+
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        async def try_reserve(
+            self, *, user_id: str, handle_id: str, handle_ttl_seconds: int
+        ) -> None:
+            raise RuntimeError("redis connection reset")
+
+        async def release(
+            self, *, user_id: str, handle_id: str, correlation_id: str | None = None
+        ) -> None:
+            self.released.append(handle_id)  # must NEVER be called
+
+    faulty = _FaultyReserveHandleCap()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    with pytest.raises(RuntimeError, match="redis connection reset"):
+        await _dispatch(audit=audit, extractor=extractor, handle_cap=faulty)
+
+    extractor.handle.assert_not_awaited()
+    assert faulty.released == []
+    assert audit.append_schema.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_propagates_and_releases_slot() -> None:
+    """Low / optional (error-reviewer): an ``asyncio.CancelledError`` raised
+    inside the extractor's ``handle()`` propagates OUT of ``dispatch_web_fetch``
+    uncaught, AND the reserved per-user slot is still released — the outer
+    ``finally`` (Step 4/5) runs unconditionally, while the narrower
+    ``except Exception`` guarding the release call does NOT catch it
+    (``CancelledError`` is a ``BaseException`` subclass, not an ``Exception``
+    subclass — see the module's FIX-8 docstring note). Modelled on
+    ``test_release_on_timeout``, substituting a direct raise for the sleep +
+    action-deadline race so no real cancellation/timeout wiring is needed —
+    mirrors the precedent in
+    ``tests/unit/egress/test_egress_response_extract.py::test_cancelled_error_leaves_no_orphaned_body``.
+    """
+    spy = _SpyHandleCap()
+
+    async def _cancelled_handle(**_kwargs: Any) -> EgressExtractOutcome:
+        raise asyncio.CancelledError()
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _cancelled_handle
+
+    with pytest.raises(asyncio.CancelledError):
+        await _dispatch(extractor=extractor, handle_cap=spy)
+
+    assert len(spy.released) == 1
+    assert spy.released == spy.reserved
