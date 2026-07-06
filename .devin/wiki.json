@@ -1,0 +1,294 @@
+{
+  "repo_notes": [
+    {
+      "content": "Dual-LLM / trust flow. The privileged orchestrator sees only T0-T2. The quarantined LLM is the ONLY consumer of raw T3 (web/email/file/tool-output) and emits ONLY schema-validated structured data — never tool calls, never free text fed back as instructions. All external content is tagged T3 at ingest. Never write 'the orchestrator reads a web page / processes tool output': T3 reaches the privileged side only as structured extraction via the T3->T2 dispatch chokepoint. Non-negotiable (PRD §5, DEC-007).",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Gateway sole-egress / connectivity-free core. The core runs on `internal:true` and cannot open external sockets (kernel-enforced). ALL egress — provider calls, tool egress, adapter egress — routes through the gateway L7 CONNECT proxy via the `EgressClient` seam. Never write that a provider adapter or plugin 'connects to' / 'makes an HTTP request to' an external host from the core.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Self-modification reviewer-gate loop. Alfred improves itself via proposal branches in `/var/lib/alfred/state.git` (OUTSIDE the source tree) -> reviewer agent reviews diff+tests+rationale -> merge activates -> rollback is `git revert`. Never describe Alfred editing its own personas/skills/policy in place on main at runtime. Plugin install/remove needs additional human approval.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Every action is hookable. Hookpoints wrap every side-effecting action (a PRD §5 non-negotiable invariant, ADR-0014). Describe capabilities as dispatched through hookpoints, not as direct un-interceptable calls.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Secrets & outbound DLP. Plugins/tools request secret IDs from the broker; the broker substitutes the value at the tool-call boundary — never write 'the plugin reads the API key from an env var'. Every outbound path is DLP-scanned on by default and cannot be disabled per-call. (HARD rules 4 & 6.)",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Shipped-vs-scaffolded honesty. The security/infra chassis (Slices 1-4; gateway program Specs A/B/C) is complete and merged. The real-LLM engine is not fully wired: most paths are deterministic-echo; the exception is the agentic tool-calling epic (#339), in progress. Describe the architecture as built and tested; do NOT present tool-calling, live dual-LLM extraction, or end-to-end autonomous task execution as fully operational. When unsure whether something is shipped or planned, say 'is designed to', not 'does'.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Functional-core / imperative-shell, no global state. Pure functions for transforms; classes only for state machines; dependencies injected via Protocols; fail-loud at trust boundaries. Don't describe modules as global singletons or ambient services.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "The model is not the perimeter; the tool layer is. Every security guarantee is enforced in code at the tool/transport boundary, independent of what any LLM is prompted or persuaded to do. Describe defenses as enforced by the boundary — never as 'the model is instructed to...'.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Trust tiers are provenance, not capability; do not conflate the two tier axes. A plugin's subscriber-capability tier (system/operator/user-plugin) is orthogonal to a content trust tier (T0-T3). A plugin is never 'T2'; content is. Conflating them is a named bug class (tier-laundering) — keep the axes separate in all prose. (Highest-risk fidelity item; matches `capability_gate/policy.py`.)",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Vocabulary lock (with a gap fail-safe). `docs/glossary.md` is the single source of AlfredOS vocabulary; where a `##` heading exists (canonical, GitHub-slugified anchor), reuse the exact term and link to it, never coin a synonym. Some terms do NOT have a heading yet (reviewer gate, egress plane, capability grant, audit graph) — for those, describe the concept plainly in the page body and do NOT invent a definitional heading or fake an anchor link. Alfred = the default persona; AlfredOS = the system.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Disclosure guardrail A — no 'how to weaken it' recipe. Describe controls and their threat model in full (Apache-2.0, public repo, Kerckhoffs — full design disclosure is correct). But do NOT compile a step-by-step checklist for disabling DLP, widening the egress allowlist, or lowering a grant; that is operator-runbook material, not public-wiki headline material.",
+      "author": "AlfredOS maintainers"
+    },
+    {
+      "content": "Disclosure guardrails B & C — residuals paired, live values never. (B) Whenever a page states a limitation or accepted residual, it must state, in the same breath, the assumption that puts it out of scope — e.g. 'this presupposes an attacker with code execution inside the core container, which is full compromise and outside the tool-layer's threat boundary.' A residual must read as documented accepted risk, never as an unpatched hole. (C) Describe canaries, allowlists, and secrets at the mechanism level; never enumerate literal canary strings, per-deployment seeding positions, real egress-allowlist domains, or anything token-shaped. C is model-enforced only — the wiki is generated in Devin's cloud, so it is backstopped by an input-side secret-shape scan over the files Devin ingests (see Validation), not by trusting the generator.",
+      "author": "AlfredOS maintainers"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview",
+      "purpose": "Front-door router: a three-sentence pitch, the trust-boundary diagram, and an audience fork (self-hosters -> Security Model, operators -> Operating, contributors -> Extending).",
+      "page_notes": [
+        "Ground in `PRD.md` §1-§2. Keep it a router, not a throat-clear."
+      ]
+    },
+    {
+      "title": "Architecture",
+      "purpose": "Structural spine — what it is, structurally.",
+      "page_notes": [
+        "Ground in `docs/ARCHITECTURE.md` and `PRD.md` §5 (the 8 non-negotiable invariants)."
+      ]
+    },
+    {
+      "title": "Security Model",
+      "purpose": "The differentiator: how AlfredOS is secured.",
+      "page_notes": [
+        "Ground in `docs/subsystems/security.md`, `docs/subsystems/quarantine.md`, and `PRD.md` §7.1."
+      ]
+    },
+    {
+      "title": "Operating & Deploying",
+      "purpose": "How to run it.",
+      "page_notes": [
+        "Ground in `README.md` and `docs/runbooks/`."
+      ]
+    },
+    {
+      "title": "Extending & Contributing",
+      "purpose": "How to extend it.",
+      "page_notes": [
+        "Ground in `CONTRIBUTING.md` and `docs/python-conventions.md`."
+      ]
+    },
+    {
+      "title": "Reference",
+      "purpose": "Lookups and honesty.",
+      "page_notes": [
+        "Ground in `docs/glossary.md` and `docs/adr/`."
+      ]
+    },
+    {
+      "title": "Orchestrator & Act-Phase Loop",
+      "purpose": "The OODA turn and the agentic tool-calling loop that drives a persona's response.",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in `PRD.md` §5, ADR-0003/0045/0046, and `src/alfred/orchestrator/`.",
+        "⚠ The real-LLM engine is not fully wired yet; #339 (agentic tool-calling) is in progress — this branch is PR3 of 4. Describe the act-phase loop as designed, not fully shipped.",
+        "No curated deep-doc exists yet — anchor to `PRD.md` §5 + `src/alfred/orchestrator/`; treat claims as unverified until a deep-doc lands."
+      ]
+    },
+    {
+      "title": "Memory Model (6 Layers)",
+      "purpose": "Working, episodic, summarized, semantic, vector, knowledge-graph layers and consolidation.",
+      "parent": "Architecture",
+      "page_notes": [
+        "No curated deep-doc exists yet — anchor to `PRD.md` §6.2 + `src/alfred/memory/`; treat claims as unverified until a deep-doc lands.",
+        "Working + episodic are live; semantic/vector/graph are partial/planned — describe as designed, not shipped."
+      ]
+    },
+    {
+      "title": "Personas & Addressing",
+      "purpose": "Persona registry, addressing modes, inter-persona bus with safety rails.",
+      "parent": "Architecture",
+      "page_notes": [
+        "No curated deep-doc exists yet — anchor to `PRD.md` §6.8 + `src/alfred/personas/`; treat claims as unverified until a deep-doc lands. No governing ADR either.",
+        "⚠ Only Alfred ships enabled; Lucius/Oracle/Diana are example persona definitions, not shipped personas.",
+        "Distinct from Providers & Routing: this page covers persona addressing (registry + addressing modes + inter-persona bus), not model routing."
+      ]
+    },
+    {
+      "title": "Providers & Routing",
+      "purpose": "Tiered provider routing, capability fallback, caching, tool-call protocol.",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in `PRD.md` §6.5/§6.6, ADR-0001/0045/0046, and `src/alfred/providers/`.",
+        "No curated deep-doc exists yet — anchor to `PRD.md` §6.5 + `src/alfred/providers/`; treat claims as unverified until a deep-doc lands."
+      ]
+    },
+    {
+      "title": "Plugins & MCP Transport",
+      "purpose": "MCP plugin transport (stdio/HTTP), session lifecycle, manifest, capability declarations.",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in `docs/subsystems/plugins.md`. The `comms_mcp` MCP transport is folded into this page, not a separate one."
+      ]
+    },
+    {
+      "title": "Comms & Gateway Inbound",
+      "purpose": "Comms adapters (Discord/TUI), identity binding, the gateway as comms front door + resume.",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in `docs/subsystems/comms.md` and ADR-0036.",
+        "⚠ Discord and TUI are implemented; Telegram is an MVP-target adapter not yet built; Slack/WhatsApp/voice/email are post-MVP (`PRD.md` §6.1)."
+      ]
+    },
+    {
+      "title": "Hooks & Hookpoints",
+      "purpose": "Every action is hookable; hook kinds, tiers, and the dispatcher.",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in `docs/subsystems/hooks.md`, ADR-0014, and `PRD.md` §5/§5.1.",
+        "A PRD §5 non-negotiable invariant — kept as a first-class page, not folded into other prose."
+      ]
+    },
+    {
+      "title": "Connectivity-Free Core & Egress Topology",
+      "purpose": "Kernel-isolated core (internal:true); the gateway as sole external egress plane (L7 CONNECT proxy, default-deny allowlist).",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in ADR-0040/0042/0043 and `docs/ARCHITECTURE.md` (architecture overview, post de-stale).",
+        "Cross-linked from Security Model — the connectivity-free core / egress topology is both an architecture-identity page and a security control."
+      ]
+    },
+    {
+      "title": "Self-Modification: Reviewer-Gate Loop",
+      "purpose": "Proposal branches in /var/lib/alfred/state.git -> reviewer agent -> merge activates; rollback = revert.",
+      "parent": "Architecture",
+      "page_notes": [
+        "Ground in `PRD.md` §6.4 and ADR-0018/0021."
+      ]
+    },
+    {
+      "title": "Trust Tiers (T0-T3)",
+      "purpose": "Provenance tiers, boundary tagging, immutability; T3 minting capability-gated to a closed set of boundary call sites.",
+      "parent": "Security Model",
+      "page_notes": [
+        "Ground in `docs/subsystems/security.md`, ADR-0017 (trust-tier completion), and ADR-0028 (boot-time T3 nonce auth, folded in as principle, not wire-level mechanics)."
+      ]
+    },
+    {
+      "title": "Dual-LLM Split & Quarantine",
+      "purpose": "Privileged orchestrator never sees raw T3; the quarantined LLM is the only T3 consumer; the single sanctioned T3->T2 dispatch chokepoint.",
+      "parent": "Security Model",
+      "page_notes": [
+        "Ground in `docs/subsystems/quarantine.md` and ADR-0046. The purpose MUST name the T3->T2 crossing."
+      ]
+    },
+    {
+      "title": "Capability Gate, Grants & Secret Broker",
+      "purpose": "Fail-closed gate, grants-before-dispatch, secret-IDs-not-values substituted at the tool boundary, out-of-band step-up for high-blast actions.",
+      "parent": "Security Model",
+      "page_notes": [
+        "Ground in `docs/subsystems/security.md`.",
+        "⚠ Reviewer-gated config step-up exists and is live; general high-blast tool step-up is more scaffold than a fully wired flow — don't present it as uniformly operational."
+      ]
+    },
+    {
+      "title": "DLP, Canary Tokens & Outbound Redaction",
+      "purpose": "On-by-default outbound DLP (per-call-undisableable), canary-token tripwires, redaction — the content-scanning family.",
+      "parent": "Security Model",
+      "page_notes": [
+        "Ground in `docs/subsystems/security.md`.",
+        "Mechanism-level description only — no literal canary strings, seeding positions, or real allowlist domains (disclosure guardrail C)."
+      ]
+    },
+    {
+      "title": "Audit Log, Audit Graph & Reviewer Trail",
+      "purpose": "Append-only signed audit, alfred audit graph, and the reviewer-gate decision trail.",
+      "parent": "Security Model",
+      "page_notes": [
+        "No curated deep-doc exists yet — anchor to `PRD.md` §7.4 + `src/alfred/audit/`; treat claims as unverified until a deep-doc lands. No governing ADR either."
+      ]
+    },
+    {
+      "title": "Deployment & First-Run Setup",
+      "purpose": "Docker Compose stack, setup scripts, state.git seed, datastores (Postgres 18 / Redis 8 / Qdrant).",
+      "parent": "Operating & Deploying",
+      "page_notes": [
+        "Ground in `README.md`, `docker-compose.yaml`, and `bin/`.",
+        "⚠ README currently carries a 'Pre-implementation' status marker — carry that maturity caveat; don't present the quickstart as fully live."
+      ]
+    },
+    {
+      "title": "CLI & Operator Surface",
+      "purpose": "The alfred command tree by area (user, plugin, web, config, supervisor, audit, gateway).",
+      "parent": "Operating & Deploying",
+      "page_notes": [
+        "Anchor to the `.rulesync/rules/CLAUDE.md` command table (the committed source; root CLAUDE.md is a gitignored rulesync output Devin cannot see) + `src/alfred/cli/`.",
+        "Honour slice markers — alfred memory show / alfred cost report are Slice 4+ / not implemented."
+      ]
+    },
+    {
+      "title": "Configuration & Policies",
+      "purpose": "policies.yaml, reviewer-gated vs direct config keys, hot reload.",
+      "parent": "Operating & Deploying",
+      "page_notes": [
+        "Ground in `docs/subsystems/policies.md`."
+      ]
+    },
+    {
+      "title": "Writing Plugins, Personas & Skills",
+      "purpose": "Authoring MCP plugins, persona definitions, and runtime skills; manifest + capability model.",
+      "parent": "Extending & Contributing",
+      "page_notes": [
+        "Ground in `docs/subsystems/plugins.md` and `CONTRIBUTING.md`."
+      ]
+    },
+    {
+      "title": "Conventions & i18n",
+      "purpose": "Python 3.14+ idioms, SOLID+FP, typing bar, and the day-one i18n discipline (t(), language fields).",
+      "parent": "Extending & Contributing",
+      "page_notes": [
+        "Ground in `docs/python-conventions.md` and `PRD.md` §7.7."
+      ]
+    },
+    {
+      "title": "Testing & the Adversarial Suite",
+      "purpose": "Unit/integration/smoke/adversarial layers; the adversarial suite is release-blocking.",
+      "parent": "Extending & Contributing",
+      "page_notes": [
+        "Ground in `PRD.md` §8.1.",
+        "Cross-linked from Security Model — the adversarial suite is security posture evidence, not just contributor detail."
+      ]
+    },
+    {
+      "title": "Glossary",
+      "purpose": "The single canonical AlfredOS vocabulary.",
+      "parent": "Reference",
+      "page_notes": [
+        "Ground in `docs/glossary.md` — headings are canonical, GitHub-slugified anchors; reuse existing terms rather than coining synonyms."
+      ]
+    },
+    {
+      "title": "Decision Records (ADR Index)",
+      "purpose": "Index of the 46 ADRs; the load-bearing ones are pinned as page_notes on the concept pages they govern.",
+      "parent": "Reference",
+      "page_notes": [
+        "Ground in `docs/adr/`. Load-bearing ADRs are pinned on the concept pages they govern: ADR-0040/0042/0043 -> Egress Topology, ADR-0017 -> Trust Tiers, ADR-0046 -> Dual-LLM Split, ADR-0045 -> Providers/Orchestrator, ADR-0014 -> Hooks."
+      ]
+    },
+    {
+      "title": "Slice / Roadmap Status",
+      "purpose": "Explicitly forward-looking page absorbing planned surfaces so no other page oversells them.",
+      "parent": "Reference",
+      "page_notes": [
+        "Ground in `PRD.md` §9/§10 (MVP scope vs. roadmap, open questions) and the `.rulesync/rules/CLAUDE.md` current-state section (the committed source; root CLAUDE.md is a gitignored rulesync output)."
+      ]
+    }
+  ]
+}

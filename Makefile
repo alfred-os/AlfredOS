@@ -16,7 +16,7 @@
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
         check format-check lint-check typecheck strict-declarations-lint tag-t3-check test test-unit test-integration test-smoke test-adversarial test-perf \
-        docs-check
+        docs-check wiki-check
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -179,6 +179,9 @@ check: format-check lint-check typecheck strict-declarations-lint tag-t3-check t
 docs-check: ## Verify markdown link + anchor integrity across docs/, top-level *.md.
 	python3 scripts/docs_check.py docs/ PRD.md README.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md \
 		--exclude docs/superpowers/plans
+
+wiki-check: ## Validate .devin/wiki.json (schema, limits, anchor resolution, secret shapes).
+	python3 scripts/validate_devin_wiki.py .devin/wiki.json --repo-root "$(CURDIR)"
 
 # ──────────────────────────────────────────────────────────────
 # Git helpers

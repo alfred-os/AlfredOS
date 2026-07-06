@@ -119,3 +119,10 @@ def test_clean_notes_have_no_secret_findings() -> None:
 def test_validate_file_aggregates_and_main_exit_codes(capsys: pytest.CaptureFixture[str]) -> None:
     assert vw.main([str(_FIX / "valid_minimal.json"), "--repo-root", str(_REPO_ROOT)]) == 0
     assert vw.main([str(_FIX / "bad_empty_title.json"), "--repo-root", str(_REPO_ROOT)]) == 1
+
+
+def test_real_devin_wiki_file_is_valid() -> None:
+    path = _REPO_ROOT / ".devin" / "wiki.json"
+    assert path.exists(), ".devin/wiki.json must exist"
+    errs = vw.validate_file(path, _REPO_ROOT)
+    assert errs == [], "real .devin/wiki.json failed validation:\n" + "\n".join(errs)
