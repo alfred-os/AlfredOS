@@ -42,6 +42,8 @@ CONSTANT_NAMES: Final[tuple[str, ...]] = (
     "STATE_PROPOSAL_PROCESSED_FIELDS",
     "STATE_PROPOSAL_DISPATCH_FAILED_FIELDS",
     "STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS",
+    # #339 PR2 — tool.dispatch chokepoint audit family.
+    "TOOL_DISPATCH_FIELDS",
 )
 
 
@@ -477,3 +479,60 @@ def test_state_proposal_dispatch_failed_supersets_processed() -> None:
     assert processed.issubset(failed)
     assert "framework_error_kind" in failed
     assert "framework_error_kind" not in processed
+
+
+# ---------------------------------------------------------------------------
+# tool.dispatch family (#339 PR2)
+# ---------------------------------------------------------------------------
+
+
+def test_tool_dispatch_fields_closed_set() -> None:
+    """TOOL_DISPATCH_FIELDS exact 8-key field list per the #339 PR2 plan-review
+
+    FIX-6 override: the brief's Task-2 draft showed 7 keys; a 6-reviewer
+    plan-review added ``phase`` to carry the §10 audit-graph disambiguator
+    (e.g. ``tool_dispatch:web.fetch:3``), set by the later ``dispatch_tool``
+    chokepoint.
+    """
+    assert audit_row_schemas.TOOL_DISPATCH_FIELDS == frozenset(  # noqa: SIM300
+        {
+            "tool_name",
+            "call_id",
+            "call_index",
+            "result_tier",
+            "dispatch_outcome",
+            "triggering_user_id",
+            "correlation_id",
+            "phase",
+        }
+    )
+
+
+def test_tool_dispatch_outcome_literal_closed_set() -> None:
+    """ToolDispatchOutcome's Literal pins the 13-token closed vocabulary.
+
+    FIX-5 override (#339 PR2 plan-review): includes ``unexpected_error``
+    for a defensive catch-all arm the later ``dispatch_tool`` chokepoint
+    adds. Mirrors the ``RateLimitBucket`` / ``DlpScanResult`` exact-set
+    pattern so a stray extra literal, a dropped existing one, or a typo
+    all surface here.
+    """
+    from typing import get_args
+
+    from alfred.audit.audit_row_schemas import ToolDispatchOutcome
+
+    assert set(get_args(ToolDispatchOutcome)) == {
+        "dispatched",
+        "unknown_tool",
+        "invalid_arguments",
+        "gate_denied",
+        "tool_refused",
+        "domain_not_allowed",
+        "rate_limited",
+        "tool_error",
+        "timeout",
+        "downgrade_denied",
+        "canary_tripped",
+        "dlp_canary",
+        "unexpected_error",
+    }

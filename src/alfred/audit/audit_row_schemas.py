@@ -268,6 +268,48 @@ WEB_FETCH_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# tool.dispatch family (#339 PR2)
+# ---------------------------------------------------------------------------
+
+ToolDispatchOutcome = Literal[
+    "dispatched",  # ok (internal <=T2 or T3 Extracted->downgrade->DLP clean)
+    "unknown_tool",  # tool_name not present in the registry
+    "invalid_arguments",  # call args failed the tool's Pydantic argument model
+    "gate_denied",  # tool.dispatch capability-gate grant deny
+    "tool_refused",  # tool returned a TypedRefusal
+    "domain_not_allowed",  # web.fetch allowlist refusal
+    "rate_limited",
+    "tool_error",  # tool-raised error (e.g. WebFetchError) — never str(exc)
+    "timeout",  # action-deadline surfaced TimeoutError (#347 blocker-2 seam)
+    "downgrade_denied",  # T2->planner clearance deny (escalation)
+    "canary_tripped",  # inbound canary in the T3 response (escalation)
+    "dlp_canary",  # canary in the EXTRACTED T2 (escalation)
+    "unexpected_error",  # defensive catch-all arm; type(exc).__name__ only
+]
+"""Granular per-dispatch outcome recorded in
+``TOOL_DISPATCH_FIELDS['dispatch_outcome']`` (spec §10). The closed ``result``
+column on the audit row reuses the existing vocab (success/refused/quarantined/
+rate_limited) — this Literal is a finer-grained companion, not a replacement."""
+
+TOOL_DISPATCH_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "tool_name",
+        "call_id",
+        "call_index",
+        "result_tier",
+        "dispatch_outcome",
+        "triggering_user_id",
+        "correlation_id",
+        # §10 audit-graph disambiguator, e.g. "tool_dispatch:web.fetch:3" — set
+        # by the dispatch_tool chokepoint, not by this schema module.
+        "phase",
+    }
+)
+"""Fields for the ``tool.dispatch`` audit family (#339 PR2). NEVER carries raw
+tool arguments, the fetched URL/body, or ``str(exc)`` — only safe tokens +
+attribution (HARD rule #7 / spec §5.6)."""
+
+# ---------------------------------------------------------------------------
 # supervisor.breaker.* family
 # ---------------------------------------------------------------------------
 
