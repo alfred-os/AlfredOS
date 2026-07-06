@@ -1,6 +1,7 @@
 # AlfredOS
 
 [![Discord](https://img.shields.io/discord/1508136189830369300?label=chat&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/HeNwaBhJfU)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/alfred-os/AlfredOS)
 
 > An open-source, self-hostable, multi-user, multi-persona, security-hardened agentic OS.
 
