@@ -1,0 +1,7 @@
+{
+  "repo_notes": [{ "content": "AlfredOS is a security-hardened agentic OS." }],
+  "pages": [
+    { "title": "Overview", "purpose": "Front-door router." },
+    { "title": "Architecture", "purpose": "Structural spine.", "parent": "Overview" }
+  ]
+}
