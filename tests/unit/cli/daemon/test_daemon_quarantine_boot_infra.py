@@ -24,7 +24,11 @@ from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
 from alfred.hooks.errors import HookError
-from alfred.security.capability_gate._bootstrap_grants import FIRST_PARTY_SYSTEM_GRANTS
+from alfred.security.capability_gate._bootstrap_grants import (
+    _FIRST_PARTY_PROPOSAL_BRANCH,
+    FIRST_PARTY_SYSTEM_GRANTS,
+)
+from alfred.security.capability_gate.policy import GrantRow
 from tests.helpers.gates import (
     make_comms_adapter_load_gate,
     make_deny_all_gate,
@@ -51,28 +55,60 @@ def test_first_party_grant_live_true_when_seeded() -> None:
     assert _first_party_grant_live(gate) is True
 
 
-def test_first_party_grant_live_false_when_missing_one_content_grant() -> None:
-    """A gate missing ONE content-tier grant reports NOT live.
+def test_first_party_grant_live_false_when_content_grant_wrong_axis() -> None:
+    """A gate carrying the ``quarantine.dereference`` row on the WRONG axis
+    (present on ``subscriber_tier`` but ``content_tier=None`` instead of the
+    real ``"T3"``) reports NOT live.
 
-    FIX-13: proves the content-clearance axis is ACTUALLY consulted, not
-    vacuously satisfied. Seeds every first-party grant EXCEPT
-    ``quarantine.dereference`` (a ``content_tier="T3"`` row) — the
-    subscriber-tier rows (DLP subscriber, ``tool.dispatch``) are still live,
-    so a version of ``_first_party_grant_live`` that only exercised the
-    ``check`` branch (ignoring ``content_tier``) would wrongly report
-    ``True`` here. The dependency on ``check_content_clearance`` for
-    content-bearing rows is exactly what fails this gate to ``False``.
+    FIX-13: proves ``_first_party_grant_live`` actually CONSULTS the
+    content-clearance axis rather than just falling through to
+    ``gate.check(...)`` for every row. Dropping the ``quarantine.dereference``
+    row entirely does NOT discriminate this: both ``check`` and
+    ``check_content_clearance`` key on ``plugin_id`` first, and
+    ``alfred.quarantined-llm`` is the only row with that plugin_id, so a
+    BUGGY implementation that reverted to always-``gate.check(...)`` (the
+    pre-#339 behaviour) also returns ``False`` on a dropped row — it fails on
+    the missing ``plugin_id`` match, never reaching the axis distinction.
+
+    Instead this fixture keeps the row PRESENT with a mutated
+    ``content_tier=None`` (the real grant is ``"T3"``):
+
+    * A buggy ``_first_party_grant_live`` that only ever called
+      ``gate.check(...)`` (ignoring ``content_tier``) would see
+      ``subscriber_tier="system"`` + matching ``plugin_id``/``hookpoint`` and
+      wrongly report ``True`` — ``check`` never looks at ``content_tier``.
+    * The correct, axis-faithful implementation calls
+      ``gate.check_content_clearance(content_tier="T3")`` for this row (per
+      the REAL :data:`FIRST_PARTY_SYSTEM_GRANTS` entry, which is untouched)
+      and that fails to match the gate's mutated ``content_tier=None`` row,
+      so it correctly reports ``False``.
+
+    This is the mutation that actually kills the "reverted to always-check"
+    regression; the drop-the-row variant does not (verified empirically
+    against the real :class:`GatePolicy`).
     """
     from alfred.cli.daemon._commands import _first_party_grant_live
 
-    partial = tuple(
-        grant for grant in FIRST_PARTY_SYSTEM_GRANTS if grant.hookpoint != "quarantine.dereference"
+    wrong_axis_dereference_grant = GrantRow(
+        plugin_id="alfred.quarantined-llm",
+        subscriber_tier="system",
+        hookpoint="quarantine.dereference",
+        content_tier=None,  # WRONG — the real grant is T3; the mutation-killer.
+        proposal_branch=_FIRST_PARTY_PROPOSAL_BRANCH,
     )
-    # Sanity: the omission actually dropped a row (guards against a future
-    # hookpoint rename silently turning this into a no-op tautology).
-    assert len(partial) == len(FIRST_PARTY_SYSTEM_GRANTS) - 1
+    mutated = tuple(
+        grant if grant.hookpoint != "quarantine.dereference" else wrong_axis_dereference_grant
+        for grant in FIRST_PARTY_SYSTEM_GRANTS
+    )
+    # Sanity: the mutation actually replaced a row in place (same count, one
+    # row now differs) — guards against a future hookpoint rename silently
+    # turning this into a no-op tautology (the omitted row would never be
+    # found, and this comprehension would then leave every row untouched).
+    assert len(mutated) == len(FIRST_PARTY_SYSTEM_GRANTS)
+    assert mutated != FIRST_PARTY_SYSTEM_GRANTS
+    assert wrong_axis_dereference_grant in mutated
 
-    gate = make_comms_adapter_load_gate(partial)
+    gate = make_comms_adapter_load_gate(mutated)
     assert _first_party_grant_live(gate) is False
 
 
