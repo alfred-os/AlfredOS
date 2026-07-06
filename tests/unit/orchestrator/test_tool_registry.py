@@ -38,7 +38,7 @@ def _int(name: str) -> InternalToolSpec:
     return InternalToolSpec(
         name=name,
         definition=ToolDefinition(name=name, description="d", input_schema={"type": "object"}),
-        dispatch=_d,  # type: ignore[arg-type]
+        dispatch=_d,
     )
 
 
@@ -72,6 +72,27 @@ def test_arguments_conform_required_presence() -> None:
     schema = {"type": "object", "required": ["url"], "properties": {"url": {"type": "string"}}}
     assert arguments_conform({"url": "https://x"}, schema) is True
     assert arguments_conform({}, schema) is False
+
+
+def test_arguments_conform_rejects_extra_keys() -> None:
+    # additionalProperties: False → a key outside `properties` is rejected,
+    # while a call entirely within `properties` (or empty) passes the loop clean.
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"url": {"type": "string"}},
+    }
+    assert arguments_conform({"url": "https://x", "rogue": 1}, schema) is False
+    assert arguments_conform({"url": "https://x"}, schema) is True
+    assert arguments_conform({}, schema) is True
+
+
+def test_arguments_conform_tolerates_malformed_schema_shapes() -> None:
+    # Defensive isinstance guards: a `required` that isn't a list/tuple and a
+    # `properties` that isn't a Mapping are treated as "no constraint" (fail-open
+    # on a malformed schema SHAPE, not on a real missing/extra argument).
+    assert arguments_conform({}, {"required": "url"}) is True  # str `required` → skipped
+    assert arguments_conform({"x": 1}, {"additionalProperties": False, "properties": []}) is True
 
 
 def test_duplicate_tool_name_rejected() -> None:
