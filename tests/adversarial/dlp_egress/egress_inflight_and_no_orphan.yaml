@@ -4,9 +4,10 @@
 # Renamed from handle_cap_exhaustion.yaml when the per-user ContentHandle cap
 # was removed in G7-2.5 (the fused fetch+extract stages T3 in-memory transiently;
 # no Redis handle store). The de-2026-004 corpus id is RETAINED — this entry
-# supersedes the old handle-cap threat and carries the deferred-property obligation.
+# supersedes the old handle-cap threat; #339 PR4a REINSTATES the per-user
+# resource-exhaustion REFUSAL bound (see the Converted-property note below).
 #
-# Two related egress fetch+extract resource-integrity threats proved here:
+# Three related egress fetch+extract resource-integrity threats proved here:
 #
 # (a) No-orphan (C9): a gate-denied OR cancelled fetch MUST NOT leave a raw T3
 #     body alive in the unbounded QuarantineStagingMap. Without the C9 fix
@@ -23,14 +24,16 @@
 #     single extractor — the bounded-wait property must hold (asyncio.wait_for
 #     wraps the concurrent gather; a TimeoutError is a FAIL, not a skip).
 #
-# Deferred property (#339 merge-blocker, machine-visible as xfail in test file):
-#   The ACTIVE per-user resource-exhaustion REFUSAL bound (handle_cap=5 → 6th
-#   call refused with WebFetchRateLimited(bucket='handle_cap') BEFORE the plugin
-#   call, Lua-atomic Redis ZADD, spec §7.10 HandleCap) was removed with the
-#   handle-cap in G7-2.5. It is DEFERRED to PR #339 (needs real turn-user;
-#   no production caller until after G7-3). PR #339 MUST reinstate this bound
-#   before merging — the xfail stub in test_egress_no_orphan_and_inflight.py is
-#   an explicit merge-blocker on that PR.
+# Converted property (#339 PR4a, formerly a merge-blocker machine-visible as a
+#   strict-raising xfail stub — NOT a mechanical XPASS forcing function, since
+#   the stub raised unconditionally): the ACTIVE per-user resource-exhaustion
+#   REFUSAL bound (handle_cap=5 → 6th call refused with
+#   WebFetchRateLimited(bucket='handle_cap') BEFORE the plugin call) was removed
+#   with the handle-cap in G7-2.5 and is REINSTATED by #339 PR4a (Task B3 wired
+#   the reserve into dispatch_web_fetch; Task B5 converted the xfail stub into
+#   test_per_user_handle_cap_refuses_sixth_pre_network — a real passing test
+#   proving 5 concurrent reserves held simultaneously, the 6th refused
+#   pre-network). merge_blocker is now false.
 id: de-2026-004
 category: dlp_egress
 threat: >-
@@ -49,11 +52,14 @@ note: >-
   the same except BaseException block; staging map is empty on exit.
   (c) in-flight liveness — two concurrent handle() calls serialise through the
   shared single gated extractor without hang; both complete within
-  _LIVENESS_DEADLINE_S. Deferred property (machine-visible xfail, PR #339
-  merge-blocker): per-user resource-exhaustion REFUSAL bound
-  (WebFetchRateLimited(bucket='handle_cap') before network, cap=5 → 6th call
-  refused) was removed with the handle-cap in G7-2.5 and MUST be reinstated
-  before the first live dispatch_web_fetch caller merges on PR #339.
+  _LIVENESS_DEADLINE_S. (d) per-user exhaustion refusal (#339 PR4a, CONVERTED
+  from the former machine-visible xfail): the per-user resource-exhaustion
+  REFUSAL bound (WebFetchRateLimited(bucket='handle_cap') before network,
+  cap=5 → 6th call refused) was removed with the handle-cap in G7-2.5 and is
+  REINSTATED by #339 PR4a Task B3 (the dispatch_web_fetch reserve) + Task B5
+  (this test conversion) — proven by 5 concurrent reserves held
+  simultaneously and the 6th refused pre-network with an audited
+  handle_cap_exceeded row.
 ingestion_path: web.fetch
 payload:
   threat_class: "egress_fetch_extract_resource_integrity"
@@ -63,13 +69,18 @@ payload:
     - "inflight_liveness"
   deferred_property:
     id: "per_user_exhaustion_refusal"
-    deferred_to: "PR #339"
-    merge_blocker: true
+    deferred_to: null
+    merge_blocker: false
+    converted_in: "PR #339 PR4a"
     reason: >-
-      Needs the real turn-user the C1 global semaphore lacks;
-      no production caller until #339 (after G7-3). The per-user REFUSAL
-      bound (WebFetchRateLimited(bucket='handle_cap') before network) must
-      be reinstated before the first live dispatch_web_fetch caller merges.
+      REINSTATED by #339 PR4a: Task B3 wired the per-user HandleCap
+      reserve-before-network gate (with release-in-finally) into
+      dispatch_web_fetch; Task B5 converted the strict-xfail stub into
+      test_per_user_handle_cap_refuses_sixth_pre_network, which drives the
+      real dispatch path and proves 5 concurrent reserves are held
+      simultaneously while the 6th is refused pre-network with
+      WebFetchRateLimited(bucket='handle_cap'), audited as
+      dlp_scan_result='handle_cap_exceeded' / result='rate_limited'.
 expected_outcome: refused
 provenance: >-
   Spec C G7-2c-1 (#333) C9 no-orphan fix: EgressResponseExtractor.handle()
@@ -80,8 +91,12 @@ provenance: >-
   extractions without deadlock (asyncio.Lock in the gated extractor; mirrors
   test_quarantine_contention.py's full-stack proof). The per-user resource-exhaustion
   REFUSAL bound from the original de-2026-004 (handle_cap=5, WebFetchRateLimited
-  before network) is deferred to PR #339 as a merge-blocker and is machine-visible
-  as a @pytest.mark.xfail(strict=False) stub in the test file.
+  before network) is REINSTATED by #339 PR4a: Task B3 wired the reserve-before-
+  network gate into dispatch_web_fetch; Task B5 converted the former
+  @pytest.mark.xfail(strict=True) stub (which raised unconditionally — there was
+  no mechanical XPASS forcing function) into
+  test_per_user_handle_cap_refuses_sixth_pre_network, a real passing test in the
+  test file.
 references:
   - "Spec C G7-2c-1 (#333) — EgressResponseExtractor C9 no-orphan fix"
   - "src/alfred/egress/egress_response_extract.py EgressResponseExtractor.handle except BaseException"
@@ -89,6 +104,8 @@ references:
   - "tests/integration/egress/test_quarantine_contention.py — C1 in-flight liveness full-stack proof"
   - "tests/unit/egress/test_egress_response_extract.py tests 8+9 — C9 unit-level proofs"
   - "CLAUDE.md security rule #7 no silent failures in security paths"
-  - "PR #339 merge-blocker — per-user exhaustion refusal reinstatement (task-9-brief.md §Step 3)"
+  - "PR #339 PR4a Task B5 — per-user exhaustion refusal reinstatement (task-B5-brief.md)"
+  - "src/alfred/plugins/web_fetch/fetch_dispatcher.py dispatch_web_fetch Step 3b — reserve-before-network"
+  - "src/alfred/plugins/web_fetch/handle_cap.py HandleCap — spec §7.10 per-user concurrency bound"
   - "CWE-400 Uncontrolled Resource Consumption — https://cwe.mitre.org/data/definitions/400.html"
   - "CWE-833 Deadlock — https://cwe.mitre.org/data/definitions/833.html"

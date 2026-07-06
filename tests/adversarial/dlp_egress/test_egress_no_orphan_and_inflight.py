@@ -5,12 +5,17 @@ the per-user ContentHandle cap was removed from the fused fetch+extract path. Th
 original de-2026-004 proved an ACTIVE per-user resource-exhaustion REFUSAL bound
 (handle_cap=5 → 6th concurrent call refused with
 ``WebFetchRateLimited(bucket='handle_cap')`` BEFORE the plugin call). That property
-is DEFERRED to PR #339 (needs the real turn-user the C1 global semaphore lacks; no
-production caller until after G7-3) and is machine-visible here as a
-``@pytest.mark.xfail(strict=True)`` stub that is an explicit **merge-blocker on
-PR #339**.
+was DEFERRED from G7-2.5 through PR #339 PR4a (Task B3 reinstated the per-user
+``HandleCap`` reserve inside ``dispatch_web_fetch``; Task B5 converts the
+corresponding test). ``test_per_user_handle_cap_refuses_sixth_pre_network`` below
+is the REAL reinstatement proof — it replaces what used to be a
+``@pytest.mark.xfail(strict=True)`` stub. NOTE (unlike the sibling de-2026-012
+canary conversion): that stub `raise`d UNCONDITIONALLY, so there was no
+mechanical XPASS forcing function pushing this conversion — it was enforced only
+by the human task + the YAML ``payload.deferred_property.merge_blocker`` flag,
+now flipped to ``false``.
 
-Two properties exercised here — both are release-blocking:
+Three properties are exercised here — all release-blocking:
 
 (a) **No-orphan (C9)** — a gate-denied or cancelled egress fetch must not leave a
     raw T3 body alive in the unbounded ``QuarantineStagingMap``:
@@ -32,6 +37,14 @@ Two properties exercised here — both are release-blocking:
     ``asyncio.wait_for`` is a FAIL, not a skip.  This test is entirely
     in-process (no Postgres, no Docker) so it completes in milliseconds.
 
+(c) **Per-user exhaustion (de-2026-004)** — the 6th concurrent ``web.fetch``
+    reserve for a single user is refused PRE-network with
+    ``WebFetchRateLimited(bucket='handle_cap')`` while five reserves for that
+    user are held simultaneously, audited as
+    ``dlp_scan_result='handle_cap_exceeded'`` / ``result='rate_limited'``. See
+    ``test_per_user_handle_cap_refuses_sixth_pre_network`` below (#339 PR4a,
+    alfred-security-engineer sign-off required per #347 blocker 1).
+
 The unit-level proofs of (a) live in
 ``tests/unit/egress/test_egress_response_extract.py`` tests 8 and 9.  The full-
 stack integration proof of (b) lives in
@@ -44,19 +57,24 @@ CLAUDE.md security rule #7: no silent failures in security paths.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 
 import pytest
 import yaml
 
 from alfred.egress.egress_id import TurnEgressContext
-from alfred.egress.egress_response_extract import EgressResponseExtractor
+from alfred.egress.egress_response_extract import EgressExtractOutcome, EgressResponseExtractor
 from alfred.egress.relay_client import Fired
 from alfred.egress.relay_protocol import EgressResponse, _RawToolRequest
 from alfred.errors import AlfredError
 from alfred.memory.egress_idempotency import CommitIntentResult, IntentFresh
+from alfred.plugins.web_fetch.allowlist import AllowlistEntry
+from alfred.plugins.web_fetch.errors import WebFetchRateLimited
+from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig, dispatch_web_fetch
 from alfred.security.quarantine import (
     Extracted,
     ExtractionSchema,
@@ -65,6 +83,8 @@ from alfred.security.quarantine import (
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.dlp import identity_outbound_dlp
+from tests.helpers.egress_doubles import _CapturingAuditWriter
 from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
 
 _PAYLOAD_PATH: Final[Path] = Path(__file__).parent / "egress_inflight_and_no_orphan.yaml"
@@ -207,9 +227,14 @@ def test_payload_schema_valid() -> None:
     assert "cancellation_no_orphan" in sub
     assert "inflight_liveness" in sub
     # Deferred-property obligation is machine-documented in the payload.
+    # #339 PR4a (Task B5) reinstated the per-user handle_cap REFUSAL bound and
+    # converted the strict-xfail stub into a real passing test — the merge
+    # blocker is retired and the converting PR is machine-recorded (mirrors the
+    # de-2026-012 canary conversion's ``converted_in`` convention).
     deferred = payload.payload.get("deferred_property", {})
     assert isinstance(deferred, dict)
-    assert deferred.get("merge_blocker") is True
+    assert deferred.get("merge_blocker") is False
+    assert deferred.get("converted_in") == "PR #339 PR4a"
 
 
 # ---------------------------------------------------------------------------
@@ -446,68 +471,152 @@ async def test_inflight_liveness_concurrent_handles_no_deadlock(
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — deferred property: per-user exhaustion REFUSAL (xfail, #339 merge-blocker)
+# Test 5 — per-user exhaustion REFUSAL (de-2026-004, #339 PR4a reinstatement)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Per-user egress resource-exhaustion REFUSAL bound deferred to PR #339 "
-        "(needs real turn-user; no production dispatch_web_fetch caller until after G7-3). "
-        "This xfail is a MERGE-BLOCKER on PR #339: "
-        "WebFetchRateLimited(bucket='handle_cap') refusal-before-network "
-        "(Lua-atomic Redis ZADD, handle_cap=5 → 6th call refused, spec §7.10) "
-        "MUST be reinstated before the first live caller merges on #339."
-    ),
-    # CR-16: strict=True — the body raises today (XFAIL). When #339 reinstates the
-    # property the body will pass → XPASS → strict turns the XPASS into a FAILURE,
-    # mechanically forcing this stub's removal rather than leaving a silent XPASS.
-    strict=True,
-)
-def test_per_user_exhaustion_refusal_deferred_to_339() -> None:
-    """Deferred: per-user WebFetchRateLimited(bucket='handle_cap') refusal before network.
+class _CappedHandleCap:
+    """Fake per-user ``HandleCap`` (spec §7.10): allows ``cap`` concurrent
+    reserves, refuses the next.
 
-    The original de-2026-004 proved that the 6th concurrent web.fetch call for a
-    single user is refused with ``WebFetchRateLimited(bucket='handle_cap')`` BEFORE
-    the plugin call (Lua-atomic Redis ZADD pre-gate, spec §7.10 HandleCap):
+    Mirrors the real :class:`~alfred.plugins.web_fetch.handle_cap.HandleCap`
+    contract (``try_reserve`` / ``release`` kwargs) without Redis — the
+    check-then-increment in :meth:`try_reserve` has NO ``await`` before the
+    comparison, so it is atomic with respect to the cooperative-scheduling
+    interleaving this test drives (mirrors the real Lua-script atomicity, spec
+    §2.3, without needing a live Redis)."""
 
-    * Five concurrent reserves succeed (ZSET ZCARD == 5).
-    * The 6th is refused atomically before any network round-trip.
-    * A ``tool.web.fetch`` audit row with ``rate_limit_bucket='handle_cap'``,
-      ``dlp_scan_result='handle_cap_exceeded'``, ``result='rate_limited'`` fires.
+    def __init__(self, *, cap: int) -> None:
+        self._cap = cap
+        self._live = 0
 
-    This property was REMOVED when the per-user ContentHandle cap was replaced by the
-    C1 global semaphore in G7-2.5 (the fused fetch+extract stages T3 in-memory
-    transiently; no Redis handle store).
+    @property
+    def live(self) -> int:
+        return self._live
 
-    It is DEFERRED to PR #339 which:
-      - Introduces the first live ``dispatch_web_fetch`` caller (after G7-3).
-      - Has access to the real turn-user context the per-user cap requires.
-      - MUST reinstate the per-user REFUSAL bound BEFORE merging.
+    async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
+        if self._live >= self._cap:
+            raise WebFetchRateLimited("handle_cap")
+        self._live += 1
 
-    Until then this test is a ``@pytest.mark.xfail(strict=True)`` stub — CI
-    surfaces it as a machine-visible known-gap (XFAIL), not prose a reviewer may
-    miss.  When PR #339 reinstates the property:
+    async def release(
+        self, *, user_id: str, handle_id: str, correlation_id: str | None = None
+    ) -> None:
+        self._live -= 1
 
-    1. Replace this body with the real per-user REFUSAL test (drive
-       ``dispatch_web_fetch`` against a real or fake Redis handle-cap with
-       ``cap=5``; issue 6 concurrent calls; assert 5 succeed and the 6th raises
-       ``WebFetchRateLimited(bucket='handle_cap')`` before the plugin call).
-    2. Update ``expected_outcome`` in the YAML to ``audit_row_emitted`` (or
-       add a sub-scenario) once the audit row is re-verified.
-    3. The mark is already ``strict=True``: once the reinstated body passes, the
-       XPASS becomes a strict FAILURE that forces this step.
-    4. Remove the ``xfail`` mark entirely once stable.
 
-    **PR #339 merge-blocker**: do NOT merge PR #339 until this xfail is converted
-    to a passing test.  The obligation is recorded in the G7-2.5 Task-9 commit and
-    in the de-2026-004 YAML ``payload.deferred_property.merge_blocker``.
-    """
-    # This body INTENTIONALLY FAILS: there is no per-user handle-cap wired into
-    # dispatch_web_fetch in the current codebase (G7-2.5 removed it).  The xfail
-    # mark ensures CI shows XFAIL rather than RED — a machine-visible gap, not a
-    # passing false-green.
-    raise AssertionError(
-        "Per-user resource-exhaustion REFUSAL bound not yet reinstated — "
-        "PR #339 merge-blocker. See docstring for reinstatement requirements."
+@pytest.mark.asyncio
+async def test_per_user_handle_cap_refuses_sixth_pre_network() -> None:
+    """de-2026-004: the 6th concurrent web.fetch reserve for one user is refused
+    pre-network. Five dispatches reserve then PARK holding the slot inside
+    ``handle()``; the 6th's reserve refuses BEFORE its extractor is ever reached.
+
+    #339 PR4a reinstates the per-user REFUSAL bound Task B3 wired into
+    ``dispatch_web_fetch`` (Step 3b: reserve-before-network, release-in-``finally``).
+    This test drives the REAL ``dispatch_web_fetch`` — never an always-allow shim
+    (CLAUDE.md hard rule #2) — against a fake (non-Redis) ``HandleCap`` double
+    whose atomicity mirrors the real Lua-script contract.
+
+    Non-vacuity: ``cap.live == 5`` proves five slots are held CONCURRENTLY (not
+    sequentially — ``dispatch_web_fetch`` releases the slot in a ``finally``, so a
+    sequential loop would never observe more than one live reservation at a
+    time); the 6th's ``_MustNotFireExtractor`` raises loudly if the network path
+    is EVER reached after the cap refuses; ``cap.live == 0`` at the end proves
+    release-on-success fires for every parked holder.
+
+    alfred-security-engineer sign-off required (#347 blocker 1)."""
+    cap = _CappedHandleCap(cap=5)
+    gate = asyncio.Event()  # never set until drain → holds the 5 slots
+    reached: list[str] = []  # one entry per slot genuinely held inside handle()
+    audit = _CapturingAuditWriter()
+
+    def _ok_outcome() -> EgressExtractOutcome:
+        return EgressExtractOutcome(
+            result=Extracted(
+                data=T3DerivedData({"payload": "ok"}), extraction_mode="native_constrained"
+            ),
+            deduplicated=False,
+            language="en",
+            status=200,
+        )
+
+    class _ParkingExtractor:
+        """``EgressResponseExtractor``-shaped double (``.handle``, NOT
+        ``.extract`` — ``dispatch_web_fetch`` drives the extractor's ``handle``
+        entry point, not the lower-level quarantine ``extract`` seam)."""
+
+        async def handle(self, *, ctx: object, **_: object) -> EgressExtractOutcome:
+            reached.append(ctx.inbound_id)  # type: ignore[attr-defined]
+            await gate.wait()  # park while HOLDING the reserved slot
+            return _ok_outcome()
+
+    class _MustNotFireExtractor:
+        """The 6th dispatch's extractor: the reserve must refuse BEFORE this is
+        ever awaited — reaching it is a defense breach, not a benign no-op."""
+
+        async def handle(self, **_: object) -> EgressExtractOutcome:
+            raise AssertionError(
+                "6th web.fetch reached the network — handle_cap must refuse pre-network"
+            )
+
+    config = FetchDispatchConfig(
+        manifest_allowed_entries=(AllowlistEntry(domain="example.com"),),
+        operator_allowed_entries=(AllowlistEntry(domain="example.com"),),
+        session_allowed_entries=(AllowlistEntry(domain="example.com"),),
+        manifest_commit_hash="de-2026-004",
     )
+
+    async def _permissive_rl(*, domain: str, user_id: str) -> None:  # only handle_cap refuses here
+        return None
+
+    rate_limiter = SimpleNamespace(check_and_increment=_permissive_rl)
+
+    def _dispatch(i: int, extractor: object) -> Coroutine[Any, Any, EgressExtractOutcome]:
+        return dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="u-1",
+            correlation_id=f"corr-{i}",
+            egress_ctx=TurnEgressContext(
+                adapter_id="ada-hc", inbound_id=f"in-{i}", session_id="sess-hc"
+            ),
+            call_index=i,
+            schema=_TestSchema,
+            config=config,
+            rate_limiter=rate_limiter,  # type: ignore[arg-type]
+            outbound_dlp=identity_outbound_dlp(),
+            audit=audit,  # type: ignore[arg-type]
+            extractor=extractor,  # type: ignore[arg-type]
+            handle_cap=cap,  # type: ignore[arg-type]
+        )
+
+    # Fire 5 concurrent dispatches; each reserves then PARKS inside handle(),
+    # holding its slot. A sequential loop would be WRONG here — release() runs
+    # in dispatch_web_fetch's `finally`, so each slot would free before the next
+    # reserve, and cap.live would never exceed 1.
+    holders: list[asyncio.Task[EgressExtractOutcome]] = [
+        asyncio.create_task(_dispatch(i, _ParkingExtractor())) for i in range(5)
+    ]
+    async with asyncio.timeout(5.0):  # loud fail if a reserve is never reached
+        while len(reached) < 5:
+            await asyncio.sleep(0)
+    assert cap.live == 5, "all five per-user slots must be held concurrently before the 6th reserve"
+
+    with pytest.raises(WebFetchRateLimited) as exc:
+        await _dispatch(5, _MustNotFireExtractor())
+    assert exc.value.bucket == "handle_cap"
+
+    # Assert the refusal row BEFORE releasing the 5 holders — they are still
+    # parked on `gate` and have not reached the Step-5 success audit write yet,
+    # so exactly one handle_cap_exceeded row exists right now, deterministically.
+    hc_rows = [
+        r for r in audit.rows if r["subject"].get("dlp_scan_result") == "handle_cap_exceeded"
+    ]
+    assert len(hc_rows) == 1
+    assert hc_rows[0]["subject"]["rate_limit_bucket"] == "handle_cap"
+    assert hc_rows[0]["result"] == "rate_limited"
+
+    gate.set()  # release the 5 parked holders
+    async with asyncio.timeout(5.0):
+        await asyncio.gather(*holders)
+    assert cap.live == 0, "every held slot must be released on the success finally-path"
