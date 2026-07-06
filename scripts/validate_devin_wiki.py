@@ -404,28 +404,50 @@ def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
 
 # Token shapes we never want pasted into steering text. Deliberately narrow to
 # avoid false positives on prose: provider key prefixes + long base64-ish runs.
-_SECRET_RES = (
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+# Each entry pairs a human-readable label (used in the error message so a
+# human doesn't have to decode a raw regex) with the pattern itself.
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # `-` is allowed in the run (not just alphanumerics) so this also catches
+    # hyphenated Anthropic keys, e.g. `sk-ant-api03-...`, not just OpenAI's
+    # `sk-<alphanumeric>` shape.
+    ("OpenAI/Anthropic-style key (sk-...)", re.compile(r"\bsk-[A-Za-z0-9-]{20,}\b")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
 )
 
 
-def check_secret_shapes(data: Mapping[str, object]) -> list[str]:
-    """Flag token-shaped literals in note text (guardrail C in-repo backstop).
+def _secret_findings(source: str, text: str) -> list[str]:
+    """Every `_SECRET_PATTERNS` match in `text`, as a labelled, non-echoing error."""
+    return [
+        f"{source}: token-shaped literal matched {label} — remove it (guardrail C)"
+        for label, rx in _SECRET_PATTERNS
+        if rx.search(text)
+    ]
 
-    Repo-wide secret hygiene is gitleaks' job; this is narrowly scoped to the
-    steering file's own free text, which gitleaks doesn't specially inspect.
+
+def check_secret_shapes(data: Mapping[str, object]) -> list[str]:
+    """Flag token-shaped literals in page/note text (guardrail C in-repo backstop).
+
+    Repo-wide secret hygiene is gitleaks' job; this is narrowly scoped to
+    this steering file's own free text — `page_notes`/`repo_notes` content
+    AND page `title`/`purpose` (a secret pasted into either of the latter
+    would otherwise sail through unscanned) — which gitleaks doesn't
+    specially inspect. The matched literal itself is never echoed back, only
+    a human-readable label for which pattern tripped.
     """
+    # Deliberately locate a title/purpose finding by page INDEX only, never by
+    # the page's own title — the title is exactly what may be carrying the
+    # secret this loop is scanning `title` for, and echoing it as the label
+    # would defeat the "never echo the matched secret" guarantee below.
     errs: list[str] = []
+    for i, page in enumerate(_pages(data)):
+        for field in ("title", "purpose"):
+            value = page.get(field)
+            if isinstance(value, str):
+                errs.extend(_secret_findings(f"page[{i}] {field}", value))
     for note in _all_notes(data):
-        for rx in _SECRET_RES:
-            if rx.search(note.content):
-                errs.append(
-                    f"{note.source}: token-shaped literal matched {rx.pattern!r} — "
-                    "remove it (guardrail C)"
-                )
+        errs.extend(_secret_findings(note.source, note.content))
     return errs
 
 
