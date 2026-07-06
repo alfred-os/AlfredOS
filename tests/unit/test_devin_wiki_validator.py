@@ -201,6 +201,23 @@ def test_gitignored_anchor_is_flagged() -> None:
     assert any("CLAUDE.md" in e and ("not tracked" in e or "gitignored" in e) for e in errs)
 
 
+def test_dotted_tracked_path_anchor_extracts_and_resolves() -> None:
+    # `.rulesync/rules/CLAUDE.md` is the committed CLAUDE source the CLI/Roadmap
+    # wiki pages anchor to. A leading-dot regression in `_PATH_RE` would silently
+    # stop extracting it, blinding the guard — pin both extraction AND resolution
+    # (the positive case; the gitignored root `CLAUDE.md` is the negative case).
+    note = "anchor to the `.rulesync/rules/CLAUDE.md` command table"
+    assert any(
+        a.kind == "path" and a.value == ".rulesync/rules/CLAUDE.md"
+        for a in vw.extract_anchors(note)
+    )
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": "CLI", "purpose": "p", "page_notes": [note]}],
+    }
+    assert vw.check_anchors(data, _REPO_ROOT) == []
+
+
 def test_bad_adr_and_slug_are_flagged() -> None:
     data = {
         "repo_notes": [],

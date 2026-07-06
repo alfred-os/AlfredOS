@@ -27,7 +27,10 @@ MAX_NOTE_CHARS = 10_000
 
 # Repo path — any backtick-quoted token ending in a known extension or in `/`
 # (a directory reference).
-_PATH_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:md|py|ya?ml|json|toml)|/))`")
+# The leading class includes `.` so dot-prefixed tracked paths — notably
+# `.rulesync/rules/CLAUDE.md`, the committed CLAUDE source the CLI/Roadmap
+# pages anchor to — are extracted and resolved, not silently skipped.
+_PATH_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*(?:\.(?:md|py|ya?ml|json|toml)|/))`")
 # A single ADR reference or a slash-compound one, e.g. "ADR-0040/0042/0043" —
 # the compound form is how `.devin/wiki.json` pins multiple load-bearing ADRs
 # on one concept page. `group(1)` is split on "/" in `extract_anchors` so
