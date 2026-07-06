@@ -59,6 +59,7 @@ A 6-reviewer plan-review fleet (architect, cross-cutting reviewer, test-engineer
 **Open questions — RESOLVED (all reviewer-endorsed):** Q1 single `tool.dispatch` hookpoint → **YES** (per-tool GRANT granularity is a follow-up; web.fetch egress is separately bounded by its three-way allowlist). Q2 gate-deny recoverable → **YES** (authz-config state, not a boundary attack). Q3 echo-compatible `WebFetchExtraction({text, intent})` → **YES**; do NOT reuse `CommsBodyExtraction` (cross-subsystem coupling); keep the `TODO(#340)`. Q4 downgrade-denial escalation → **YES** (the second content-clearance gate saying no is a security refusal, symmetric with canary).
 
 **FIX-1 (High, Task 1 — hookpoint declaration).** `register_hookpoint(carrier_tier=None)` raises `HookError` for a non-meta hookpoint (`registry.py:715` — non-meta MUST set `carrier_tier`; only `_META_HOOKPOINT_NAMES` may be `None`). Do NOT mirror `declare_meta_hookpoints`. Mirror `security/capability_gate/proposals.py:declare_hookpoints`:
+
 ```python
 # src/alfred/orchestrator/tool_hookpoints.py
 from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry, get_registry  # get_registry, NOT get_hook_registry
@@ -79,11 +80,13 @@ def declare_tool_hookpoints(registry: HookRegistry | None = None) -> None:
 
 declare_tool_hookpoints()   # module-init eager registration (mirrors proposals.py:411) so the KNOWN_HOOKPOINTS import-sweep sync test passes
 ```
+
 Task-1 Step 5: the `KNOWN_HOOKPOINTS` sync test passes via the eager `declare_tool_hookpoints()` call + the manifest entry (add `tool.dispatch` under `"alfred.orchestrator.tool_hookpoints"`); it is NOT an inline-expected-manifest edit. Verify the `HookRegistry(...)` ctor arg you pass in the Task-1 test against the real signature.
 
 **FIX-2 (High, Tasks 6/7/8 — audit-capture double).** `make_capturing_audit_writer`/`tests.helpers.audit` does NOT exist. Use `_CapturingAuditWriter` from `tests/helpers/egress_doubles.py` (its `append_schema(**kwargs)` appends `dict(kwargs)` to `.rows`). Assertions become `writer.rows[-1]["subject"]["dispatch_outcome"]` and `writer.rows[-1]["result"]` — NOT `cap.last.subject`/`cap.last.result`. Rewrite `_run` and every audit assertion in Tasks 6/7/8 accordingly.
 
 **FIX-3 (High, Tasks 6/7/8 — gate composition + production grant-seed).** `dispatch_tool`'s T3 Extracted branch crosses TWO gate surfaces: `gate.check(plugin_id=TOOL_DISPATCH_PLUGIN_ID, hookpoint="tool.dispatch", requested_tier="system")` AND (inside `downgrade_to_orchestrator`) `gate.check_content_clearance(plugin_id="t3.downgrade_to_orchestrator", hookpoint="t3.downgrade_to_orchestrator", content_tier="T3")`. `make_allow_system_gate` seeds only the first → the `dispatched`(T3) and `dlp_canary` branches wrongly route to `downgrade_denied`, killing 100% coverage. **Do NOT "fix" this with `make_permissive_fixture_gate`/an always-allow shim — that is a HARD-#2 gate-bypass (sec-001).** Add a composed helper to `tests/helpers/gates.py`:
+
 ```python
 def make_tool_dispatch_gate(*, grant_downgrade: bool = True) -> CapabilityGate:
     grants = {
@@ -97,17 +100,20 @@ def make_tool_dispatch_gate(*, grant_downgrade: bool = True) -> CapabilityGate:
     return RealGate(policy=GatePolicy(grants=frozenset(grants)),
                     backend=_make_in_memory_backend(grants=grants), audit_sink=_make_no_op_audit_sink())
 ```
+
 Use `make_tool_dispatch_gate()` (both grants) for the T3 happy-path, dlp-canary, and Task-7 integration tests; `make_tool_dispatch_gate(grant_downgrade=False)` for a NEW `test_downgrade_denied_escalates` (grants dispatch, denies the downgrade clearance → `downgrade_denied` + escalation); `make_deny_all_gate()` for the gate-deny test.
 **PRODUCTION obligation (defer to PR3/#338, tracked WITH the #347 blockers):** `FIRST_PARTY_SYSTEM_GRANTS` (`_bootstrap_grants.py`) seeds ONLY `security.quarantined.extract` — NOT `tool.dispatch` NOR `t3.downgrade_to_orchestrator`. The live T3 path therefore fails-closed (loud `downgrade_denied` audit — not silent) until PR3 seeds BOTH first-party grants. PR2 is fixture-tested only, so this defers; the deferred-obligations list below names it and PR3's integration test MUST prove the seeded prod gate.
 
 **FIX-4 (High, Task 6 — escalation tests assert the audit row).** The canary / dlp-canary / downgrade-denied escalation tests currently only `pytest.raises`. Add the loud pre-raise audit-row assertion to each (the exact HARD-#7 property), e.g. after `pytest.raises(OutboundCanaryTripped)`: assert `writer.rows[-1]["subject"]["dispatch_outcome"] == "dlp_canary"` and `writer.rows[-1]["result"] == "quarantined"`.
 
 **FIX-5 (Medium, Task 6 — defensive escalating arm, sec-003).** An unexpected exception from `spec.dispatch` (a bug, a new error type, an un-enumerated canary) escapes `dispatch_tool` unaudited today. Add a final defensive arm to the dispatch `try` (placed LAST, after the specific recoverable/escalation arms) so HARD-#7 holds:
+
 ```python
     except Exception:
         await _audit(dispatch_outcome="unexpected_error", result="fault", tool_name=spec.name, result_tier="T3")
         raise
 ```
+
 Add `"unexpected_error"` to `ToolDispatchOutcome` (Task 2); `result="fault"` is already in the closed vocab (no migration). A unit test drives a dispatch raising a novel exception and asserts the audited re-raise.
 
 **FIX-6 (Medium — `phase` audit-graph join, arch-002/§10).** §10 disambiguates dispatch rows by the `subject.phase` convention (`tool_dispatch:{tool}:{call_index}`). Add `"phase"` to `TOOL_DISPATCH_FIELDS` (Task 2 → 8 keys) and to the Task-6 `_audit` subject: `"phase": f"tool_dispatch:{tool_name}:{call_index}"`. Update the Task-2 closed-set test to expect 8 keys.
@@ -157,12 +163,14 @@ Tests:
 ### Task 1: `tool.dispatch` named hookpoint declaration
 
 **Files:**
+
 - Create: `src/alfred/orchestrator/tool_hookpoints.py`
 - Modify: `src/alfred/hooks/_known_hookpoints.py` (add `tool.dispatch`)
 - Modify: `tests/unit/hooks/test_known_hookpoints_sync.py` (manifest sync pin)
 - Test: `tests/unit/orchestrator/test_tool_hookpoints.py`
 
 **Interfaces:**
+
 - Consumes: `HookRegistry.register_hookpoint(*, name, subscribable_tiers, refusable_tiers, fail_closed, carrier_tier, allow_error_substitution=True)` (`hooks/registry.py:587`); tier constants `SYSTEM_ONLY_TIERS` (`registry.py:342`); `KNOWN_HOOKPOINTS` manifest (`hooks/_known_hookpoints.py:56`); declare pattern to mirror = `security/capability_gate/proposals.py:94`.
 - Produces: `TOOL_DISPATCH_HOOKPOINT: Final[str] = "tool.dispatch"`, `TOOL_DISPATCH_PLUGIN_ID: Final[str] = "alfred.orchestrator.tool_dispatch"`, `declare_tool_hookpoints(registry: HookRegistry \| None = None) -> None`.
 
@@ -265,10 +273,12 @@ git commit -m "feat(orchestrator): declare tool.dispatch hookpoint (#339 PR2)"
 ### Task 2: `TOOL_DISPATCH_FIELDS` audit schema
 
 **Files:**
+
 - Modify: `src/alfred/audit/audit_row_schemas.py` (add `TOOL_DISPATCH_FIELDS` + a `ToolDispatchOutcome` Literal)
 - Test: `tests/unit/audit/test_audit_row_schemas.py` (or the existing schema-constants test file — grep for where `WEB_FETCH_FIELDS` is asserted)
 
 **Interfaces:**
+
 - Consumes: the `Final[frozenset[str]]` convention (`audit_row_schemas.py:98+`).
 - Produces: `TOOL_DISPATCH_FIELDS: Final[frozenset[str]]` = `{tool_name, call_id, call_index, result_tier, dispatch_outcome, triggering_user_id, correlation_id}`; `ToolDispatchOutcome` Literal.
 
@@ -353,10 +363,12 @@ git commit -m "feat(audit): TOOL_DISPATCH_FIELDS schema for tool dispatch (#339 
 ### Task 3: `ToolRegistry` + specs + ≤T2 tier-claim enforcement
 
 **Files:**
+
 - Create: `src/alfred/orchestrator/tool_registry.py`
 - Test: `tests/unit/orchestrator/test_tool_registry.py`
 
 **Interfaces:**
+
 - Consumes: `ToolDefinition`, `ToolCall` (`alfred.providers.base`); `TurnEgressContext` (`alfred.egress.egress_id`); `EgressExtractOutcome` (`alfred.egress.egress_response_extract`); `ExtractionSchema` (`alfred.security.quarantine`).
 - Produces:
   - `ToolInvocation` (frozen dataclass): `arguments: Mapping[str, object]`, `ctx: TurnEgressContext`, `call_index: int`, `user_id: str`, `correlation_id: str`, `language: str | None`.
@@ -595,10 +607,12 @@ git commit -m "feat(orchestrator): ToolRegistry + fail-closed T3-default tier cl
 ### Task 4: internal `clock.now` ≤T2 demo tool
 
 **Files:**
+
 - Create: `src/alfred/orchestrator/builtin_tools.py` (the clock half; web.fetch added in Task 5)
 - Test: `tests/unit/orchestrator/test_builtin_tools.py`
 
 **Interfaces:**
+
 - Consumes: `ToolDefinition` (`providers.base`), `ToolInvocation`/`InternalToolSpec` (Task 3).
 - Produces: `build_clock_tool(*, now: Callable[[], datetime]) -> InternalToolSpec` (name `"clock.now"`, no-arg schema, dispatch returns `now().isoformat()`).
 
@@ -698,10 +712,12 @@ git commit -m "feat(orchestrator): mandatory internal clock.now demo tool (#339 
 ### Task 5: `web.fetch` T3 tool (schema + spec + adapter)
 
 **Files:**
+
 - Modify: `src/alfred/orchestrator/builtin_tools.py` (add `WebFetchExtraction`, `build_web_fetch_tool`)
 - Test: `tests/unit/orchestrator/test_builtin_tools.py` (append)
 
 **Interfaces:**
+
 - Consumes: `dispatch_web_fetch(*, url, headers, user_id, correlation_id, egress_ctx, call_index, schema, config, rate_limiter, outbound_dlp, audit, extractor, action_deadline_seconds)` (`plugins/web_fetch/fetch_dispatcher.py:182`) → `EgressExtractOutcome`; `FetchDispatchConfig`, `RateLimiter`, `OutboundDlp`, `EgressResponseExtractor`, `AuditWriter`; `_DEFAULT_ACTION_DEADLINE_SECONDS` (`plugins/web_fetch/constants.py`, value 30); `ExtractionSchema`.
 - Produces: `WebFetchExtraction(ExtractionSchema)`; `build_web_fetch_tool(*, extractor, config, rate_limiter, outbound_dlp, audit, action_deadline_seconds=_DEFAULT_ACTION_DEADLINE_SECONDS) -> ExternalToolSpec` (name `"web.fetch"`, input_schema requires `url`, optional `headers`).
 
@@ -865,12 +881,14 @@ git commit -m "feat(orchestrator): wire web.fetch as the first T3 tool (#339 PR2
 ### Task 6: `dispatch_tool` — the trust-boundary chokepoint (100% line+branch)
 
 **Files:**
+
 - Create: `src/alfred/orchestrator/tool_dispatch.py`
 - Modify: `locale/en/LC_MESSAGES/alfred.po` (new `orchestrator.tool.*` keys)
 - Modify: `ci.yml` (add `tool_dispatch.py` to the per-file 100% coverage gate in BOTH the `python` and `coverage-gates` jobs — mirror the egress gates)
 - Test: `tests/unit/orchestrator/test_tool_dispatch.py`
 
 **Interfaces:**
+
 - Consumes: everything above + `downgrade_to_orchestrator(data, *, gate, audit_writer) -> dict[str,object]` (`security/quarantine.py:1444`), `Extracted`/`TypedRefusal` (`security/quarantine.py`), `OutboundDlp.scan(text) -> str` raising `OutboundCanaryTripped` (`security/dlp.py`), `CapabilityGate.check(*, plugin_id, hookpoint, requested_tier) -> bool` (`hooks/capability.py:93`), `InboundCanaryTripped` (`egress/response_inspection.py`), `WebFetchDomainNotAllowed`/`WebFetchRateLimited`/`WebFetchError` (`plugins/web_fetch/errors.py`), `TOOL_DISPATCH_FIELDS` (Task 2), `TOOL_DISPATCH_HOOKPOINT`/`TOOL_DISPATCH_PLUGIN_ID` (Task 1).
 - Produces: `async def dispatch_tool(call: ToolCall, call_index: int, *, ctx: TurnEgressContext, registry: ToolRegistry, gate: CapabilityGate, dlp: OutboundDlpProtocol, audit: AuditWriter, user_id: str, correlation_id: str, language: str | None) -> str`.
 
@@ -1232,10 +1250,12 @@ git commit -m "feat(orchestrator): dispatch_tool trust-boundary chokepoint (#339
 ### Task 7: `build_tool_registry` assembly + integration test
 
 **Files:**
+
 - Create: `src/alfred/orchestrator/tool_assembly.py`
 - Test: `tests/integration/orchestrator/test_tool_assembly.py`
 
 **Interfaces:**
+
 - Consumes: `build_web_fetch_egress_extractor(*, settings, gate, extractor, recorder, outbound_dlp, audit_writer, session_scope, concurrency=8, canary=None)` (`plugins/web_fetch/assembly.py:93`), `FetchDispatchConfig`, `RateLimiter`, `build_clock_tool`, `build_web_fetch_tool`, `ToolRegistry`.
 - Produces: `build_tool_registry(*, settings, gate, extractor, recorder, outbound_dlp, audit_writer, session_scope, rate_limiter, config, now=datetime.now-UTC) -> ToolRegistry`.
 
@@ -1269,10 +1289,12 @@ git commit -m "feat(orchestrator): build_tool_registry assembly (#339 PR2)"
 ### Task 8: adversarial tool-argument-injection corpus entry (`cap-2026-006`)
 
 **Files:**
+
 - Create: `tests/adversarial/capability_bypass/cap-2026-006-tool-arg-injection-offlist-url-refused.yaml`
 - Create: `tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py`
 
 **Interfaces:**
+
 - Consumes: `dispatch_tool`, `build_web_fetch_tool`/`ToolRegistry`, the real allowlist + fixture-grant gate; `AdversarialPayload` schema (`tests/adversarial/payload_schema.py`).
 
 The threat (epic §11, arch-002/test-003/sec-006, moved INTO PR2): a recorded planner emits a `ToolCall(name="web.fetch", arguments={"url": <attacker-chosen off-allowlist URL>})`; assert the **allowlist refuses** (the URL is outside the three-way allowlist → `dispatch_web_fetch` raises `WebFetchDomainNotAllowed` → `dispatch_tool` returns the `domain_not_allowed` recoverable string + emits a `refused` audit row; the fetch never fires).
@@ -1324,6 +1346,7 @@ git commit -m "test(adversarial): cap-2026-006 tool-arg-injection off-list URL r
 ### Task 9: ADR-0046 + docs + final gates
 
 **Files:**
+
 - Create: `docs/adr/0046-dual-llm-tool-result-flow.md`
 - Modify (if a subsystem deep-doc references tool dispatch): `docs/subsystems/security.md` (add the tool-result-flow to the T3 boundary section) — English-only.
 
