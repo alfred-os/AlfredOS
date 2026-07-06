@@ -43,9 +43,171 @@
 - Modify `src/alfred/orchestrator/builtin_tools.py` — thread `handle_cap` through `build_web_fetch_tool`.
 - Modify `src/alfred/orchestrator/tool_assembly.py` — thread `handle_cap` through `build_tool_registry`.
 - Modify `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py` — dispatcher reserve/release/refusal unit tests.
+- Modify `tests/unit/orchestrator/test_builtin_tools.py` — three `build_web_fetch_tool(...)` calls (lines 65/90/125) gain `handle_cap=`; line-80 test gains the "forwards handle_cap" assertion (FIX-2).
+- Modify `tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py` — the `build_web_fetch_tool(...)` call (line 163) gains `handle_cap=` (FIX-2; adversarial → security sign-off).
 - Modify `tests/adversarial/dlp_egress/test_egress_no_orphan_and_inflight.py` — convert the `test_per_user_exhaustion_refusal_deferred_to_339` xfail to a real in-process refusal test.
-- Modify `tests/adversarial/dlp_egress/egress_inflight_and_no_orphan.yaml` — flip `deferred_property.merge_blocker` → `false` (confirm the field path in Task B5).
+- Modify `tests/adversarial/dlp_egress/egress_inflight_and_no_orphan.yaml` — flip `deferred_property.merge_blocker` → `false` + set `converted_in` (confirm the field path in Task B5).
 - Create `tests/integration/egress/test_handle_cap_exhaustion.py` — Redis-backed per-user exhaustion atomicity proof.
+- Modify `src/alfred/plugins/web_fetch/handle_cap.py` — reconcile the stale `transport_error`-arm docstring (lines 206-211) + `~80s` self-heal figures (216/399/431) → 120s (FIX-9, FIX-11). **Do NOT change `release()`'s `RedisError`-swallow (FIX-16).**
+- Create `docs/adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md` (or amend ADR-0041) — Task Y (FIX-4).
+
+---
+
+## Plan-review fixes (rev.2 — FOLD THESE FIRST; they OVERRIDE the task bodies below)
+
+A 4-lens focused plan-review (security / test / error / cross-cutting) ran against rev.1. Security **withheld sign-off** pending FIX-1/FIX-3/FIX-5. Every implementer dispatch MUST apply the FIX items applicable to its task; where a FIX conflicts with a task body below, the FIX wins.
+
+- **FIX-1 (HIGH, security — empirically proven boot-crash). Task A1 field is broken as written.** pydantic-settings 2.14.2 JSON-decodes a `tuple[str, ...]` env field in `EnvSettingsSource` **before** any `mode="before"` validator runs, so `ALFRED_WEB_FETCH_CANARY_TOKENS="a,b"` raises `SettingsError` (verified). Declare the field with `NoDecode` so the comma-split validator runs:
+
+  ```python
+  # add to imports:
+  from typing import Annotated
+  from pydantic_settings import NoDecode
+  # field (replaces the rev.1 Task A1 Step 3 declaration):
+  web_fetch_canary_tokens: Annotated[tuple[str, ...], NoDecode] = Field(default=())
+  ```
+
+  Keep the `_normalize_web_fetch_canary_tokens` `mode="before"` validator (it now executes). Do NOT use model-wide `enable_decoding=False` (breaks `comms_enabled_adapters`'s JSON-env contract). A1 Step 1 tests 2 & 3 only PASS with this fix (without it they ERROR).
+
+- **FIX-2 (HIGH, cross-cutting + test — corroborated). Enumerate ALL `build_web_fetch_tool` callers in Task B4.** `handle_cap` is a REQUIRED kwarg (keep it required — an optional default is a fail-open footgun; it mirrors the required `rate_limiter`). Callers that break:
+  - `tests/unit/orchestrator/test_builtin_tools.py:65, 90, 125` — add `handle_cap=_SpyHandleCap()`.
+  - `tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py:163` — add `handle_cap=_SpyHandleCap()` (permissive; that test asserts a *domain* refusal that fires BEFORE the cap, so the cap must not itself refuse). This is an adversarial-suite edit → route past `alfred-security-engineer` sign-off.
+  - Put B4 Step 1's "forwards handle_cap" assertion in `test_builtin_tools.py:80` (`test_web_fetch_adapter_threads_ctx_and_call_index`, which monkeypatches `dispatch_web_fetch` and checks `seen[...]`): `assert seen["handle_cap"] is spy`.
+  - Fix Task Z Step 1's grep to also cover `build_web_fetch_tool(` and `dispatch_web_fetch(`, not only `build_tool_registry(`. B4 Step 4's "Expected: PASS" holds only AFTER these edits.
+
+- **FIX-3 (HIGH, security + test — corroborated). Replace Task B5 Step 2's body wholesale.** The rev.1 sketch hangs/orphans tasks and mirrors the wrong double (`_GatedExtractor` exposes `.extract()`; `dispatch_web_fetch` calls `extractor.handle(...)`). Use this create-task / park / count / drain structure (deterministic + non-vacuous):
+
+  ```python
+  class _CappedHandleCap:
+      """Fake per-user HandleCap: allows `cap` reserves, refuses the next (atomic)."""
+      def __init__(self, *, cap: int) -> None:
+          self._cap, self._live = cap, 0
+      @property
+      def live(self) -> int:
+          return self._live
+      async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
+          if self._live >= self._cap:                 # no await before the check → atomic vs the loop
+              raise WebFetchRateLimited("handle_cap")
+          self._live += 1
+      async def release(self, *, user_id: str, handle_id: str, correlation_id: str | None = None) -> None:
+          self._live -= 1
+
+  @pytest.mark.asyncio
+  async def test_per_user_handle_cap_refuses_sixth_pre_network() -> None:
+      """de-2026-004: the 6th concurrent web.fetch reserve for one user is refused
+      pre-network. Five dispatches reserve then PARK holding the slot inside handle();
+      the 6th's reserve refuses BEFORE its extractor is reached.
+      alfred-security-engineer sign-off required (#347)."""
+      cap = _CappedHandleCap(cap=5)
+      gate = asyncio.Event()          # never set until drain → holds the 5 slots
+      reached: list[str] = []         # one entry per slot genuinely held in handle()
+      audit = _CapturingAuditWriter()
+
+      def _ok_outcome() -> EgressExtractOutcome:
+          return EgressExtractOutcome(
+              result=Extracted(data=T3DerivedData({"payload": "ok"}), extraction_mode="native_constrained"),
+              deduplicated=False, language="en", status=200)
+
+      class _ParkingExtractor:            # EgressResponseExtractor double: .handle (NOT .extract)
+          async def handle(self, *, ctx: Any, **_: Any) -> EgressExtractOutcome:
+              reached.append(ctx.inbound_id)
+              await gate.wait()           # park while HOLDING the reserved slot
+              return _ok_outcome()
+
+      class _MustNotFireExtractor:        # the 6th: reserve must refuse first
+          async def handle(self, **_: Any) -> EgressExtractOutcome:
+              raise AssertionError("6th web.fetch reached the network — handle_cap must refuse pre-network")
+
+      config = FetchDispatchConfig(
+          manifest_allowed_entries=(AllowlistEntry(domain="example.com"),),
+          operator_allowed_entries=(AllowlistEntry(domain="example.com"),),
+          session_allowed_entries=(AllowlistEntry(domain="example.com"),),
+          manifest_commit_hash="de-2026-004")
+
+      async def _permissive_rl(*, domain: str, user_id: str) -> None:  # only handle_cap refuses
+          return None
+      rate_limiter = SimpleNamespace(check_and_increment=_permissive_rl)
+
+      def _dispatch(i: int, extractor: Any) -> Awaitable[EgressExtractOutcome]:
+          return dispatch_web_fetch(
+              url="https://example.com/page", headers={}, user_id="u-1", correlation_id=f"corr-{i}",
+              egress_ctx=TurnEgressContext(adapter_id="ada-hc", inbound_id=f"in-{i}", session_id="sess-hc"),
+              call_index=i, schema=_TestSchema, config=config,
+              rate_limiter=rate_limiter, outbound_dlp=identity_outbound_dlp(),  # type: ignore[arg-type]
+              audit=audit, extractor=extractor, handle_cap=cap)                 # type: ignore[arg-type]
+
+      holders = [asyncio.create_task(_dispatch(i, _ParkingExtractor())) for i in range(5)]
+      async with asyncio.timeout(5.0):            # loud fail if the reserve is never reached
+          while len(reached) < 5:
+              await asyncio.sleep(0)
+      assert cap.live == 5, "all five per-user slots must be held before the 6th reserve"
+
+      with pytest.raises(WebFetchRateLimited) as exc:
+          await _dispatch(5, _MustNotFireExtractor())
+      assert exc.value.bucket == "handle_cap"
+      # Assert the refusal row BEFORE releasing — the parked 5 have not reached their
+      # Step-5 success rows yet, so the last audit row is deterministically the 6th's.
+      hc = [r for r in audit.rows if r["subject"].get("dlp_scan_result") == "handle_cap_exceeded"]
+      assert len(hc) == 1
+      assert hc[0]["subject"]["rate_limit_bucket"] == "handle_cap"
+      assert hc[0]["result"] == "rate_limited"
+
+      gate.set()                                  # release the 5 holders
+      async with asyncio.timeout(5.0):
+          await asyncio.gather(*holders)
+      assert cap.live == 0, "every held slot must be released on the success finally-path"
+  ```
+
+  Confirm `EgressExtractOutcome` / `Extracted` / `T3DerivedData` / `AllowlistEntry` / `FetchDispatchConfig` constructor kwargs against `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py` and reuse that module's `_CapturingAuditWriter` / `identity_outbound_dlp` helpers; keep the file dependency-free (no Postgres/Redis). Add `SimpleNamespace`/`Awaitable` imports.
+
+- **FIX-4 (HIGH, cross-cutting). PR4a reverses ADR-0041 Decision 2 — author an ADR (Task Y, below).** ADR-0041 Decision 2 (lines 56-59) states `HandleCap` is **detached** from `dispatch_web_fetch`; B3 re-attaches it. ADR-0041's residual (lines 117-122) says the inbound canary is deferred with `canary=None`; A1/A2 close it. ADRs are NOT human-gated (only `CLAUDE.md`/`PRD.md` are — self-improvement rule #4), so record the change. Frame the re-attach as a **re-purpose** (a per-user *concurrency* bound in the fused model — a different rationale than the parked-body bound Decision 2 detached), NOT a straight undo. Escalate the structural change to architect/user for sign-off at PR time.
+
+- **FIX-5 (MED, security). Task A3 must also guard the WIRING, not only seam behavior.** The rev.1 A3 hand-builds `ResponsePolicy(canary=...)` directly and never calls `build_web_fetch_egress_extractor`, so a future re-introduction of `canary=None` in the factory would leave A3 green — the corpus entry stops guarding the merge-blocker's actual subject. Add to the converted `de-2026-012` entry a cheap inert-double factory assertion (mirror the current xfail's build at `test_de_egress_inbound_canary_unwired.py:139-167`):
+
+  ```python
+  from alfred.config.settings import Settings
+  from alfred.plugins.web_fetch.assembly import build_web_fetch_egress_extractor
+  assembled = build_web_fetch_egress_extractor(
+      settings=Settings(egress_relay_url=_RELAY_URL, web_fetch_canary_tokens=(token,)),
+      gate=Mock(name="gate"), extractor=Mock(name="extractor"), recorder=Mock(name="recorder"),
+      outbound_dlp=Mock(name="outbound_dlp"), audit_writer=Mock(name="audit_writer"),
+      session_scope=lambda: None,
+  )
+  assert assembled._response_policy.canary is not None
+  assert assembled._response_policy.canary.first_match(token) == token
+  ```
+
+- **FIX-6 (MED, test). Add a canary NO-TRIP regression (A3 or A4 sub-case).** Armed matcher + benign body that does NOT contain a token → no `InboundCanaryTripped`, extractor reached, clean T2. CRITICAL detail: `inspect_response` runs canary FIRST, MIME SECOND — a no-trip test MUST set `Content-Type: text/html` on the response, else the missing-MIME soft-refusal short-circuits before the extractor and the `extract.assert_awaited_once()` becomes vacuous. Assert `mock_extractor.extract.assert_awaited_once()` and no exception.
+
+- **FIX-7 (MED, test). Add two release-matrix branches to Task B3 tests:** (a) `extractor.handle` raises a generic `WebFetchError`/`RuntimeError` → `pytest.raises(...)` AND `released == [handle_id]` (the finally covers transport errors too); (b) an EARLY refusal (rate-limit or allowlist, which returns before Step 3b) leaves `reserved == []` AND `released == []` — pinning that the cap is only touched AFTER the rate-limit gate.
+
+- **FIX-8 (MED, error). Harden the `finally`-release against a non-`RedisError` masking the propagating security exception.** `release()` swallows only `RedisError`; a non-`RedisError` escaping it (e.g. a `zrem` TypeError regression) would replace the in-flight `InboundCanaryTripped`/`TimeoutError`. Wrap the finally body:
+
+  ```python
+  finally:
+      try:
+          await handle_cap.release(user_id=user_id, handle_id=handle_id, correlation_id=correlation_id)
+      except Exception:  # noqa: BLE001 — never let a release fault mask the real exception; CancelledError still propagates
+          _log.error("web_fetch.handle_cap.release_unexpected", user_id=user_id, handle_id=handle_id)
+  ```
+
+  Catch `Exception` (NOT `BaseException`) so `CancelledError` propagates. Add a B3 test: a fake `release()` raising `RuntimeError` → the original `InboundCanaryTripped` still propagates. (`fetch_dispatcher.py` already has a module `_log`; if not, add `structlog.get_logger(__name__)`.)
+
+- **FIX-9 (MED, error + security LOW-4). Reserve-transport failure stays un-audited at the dispatcher BY DESIGN — reconcile the stale contract, do NOT add a redundant arm.** Step 3b catching only `WebFetchRateLimited` matches the adjacent Step 3 rate-limiter; a `RedisError`/`ValueError`/`RuntimeError` from `try_reserve` is caught loud one layer up by `dispatch_tool`'s `except Exception → unexpected_error/fault` (`tool_dispatch.py:224-233`) — NOT a HARD-#7 regression, so no new dispatcher audit arm (security's call; a second arm would double-audit). Instead: (a) add a one-line comment in Step 3b noting the outer totality; (b) rewrite `handle_cap.py:206-211` — it still promises "the dispatcher's `transport_error` audit arm fires", but `transport_error` was removed from `DlpScanResult` at the G7-2.5 re-home. State reserve faults propagate and are audited by the `dispatch_tool` chokepoint.
+
+- **FIX-10 (MED, cross-cutting). Task B3 must rewrite the `fetch_dispatcher.py` module docstring.** Lines 19-22 ("ADR-0041 records ... the `HandleCap` removal") and 32-35 (residual: "the per-user fairness bound ... land there too") go stale on B3. Rewrite to say HandleCap is re-attached as a per-user concurrency bound and the fairness bound lands in PR4a — but PRESERVE the "broker secret-injection for authenticated fetch" deferral clause (that is PR4b, NOT PR4a; do not over-claim broker auth).
+
+- **FIX-11 (LOW, error + security). TTL doc drift.** Keep `_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS = 120`; update the `~80s` self-heal figures in `handle_cap.py` (docstring lines 216, 399, 431) to `~120s`.
+
+- **FIX-12 (LOW, cross-cutting). Both YAMLs keep `deferred_to: "PR #339"` after the flip.** In `de_egress_inbound_canary_unwired.yaml` and `egress_inflight_and_no_orphan.yaml`, alongside `merge_blocker: false` add `converted_in: "PR #339 PR4a"` (and null/relax `deferred_to`) so the corpus record is accurate.
+
+- **FIX-13 (LOW, cross-cutting). Task B4's "updated in Task B6/Task Z" cross-ref is wrong** — the caller fixups live only in Task Z; B6 touches no `build_tool_registry` caller. Drop the B6 reference.
+
+- **FIX-14 (LOW, security). Use a per-field settings test file.** Task A1's tests go in a NEW `tests/unit/config/test_settings_web_fetch_canary_tokens.py` (matches the `test_settings_egress_relay_url.py` convention), not appended to `test_settings.py`.
+
+- **FIX-15 (LOW, test — confirmations to bake in).** Both "confirm-the-path" fallbacks are moot: `tests/unit/config/test_settings.py` and `tests/unit/plugins/web_fetch/test_assembly.py` both EXIST — A2 appends to `test_assembly.py` (A1 uses the new per-field file per FIX-14). Add a one-line comment in A3/A4 that `headers={}` on the reflecting relay is intentional (canary precedes MIME). `test_audit_log_result_domain_closed` needs NO change (Step 3b emits the literal `result="rate_limited"`, off the dynamic-site pin list); only `test_audit_row_schemas` changes (Task B1).
+
+- **FIX-16 (LOW, security). Do NOT "improve" `HandleCap.release()` to propagate** — the `try/finally` safety depends on its `RedisError`-swallow (handle_cap.py:416-434). Leave it.
 
 ---
 
@@ -957,6 +1119,34 @@ Expected: PASS. (A `TimeoutError`/skip means the Redis container did not start �
 ```bash
 git add tests/integration/egress/test_handle_cap_exhaustion.py
 git commit -m "test(egress): Redis-backed per-user handle_cap exhaustion atomicity (#339 PR4a)"
+```
+
+---
+
+## Task Y: ADR — record the ADR-0041 reversal (FIX-4)
+
+**Files:**
+- Create: `docs/adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md` (or, if the maintainer prefers, a dated factual amendment appended to `docs/adr/0041-web-fetch-fused-fetch-extract-contract.md` — decide at PR time with the architect).
+
+**Interfaces:** none (documentation of a structural-invariant change). ADRs are NOT human-gated (only `CLAUDE.md`/`PRD.md` are — self-improvement rule #4), so authoring this is in-remit; but the structural change itself wants architect/user sign-off at PR time.
+
+- [ ] **Step 1: Write the ADR**
+
+Record two coupled decisions, both landed by #339 PR4a:
+1. **`HandleCap` is re-attached to `dispatch_web_fetch`** — this REVERSES ADR-0041 Decision 2 (lines 56-59: "HandleCap is detached ... no longer reserved or released by `dispatch_web_fetch`"). Frame it as a **re-purpose, not a straight undo**: the reserve is now a pure per-user *concurrency* bound in the fused fetch+extract model (the T3 body stages in-memory transiently, not as a Redis ContentHandle), whereas Decision 2 detached a *parked-body* handle bound. Context: #347 blocker 1 restored per-user fairness (the `alfred-security-engineer` D3 dissent was reconciled by G7-2.5's zero-exposure window, not by solving the property; PR4a solves it). Consequence: `handle_id` is a synthetic ZSET member; the old host-side handle_id-equality / `WebFetchHandleIdMismatch` check does not return.
+2. **The inbound-reflection canary residual (ADR-0041 lines 117-122) is closed** — the core-side `ALFRED_WEB_FETCH_CANARY_TOKENS` source + `_resolve_web_fetch_canary` make `ResponsePolicy.canary` non-`None` from the factory; the gateway keeps its distinct outbound scanner (`ALFRED_CANARY_TOKENS`).
+
+Cross-reference #339, #347 (blockers 1 & 5), and the two converted corpus entries (`de-2026-004`, `de-2026-012`). Run `markdownlint-cli2` on the new file before committing (MD031/MD032 around fences/lists; no line may start with `#NNN`).
+
+- [ ] **Step 2: Add a dated factual amendment note to ADR-0041**
+
+At the top of `docs/adr/0041-...md`, add a dated (`2026-07-06`) one-line note that Decision 2 and the inbound-canary residual are superseded by ADR-0047 (#339 PR4a) — the ADR-0015/0016-amendment precedent (factual amendments are in-remit; status flips stay with the maintainer).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md docs/adr/0041-web-fetch-fused-fetch-extract-contract.md
+git commit -m "docs(adr): ADR-0047 handle_cap re-attach + inbound canary; amend ADR-0041 (#339 PR4a)"
 ```
 
 ---
