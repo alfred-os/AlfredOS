@@ -93,6 +93,7 @@ from alfred.audit.audit_row_schemas import SUPERVISOR_ACTION_TIMEOUT_FIELDS
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard, UnknownBudgetUserError
 from alfred.comms_mcp import observability as comms_observability
+from alfred.egress.egress_id import TurnEgressContext
 from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
@@ -105,7 +106,10 @@ from alfred.supervisor.deadline import DeadlineWrapper
 from alfred.supervisor.observability import record_action_duration
 
 if TYPE_CHECKING:
+    from alfred.hooks.capability import CapabilityGate
     from alfred.identity.models import User
+    from alfred.orchestrator.tool_registry import ToolRegistry
+    from alfred.security.dlp import OutboundDlpProtocol
     from alfred.security.quarantine import ExtractionResult
 
 _log = structlog.get_logger(__name__)
@@ -266,6 +270,14 @@ class Orchestrator:
         # constructing; the comms inbound path (Wave 2) requires it wired and
         # ``quarantined_extract`` raises loudly when it is absent.
         quarantined_extractor: QuarantinedExtractorLike | None = None,
+        # #339 PR3: the agentic act-phase loop seams. Additive + optional so
+        # every Slice-1..4 caller that omits them keeps constructing and the
+        # loop degrades to today's single completion (empty registry ->
+        # tools=() -> stop_reason "end_turn" on iteration 0). The daemon
+        # inbound assembly (#338) injects the live registry/gate/dlp.
+        tool_registry: ToolRegistry | None = None,
+        gate: CapabilityGate | None = None,
+        outbound_dlp: OutboundDlpProtocol | None = None,
     ) -> None:
         # Resolve the operator exactly once, here. Caching for the
         # orchestrator's lifetime is load-bearing: re-resolving each turn
@@ -297,6 +309,9 @@ class Orchestrator:
         # outside the rolled-back session.
         self._deadline_wrapper = DeadlineWrapper(deadline_seconds=deadline_seconds)
         self._quarantined_extractor = quarantined_extractor
+        self._tool_registry = tool_registry
+        self._gate = gate
+        self._outbound_dlp = outbound_dlp
 
     async def quarantined_extract(
         self,
@@ -892,4 +907,26 @@ class Orchestrator:
             trace_id=trace_id,
             language=user.language,
             persona_id=_ALFRED_PERSONA_ID,
+        )
+
+    def _synthesize_egress_context(self, *, trace_id: str, user: UserLike) -> TurnEgressContext:
+        """Build the per-turn egress anchor for the fixture / ``alfred chat`` path.
+
+        #339 is mechanism-proven-by-fixtures: there is no live comms resume, so
+        the anchor is synthesized DETERMINISTICALLY from the turn identity (as
+        G7-2's synthetic driver did). ``inbound_id`` is the turn ``trace_id``
+        (the committed inbound identity on this path); ``session_id`` is the
+        requesting user's slug. #338 REPLACES this synthesis with the real
+        adapter/inbound/session identity carried by the live comms inbound.
+
+        Replay note (spec §5): within a turn the same ``trace_id`` yields the
+        same anchor, so ``compute_egress_id(ctx, call_index)`` is stable for a
+        fixed dispatch sequence. Cross-turn at-most-once under re-planning is a
+        hard #338 prerequisite (journal the dispatch sequence), NOT provided
+        here — #339 has no live resume so it is not reachable.
+        """
+        return TurnEgressContext(
+            adapter_id="orchestrator.synthetic",
+            inbound_id=trace_id,
+            session_id=user.slug,
         )

@@ -336,7 +336,7 @@ def test_dynamic_result_sites_are_documented() -> None:
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
-            "src/alfred/orchestrator/core.py:842",  # IfExp over charge_result
+            "src/alfred/orchestrator/core.py:857",  # IfExp over charge_result
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
