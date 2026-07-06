@@ -155,7 +155,7 @@ Lookups and honesty. → `docs/glossary.md`, `docs/adr/`.
 | Page | parent | purpose (one line) | anchor / caveat |
 | --- | --- | --- | --- |
 | Glossary | Reference | The single canonical AlfredOS vocabulary. | → `docs/glossary.md` (headings are canonical, GitHub-slugified anchors). |
-| Decision Records (ADR Index) | Reference | Index of the 46 ADRs; the load-bearing ones are pinned as `page_notes` on the concept pages they govern (see the ADR-pin map below). | → `docs/adr/`. |
+| Decision Records (ADR Index) | Reference | Index of the ADRs (47 after ADR-0047 adds the DeepWiki-adoption decision); the load-bearing ones are pinned as `page_notes` on the concept pages they govern (see the ADR-pin map below). | → `docs/adr/`. |
 | Slice / Roadmap Status | Reference | **Explicitly forward-looking** page absorbing planned surfaces so no other page oversells them. | → `PRD.md` slice plan; **`.rulesync/rules/CLAUDE.md`** current-state (committed source, not the generated root `CLAUDE.md`). |
 
 ### ADR-pin map (fixes the "pinned on the pages they govern" claim)

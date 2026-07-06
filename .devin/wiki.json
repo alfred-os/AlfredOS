@@ -276,10 +276,11 @@
     },
     {
       "title": "Decision Records (ADR Index)",
-      "purpose": "Index of the 46 ADRs; the load-bearing ones are pinned as page_notes on the concept pages they govern.",
+      "purpose": "Index of the 47 ADRs; the load-bearing ones are pinned as page_notes on the concept pages they govern.",
       "parent": "Reference",
       "page_notes": [
-        "Ground in `docs/adr/`. Load-bearing ADRs are pinned on the concept pages they govern: ADR-0040/0042/0043 -> Egress Topology, ADR-0017 -> Trust Tiers, ADR-0046 -> Dual-LLM Split, ADR-0045 -> Providers/Orchestrator, ADR-0014 -> Hooks."
+        "Ground in `docs/adr/`. Load-bearing ADRs are pinned on the concept pages they govern: ADR-0040/0042/0043 -> Egress Topology, ADR-0017 -> Trust Tiers, ADR-0046 -> Dual-LLM Split, ADR-0045 -> Providers/Orchestrator, ADR-0014 -> Hooks.",
+        "ADR-0047 records the decision to adopt Devin DeepWiki — i.e. the decision behind this steering file itself."
       ]
     },
     {
