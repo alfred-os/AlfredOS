@@ -77,10 +77,45 @@ FIRST_PARTY_SYSTEM_GRANTS: Final[tuple[GrantRow, ...]] = (
         content_tier=None,
         proposal_branch=_FIRST_PARTY_PROPOSAL_BRANCH,
     ),
+    # --- #339 PR3: the three grants the live agentic tool-dispatch T3 path
+    # needs. Until seeded, a real turn's web.fetch dispatch fails LOUD
+    # (downgrade_denied) at the second content-clearance boundary. Mirrors the
+    # test fixtures tests.helpers.gates.make_tool_dispatch_gate() (grants 1+3)
+    # and tests/integration/orchestrator/test_tool_assembly._assembly_gate()
+    # (grant 2). ADR-0046 (dual-LLM tool-result flow) + ADR-0026.
+    GrantRow(
+        # dispatch_tool: gate.check(plugin_id=TOOL_DISPATCH_PLUGIN_ID,
+        #   hookpoint="tool.dispatch", requested_tier="system").
+        plugin_id="alfred.orchestrator.tool_dispatch",
+        subscriber_tier="system",
+        hookpoint="tool.dispatch",
+        content_tier=None,
+        proposal_branch=_FIRST_PARTY_PROPOSAL_BRANCH,
+    ),
+    GrantRow(
+        # quarantined_to_structured: gate.check_content_clearance(
+        #   plugin_id="alfred.quarantined-llm",
+        #   hookpoint="quarantine.dereference", content_tier="T3").
+        plugin_id="alfred.quarantined-llm",
+        subscriber_tier="system",
+        hookpoint="quarantine.dereference",
+        content_tier="T3",
+        proposal_branch=_FIRST_PARTY_PROPOSAL_BRANCH,
+    ),
+    GrantRow(
+        # downgrade_to_orchestrator: gate.check_content_clearance(
+        #   plugin_id="t3.downgrade_to_orchestrator",
+        #   hookpoint="t3.downgrade_to_orchestrator", content_tier="T3").
+        plugin_id="t3.downgrade_to_orchestrator",
+        subscriber_tier="system",
+        hookpoint="t3.downgrade_to_orchestrator",
+        content_tier="T3",
+        proposal_branch=_FIRST_PARTY_PROPOSAL_BRANCH,
+    ),
 )
 """The fixed first-party system grants seeded at boot (ADR-0026).
 
-One row today: the ``security.quarantined.extract`` DLP subscriber.
+Four rows today: the DLP subscriber + the three #339 tool-dispatch grants.
 Drives BOTH the seed
 (:meth:`alfred.security.capability_gate.backend.PostgresBackend.seed_first_party_grants`)
 AND the daemon's post-install grant assertion — the SAME constant on

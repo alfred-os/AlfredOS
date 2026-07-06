@@ -49,3 +49,20 @@ Two sub-problems hide inside "give the daemon a granted gate":
 ### Neutral
 
 - `build_boot_real_gate` coexists with `build_real_gate` (the un-seeded production factory) and `build_dev_gate`. The seeded factory is the daemon-boot path; the un-seeded one remains for callers that manage grants by other means.
+
+## Amendment 2026-07-06 (#339 PR3) — tool-dispatch grants added
+
+`FIRST_PARTY_SYSTEM_GRANTS` gains three rows so the live agentic tool-dispatch
+T3 path clears its gate boundaries at boot (previously it would fail loud with
+`downgrade_denied`):
+
+| plugin_id | hookpoint | subscriber_tier | content_tier | axis |
+| --- | --- | --- | --- | --- |
+| `alfred.orchestrator.tool_dispatch` | `tool.dispatch` | `system` | — | `check` |
+| `alfred.quarantined-llm` | `quarantine.dereference` | `system` | `T3` | `check_content_clearance` |
+| `t3.downgrade_to_orchestrator` | `t3.downgrade_to_orchestrator` | `system` | `T3` | `check_content_clearance` |
+
+These realize the ADR-0046 dual-LLM tool-result flow. The boot grant-assertion
+(`_first_party_grant_live`) now verifies each grant on its correct axis. This is
+a factual amendment (grant list); the ADR-0026 seed-then-load mechanism and the
+mandatory-defence posture are unchanged.

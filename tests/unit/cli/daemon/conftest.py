@@ -171,20 +171,30 @@ def apply_boot_success_patches(
         lambda _scope: _HealthyGate(),
     )
     # PR-S4-11b0: the daemon now builds a RAW seeded RealGate, installs the
-    # boot HookRegistry over it, and asserts the first-party DLP grant is
-    # live. The success path needs a gate that GRANTS that first-party
-    # grant — ``make_quarantined_extract_chain_gate`` seeds exactly the
-    # ``security.quarantined.extract`` system-tier grant via a FIXTURE
-    # (RealGate, not a permissive shim — CLAUDE.md hard rule #2). The
-    # process registry singleton is restored after the test so the
-    # installed boot registry does not leak into sibling tests.
+    # boot HookRegistry over it, and asserts EVERY first-party grant is
+    # live (ADR-0026). The success path needs a gate that GRANTS all of
+    # them — #339 PR3 grew :data:`FIRST_PARTY_SYSTEM_GRANTS` from one row
+    # (the DLP subscriber) to four (+ tool.dispatch, quarantine.dereference,
+    # t3.downgrade_to_orchestrator), so the fixture is wired DIRECTLY off
+    # that production constant via ``make_comms_adapter_load_gate`` (a
+    # generic "RealGate seeded with these exact GrantRows" builder — real
+    # gate + real policy match, not a permissive shim; CLAUDE.md hard rule
+    # #2) rather than off a hand-maintained subset. A future grant added to
+    # the constant is therefore live on this fixture automatically, so the
+    # boot-success double can never drift back out of sync with the seed
+    # the way a hardcoded row list would. The process registry singleton is
+    # restored after the test so the installed boot registry does not leak
+    # into sibling tests.
     from alfred.hooks import get_registry, set_registry
-    from tests.helpers.gates import make_quarantined_extract_chain_gate
+    from alfred.security.capability_gate._bootstrap_grants import (
+        FIRST_PARTY_SYSTEM_GRANTS,
+    )
+    from tests.helpers.gates import make_comms_adapter_load_gate
 
     _prior_registry = get_registry()
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
-        _make_async(lambda _settings: make_quarantined_extract_chain_gate()),
+        _make_async(lambda _settings: make_comms_adapter_load_gate(FIRST_PARTY_SYSTEM_GRANTS)),
     )
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.read_state_git_head_sha",

@@ -85,8 +85,16 @@ async def test_seed_writes_state_approved_and_on_conflict_idempotent() -> None:
 
     await backend.seed_first_party_grants(FIRST_PARTY_SYSTEM_GRANTS)
 
+    # #339 PR3: seed_first_party_grants sorts by _grant_sort_key before
+    # upserting, so the DLP row is no longer necessarily the FIRST INSERT
+    # once three more first-party grants exist (alphabetically,
+    # "alfred.orchestrator..." sorts before "alfred.security..."). Locate the
+    # DLP row's own INSERT by its plugin_id rather than assuming position.
     insert_call = next(
-        c for c in session.execute.await_args_list if "INSERT INTO plugin_grants" in str(c.args[0])
+        c
+        for c in session.execute.await_args_list
+        if "INSERT INTO plugin_grants" in str(c.args[0])
+        and c.args[1]["plugin_id"] == "alfred.security._extract_dlp_subscriber"
     )
     sql_text = str(insert_call.args[0])
     params = insert_call.args[1]
