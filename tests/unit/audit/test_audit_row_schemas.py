@@ -352,7 +352,8 @@ def test_rate_limit_bucket_literal_closed_set() -> None:
 
 def test_dlp_scan_result_literal_includes_new_values() -> None:
     """dlp_scan_result's Literal pins the closed vocabulary AFTER the G7-2.5
-    ``web.fetch`` re-home reconciliation (#333).
+    ``web.fetch`` re-home reconciliation (#333) and #339 PR4a per-user handle-cap
+    reinstatement.
 
     Mirrors the ``RateLimitBucket`` pattern (exact-set equality) so a stray extra
     literal, a dropped existing one, or a typo all surface here — not at a
@@ -361,12 +362,13 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
     The re-home removed the plugin subprocess, so the whole subprocess
     ``dlp_scan_result`` family (``scanned_dirty`` / ``transport_error`` /
     ``dispatch_shape_error`` / ``internal_ip_refused`` / ``redirect_refused`` /
-    ``tls_verification_failed`` / ``fetch_error`` / ``handle_cap_exceeded`` /
-    ``handle_id_mismatch`` / ``dispatch_param_invalid``) is gone — none has a live
+    ``tls_verification_failed`` / ``fetch_error`` / ``handle_id_mismatch`` /
+    ``dispatch_param_invalid``) is gone — none has a live
     ``"dlp_scan_result": "<token>"`` emit site after the re-home. The four NEW
     tokens are the re-homed dispatcher's emits (URL-secret refusal, inbound canary,
-    and the two D1 MIME/size pre-extract policy tokens). Update this set in
-    lockstep with the schema.
+    and the two D1 MIME/size pre-extract policy tokens). The ``handle_cap_exceeded``
+    token was re-added in #339 PR4a for per-user concurrent-fetch refusal.
+    Update this set in lockstep with the schema.
     """
     from typing import get_args
 
@@ -381,6 +383,7 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
         "inbound_canary_tripped",  # NEW per G7-2.5
         "mime_type_not_allowed",  # NEW per G7-2.5
         "size_limit_exceeded",  # NEW per G7-2.5
+        "handle_cap_exceeded",  # RE-ADDED #339 PR4a — per-user concurrency refusal
         # Quarantined-extractor refusal tokens added alongside G7-2.5 CR follow-ons.
         "cannot_extract",
         "refused_by_safety",
