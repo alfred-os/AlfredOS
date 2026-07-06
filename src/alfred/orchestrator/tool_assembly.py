@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
     from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
+    from alfred.plugins.web_fetch.handle_cap import HandleCap
     from alfred.plugins.web_fetch.rate_limit import RateLimiter
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import QuarantinedExtractor
@@ -73,6 +74,7 @@ def build_tool_registry(
     audit_writer: AuditWriter,
     session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
     rate_limiter: RateLimiter,
+    handle_cap: HandleCap,
     config: FetchDispatchConfig,
     now: Callable[[], datetime] = _utc_now,
 ) -> ToolRegistry:
@@ -100,6 +102,7 @@ def build_tool_registry(
             Postgres idempotency ledger commits intents / records T2 through.
         rate_limiter: The per-domain/per-user/daily ``web.fetch`` rate
             limiter (spec §7.7).
+        handle_cap: The per-user concurrent-fetch cap (spec §7.10).
         config: The per-session ``FetchDispatchConfig`` (three-way allowlist
             + manifest commit hash).
         now: The clock callable ``clock.now`` reports from. Defaults to the
@@ -123,6 +126,7 @@ def build_tool_registry(
         extractor=web_fetch_extractor,
         config=config,
         rate_limiter=rate_limiter,
+        handle_cap=handle_cap,
         outbound_dlp=outbound_dlp,
         audit=audit_writer,
     )

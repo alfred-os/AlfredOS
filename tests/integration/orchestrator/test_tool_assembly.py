@@ -50,6 +50,7 @@ from alfred.orchestrator.tool_assembly import build_tool_registry
 from alfred.orchestrator.tool_dispatch import dispatch_tool
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry
 from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
+from alfred.plugins.web_fetch.handle_cap import HandleCap
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.providers.base import ToolCall
 from alfred.security.quarantine import Extracted, T3DerivedData
@@ -99,6 +100,7 @@ async def test_build_tool_registry_end_to_end(
     mock_extractor.extract = AsyncMock(return_value=extracted)
 
     rate_limiter = RateLimiter(redis_url=redis_url)
+    handle_cap = HandleCap(redis_url=redis_url)
 
     engine = create_async_engine(migrated_url, future=True)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -127,6 +129,7 @@ async def test_build_tool_registry_end_to_end(
                 audit_writer=audit_writer,
                 session_scope=lambda: session_scope(factory),
                 rate_limiter=rate_limiter,
+                handle_cap=handle_cap,
                 config=config,
                 now=lambda: _FIXED_NOW,
             )
@@ -207,4 +210,5 @@ async def test_build_tool_registry_end_to_end(
             assert rows[0].subject["dispatch_outcome"] == "domain_not_allowed"
     finally:
         await rate_limiter.close()
+        await handle_cap.aclose()
         await engine.dispose()

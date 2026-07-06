@@ -61,6 +61,7 @@ from alfred.orchestrator.core import Orchestrator
 from alfred.orchestrator.tool_assembly import build_tool_registry
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry
 from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
+from alfred.plugins.web_fetch.handle_cap import HandleCap
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.providers.base import CompletionRequest, CompletionResponse, ToolCall
 from alfred.providers.router import ProviderRouter
@@ -201,6 +202,7 @@ async def test_loop_drives_real_web_fetch_then_clock_then_answers(
     mock_extractor.extract = AsyncMock(return_value=extracted)
 
     rate_limiter = RateLimiter(redis_url=redis_url)
+    handle_cap = HandleCap(redis_url=redis_url)
 
     engine = create_async_engine(migrated_url, future=True)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -263,6 +265,7 @@ async def test_loop_drives_real_web_fetch_then_clock_then_answers(
                 audit_writer=audit_writer,
                 session_scope=_real_session_scope,
                 rate_limiter=rate_limiter,
+                handle_cap=handle_cap,
                 config=config,
                 now=lambda: _FIXED_NOW,
             )
@@ -343,4 +346,5 @@ async def test_loop_drives_real_web_fetch_then_clock_then_answers(
             mock_extractor.extract.assert_awaited_once()
     finally:
         await rate_limiter.close()
+        await handle_cap.aclose()
         await engine.dispose()
