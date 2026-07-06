@@ -77,9 +77,11 @@ fidelity. Rationale:
   re-derives content on every regeneration. The hazard is page titles/purposes
   that *become lies* as the repo moves. So: anchor pages to **curated docs that
   Devin can actually see in the committed tree** (`docs/subsystems/*`, ADRs,
-  glossary, PRD, `.rulesync/rules/CLAUDE.md`) — never to churn-prone
-  `src/alfred/` directories, and never to a gitignored generated output.
-  Prefer **concept titles** over path titles; concept titles survive refactors.
+  glossary, PRD, `.rulesync/rules/CLAUDE.md`) — never as a page's *primary*
+  anchor to a churn-prone `src/alfred/` directory (a `src/alfred/<dir>/` path
+  may appear only as a *secondary* pointer where no deep-doc exists yet), and
+  never to a gitignored generated output. Prefer **concept titles** over path
+  titles; concept titles survive refactors.
 - **The trust boundary is the differentiator**, so Security Model is a
   first-class subtree.
 - **`Overview` is a hard-working router**: a three-sentence pitch, the
@@ -103,10 +105,10 @@ de-stale), `PRD.md` §5 (the 8 non-negotiable invariants).
 | --- | --- | --- | --- |
 | Orchestrator & Act-Phase Loop | Architecture | The OODA turn and the agentic tool-calling loop that drives a persona's response. | → `PRD.md` §5, ADR-0003/0045/0046, `src/alfred/orchestrator/`. ⚠ real-LLM engine not fully wired; #339 in progress (this branch is PR3 of 4) — describe as *designed*, not *shipped*. |
 | Memory Model (6 Layers) | Architecture | Working, episodic, summarized, semantic, vector, knowledge-graph layers and consolidation. | → `PRD.md` §6.2, `src/alfred/memory/`. ⚠ working+episodic live; semantic/vector/graph partial/planned. |
-| Personas & Routing | Architecture | Persona registry, addressing modes, inter-persona bus with safety rails. | → `PRD.md` §6.8, `src/alfred/personas/`. No ADR — say so. ⚠ only **Alfred** ships enabled; Lucius/Oracle/Diana are example definitions. |
+| Personas & Addressing | Architecture | Persona registry, addressing modes, inter-persona bus with safety rails. | → `PRD.md` §6.8, `src/alfred/personas/`. No ADR — say so. ⚠ only **Alfred** ships enabled; Lucius/Oracle/Diana are example definitions. (Distinct from "Providers & Routing" — this is persona addressing, that is model routing.) |
 | Providers & Routing | Architecture | Tiered provider routing, capability fallback, caching, tool-call protocol. | → `PRD.md` §6.5/§6.6, ADR-0001/0045/0046, `src/alfred/providers/`, `src/alfred/caching/`. |
 | Plugins & MCP Transport | Architecture | MCP plugin transport (stdio/HTTP), session lifecycle, manifest, capability declarations. | → `docs/subsystems/plugins.md`. `comms_mcp` folded in here. |
-| Comms & Gateway Inbound | Architecture | Comms adapters (Discord/TUI), identity binding, the gateway as comms front door + resume. | → `docs/subsystems/comms.md`, ADR-0036. ⚠ Discord + TUI only; Telegram/Slack/WhatsApp are post-MVP (per PRD §6.1). |
+| Comms & Gateway Inbound | Architecture | Comms adapters (Discord/TUI), identity binding, the gateway as comms front door + resume. | → `docs/subsystems/comms.md`, ADR-0036. ⚠ Discord + TUI implemented; **Telegram is an MVP-target adapter not yet built**; Slack/WhatsApp/voice/email are post-MVP (PRD §6.1). |
 | Hooks & Hookpoints | Architecture | Every action is hookable; hook kinds, tiers, and the dispatcher. | → `docs/subsystems/hooks.md`, ADR-0014, `PRD.md` §5/§5.1. A PRD §5 non-negotiable invariant — first-class page, not folded prose. |
 | Connectivity-Free Core & Egress Topology | Architecture | Kernel-isolated core (`internal:true`); the gateway as sole external egress plane (L7 CONNECT proxy, default-deny allowlist). | → ADR-0040/0042/0043, `docs/ARCHITECTURE.md` §2 (after de-stale). **Cross-linked from Security Model.** Has a curated ADR anchor — the anchor-gap note does NOT apply. |
 | Self-Modification: Reviewer-Gate Loop | Architecture | Proposal branches in `/var/lib/alfred/state.git` → reviewer agent → merge activates; rollback = revert. | → `PRD.md` §6.4, ADR-0018/0021. |
@@ -357,6 +359,15 @@ corrected against the live glossary (docs-004/005); README maturity caveat added
 (docs-006). The gc.get_objects example was **swapped for a tamer in-core-code-
 execution example** (sec-003). Self-contradictions the coordinator flagged are
 reconciled (scope vs validator; anchor-gap scope; ADR-pin claim; vocab-lock).
+Remaining Lows fixed: the "never anchor to src/" absolute softened to "never as
+*primary* anchor" (arch-006); Telegram corrected to an MVP-target adapter, not
+post-MVP (arch-007, per PRD §6.1); `Personas & Routing` renamed `Personas &
+Addressing` to disambiguate from `Providers & Routing` (arch-008).
+**Consciously deferred to the implementation plan / accepted:** the validator's
+anchor-*extraction* contract from free-text `page_notes` (test-003) is an
+implementation detail the plan pins down; the anchor-gap `page_note` template
+(rev-004) is filled per-page at build time; the minor static string-rot risk
+(docs-007) is an accepted residual the regenerate-on-change model keeps small.
 
 ## Open questions
 
