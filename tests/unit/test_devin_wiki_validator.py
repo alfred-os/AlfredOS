@@ -58,3 +58,50 @@ def test_parent_cycle_is_flagged() -> None:
 
 def test_valid_minimal_has_no_reference_errors() -> None:
     assert vw.check_references(_load("valid_minimal.json")) == []
+
+
+_REPO_ROOT = Path(__file__).parents[2]
+
+
+def test_extract_anchors_finds_each_kind() -> None:
+    note = "Ground in `docs/subsystems/security.md`, ADR-0017, PRD.md §7.1, glossary.md#trust-tier."
+    kinds = {a.kind for a in vw.extract_anchors(note)}
+    assert kinds == {"path", "adr", "prd", "glossary"}
+
+
+def test_real_tracked_anchors_resolve() -> None:
+    data = {
+        "repo_notes": [],
+        "pages": [
+            {
+                "title": "Sec",
+                "purpose": "p",
+                "page_notes": [
+                    "-> `docs/subsystems/security.md`, ADR-0017, glossary.md#trust-tier"
+                ],
+            },
+        ],
+    }
+    assert vw.check_anchors(data, _REPO_ROOT) == []
+
+
+def test_gitignored_anchor_is_flagged() -> None:
+    # Root CLAUDE.md is a gitignored rulesync output — Devin cannot see it.
+    errs = vw.check_anchors(_load("bad_gitignored_anchor.json"), _REPO_ROOT)
+    assert any("CLAUDE.md" in e and ("not tracked" in e or "gitignored" in e) for e in errs)
+
+
+def test_bad_adr_and_slug_are_flagged() -> None:
+    data = {
+        "repo_notes": [],
+        "pages": [
+            {
+                "title": "X",
+                "purpose": "p",
+                "page_notes": ["ADR-9999 and glossary.md#no-such-heading"],
+            },
+        ],
+    }
+    errs = vw.check_anchors(data, _REPO_ROOT)
+    assert any("ADR-9999" in e for e in errs)
+    assert any("no-such-heading" in e for e in errs)
