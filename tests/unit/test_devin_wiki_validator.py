@@ -1,6 +1,7 @@
 # tests/unit/test_devin_wiki_validator.py
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -52,6 +53,42 @@ def test_duplicate_page_title_is_flagged() -> None:
 def test_empty_purpose_is_flagged() -> None:
     errs = vw.check_structure_and_limits(_load("bad_empty_purpose.json"))
     assert any("purpose" in e.lower() and "empty" in e.lower() for e in errs)
+
+
+def test_valid_minimal_has_no_shape_errors() -> None:
+    assert vw.check_shapes(_load("valid_minimal.json")) == []
+
+
+def test_nondict_page_is_flagged() -> None:
+    # `_pages()` silently drops a non-dict `pages[]` entry so every other
+    # check can assume well-formed page objects — `check_shapes` is what
+    # restores the loud failure for that dropped entry.
+    errs = vw.check_shapes(_load("bad_nondict_page.json"))
+    assert any("page[1]" in e and "object" in e.lower() for e in errs)
+
+
+def test_nonlist_page_notes_is_flagged() -> None:
+    errs = vw.check_shapes(_load("bad_nonlist_page_notes.json"))
+    assert any("page_notes" in e and "list" in e.lower() for e in errs)
+
+
+def test_pages_not_a_list_is_flagged() -> None:
+    errs = vw.check_shapes({"repo_notes": [], "pages": "not-a-list"})
+    assert any(e.startswith("pages:") and "list" in e.lower() for e in errs)
+
+
+def test_repo_notes_not_a_list_is_flagged() -> None:
+    errs = vw.check_shapes({"repo_notes": "not-a-list", "pages": []})
+    assert any(e.startswith("repo_notes:") and "list" in e.lower() for e in errs)
+
+
+def test_nonstring_page_note_entry_is_flagged() -> None:
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": "X", "purpose": "p", "page_notes": ["ok", 42]}],
+    }
+    errs = vw.check_shapes(data)
+    assert any("page_notes[1]" in e and "string" in e.lower() for e in errs)
 
 
 def test_load_wiki_raises_on_invalid_json(tmp_path: Path) -> None:
@@ -180,9 +217,38 @@ def test_compound_adr_reference_partially_broken_is_flagged() -> None:
     assert not any("ADR-0040 has no file" in e for e in errs)
 
 
+def test_check_anchors_missing_prd_and_glossary_files_no_crash(tmp_path: Path) -> None:
+    # `check_anchors` used to do an unguarded `(repo_root/"PRD.md").read_text()`
+    # / `(repo_root/"docs/glossary.md").read_text()` — an unhandled
+    # `FileNotFoundError` (traceback) if either was absent/renamed. `git init`
+    # so the (unrelated) tracked-file preload doesn't itself raise — this
+    # test is isolating the PRD/glossary guard, not git availability.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)  # noqa: S607
+    errs = vw.check_anchors({"repo_notes": [], "pages": []}, tmp_path)
+    assert isinstance(errs, list)
+    assert all(isinstance(e, str) for e in errs)
+    assert any("PRD.md" in e and "not found" in e for e in errs)
+    assert any("glossary" in e.lower() and "not found" in e for e in errs)
+
+
 def test_token_shaped_string_is_flagged() -> None:
     data = {"repo_notes": [{"content": "example key sk-" + "a" * 40}], "pages": []}
     assert any("token-shaped" in e for e in vw.check_secret_shapes(data))
+
+
+def test_note_error_locates_repo_note_source() -> None:
+    data = {"repo_notes": [{"content": ""}], "pages": []}
+    errs = vw.check_structure_and_limits(data)
+    assert any(e.startswith("repo_notes[0]:") for e in errs)
+
+
+def test_note_error_locates_page_note_source() -> None:
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": "Sec", "purpose": "p", "page_notes": [""]}],
+    }
+    errs = vw.check_structure_and_limits(data)
+    assert any("Sec" in e and "page_notes[0]" in e for e in errs)
 
 
 def test_clean_notes_have_no_secret_findings() -> None:
