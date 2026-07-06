@@ -147,11 +147,14 @@ for the operator-facing runbook.
 > not reverted — see ADR-0047). `HandleCap` is re-attached to `dispatch_web_fetch` as a
 > per-user *concurrency* bound: the dispatcher reserves a slot before the network fire
 > and releases it in a `finally` on every exit path. Separately, the inbound-reflection
-> canary is now armed by default: a core-side token source,
+> canary *seam* is now wired by default: a core-side token source,
 > `Settings.web_fetch_canary_tokens` (env `ALFRED_WEB_FETCH_CANARY_TOKENS` — distinct
 > from the gateway's outbound `ALFRED_CANARY_TOKENS`, which stays hard-forbidden on the
 > core container), feeds `build_web_fetch_egress_extractor`'s `ResponsePolicy.canary`,
-> which is never `None` for a factory-built extractor. See
+> which is never `None` for a factory-built extractor. Wiring is not the same as
+> protection, though: the matcher only fires an *active* trip when the token set is
+> non-empty — a blank `ALFRED_WEB_FETCH_CANARY_TOKENS` still yields a non-`None` but
+> no-op matcher, so an operator must seed real tokens to get live canary coverage. See
 > [ADR-0047](../adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md).
 
 **Audit vocabulary widening (handle-cap + dispatch-params PRs).** Closed

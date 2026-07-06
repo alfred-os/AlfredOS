@@ -69,6 +69,7 @@ re-raises.
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
@@ -428,11 +429,23 @@ async def dispatch_web_fetch(
     # ``except Exception -> unexpected_error/fault`` arm (HARD rule #7 satisfied by
     # the outer totality — a second dispatcher arm would double-audit).
     handle_id = str(uuid.uuid4())
+    # CR-cloud (PR4a review) + perf-reviewer: a hardcoded 120s reservation TTL
+    # could passively evict a live slot if an operator raises
+    # ``action_deadline_seconds`` above it — the fetch would still be in flight
+    # (bounded by the action deadline) after the reservation self-heals away.
+    # TTL must outlive the per-fetch action deadline (the max single-fetch
+    # duration) so a slow-but-live fetch's slot is never passively evicted
+    # mid-flight; the 120s constant is the floor/self-heal backstop for the
+    # common (30s-deadline) case.
+    reservation_ttl_seconds = max(
+        _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
+        math.ceil(action_deadline_seconds) * 2,
+    )
     try:
         await handle_cap.try_reserve(
             user_id=user_id,
             handle_id=handle_id,
-            handle_ttl_seconds=_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
+            handle_ttl_seconds=reservation_ttl_seconds,
         )
     except WebFetchRateLimited as e:
         await audit.append_schema(
