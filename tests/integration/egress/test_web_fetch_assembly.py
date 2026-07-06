@@ -31,8 +31,9 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alfred.config.settings import Settings
-from alfred.egress.egress_id import TurnEgressContext
+from alfred.egress.egress_id import TurnEgressContext, compute_egress_id
 from alfred.egress.egress_response_extract import EgressExtractOutcome
+from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.errors import AlfredError
 from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
@@ -349,6 +350,133 @@ async def test_assembled_extractor_refuses_on_gate_deny(
         # The request did reach the (faked) upstream once — the deny is on the
         # inbound T3→T2 crossing, not on the outbound egress (see docstring).
         assert fire_counter.value == 1
+    finally:
+        try:
+            shutdown.set()
+            await asyncio.wait_for(serve_task, timeout=5)
+        finally:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_factory_canary_from_settings_trips_over_real_relay(
+    migrated_url: str,
+    authorized_t3_nonce: CapabilityGateNonce,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_external_world: tuple[Any, Any, Any],
+) -> None:
+    """A canary token in ``Settings.web_fetch_canary_tokens``, reflected by the
+    upstream, trips ``InboundCanaryTripped`` end-to-end through the
+    factory-built extractor + real loopback relay + real Postgres ledger
+    (de-2026-012 wiring closure, #339 PR4a).
+
+    Closes the "settings → factory → real relay → terminal ledger row" wiring
+    loop: A3 proved the in-process trip + the factory-wiring guard (unit-level,
+    no live relay); this proves the SAME canary-derivation path
+    (``_resolve_web_fetch_canary``) fires over a REAL loopback ``EgressRelay``
+    and REAL Postgres idempotency store, landing a terminal
+    ``committed_with_response`` row BEFORE the loud raise (C8 invariant).
+    """
+    open_client_factory, fire_counter, canned = fake_external_world
+    token = "ALFRED-CANARY-TEST-TOKEN-8675309"  # noqa: S105 -- canary sentinel, not a credential
+    canned.body = f"upstream page reflecting {token}".encode()
+
+    # --- Boot a real loopback gateway EgressRelay (upstream faked). -----------
+    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port: int = srv.sockets[0].getsockname()[1]
+    srv.close()
+    await srv.wait_closed()
+
+    # No canary tokens on the gateway DLP — we are testing the CORE inbound
+    # canary (web.fetch's own ResponsePolicy), not the gateway's outbound DLP.
+    gateway_dlp = OutboundDlp(
+        broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
+    )
+    relay = EgressRelay(
+        tool_allowlist=_FAKE_ALLOWLIST,
+        dlp=gateway_dlp,
+        audit=record_egress_relay,
+        bind_host="127.0.0.1",
+        port=port,
+        resolve=lambda _h: "1.1.1.1",
+        open_client=open_client_factory,
+        response_byte_cap=4096,
+        upstream_deadline_s=10.0,
+    )
+    shutdown = asyncio.Event()
+    serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
+    try:
+        await _await_relay_ready(port, serve_task)
+    except BaseException:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+        raise
+
+    # --- The daemon quarantine-graph components (reused, never re-spawned). ----
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    mock_extractor.extract = AsyncMock()  # canary is pre-extract → never reached
+
+    engine = create_async_engine(migrated_url, future=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    settings = Settings(
+        egress_relay_url=f"tcp://127.0.0.1:{port}",
+        web_fetch_canary_tokens=(token,),
+    )
+    try:
+        assembled = build_web_fetch_egress_extractor(
+            settings=settings,
+            gate=gate,
+            extractor=mock_extractor,
+            recorder=recorder,
+            outbound_dlp=identity_outbound_dlp(),
+            audit_writer=_NullAuditWriter(),  # type: ignore[arg-type]
+            session_scope=lambda: session_scope(factory),
+        )
+
+        # The factory derived a non-None canary matcher from Settings — this is
+        # the de-2026-012 wiring closure under test, not a re-check of A3's
+        # in-process assertion.
+        assert assembled._response_policy is not None
+        assert assembled._response_policy.canary is not None
+
+        ctx = TurnEgressContext(adapter_id="ada-cn", inbound_id="in-cn", session_id="sess-cn")
+        from alfred.egress.relay_protocol import _RawToolRequest
+
+        raw_request = _RawToolRequest(
+            method="GET", url=_FAKE_URL, headers={}, body="", idempotent=True
+        )
+
+        with pytest.raises(InboundCanaryTripped):
+            await assembled.handle(
+                raw_request=raw_request,
+                ctx=ctx,
+                call_index=0,
+                schema=_TestSchema,
+                language="en",
+            )
+
+        # Gate-first / pre-extract: the quarantine child never saw the T3 body.
+        mock_extractor.extract.assert_not_awaited()
+        # The request DID reach the (faked) upstream once through the real relay
+        # — the canary lives in the REFLECTED response body, not the outbound
+        # request.
+        assert fire_counter.value == 1
+
+        # C8 invariant: a terminal committed_with_response row lands BEFORE the
+        # raise — a replay must never re-fire at the flagged-hostile destination.
+        egress_id = compute_egress_id(ctx, call_index=0)
+        row = await _query_row(migrated_url, egress_id)
+        assert row is not None
+        assert row["state"] == "committed_with_response"
+        assert "refused_by_safety" in row["response"]
     finally:
         try:
             shutdown.set()
