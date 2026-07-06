@@ -155,6 +155,13 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "comms.adapter.binding_requested",
         "comms.adapter.rate_limit_signal",
     ),
+    # #339 PR2 Task 1 (spec §10): the single orchestrator tool-dispatch
+    # hookpoint. carrier_tier=T0 (system-internal dispatch attribution) +
+    # fail_closed=True. Registered by
+    # ``alfred.orchestrator.tool_hookpoints.declare_tool_hookpoints`` at
+    # module import (bottom-of-module call), mirroring
+    # ``alfred.security.capability_gate.proposals``.
+    "alfred.orchestrator.tool_hookpoints": ("tool.dispatch",),
 }
 
 
