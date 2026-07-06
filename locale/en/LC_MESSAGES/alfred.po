@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-06 14:59+0100\n"
+"POT-Creation-Date: 2026-07-06 15:33+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2510,6 +2510,12 @@ msgstr "That request needed too many tools at once, so I stopped for safety."
 #: src/alfred/orchestrator/core.py:937
 msgid "orchestrator.tool.max_iterations_reached"
 msgstr "I reached the limit on tool steps for this request without finishing it."
+
+#: src/alfred/orchestrator/core.py:965
+msgid "orchestrator.tool.dispatch_seams_unwired"
+msgstr ""
+"Tool dispatch is not fully wired: registry, gate, and DLP must be "
+"configured together."
 
 #: src/alfred/orchestrator/tool_dispatch.py:124
 msgid "orchestrator.tool.unknown_tool"

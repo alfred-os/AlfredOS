@@ -960,10 +960,9 @@ class Orchestrator:
             # raise fails loud (hard rule #7) regardless of optimization flags,
             # and narrows all three for the `dispatch_tool` call below.
             if self._tool_registry is None or self._gate is None or self._outbound_dlp is None:
-                raise RuntimeError(
-                    "tool dispatch requires tool_registry, gate, and outbound_dlp "
-                    "to be wired together"
-                )
+                # t()'d for consistency with the sibling quarantined_extract
+                # wiring guards above (source_tier_must_be_t3 / no_extractor_wired).
+                raise RuntimeError(t("orchestrator.tool.dispatch_seams_unwired"))
             for call in response.tool_calls:
                 result_t2 = await dispatch_tool(
                     call,
