@@ -450,6 +450,25 @@ intent-driven dynamic schemas are a later enhancement.
    reconciliation (core-004). Integration tests (fixtures) proving a 2-tool turn
    (one egress + one internal) + a budget-refusal path + a negative-persistence
    test.
+
+   **SHIPPED (2026-07-06).** The loop, the per-iteration budget/cap machinery,
+   and the three production first-party grants (`tool.dispatch`,
+   `quarantine.dereference`, `t3.downgrade_to_orchestrator`) plus the
+   axis-faithful boot assertion all merged, proven by fixture-driven unit tests
+   and a live real-chain integration test exercising a 2-tool turn (one egress
+   leg and one internal leg). Per the Option-A scope reconciliation recorded in
+   the "Scope reconciliation" section of
+   [the PR3 plan](../plans/2026-07-06-issue-339-pr3-act-phase-loop.md),
+   two items originally piled onto "PR3" by PR2's memory notes are explicitly
+   **deferred to PR4**: converting the two `xfail(strict=True)` merge-blockers
+   (`test_inbound_canary_unwired_deferred_to_339`,
+   `test_per_user_exhaustion_refusal_deferred_to_339` — both stay green XFAIL
+   until PR4's live caller lands) and three of the four #347 blockers (live-relay
+   `TimeoutError`/`in_doubt` cross-layer audit test, per-user resource bound,
+   broker auth — properties of the web.fetch egress *live* path, whose first
+   live exercise is PR4). The fourth #347 item, `User.language` sourcing, is
+   **NOT deferred** — PR3 threads the real `language=user.language` through
+   `dispatch_tool`. No decision above is reversed by this note.
 4. **PR4 — Corpus breadth + real-LLM smoke.** Broaden the `prompt_injection/`
    tool-argument-injection corpus beyond PR2's structural case, and add the
    `tests/smoke/` real-LLM turn driving the loop end-to-end (nightly /
