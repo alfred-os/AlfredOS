@@ -247,6 +247,7 @@ async def test_t3_typed_refusal_returns_benign_string() -> None:
         writer=writer,
     )
     assert "cannot_extract" in out
+    assert "web.fetch" in out  # devex: the refusal message names the tool
     assert writer.rows[-1]["subject"]["dispatch_outcome"] == "tool_refused"
     assert writer.rows[-1]["result"] == "refused"
 
@@ -339,6 +340,37 @@ async def test_unexpected_error_escalates_and_is_audited() -> None:
             writer=writer,
         )
     assert writer.rows[-1]["subject"]["dispatch_outcome"] == "unexpected_error"
+    assert writer.rows[-1]["result"] == "fault"
+
+
+async def test_internal_tool_unexpected_error_escalates_and_is_audited() -> None:
+    """Internal-leg totality (HARD #7): an internal tool raising must NOT escape
+    the chokepoint unaudited — the sec-003 arm on the internal branch mirrors
+    the external T3 arm."""
+
+    async def _boom(_inv: ToolInvocation) -> str:
+        raise _UnexpectedBoomError
+
+    spec = InternalToolSpec(
+        name="clock.now",
+        definition=ToolDefinition(
+            name="clock.now",
+            description="d",
+            input_schema={"type": "object", "properties": {}},
+        ),
+        dispatch=_boom,
+    )
+    writer = _CapturingAuditWriter()
+    with pytest.raises(_UnexpectedBoomError):
+        await _dispatch(
+            ToolCall(id="1", name="clock.now", arguments={}),
+            spec,
+            gate=make_tool_dispatch_gate(),
+            dlp=_NoopDlp(),
+            writer=writer,
+        )
+    assert writer.rows[-1]["subject"]["dispatch_outcome"] == "unexpected_error"
+    assert writer.rows[-1]["subject"]["result_tier"] == "T2"
     assert writer.rows[-1]["result"] == "fault"
 
 
