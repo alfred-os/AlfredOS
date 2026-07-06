@@ -45,7 +45,10 @@ from alfred.egress.egress_response_extract import (
 )
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry
-from alfred.plugins.web_fetch.constants import _DEFAULT_ACTION_DEADLINE_SECONDS
+from alfred.plugins.web_fetch.constants import (
+    _DEFAULT_ACTION_DEADLINE_SECONDS,
+    _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
+)
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
@@ -167,15 +170,21 @@ class _SpyHandleCap:
     dispatcher test — none of which cares about the per-user concurrency
     bound — keeps passing once ``handle_cap`` becomes a required kwarg.
     Records reserved/released handle ids in call order so the new tests can
-    assert reserve-precedes-network and release-on-every-exit-path.
+    assert reserve-precedes-network and release-on-every-exit-path. Also
+    captures every ``handle_ttl_seconds`` the dispatcher passed in
+    (CR-cloud PR4a review: the TTL is now derived from
+    ``action_deadline_seconds`` rather than a bare constant) — additive, so
+    existing callers that never inspect ``ttls_seen`` are unaffected.
     """
 
     def __init__(self, *, raise_on_reserve: bool = False) -> None:
         self.reserved: list[str] = []
         self.released: list[str] = []
+        self.ttls_seen: list[int] = []
         self._raise = raise_on_reserve
 
     async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
+        self.ttls_seen.append(handle_ttl_seconds)
         if self._raise:
             raise WebFetchRateLimited("handle_cap")
         self.reserved.append(handle_id)
@@ -755,6 +764,31 @@ async def test_reserve_before_network_and_release_on_success() -> None:
 
     assert len(spy.reserved) == 1
     assert spy.released == spy.reserved
+
+
+@pytest.mark.asyncio
+async def test_reservation_ttl_derived_from_action_deadline() -> None:
+    """CR-cloud (PR4a review) + perf-reviewer: the reservation TTL must
+    outlive the per-fetch action deadline so a slow-but-live fetch's slot is
+    never passively evicted mid-flight. Asserts both the derived branch (an
+    operator-raised deadline of 200s doubles to 400s, exceeding the 120s
+    floor) and the floor branch (the default 30s deadline still floors at
+    the 120s backstop, matching the ``~120s`` runbook language)."""
+    spy = _SpyHandleCap()
+    await _dispatch(
+        extractor=_build_extractor(outcome=_make_extracted_outcome()),
+        handle_cap=spy,
+        action_deadline_seconds=200,
+    )
+    assert spy.ttls_seen == [400]
+
+    spy_default = _SpyHandleCap()
+    await _dispatch(
+        extractor=_build_extractor(outcome=_make_extracted_outcome()),
+        handle_cap=spy_default,
+    )
+    assert spy_default.ttls_seen == [_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS]
+    assert spy_default.ttls_seen == [120]
 
 
 @pytest.mark.asyncio

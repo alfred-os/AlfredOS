@@ -205,4 +205,4 @@ def build_web_fetch_egress_extractor(
     )
 
 
-__all__ = ["_resolve_web_fetch_canary", "build_web_fetch_egress_extractor"]
+__all__ = ["build_web_fetch_egress_extractor"]
