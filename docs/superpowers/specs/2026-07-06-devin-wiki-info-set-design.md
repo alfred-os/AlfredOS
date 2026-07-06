@@ -94,10 +94,12 @@ Legend: `→` names the **anchor doc** a page's `page_notes` should pin. `⚠` m
 a **shipped-vs-scaffolded** caveat the `page_notes` must carry.
 
 ### Root: `Overview`
+
 Front-door router. Three-sentence "what it is", the trust-boundary diagram, and
 the audience fork. → `PRD.md` §1–§2.
 
 ### Root: `Architecture`
+
 Structural spine — "what it is, structurally". → `docs/ARCHITECTURE.md` (after
 de-stale), `PRD.md` §5 (the 8 non-negotiable invariants).
 
@@ -114,6 +116,7 @@ de-stale), `PRD.md` §5 (the 8 non-negotiable invariants).
 | Self-Modification: Reviewer-Gate Loop | Architecture | Proposal branches in `/var/lib/alfred/state.git` → reviewer agent → merge activates; rollback = revert. | → `PRD.md` §6.4, ADR-0018/0021. |
 
 ### Root: `Security Model`
+
 The differentiator — "how it's secured". → `docs/subsystems/security.md`,
 `docs/subsystems/quarantine.md`, `PRD.md` §7.1.
 
@@ -126,6 +129,7 @@ The differentiator — "how it's secured". → `docs/subsystems/security.md`,
 | Audit Log, Audit Graph & Reviewer Trail | Security Model | Append-only signed audit, `alfred audit graph`, and the reviewer-gate decision trail. | → `PRD.md` §7.4, `src/alfred/audit/`. No ADR — say so. |
 
 ### Root: `Operating & Deploying`
+
 "How to run it". → `README.md`, `docs/runbooks/`.
 
 | Page | parent | purpose (one line) | anchor / caveat |
@@ -135,6 +139,7 @@ The differentiator — "how it's secured". → `docs/subsystems/security.md`,
 | Configuration & Policies | Operating & Deploying | `policies.yaml`, reviewer-gated vs direct config keys, hot reload. | → `docs/subsystems/policies.md`. |
 
 ### Root: `Extending & Contributing`
+
 "How to extend it". → `CONTRIBUTING.md`, `docs/python-conventions.md`.
 
 | Page | parent | purpose (one line) | anchor / caveat |
@@ -144,6 +149,7 @@ The differentiator — "how it's secured". → `docs/subsystems/security.md`,
 | Testing & the Adversarial Suite | Extending & Contributing | Unit/integration/smoke/adversarial layers; the adversarial suite is release-blocking. | → `PRD.md` §8.1. **Cross-linked from Security Model** (posture evidence, not just contributor detail). |
 
 ### Root: `Reference`
+
 Lookups and honesty. → `docs/glossary.md`, `docs/adr/`.
 
 | Page | parent | purpose (one line) | anchor / caveat |
