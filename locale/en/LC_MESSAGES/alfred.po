@@ -2894,7 +2894,7 @@ msgstr ""
 msgid "web.fetch.error.rate_limited.handle_cap"
 msgstr ""
 "Too many concurrent web.fetch requests are in flight for this user. Wait "
-"for an existing request to complete; this usually clears within ~80 "
+"for an existing request to complete; this usually clears within ~120 "
 "seconds. Operator: see docs/runbooks/handle-cap-exceeded.md to raise the "
 "cap."
 

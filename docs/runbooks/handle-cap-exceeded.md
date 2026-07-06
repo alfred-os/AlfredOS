@@ -1,18 +1,24 @@
 # Runbook: `handle_cap_exceeded` in the `tool.web.fetch` audit log
 
-> **[2026-06-28 — G7-2.5 update]** `web.fetch` no longer triggers the handle-cap. As of
-> G7-2.5, `dispatch_web_fetch` is detached from `HandleCap` (ADR-0041 — fused fetch+extract
-> path). This runbook applies to remaining consumers of `HandleCap` only (e.g. any
-> `StdioTransport`-based content plugin that still returns a `ContentHandle`).
+> **[2026-07-06 — #339 PR4a update, ADR-0047]** `web.fetch` DOES enforce the handle-cap
+> again. ADR-0041 (G7-2.5) had detached `dispatch_web_fetch` from `HandleCap` because the
+> fused fetch+extract model removed the Redis-parked `ContentHandle` the cap originally
+> bounded. ADR-0047 re-attaches `HandleCap` as a pure per-user *concurrency* bound: the
+> dispatcher mints a synthetic `handle_id` and reserves a slot on the per-user ZSET
+> **before** the network fire, releasing it in a `finally` block on every exit path
+> (success, refusal, canary trip, timeout, or transport fault). The reservation is no
+> longer a parked response body — the T3 body now stages transiently in-memory — but the
+> per-user in-flight-fetch bound (and this runbook) apply again.
 
-> **Audit row signal:** `rate_limit_bucket="handle_cap"` + `dlp_scan_result="handle_cap_exceeded"` + `result="rate_limited"` on a `tool.web.fetch` event.
+> **Audit row signal:** `rate_limit_bucket="handle_cap"` + `dlp_scan_result="handle_cap_exceeded"` + `result="rate_limited"` on a `tool.web.fetch` event. Also raised as `WebFetchRateLimited(bucket="handle_cap")` at the dispatch call site.
 
 ## What it means
 
 A user (`triggering_user_id`) issued a `web.fetch` call while already at
-the per-user concurrent ContentHandle cap. The cap bounds how many fetched
-response bodies the user can have alive in Redis at one moment — its purpose
-is to prevent one user from filling Redis with parked content.
+the per-user concurrent in-flight-fetch cap. The cap bounds how many
+`web.fetch` calls the user can have reserved (pre-network through
+release-on-exit) at one moment — its purpose is to prevent one user from
+holding unbounded concurrent fetches against the shared gateway relay.
 
 Default: 5 concurrent handles per user. The intended operator knob is
 `web_fetch.max_concurrent_handles_per_user` in `config/policies.yaml`,
@@ -28,15 +34,16 @@ see the "How to override" section below.
 
 ## Why the default is 5
 
-Default cap × max body size = 5 × 5 MiB = 25 MiB of T3 content parked in
-Redis per user. Worst-case fleet sizing: 100 active users × 25 MiB ≈ 2.5 GiB
-held in Redis — well within commodity Redis sizing. Operators with
-single-user / high-throughput deployments may raise the cap; multi-tenant
-operators may lower it. Heuristic:
-
-```
-cap_per_user ≤ (redis_memory_budget_mb × 0.5) / (active_users × max_body_mb)
-```
+The cap value (`_DEFAULT_PER_USER_CAP = 5` in `handle_cap.py`) predates ADR-0047 and was
+originally sized against parked `ContentHandle` response bodies in Redis: 5 × 5 MiB max body
+= 25 MiB per user, worst-case fleet sizing 100 active users × 25 MiB ≈ 2.5 GiB — well within
+commodity Redis sizing. ADR-0047 re-purposed the same cap as a pure per-user *concurrency*
+bound instead — in-flight `web.fetch` reservations on a ZSET; no response body is parked in
+Redis anymore, since the T3 body now stages transiently in-memory — but kept the inherited
+default of 5 as the starting tuning point. There is no longer a Redis-memory sizing formula
+to derive the value from (the resource being bounded is in-flight concurrency, not parked
+bytes); operators with single-user / high-throughput deployments may still raise the cap,
+and multi-tenant operators may still lower it, based on expected per-user fetch fan-out.
 
 ## Audit vocabulary widening
 
@@ -94,10 +101,10 @@ The cap value referenced below is **whatever cap is currently in effect**
 
 | Cause | Signal | Remediation |
 | --- | --- | --- |
-| Legitimate burst (e.g., research agent in parallel-fetch mode) | Cap-refusals stop after extracts drain; ZCARD drops naturally | None — system is working as designed |
-| Stuck handles (extract path broken upstream) | ZCARD stays at cap, no decrement for >2× TTL | Investigate the extractor; passive TTL will free within ~80s × 2 |
-| Slow canary-quarantine I/O (delete failed) | `web_fetch.canary.quarantine_failed` structlog events | Investigate Redis health; cap slot held until passive TTL by design |
-| Success-path audit write failed | `web_fetch.handle_cap.success_audit_failed_holding_cap` structlog event | Investigate audit DB; cap slot held until passive TTL by design |
+| Legitimate burst (e.g., research agent in parallel-fetch mode) | Cap-refusals stop after in-flight fetches drain; ZCARD drops naturally | None — system is working as designed |
+| `release()`'s ZREM failed on a transient Redis error (fail-quiet by design — spec §7.10) | `web_fetch.handle_cap.release_failed` structlog event | Investigate Redis health; passive TTL will free the slot within ~120s regardless |
+| A non-`RedisError` fault escaped `release()` (defensive `finally` guard in the dispatcher) | `web_fetch.handle_cap.release_unexpected` structlog event | Investigate the logged exception type; passive TTL still frees the slot within ~120s |
+| Canary-trip quarantine I/O failed (delete failed) | `web_fetch.canary.quarantine_failed` / `web_fetch.handle_cap.eager_release_failed` structlog events | Investigate Redis health; cap slot held until passive TTL by design |
 | Cap too tight for workload | Continuous cap-refusals for a known-legitimate user | Raise `web_fetch.max_concurrent_handles_per_user` in `policies.yaml` — note: knob is currently inert until the policies-loader lands (#159); the value applies at next process boot after that |
 
 ## How to override

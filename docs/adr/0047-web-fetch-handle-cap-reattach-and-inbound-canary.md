@@ -139,6 +139,10 @@ settings-derived matcher trips over a real loopback relay
   reserve, one `ZREM` release) — a cost ADR-0041 had removed. Accepted: the per-user fairness
   property it buys back is worth one extra Redis round-trip per fetch, and the reservation is
   pre-network so it fails fast relative to the fetch itself.
+- The `docker-compose.yaml` passthrough of `ALFRED_WEB_FETCH_CANARY_TOKENS` to `alfred-core`
+  is deferred to #338 (the live comms cutover); this PR wires the `Settings` field and the
+  `_resolve_web_fetch_canary` seam, but no compose service currently forwards the env — expect
+  the no-op matcher (empty tokens) until #338 lands the passthrough.
 
 ## Alternatives considered
 
