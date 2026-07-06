@@ -232,32 +232,62 @@ async def dispatch_tool(
         return t("orchestrator.tool.refused", reason=result.reason)
 
     # ``result`` is Extracted — cross the SECOND boundary into the planner.
+    #
+    # The WHOLE post-dispatch region (downgrade → json.dumps → dlp.scan →
+    # terminal audit) is guarded so NO path escapes unaudited (HARD #7): the two
+    # security refusals get their specific terminal rows, and ANY other
+    # unexpected exception — a downgrade-side bug, a non-serialisable downgraded
+    # value (``json.dumps`` TypeError), or a non-canary DLP fault — gets the
+    # defensive ``unexpected_error``/``fault`` row before re-raising (sec-003,
+    # mirroring the dispatch arm above). ``audited`` records whether an inner arm
+    # already wrote the terminal row, so the broad arm never double-audits nor
+    # mislabels an already-classified refusal.
+    audited = False
     try:
-        # Tightly scoped to the downgrade call ONLY: downgrade_to_orchestrator
-        # raises a bare AlfredError SOLELY on clearance-deny (quarantine.py:1498),
-        # so this arm cannot mask any other AlfredError (sec-004 / FIX-8d).
-        data = await downgrade_to_orchestrator(result.data, gate=gate, audit_writer=audit)
-    except AlfredError:
+        try:
+            # Tightly scoped to the downgrade call ONLY: downgrade_to_orchestrator
+            # raises a bare AlfredError SOLELY on clearance-deny (quarantine.py:1498),
+            # so this arm cannot mask any other AlfredError (sec-004 / FIX-8d).
+            data = await downgrade_to_orchestrator(result.data, gate=gate, audit_writer=audit)
+        except AlfredError:
+            await _audit(
+                dispatch_outcome="downgrade_denied",
+                result="refused",
+                tool_name=external.name,
+                result_tier="T3",
+            )
+            audited = True
+            raise  # ESCALATE — a clearance denial is a security refusal, not a result.
+
+        try:
+            clean = dlp.scan(json.dumps(data))
+        except OutboundCanaryTripped:
+            await _audit(
+                dispatch_outcome="dlp_canary",
+                result="quarantined",
+                tool_name=external.name,
+                result_tier="T3",
+            )
+            audited = True
+            raise  # ESCALATE — a canary in the EXTRACTED T2 is a serious leak.
+
         await _audit(
-            dispatch_outcome="downgrade_denied",
-            result="refused",
+            dispatch_outcome="dispatched",
+            result="success",
             tool_name=external.name,
             result_tier="T3",
         )
-        raise  # ESCALATE — a clearance denial is a security refusal, not a result.
-
-    try:
-        clean = dlp.scan(json.dumps(data))
-    except OutboundCanaryTripped:
-        await _audit(
-            dispatch_outcome="dlp_canary",
-            result="quarantined",
-            tool_name=external.name,
-            result_tier="T3",
-        )
-        raise  # ESCALATE — a canary in the EXTRACTED T2 is a serious leak.
-
-    await _audit(
-        dispatch_outcome="dispatched", result="success", tool_name=external.name, result_tier="T3"
-    )
-    return clean
+        return clean
+    except Exception:
+        # sec-003 totality: an exception the specific arms did NOT already audit
+        # (e.g. json.dumps on a non-serialisable value) must still leave a loud
+        # terminal row before propagating. Already-audited refusals fall through
+        # untouched (``audited`` guard) so their classification is preserved.
+        if not audited:
+            await _audit(
+                dispatch_outcome="unexpected_error",
+                result="fault",
+                tool_name=external.name,
+                result_tier="T3",
+            )
+        raise
