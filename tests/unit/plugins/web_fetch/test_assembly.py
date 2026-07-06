@@ -26,6 +26,7 @@ from alfred.egress.egress_response_extract import EgressResponseExtractor
 from alfred.plugins.web_fetch.assembly import (
     _WEB_FETCH_MIME_ALLOWLIST,
     _WEB_FETCH_RESPONSE_MAX_BYTES,
+    _resolve_web_fetch_canary,
     build_web_fetch_egress_extractor,
 )
 
@@ -54,6 +55,13 @@ def _settings(monkeypatch: pytest.MonkeyPatch, *, relay_url: str | None) -> Sett
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.delenv("ALFRED_EGRESS_RELAY_URL", raising=False)
     return Settings(egress_relay_url=relay_url)
+
+
+def _s(monkeypatch: pytest.MonkeyPatch, *, tokens: tuple[str, ...] = ()) -> Settings:
+    """A real :class:`Settings` with provider key + relay URL + canary tokens."""
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    return Settings(egress_relay_url=_RELAY_URL, web_fetch_canary_tokens=tokens)
 
 
 def _collaborators() -> dict[str, Any]:
@@ -90,7 +98,7 @@ def test_factory_reuses_graph_and_stamps_web_fetch_policy(
     assert extractor._extractor is collab["extractor"]
     assert extractor._recorder is collab["recorder"]
 
-    # Spec C5: web.fetch's 5 MiB cap + the MIME allowlist + the canary residual.
+    # Spec C5: web.fetch's 5 MiB cap + the MIME allowlist + the canary seam (#339 PR4a).
     policy = extractor._response_policy
     assert policy is not None
     assert policy.max_bytes == _WEB_FETCH_RESPONSE_MAX_BYTES == 5 * 1024 * 1024
@@ -101,8 +109,10 @@ def test_factory_reuses_graph_and_stamps_web_fetch_policy(
     # cannot silently track a drifted production value.
     assert _WEB_FETCH_MIME_ALLOWLIST == _EXPECTED_WEB_FETCH_MIME_ALLOWLIST
     assert "text/html" in policy.mime_allowlist
-    # canary defaults to None — the inbound-canary source is a tracked #339 residual.
-    assert policy.canary is None
+    # canary is now ALWAYS non-None, derived from settings.web_fetch_canary_tokens.
+    # With no tokens set, it's a no-op matcher (first_match always None).
+    assert policy.canary is not None
+    assert policy.canary.first_match("anything") is None
 
     # The relay client dialed the configured host:port (no live socket here).
     assert extractor._relay_client._relay_host == "127.0.0.1"
@@ -147,3 +157,59 @@ def test_factory_fail_closed_when_relay_url_unset(
             audit_writer=collab["audit_writer"],
             session_scope=collab["session_scope"],
         )
+
+
+def test_resolve_web_fetch_canary_empty_is_non_none_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty token list yields a non-None no-op matcher."""
+    matcher = _resolve_web_fetch_canary(_s(monkeypatch))
+    assert matcher is not None
+    assert matcher.first_match("anything at all") is None
+
+
+def test_resolve_web_fetch_canary_matches_seeded_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seeded token is matched by the canary matcher."""
+    matcher = _resolve_web_fetch_canary(_s(monkeypatch, tokens=("SEED-9",)))
+    assert matcher.first_match("body contains SEED-9 reflected") == "SEED-9"
+
+
+def test_factory_derives_non_none_canary_when_none_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Factory derives a non-None canary from settings when none is explicitly passed."""
+    assembled = build_web_fetch_egress_extractor(
+        settings=_s(monkeypatch, tokens=("SEED-9",)),
+        gate=Mock(name="gate"),
+        extractor=Mock(name="extractor"),
+        recorder=Mock(name="recorder"),
+        outbound_dlp=Mock(name="outbound_dlp"),
+        audit_writer=Mock(name="audit_writer"),
+        session_scope=lambda: None,
+    )
+    policy = assembled._response_policy
+    assert policy is not None
+    assert policy.canary is not None
+    assert policy.canary.first_match("SEED-9") == "SEED-9"
+
+
+def test_factory_explicit_canary_overrides_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit canary matcher overrides settings-derived canary."""
+    from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
+
+    override = CanaryMatcher(tokens=[CanaryToken("OVERRIDE-1")])
+    assembled = build_web_fetch_egress_extractor(
+        settings=_s(monkeypatch, tokens=("SEED-9",)),
+        gate=Mock(name="gate"),
+        extractor=Mock(name="extractor"),
+        recorder=Mock(name="recorder"),
+        outbound_dlp=Mock(name="outbound_dlp"),
+        audit_writer=Mock(name="audit_writer"),
+        session_scope=lambda: None,
+        canary=override,
+    )
+    assert assembled._response_policy.canary is override
