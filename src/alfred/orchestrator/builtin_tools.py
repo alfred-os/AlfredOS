@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.egress.egress_response_extract import EgressExtractOutcome, EgressResponseExtractor
     from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
+    from alfred.plugins.web_fetch.handle_cap import HandleCap
     from alfred.plugins.web_fetch.rate_limit import RateLimiter
     from alfred.security.dlp import OutboundDlp
 
@@ -70,6 +71,7 @@ def build_web_fetch_tool(
     extractor: EgressResponseExtractor,
     config: FetchDispatchConfig,
     rate_limiter: RateLimiter,
+    handle_cap: HandleCap,
     outbound_dlp: OutboundDlp,
     audit: AuditWriter,
     action_deadline_seconds: float = _DEFAULT_ACTION_DEADLINE_SECONDS,
@@ -101,6 +103,7 @@ def build_web_fetch_tool(
             schema=WebFetchExtraction,
             config=config,
             rate_limiter=rate_limiter,
+            handle_cap=handle_cap,
             outbound_dlp=outbound_dlp,
             audit=audit,
             extractor=extractor,

@@ -45,6 +45,21 @@ def _inv(args: dict[str, object]) -> ToolInvocation:
     )
 
 
+class _SpyHandleCap:
+    """Permissive fake ``HandleCap`` — never refuses. These tests only assert
+    the ``build_web_fetch_tool`` closure's parameter wiring (Task 5), not the
+    real per-user cap's reserve/refuse behaviour (unit-covered at
+    ``handle_cap.py`` itself)."""
+
+    async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
+        return None
+
+    async def release(
+        self, *, user_id: str, handle_id: str, correlation_id: str | None = None
+    ) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_clock_tool_is_internal_and_allowlisted() -> None:
     spec = build_clock_tool(now=lambda: datetime(2026, 7, 6, tzinfo=UTC))
@@ -66,6 +81,7 @@ async def test_web_fetch_tool_is_external_t3() -> None:
         extractor=object(),
         config=object(),
         rate_limiter=object(),
+        handle_cap=_SpyHandleCap(),
         outbound_dlp=object(),
         audit=object(),
     )
@@ -87,10 +103,12 @@ async def test_web_fetch_adapter_threads_ctx_and_call_index(
         return "SENTINEL_OUTCOME"
 
     monkeypatch.setattr("alfred.orchestrator.builtin_tools.dispatch_web_fetch", _fake_dispatch)
+    spy = _SpyHandleCap()
     spec = build_web_fetch_tool(
         extractor="EXT",
         config="CFG",
         rate_limiter="RL",
+        handle_cap=spy,
         outbound_dlp="DLP",
         audit="AUD",
     )
@@ -104,6 +122,9 @@ async def test_web_fetch_adapter_threads_ctx_and_call_index(
     assert seen["extractor"] == "EXT"
     assert seen["user_id"] == "u"
     assert seen["correlation_id"] == "c"
+    # FIX-2: prove the closure forwards `handle_cap` unchanged through to
+    # `dispatch_web_fetch` — not just that it's accepted as a parameter.
+    assert seen["handle_cap"] is spy
 
 
 @pytest.mark.asyncio
@@ -126,6 +147,7 @@ async def test_web_fetch_adapter_coerces_non_dict_headers(
         extractor="EXT",
         config="CFG",
         rate_limiter="RL",
+        handle_cap=_SpyHandleCap(),
         outbound_dlp="DLP",
         audit="AUD",
     )

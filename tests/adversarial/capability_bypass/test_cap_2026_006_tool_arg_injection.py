@@ -134,6 +134,25 @@ class _RateLimiterNeverConsulted:
         )
 
 
+class _SpyHandleCap:
+    """Permissive fake ``HandleCap`` — required by ``build_web_fetch_tool``'s
+    signature but NEVER reached: the allowlist refusal (step 2) fires strictly
+    BEFORE the handle-cap reserve (step 3b), so this fake is construction-only
+    plumbing, not a defense under test here. It is intentionally NOT a
+    fire-spy (unlike ``_RelayNeverFiresExtractor`` /
+    ``_RateLimiterNeverConsulted`` above) — asserting the cap is never
+    consulted would just duplicate the ordering already pinned by those two
+    fire-spies plus this test's own allowlist-refusal outcome."""
+
+    async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
+        return None
+
+    async def release(
+        self, *, user_id: str, handle_id: str, correlation_id: str | None = None
+    ) -> None:
+        return None
+
+
 async def test_tool_arg_injection_offlist_url_refused(
     tool_arg_injection_payload: AdversarialPayload,
 ) -> None:
@@ -164,6 +183,7 @@ async def test_tool_arg_injection_offlist_url_refused(
         extractor=_RelayNeverFiresExtractor(),  # type: ignore[arg-type]
         config=config,
         rate_limiter=_RateLimiterNeverConsulted(),  # type: ignore[arg-type]
+        handle_cap=_SpyHandleCap(),  # type: ignore[arg-type]
         outbound_dlp=identity_outbound_dlp(),
         audit=writer,  # type: ignore[arg-type]
     )
