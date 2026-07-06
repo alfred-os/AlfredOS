@@ -53,8 +53,8 @@ the next opens.
 | Epic | Scope | Status |
 | --- | --- | --- |
 | **Spec A — Comms-resume gateway** (G0–G5) | Resumable dial-in transport for the TUI so a platform session survives a core restart. No adapter hosting, no egress proxy. | **Merged to main** |
-| **Spec B — Adapter-hosting inversion** (G6) | Move comms adapters (Discord → Telegram) from daemon-spawned to **gateway-hosted + sandbox-supervised**, so resume generalizes beyond the TUI. | **In progress (here now)** |
-| **Spec C — Egress control plane + connectivity-free core** (G7) | Gateway becomes the sole egress for *all* outbound I/O (tools + providers); the core loses its external network; the PRD §5 invariant is rewritten. | Future, gated on B |
+| **Spec B — Adapter-hosting inversion** (G6) | Move comms adapters (Discord → Telegram) from daemon-spawned to **gateway-hosted + sandbox-supervised**, so resume generalizes beyond the TUI. | **Complete (#288)** |
+| **Spec C — Egress control plane + connectivity-free core** (G7) | Gateway becomes the sole egress for *all* outbound I/O (tools + providers); the core loses its external network; the PRD §5 invariant is rewritten. | **Complete (#333)** |
 
 **Authoritative reading order for the program:**
 
@@ -64,26 +64,15 @@ the next opens.
 2. [`docs/superpowers/specs/2026-06-13-comms-gateway-resume-design.md`](superpowers/specs/2026-06-13-comms-gateway-resume-design.md)
    — Spec A (shipped).
 3. [`docs/superpowers/specs/2026-06-18-spec-b-adapter-inversion-design.md`](superpowers/specs/2026-06-18-spec-b-adapter-inversion-design.md)
-   — Spec B (in progress).
+   — Spec B (merged).
 4. ADRs: **0031** comms socket, **0032** resume transport, **0033** lifecycle
    signalling, **0036** adapter-hosting inversion, **0037** quarantine sandbox,
    **0038** daemon control socket.
 
-### Spec B (G6) progress
+### Spec B / Spec C completion
 
-The deployable substrate + core link-up (G6-0, G6-0b) and the inversion foundation
-through the live gateway→core status leg are merged (G6-0 substrate, G6-0b core
-link-up, G6-1 privilege reframe, G6-2a status observer, G6-2b-1 producer, G6-2b-2a
-live leg, G6-2b-2b crash de-dup, G6-2c local control plane). Still ahead:
-
-- **G6-2c** — the **local control plane** so the `alfred` CLI can read the daemon's
-  live per-adapter status (see *The three planes* below). **Merged (#301, ADR-0038).**
-- **G6-3** — real credential spawn (`spawn_request`/`spawn_grant`/fd-3): the heaviest
-  trust boundary in the epic. *Next.*
-- **G6-4** — per-adapter ingress gate + leg scheduler + per-leg replay buffer.
-- **G6-5** — Discord flag-day (delete the compose service; relocate the token to the
-  core-vault → spawn-grant → fd-3 path; migrate the adapter tests; setup-script + runbook).
-- **G6-6** — adversarial corpus + restart-survival integration test (release-blocking).
+Spec B complete (G6-0…G6-7, #288); Spec C complete (G7, #333). The PRD §5
+egress-invariant rewrite has landed.
 
 ---
 
@@ -98,8 +87,8 @@ Platform users (Discord, TUI, …) → adapter → core. T3 inbound bodies cross
 payload-blind wire; **identity-resolve, rate-limit, trust-tagging, and quarantined
 extraction are core-side** — reached over the wire, not performed in the adapter.
 (This is the as-built post-Slice-4 reality, per the Spec B roadmap; PRD §5's original
-"adapters do ingress" split is superseded here and is reconciled by the deferred
-**G7 §5 rewrite** — see D2. Outbound DLP runs on the *outbound* path.) Spec A/B
+"adapters do ingress" split is superseded here and is reconciled by the
+**G7 §5 rewrite** (landed — see D2). Outbound DLP runs on the *outbound* path.) Spec A/B
 re-home the adapter *hosting* into the gateway; the ingress logic stays core-side.
 Carrier: the ADR-0025/0031 line-delimited JSON-RPC comms wire.
 
@@ -160,18 +149,18 @@ system is undecided**, and the program's existing roadmap covers only *outbound*
   are weighed in the spec; this page only records the tension, it does not pick. (Note:
   Prometheus/Grafana already scrape *metrics* out-of-band; the new thing is an
   interactive ops/management surface.)
-- **Status:** needs its own `brainstorming → spec → ADR` cycle, slotted around/after
-  G7 (it interacts with the G7 topology + the PRD §5 rewrite). It must **not** be
-  decided inside a status-render sub-slice.
+- **Status:** needs its own `brainstorming → spec → ADR` cycle. G7 (Spec C) and the
+  PRD §5 rewrite have both landed, so this decision is no longer blocked on unshipped
+  work — it can be spec'd against the now-stable G7 topology whenever it is
+  prioritized. It must **not** be decided inside a status-render sub-slice.
 
-### D2 — PRD §5 rewrite (the connectivity-free invariant)
+### D2 — PRD §5 rewrite (the connectivity-free invariant) — RESOLVED
 
-The "connectivity-free core / all-I/O-via-gateway" invariant is **false through Spec
-A/B** and only becomes true at **Spec C / G7**. Per the roadmap decision-log, the PRD
-§5 rewrite (gateway above the core as the I/O plane; promote the invariant; centralize
-§7.1 egress enforcement; fix the stale Redis-streams comms-bus depiction) is **deferred
-to G7 and is human-gated**. Until then, the gateway program lives in the specs + ADRs +
-this page, *not* the PRD. This is intentional sequencing, not neglect.
+The "connectivity-free core / all-I/O-via-gateway" invariant is now **true**: Spec C
+(G7, #333) shipped, and the PRD §5 rewrite (gateway above the core as the I/O plane;
+the invariant promoted; §7.1 egress enforcement centralized; the stale Redis-streams
+comms-bus depiction removed) has landed — see [`PRD.md`](../PRD.md) §5. Kept here as a
+historical record of the decision and its sequencing rationale.
 
 ---
 
@@ -192,10 +181,11 @@ this page, *not* the PRD. This is intentional sequencing, not neglect.
 
 ## 6. Known doc drift (be honest about it)
 
-- **The PRD does not describe the gateway program.** Intentional — the PRD §5 rewrite
-  is sequenced for G7 (D2 above). Until then, the specs/ADRs/this page are the
-  architecture-of-record for the gateway.
+- **The PRD now describes the gateway program.** The PRD §5 rewrite (D2 above) landed
+  alongside Spec C — the PRD documents the gateway as the I/O plane and the
+  connectivity-free core invariant (see [`PRD.md`](../PRD.md) §5). This page keeps the
+  finer-grained epic/G-number history the PRD does not restate.
 - **The remote management plane (Plane 3 / D1) is captured only here.** It needs its
   own spec when its turn comes; this page is a placeholder so the intent and the open
   decision are not lost.
-- This page should be updated as each G6 sub-slice merges and when D1/D2 are decided.
+- This page should be updated when D1 is decided.
