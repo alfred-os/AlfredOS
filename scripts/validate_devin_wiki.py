@@ -9,12 +9,26 @@ git-tracked tree, and a secret-shape scan. Exit 0 when clean, 1 on any error.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+
+# docs_check.py lives beside this script; reuse its GitHub-accurate slugifier
+# and heading extractor rather than re-implementing them here.
+from docs_check import extract_headings, slugify
 
 MAX_PAGES = 30
 MAX_NOTES = 100
 MAX_NOTE_CHARS = 10_000
+
+# Repo path — any backtick-quoted token ending in a known extension or in `/`
+# (a directory reference).
+_PATH_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:md|py|ya?ml|json|toml)|/))`")
+_ADR_RE = re.compile(r"\bADR-(\d{4})\b")
+_PRD_RE = re.compile(r"PRD(?:\.md)?\s+§(\d+(?:\.\d+)?)")
+_GLOSSARY_RE = re.compile(r"glossary(?:\.md)?#([a-z0-9_-]+)")
 
 
 class WikiError(Exception):
@@ -120,4 +134,125 @@ def check_references(data: Mapping[str, object]) -> list[str]:
                 break
             seen.add(cursor)
             cursor = title_to_parent.get(cursor)
+    return errs
+
+
+@dataclass(frozen=True)
+class Anchor:
+    """A single anchor token found in free-text `page_notes`.
+
+    `kind` distinguishes the four anchor shapes the Devin wiki schema
+    supports; `value` is the extracted, kind-specific payload (a repo-relative
+    path, an ADR number, a PRD section number, or a glossary slug).
+    """
+
+    kind: str  # "path" | "adr" | "prd" | "glossary"
+    value: str
+
+
+def extract_anchors(note: str) -> list[Anchor]:
+    """Extract every anchor token embedded in a free-text `page_notes` string.
+
+    Anchors are the drift-guard surface: each one is later resolved against
+    the git-tracked tree by `check_anchors`, so a stale or gitignored
+    reference is caught before Devin ingests the wiki.
+    """
+    out: list[Anchor] = []
+    out += [Anchor("path", m.group(1)) for m in _PATH_RE.finditer(note)]
+    out += [Anchor("adr", m.group(1)) for m in _ADR_RE.finditer(note)]
+    out += [Anchor("prd", m.group(1)) for m in _PRD_RE.finditer(note)]
+    out += [Anchor("glossary", m.group(1)) for m in _GLOSSARY_RE.finditer(note)]
+    return out
+
+
+def _is_tracked(repo_root: Path, rel: str) -> bool:
+    """True iff `rel` is tracked (committed or staged) — i.e. Devin-visible.
+
+    Devin's DeepWiki ingests the git-tracked tree only; a gitignored file
+    (e.g. root `CLAUDE.md`, a rulesync output) is invisible to it even
+    though it exists on disk. `git ls-files --error-unmatch` is the direct
+    tracked-file check; `check=False` because a non-zero exit is the
+    "not tracked" signal we branch on, not an exceptional condition.
+    """
+    # ruff S603/S607: fixed-literal git argv, no shell, no untrusted input —
+    # `rel` is an anchor token authored by a trusted repo maintainer in
+    # `.devin/wiki.json` (not T3 content), `--` guards a leading-dash path,
+    # and PATH-resolved `git` is the standard invocation (its absolute path
+    # is platform-variable). Scoped inline (not a per-file ignore) so a
+    # future subprocess call in this module is still flagged.
+    result = subprocess.run(  # noqa: S603
+        ["git", "ls-files", "--error-unmatch", "--", rel.rstrip("/")],  # noqa: S607
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    # A directory anchor (trailing "/") is tracked iff `git ls-files` lists
+    # one or more tracked paths underneath it — `--error-unmatch` alone can't
+    # answer that for a directory.
+    listing = subprocess.run(  # noqa: S603
+        ["git", "ls-files", "--", rel],  # noqa: S607
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(listing.stdout.strip())
+
+
+def _prd_heading_numbers(repo_root: Path) -> set[str]:
+    """Return every numeric section prefix found in a `PRD.md` ATX heading.
+
+    Matches both `## 7. Cross-Cutting Concerns` (bare number) and
+    `### 7.1 Security & Prompt Injection Defense` (dotted number), with or
+    without a leading `§`.
+    """
+    text = (repo_root / "PRD.md").read_text(encoding="utf-8")
+    nums: set[str] = set()
+    for line in text.splitlines():
+        m = re.match(r"^#{1,6}\s+§?\s*(\d+(?:\.\d+)*)\b", line)
+        if m:
+            nums.add(m.group(1))
+    return nums
+
+
+def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
+    """Resolve every anchor in every `page_notes` entry against the repo.
+
+    This is the drift guard: anchors are authored as free text and can go
+    stale (a renamed ADR, a moved doc, a gitignored path) without any other
+    check catching it. Resolution is against the **git-tracked** tree, not
+    the working tree, so a file that exists on disk but is gitignored (e.g.
+    root `CLAUDE.md`) is correctly flagged as invisible to Devin.
+    """
+    errs: list[str] = []
+    glossary_slugs = extract_headings((repo_root / "docs/glossary.md").read_text(encoding="utf-8"))
+    prd_nums = _prd_heading_numbers(repo_root)
+    adr_dir = repo_root / "docs/adr"
+
+    for page in _pages(data):
+        title = page.get("title")
+        pnotes = page.get("page_notes", [])
+        if not isinstance(pnotes, list):
+            continue
+        for note in (n for n in pnotes if isinstance(n, str)):
+            for a in extract_anchors(note):
+                if a.kind == "path":
+                    if not _is_tracked(repo_root, a.value):
+                        errs.append(
+                            f"page {title!r}: `{a.value}` is not tracked "
+                            "(gitignored/absent — Devin cannot see it)"
+                        )
+                elif a.kind == "adr":
+                    if not any(adr_dir.glob(f"{a.value}-*.md")):
+                        errs.append(f"page {title!r}: ADR-{a.value} has no file under docs/adr/")
+                elif a.kind == "prd":
+                    if not any(n == a.value or n.startswith(a.value + ".") for n in prd_nums):
+                        errs.append(
+                            f"page {title!r}: PRD §{a.value} resolves to no heading in PRD.md"
+                        )
+                elif a.kind == "glossary" and slugify(a.value) not in glossary_slugs:
+                    errs.append(f"page {title!r}: glossary.md#{a.value} resolves to no heading")
     return errs
