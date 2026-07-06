@@ -1,84 +1,92 @@
-# de-2026-012 — web.fetch INBOUND egress-response canary scan is built but unwired.
+# de-2026-012 — web.fetch INBOUND egress-response canary scan: BUILT and WIRED.
 # Schema: tests/adversarial/payload_schema.py. Executable counterpart:
 # test_de_egress_inbound_canary_unwired.py.
 #
 # Threat: a hostile (or compromised) upstream REFLECTS an operator-seeded canary
-# token back in its RESPONSE body. The C2 pre-extract seam can catch this — the
+# token back in its RESPONSE body. The C2 pre-extract seam catches this — the
 # ResponsePolicy.canary matcher → inspect_response → _CanaryHit →
-# InboundCanaryTripped path is BUILT — but build_web_fetch_egress_extractor
-# passes canary=None today: the only resolve_canary_tokens() source reads the
-# gateway-only ALFRED_CANARY_TOKENS env and lives in alfred.gateway.egress_relay
-# (importing it core-side is a layering inversion AND the env is not set on the
-# core). So a LIVE web.fetch caller would NOT trip on a reflected canary in the
-# INBOUND response until #339 supplies a core-side token source and threads a
-# real CanaryMatcher into the factory.
+# InboundCanaryTripped path is BUILT, and as of #339 PR4a build_web_fetch_egress_extractor
+# derives a non-None CanaryMatcher from settings.web_fetch_canary_tokens
+# (ALFRED_WEB_FETCH_CANARY_TOKENS, the new core-side token source #339 PR4a
+# introduced — distinct from the gateway-only ALFRED_CANARY_TOKENS env used by
+# the outbound scan) unless an explicit canary is passed. A LIVE web.fetch caller
+# now trips on a reflected canary in the INBOUND response.
 #
 # Distinct from de-2026-008 (the OUTBOUND canary on the gateway relay's stage-3
 # DLP scan of the REQUEST body — that IS wired and trips). This entry is the
-# INBOUND-reflection seam on the RESPONSE side, which web.fetch does not yet wire.
+# INBOUND-reflection seam on the RESPONSE side.
 #
-# Deferred property (#339 merge-blocker, machine-visible as a strict xfail in the
-# test file): web.fetch's inbound egress-response canary scan is DEFERRED to PR
-# #339 (no core-side canary-token source exists until then; no live
-# dispatch_web_fetch caller until after G7-3). PR #339 MUST thread a real
-# CanaryMatcher into build_web_fetch_egress_extractor before merging — the
-# strict-xfail stub in test_de_egress_inbound_canary_unwired.py is an explicit
-# merge-blocker on that PR.
+# Converted property (#339 PR4a, formerly a merge-blocker machine-visible as a
+# strict xfail in the test file): web.fetch's inbound egress-response canary
+# scan was DEFERRED to PR #339 pending a core-side canary-token source and a
+# live dispatch_web_fetch caller (after G7-3). #339 PR4a supplied the token
+# source, threaded a real CanaryMatcher into build_web_fetch_egress_extractor,
+# and converted the strict-xfail stub in test_de_egress_inbound_canary_unwired.py
+# into three real passing tests (reflected-canary trip, factory-wiring guard,
+# armed-but-no-trip regression). merge_blocker is now false.
 id: de-2026-012
 category: dlp_egress
 threat: >-
   A hostile upstream reflects an operator-seeded canary token in its RESPONSE
-  body, and the live web.fetch path does not trip on it because the inbound
-  egress-response canary scan is unwired (the factory passes canary=None).
+  body. The live web.fetch path must trip InboundCanaryTripped on it — wired
+  by #339 PR4a via a non-None ResponsePolicy.canary derived from the factory's
+  settings-sourced CanaryMatcher.
 note: >-
   The C2 inbound-canary seam is built: ResponsePolicy.canary feeds
   response_inspection.inspect_response, which returns a _CanaryHit on a reflected
   token; EgressResponseExtractor.handle() then records a TERMINAL refusal to the
   ledger (committed_with_response, so a §5 replay short-circuits and NEVER
   re-fires the canary'd request) and raises InboundCanaryTripped (loud, HARD rule
-  #7). But build_web_fetch_egress_extractor defaults canary=None because the only
-  resolve_canary_tokens() source is gateway-only (ALFRED_CANARY_TOKENS) and the
-  env is not set on the core. The gateway already runs its OUTBOUND canary scan
-  (de-2026-008); the web.fetch INBOUND-reflection canary is wired here by #339
-  once a core-side token source exists. record_response / size / MIME enforcement
-  are unaffected by canary=None — only the inbound-reflection canary is deferred.
+  #7). As of #339 PR4a, build_web_fetch_egress_extractor derives a non-None
+  CanaryMatcher from settings.web_fetch_canary_tokens (ALFRED_WEB_FETCH_CANARY_TOKENS,
+  a new core-side env distinct from the gateway-only ALFRED_CANARY_TOKENS) unless
+  an explicit canary is passed — a non-None matcher is guaranteed even with zero
+  tokens (a no-op matcher). The gateway already runs its OUTBOUND canary scan
+  (de-2026-008); the web.fetch INBOUND-reflection canary is now wired too.
+  record_response / size / MIME enforcement are unaffected by this change.
 ingestion_path: web.fetch
 payload:
   threat_class: "inbound_egress_response_canary_reflection"
   reflected_canary_token: "ALFRED-CANARY-TEST-TOKEN-8675309"
   note: >-
-    When #339 wires a core-side token source, a CanaryMatcher seeded with this
-    token would trip inspect_response on a response body that reflects it,
-    yielding _CanaryHit → InboundCanaryTripped. Today the factory's canary=None
-    skips the scan, so the reflected token would pass the pre-extract seam.
+    #339 PR4a wired a core-side token source (ALFRED_WEB_FETCH_CANARY_TOKENS).
+    A CanaryMatcher seeded with this token trips inspect_response on a
+    response body that reflects it, yielding _CanaryHit → InboundCanaryTripped
+    — proven by test_inbound_canary_reflected_response_trips.
   deferred_property:
     id: "inbound_response_canary_scan"
-    deferred_to: "PR #339"
-    merge_blocker: true
+    deferred_to: null
+    merge_blocker: false
+    converted_in: "PR #339 PR4a"
     reason: >-
       The inbound egress-response canary (ResponsePolicy.canary →
-      inspect_response → InboundCanaryTripped) is built, but
-      build_web_fetch_egress_extractor passes canary=None: no core-side
-      canary-token source exists (resolve_canary_tokens is gateway-only) and
-      there is no live dispatch_web_fetch caller until after G7-3. PR #339 MUST
-      thread a real CanaryMatcher into the factory before the first live caller
-      merges, then convert the strict-xfail stub to a passing reflected-canary
-      test and flip this merge_blocker.
+      inspect_response → InboundCanaryTripped) is built AND wired:
+      build_web_fetch_egress_extractor derives a non-None CanaryMatcher from
+      settings.web_fetch_canary_tokens (the core-side token source #339 PR4a
+      introduced) unless an explicit canary is passed. #339 PR4a threaded the
+      real CanaryMatcher into the factory and converted the strict-xfail stub
+      to three passing tests in test_de_egress_inbound_canary_unwired.py
+      (reflected-canary trip, factory-wiring guard, armed-but-no-trip
+      regression).
 expected_outcome: caught_by_dlp
 provenance: >-
-  Spec C G7-2.5 PR2 (#333) production assembly: build_web_fetch_egress_extractor
-  defaults canary=None (no core-side token source). The C2 inbound-canary seam
-  (response_inspection _CanaryHit → InboundCanaryTripped) shipped in G7-2c-1; the
-  OUTBOUND canary (de-2026-008) is wired on the gateway. The web.fetch INBOUND
-  canary is the alfred-security-engineer-signed-off tracked residual for #339
-  (#347 obligation list), enforced machine-visibly by the de-2026-012 strict-xfail
-  merge-blocker. CLAUDE.md hard rule #7 (canary trip is loud, never fail-open).
+  Spec C G7-2.5 PR2 (#333) production assembly originally shipped
+  build_web_fetch_egress_extractor with canary=None (no core-side token
+  source) — the alfred-security-engineer-signed-off tracked residual for #339
+  (#347 obligation list), enforced machine-visibly by a de-2026-012
+  strict-xfail merge-blocker. The C2 inbound-canary seam (response_inspection
+  _CanaryHit → InboundCanaryTripped) shipped in G7-2c-1; the OUTBOUND canary
+  (de-2026-008) is wired on the gateway. #339 PR4a supplied
+  ALFRED_WEB_FETCH_CANARY_TOKENS as the core-side token source, threaded a
+  real CanaryMatcher into the factory, and converted the strict-xfail stub
+  into three passing tests. CLAUDE.md hard rule #7 (canary trip is loud,
+  never fail-open).
 references:
-  - "Spec C G7-2.5 PR2 (#333) — build_web_fetch_egress_extractor canary=None residual"
-  - "src/alfred/plugins/web_fetch/assembly.py — factory passes canary=None (tracked #339)"
+  - "Spec C G7-2.5 PR2 (#333) — build_web_fetch_egress_extractor original canary=None residual"
+  - "src/alfred/plugins/web_fetch/assembly.py — factory derives canary from settings.web_fetch_canary_tokens (#339 PR4a)"
   - "src/alfred/egress/response_inspection.py — ResponsePolicy.canary / _CanaryHit / inspect_response"
   - "src/alfred/egress/egress_response_extract.py — InboundCanaryTripped terminal-refusal path"
   - "src/alfred/security/canary_matcher.py — shared CanaryMatcher + CanaryToken"
   - "docs/adr/0041-web-fetch-fused-fetch-extract-contract.md — #339/#347 deferred residuals"
   - "CLAUDE.md hard rule #7 — canary trip is loud, never fail-open"
-  - "PR #339 merge-blocker — inbound egress-response canary wiring (de-2026-012 strict xfail)"
+  - "PR #339 PR4a — de-2026-012 conversion: reflected-canary trip, factory-wiring guard, no-trip regression"
