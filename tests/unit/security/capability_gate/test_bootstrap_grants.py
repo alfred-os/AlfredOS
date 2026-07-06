@@ -97,10 +97,14 @@ def test_seeded_plugin_id_matches_dlp_subscriber_module() -> None:
     from alfred.security._extract_dlp_subscriber import OutboundDlpExtractSubscriber
 
     dlp_row = next(
-        g
-        for g in FIRST_PARTY_SYSTEM_GRANTS
-        if g.plugin_id == "alfred.security._extract_dlp_subscriber"
+        (
+            g
+            for g in FIRST_PARTY_SYSTEM_GRANTS
+            if g.plugin_id == "alfred.security._extract_dlp_subscriber"
+        ),
+        None,
     )
+    assert dlp_row is not None, "DLP subscriber row missing from FIRST_PARTY_SYSTEM_GRANTS"
     assert dlp_row.plugin_id == OutboundDlpExtractSubscriber.__call__.__module__
     assert dlp_row.hookpoint == "security.quarantined.extract"
     assert dlp_row.subscriber_tier == "system"

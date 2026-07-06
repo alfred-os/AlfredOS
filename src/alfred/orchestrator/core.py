@@ -231,11 +231,17 @@ def _truncate_tool_result(text: str) -> str:
 
     A pathological or verbose tool must not balloon the next completion's
     context. Truncates on a character boundary and appends an ellipsis marker
-    so the planner can tell the result was clipped.
+    so the planner can tell the result was clipped. The marker itself counts
+    against the cap — appending it AFTER slicing to the full limit would let
+    the result exceed ``TOOL_RESULT_MAX_CHARS`` by the marker's length.
     """
-    if len(text) <= loop_constants.TOOL_RESULT_MAX_CHARS:
+    limit = loop_constants.TOOL_RESULT_MAX_CHARS
+    marker = "…[truncated]"
+    if len(text) <= limit:
         return text
-    return text[: loop_constants.TOOL_RESULT_MAX_CHARS] + "…[truncated]"
+    if limit <= len(marker):
+        return marker[:limit]
+    return text[: limit - len(marker)] + marker
 
 
 class Orchestrator:
@@ -750,6 +756,10 @@ class Orchestrator:
         # matches the variable name, not the value; suppressed below.
         final_result_token = "success"  # noqa: S105
         final_exit_reason: str | None = None  # set only on a non-normal exit
+        # Loop-invariant — depends only on trace_id + user, both fixed for the
+        # whole turn — so it is synthesized once here rather than re-derived
+        # on every dispatch inside the loop below.
+        ctx = self._synthesize_egress_context(trace_id=trace_id, user=user)
 
         for iteration in range(loop_constants.MAX_TOOL_ITERATIONS):
             request = CompletionRequest(
@@ -924,18 +934,22 @@ class Orchestrator:
 
             # --- deterministic ordered dispatch (NEVER gather; call_index
             #     monotonic across the whole turn, not per-iteration) ---
-            # mypy narrowing, not a behavioural guard: reaching this branch means
-            # `response.tool_calls` is non-empty, which is only possible when
-            # `tools` (built in Orient) was non-empty, which is only possible
-            # when `self._tool_registry is not None`. Production (#338) wires
+            # Not a behavioural guard, a construction-time invariant check:
+            # reaching this branch means `response.tool_calls` is non-empty,
+            # which is only possible when `tools` (built in Orient) was
+            # non-empty, which is only possible when
+            # `self._tool_registry is not None`. Production (#338) wires
             # registry/gate/dlp together as a trio, so a registry set without a
-            # gate/dlp is a construction-time misconfiguration — asserting here
-            # fails loud (hard rule #7) rather than surfacing as an opaque
-            # AttributeError inside ``dispatch_tool``.
-            assert self._tool_registry is not None
-            assert self._gate is not None
-            assert self._outbound_dlp is not None
-            ctx = self._synthesize_egress_context(trace_id=trace_id, user=user)
+            # gate/dlp is a construction-time misconfiguration. An `assert`
+            # here would be stripped under `python -O`, degrading this to an
+            # opaque `AttributeError` inside `dispatch_tool` — an explicit
+            # raise fails loud (hard rule #7) regardless of optimization flags,
+            # and narrows all three for the `dispatch_tool` call below.
+            if self._tool_registry is None or self._gate is None or self._outbound_dlp is None:
+                raise RuntimeError(
+                    "tool dispatch requires tool_registry, gate, and outbound_dlp "
+                    "to be wired together"
+                )
             for call in response.tool_calls:
                 result_t2 = await dispatch_tool(
                     call,
@@ -974,6 +988,13 @@ class Orchestrator:
         # internals/code/prompts/configs per PRD §7.1. Slice 2's dual-LLM
         # split refines provider output to T1 and introduces T3.
         await working_memory.append(role="assistant", content=answer)
+        # A synthetic refusal (final_exit_reason set) is a local i18n string, not
+        # a provider completion — its episodic row must carry ZERO provider
+        # tokens/cost (the real cost already rode the provider_call:* rows).
+        # Charging it `final_response`'s tokens/cost would misattribute the
+        # PRIOR completion's spend to the refusal string AND double-count cost
+        # already logged on a `provider_call:*` audit row.
+        answer_from_provider = final_exit_reason is None
         # FIX-15: episodic.record logs the FINAL completion's cost/tokens (the
         # answer's attribution); the `completed` audit row logs the TURN total
         # (per_turn_spent_usd). For a multi-completion turn these differ BY
@@ -983,9 +1004,9 @@ class Orchestrator:
             role="assistant",
             content=answer,
             trust_tier="T2",
-            tokens_in=final_response.tokens_in,
-            tokens_out=final_response.tokens_out,
-            cost_usd=final_response.cost_usd,
+            tokens_in=final_response.tokens_in if answer_from_provider else 0,
+            tokens_out=final_response.tokens_out if answer_from_provider else 0,
+            cost_usd=final_response.cost_usd if answer_from_provider else 0.0,
             language=user.language,
             persona=_ALFRED_PERSONA_ID,
             # See the user-turn ``episodic.record`` call above for the

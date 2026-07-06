@@ -327,8 +327,11 @@ async def test_loop_drives_real_web_fetch_then_clock_then_answers(
                 "text": "hello from the echo child",
                 "intent": "informational",
             }
-            # (b) the upstream marker never reaches ANY fed-back tool content.
-            assert all(_MARKER not in content for content in fed_back_by_call_id.values())
+            # (b) the upstream marker never reaches ANY fed-back message content
+            #     — scan the WHOLE planner request (system + history + tool
+            #     messages), not just the tool-role subset, so a leak into any
+            #     other message shape is caught too.
+            assert all(_MARKER not in str(message.content) for message in second_request.messages)
             # (c) the fetch REALLY fired — the marker-bearing upstream bytes
             #     were genuinely produced (not skipped/short-circuited), so
             #     (b) is a meaningful containment proof, not a vacuous one.

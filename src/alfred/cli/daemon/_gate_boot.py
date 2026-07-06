@@ -4,7 +4,8 @@ Extracted from ``_commands.py``: the seed-then-load boot gate
 (:func:`build_boot_real_gate_for_daemon`, ADR-0026), the Postgres-connectivity
 handshake for probe (c) (:class:`_BootHandshake` / :func:`build_boot_handshake`),
 the fail-closed first-party grant assertion (:func:`_first_party_grant_live`,
-ADR-0026), the boot :class:`HookRegistry` install
+ADR-0026) plus its diagnostic sibling naming the failing row
+(:func:`_first_missing_first_party_grant`), the boot :class:`HookRegistry` install
 (:func:`_install_quarantine_boot_registry`), and the Supervisor-facing sync
 backing-store gate wrapper (:class:`_SupervisorBootGate` over the typed
 :class:`_BackingStoreAvailabilityGate` contract — no ``getattr`` fail-open).
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
     from alfred.security.capability_gate._gate import RealGate
+    from alfred.security.capability_gate.policy import GrantRow
 
 
 class _BackingStoreAvailabilityGate(Protocol):
@@ -140,17 +142,8 @@ async def build_boot_real_gate_for_daemon(
     )
 
 
-def _first_party_grant_live(gate: CapabilityGate) -> bool:
-    """Return ``True`` iff every first-party system grant is live on ``gate``.
-
-    ADR-0026: drives the assertion off the SAME
-    :data:`FIRST_PARTY_SYSTEM_GRANTS` constant the seed uses, so the seed
-    and the liveness check can never drift. A ``False`` means the
-    seed-then-load did not project a grant into the in-memory policy — a
-    structurally-broken trust boundary (e.g. the
-    :class:`QuarantinedExtractor` could not register its DLP scan, or a
-    real turn's tool dispatch would fail loud at the T3 content-clearance
-    boundary).
+def _grant_is_live(gate: CapabilityGate, grant: GrantRow) -> bool:
+    """Check ONE first-party grant on its correct axis.
 
     #339 PR3: :class:`GrantRow` carries TWO ORTHOGONAL axes (spec §4.3) —
     ``subscriber_tier`` (capability) and ``content_tier`` (trust). Each is
@@ -163,8 +156,38 @@ def _first_party_grant_live(gate: CapabilityGate) -> bool:
     ``content_tier`` and ignores ``subscriber_tier`` entirely. Checking a
     content-tier grant with :meth:`check` instead would silently pass
     (``check`` ignores ``content_tier``) without proving the content-tier
-    boundary is actually clear — this branch is what makes the assertion
+    boundary is actually clear — this branch is what makes the check
     faithful to what the runtime dispatch/quarantine call sites query.
+
+    Shared by :func:`_first_party_grant_live` (the boot-assertion predicate)
+    and :func:`_first_missing_first_party_grant` (the diagnostic that names
+    which row failed) so the two can never disagree about what "live" means
+    for a given grant.
+    """
+    if grant.content_tier is not None:
+        return gate.check_content_clearance(
+            plugin_id=grant.plugin_id,
+            hookpoint=grant.hookpoint,
+            content_tier=grant.content_tier,
+        )
+    return gate.check(
+        plugin_id=grant.plugin_id,
+        hookpoint=grant.hookpoint,
+        requested_tier=grant.subscriber_tier,
+    )
+
+
+def _first_party_grant_live(gate: CapabilityGate) -> bool:
+    """Return ``True`` iff every first-party system grant is live on ``gate``.
+
+    ADR-0026: drives the assertion off the SAME
+    :data:`FIRST_PARTY_SYSTEM_GRANTS` constant the seed uses, so the seed
+    and the liveness check can never drift. A ``False`` means the
+    seed-then-load did not project a grant into the in-memory policy — a
+    structurally-broken trust boundary (e.g. the
+    :class:`QuarantinedExtractor` could not register its DLP scan, or a
+    real turn's tool dispatch would fail loud at the T3 content-clearance
+    boundary).
     """
     from alfred.security.capability_gate._bootstrap_grants import (
         FIRST_PARTY_SYSTEM_GRANTS,
@@ -175,22 +198,37 @@ def _first_party_grant_live(gate: CapabilityGate) -> bool:
     # with no first-party grant to verify is itself broken — refuse.
     if not FIRST_PARTY_SYSTEM_GRANTS:
         return False
-    return all(
-        (
-            gate.check_content_clearance(
-                plugin_id=grant.plugin_id,
-                hookpoint=grant.hookpoint,
-                content_tier=grant.content_tier,
-            )
-            if grant.content_tier is not None
-            else gate.check(
-                plugin_id=grant.plugin_id,
-                hookpoint=grant.hookpoint,
-                requested_tier=grant.subscriber_tier,
-            )
-        )
-        for grant in FIRST_PARTY_SYSTEM_GRANTS
+    return all(_grant_is_live(gate, grant) for grant in FIRST_PARTY_SYSTEM_GRANTS)
+
+
+def _first_missing_first_party_grant(gate: CapabilityGate) -> GrantRow | None:
+    """Return the FIRST first-party grant that is NOT live on ``gate``.
+
+    ``None`` iff every grant is live (mirrors :func:`_first_party_grant_live`
+    returning ``True``) — callers only consult this AFTER
+    :func:`_first_party_grant_live` has already reported ``False``, to name
+    which row failed for the boot-refusal log line.
+
+    devex follow-up (#339 PR3 review): the boot-refusal message used to be
+    framed solely around the DLP-subscriber grant even though the assertion
+    now covers four first-party grants (+ ``tool.dispatch``,
+    ``quarantine.dereference``, ``t3.downgrade_to_orchestrator``) — an
+    operator debugging a missing ``tool.dispatch`` grant would misread the
+    old message as a DLP problem. This helper lets the refusal log the
+    ACTUAL failing ``plugin_id`` + ``hookpoint`` instead of a generic "the"
+    grant, without changing the audited ``failure_reason`` token (still
+    ``quarantine_grant_missing`` — an existing, test-pinned contract; see
+    ``tests/unit/cli/daemon/test_daemon_quarantine_boot_infra.py`` and the
+    adversarial ``test_cap_2026_001_boot_refuses_without_first_party_dlp_grant``).
+    """
+    from alfred.security.capability_gate._bootstrap_grants import (
+        FIRST_PARTY_SYSTEM_GRANTS,
     )
+
+    for grant in FIRST_PARTY_SYSTEM_GRANTS:
+        if not _grant_is_live(gate, grant):
+            return grant
+    return None
 
 
 def _install_quarantine_boot_registry(gate: CapabilityGate, *, audit: AuditWriter) -> None:

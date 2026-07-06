@@ -142,6 +142,63 @@ def test_first_party_grant_live_false_on_empty_grant_set(
     assert _first_party_grant_live(make_quarantined_extract_chain_gate()) is False
 
 
+def test_first_missing_first_party_grant_none_when_all_live() -> None:
+    """devex follow-up (#339 PR3 review): the diagnostic sibling of
+    ``_first_party_grant_live`` reports NO missing grant when every row is
+    live — mirrors ``_first_party_grant_live`` returning ``True``."""
+    from alfred.cli.daemon._commands import _first_missing_first_party_grant
+
+    gate = make_comms_adapter_load_gate(FIRST_PARTY_SYSTEM_GRANTS)
+    assert _first_missing_first_party_grant(gate) is None
+
+
+def test_first_missing_first_party_grant_names_the_failing_row() -> None:
+    """A deny-all gate (no first-party grant live) names the FIRST grant in
+    :data:`FIRST_PARTY_SYSTEM_GRANTS` — the DLP-subscriber row — so a
+    boot-refusal log line can point an operator at the actual broken
+    ``plugin_id``/``hookpoint`` instead of a generic message."""
+    from alfred.cli.daemon._commands import _first_missing_first_party_grant
+
+    gate = make_deny_all_gate()
+    missing = _first_missing_first_party_grant(gate)
+    assert missing is not None
+    assert missing.plugin_id == "alfred.security._extract_dlp_subscriber"
+    assert missing.hookpoint == "security.quarantined.extract"
+
+
+def test_first_missing_first_party_grant_names_a_content_tier_row() -> None:
+    """When only a CONTENT-tier row (not the first, subscriber-tier, row) is
+    broken, the diagnostic names THAT row — proving it checks every row on
+    its own axis rather than stopping at the first (already-live) one.
+
+    Deliberately does NOT monkeypatch ``FIRST_PARTY_SYSTEM_GRANTS`` (unlike
+    the empty-grant-set test above): ``_first_missing_first_party_grant``
+    must iterate the REAL production constant (whose ``quarantine.dereference``
+    row carries the real ``content_tier="T3"``) to pick the correct axis, and
+    find that axis unsatisfied against a ``gate`` seeded with the WRONG-axis
+    row — mirroring ``test_first_party_grant_live_false_when_content_grant_wrong_axis``.
+    """
+    from alfred.cli.daemon._commands import _first_missing_first_party_grant
+
+    wrong_axis_dereference_grant = GrantRow(
+        plugin_id="alfred.quarantined-llm",
+        subscriber_tier="system",
+        hookpoint="quarantine.dereference",
+        content_tier=None,  # WRONG — the real grant is T3.
+        proposal_branch=_FIRST_PARTY_PROPOSAL_BRANCH,
+    )
+    mutated = tuple(
+        grant if grant.hookpoint != "quarantine.dereference" else wrong_axis_dereference_grant
+        for grant in FIRST_PARTY_SYSTEM_GRANTS
+    )
+    gate = make_comms_adapter_load_gate(mutated)
+
+    missing = _first_missing_first_party_grant(gate)
+    assert missing is not None
+    assert missing.plugin_id == "alfred.quarantined-llm"
+    assert missing.hookpoint == "quarantine.dereference"
+
+
 def test_install_quarantine_boot_registry_admits_extractor() -> None:
     """After install over a granted gate, a QuarantinedExtractor-style
     DLP-subscriber registration lands exactly one subscriber."""

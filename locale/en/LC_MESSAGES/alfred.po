@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-06 11:39+0100\n"
+"POT-Creation-Date: 2026-07-06 14:40+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -961,7 +961,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:330
+#: src/alfred/cli/daemon/_commands.py:331
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -969,7 +969,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:333
+#: src/alfred/cli/daemon/_commands.py:334
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -978,7 +978,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:384
+#: src/alfred/cli/daemon/_commands.py:385
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -986,7 +986,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:395
+#: src/alfred/cli/daemon/_commands.py:396
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -995,7 +995,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:411
+#: src/alfred/cli/daemon/_commands.py:412
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1003,7 +1003,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:425
+#: src/alfred/cli/daemon/_commands.py:426
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1011,7 +1011,7 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:466
+#: src/alfred/cli/daemon/_commands.py:467
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1021,15 +1021,17 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:479
+#: src/alfred/cli/daemon/_commands.py:493
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
-"First-party DLP-subscriber grant is not live after boot. The quarantined-"
-"extract trust boundary cannot wire its mandatory DLP scan, so booting is "
-"refused. Check `alfred audit log --since 5m` for capability-gate seed or "
-"grant-load errors, then re-run `alfred daemon start`."
+"A mandatory first-party capability grant is not live after boot (the DLP-"
+"subscriber grant, the tool-dispatch grant, or a T3 content-clearance "
+"grant), so a trust boundary cannot be wired and booting is refused. Check"
+" `alfred audit log --since 5m` for capability-gate seed or grant-load "
+"errors — the daemon log names the specific plugin_id/hookpoint that "
+"failed — then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:507
+#: src/alfred/cli/daemon/_commands.py:521
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1040,7 +1042,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:579
+#: src/alfred/cli/daemon/_commands.py:593
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1048,7 +1050,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS to exactly one adapter and re-run `alfred "
 "daemon start`. Multi-adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:646
+#: src/alfred/cli/daemon/_commands.py:660
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1058,7 +1060,7 @@ msgstr ""
 "unset (comms disabled), or provision bwrap + the plugin launcher and re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:663
+#: src/alfred/cli/daemon/_commands.py:677
 #: src/alfred/cli/daemon/_comms_boot.py:959
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
@@ -1068,38 +1070,38 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:813
+#: src/alfred/cli/daemon/_commands.py:827
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:929
+#: src/alfred/cli/daemon/_commands.py:943
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:932
-#: src/alfred/cli/daemon/_commands.py:937
+#: src/alfred/cli/daemon/_commands.py:946
+#: src/alfred/cli/daemon/_commands.py:951
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:939
+#: src/alfred/cli/daemon/_commands.py:953
 #: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:954
+#: src/alfred/cli/daemon/_commands.py:968
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:957
+#: src/alfred/cli/daemon/_commands.py:971
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:965
+#: src/alfred/cli/daemon/_commands.py:979
 #: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
@@ -1108,25 +1110,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1019
-#: src/alfred/cli/daemon/_commands.py:1026
-#: src/alfred/cli/daemon/_commands.py:1037
+#: src/alfred/cli/daemon/_commands.py:1033
+#: src/alfred/cli/daemon/_commands.py:1040
+#: src/alfred/cli/daemon/_commands.py:1051
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1041
+#: src/alfred/cli/daemon/_commands.py:1055
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1043
+#: src/alfred/cli/daemon/_commands.py:1057
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1048
+#: src/alfred/cli/daemon/_commands.py:1062
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1057
+#: src/alfred/cli/daemon/_commands.py:1071
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
@@ -2480,34 +2482,34 @@ msgstr ""
 "follow a winning commit_intent — this is a caller-contract violation, not"
 " a transient failure."
 
-#: src/alfred/orchestrator/core.py:358
+#: src/alfred/orchestrator/core.py:364
 msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
 msgstr ""
 "comms inbound must be T3: quarantined_extract refuses any source_tier "
 "other than T3 (no silent T3->T2 promotion)."
 
-#: src/alfred/orchestrator/core.py:360
+#: src/alfred/orchestrator/core.py:366
 msgid "orchestrator.quarantined_extract.no_extractor_wired"
 msgstr ""
 "quarantined_extract called on an orchestrator constructed without a "
 "quarantined_extractor; the comms inbound trust-boundary funnel is not "
 "wired."
 
-#: src/alfred/orchestrator/core.py:792
+#: src/alfred/orchestrator/core.py:810
 msgid "orchestrator.tool.budget_exhausted_mid_turn"
 msgstr "I ran out of budget partway through this request."
 
-#: src/alfred/orchestrator/core.py:893
+#: src/alfred/orchestrator/core.py:911
 msgid "orchestrator.tool.budget_overrun_mid_turn"
 msgstr "This request went over budget, so I stopped before running more tools."
 
-#: src/alfred/orchestrator/core.py:905
+#: src/alfred/orchestrator/core.py:923
 msgid "orchestrator.tool.too_many_tool_calls"
 msgstr "That request needed too many tools at once, so I stopped for safety."
 
-#: src/alfred/orchestrator/core.py:954
+#: src/alfred/orchestrator/core.py:976
 msgid "orchestrator.tool.max_iterations_reached"
-msgstr "I reached the limit on tool steps for this request. Here's where I got to."
+msgstr "I reached the limit on tool steps for this request without finishing it."
 
 #: src/alfred/orchestrator/tool_dispatch.py:124
 msgid "orchestrator.tool.unknown_tool"
