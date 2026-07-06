@@ -10,10 +10,10 @@ from __future__ import annotations
 import re
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, PostgresDsn, PrivateAttr, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from alfred.config._environment_loader import EnvironmentLoadResult, load_environment
 
@@ -118,6 +118,20 @@ class Settings(BaseSettings):
     # surface as every other setting rather than an ad-hoc os.environ read.
     # Override via ALFRED_REDIS_URL.
     redis_url: str = Field(default="redis://localhost:6379/0")
+
+    # #339 PR4a (blocker 5, #347): the core-side INBOUND-reflection canary token
+    # source for web.fetch. The gateway runs the OUTBOUND exfil scan from
+    # ALFRED_CANARY_TOKENS; this is the DISTINCT core env for the inbound tripwire
+    # (a seeded canary reflected in a fetched RESPONSE body). A NEW env name —
+    # ALFRED_CANARY_TOKENS is hard-forbidden on the core container
+    # (tests/unit/test_compose_invariants.py). Default () arms the ResponsePolicy
+    # canary seam with an empty (no-op) matcher; operators populate it to enable
+    # the reflection tripwire. Override via ALFRED_WEB_FETCH_CANARY_TOKENS
+    # (comma-separated, blanks skipped). NoDecode: pydantic-settings JSON-decodes a
+    # tuple env field BEFORE the mode="before" validator runs, so the comma-split
+    # would never execute (and a plain comma list would raise SettingsError at boot)
+    # without disabling per-field JSON decoding here.
+    web_fetch_canary_tokens: Annotated[tuple[str, ...], NoDecode] = Field(default=())
 
     # Budget. Both must be > 0 — a zero or negative cap would make every
     # call an automatic refusal (daily_usd) or trivially-bypass-able
@@ -390,6 +404,21 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             stripped = value.strip()
             return stripped or None
+        return value
+
+    @field_validator("web_fetch_canary_tokens", mode="before")
+    @classmethod
+    def _normalize_web_fetch_canary_tokens(cls, value: object) -> object:
+        """Parse ALFRED_WEB_FETCH_CANARY_TOKENS as a comma-separated token list.
+
+        Mirrors the gateway's ``resolve_canary_tokens`` split (comma-separated,
+        blanks skipped) so operators use ONE token format across the core inbound
+        source and the gateway outbound scanner. Blank/whitespace → ``()`` (seam
+        armed but empty = no-op matcher). A tuple/list (direct construction) passes
+        through.
+        """
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
         return value
 
     @field_validator("deepseek_api_key")
