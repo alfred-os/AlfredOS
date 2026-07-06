@@ -49,7 +49,11 @@ _GLOSSARY_RE = re.compile(r"glossary(?:\.md)?#([a-z0-9_-]+)")
 
 
 class WikiError(Exception):
-    """Raised when `.devin/wiki.json` cannot be loaded as the expected shape."""
+    """Raised when `.devin/wiki.json` cannot be loaded as the expected shape,
+    or when an environment precondition validation depends on (git, the
+    files anchors resolve against) is broken — never conflated with a
+    content problem the checks can report as an ordinary error string.
+    """
 
 
 def load_wiki(path: Path) -> dict[str, object]:
@@ -63,23 +67,100 @@ def load_wiki(path: Path) -> dict[str, object]:
 
 
 def _pages(data: Mapping[str, object]) -> list[dict[str, object]]:
+    """Every well-formed page object.
+
+    Silently drops anything that isn't a dict — callers past this point may
+    assume every element is a page object. `check_shapes` is what LOUDLY
+    flags the dropped (malformed) entries; every other check is free to
+    build on this filtered view without re-checking shape itself.
+    """
     raw = data.get("pages", [])
     return [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
 
 
-def _all_notes(data: Mapping[str, object]) -> list[str]:
-    """Every note string: repo_notes[].content + pages[].page_notes[]."""
-    notes: list[str] = []
+def _page_label(page: Mapping[str, object]) -> str:
+    """A human-locatable label for a page: its title, or `"?"` if malformed
+    (title-shape is `check_shapes`'/`check_structure_and_limits`' concern,
+    not this helper's)."""
+    title = page.get("title")
+    return title if isinstance(title, str) and title.strip() else "?"
+
+
+@dataclass(frozen=True)
+class _Note:
+    """A note's text plus a human-locatable source label.
+
+    A flat `list[str]` (the prior shape of `_all_notes`) loses which
+    repo_notes entry or which page's page_notes a given string came from —
+    every downstream error read back as an opaque `note[7]`. `source` is
+    that context, e.g. `"repo_notes[2]"` or `'page "Security Model"
+    page_notes[0]'`.
+    """
+
+    source: str
+    content: str
+
+
+def _all_notes(data: Mapping[str, object]) -> list[_Note]:
+    """Every note string, labelled: repo_notes[].content + pages[].page_notes[]."""
+    notes: list[_Note] = []
     repo_notes = data.get("repo_notes", [])
     if isinstance(repo_notes, list):
-        for n in repo_notes:
+        for k, n in enumerate(repo_notes):
             if isinstance(n, dict) and isinstance(n.get("content"), str):
-                notes.append(n["content"])
+                notes.append(_Note(f"repo_notes[{k}]", n["content"]))
     for page in _pages(data):
+        label = _page_label(page)
         pnotes = page.get("page_notes", [])
         if isinstance(pnotes, list):
-            notes.extend(x for x in pnotes if isinstance(x, str))
+            notes.extend(
+                _Note(f"page {label!r} page_notes[{m}]", x)
+                for m, x in enumerate(pnotes)
+                if isinstance(x, str)
+            )
     return notes
+
+
+def check_shapes(data: Mapping[str, object]) -> list[str]:
+    """Flag malformed `pages` / `repo_notes` / `page_notes` shapes LOUDLY.
+
+    `_pages()` and `_all_notes()` silently filter out anything that doesn't
+    match the expected shape so every other check can assume well-formed
+    input — but that means a non-dict `pages[]` entry, a non-list `pages` /
+    `repo_notes` / `page_notes`, or a non-string `page_notes[]` entry would
+    otherwise vanish without a trace and the file would pass validation
+    clean. This restores the loud failure the rest of the module is allowed
+    to skip.
+    """
+    errs: list[str] = []
+
+    raw_pages = data.get("pages", [])
+    if not isinstance(raw_pages, list):
+        errs.append(f"pages: must be a list, got {type(raw_pages).__name__}")
+    else:
+        for i, page in enumerate(raw_pages):
+            if not isinstance(page, dict):
+                errs.append(f"page[{i}]: must be an object, got {type(page).__name__}")
+                continue
+            label = _page_label(page)
+            pnotes = page.get("page_notes", [])
+            if not isinstance(pnotes, list):
+                errs.append(
+                    f"page[{i}] ({label!r}): page_notes must be a list, got {type(pnotes).__name__}"
+                )
+                continue
+            for j, note in enumerate(pnotes):
+                if not isinstance(note, str):
+                    errs.append(
+                        f"page[{i}] ({label!r}) page_notes[{j}]: must be a string, "
+                        f"got {type(note).__name__}"
+                    )
+
+    raw_repo_notes = data.get("repo_notes", [])
+    if not isinstance(raw_repo_notes, list):
+        errs.append(f"repo_notes: must be a list, got {type(raw_repo_notes).__name__}")
+
+    return errs
 
 
 def check_structure_and_limits(data: Mapping[str, object]) -> list[str]:
@@ -109,11 +190,11 @@ def check_structure_and_limits(data: Mapping[str, object]) -> list[str]:
     notes = _all_notes(data)
     if len(notes) > MAX_NOTES:
         errs.append(f"too many notes: {len(notes)} > {MAX_NOTES}")
-    for j, content in enumerate(notes):
-        if not content.strip():
-            errs.append(f"note[{j}]: content is empty")
-        if len(content) > MAX_NOTE_CHARS:
-            errs.append(f"note[{j}]: {len(content)} code points > {MAX_NOTE_CHARS}")
+    for note in notes:
+        if not note.content.strip():
+            errs.append(f"{note.source}: content is empty")
+        if len(note.content) > MAX_NOTE_CHARS:
+            errs.append(f"{note.source}: {len(note.content)} code points > {MAX_NOTE_CHARS}")
 
     # repo_notes must be objects with a string `content`.
     repo_notes = data.get("repo_notes", [])
@@ -193,51 +274,63 @@ def extract_anchors(note: str) -> list[Anchor]:
     return out
 
 
-def _is_tracked(repo_root: Path, rel: str) -> bool:
+def _tracked_files(repo_root: Path) -> frozenset[str]:
+    """Every git-tracked path in `repo_root`, relative to it.
+
+    Loaded ONCE per `check_anchors` call rather than once (or twice, for a
+    directory anchor) per path anchor — a single `git ls-files -z` instead
+    of a `git ls-files --error-unmatch` subprocess per anchor. `-z` NUL-
+    delimits so a path containing whitespace can't be mis-split.
+
+    A failure here (git unavailable, `repo_root` not a repo) is an
+    environment problem, not a "nothing is tracked" content finding —
+    conflating the two would silently flag every path anchor as untracked
+    instead of surfacing the real cause loudly.
+    """
+    # ruff S603/S607: fixed-literal git argv, no shell, no untrusted input —
+    # `repo_root` comes from the CLI/test harness (not T3 content). Scoped
+    # inline (not a per-file ignore) so a future subprocess call in this
+    # module is still flagged.
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],  # noqa: S607
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise WikiError(f"cannot resolve path anchors: git is unavailable: {exc}") from exc
+    if result.returncode != 0:
+        raise WikiError(
+            f"cannot resolve path anchors: `git ls-files` failed in {repo_root} "
+            f"(exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return frozenset(p for p in result.stdout.split("\0") if p)
+
+
+def _is_tracked(tracked: frozenset[str], rel: str) -> bool:
     """True iff `rel` is tracked (committed or staged) — i.e. Devin-visible.
 
     Devin's DeepWiki ingests the git-tracked tree only; a gitignored file
     (e.g. root `CLAUDE.md`, a rulesync output) is invisible to it even
-    though it exists on disk. `git ls-files --error-unmatch` is the direct
-    tracked-file check; `check=False` because a non-zero exit is the
-    "not tracked" signal we branch on, not an exceptional condition.
+    though it exists on disk. A trailing "/" anchor is a directory
+    reference, tracked iff any tracked path sits underneath it.
     """
-    # ruff S603/S607: fixed-literal git argv, no shell, no untrusted input —
-    # `rel` is an anchor token authored by a trusted repo maintainer in
-    # `.devin/wiki.json` (not T3 content), `--` guards a leading-dash path,
-    # and PATH-resolved `git` is the standard invocation (its absolute path
-    # is platform-variable). Scoped inline (not a per-file ignore) so a
-    # future subprocess call in this module is still flagged.
-    result = subprocess.run(  # noqa: S603
-        ["git", "ls-files", "--error-unmatch", "--", rel.rstrip("/")],  # noqa: S607
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        return True
-    # A directory anchor (trailing "/") is tracked iff `git ls-files` lists
-    # one or more tracked paths underneath it — `--error-unmatch` alone can't
-    # answer that for a directory.
-    listing = subprocess.run(  # noqa: S603
-        ["git", "ls-files", "--", rel],  # noqa: S607
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return bool(listing.stdout.strip())
+    if rel.endswith("/"):
+        return any(p.startswith(rel) for p in tracked)
+    return rel in tracked
 
 
-def _prd_heading_numbers(repo_root: Path) -> set[str]:
+def _prd_heading_numbers(text: str) -> set[str]:
     """Return every numeric section prefix found in a `PRD.md` ATX heading.
 
     Matches both `## 7. Cross-Cutting Concerns` (bare number) and
     `### 7.1 Security & Prompt Injection Defense` (dotted number), with or
-    without a leading `§`.
+    without a leading `§`. Takes the already-read file text (rather than
+    `repo_root`) so a missing-file guard lives in exactly one place:
+    `check_anchors`.
     """
-    text = (repo_root / "PRD.md").read_text(encoding="utf-8")
     nums: set[str] = set()
     for line in text.splitlines():
         m = re.match(r"^#{1,6}\s+§?\s*(\d+(?:\.\d+)*)\b", line)
@@ -254,11 +347,34 @@ def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
     check catching it. Resolution is against the **git-tracked** tree, not
     the working tree, so a file that exists on disk but is gitignored (e.g.
     root `CLAUDE.md`) is correctly flagged as invisible to Devin.
+
+    A missing `PRD.md` / `docs/glossary.md` is reported as a clear error
+    (that anchor kind is then skipped, not crashed on) rather than an
+    unhandled `FileNotFoundError` — `.devin/wiki.json` still needs to be
+    validatable even if one of those anchor targets has been renamed away.
     """
     errs: list[str] = []
-    glossary_slugs = extract_headings((repo_root / "docs/glossary.md").read_text(encoding="utf-8"))
-    prd_nums = _prd_heading_numbers(repo_root)
+
+    glossary_path = repo_root / "docs/glossary.md"
+    try:
+        glossary_text = glossary_path.read_text(encoding="utf-8")
+    except OSError:
+        glossary_slugs: set[str] = set()
+        errs.append(f"cannot resolve glossary anchors: {glossary_path} not found")
+    else:
+        glossary_slugs = extract_headings(glossary_text)
+
+    prd_path = repo_root / "PRD.md"
+    try:
+        prd_text = prd_path.read_text(encoding="utf-8")
+    except OSError:
+        prd_nums: set[str] = set()
+        errs.append(f"cannot resolve PRD anchors: {prd_path} not found")
+    else:
+        prd_nums = _prd_heading_numbers(prd_text)
+
     adr_dir = repo_root / "docs/adr"
+    tracked = _tracked_files(repo_root)
 
     for page in _pages(data):
         title = page.get("title")
@@ -268,7 +384,7 @@ def check_anchors(data: Mapping[str, object], repo_root: Path) -> list[str]:
         for note in (n for n in pnotes if isinstance(n, str)):
             for a in extract_anchors(note):
                 if a.kind == "path":
-                    if not _is_tracked(repo_root, a.value):
+                    if not _is_tracked(tracked, a.value):
                         errs.append(
                             f"page {title!r}: `{a.value}` is not tracked "
                             "(gitignored/absent — Devin cannot see it)"
@@ -303,11 +419,11 @@ def check_secret_shapes(data: Mapping[str, object]) -> list[str]:
     steering file's own free text, which gitleaks doesn't specially inspect.
     """
     errs: list[str] = []
-    for j, note in enumerate(_all_notes(data)):
+    for note in _all_notes(data):
         for rx in _SECRET_RES:
-            if rx.search(note):
+            if rx.search(note.content):
                 errs.append(
-                    f"note[{j}]: token-shaped literal matched {rx.pattern!r} — "
+                    f"{note.source}: token-shaped literal matched {rx.pattern!r} — "
                     "remove it (guardrail C)"
                 )
     return errs
@@ -317,6 +433,7 @@ def validate_file(path: Path, repo_root: Path) -> list[str]:
     """Load `.devin/wiki.json` and run every check, in order, against it."""
     data = load_wiki(path)
     return [
+        *check_shapes(data),
         *check_structure_and_limits(data),
         *check_references(data),
         *check_anchors(data, repo_root),
@@ -327,7 +444,16 @@ def validate_file(path: Path, repo_root: Path) -> list[str]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Path to .devin/wiki.json")
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help=(
+            "Repository root to resolve anchors (paths/ADRs/PRD sections/glossary "
+            "slugs) and git-tracked status against. Defaults to the current "
+            "working directory."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         errs = validate_file(args.path, args.repo_root.resolve())

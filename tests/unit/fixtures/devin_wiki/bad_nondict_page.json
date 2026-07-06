@@ -1,0 +1,7 @@
+{
+  "repo_notes": [],
+  "pages": [
+    { "title": "Good Page", "purpose": "p" },
+    "this-should-be-an-object-not-a-string"
+  ]
+}

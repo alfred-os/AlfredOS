@@ -1,0 +1,10 @@
+{
+  "repo_notes": [],
+  "pages": [
+    {
+      "title": "Bad Notes",
+      "purpose": "p",
+      "page_notes": "should be a list, not a bare string"
+    }
+  ]
+}
