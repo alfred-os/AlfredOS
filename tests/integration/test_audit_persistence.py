@@ -130,8 +130,9 @@ async def test_provider_failure_audit_row_survives_rollback() -> None:
 
     PR-B Phase 6 additions: the row carries the resolved operator's
     ``language`` and ``actor_persona='alfred'``, and ``subject["phase"]``
-    is the canonical English key ``"provider_call"`` (operator-readable
-    even under a non-English operator language).
+    is the canonical English key ``"provider_call:0"`` (#339 PR3 suffixes
+    the per-completion index; operator-readable even under a non-English
+    operator language).
     """
     with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
@@ -204,8 +205,10 @@ async def test_provider_failure_audit_row_survives_rollback() -> None:
                 assert row.trust_tier_of_trigger == "T2"
                 assert row.subject["error_type"] == "RuntimeError"
                 # Subject JSONB stays operator-readable English — the
-                # ``phase`` key is canonical, never translated.
-                assert row.subject["phase"] == "provider_call"
+                # ``phase`` key is canonical, never translated. #339 PR3's
+                # act-phase loop suffixes the per-completion index, so the
+                # first (and here only) provider call is ``provider_call:0``.
+                assert row.subject["phase"] == "provider_call:0"
                 # PR-B per-row attribution — language matches the resolved
                 # operator; actor_persona is pinned to ``alfred`` in
                 # Slice 1+2 (the persona registry replaces this in Slice 5).
