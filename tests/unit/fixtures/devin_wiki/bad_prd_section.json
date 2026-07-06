@@ -1,0 +1,12 @@
+{
+  "repo_notes": [],
+  "pages": [
+    {
+      "title": "Bad PRD Section",
+      "purpose": "p",
+      "page_notes": [
+        "Ground in `PRD.md` \u00a799.9 for details that don't exist."
+      ]
+    }
+  ]
+}

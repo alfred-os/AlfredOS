@@ -34,6 +34,26 @@ def test_more_than_30_pages_is_flagged() -> None:
     assert any("30" in e for e in errs)
 
 
+def test_more_than_max_notes_is_flagged() -> None:
+    errs = vw.check_structure_and_limits(_load("bad_max_notes.json"))
+    assert any("too many notes" in e for e in errs)
+
+
+def test_note_over_max_chars_is_flagged() -> None:
+    errs = vw.check_structure_and_limits(_load("bad_note_too_long.json"))
+    assert any("code points" in e for e in errs)
+
+
+def test_duplicate_page_title_is_flagged() -> None:
+    errs = vw.check_structure_and_limits(_load("bad_duplicate_title.json"))
+    assert any("duplicate page title" in e.lower() for e in errs)
+
+
+def test_empty_purpose_is_flagged() -> None:
+    errs = vw.check_structure_and_limits(_load("bad_empty_purpose.json"))
+    assert any("purpose" in e.lower() and "empty" in e.lower() for e in errs)
+
+
 def test_load_wiki_raises_on_invalid_json(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
@@ -64,9 +84,34 @@ _REPO_ROOT = Path(__file__).parents[2]
 
 
 def test_extract_anchors_finds_each_kind() -> None:
-    note = "Ground in `docs/subsystems/security.md`, ADR-0017, PRD.md §7.1, glossary.md#trust-tier."
+    # Backtick-wrapped PRD anchor is the REAL authoring format used throughout
+    # .devin/wiki.json — a non-backtick "PRD.md §N" would mask a regex hole.
+    note = "Ground in `docs/subsystems/security.md`, ADR-0017, `PRD.md` §7.1, glossary.md#tier."
     kinds = {a.kind for a in vw.extract_anchors(note)}
     assert kinds == {"path", "adr", "prd", "glossary"}
+
+
+def test_extract_anchors_prd_backtick_form_resolves_values() -> None:
+    # `.devin/wiki.json` always writes PRD anchors as `` `PRD.md` §N `` — the
+    # closing backtick sits between ".md" and the section marker.
+    note = "Ground in `PRD.md` §7.1 and `PRD.md` §6.2 for the details."
+    values = {a.value for a in vw.extract_anchors(note) if a.kind == "prd"}
+    assert values == {"7.1", "6.2"}
+
+
+def test_extract_anchors_prd_bare_form_still_resolves() -> None:
+    note = "Ground in PRD §5 for the overview."
+    values = {a.value for a in vw.extract_anchors(note) if a.kind == "prd"}
+    assert values == {"5"}
+
+
+def test_extract_anchors_splits_slash_compound_adr() -> None:
+    # `.devin/wiki.json` writes multi-ADR references as a single
+    # slash-compound token, e.g. "ADR-0040/0042/0043" — every ADR number in
+    # the compound must be extracted, not just the first.
+    note = "Ground in ADR-0040/0042/0043 and docs/ARCHITECTURE.md."
+    values = {a.value for a in vw.extract_anchors(note) if a.kind == "adr"}
+    assert values == {"0040", "0042", "0043"}
 
 
 def test_real_tracked_anchors_resolve() -> None:
@@ -105,6 +150,23 @@ def test_bad_adr_and_slug_are_flagged() -> None:
     errs = vw.check_anchors(data, _REPO_ROOT)
     assert any("ADR-9999" in e for e in errs)
     assert any("no-such-heading" in e for e in errs)
+
+
+def test_bad_prd_section_backtick_form_is_flagged() -> None:
+    # Real authoring format (`` `PRD.md` §N ``) referencing a section that
+    # doesn't exist in PRD.md — proves the PRD-anchor guard actually fires
+    # now that _PRD_RE tolerates the closing backtick.
+    errs = vw.check_anchors(_load("bad_prd_section.json"), _REPO_ROOT)
+    assert any("99.9" in e for e in errs)
+
+
+def test_compound_adr_reference_partially_broken_is_flagged() -> None:
+    # "ADR-0040/9999": 0040 is real, 9999 is not — only the broken one should
+    # be flagged, proving every ADR in the slash-compound is resolved
+    # individually rather than just the first.
+    errs = vw.check_anchors(_load("bad_adr_compound.json"), _REPO_ROOT)
+    assert any("9999" in e for e in errs)
+    assert not any("ADR-0040 has no file" in e for e in errs)
 
 
 def test_token_shaped_string_is_flagged() -> None:

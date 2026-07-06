@@ -28,8 +28,15 @@ MAX_NOTE_CHARS = 10_000
 # Repo path — any backtick-quoted token ending in a known extension or in `/`
 # (a directory reference).
 _PATH_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*(?:\.(?:md|py|ya?ml|json|toml)|/))`")
-_ADR_RE = re.compile(r"\bADR-(\d{4})\b")
-_PRD_RE = re.compile(r"PRD(?:\.md)?\s+§(\d+(?:\.\d+)?)")
+# A single ADR reference or a slash-compound one, e.g. "ADR-0040/0042/0043" —
+# the compound form is how `.devin/wiki.json` pins multiple load-bearing ADRs
+# on one concept page. `group(1)` is split on "/" in `extract_anchors` so
+# every ADR number in the compound is resolved individually.
+_ADR_RE = re.compile(r"\bADR-(\d{4}(?:/\d{4})*)\b")
+# `.devin/wiki.json` always backtick-wraps the path, e.g. `` `PRD.md` §7.1 ``
+# — the optional closing backtick sits between ".md" and the section marker.
+# Also tolerates the bare "PRD §N" form with no path at all.
+_PRD_RE = re.compile(r"PRD(?:\.md)?`?\s+§(\d+(?:\.\d+)?)")
 _GLOSSARY_RE = re.compile(r"glossary(?:\.md)?#([a-z0-9_-]+)")
 
 
@@ -161,7 +168,11 @@ def extract_anchors(note: str) -> list[Anchor]:
     """
     out: list[Anchor] = []
     out += [Anchor("path", m.group(1)) for m in _PATH_RE.finditer(note)]
-    out += [Anchor("adr", m.group(1)) for m in _ADR_RE.finditer(note)]
+    # Split the slash-compound capture ("0040/0042/0043") into one Anchor per
+    # ADR number so each is resolved independently by `check_anchors`.
+    out += [
+        Anchor("adr", adr_num) for m in _ADR_RE.finditer(note) for adr_num in m.group(1).split("/")
+    ]
     out += [Anchor("prd", m.group(1)) for m in _PRD_RE.finditer(note)]
     out += [Anchor("glossary", m.group(1)) for m in _GLOSSARY_RE.finditer(note)]
     return out
