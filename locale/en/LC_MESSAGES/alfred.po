@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-06 08:17+0100\n"
+"POT-Creation-Date: 2026-07-06 11:07+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2480,18 +2480,30 @@ msgstr ""
 "follow a winning commit_intent — this is a caller-contract violation, not"
 " a transient failure."
 
-#: src/alfred/orchestrator/core.py:329
+#: src/alfred/orchestrator/core.py:345
 msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
 msgstr ""
 "comms inbound must be T3: quarantined_extract refuses any source_tier "
 "other than T3 (no silent T3->T2 promotion)."
 
-#: src/alfred/orchestrator/core.py:331
+#: src/alfred/orchestrator/core.py:347
 msgid "orchestrator.quarantined_extract.no_extractor_wired"
 msgstr ""
 "quarantined_extract called on an orchestrator constructed without a "
 "quarantined_extractor; the comms inbound trust-boundary funnel is not "
 "wired."
+
+#: src/alfred/orchestrator/core.py:782
+msgid "orchestrator.tool.budget_exhausted_mid_turn"
+msgstr "I ran out of budget partway through this request."
+
+#: src/alfred/orchestrator/core.py:883
+msgid "orchestrator.tool.budget_overrun_mid_turn"
+msgstr "This request went over budget, so I stopped before running more tools."
+
+#: src/alfred/orchestrator/core.py:892
+msgid "orchestrator.tool.max_iterations_reached"
+msgstr "I reached the limit on tool steps for this request. Here's where I got to."
 
 #: src/alfred/orchestrator/tool_dispatch.py:124
 msgid "orchestrator.tool.unknown_tool"
@@ -3646,4 +3658,7 @@ msgstr "alfred"
 #~ "Operator can adjust the size cap "
 #~ "in config/policies.yaml `web_fetch.size_limit_bytes` "
 #~ "(default 5 MiB)."
+
+#~ msgid "orchestrator.tool.too_many_tool_calls"
+#~ msgstr "That request needed too many tools at once, so I stopped for safety."
 

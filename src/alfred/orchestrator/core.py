@@ -97,8 +97,9 @@ from alfred.egress.egress_id import TurnEgressContext
 from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
+from alfred.orchestrator import loop_constants
 from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
-from alfred.providers.base import CompletionRequest, Message
+from alfred.providers.base import CompletionRequest, CompletionResponse, Message
 from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T1, T2, TaggedContent
 from alfred.supervisor.breaker import invoke_supervisor_action_timeout_hookpoint
@@ -703,149 +704,163 @@ class Orchestrator:
         history = await working_memory.turns()
         messages: list[Message] = [Message(role="system", content=system_prompt)]
         messages.extend(Message(role=turn.role, content=turn.content) for turn in history)
-        request = CompletionRequest(messages=messages)
+        # ------------------------------------------------------------------
+        # Act — the agentic tool-calling loop (#339 PR3, spec §6/§7/§9).
+        #
+        # The per-action DEADLINE (DeadlineWrapper in handle_user_message)
+        # bounds the WHOLE loop; loop_constants.MAX_TOOL_ITERATIONS is the
+        # cost/round-trip backstop under it (core-004). asyncio.CancelledError
+        # from the deadline is NOT caught here — it propagates to the top-level
+        # timeout/cancel arm (hard rule #7). dispatch_tool escalations (Task 3)
+        # likewise propagate to halt the turn. With no registry the loop runs
+        # exactly one iteration and reduces to the pre-#339 single-completion
+        # turn (empty tools -> stop_reason "end_turn" on iteration 0).
+        # ------------------------------------------------------------------
+        tools = self._tool_registry.definitions() if self._tool_registry is not None else ()
+        base_messages = messages  # system + history (built in Orient)
+        local: list[Message] = []  # in-turn tool transcript (EPHEMERAL — Task 3 appends)
+        # Underscore-prefixed: unused until Task 3 starts incrementing it on
+        # each dispatched tool call — kept here now so the loop preamble
+        # shape doesn't churn again next task.
+        _call_index = 0  # monotonic dispatch ordinal (Task 3 increments)
+        per_turn_spent_usd = 0.0
+        pending_completion_cost = 0.0  # this completion's cost until a provider_call row logs it
+        final_content: str | None = None
+        final_response: CompletionResponse | None = None
+        # "token" here means a closed-vocabulary audit result label
+        # (ck_audit_log_result), not a credential — bandit's S105 pattern-
+        # matches the variable name, not the value; suppressed below.
+        final_result_token = "success"  # noqa: S105
+        final_exit_reason: str | None = None  # set only on a non-normal exit
 
-        # ------------------------------------------------------------------
-        # Decide — budget calls are keyed on the REQUESTING user's slug.
-        # The 7th audit branch (``unknown_budget_user``) surfaces if the
-        # guard rejects a slug the resolver should have caught upstream:
-        # the BudgetError except arm discriminates on isinstance and writes
-        # a distinct audit row for that path.
-        # ------------------------------------------------------------------
-        try:
-            estimate = self._budget.estimate_for(user.slug, request)
-            would_exceed = self._budget.would_exceed(user.slug, estimate)
-        except BudgetError as exc:
-            # Defense-in-depth: the resolver is supposed to have rejected
-            # an unknown slug long before it reaches the guard. If we land
-            # here, surface it as the 7th audit branch and re-raise so the
-            # adapter can show a generic error to the user.
-            if isinstance(exc, UnknownBudgetUserError):
-                await self._audit_unknown_budget_user(
-                    user=user,
+        for iteration in range(loop_constants.MAX_TOOL_ITERATIONS):
+            request = CompletionRequest(
+                messages=base_messages + local,
+                tools=tools,
+                tool_choice="auto",
+            )
+
+            # --- per-iteration budget pre-check (spec §7) ---
+            try:
+                estimate = self._budget.estimate_for(user.slug, request)
+                would_exceed = self._budget.would_exceed(user.slug, estimate)
+            except BudgetError as exc:
+                if isinstance(exc, UnknownBudgetUserError):
+                    await self._audit_unknown_budget_user(
+                        user=user,
+                        trace_id=trace_id,
+                        phase="budget_pre_check",
+                        trigger_tier=user_input_tier,
+                    )
+                raise
+            if would_exceed:
+                if iteration == 0:
+                    # No spend yet — preserve the pre-#339 pre-check contract
+                    # (a budget_pre_check row + a raised BudgetError). Existing
+                    # test_pre_check_refusal_audits_and_raises depends on this.
+                    await self._audit.append(
+                        event="orchestrator.turn",
+                        actor_user_id=user.slug,
+                        actor_persona=_ALFRED_PERSONA_ID,
+                        subject=_sanitize_subject(
+                            {"phase": "budget_pre_check", "estimate_usd": estimate},
+                            self._redactor,
+                        ),
+                        trust_tier_of_trigger=user_input_tier,
+                        result="budget_blocked",
+                        cost_estimate_usd=estimate,
+                        cost_actual_usd=0.0,
+                        trace_id=trace_id,
+                        language=user.language,
+                        persona_id=_ALFRED_PERSONA_ID,
+                    )
+                    raise BudgetError(
+                        f"pre-check refused: estimate ${estimate:.4f} would breach budget"
+                    )
+                # Mid-turn (iteration >= 1): end gracefully; the terminal
+                # `completed` row records it (FIX-6 — no separate row).
+                final_content = t("orchestrator.tool.budget_exhausted_mid_turn")
+                final_result_token = "budget_blocked"  # noqa: S105
+                final_exit_reason = "budget_exhausted_mid_turn"
+                break
+
+            # --- completion (NEVER gather) ---
+            try:
+                response = await self._router.complete(request)
+            except Exception as exc:
+                _log.error(
+                    "orchestrator.provider_failed",
                     trace_id=trace_id,
-                    phase="budget_pre_check",
-                    trigger_tier=user_input_tier,
+                    iteration=iteration,
+                    error=self._redactor(str(exc)),
+                    error_type=type(exc).__name__,
+                )
+                await self._audit.append(
+                    event="orchestrator.turn",
+                    actor_user_id=user.slug,
+                    actor_persona=_ALFRED_PERSONA_ID,
+                    subject=_sanitize_subject(
+                        {
+                            "phase": f"provider_call:{iteration}",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                        self._redactor,
+                    ),
+                    trust_tier_of_trigger=user_input_tier,
+                    result="provider_failed",
+                    cost_estimate_usd=estimate,
+                    cost_actual_usd=0.0,
+                    trace_id=trace_id,
+                    language=user.language,
+                    persona_id=_ALFRED_PERSONA_ID,
                 )
                 raise
-            # Any other BudgetError on the pre-check path is structurally
-            # impossible today (would_exceed/estimate_for don't raise the
-            # other budget errors), but re-raise defensively rather than
-            # silently swallowing.
-            raise
+            final_response = response
 
-        if would_exceed:
-            await self._audit.append(
-                event="orchestrator.turn",
-                actor_user_id=user.slug,
-                actor_persona=_ALFRED_PERSONA_ID,
-                subject=_sanitize_subject(
-                    {"phase": "budget_pre_check", "estimate_usd": estimate},
-                    self._redactor,
-                ),
-                trust_tier_of_trigger=user_input_tier,
-                result="budget_blocked",
-                cost_estimate_usd=estimate,
-                cost_actual_usd=0.0,
-                trace_id=trace_id,
-                language=user.language,
-                persona_id=_ALFRED_PERSONA_ID,
-            )
-            raise BudgetError(f"pre-check refused: estimate ${estimate:.4f} would breach budget")
+            # --- charge; force-record on overrun (spec §7, mem-002) ---
+            charge_result = "success"
+            try:
+                self._budget.check_and_charge(user.slug, response.cost_usd)
+            except BudgetError as exc:
+                if isinstance(exc, UnknownBudgetUserError):
+                    await self._audit_unknown_budget_user(
+                        user=user,
+                        trace_id=trace_id,
+                        phase="budget_post_charge",
+                        trigger_tier=user_input_tier,
+                    )
+                    raise
+                charge_result = "budget_overrun"
+                _log.warning(
+                    "orchestrator.budget_overrun",
+                    trace_id=trace_id,
+                    iteration=iteration,
+                    estimate_usd=estimate,
+                    actual_usd=response.cost_usd,
+                    error=self._redactor(str(exc)),
+                )
+            per_turn_spent_usd += response.cost_usd
+            pending_completion_cost = response.cost_usd  # not yet logged to any row
 
-        # ------------------------------------------------------------------
-        # Act
-        # ------------------------------------------------------------------
-        # Note: asyncio.CancelledError is NOT caught here — it propagates to
-        # the top-level `handle_user_message` arm so a single backstop audits
-        # cancellation at any awaited step in the turn (CLAUDE.md hard rule
-        # #7). Auditing here would double-write when cancellation lands
-        # inside the provider call.
-        try:
-            response = await self._router.complete(request)
-        except Exception as exc:
-            _log.error(
-                "orchestrator.provider_failed",
-                trace_id=trace_id,
-                error=self._redactor(str(exc)),
-                error_type=type(exc).__name__,
-            )
+            # --- terminal? (no tool request -> final answer). FIX-3: the
+            #     terminal completion is audited SOLELY by the `completed` row
+            #     below — NO provider_call row here. This keeps the no-tools
+            #     happy path at audit.append.await_count == 1 (byte-for-byte). ---
+            if response.stop_reason != "tool_use" or not response.tool_calls:
+                final_content = response.content
+                final_result_token = charge_result  # "success" | "budget_overrun"
+                break
+
+            # --- non-terminal completion: audit it as provider_call:{iteration}
+            #     (FIX-3 — only continuing completions get their own row). ---
             await self._audit.append(
                 event="orchestrator.turn",
                 actor_user_id=user.slug,
                 actor_persona=_ALFRED_PERSONA_ID,
                 subject=_sanitize_subject(
                     {
-                        "phase": "provider_call",
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                    self._redactor,
-                ),
-                trust_tier_of_trigger=user_input_tier,
-                result="provider_failed",
-                cost_estimate_usd=estimate,
-                cost_actual_usd=0.0,
-                trace_id=trace_id,
-                language=user.language,
-                persona_id=_ALFRED_PERSONA_ID,
-            )
-            raise
-
-        # Charge the actual cost. If it busts the cap, the work has already
-        # happened — record truthfully, log loudly, do not raise (except for
-        # the 7th branch's UnknownBudgetUserError, which IS re-raised after
-        # auditing because a phantom slug post-success indicates a partial-
-        # state bug worth surfacing to the adapter).
-        charge_result = "success"
-        try:
-            self._budget.check_and_charge(user.slug, response.cost_usd)
-        except BudgetError as exc:
-            if isinstance(exc, UnknownBudgetUserError):
-                await self._audit_unknown_budget_user(
-                    user=user,
-                    trace_id=trace_id,
-                    phase="budget_post_charge",
-                    trigger_tier=user_input_tier,
-                )
-                raise
-            charge_result = "budget_overrun"
-            _log.warning(
-                "orchestrator.budget_overrun",
-                trace_id=trace_id,
-                estimate_usd=estimate,
-                actual_usd=response.cost_usd,
-                error=self._redactor(str(exc)),
-            )
-
-        # ADR-0008: assistant output is T2 in Slice 1+2 (at-most-as-trusted as
-        # the T2 input that triggered it). T0 is reserved for AlfredOS
-        # internals/code/prompts/configs per PRD §7.1. Slice 2's dual-LLM
-        # split refines provider output to T1 and introduces T3.
-        await working_memory.append(role="assistant", content=response.content)
-        await episodic.record(
-            user_id=user.slug,
-            role="assistant",
-            content=response.content,
-            trust_tier="T2",
-            tokens_in=response.tokens_in,
-            tokens_out=response.tokens_out,
-            cost_usd=response.cost_usd,
-            language=user.language,
-            persona=_ALFRED_PERSONA_ID,
-            # See the user-turn ``episodic.record`` call above for the
-            # ``persona`` vs ``persona_id`` split rationale.
-            persona_id=_ALFRED_PERSONA_ID,
-        )
-
-        try:
-            await self._audit.append(
-                event="orchestrator.turn",
-                actor_user_id=user.slug,
-                actor_persona=_ALFRED_PERSONA_ID,
-                subject=_sanitize_subject(
-                    {
-                        "phase": "completed",
+                        "phase": f"provider_call:{iteration}",
                         "model": response.model,
                         "tokens_in": response.tokens_in,
                         "tokens_out": response.tokens_out,
@@ -857,6 +872,77 @@ class Orchestrator:
                 result=charge_result if charge_result == "budget_overrun" else "success",
                 cost_estimate_usd=estimate,
                 cost_actual_usd=response.cost_usd,
+                trace_id=trace_id,
+                language=user.language,
+                persona_id=_ALFRED_PERSONA_ID,
+            )
+            pending_completion_cost = 0.0  # logged to the provider_call row above
+
+            if charge_result == "budget_overrun":
+                # Over cap AND the model wants more tools — stop before more egress.
+                final_content = t("orchestrator.tool.budget_overrun_mid_turn")
+                final_result_token = "budget_overrun"  # noqa: S105
+                final_exit_reason = "budget_overrun_mid_turn"
+                break
+
+            # --- TOOL DISPATCH HOOK (Task 3 replaces this line) ---
+            raise NotImplementedError("tool dispatch lands in Task 3")
+        else:
+            # Loop exhausted MAX_TOOL_ITERATIONS without a terminal answer.
+            final_content = t("orchestrator.tool.max_iterations_reached")
+            final_result_token = "refused"  # noqa: S105 -- FIX-1: in-domain (NOT "max_iterations_reached")
+            final_exit_reason = "max_iterations_reached"
+
+        # final_response is None ONLY on the iteration-0 pre-check raise / provider
+        # failure paths, which do not reach here (they raise). So it is populated
+        # on every path that reaches persist.
+        assert final_response is not None
+        answer = final_content if final_content is not None else final_response.content
+
+        # ADR-0008: assistant output is T2 in Slice 1+2 (at-most-as-trusted as
+        # the T2 input that triggered it). T0 is reserved for AlfredOS
+        # internals/code/prompts/configs per PRD §7.1. Slice 2's dual-LLM
+        # split refines provider output to T1 and introduces T3.
+        await working_memory.append(role="assistant", content=answer)
+        # FIX-15: episodic.record logs the FINAL completion's cost/tokens (the
+        # answer's attribution); the `completed` audit row logs the TURN total
+        # (per_turn_spent_usd). For a multi-completion turn these differ BY
+        # DESIGN — episodic = answer attribution, audit = turn spend.
+        await episodic.record(
+            user_id=user.slug,
+            role="assistant",
+            content=answer,
+            trust_tier="T2",
+            tokens_in=final_response.tokens_in,
+            tokens_out=final_response.tokens_out,
+            cost_usd=final_response.cost_usd,
+            language=user.language,
+            persona=_ALFRED_PERSONA_ID,
+            # See the user-turn ``episodic.record`` call above for the
+            # ``persona`` vs ``persona_id`` split rationale.
+            persona_id=_ALFRED_PERSONA_ID,
+        )
+
+        completed_subject: dict[str, object] = {
+            "phase": "completed",
+            "model": final_response.model,
+            "tokens_in": final_response.tokens_in,
+            "tokens_out": final_response.tokens_out,
+            "charge_result": final_result_token,
+            "turn_cost_usd": per_turn_spent_usd,
+        }
+        if final_exit_reason is not None:
+            completed_subject["exit_reason"] = final_exit_reason
+        try:
+            await self._audit.append(
+                event="orchestrator.turn",
+                actor_user_id=user.slug,
+                actor_persona=_ALFRED_PERSONA_ID,
+                subject=_sanitize_subject(completed_subject, self._redactor),
+                trust_tier_of_trigger=user_input_tier,
+                result=final_result_token,
+                cost_estimate_usd=0.0,
+                cost_actual_usd=pending_completion_cost,  # FIX-3: terminal cost only
                 trace_id=trace_id,
                 language=user.language,
                 persona_id=_ALFRED_PERSONA_ID,
@@ -874,12 +960,12 @@ class Orchestrator:
         _log.info(
             "orchestrator.turn",
             trace_id=trace_id,
-            tokens_in=response.tokens_in,
-            tokens_out=response.tokens_out,
-            cost_usd=response.cost_usd,
-            charge_result=charge_result,
+            tokens_in=final_response.tokens_in,
+            tokens_out=final_response.tokens_out,
+            cost_usd=per_turn_spent_usd,
+            charge_result=final_result_token,
         )
-        return response.content
+        return answer
 
     async def _audit_unknown_budget_user(
         self,
