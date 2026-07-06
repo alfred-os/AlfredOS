@@ -92,3 +92,32 @@ def check_structure_and_limits(data: Mapping[str, object]) -> list[str]:
                 errs.append(f"repo_notes[{k}]: must be an object with a string `content`")
 
     return errs
+
+
+def check_references(data: Mapping[str, object]) -> list[str]:
+    errs: list[str] = []
+    pages = _pages(data)
+    title_to_parent: dict[str, str | None] = {}
+    for page in pages:
+        title = page.get("title")
+        if not isinstance(title, str) or not title.strip():
+            continue  # structure check already flags this
+        parent = page.get("parent")
+        title_to_parent[title] = parent if isinstance(parent, str) else None
+
+    for title, parent in title_to_parent.items():
+        if parent is None:
+            continue
+        if parent not in title_to_parent:
+            errs.append(f"page {title!r}: parent {parent!r} is not an existing page title")
+            continue
+        # Walk ancestors; a revisit of `title` (or any node twice) is a cycle.
+        seen: set[str] = set()
+        cursor: str | None = title
+        while cursor is not None:
+            if cursor in seen:
+                errs.append(f"page {title!r}: parent chain forms a cycle (via {cursor!r})")
+                break
+            seen.add(cursor)
+            cursor = title_to_parent.get(cursor)
+    return errs

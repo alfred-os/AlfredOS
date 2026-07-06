@@ -1,0 +1,4 @@
+{ "repo_notes": [], "pages": [
+  { "title": "A", "purpose": "p", "parent": "B" },
+  { "title": "B", "purpose": "p", "parent": "A" }
+] }

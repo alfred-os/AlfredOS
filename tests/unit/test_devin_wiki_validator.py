@@ -39,3 +39,22 @@ def test_load_wiki_raises_on_invalid_json(tmp_path: Path) -> None:
     bad.write_text("{not json", encoding="utf-8")
     with pytest.raises(vw.WikiError):
         vw.load_wiki(bad)
+
+
+def test_dangling_parent_is_flagged() -> None:
+    errs = vw.check_references(_load("bad_dangling_parent.json"))
+    assert any("parent" in e.lower() and "Nonexistent" in e for e in errs)
+
+
+def test_self_parent_is_flagged() -> None:
+    errs = vw.check_references(_load("bad_self_parent.json"))
+    assert any("cycle" in e.lower() or "ancestor" in e.lower() for e in errs)
+
+
+def test_parent_cycle_is_flagged() -> None:
+    errs = vw.check_references(_load("bad_parent_cycle.json"))
+    assert any("cycle" in e.lower() for e in errs)
+
+
+def test_valid_minimal_has_no_reference_errors() -> None:
+    assert vw.check_references(_load("valid_minimal.json")) == []
