@@ -236,6 +236,72 @@ def test_token_shaped_string_is_flagged() -> None:
     assert any("token-shaped" in e for e in vw.check_secret_shapes(data))
 
 
+def test_gh_token_is_flagged() -> None:
+    # Assembled from fragments at runtime so no token-shaped literal lands in
+    # this file (the repo's Gitleaks gate scans literals, not runtime values).
+    token = "ghp_" + "a" * 36
+    data = {"repo_notes": [{"content": f"example {token}"}], "pages": []}
+    errs = vw.check_secret_shapes(data)
+    assert any("GitHub token" in e for e in errs)
+
+
+def test_aws_access_key_is_flagged() -> None:
+    token = "AKIA" + "A" * 16
+    data = {"repo_notes": [{"content": f"example {token}"}], "pages": []}
+    errs = vw.check_secret_shapes(data)
+    assert any("AWS access key" in e for e in errs)
+
+
+def test_slack_token_is_flagged() -> None:
+    token = "xoxb-" + "1" * 12
+    data = {"repo_notes": [{"content": f"example {token}"}], "pages": []}
+    errs = vw.check_secret_shapes(data)
+    assert any("Slack token" in e for e in errs)
+
+
+def test_hyphenated_anthropic_key_is_flagged() -> None:
+    # Anthropic keys are hyphen-heavy (`sk-ant-api03-...`) — the widened
+    # OpenAI/Anthropic pattern must still match a run containing hyphens,
+    # not just a bare alphanumeric run.
+    token = "sk-ant-api03-" + "a" * 32
+    data = {"repo_notes": [{"content": f"example {token}"}], "pages": []}
+    errs = vw.check_secret_shapes(data)
+    assert any("OpenAI/Anthropic" in e for e in errs)
+
+
+def test_secret_in_page_title_or_purpose_is_flagged() -> None:
+    # Guardrail C previously only scanned page_notes/repo_notes content — a
+    # secret pasted into a page's title or purpose sailed through unscanned.
+    token = "AKIA" + "B" * 16
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": f"Leaky {token}", "purpose": "p"}],
+    }
+    errs = vw.check_secret_shapes(data)
+    assert any("title" in e and "AWS access key" in e for e in errs)
+
+
+def test_secret_error_does_not_echo_the_matched_token() -> None:
+    token = "AKIA" + "C" * 16
+    data = {"repo_notes": [{"content": f"example {token}"}], "pages": []}
+    errs = vw.check_secret_shapes(data)
+    assert errs
+    assert not any(token in e for e in errs)
+
+
+def test_secret_in_page_title_does_not_echo_the_title() -> None:
+    # A page title carrying the secret must not be used as its own display
+    # label — that would print the very token the finding exists to redact.
+    token = "AKIA" + "D" * 16
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": f"Leaky {token}", "purpose": "p"}],
+    }
+    errs = vw.check_secret_shapes(data)
+    assert errs
+    assert not any(token in e for e in errs)
+
+
 def test_note_error_locates_repo_note_source() -> None:
     data = {"repo_notes": [{"content": ""}], "pages": []}
     errs = vw.check_structure_and_limits(data)
