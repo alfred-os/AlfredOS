@@ -264,6 +264,16 @@ invariant is:
   in the content store; only the quarantined LLM subprocess can dereference
   them via `quarantined_to_structured()`.
 
+**Tool-result flow (#339 PR2).** `dispatch_tool`
+(`src/alfred/orchestrator/tool_dispatch.py`) is the analogous chokepoint on the
+*output* side of a tool call: a T3 tool result crosses `downgrade_to_orchestrator`
+(a second, distinct `check_content_clearance` call, `hookpoint=
+"t3.downgrade_to_orchestrator"`) and an `OutboundDlp.scan` pass before it reaches
+the privileged orchestrator's next completion request. `result_tier` defaults to
+T3 for every tool; only a hardcoded first-party allowlist may claim ≤T2 and skip
+both crossings. See [ADR-0046](../adr/0046-dual-llm-tool-result-flow.md) for the
+full invariant.
+
 See [docs/subsystems/plugins.md](plugins.md) for the quarantined LLM
 transport and process isolation contract.
 
@@ -311,6 +321,7 @@ Discord egress bridge decision record.
 - [ADR-0013](../adr/0013-defer-t1-t3-and-dual-llm.md) — deferred T1+T3+dual-LLM to Slice 3; superseded by ADR-0017.
 - [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Decision 1 (nonce gate), Decision 3 (two-axis naming), Decision 7 (wire-format versioning anchors).
 - [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md) — Slice-4 containerised quarantined LLM commitment.
+- [ADR-0046](../adr/0046-dual-llm-tool-result-flow.md) — the tool-result-flow trust boundary: `dispatch_tool`'s downgrade + DLP crossing for T3 tool results, and the `result_tier`-defaults-to-T3 rule.
 - Spec C G7-2c (#333) — the §4.3 tool-egress response path (in-core `EgressResponseExtractor`) routes T3 upstream tool-response bodies through the SAME gate-checked `quarantined_to_structured` seam — never a parallel extractor — and the dedup ledger stores only the post-extraction T2, never raw T3. See the [Spec C egress control-plane design](../superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md).
 - Sibling subsystems: [plugins.md](plugins.md), [identity.md](identity.md), [hooks.md](hooks.md).
 - Glossary: [trust tier](../glossary.md#trust-tier), [T3 (untrusted-ingestion tier)](../glossary.md#t3-untrusted-ingestion-tier), [CapabilityGateNonce](../glossary.md#capabilitygatenonce), [dual-LLM split](../glossary.md#dual-llm-split), [RealGate](../glossary.md#realgate), [GatePolicy](../glossary.md#gatepolicy), [GrantRow](../glossary.md#grantrow), [QuarantinedExtractor](../glossary.md#quarantinedextractor), [ExtractionMode](../glossary.md#extractionmode), [TypedRefusalReason](../glossary.md#typedrefusalreason), [ProviderCapability](../glossary.md#providercapability), [alfred_quarantined_llm](../glossary.md#alfred_quarantined_llm), [quarantine.ingest](../glossary.md#quarantineingest), [quarantine.extract](../glossary.md#quarantineextract), [Extracted](../glossary.md#extracted), [TypedRefusal](../glossary.md#typedrefusal), [ExtractionResult](../glossary.md#extractionresult).
