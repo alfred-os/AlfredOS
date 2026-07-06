@@ -735,6 +735,14 @@ class Orchestrator:
         call_index = 0  # monotonic per-turn dispatch ordinal (threaded to the egress path)
         per_turn_spent_usd = 0.0
         pending_completion_cost = 0.0  # this completion's cost until a provider_call row logs it
+        # Pyright can't prove the loop body below runs at least once (it only
+        # sees MAX_TOOL_ITERATIONS as `Final[int]`, not a literal), so it
+        # can't see that `estimate` is always assigned before the `completed`
+        # audit row reads it (line ~1006). Runtime-safe either way — the
+        # constant is 8, so the loop always executes — but the 0.0 here is
+        # never the value actually persisted; it only satisfies the static
+        # analyzer.
+        estimate: float = 0.0
         final_content: str | None = None
         final_response: CompletionResponse | None = None
         # "token" here means a closed-vocabulary audit result label
