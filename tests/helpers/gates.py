@@ -634,9 +634,70 @@ def make_quarantined_extract_chain_gate(
     )
 
 
+def make_tool_dispatch_gate(*, grant_downgrade: bool = True) -> CapabilityGate:
+    """Return a :class:`RealGate` scoped to the ``dispatch_tool`` chokepoint
+    (#339 PR2) — the canonical composed-grant fixture for the T3 tool leg.
+
+    ``dispatch_tool``'s T3 ``Extracted`` branch crosses TWO gate surfaces:
+
+    1. ``gate.check(plugin_id="alfred.orchestrator.tool_dispatch",
+       hookpoint="tool.dispatch", requested_tier="system")`` — the per-dispatch
+       capability check.
+    2. ``gate.check_content_clearance(plugin_id="t3.downgrade_to_orchestrator",
+       hookpoint="t3.downgrade_to_orchestrator", content_tier="T3")`` — the
+       second content-clearance boundary inside
+       :func:`alfred.security.quarantine.downgrade_to_orchestrator`.
+
+    :func:`make_allow_system_gate` seeds only the first grant, so a real T3
+    dispatch would wrongly route to ``downgrade_denied`` — a permissive shim
+    would paper over that. This helper seeds BOTH grants against the SAME
+    :class:`RealGate` the production hot path uses (CLAUDE.md HARD rule #2:
+    never a permissive shim for a security-gated assertion).
+
+    Args:
+        grant_downgrade: When :data:`True` (default) the
+            ``t3.downgrade_to_orchestrator`` content-T3 grant is seeded too, so
+            the full T3 happy/dlp-canary path clears both boundaries. Pass
+            :data:`False` to grant ONLY ``tool.dispatch`` — the deny fixture for
+            ``test_downgrade_denied_escalates`` (the downgrade clearance fails
+            closed → ``downgrade_denied`` escalation).
+
+    Returns:
+        A :class:`RealGate` — production gate code, not a test shim. Any
+        request outside the seeded scope denies fail-closed.
+    """
+    grants: set[GrantRow] = {
+        GrantRow(
+            plugin_id="alfred.orchestrator.tool_dispatch",
+            subscriber_tier="system",
+            hookpoint="tool.dispatch",
+            content_tier=None,
+            proposal_branch="test-fixture",
+        ),
+    }
+    if grant_downgrade:
+        grants.add(
+            GrantRow(
+                plugin_id="t3.downgrade_to_orchestrator",
+                subscriber_tier="system",
+                hookpoint="t3.downgrade_to_orchestrator",
+                content_tier="T3",
+                proposal_branch="test-fixture",
+            )
+        )
+    frozen_grants = frozenset(grants)
+    return RealGate(
+        policy=GatePolicy(grants=frozen_grants),
+        backend=_make_in_memory_backend(grants=frozen_grants),
+        audit_sink=_make_no_op_audit_sink(),
+    )
+
+
 __all__ = [
     "make_allow_system_gate",
+    "make_comms_adapter_load_gate",
     "make_deny_all_gate",
     "make_permissive_fixture_gate",
     "make_quarantined_extract_chain_gate",
+    "make_tool_dispatch_gate",
 ]
