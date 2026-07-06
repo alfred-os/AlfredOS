@@ -311,6 +311,15 @@ def test_dynamic_result_sites_are_documented() -> None:
       and ``"denied"`` — all in-domain (the first two added by migration 0024;
       ``"denied"`` was already in-domain since migration 0007). Manually audited
       in the G7-2c-1 C1 pass (#333).
+    * ``orchestrator/core.py`` — #339 PR3 (act-phase loop, task 2) replaced the
+      single ``result=charge_result if charge_result == "budget_overrun" else
+      "success"`` completed-row IfExp with TWO dynamic sites: the SAME IfExp
+      shape now emits on the per-iteration ``provider_call:{iteration}`` row
+      (reachable values unchanged: "success" | "budget_overrun"), and the new
+      terminal ``completed`` row's ``result=final_result_token`` forwards a
+      closed-vocab local that is only ever assigned one of "success" /
+      "budget_blocked" / "budget_overrun" / "refused" — all already in
+      ``ck_audit_log_result`` (no migration).
     * all others route through enumerated lookups / ``IfExp`` over in-domain
       constants / forwarded typed params.
 
@@ -336,7 +345,14 @@ def test_dynamic_result_sites_are_documented() -> None:
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
-            "src/alfred/orchestrator/core.py:857",  # IfExp over charge_result
+            # #339 PR3 task 2 — provider_call:{iteration} row's IfExp over
+            # charge_result (moved from the old single-completion "completed"
+            # row's line 857; reachable values unchanged: success/budget_overrun).
+            "src/alfred/orchestrator/core.py:872",
+            # #339 PR3 task 2 — the NEW terminal `completed` row forwards
+            # final_result_token, a closed-vocab local (success/budget_blocked/
+            # budget_overrun/refused, all in-domain).
+            "src/alfred/orchestrator/core.py:943",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
