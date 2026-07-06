@@ -105,3 +105,17 @@ def test_bad_adr_and_slug_are_flagged() -> None:
     errs = vw.check_anchors(data, _REPO_ROOT)
     assert any("ADR-9999" in e for e in errs)
     assert any("no-such-heading" in e for e in errs)
+
+
+def test_token_shaped_string_is_flagged() -> None:
+    data = {"repo_notes": [{"content": "example key sk-" + "a" * 40}], "pages": []}
+    assert any("token-shaped" in e for e in vw.check_secret_shapes(data))
+
+
+def test_clean_notes_have_no_secret_findings() -> None:
+    assert vw.check_secret_shapes(_load("valid_minimal.json")) == []
+
+
+def test_validate_file_aggregates_and_main_exit_codes(capsys: pytest.CaptureFixture[str]) -> None:
+    assert vw.main([str(_FIX / "valid_minimal.json"), "--repo-root", str(_REPO_ROOT)]) == 0
+    assert vw.main([str(_FIX / "bad_empty_title.json"), "--repo-root", str(_REPO_ROOT)]) == 1
