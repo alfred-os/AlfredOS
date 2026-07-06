@@ -101,7 +101,8 @@ def test_load_wiki_raises_on_invalid_json(tmp_path: Path) -> None:
 
 def test_dangling_parent_is_flagged() -> None:
     errs = vw.check_references(_load("bad_dangling_parent.json"))
-    assert any("parent" in e.lower() and "Nonexistent" in e for e in errs)
+    # Located by positional page[i], NOT by echoing the raw parent/title text.
+    assert any("parent" in e.lower() and "page[" in e for e in errs)
 
 
 def test_self_parent_is_flagged() -> None:
@@ -112,6 +113,21 @@ def test_self_parent_is_flagged() -> None:
 def test_parent_cycle_is_flagged() -> None:
     errs = vw.check_references(_load("bad_parent_cycle.json"))
     assert any("cycle" in e.lower() for e in errs)
+
+
+def test_secret_in_title_not_echoed_via_reference_error() -> None:
+    # A token-shaped secret in a page title must never be echoed into a
+    # referential-integrity error (dangling parent), just as it is not echoed
+    # by the note/anchor checks. Token assembled from fragments so no literal
+    # secret lands in this file (repo Gitleaks gate).
+    aws = "AKIA" + "Z" * 16  # AWS-access-key-shaped
+    data = {
+        "repo_notes": [],
+        "pages": [{"title": f"Leaky {aws}", "purpose": "p", "parent": "Nonexistent"}],
+    }
+    errs = vw.check_references(data)
+    assert errs, "a dangling parent should be flagged"
+    assert all(aws not in e for e in errs), f"secret from title echoed: {errs}"
 
 
 def test_valid_minimal_has_no_reference_errors() -> None:
