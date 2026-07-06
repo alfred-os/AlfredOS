@@ -11,6 +11,13 @@
   issue [#347](https://github.com/alfred-os/AlfredOS/issues/347) (the deferred-residual merge-blockers on #339's first live caller)
 - **Supersedes**: —
 
+> **Amendment (2026-07-06, #339 PR4a):** Decision 2 (`HandleCap` detached) is **superseded** —
+> `HandleCap` is re-attached to `dispatch_web_fetch` as a per-user *concurrency* bound (a
+> re-purpose, not the parked-body bound this ADR detached). The "Inbound egress-response canary
+> deferred to #339" residual is **closed** (core-side `ALFRED_WEB_FETCH_CANARY_TOKENS` source).
+> See [ADR-0047](0047-web-fetch-handle-cap-reattach-and-inbound-canary.md). (Factual amendment;
+> the ADR-0015/0016 amendment precedent — status flips stay with the maintainer.)
+
 > **ADR-0040 reservation note.** ADR-0040 is reserved for the comprehensive Spec-C egress ADR
 > landing human-gated at G7-5. It is already referenced in `docker-compose.yaml`,
 > `gateway/egress_relay.py`, `egress_audit.py`, `egress_relay_audit.py`, and two gateway tests
