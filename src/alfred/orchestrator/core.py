@@ -98,6 +98,7 @@ from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
 from alfred.orchestrator import loop_constants
+from alfred.orchestrator.tool_dispatch import dispatch_tool
 from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
 from alfred.providers.base import CompletionRequest, CompletionResponse, Message
 from alfred.providers.router import ProviderRouter
@@ -223,6 +224,18 @@ def _sanitize_subject(subject: dict[str, Any], redactor: Callable[[str], str]) -
         return value
 
     return {k: _walk(v) for k, v in subject.items()}
+
+
+def _truncate_tool_result(text: str) -> str:
+    """Bound a tool_result fed back to the planner (spec §6, TOOL_RESULT_MAX_CHARS).
+
+    A pathological or verbose tool must not balloon the next completion's
+    context. Truncates on a character boundary and appends an ellipsis marker
+    so the planner can tell the result was clipped.
+    """
+    if len(text) <= loop_constants.TOOL_RESULT_MAX_CHARS:
+        return text
+    return text[: loop_constants.TOOL_RESULT_MAX_CHARS] + "…[truncated]"
 
 
 class Orchestrator:
@@ -718,11 +731,8 @@ class Orchestrator:
         # ------------------------------------------------------------------
         tools = self._tool_registry.definitions() if self._tool_registry is not None else ()
         base_messages = messages  # system + history (built in Orient)
-        local: list[Message] = []  # in-turn tool transcript (EPHEMERAL — Task 3 appends)
-        # Underscore-prefixed: unused until Task 3 starts incrementing it on
-        # each dispatched tool call — kept here now so the loop preamble
-        # shape doesn't churn again next task.
-        _call_index = 0  # monotonic dispatch ordinal (Task 3 increments)
+        local: list[Message] = []  # in-turn tool transcript (EPHEMERAL — never persisted)
+        call_index = 0  # monotonic per-turn dispatch ordinal (threaded to the egress path)
         per_turn_spent_usd = 0.0
         pending_completion_cost = 0.0  # this completion's cost until a provider_call row logs it
         final_content: str | None = None
@@ -885,8 +895,60 @@ class Orchestrator:
                 final_exit_reason = "budget_overrun_mid_turn"
                 break
 
-            # --- TOOL DISPATCH HOOK (Task 3 replaces this line) ---
-            raise NotImplementedError("tool dispatch lands in Task 3")
+            # --- fan-out cap (spec §7, mem-003). FIX-6: fold into the terminal
+            #     `completed` row below — no separate audit row. A single
+            #     completion requesting more tools than the cap allows is
+            #     refused outright rather than partially honoured (a partial
+            #     dispatch would silently drop the model's remaining
+            #     requests without telling it). ---
+            if len(response.tool_calls) > loop_constants.MAX_TOOL_CALLS_PER_ITERATION:
+                final_content = t("orchestrator.tool.too_many_tool_calls")
+                final_result_token = "refused"  # noqa: S105
+                final_exit_reason = "too_many_tool_calls"
+                break
+
+            # --- echo the assistant's tool-request turn into the EPHEMERAL
+            #     local transcript (discarded after the turn; never persisted
+            #     to working memory or episodic — only the final answer is). ---
+            local.append(
+                Message(role="assistant", content=response.content, tool_calls=response.tool_calls)
+            )
+
+            # --- deterministic ordered dispatch (NEVER gather; call_index
+            #     monotonic across the whole turn, not per-iteration) ---
+            # mypy narrowing, not a behavioural guard: reaching this branch means
+            # `response.tool_calls` is non-empty, which is only possible when
+            # `tools` (built in Orient) was non-empty, which is only possible
+            # when `self._tool_registry is not None`. Production (#338) wires
+            # registry/gate/dlp together as a trio, so a registry set without a
+            # gate/dlp is a construction-time misconfiguration — asserting here
+            # fails loud (hard rule #7) rather than surfacing as an opaque
+            # AttributeError inside ``dispatch_tool``.
+            assert self._tool_registry is not None
+            assert self._gate is not None
+            assert self._outbound_dlp is not None
+            ctx = self._synthesize_egress_context(trace_id=trace_id, user=user)
+            for call in response.tool_calls:
+                result_t2 = await dispatch_tool(
+                    call,
+                    call_index,
+                    ctx=ctx,
+                    registry=self._tool_registry,
+                    gate=self._gate,
+                    dlp=self._outbound_dlp,
+                    audit=self._audit,
+                    user_id=user.slug,
+                    correlation_id=trace_id,
+                    language=user.language,
+                )
+                call_index += 1
+                local.append(
+                    Message(
+                        role="tool",
+                        tool_call_id=call.id,
+                        content=_truncate_tool_result(result_t2),
+                    )
+                )
         else:
             # Loop exhausted MAX_TOOL_ITERATIONS without a terminal answer.
             final_content = t("orchestrator.tool.max_iterations_reached")
@@ -941,7 +1003,7 @@ class Orchestrator:
                 subject=_sanitize_subject(completed_subject, self._redactor),
                 trust_tier_of_trigger=user_input_tier,
                 result=final_result_token,
-                cost_estimate_usd=0.0,
+                cost_estimate_usd=estimate,  # MINOR-A: was 0.0; restores terminal estimate
                 cost_actual_usd=pending_completion_cost,  # FIX-3: terminal cost only
                 trace_id=trace_id,
                 language=user.language,

@@ -10,10 +10,14 @@ import pytest
 
 from alfred.budget.guard import BudgetExceededError
 from alfred.egress.egress_id import TurnEgressContext
+from alfred.egress.response_inspection import InboundCanaryTripped
+from alfred.errors import AlfredError
+from alfred.i18n import t
 from alfred.memory.working import Turn
 from alfred.orchestrator import loop_constants
-from alfred.orchestrator.core import Orchestrator
-from alfred.providers.base import CompletionResponse
+from alfred.orchestrator.core import Orchestrator, _truncate_tool_result
+from alfred.providers.base import CompletionResponse, ToolCall, ToolDefinition
+from alfred.security.dlp import OutboundCanaryTripped
 from alfred.security.tiers import T2, TaggedContent, tag
 
 
@@ -82,7 +86,16 @@ def _text_response(content: str = "hello", cost: float = 0.01) -> CompletionResp
 def _make_orchestrator(*, router: Any = None, budget: Any = None, **kw: Any) -> Orchestrator:
     @asynccontextmanager
     async def _scope() -> Any:
-        yield MagicMock()
+        # ``rollback`` must be an AsyncMock (mirrors test_core.py's ``_build``):
+        # the top-level ``except BaseException`` arm in ``handle_user_message``
+        # awaits ``session.rollback()`` on ANY propagating exception — including
+        # the Task 3 escalation-propagation tests' faked ``dispatch_tool``
+        # raises. A plain ``MagicMock`` attribute is a sync callable and would
+        # raise ``TypeError: 'MagicMock' object can't be awaited`` there,
+        # masking the escalation the test means to observe.
+        session = MagicMock()
+        session.rollback = AsyncMock()
+        yield session
 
     resolver = MagicMock()
     resolver.get_operator = MagicMock(return_value=_stub_user())
@@ -202,3 +215,323 @@ class TestActLoopBudgetOverrunTerminal:
         assert audit_kwargs["subject"]["phase"] == "completed"
         assert audit_kwargs["subject"]["charge_result"] == "budget_overrun"
         assert audit_kwargs["cost_actual_usd"] == pytest.approx(0.50)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: ordered tool dispatch, ephemeral transcript, fan-out cap, escalation
+# propagation (#339 PR3, task-3-supplement.md).
+#
+# FIX-16: every test below monkeypatches ``alfred.orchestrator.core.dispatch_tool``
+# wholesale, so ``gate=MagicMock()`` / ``outbound_dlp=MagicMock()`` are safe
+# stand-ins here — the real gate/dlp are never consulted (dispatch_tool itself
+# is faked out). Task 5's integration test exercises the real gate + dlp.
+# ---------------------------------------------------------------------------
+
+
+def _tool_use_response(*calls: ToolCall, cost: float = 0.01) -> CompletionResponse:
+    """A non-terminal provider completion requesting one or more tool calls."""
+    return CompletionResponse(
+        content="",
+        tokens_in=5,
+        tokens_out=3,
+        cost_usd=cost,
+        model="fake",
+        stop_reason="tool_use",
+        tool_calls=calls,
+    )
+
+
+def _fake_registry(*names: str) -> Any:
+    """A ``ToolRegistry`` stand-in advertising ``names`` via ``.definitions()``.
+
+    Tests that monkeypatch ``dispatch_tool`` wholesale never call
+    ``registry.get`` — only ``.definitions()`` (consumed in Orient to build
+    ``tools`` for the ``CompletionRequest``) needs to be real.
+    """
+    reg = MagicMock()
+    reg.definitions = MagicMock(
+        return_value=tuple(
+            ToolDefinition(name=n, description=n, input_schema={"type": "object", "properties": {}})
+            for n in names
+        )
+    )
+    return reg
+
+
+async def _drive_turn_capturing_episodic(
+    *, router: Any, tool_registry: Any, gate: Any = None, outbound_dlp: Any = None
+) -> list[dict[str, Any]]:
+    """Drive one turn and capture every ``EpisodicMemory.record`` call's kwargs.
+
+    Backs the negative-persistence test: proves a tool_result's raw content
+    never reaches ``episodic.record`` — it only ever lands in the ephemeral
+    ``local`` transcript that ``_handle_turn`` discards at the end of the turn.
+    """
+    records: list[dict[str, Any]] = []
+
+    async def _record(**kwargs: Any) -> None:
+        records.append(kwargs)
+
+    episodic = MagicMock()
+    episodic.record = AsyncMock(side_effect=_record)
+
+    @asynccontextmanager
+    async def _scope() -> Any:
+        yield MagicMock()
+
+    resolver = MagicMock()
+    resolver.get_operator = MagicMock(return_value=_stub_user())
+    audit = MagicMock()
+    audit.append = AsyncMock()
+    audit.append_schema = AsyncMock()
+
+    orch = Orchestrator(
+        identity_resolver=resolver,
+        session_scope=_scope,
+        router=router,
+        budget=_make_no_op_budget(),
+        episodic_factory=lambda _s: episodic,
+        audit_factory=lambda _f: audit,
+        autocommit_audit_factory=lambda _f: audit,
+        tool_registry=tool_registry,
+        gate=gate if gate is not None else MagicMock(),
+        outbound_dlp=outbound_dlp if outbound_dlp is not None else MagicMock(),
+    )
+    await orch.handle_user_message(
+        user=_stub_user(),
+        content=_tag_t2("hello, alfred"),
+        working_memory=_make_working_memory(),
+    )
+    return records
+
+
+class TestTruncateToolResult:
+    """``_truncate_tool_result`` bounds a tool_result fed back to the planner
+    (spec §6, TOOL_RESULT_MAX_CHARS) — a pathological or verbose tool must not
+    balloon the next completion's context."""
+
+    def test_result_at_or_under_the_cap_passes_through_unchanged(self) -> None:
+        text = "x" * loop_constants.TOOL_RESULT_MAX_CHARS
+        assert _truncate_tool_result(text) == text
+        assert _truncate_tool_result("short") == "short"
+
+    def test_result_over_the_cap_truncates_with_ellipsis_marker(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(loop_constants, "TOOL_RESULT_MAX_CHARS", 10)
+        result = _truncate_tool_result("x" * 20)
+        assert result == ("x" * 10) + "…[truncated]"
+        assert result.startswith("x" * 10)  # truncates on the character boundary
+
+
+class TestActLoopOrderedDispatch:
+    """Deterministic ordered dispatch — never ``asyncio.gather`` — with a
+    monotonic ``call_index`` threaded across the whole turn."""
+
+    async def test_two_tool_turn_dispatches_in_order_then_returns(self, monkeypatch: Any) -> None:
+        # planner: iteration 0 asks for two tools; iteration 1 gives the final answer.
+        r0 = _tool_use_response(
+            ToolCall(id="c0", name="clock.now", arguments={}),
+            ToolCall(id="c1", name="clock.now", arguments={}),
+        )
+        r1 = _text_response("done")
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=[r0, r1])
+
+        seen_call_index: list[int] = []
+        captured_kwargs: list[dict[str, Any]] = []
+
+        async def _fake_dispatch(call: ToolCall, call_index: int, **kw: Any) -> str:
+            seen_call_index.append(call_index)
+            captured_kwargs.append(kw)
+            return f"result-{call.id}"
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _fake_dispatch)
+
+        registry = _fake_registry("clock.now")
+        gate = MagicMock()
+        dlp = MagicMock()
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=registry,
+            gate=gate,
+            outbound_dlp=dlp,
+        )
+
+        reply = await _drive_turn(orch)
+
+        assert reply == "done"
+        assert seen_call_index == [0, 1]  # monotonic, in tool_calls order, no gather
+        assert router.complete.await_count == 2  # re-completed after feeding results back
+
+        # FIX-10: assert the loop passed the EXACT seam objects through to
+        # dispatch_tool — not just that it was called.
+        assert len(captured_kwargs) == 2
+        for kwargs in captured_kwargs:
+            assert isinstance(kwargs["ctx"], TurnEgressContext)
+            assert kwargs["registry"] is registry
+            assert kwargs["gate"] is gate
+            assert kwargs["dlp"] is dlp
+            assert kwargs["user_id"] == "bruce"  # _stub_user() default slug
+            assert kwargs["language"] == "en-US"  # _stub_user() default language
+            # the committed per-turn egress anchor's inbound_id IS the trace_id
+            # threaded as correlation_id — same identity, not merely equal by
+            # coincidence (both derive from the same _handle_turn trace_id).
+            assert kwargs["correlation_id"] == kwargs["ctx"].inbound_id
+
+
+class TestActLoopFanoutCap:
+    """FIX-6: the fan-out-over-cap arm folds into the terminal ``completed``
+    row — there is no separate ``tool_fanout_exceeded`` audit row."""
+
+    async def test_fanout_over_cap_refuses(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(loop_constants, "MAX_TOOL_CALLS_PER_ITERATION", 1)
+        r0 = _tool_use_response(
+            ToolCall(id="c0", name="clock.now", arguments={}),
+            ToolCall(id="c1", name="clock.now", arguments={}),
+        )
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=r0)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+        )
+
+        reply = await _drive_turn(orch)
+
+        assert reply == t("orchestrator.tool.too_many_tool_calls")
+
+        # The over-cap completion itself still gets the ordinary non-terminal
+        # `provider_call:0` row (FIX-3 — every continuing completion is
+        # audited that way regardless of what happens next). FIX-6 is about
+        # what does NOT happen: there is no SEPARATE `tool_fanout_exceeded`
+        # row — the refusal is folded into the terminal `completed` row.
+        phases = [c.kwargs["subject"]["phase"] for c in orch._audit.append.await_args_list]
+        assert phases == ["provider_call:0", "completed"]
+        completed_kwargs = orch._audit.append.await_args.kwargs
+        assert completed_kwargs["result"] == "refused"
+        assert completed_kwargs["subject"]["exit_reason"] == "too_many_tool_calls"
+
+
+class TestActLoopMaxIterations:
+    """The for-else + monotonic ``call_index`` across iterations are now
+    REACHABLE now that dispatch actually runs (Task 3)."""
+
+    async def test_max_iterations_reached(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(loop_constants, "MAX_TOOL_ITERATIONS", 2)
+        forever = _tool_use_response(ToolCall(id="c", name="clock.now", arguments={}))
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=forever)
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            return "r"
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+        )
+
+        reply = await _drive_turn(orch)
+
+        assert reply == t("orchestrator.tool.max_iterations_reached")
+        assert router.complete.await_count == 2
+
+
+class TestActLoopNegativePersistence:
+    """A tool_result's raw content is EPHEMERAL — it must never reach the
+    episodic store, only the ephemeral in-turn ``local`` transcript."""
+
+    async def test_tool_results_never_persist_to_episodic(self, monkeypatch: Any) -> None:
+        r0 = _tool_use_response(ToolCall(id="c0", name="clock.now", arguments={}))
+        r1 = _text_response("final")
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=[r0, r1])
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            return "SENSITIVE-TOOL-BODY"
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+
+        episodic_rows = await _drive_turn_capturing_episodic(
+            router=router, tool_registry=_fake_registry("clock.now")
+        )
+
+        contents = [r["content"] for r in episodic_rows]
+        assert "SENSITIVE-TOOL-BODY" not in contents  # ephemeral: never persists
+        assert "final" in contents  # only user input + final assistant answer persist
+
+
+class TestActLoopEscalationPropagation:
+    """FIX-5: dispatch_tool's escalation exceptions MUST propagate UNCAUGHT
+    out of the loop / ``_handle_turn`` / ``handle_user_message`` — a canary
+    trip or a clearance denial halts the turn, it is never converted into a
+    recoverable ``tool_result`` string (spec §9 / CLAUDE.md HARD rule #7)."""
+
+    async def test_inbound_canary_tripped_propagates_uncaught(self, monkeypatch: Any) -> None:
+        r0 = _tool_use_response(ToolCall(id="c0", name="web.fetch", arguments={}))
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=r0)
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            raise InboundCanaryTripped(destination="evil.example", egress_id="egress-1")
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("web.fetch"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+        )
+
+        with pytest.raises(InboundCanaryTripped):
+            await _drive_turn(orch)
+
+    async def test_outbound_canary_tripped_propagates_uncaught(self, monkeypatch: Any) -> None:
+        r0 = _tool_use_response(ToolCall(id="c0", name="web.fetch", arguments={}))
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=r0)
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            raise OutboundCanaryTripped(token="canary-token-1")  # noqa: S106
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("web.fetch"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+        )
+
+        with pytest.raises(OutboundCanaryTripped):
+            await _drive_turn(orch)
+
+    async def test_downgrade_clearance_denial_propagates_uncaught(self, monkeypatch: Any) -> None:
+        r0 = _tool_use_response(ToolCall(id="c0", name="web.fetch", arguments={}))
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=r0)
+
+        async def _d(call: ToolCall, call_index: int, **kw: Any) -> str:
+            # the downgrade-clearance shape: a bare AlfredError (not a more
+            # specific subclass) raised by downgrade_to_orchestrator on a
+            # clearance denial (tool_dispatch.py's downgrade_denied arm).
+            raise AlfredError("downgrade clearance denied")
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _d)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("web.fetch"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+        )
+
+        with pytest.raises(AlfredError):
+            await _drive_turn(orch)
