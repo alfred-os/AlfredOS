@@ -6,7 +6,9 @@ Pin the construction-time contract of
 * the happy path wires an :class:`EgressResponseExtractor` REUSING the passed-in
   quarantine-graph components (gate / extractor / recorder — identity, not a
   re-spawn) and stamps web.fetch's Spec-C5 policy (5 MiB cap, MIME allowlist,
-  ``canary=None`` residual);
+  and a non-``None`` canary matcher — derived from
+  ``settings.web_fetch_canary_tokens`` when none is explicitly supplied,
+  #339 PR4a);
 * the fail-closed path refuses when ``settings.egress_relay_url`` is unset.
 
 The end-to-end fetch+extract proof over a loopback relay lives in
