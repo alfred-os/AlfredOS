@@ -81,6 +81,11 @@ def build_web_fetch_tool(
 
     async def _dispatch(inv: ToolInvocation) -> EgressExtractOutcome:
         headers_arg = inv.arguments.get("headers", {})
+        # A non-dict ``headers`` arg from the planner is silently dropped to
+        # ``{}`` (no custom headers sent) rather than refused — benign, since
+        # ``dispatch_web_fetch`` DLP-scans every header value downstream.
+        # TODO(#339 follow-up): consider refuse-loud vs silent-drop for a
+        # malformed headers arg (full JSON-Schema arg type-checking is deferred).
         headers = (
             {str(k): str(v) for k, v in headers_arg.items()}
             if isinstance(headers_arg, dict)

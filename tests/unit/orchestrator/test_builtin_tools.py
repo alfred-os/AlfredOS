@@ -104,3 +104,32 @@ async def test_web_fetch_adapter_threads_ctx_and_call_index(
     assert seen["extractor"] == "EXT"
     assert seen["user_id"] == "u"
     assert seen["correlation_id"] == "c"
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_adapter_coerces_non_dict_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-dict ``headers`` tool-call arg (a model-supplied trust-boundary
+    input) is silently dropped to ``{}`` — no custom headers sent — rather than
+    refused. Pins the deliberate defensive-coercion ``else {}`` branch (which
+    coverage.py's ternary-arc blind spot doesn't otherwise instrument). See the
+    ``# TODO(#339 follow-up)`` note in ``builtin_tools.py``."""
+    seen: dict[str, Any] = {}
+
+    async def _fake_dispatch(**kwargs: Any) -> object:
+        seen.update(kwargs)
+        return "SENTINEL_OUTCOME"
+
+    monkeypatch.setattr("alfred.orchestrator.builtin_tools.dispatch_web_fetch", _fake_dispatch)
+    spec = build_web_fetch_tool(
+        extractor="EXT",
+        config="CFG",
+        rate_limiter="RL",
+        outbound_dlp="DLP",
+        audit="AUD",
+    )
+    out = await spec.dispatch(_inv({"url": "https://example.com", "headers": "not-a-dict"}))
+    assert out == "SENTINEL_OUTCOME"
+    assert seen["url"] == "https://example.com"
+    assert seen["headers"] == {}
