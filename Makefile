@@ -92,7 +92,7 @@ test-unit: ## Run unit tests only (fast; no Docker).
 
 test-integration: ## Run integration tests only (needs Docker for testcontainers).
 	@if [ -d tests/integration ]; then \
-		uv run pytest tests/integration -q; \
+		uv run pytest tests/integration -q -m "not real_llm"; \
 	else \
 		echo "::notice::no tests/integration/ yet — skipping test-integration"; \
 	fi
@@ -101,7 +101,7 @@ test: test-unit test-integration ## Run unit + integration (matches what CI runs
 
 test-smoke: ## Run smoke tests against a running stack (requires `docker compose up`).
 	@if [ -d tests/smoke ]; then \
-		uv run pytest tests/smoke -q; \
+		uv run pytest tests/smoke -q -m "not real_llm"; \
 	else \
 		echo "::notice::no tests/smoke/ yet — skipping test-smoke"; \
 	fi
