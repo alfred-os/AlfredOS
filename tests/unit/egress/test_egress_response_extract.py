@@ -89,6 +89,7 @@ class _StubLedger:
 
     commit_result: CommitIntentResult = field(default_factory=IntentFresh)
     record_calls: list[dict[str, Any]] = field(default_factory=list)
+    get_state_calls: list[dict[str, Any]] = field(default_factory=list)
     state: str | None = "committed_no_response"
 
     async def commit_intent(self, **_kwargs: Any) -> CommitIntentResult:
@@ -99,7 +100,8 @@ class _StubLedger:
             {"egress_id": egress_id, "response": response, "language": language}
         )
 
-    async def get_state(self, **_kwargs: Any) -> str | None:
+    async def get_state(self, *, egress_id: str) -> str | None:
+        self.get_state_calls.append({"egress_id": egress_id})
         return self.state
 
     async def prune_expired(self, **_kwargs: Any) -> int:
@@ -956,6 +958,18 @@ async def test_ledger_state_delegates_to_relay_ledger(
         authorized_nonce=authorized_t3_nonce,
     )
 
-    state = await extractor_obj.ledger_state(egress_id="c" * 64)
+    # Mutate the fake to a value distinct from its own default
+    # ("committed_no_response"). If ledger_state() were a hardcoded literal
+    # (or forwarded the wrong egress_id to a differently-configured ledger),
+    # asserting against the *default* would pass regardless — the mutation
+    # forces the returned value to trace back to this call.
+    egress_id = "c" * 64
+    ledger.state = "committed_with_response"
 
-    assert state == ledger.state == "committed_no_response"
+    state = await extractor_obj.ledger_state(egress_id=egress_id)
+
+    assert state == "committed_with_response"
+
+    # Prove the accessor forwards the caller's egress_id through to the
+    # ledger, not a wrong or absent one.
+    assert ledger.get_state_calls == [{"egress_id": egress_id}]
