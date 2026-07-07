@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-06 19:23+0100\n"
+"POT-Creation-Date: 2026-07-07 10:49+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2517,35 +2517,36 @@ msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "
 "configured together."
 
-#: src/alfred/orchestrator/tool_dispatch.py:124
+#: src/alfred/orchestrator/tool_dispatch.py:129
 msgid "orchestrator.tool.unknown_tool"
 msgstr "Unknown tool: {tool}."
 
-#: src/alfred/orchestrator/tool_dispatch.py:133
+#: src/alfred/orchestrator/tool_dispatch.py:138
 msgid "orchestrator.tool.invalid_arguments"
 msgstr "Invalid arguments for {tool}."
 
-#: src/alfred/orchestrator/tool_dispatch.py:146
+#: src/alfred/orchestrator/tool_dispatch.py:151
 msgid "orchestrator.tool.not_permitted"
 msgstr "Tool {tool} is not permitted."
 
-#: src/alfred/orchestrator/tool_dispatch.py:197
+#: src/alfred/orchestrator/tool_dispatch.py:202
 msgid "orchestrator.tool.rate_limited"
 msgstr "Tool {tool} is rate limited."
 
-#: src/alfred/orchestrator/tool_dispatch.py:205
+#: src/alfred/orchestrator/tool_dispatch.py:210
 msgid "orchestrator.tool.domain_not_allowed"
 msgstr "Tool {tool} refused: destination not allowed."
 
-#: src/alfred/orchestrator/tool_dispatch.py:213
-msgid "orchestrator.tool.error"
-msgstr "Tool {tool} failed."
-
-#: src/alfred/orchestrator/tool_dispatch.py:223
+#: src/alfred/orchestrator/tool_dispatch.py:242
+#: src/alfred/orchestrator/tool_dispatch.py:270
 msgid "orchestrator.tool.timeout"
 msgstr "Tool {tool} timed out."
 
-#: src/alfred/orchestrator/tool_dispatch.py:243
+#: src/alfred/orchestrator/tool_dispatch.py:250
+msgid "orchestrator.tool.error"
+msgstr "Tool {tool} failed."
+
+#: src/alfred/orchestrator/tool_dispatch.py:290
 msgid "orchestrator.tool.refused"
 msgstr "Tool {tool} refused: {reason}."
 
@@ -2872,7 +2873,7 @@ msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 
 #: src/alfred/plugins/stdio_transport.py:629
-#: src/alfred/plugins/web_fetch/errors.py:120
+#: src/alfred/plugins/web_fetch/errors.py:153
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
@@ -2911,14 +2912,14 @@ msgstr ""
 msgid "web.fetch.error.action_timeout"
 msgstr "web.fetch exceeded its action deadline."
 
-#: src/alfred/plugins/web_fetch/errors.py:96
+#: src/alfred/plugins/web_fetch/errors.py:129
 msgid "web.fetch.error.handle_id_mismatch"
 msgstr ""
 "The web.fetch plugin returned a content handle whose id does not match "
 "the host-side reservation. This indicates a plugin defect. Inspect the "
 "audit log: alfred audit log --event tool.web.fetch --since 1h."
 
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:313
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:324
 msgid "web.fetch.error.url_secret_refused"
 msgstr ""
 "web.fetch refused: the request URL was redacted by the outbound DLP scan "
