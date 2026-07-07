@@ -261,7 +261,8 @@ references:
 
 Each payload targets a different way an attacker-controlled ``web.fetch`` ``url``
 argument might escape the three-way ``AllowlistIntersection`` (literal-IP SSRF,
-non-HTTP scheme, suffix-spoof host). All are refused with
+an empty-authority ``file://`` URL failing netloc-equality (NOT a scheme guard),
+suffix-spoof host). All are refused with
 ``dispatch_outcome="domain_not_allowed"`` BEFORE any relay fire — the fire-spy
 extractor/rate-limiter RAISE if reached. Broadens ``cap-2026-006``; drives the
 REAL tool chain, never a permissive shim (CLAUDE.md hard rule #2).

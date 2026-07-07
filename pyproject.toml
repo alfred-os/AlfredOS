@@ -149,7 +149,11 @@ testpaths = ["tests"]
 # (``tests/integration/test_tui_round_trip.py`` + ``tests/smoke/test_tui_e2e.py``)
 # need its ``src/`` on the import path — mirroring the plugin's own test conftest.
 pythonpath = [".", "plugins/alfred_tui/src"]
-addopts = "-ra --strict-markers --strict-config"
+# -m "not real_llm" deselects the spending nightly smoke by default so a bare
+# `uv run pytest tests/integration` (the CLAUDE.md-documented dev command)
+# never spends real provider tokens. pytest's last-`-m`-wins lets the nightly
+# job's explicit `-m real_llm` override this default and still collect it.
+addopts = "-ra --strict-markers --strict-config -m \"not real_llm\""
 asyncio_mode = "auto"
 # pytest-asyncio 1.x changed the UNSET default async-fixture loop scope to
 # function-scope. Pin it explicitly so a future broad-scope async fixture binds
