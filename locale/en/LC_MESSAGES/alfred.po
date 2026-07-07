@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-07 12:23+0100\n"
+"POT-Creation-Date: 2026-07-07 16:01+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1645,6 +1645,27 @@ msgstr ""
 "allow_error_substitution=False to belt-and-braces the recursion guard "
 "(see ADR-0022 PR-S4-3)."
 
+#: src/alfred/i18n/_339_pr4b_broker_reserve.py:37
+msgid "web.fetch.error.url_secret_refused"
+msgstr ""
+"web.fetch refused: the request URL was redacted by the outbound DLP scan "
+"— it appears to carry a secret. Refusing rather than forwarding the raw "
+"secret-bearing URL or sending a redacted URL the gateway cannot fetch. "
+"Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h"
+" (look for dlp_scan_result=url_secret_refused)."
+
+#: src/alfred/i18n/_339_pr4b_broker_reserve.py:38
+msgid "web.fetch.error.header_secret_refused"
+msgstr ""
+"The request was refused because a header contained a secret value. "
+"Reference the secret through the broker instead of sending its value."
+
+#: src/alfred/i18n/_339_pr4b_broker_reserve.py:39
+msgid "web.fetch.error.secret_substitution_refused"
+msgstr ""
+"The request was refused because it referenced a secret that is not on the"
+" web.fetch allowlist. Ask an operator to allowlist it."
+
 #: src/alfred/i18n/_deferred_key_anchors.py:68
 msgid "cli.plugin.grant.status.approved"
 msgstr "approved"
@@ -2931,15 +2952,6 @@ msgstr ""
 "the host-side reservation. This indicates a plugin defect. Inspect the "
 "audit log: alfred audit log --event tool.web.fetch --since 1h."
 
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:386
-msgid "web.fetch.error.url_secret_refused"
-msgstr ""
-"web.fetch refused: the request URL was redacted by the outbound DLP scan "
-"— it appears to carry a secret. Refusing rather than forwarding the raw "
-"secret-bearing URL or sending a redacted URL the gateway cannot fetch. "
-"Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h"
-" (look for dlp_scan_result=url_secret_refused)."
-
 #: src/alfred/providers/base.py:162
 msgid "providers.tool_use_unsupported"
 msgstr ""
@@ -3023,26 +3035,26 @@ msgstr ""
 "`quarantine.ingest` is an internal pre-step; only `quarantine.extract` is"
 " dispatched as the extractor-observed method on this path."
 
-#: src/alfred/security/secrets.py:372 src/alfred/security/secrets.py:383
-#: src/alfred/security/secrets.py:399 src/alfred/security/secrets.py:411
+#: src/alfred/security/secrets.py:398 src/alfred/security/secrets.py:409
+#: src/alfred/security/secrets.py:425 src/alfred/security/secrets.py:437
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:393
+#: src/alfred/security/secrets.py:419
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:486 src/alfred/security/secrets.py:497
+#: src/alfred/security/secrets.py:512 src/alfred/security/secrets.py:523
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:538
+#: src/alfred/security/secrets.py:564
 msgid "secrets.file_in_git_repo_layer3"
 msgstr ""
 "Secrets file '{path}' sits under a git '.git' marker (found at "
@@ -3054,7 +3066,7 @@ msgstr ""
 "repository is valid, then check the secrets.gitignore_check_failed log "
 "for why verification failed.)"
 
-#: src/alfred/security/secrets.py:544
+#: src/alfred/security/secrets.py:570
 msgid "secrets.file_in_git_repo"
 msgstr ""
 "Secrets file '{path}' sits under a git '.git' marker (found at "
@@ -3062,14 +3074,14 @@ msgstr ""
 "directory containing a '.git' marker, or set ALFRED_SECRETS_FILE to a "
 "path outside one."
 
-#: src/alfred/security/secrets.py:583 src/alfred/security/secrets.py:800
+#: src/alfred/security/secrets.py:609 src/alfred/security/secrets.py:855
 msgid "secrets.file_malformed"
 msgstr ""
 "Secrets file '{path}' is not valid TOML. Fix the file's TOML syntax (a "
 "flat table of name = \"value\" entries) and its UTF-8 encoding, then "
 "retry."
 
-#: src/alfred/security/secrets.py:593 src/alfred/security/secrets.py:806
+#: src/alfred/security/secrets.py:619 src/alfred/security/secrets.py:861
 msgid "secrets.file_unreadable"
 msgstr ""
 "Secrets file '{path}' could not be read: {reason}. Check the file and its"

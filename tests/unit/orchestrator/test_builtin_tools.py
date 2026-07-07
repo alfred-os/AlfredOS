@@ -32,6 +32,7 @@ from alfred.orchestrator.tool_registry import (
     InternalToolSpec,
     ToolInvocation,
 )
+from alfred.plugins.web_fetch.auth_allowlist import WEB_FETCH_AUTH_SECRET_ALLOWLIST
 
 
 def _inv(args: dict[str, object]) -> ToolInvocation:
@@ -60,6 +61,16 @@ class _SpyHandleCap:
         return None
 
 
+class _PassthroughBroker:
+    """Minimal ``_SecretSubstituter``-shaped fake — these tests only assert
+    the ``build_web_fetch_tool`` closure's parameter wiring (#339 PR4b-broker
+    Task 3), not the real broker's allowlist/substitution behaviour
+    (unit-covered at ``fetch_dispatcher.py`` / ``secrets.py`` themselves)."""
+
+    def substitute(self, text: str, *, allowed_secrets: frozenset[str]) -> str:
+        return text
+
+
 @pytest.mark.asyncio
 async def test_clock_tool_is_internal_and_allowlisted() -> None:
     spec = build_clock_tool(now=lambda: datetime(2026, 7, 6, tzinfo=UTC))
@@ -83,6 +94,7 @@ async def test_web_fetch_tool_is_external_t3() -> None:
         rate_limiter=object(),
         handle_cap=_SpyHandleCap(),
         outbound_dlp=object(),
+        broker=_PassthroughBroker(),
         audit=object(),
     )
     assert isinstance(spec, ExternalToolSpec)
@@ -104,12 +116,14 @@ async def test_web_fetch_adapter_threads_ctx_and_call_index(
 
     monkeypatch.setattr("alfred.orchestrator.builtin_tools.dispatch_web_fetch", _fake_dispatch)
     spy = _SpyHandleCap()
+    broker = _PassthroughBroker()
     spec = build_web_fetch_tool(
         extractor="EXT",
         config="CFG",
         rate_limiter="RL",
         handle_cap=spy,
         outbound_dlp="DLP",
+        broker=broker,
         audit="AUD",
     )
     out = await spec.dispatch(_inv({"url": "https://example.com", "headers": {"X": "1"}}))
@@ -125,6 +139,11 @@ async def test_web_fetch_adapter_threads_ctx_and_call_index(
     # FIX-2: prove the closure forwards `handle_cap` unchanged through to
     # `dispatch_web_fetch` — not just that it's accepted as a parameter.
     assert seen["handle_cap"] is spy
+    # #339 PR4b-broker Task 3: prove `broker` (and its default
+    # `auth_secret_allowlist`) forward unchanged too — not just that `broker`
+    # is accepted as a parameter.
+    assert seen["broker"] is broker
+    assert seen["auth_secret_allowlist"] == WEB_FETCH_AUTH_SECRET_ALLOWLIST
 
 
 @pytest.mark.asyncio
@@ -149,6 +168,7 @@ async def test_web_fetch_adapter_coerces_non_dict_headers(
         rate_limiter="RL",
         handle_cap=_SpyHandleCap(),
         outbound_dlp="DLP",
+        broker=_PassthroughBroker(),
         audit="AUD",
     )
     out = await spec.dispatch(_inv({"url": "https://example.com", "headers": "not-a-dict"}))

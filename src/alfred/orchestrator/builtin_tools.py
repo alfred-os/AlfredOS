@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar, Final, Literal
 
 from alfred.orchestrator.tool_registry import ExternalToolSpec, InternalToolSpec, ToolInvocation
+from alfred.plugins.web_fetch.auth_allowlist import WEB_FETCH_AUTH_SECRET_ALLOWLIST
 from alfred.plugins.web_fetch.constants import _DEFAULT_ACTION_DEADLINE_SECONDS
 from alfred.plugins.web_fetch.fetch_dispatcher import dispatch_web_fetch
 from alfred.providers.base import ToolDefinition
@@ -16,6 +17,7 @@ from alfred.security.quarantine import ExtractionSchema
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.egress.egress_response_extract import EgressExtractOutcome, EgressResponseExtractor
+    from alfred.plugins.web_fetch.auth_allowlist import _SecretSubstituter
     from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
     from alfred.plugins.web_fetch.handle_cap import HandleCap
     from alfred.plugins.web_fetch.rate_limit import RateLimiter
@@ -73,6 +75,8 @@ def build_web_fetch_tool(
     rate_limiter: RateLimiter,
     handle_cap: HandleCap,
     outbound_dlp: OutboundDlp,
+    broker: _SecretSubstituter,
+    auth_secret_allowlist: frozenset[str] = WEB_FETCH_AUTH_SECRET_ALLOWLIST,
     audit: AuditWriter,
     action_deadline_seconds: float = _DEFAULT_ACTION_DEADLINE_SECONDS,
 ) -> ExternalToolSpec:
@@ -105,6 +109,8 @@ def build_web_fetch_tool(
             rate_limiter=rate_limiter,
             handle_cap=handle_cap,
             outbound_dlp=outbound_dlp,
+            broker=broker,
+            auth_secret_allowlist=auth_secret_allowlist,
             audit=audit,
             extractor=extractor,
             action_deadline_seconds=action_deadline_seconds,
