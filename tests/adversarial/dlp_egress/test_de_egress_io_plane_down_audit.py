@@ -298,6 +298,9 @@ async def test_in_doubt_emits_audit_row_before_raise(
         async def record_response(self, **_kw: Any) -> None:
             return None
 
+        async def get_state(self, **_kw: Any) -> str | None:
+            return "committed_no_response"
+
         async def prune_expired(self, **_kw: Any) -> int:
             return 0
 

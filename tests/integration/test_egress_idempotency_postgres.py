@@ -208,6 +208,20 @@ async def test_prune_expired_returns_zero_when_nothing_expired(
     assert await _state_of(migrated_url, "eg-young") == "committed_no_response"
 
 
+async def test_get_state_reflects_ledger_lifecycle(store: PostgresEgressIdempotencyStore) -> None:
+    # A pure read of the ledger's tri-state lifecycle (#347 blocker 2's post-timeout
+    # audit path): no row -> None, fresh commit -> committed_no_response (the
+    # in-doubt state), record_response -> committed_with_response. Unlike
+    # commit_intent, get_state never inserts and cannot re-fire a side effect.
+    egress_id = "a" * 64
+    assert await store.get_state(egress_id=egress_id) is None
+    result = await _commit(store, egress_id=egress_id)
+    assert isinstance(result, IntentFresh)
+    assert await store.get_state(egress_id=egress_id) == "committed_no_response"
+    await store.record_response(egress_id=egress_id, response="ok", language="en")
+    assert await store.get_state(egress_id=egress_id) == "committed_with_response"
+
+
 async def test_check_constraint_rejects_no_response_row_with_a_response(
     migrated_url: str,
 ) -> None:

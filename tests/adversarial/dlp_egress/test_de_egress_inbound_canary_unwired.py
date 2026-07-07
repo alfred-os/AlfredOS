@@ -105,6 +105,9 @@ class _StubLedger:
             {"egress_id": egress_id, "response": response, "language": language}
         )
 
+    async def get_state(self, **_kwargs: Any) -> str | None:
+        return None
+
     async def prune_expired(self, **_kwargs: Any) -> int:
         return 0
 

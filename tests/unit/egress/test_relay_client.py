@@ -125,12 +125,16 @@ class _StubLedger:
     """Scripted EgressIdempotencyStore returning a preset CommitIntentResult."""
 
     result: CommitIntentResult = field(default_factory=IntentFresh)
+    state: str | None = "committed_no_response"
 
     async def commit_intent(self, **_kwargs: Any) -> CommitIntentResult:
         return self.result
 
     async def record_response(self, **_kwargs: Any) -> None:
         return None
+
+    async def get_state(self, **_kwargs: Any) -> str | None:
+        return self.state
 
     async def prune_expired(self, **_kwargs: Any) -> int:
         return 0
@@ -143,6 +147,9 @@ class _ErrorLedger:
         raise EgressIdIntegrityError(egress_id=egress_id)
 
     async def record_response(self, **_kwargs: Any) -> None:
+        return None
+
+    async def get_state(self, **_kwargs: Any) -> str | None:
         return None
 
     async def prune_expired(self, **_kwargs: Any) -> int:
@@ -168,6 +175,9 @@ class _HashTrackingLedger:
 
     async def record_response(self, **_kwargs: Any) -> None:
         return None
+
+    async def get_state(self, **_kwargs: Any) -> str | None:
+        return "committed_no_response" if self._seen else None
 
     async def prune_expired(self, **_kwargs: Any) -> int:
         return 0
