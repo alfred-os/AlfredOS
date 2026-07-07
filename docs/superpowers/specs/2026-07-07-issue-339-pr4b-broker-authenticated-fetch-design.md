@@ -25,11 +25,12 @@ and does the live auth surface ship open or closed?
 **DECISION (Option A):** build `SecretBroker.substitute()` (the shared primitive) + wire it into
 `dispatch_web_fetch` **after DLP, before `_RawToolRequest`**, gated by a **closed web.fetch
 auth-secret allowlist that ships EMPTY**. The planner may write `{{secret:<name>}}` placeholders,
-but the empty allowlist means every reference refuses → **live authenticated fetch is OFF in
-#339**; the mechanism + contract are fully built and proven against a fixture binding in tests.
+but the empty allowlist means every reference refuses → **live authenticated fetch is OFF
+in #339**; the mechanism + contract are fully built and proven against a fixture binding in tests.
 Includes the negative defence (a raw secret in a URL/header is refused at the core DLP boundary).
 
 **Why A over the alternatives:**
+
 - **Faithful to the blocker's literal wording** — "broker secret-ID references, with the broker
   substituting the real secret value at the tool-call boundary."
 - **Builds the reusable primitive** the `_SecretBrokerSubstitute` Protocol in
@@ -41,6 +42,7 @@ Includes the negative defence (a raw secret in a URL/header is refused at the co
   `_ADAPTER_SECRET_ALLOWLIST` (an unknown key is a typed refusal, never a broker passthrough).
 
 **Rejected:**
+
 - **Option B (operator domain→secret binding, planner never names secrets):** tighter (zero
   planner secret surface) but diverges from the blocker's "caller supplies a SecretId per header"
   and does not build the reusable `substitute()` primitive.
@@ -344,8 +346,8 @@ The ADR names both explicitly so the constraint is not rediscovered later.
 - **Integration (loopback relay + Postgres):** extend `test_web_fetch_assembly.py` /
   `test_act_loop_real_chain.py` — a fixture-bound placeholder fetch reaches a loopback echo
   server with the substituted `Authorization` header (benign token that passes the gateway
-  stage-2 scan), proving end-to-end substitution + gateway pass-through; and assert the stored T2
-  + audit row carry no secret.
+  stage-2 scan), proving end-to-end substitution + gateway pass-through; and assert the stored
+  T2 and audit row carry no secret.
 - **Adversarial:** the `de-2026-0NN` entry (§10).
 - **Non-vacuous secret-absence assertion:** a test that scans the whole audit-row set + the
   serialized ledger row for the fixture secret value and asserts it is absent (mirrors PR3's
@@ -361,6 +363,7 @@ ship a `substitute()` primitive with no consumer (worse than PR4b-audit's clean 
 two independent concerns).
 
 **Task decomposition (for `writing-plans`, sketch):**
+
 1. `SecretBroker.substitute()` + `SecretSubstitutionNotAllowed` + placeholder regex + unit tests.
 2. `WEB_FETCH_AUTH_SECRET_ALLOWLIST` (empty) + the two new `DlpScanResult` tokens + lockstep +
    i18n keys.

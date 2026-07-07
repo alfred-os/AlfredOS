@@ -34,10 +34,7 @@ phase; ``test_act_loop_real_chain.py`` is that proof).
 
 from __future__ import annotations
 
-import asyncio
 import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Final
 from unittest.mock import AsyncMock
@@ -49,8 +46,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alfred.audit.log import AuditWriter
 from alfred.egress.egress_id import TurnEgressContext, compute_egress_id
-from alfred.gateway.egress_relay import EgressRelay
-from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
 from alfred.memory.models import AuditEntry, EgressIdempotency
 from alfred.orchestrator.builtin_tools import build_web_fetch_tool
@@ -63,18 +58,14 @@ from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.plugins.web_fetch.handle_cap import HandleCap
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.providers.base import ToolCall
-from alfred.security.canary_matcher import CanaryMatcher
-from alfred.security.dlp import OutboundDlp, redact_secret_shapes
+from alfred.security.dlp import redact_secret_shapes
 from alfred.security.quarantine import Extracted, T3DerivedData
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.secrets import SecretBroker
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.egress_doubles import (
-    _await_relay_ready,
     _FakeClient,
-    _FireCounter,
-    make_fake_external_world,
 )
 from tests.integration.orchestrator.conftest import _assembly_gate, _settings, boot_loopback_relay
 
@@ -258,18 +249,23 @@ async def test_build_tool_registry_end_to_end(
 # ---------------------------------------------------------------------------
 # FIX-13/FIX-14 (#339 PR4b-broker Task 6) — header-capturing loopback relay
 #
-# ``boot_loopback_relay`` (conftest.py) hardcodes ``make_fake_external_world()``'s
-# plain ``_FakeClient`` factory — sufficient for every OTHER test in this
-# directory, none of which needs to observe what the gateway's upstream
-# client actually received. The authenticated-fetch positive-path test below
-# is the one caller that does: it must prove a broker-substituted secret
-# survives past the GATEWAY's second-pass DLP re-scan (spec §7 residual), not
-# merely past the dispatcher (already unit-covered in
+# ``boot_loopback_relay`` (conftest.py) defaults to
+# ``make_fake_external_world()``'s plain ``_FakeClient`` factory — sufficient
+# for every OTHER test in this directory, none of which needs to observe what
+# the gateway's upstream client actually received. The authenticated-fetch
+# positive-path test below is the one caller that does: it must prove a
+# broker-substituted secret survives past the GATEWAY's second-pass DLP
+# re-scan (spec §7 residual), not merely past the dispatcher (already
+# unit-covered in
 # ``test_fetch_dispatcher.py::test_allowlisted_placeholder_substituted_into_wire_headers``).
-# ``_HeaderCapturingClient`` is a thin decorator over ``_FakeClient`` (never a
-# reimplementation of its body/response/fire-count behaviour) and
-# ``_boot_loopback_relay_capturing_headers`` mirrors ``boot_loopback_relay``'s
-# bind/serve/shutdown dance exactly, swapping only the ``open_client`` factory.
+# ``boot_loopback_relay`` accepts an optional ``wrap_client`` decorator seam
+# (#339 PR4b-broker Task-6 review, FIX-B) precisely for this: pass
+# ``wrap_client=`` a callable that decorates each freshly-opened
+# ``_FakeClient`` instead of hand-rolling a second copy of the
+# bind/serve/shutdown dance. ``_HeaderCapturingClient`` below is that
+# decorator — a thin wrapper over ``_FakeClient`` (never a reimplementation
+# of its body/response/fire-count behaviour) — passed as
+# ``boot_loopback_relay(..., wrap_client=...)``.
 # ---------------------------------------------------------------------------
 
 
@@ -301,58 +297,6 @@ class _HeaderCapturingClient:
 
     async def aclose(self) -> None:
         await self._inner.aclose()
-
-
-@asynccontextmanager
-async def _boot_loopback_relay_capturing_headers(
-    *, allowlist: frozenset[tuple[str, int]]
-) -> AsyncIterator[tuple[int, _FireCounter, dict[str, dict[str, str]]]]:
-    """``boot_loopback_relay`` (conftest.py), with a header-capturing upstream.
-
-    Yields ``(port, fire_counter, capture)`` — ``capture["headers"]`` holds the
-    LAST forwarded request's headers once a fetch has fired (absent before
-    that). See the module note above for why this is a local variant rather
-    than an extension of the shared fixture.
-    """
-    open_client_factory, fire_counter, _canned = make_fake_external_world()
-    capture: dict[str, dict[str, str]] = {}
-
-    def _capturing_factory() -> _HeaderCapturingClient:
-        return _HeaderCapturingClient(open_client_factory(), capture)
-
-    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-    port: int = srv.sockets[0].getsockname()[1]
-    srv.close()
-    await srv.wait_closed()
-
-    gateway_dlp = OutboundDlp(
-        broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
-    )
-    relay = EgressRelay(
-        tool_allowlist=allowlist,
-        dlp=gateway_dlp,
-        audit=record_egress_relay,
-        bind_host="127.0.0.1",
-        port=port,
-        resolve=lambda _h: "1.1.1.1",
-        open_client=_capturing_factory,
-        response_byte_cap=4096,
-        upstream_deadline_s=10.0,
-    )
-    shutdown = asyncio.Event()
-    serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
-    try:
-        await _await_relay_ready(port, serve_task)
-    except BaseException:
-        shutdown.set()
-        await asyncio.wait_for(serve_task, timeout=5)
-        raise
-
-    try:
-        yield port, fire_counter, capture
-    finally:
-        shutdown.set()
-        await asyncio.wait_for(serve_task, timeout=5)
 
 
 @pytest.mark.asyncio
@@ -415,11 +359,17 @@ async def test_build_tool_registry_authenticated_fetch_positive_path(
     ctx = TurnEgressContext(adapter_id="ada-auth", inbound_id="in-auth", session_id="sess-auth")
     egress_id = compute_egress_id(ctx, call_index=0)
 
+    capture: dict[str, dict[str, str]] = {}
+
+    def _wrap_capturing(client: _FakeClient) -> _HeaderCapturingClient:
+        return _HeaderCapturingClient(client, capture)
+
     try:
-        async with _boot_loopback_relay_capturing_headers(allowlist=_FAKE_ALLOWLIST) as (
+        async with boot_loopback_relay(allowlist=_FAKE_ALLOWLIST, wrap_client=_wrap_capturing) as (
+            _relay,
             port,
             fire_counter,
-            capture,
+            _canned,
         ):
             web_fetch_extractor = build_web_fetch_egress_extractor(
                 settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
@@ -488,13 +438,25 @@ async def test_build_tool_registry_authenticated_fetch_positive_path(
             # would never have been reached.
             assert redact_secret_shapes(substituted_header_value) == substituted_header_value
 
-        # --- FIX-13 non-vacuous secret-absence guard ---------------------------
-        # Positive control FIRST: prove the scan itself would catch the
-        # fixture value if it were present, before trusting the negative
-        # result below (mirrors the PR3 FIX-11 non-vacuous
-        # containment-regression guard's structure: prove the detector
-        # works, THEN trust its silence).
-        assert _BENIGN_AUTH_TOKEN in f"leaked {_BENIGN_AUTH_TOKEN} here"
+        # --- FIX-13 scan-mechanics sanity check (strengthened, Task-6 review) --
+        # The GENUINE end-to-end secret-handling proof is the header-capture
+        # assertion above (`capture["headers"]["Authorization"]` — §7
+        # positive path). `AuditEntry.subject` and `EgressIdempotency.response`
+        # are a closed, header-free field set by construction (see the module
+        # note above `_HeaderCapturingClient`), so the two `not in` absence
+        # assertions below CANNOT observe a substitution regression — they
+        # would pass even if `SecretBroker.substitute` leaked the real header
+        # value elsewhere. What they CAN catch is a schema change that starts
+        # smuggling header content into the audit subject or the ledger
+        # response. This block proves the two absence checks are at least
+        # capable of firing for that failure mode: it re-applies the IDENTICAL
+        # `json.dumps(...)` / bare `in` scan expressions used below, over
+        # synthetic data shaped like the real inputs but with the token
+        # planted, and asserts each scan finds it.
+        _planted_subject_rows: list[dict[str, str]] = [{"planted_for_control": _BENIGN_AUTH_TOKEN}]
+        assert _BENIGN_AUTH_TOKEN in json.dumps(_planted_subject_rows)
+        _planted_ledger_response = f"prefix-{_BENIGN_AUTH_TOKEN}-suffix"
+        assert _BENIGN_AUTH_TOKEN in _planted_ledger_response
 
         async with engine.connect() as conn:
             audit_rows = (

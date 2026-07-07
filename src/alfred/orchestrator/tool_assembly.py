@@ -98,12 +98,12 @@ def build_tool_registry(
         outbound_dlp: The boot ``OutboundDlp`` — the relay client's core-side
             redaction pass AND ``build_web_fetch_tool``'s dispatch-time DLP
             scanner.
-        broker: The daemon's ``SecretBroker`` (#339 PR4b-broker, #351
-            config-as-interface convention: a stateful SERVICE, passed by
-            plain DI rather than pulled from config) — resolves an
-            allowlisted ``{{secret:<name>}}`` header placeholder into the
-            real secret value at ``dispatch_web_fetch``'s Step 1c, gated by
-            the empty-default ``WEB_FETCH_AUTH_SECRET_ALLOWLIST``.
+        broker: The daemon's ``SecretBroker`` service (#339 PR4b-broker),
+            injected by plain DI — resolves an allowlisted
+            ``{{secret:<name>}}`` header placeholder into the real secret
+            value at ``dispatch_web_fetch``'s Step 1c, gated by the
+            empty-default ``WEB_FETCH_AUTH_SECRET_ALLOWLIST`` (see
+            ADR-0048).
         audit_writer: The durable audit sink for both the relay client's
             refusal rows and ``dispatch_web_fetch``'s per-fetch audit rows.
         session_scope: The async session scope the egress extractor's
