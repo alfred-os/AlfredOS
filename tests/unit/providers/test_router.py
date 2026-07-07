@@ -10,6 +10,7 @@ from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
     Message,
+    ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
     ToolDefinition,
 )
@@ -89,6 +90,28 @@ async def test_router_does_not_fall_back_on_tool_unsupported() -> None:
             CompletionRequest(
                 messages=[Message(role="user", content="x")],
                 tools=(ToolDefinition(name="t", description="d", input_schema={}),),
+            )
+        )
+    fallback.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_fall_back_on_tool_name_collision() -> None:
+    # A tool-name collision is a deterministic config error: the fallback would
+    # build the same name-map from the same tools and raise identically, so the
+    # router must re-raise it, not try (and mislabel) the fallback.
+    primary = MagicMock(name="primary")
+    primary.complete = AsyncMock(
+        side_effect=ProviderToolNameCollisionError("web.fetch and web_fetch collide")
+    )
+    fallback = MagicMock(name="fallback")
+    fallback.complete = AsyncMock()
+    router = ProviderRouter(primary=primary, fallback=fallback)
+    with pytest.raises(ProviderToolNameCollisionError):
+        await router.complete(
+            CompletionRequest(
+                messages=[Message(role="user", content="x")],
+                tools=(ToolDefinition(name="web.fetch", description="d", input_schema={}),),
             )
         )
     fallback.complete.assert_not_awaited()
