@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from alfred.providers.base import (
     Message,
     ProviderCapability,
     ProviderMalformedToolArgumentsError,
+    ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
     ToolCall,
     ToolDefinition,
@@ -91,10 +93,10 @@ def _openai_ok_response(content: str = "ok") -> MagicMock:
     return r
 
 
-def _openai_toolcall_response(args_json: str) -> MagicMock:
+def _openai_toolcall_response(args_json: str, *, name: str = "web.fetch") -> MagicMock:
     tc = MagicMock(id="c1", type="function")
     tc.function = MagicMock(arguments=args_json)
-    tc.function.name = "web.fetch"  # name= is a reserved MagicMock ctor kwarg; set post-ctor
+    tc.function.name = name  # name= is a reserved MagicMock ctor kwarg; set post-ctor
     r = MagicMock()
     r.choices = [
         MagicMock(message=MagicMock(content=None, tool_calls=[tc]), finish_reason="tool_calls")
@@ -139,17 +141,22 @@ async def test_tools_and_tool_role_serialize_to_openai_shape() -> None:
     )
     await provider.complete(req)
     kw = fake_client.chat.completions.create.await_args.kwargs
+    # Canonical dotted names are sanitized to underscores on the WIRE — OpenAI/
+    # DeepSeek 400 on '^[a-zA-Z0-9_-]+$' violations (dots forbidden). This
+    # applies to the tool definition, the forced tool_choice, AND the prior
+    # assistant tool_call being re-sent as history (load-bearing at iteration
+    # >= 1 of the act-phase loop).
     assert kw["tools"] == [
         {
             "type": "function",
             "function": {
-                "name": "web.fetch",
+                "name": "web_fetch",
                 "description": "fetch",
                 "parameters": {"type": "object"},
             },
         }
     ]
-    assert kw["tool_choice"] == {"type": "function", "function": {"name": "web.fetch"}}
+    assert kw["tool_choice"] == {"type": "function", "function": {"name": "web_fetch"}}
     assert kw["messages"][0] == {
         "role": "assistant",
         "content": "",
@@ -157,11 +164,48 @@ async def test_tools_and_tool_role_serialize_to_openai_shape() -> None:
             {
                 "id": "c1",
                 "type": "function",
-                "function": {"name": "web.fetch", "arguments": '{"url": "https://a.test"}'},
+                "function": {"name": "web_fetch", "arguments": '{"url": "https://a.test"}'},
             }
         ],
     }
     assert kw["messages"][1] == {"role": "tool", "content": '{"ok": true}', "tool_call_id": "c1"}
+
+
+@pytest.mark.asyncio
+async def test_sent_tool_name_matches_openai_function_name_grammar() -> None:
+    """OpenAI/DeepSeek 400 on any tools[].function.name not matching
+    ^[a-zA-Z0-9_-]+$ — dots (AlfredOS's canonical tool-name separator) are
+    forbidden. Assert the actual grammar, not just the literal 'web_fetch'
+    value, so a future sanitization-algorithm change can't silently drift
+    away from provider compliance while keeping only the exact-value test
+    green.
+    """
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response())
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    await provider.complete(
+        CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+    )
+    kw = fake_client.chat.completions.create.await_args.kwargs
+    sent_name = kw["tools"][0]["function"]["name"]
+    assert re.fullmatch(r"[a-zA-Z0-9_-]+", sent_name) is not None
+
+
+@pytest.mark.asyncio
+async def test_complete_refuses_loud_on_tool_name_collision() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock()
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    tools = (
+        ToolDefinition(name="web.fetch", description="d", input_schema={}),
+        ToolDefinition(name="web_fetch", description="d2", input_schema={}),
+    )
+    with pytest.raises(ProviderToolNameCollisionError):
+        await provider.complete(
+            CompletionRequest(messages=[Message(role="user", content="x")], tools=tools)
+        )
+    fake_client.chat.completions.create.assert_not_awaited()  # refuse BEFORE the network call
 
 
 @pytest.mark.asyncio
@@ -185,12 +229,20 @@ async def test_deepseek_tool_choice_string_variants(choice: str, expected: str) 
 
 @pytest.mark.asyncio
 async def test_response_tool_calls_parsed_and_stop_reason_mapped() -> None:
+    # Round trip: the provider echoes back the SANITIZED wire name
+    # ("web_fetch") — a real DeepSeek response never sees the canonical dot.
+    # The parser must reverse-map it via the request's tools back to the
+    # canonical "web.fetch" so tool-registry dispatch / audit rows never see
+    # the sanitized form.
     fake_client = MagicMock()
     fake_client.chat.completions.create = AsyncMock(
-        return_value=_openai_toolcall_response('{"url": "https://a.test"}')
+        return_value=_openai_toolcall_response('{"url": "https://a.test"}', name="web_fetch")
     )
     provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
-    res = await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    res = await provider.complete(
+        CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+    )
     assert res.stop_reason == "tool_use"
     assert res.tool_calls == (
         ToolCall(id="c1", name="web.fetch", arguments={"url": "https://a.test"}),

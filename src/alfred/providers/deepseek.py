@@ -29,6 +29,7 @@ from openai.types.chat import (
 from openai.types.shared_params import FunctionDefinition
 
 from alfred.i18n import t
+from alfred.providers._tool_names import build_tool_name_map, sanitize_tool_name
 from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
@@ -111,7 +112,10 @@ def _openai_tools(tools: tuple[ToolDefinition, ...]) -> list[ChatCompletionFunct
         ChatCompletionFunctionToolParam(
             type="function",
             function=FunctionDefinition(
-                name=tool.name,
+                # AlfredOS tool names are dotted (web.fetch); OpenAI/DeepSeek
+                # 400 on '^[a-zA-Z0-9_-]+$' violations. Sanitize for the wire —
+                # complete() reverse-maps the response via build_tool_name_map.
+                name=sanitize_tool_name(tool.name),
                 description=tool.description,
                 parameters=dict(tool.input_schema),
             ),
@@ -122,16 +126,25 @@ def _openai_tools(tools: tuple[ToolDefinition, ...]) -> list[ChatCompletionFunct
 
 def _openai_tool_choice(choice: ToolChoice) -> ChatCompletionToolChoiceOptionParam:
     if isinstance(choice, ForcedTool):
-        return ChatCompletionNamedToolChoiceParam(type="function", function={"name": choice.name})
+        return ChatCompletionNamedToolChoiceParam(
+            type="function", function={"name": sanitize_tool_name(choice.name)}
+        )
     # "auto" | "none" | "required" are native OpenAI string values.
     return choice
 
 
 def _openai_tool_call_param(call: ToolCall) -> ChatCompletionMessageFunctionToolCallParam:
+    # Sanitize here too: this serializes a PRIOR assistant tool_call being
+    # re-sent as message history. Without this, iteration >= 1 of the
+    # act-phase loop re-sends the dotted canonical name and 400s exactly
+    # like the initial tools[] declaration would.
     return ChatCompletionMessageFunctionToolCallParam(
         id=call.id,
         type="function",
-        function={"name": call.name, "arguments": json.dumps(dict(call.arguments))},
+        function={
+            "name": sanitize_tool_name(call.name),
+            "arguments": json.dumps(dict(call.arguments)),
+        },
     )
 
 
@@ -181,7 +194,9 @@ def _parse_tool_arguments(raw: str, *, model: str, tool: str) -> Mapping[str, ob
 
 
 def _parse_openai_tool_calls(
-    raw: list[ChatCompletionMessageToolCallUnion] | None, model: str
+    raw: list[ChatCompletionMessageToolCallUnion] | None,
+    model: str,
+    name_map: Mapping[str, str],
 ) -> tuple[ToolCall, ...]:
     if not raw:
         return ()
@@ -192,8 +207,15 @@ def _parse_openai_tool_calls(
             # provider drift is observable rather than a silent drop.
             _log.debug("deepseek.tool_call_dropped_non_function", model=model, tool_type=tc.type)
             continue
-        args = _parse_tool_arguments(tc.function.arguments, model=model, tool=tc.function.name)
-        parsed.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+        # Reverse the send-side sanitization: the provider echoes back the
+        # WIRE name (e.g. "web_fetch"); name_map recovers the canonical
+        # dotted name ("web.fetch") the tool registry/audit rows expect. An
+        # unmapped name (not in this request's tools) falls back unchanged —
+        # it then fails registry resolution loudly as unknown_tool, which is
+        # the safe outcome for a name we cannot account for.
+        canonical_name = name_map.get(tc.function.name, tc.function.name)
+        args = _parse_tool_arguments(tc.function.arguments, model=model, tool=canonical_name)
+        parsed.append(ToolCall(id=tc.id, name=canonical_name, arguments=args))
     return tuple(parsed)
 
 
@@ -259,6 +281,11 @@ class DeepSeekProvider:
             provider_name=self.name,
             model=self._model,
         )
+        # Built once, before the request is sent, so a collision (two
+        # canonical names sanitizing to the same wire name) fails loud
+        # before any network call — and threaded into the response parser
+        # below to reverse-map the wire name back to canonical.
+        name_map = build_tool_name_map(request.tools)
         # kwargs is dict[str, Any] (not a typed CompletionCreateParams) because
         # tools/tool_choice are added conditionally; each value is an official
         # SDK param type built by a typed helper, so the wire shape stays checked.
@@ -274,7 +301,7 @@ class DeepSeekProvider:
         response = await self._client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
         usage = response.usage
-        tool_calls = _parse_openai_tool_calls(msg.tool_calls, self._model)
+        tool_calls = _parse_openai_tool_calls(msg.tool_calls, self._model, name_map)
         stop_reason: StopReason = _OPENAI_STOP_REASON.get(
             response.choices[0].finish_reason, "other"
         )

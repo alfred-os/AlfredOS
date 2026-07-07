@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ from alfred.providers.base import (
     ForcedTool,
     Message,
     ProviderCapability,
+    ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
     ToolCall,
     ToolDefinition,
@@ -96,15 +98,22 @@ async def test_multi_tool_turn_maps_to_anthropic_blocks() -> None:
     )
     await provider.complete(req)
     kw = fake_client.messages.create.await_args.kwargs
+    # Canonical dotted names are sanitized to underscores on the WIRE —
+    # Anthropic 400s on '^[a-zA-Z0-9_-]{1,64}$' violations (dots forbidden).
+    # This applies to the tool definition, the forced tool_choice, AND the
+    # prior assistant tool_use block being re-sent as history (load-bearing
+    # at iteration >= 1 of the act-phase loop). "calc" has no unsafe
+    # characters so it is unchanged — proving sanitization is a targeted
+    # substitution, not a blanket rename.
     assert kw["tools"] == [
-        {"name": "web.fetch", "description": "fetch", "input_schema": {"type": "object"}}
+        {"name": "web_fetch", "description": "fetch", "input_schema": {"type": "object"}}
     ]
-    assert kw["tool_choice"] == {"type": "tool", "name": "web.fetch"}
+    assert kw["tool_choice"] == {"type": "tool", "name": "web_fetch"}
     msgs = kw["messages"]
     assert msgs[1]["role"] == "assistant"
     assert msgs[1]["content"] == [
         {"type": "text", "text": "working"},
-        {"type": "tool_use", "id": "c1", "name": "web.fetch", "input": {"url": "https://a.test"}},
+        {"type": "tool_use", "id": "c1", "name": "web_fetch", "input": {"url": "https://a.test"}},
         {"type": "tool_use", "id": "c2", "name": "calc", "input": {"x": 1}},
     ]
     # consecutive tool results collapse into ONE user turn of tool_result blocks
@@ -129,8 +138,8 @@ async def test_anthropic_tool_only_assistant_omits_empty_text_block() -> None:
     )
     asst = fake_client.messages.create.await_args.kwargs["messages"][0]
     assert asst["content"] == [
-        {"type": "tool_use", "id": "c1", "name": "web.fetch", "input": {"url": "https://a.test"}}
-    ]  # NO empty text block
+        {"type": "tool_use", "id": "c1", "name": "web_fetch", "input": {"url": "https://a.test"}}
+    ]  # NO empty text block; name sanitized for the wire
 
 
 @pytest.mark.asyncio
@@ -149,18 +158,61 @@ async def test_anthropic_tool_choice_none_omits_tools_and_auto_required_map() ->
 
 
 @pytest.mark.asyncio
+async def test_sent_tool_name_matches_anthropic_function_name_grammar() -> None:
+    """Anthropic 400s on any tools[].name not matching ^[a-zA-Z0-9_-]{1,64}$
+    — dots (AlfredOS's canonical tool-name separator) are forbidden. Assert
+    the actual grammar, not just the literal 'web_fetch' value, so a future
+    sanitization-algorithm change can't silently drift away from provider
+    compliance while keeping only the exact-value test green.
+    """
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=_anthropic_text_response())
+    provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    await provider.complete(
+        CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+    )
+    sent_name = fake_client.messages.create.await_args.kwargs["tools"][0]["name"]
+    assert re.fullmatch(r"[a-zA-Z0-9_-]+", sent_name) is not None
+
+
+@pytest.mark.asyncio
+async def test_complete_refuses_loud_on_tool_name_collision() -> None:
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock()
+    provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
+    tools = (
+        ToolDefinition(name="web.fetch", description="d", input_schema={}),
+        ToolDefinition(name="web_fetch", description="d2", input_schema={}),
+    )
+    with pytest.raises(ProviderToolNameCollisionError):
+        await provider.complete(
+            CompletionRequest(messages=[Message(role="user", content="x")], tools=tools)
+        )
+    fake_client.messages.create.assert_not_awaited()  # refuse BEFORE the network call
+
+
+@pytest.mark.asyncio
 async def test_response_tool_use_blocks_parsed() -> None:
+    # Round trip: the provider echoes back the SANITIZED wire name
+    # ("web_fetch") — a real Anthropic response never sees the canonical
+    # dot. The parser must reverse-map it via the request's tools back to
+    # the canonical "web.fetch" so tool-registry dispatch / audit rows
+    # never see the sanitized form.
     fake_client = MagicMock()
     resp = MagicMock()
     text_block = MagicMock(type="text", text="let me fetch")
     tool_block = MagicMock(type="tool_use", id="c1", input={"url": "https://a.test"})
-    tool_block.name = "web.fetch"  # name= is a reserved MagicMock ctor kwarg; set post-ctor
+    tool_block.name = "web_fetch"  # name= is a reserved MagicMock ctor kwarg; set post-ctor
     resp.content = [text_block, tool_block]
     resp.usage = MagicMock(input_tokens=5, output_tokens=3)
     resp.stop_reason = "tool_use"
     fake_client.messages.create = AsyncMock(return_value=resp)
     provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
-    res = await provider.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    res = await provider.complete(
+        CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+    )
     assert res.stop_reason == "tool_use"
     assert res.content == "let me fetch"
     assert res.tool_calls == (

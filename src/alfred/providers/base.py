@@ -141,6 +141,21 @@ class ProviderMalformedToolArgumentsError(AlfredError):
     (spec §4.3)."""
 
 
+class ProviderToolNameCollisionError(AlfredError):
+    """Two distinct canonical tool names sanitize to the same provider-safe
+    wire name (e.g. a future ``web.fetch`` alongside a ``web_fetch`` would
+    both sanitize to ``web_fetch``). Raised by
+    ``alfred.providers._tool_names.build_tool_name_map``.
+
+    Silently keeping only one mapping would let a provider's tool_call for
+    the DROPPED wire name resolve to the WRONG canonical tool at dispatch
+    time — HARD rule #7 (no silent failures in security-adjacent paths)
+    requires a loud refusal here, not a silent clobber. No tool shipped
+    today triggers this (``web.fetch`` / ``clock.now`` sanitize to distinct
+    names); the guard exists so a future tool name can't introduce the
+    ambiguity unnoticed."""
+
+
 def ensure_tool_capability(
     *,
     has_tools: bool,

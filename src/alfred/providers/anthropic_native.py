@@ -8,6 +8,7 @@ Pricing (as of 2026-05; check https://www.anthropic.com/pricing before updating)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 import httpx
@@ -27,6 +28,7 @@ from anthropic.types import (
 )
 from anthropic.types.tool_param import InputSchema
 
+from alfred.providers._tool_names import build_tool_name_map, sanitize_tool_name
 from alfred.providers.base import (
     CompletionRequest,
     CompletionResponse,
@@ -93,7 +95,10 @@ _ANTHROPIC_STOP_REASON: dict[str, StopReason] = {
 def _anthropic_tools(tools: tuple[ToolDefinition, ...]) -> list[ToolParam]:
     return [
         ToolParam(
-            name=tool.name,
+            # AlfredOS tool names are dotted (web.fetch); Anthropic 400s on
+            # '^[a-zA-Z0-9_-]{1,64}$' violations. Sanitize for the wire —
+            # complete() reverse-maps the response via build_tool_name_map.
+            name=sanitize_tool_name(tool.name),
             description=tool.description,
             # input_schema is a JSON Schema by ToolDefinition's contract; cast to
             # the SDK's InputSchema union at the boundary.
@@ -105,7 +110,7 @@ def _anthropic_tools(tools: tuple[ToolDefinition, ...]) -> list[ToolParam]:
 
 def _anthropic_tool_choice(choice: ToolChoice) -> ToolChoiceParam:
     if isinstance(choice, ForcedTool):
-        return ToolChoiceToolParam(type="tool", name=choice.name)
+        return ToolChoiceToolParam(type="tool", name=sanitize_tool_name(choice.name))
     if choice == "required":
         return ToolChoiceAnyParam(type="any")
     # "auto"/"none" -> auto; "none" additionally omits tools upstream (see complete()).
@@ -119,7 +124,13 @@ def _anthropic_assistant_content(m: Message) -> str | list[TextBlockParam | Tool
     if m.content:
         blocks.append(TextBlockParam(type="text", text=m.content))
     blocks.extend(
-        ToolUseBlockParam(type="tool_use", id=c.id, name=c.name, input=dict(c.arguments))
+        # Sanitize here too: this serializes a PRIOR assistant tool_use block
+        # being re-sent as message history. Without this, iteration >= 1 of
+        # the act-phase loop re-sends the dotted canonical name and 400s
+        # exactly like the initial tools[] declaration would.
+        ToolUseBlockParam(
+            type="tool_use", id=c.id, name=sanitize_tool_name(c.name), input=dict(c.arguments)
+        )
         for c in m.tool_calls
     )
     return blocks
@@ -157,12 +168,21 @@ def _anthropic_messages(messages: list[Message]) -> list[MessageParam]:
     return out
 
 
-def _parse_anthropic_content(blocks: list[ContentBlock]) -> tuple[str, tuple[ToolCall, ...]]:
+def _parse_anthropic_content(
+    blocks: list[ContentBlock], name_map: Mapping[str, str]
+) -> tuple[str, tuple[ToolCall, ...]]:
     text_parts: list[str] = []
     calls: list[ToolCall] = []
     for block in blocks:
         if block.type == "tool_use":
-            calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input))
+            # Reverse the send-side sanitization: the provider echoes back
+            # the WIRE name (e.g. "web_fetch"); name_map recovers the
+            # canonical dotted name ("web.fetch") the tool registry/audit
+            # rows expect. An unmapped name falls back unchanged — it then
+            # fails registry resolution loudly as unknown_tool, the safe
+            # outcome for a name we cannot account for.
+            canonical_name = name_map.get(block.name, block.name)
+            calls.append(ToolCall(id=block.id, name=canonical_name, arguments=block.input))
         elif block.type == "text":
             text_parts.append(block.text)
         else:
@@ -234,6 +254,11 @@ class AnthropicProvider:
             provider_name=self.name,
             model=self._model,
         )
+        # Built once, before the request is sent, so a collision (two
+        # canonical names sanitizing to the same wire name) fails loud
+        # before any network call — and threaded into the response parser
+        # below to reverse-map the wire name back to canonical.
+        name_map = build_tool_name_map(request.tools)
         # Anthropic separates the system prompt from the conversation: it goes
         # on the top-level `system` kwarg, not in `messages`. Strip any system
         # message out of the chat list and pass the first one's content through.
@@ -258,7 +283,7 @@ class AnthropicProvider:
             kwargs["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
         response = await self._client.messages.create(**kwargs)
         # Parse text + tool_use blocks (no longer discards non-text blocks).
-        text, tool_calls = _parse_anthropic_content(response.content)
+        text, tool_calls = _parse_anthropic_content(response.content, name_map)
         usage = response.usage
         stop_reason: StopReason = _ANTHROPIC_STOP_REASON.get(response.stop_reason, "other")
         if stop_reason == "tool_use" and not tool_calls:
