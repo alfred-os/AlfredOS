@@ -1,8 +1,9 @@
 # PR4c — tool-arg-injection corpus breadth + nightly real-LLM smoke (issue #339, the finale)
 
-Status: DESIGN + PLAN + FOCUSED PLAN-REVIEW complete (4-lens findings folded into the plan);
-HOLDING before subagent-driven TDD for the requester's ratification of the §7 forks.
-Best-judgment defaults were taken while the requester was away and vetted by plan-review. Plan:
+Status: IMPLEMENTED (Tasks 1-6 complete, full verification suite green); PR not yet opened
+(no PR number to record). Best-judgment §7 defaults were taken while the requester was away,
+vetted by plan-review, and never explicitly ratified before implementation proceeded — see §7
+for the standing ratification note, left as-recorded. Plan:
 `docs/superpowers/plans/2026-07-07-issue-339-pr4c-corpus-and-real-llm-smoke.md`.
 
 Branch: `339-pr4c-corpus-and-real-llm-smoke` off `main` @ `ee6bb88d`.
