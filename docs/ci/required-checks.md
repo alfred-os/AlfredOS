@@ -64,7 +64,7 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 > - **`Python cross-OS (windows-latest)`** — `continue-on-error` removed (6 green cycles, #312–#319); the leg now blocks.
 > - **`Hook dispatch perf gate`** — `paths:` filter dropped + an in-job changed-files gate added (mitigation option 3) so the check reports on every PR while the variance-prone bench runs only on perf-relevant changes (resolving the path-filter caveat that previously lived here).
 >
-> Two checks can **never** gate PRs and are intentionally excluded: `End-to-end` and `Adversarial test suite` live in `nightly.yml` (`schedule:`-only — they never run on a PR, so requiring them would block every PR).
+> Three checks can **never** gate PRs and are intentionally excluded: `End-to-end`, `Adversarial test suite`, and `Real-LLM act-loop smoke` (the `real-llm-smoke` job, added by PR4c / issue #339) live in `nightly.yml` (`schedule:`-only — they never run on a PR, so requiring them would block every PR).
 
 | Check name | Workflow | Job key | Rationale | Promote after |
 | --- | --- | --- | --- | --- |

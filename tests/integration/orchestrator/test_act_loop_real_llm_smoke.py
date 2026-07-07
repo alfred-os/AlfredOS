@@ -147,7 +147,7 @@ def _parsed_or_none(content: str) -> object | None:
     plain ISO string. The containment check only matches the web.fetch extract,
     so a non-JSON message must be skipped, not raise JSONDecodeError."""
     try:
-        return json.loads(content)
+        return cast(object, json.loads(content))
     except json.JSONDecodeError:
         return None
 
@@ -180,38 +180,45 @@ async def test_real_deepseek_drives_web_fetch_loop_end_to_end(
     engine = create_async_engine(migrated_url, future=True)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    def _real_session_scope() -> AbstractAsyncContextManager[AsyncSession]:
-        return session_scope(factory)
-
-    audit_writer = AuditWriter(session_factory=_real_session_scope)
-    config = FetchDispatchConfig(
-        manifest_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
-        operator_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
-        session_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
-        manifest_commit_hash="test-commit",
-    )
-
-    # REAL provider: http_client=None is the in-harness egress bypass (NOT a
-    # prod path). deepseek-chat is the only DeepSeek model with TOOL_USE.
-    provider = DeepSeekProvider.from_settings(
-        api_key=os.environ[_PROVIDER_KEY_ENV],
-        base_url=_DEEPSEEK_BASE_URL,
-        model=_DEEPSEEK_MODEL,
-        http_client=None,
-    )
-    # Wrap the real router so the containment assertions can inspect what the
-    # planner received (the real ProviderRouter, unlike _ScriptedRouter, does
-    # not capture requests).
-    capturing = _CapturingRouter(ProviderRouter(primary=provider, fallback=provider))
-
-    resolver = MagicMock()
-    resolver.get_operator = MagicMock(return_value=_stub_user())
-    monkeypatch.setattr(
-        "alfred.orchestrator.core.uuid.uuid4",
-        lambda: uuid.UUID(_FIXED_TRACE_ID),
-    )
-
+    # Widened to open immediately after engine/factory (and rate_limiter/
+    # handle_cap above) are constructed: a raise anywhere in the setup below
+    # (session-scope wiring, real DeepSeekProvider.from_settings, router
+    # construction, monkeypatch.setattr) must still hit the finally's
+    # rate_limiter.close / handle_cap.aclose / engine.dispose, or a setup
+    # failure leaks the real Redis pool and an undisposed async engine.
     try:
+
+        def _real_session_scope() -> AbstractAsyncContextManager[AsyncSession]:
+            return session_scope(factory)
+
+        audit_writer = AuditWriter(session_factory=_real_session_scope)
+        config = FetchDispatchConfig(
+            manifest_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
+            operator_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
+            session_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
+            manifest_commit_hash="test-commit",
+        )
+
+        # REAL provider: http_client=None is the in-harness egress bypass (NOT a
+        # prod path). deepseek-chat is the only DeepSeek model with TOOL_USE.
+        provider = DeepSeekProvider.from_settings(
+            api_key=os.environ[_PROVIDER_KEY_ENV],
+            base_url=_DEEPSEEK_BASE_URL,
+            model=_DEEPSEEK_MODEL,
+            http_client=None,
+        )
+        # Wrap the real router so the containment assertions can inspect what the
+        # planner received (the real ProviderRouter, unlike _ScriptedRouter, does
+        # not capture requests).
+        capturing = _CapturingRouter(ProviderRouter(primary=provider, fallback=provider))
+
+        resolver = MagicMock()
+        resolver.get_operator = MagicMock(return_value=_stub_user())
+        monkeypatch.setattr(
+            "alfred.orchestrator.core.uuid.uuid4",
+            lambda: uuid.UUID(_FIXED_TRACE_ID),
+        )
+
         async with boot_loopback_relay(allowlist=_FAKE_ALLOWLIST) as (
             _relay,
             port,

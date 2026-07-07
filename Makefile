@@ -90,6 +90,10 @@ test-unit: ## Run unit tests only (fast; no Docker).
 		echo "::notice::no tests/unit/ yet — skipping test-unit"; \
 	fi
 
+# -m "not real_llm" deselects the nightly-only real-LLM smoke
+# (test_act_loop_real_llm_smoke.py) from this local/CI broad run to avoid
+# unintended provider spend; the nightly real-llm-smoke job runs it
+# explicitly via -m real_llm. Same deselect below on test-smoke.
 test-integration: ## Run integration tests only (needs Docker for testcontainers).
 	@if [ -d tests/integration ]; then \
 		uv run pytest tests/integration -q -m "not real_llm"; \

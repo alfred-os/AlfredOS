@@ -107,7 +107,7 @@ jobs:
   real-llm-smoke:
     name: Real-LLM act-loop smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: read  # Minimal: read repo content; testcontainers use the host docker socket.
     steps:
@@ -141,11 +141,18 @@ jobs:
         # (CLAUDE.md: no new dep without justification) and gets fresh
         # testcontainers per attempt (more robust vs an infra/pull flake). A
         # skipped test (no key) exits 0 on attempt 1 → no wasted retries. Every
-        # conditional uses `if` so `set -e` never aborts mid-loop.
+        # conditional uses `if` so `set -e` never aborts mid-loop. Each attempt
+        # is itself bounded by `timeout 300` (5m) so a stuck/degraded provider
+        # fails fast (exit 124) instead of the 20-25m job-level timeout firing
+        # mid-attempt-1 and starving the retry budget — 3 x 5m attempts fits
+        # comfortably inside the 25m job timeout alongside setup/checkout.
         run: |
           set -euo pipefail
+          if [ -z "${ALFRED_SMOKE_PROVIDER_KEY:-}" ]; then
+            echo "::warning title=real-LLM smoke skipped::ALFRED_SMOKE_PROVIDER_KEY is not provisioned — this nightly run validated NOTHING (paper-gate). Provision the repo secret to activate the smoke."
+          fi
           for i in 1 2 3; do
-            if uv run pytest \
+            if timeout 300 uv run pytest \
               tests/integration/orchestrator/test_act_loop_real_llm_smoke.py \
               -m real_llm -v; then
               exit 0
