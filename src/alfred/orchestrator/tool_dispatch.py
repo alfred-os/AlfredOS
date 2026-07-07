@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
+import structlog
+
+from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS, TOOL_DISPATCH_TIMEOUT_FIELDS
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.errors import AlfredError
 from alfred.i18n import t
@@ -30,6 +32,7 @@ from alfred.orchestrator.tool_registry import (
     arguments_conform,
 )
 from alfred.plugins.web_fetch.errors import (
+    WebFetchActionTimeout,
     WebFetchDomainNotAllowed,
     WebFetchError,
     WebFetchRateLimited,
@@ -44,6 +47,8 @@ if TYPE_CHECKING:
     from alfred.orchestrator.tool_registry import ToolRegistry
     from alfred.providers.base import ToolCall
     from alfred.security.dlp import OutboundDlpProtocol
+
+_log = structlog.get_logger(__name__)
 
 
 async def dispatch_tool(
@@ -203,6 +208,38 @@ async def dispatch_tool(
             result_tier="T3",
         )
         return t("orchestrator.tool.domain_not_allowed", tool=external.name)
+    except WebFetchActionTimeout as exc:
+        # #347 blocker 2: enrich the timeout row with the forensic fields the
+        # dispatcher packaged (egress_id / destination host / in_doubt / ledger
+        # state). Non-skippable (symmetric-key append_schema); HARD rule #7. The
+        # forensic fields ride the exception — this chokepoint holds no ledger.
+        # MUST precede `except WebFetchError` (subclass-before-base): otherwise
+        # the generic arm below swallows it and the forensic fields are lost.
+        await audit.append_schema(
+            fields=TOOL_DISPATCH_TIMEOUT_FIELDS,
+            schema_name="TOOL_DISPATCH_TIMEOUT_FIELDS",
+            event="tool.dispatch",
+            actor_user_id=user_id,
+            subject={
+                "tool_name": external.name,
+                "call_id": call.id,
+                "call_index": call_index,
+                "result_tier": "T3",
+                "dispatch_outcome": "timeout",
+                "triggering_user_id": user_id,
+                "correlation_id": correlation_id,
+                "phase": f"tool_dispatch:{external.name}:{call_index}",
+                "egress_id": exc.egress_id,
+                "destination_host": exc.destination_host,
+                "in_doubt": exc.in_doubt,
+                "ledger_state": exc.ledger_state,
+            },
+            trust_tier_of_trigger="T2",
+            result="refused",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
+        )
+        return t("orchestrator.tool.timeout", tool=external.name)
     except WebFetchError:
         await _audit(
             dispatch_outcome="tool_error",
@@ -212,10 +249,20 @@ async def dispatch_tool(
         )
         return t("orchestrator.tool.error", tool=external.name)
     except TimeoutError:
-        # #347 blocker-2 seam: the surfaced action-deadline timeout is audited
-        # here; the live-relay in_doubt/ledger integration assertion lands in PR3.
+        # Defensive fallback ONLY: a bare TimeoutError from an unexpected source
+        # (NOT the web.fetch action-deadline path, which is now typed
+        # WebFetchActionTimeout and handled above with the enriched forensic
+        # row). Still audited + recoverable (HARD #7 totality) but tagged
+        # "unexpected_timeout" (distinct from the enriched "timeout" token) and
+        # logged loudly so a stray bare TimeoutError stays greppable.
+        _log.warning(
+            "orchestrator.tool_dispatch.unexpected_timeout",
+            tool_name=external.name,
+            call_index=call_index,
+            correlation_id=correlation_id,
+        )
         await _audit(
-            dispatch_outcome="timeout",
+            dispatch_outcome="unexpected_timeout",
             result="refused",
             tool_name=external.name,
             result_tier="T3",

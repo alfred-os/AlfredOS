@@ -21,9 +21,10 @@ evaluates to. Dynamic sites are therefore location-pinned in
 :func:`test_dynamic_result_sites_are_documented`, and the reachable values of
 each were MANUALLY AUDITED this round (the quarantine ``post_stage_refused``
 value reached through the ``_emit_extract_audit`` helper param is now closed in
-migration 0022; the ``web_fetch/fetch_dispatcher.py:914`` plugin-payload value
-is tracked as issue #326 — an emit-site clamp, not a domain-widen). The guard
-documents those sites rather than false-positiving on them.
+migration 0022; the ``web_fetch/fetch_dispatcher.py`` plugin-payload value once
+tracked as issue #326 is STALE here — the G7-2.5 re-home (#333) deleted that
+dynamic site entirely, so the file no longer appears in the dynamic-site list
+below). The guard documents those sites rather than false-positiving on them.
 
 The two ``audit_log`` write paths
 ----------------------------------
@@ -391,8 +392,14 @@ def test_dynamic_result_sites_are_documented() -> None:
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
-            # in ck_audit_log_result (no migration).
-            "src/alfred/orchestrator/tool_dispatch.py:114",
+            # in ck_audit_log_result (no migration). #339 PR4b-audit shifted the
+            # line (114 -> 119) by inserting the `import structlog` + `_log`
+            # module logger and the new `WebFetchActionTimeout` import/arm above
+            # this helper; the site itself (and its reachable values) is
+            # unchanged — the enriched timeout arm's own `result="refused"` is a
+            # STATIC literal, already covered by the subset guard above, so it
+            # needs no entry here.
+            "src/alfred/orchestrator/tool_dispatch.py:119",
             # web_fetch/fetch_dispatcher.py: the G7-2.5 re-home (#333) deleted the
             # dynamic ``result=dlp_result`` site (the plugin-payload-derived value
             # tracked as #326). Every result= site in the re-homed dispatcher is
