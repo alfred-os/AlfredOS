@@ -645,6 +645,71 @@ async def test_action_deadline_timeout_ledger_read_failure_forces_in_doubt() -> 
 
 
 @pytest.mark.asyncio
+async def test_action_deadline_timeout_ledger_read_genuinely_hangs_bounds_via_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-1 coverage gap (PR4b-audit review): the sibling test above only
+    proves the guard against a ``ledger_state()`` that RAISES. This test
+    empirically proves the *bound itself* — ``asyncio.timeout(
+    _LEDGER_READ_TIMEOUT_SECONDS)`` in the ``except TimeoutError`` arm — fires
+    when ``ledger_state()`` genuinely HANGS rather than raising. Both
+    ``extractor.handle`` and ``extractor.ledger_state`` are real ``async
+    def``s awaiting a never-set ``asyncio.Event()``; the only way either
+    unblocks is cancellation from an enclosing ``asyncio.timeout`` scope. The
+    module constant is monkeypatched (at the ``fetch_dispatcher`` binding the
+    function looks up by name at call time — the module does
+    ``from ... import _LEDGER_READ_TIMEOUT_SECONDS``, so patching
+    ``fetch_dispatcher._LEDGER_READ_TIMEOUT_SECONDS`` takes effect) to a tiny
+    bound so the inner read-timeout fires fast and deterministically,
+    converting to a real ``TimeoutError`` -> the same safe
+    ``in_doubt=True`` / ``ledger_state="read_unavailable"`` outcome as the
+    raise-case sibling."""
+    monkeypatch.setattr(
+        "alfred.plugins.web_fetch.fetch_dispatcher._LEDGER_READ_TIMEOUT_SECONDS", 0.05
+    )
+
+    handle_never_set = asyncio.Event()
+    ledger_never_set = asyncio.Event()
+    ledger_state_calls: list[str] = []
+
+    async def _hang(**_kwargs: Any) -> EgressExtractOutcome:
+        await handle_never_set.wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _hanging_ledger_state(*, egress_id: str) -> str | None:
+        ledger_state_calls.append(egress_id)
+        await ledger_never_set.wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _hang
+    extractor.ledger_state = _hanging_ledger_state
+    spy = _SpyHandleCap()
+
+    with (
+        structlog.testing.capture_logs() as caps,
+        pytest.raises(WebFetchActionTimeout) as excinfo,
+    ):
+        await _dispatch(extractor=extractor, handle_cap=spy, action_deadline_seconds=0.05)
+
+    exc = excinfo.value
+    assert exc.in_doubt is True
+    assert exc.ledger_state == "read_unavailable"
+    assert len(ledger_state_calls) == 1
+    assert ledger_state_calls[0] == exc.egress_id
+
+    read_fail_logs = [c for c in caps if c.get("event") == "web_fetch.timeout.ledger_read_failed"]
+    assert len(read_fail_logs) == 1
+    assert read_fail_logs[0]["error_type"] == "TimeoutError"
+    assert read_fail_logs[0]["correlation_id"] == "corr-1"
+
+    # The finally still releases the handle_cap slot after the raise, exactly
+    # as it does on the raise-case sibling above.
+    assert spy.released == spy.reserved
+    assert len(spy.released) == 1
+
+
+@pytest.mark.asyncio
 async def test_default_action_deadline_constant_is_used() -> None:
     """The default action-deadline IS ``constants._DEFAULT_ACTION_DEADLINE_SECONDS``.
 
