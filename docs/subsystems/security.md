@@ -462,11 +462,11 @@ subsystem interacts with three distinct egress consumers, all routed through the
    proxied `httpx.AsyncClient`; the gateway L7 CONNECT forward-proxy enforces the
    destination allowlist and audits every connection (mode a, TLS-passthrough).
 2. **Tool egress relay** — gateway inspecting relay for mode-(b) tool calls (web-fetch);
-   the gateway re-runs `OutboundDlp` as a second pass over the DLP-redacted body,
-   providing two-layer content enforcement for pattern-shaped and canary-tagged
-   content. It is **not** a second layer of defence for *broker* secrets — the
-   gateway holds no vault (`broker=None`) — see the DLP subsection's "DLP
-   positioning for broker secrets" note above.
+   the gateway re-runs `OutboundDlp` as a second pass over the full relay frame
+   (body, URL, and forwarded headers), providing two-layer content enforcement
+   for pattern-shaped and canary-tagged content. It is **not** a second layer
+   of defence for *broker* secrets — the gateway holds no vault (`broker=None`)
+   — see the DLP subsection's "DLP positioning for broker secrets" note above.
 3. **Discord-adapter egress** — the gateway-hosted Discord bwrap child (Spec C G7-4,
    ADR-0043) runs `--unshare-net` (empty netns); its sole egress path is a bind-mounted
    AF_UNIX socket on the gateway-only `alfred_discord_egress` volume, served by a second

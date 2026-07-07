@@ -721,7 +721,6 @@ provenance: "#339 PR4b-broker (#347 blocker 4); ADR-0048"
 references:
   - "docs/adr/0048-web-fetch-authenticated-fetch-secret-substitution.md"
   - "https://github.com/alfred-os/AlfredOS/issues/347"
-merge_blocker: true
 ```
 
 (Confirm the exact required field names against `payload_schema.py::AdversarialPayload` — `id`, `category`, `threat`, `payload`, `expected_outcome`, `provenance`, `references`, `ingestion_path`; add `note`/`merge_blocker` only if the schema declares them.)
@@ -836,7 +835,12 @@ Expected: clean.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add docs/subsystems/security.md tests/integration/orchestrator tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py
+git add docs/subsystems/security.md \
+  tests/integration/orchestrator/test_tool_assembly.py \
+  tests/integration/orchestrator/test_act_loop_real_chain.py \
+  tests/integration/orchestrator/test_tool_dispatch_timeout_audit_postgres.py \
+  tests/integration/orchestrator/conftest.py \
+  tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py
 git commit -m "$(cat <<'EOF'
 test(339): positive-path integration + security.md DLP-positioning for broker substitution (#339)
 

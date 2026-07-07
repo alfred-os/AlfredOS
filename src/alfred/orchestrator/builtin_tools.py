@@ -83,7 +83,20 @@ def build_web_fetch_tool(
     """The first real T3 tool. Its dispatch calls the fused ``dispatch_web_fetch``
     (which already runs URL-DLP + allowlist + rate-limit + T3→T2 extract) and
     returns the T2 ``EgressExtractOutcome``. ``dispatch_tool`` (Task 6) performs
-    the downgrade + final DLP scan before the planner sees anything."""
+    the downgrade + final DLP scan before the planner sees anything.
+
+    Args:
+        broker: The daemon's ``SecretBroker`` service (#339 PR4b-broker),
+            injected by plain DI — resolves an allowlisted
+            ``{{secret:<name>}}`` header placeholder into the real secret
+            value at ``dispatch_web_fetch``'s Step 1c, gated by
+            ``auth_secret_allowlist`` (see ADR-0048).
+        auth_secret_allowlist: The closed set of secret names ``broker`` is
+            permitted to substitute into a header for this tool. Defaults to
+            the empty-by-default ``WEB_FETCH_AUTH_SECRET_ALLOWLIST`` — an
+            off-allowlist ``{{secret:<name>}}`` reference is refused
+            (``secret_substitution_refused``), never silently substituted.
+    """
 
     async def _dispatch(inv: ToolInvocation) -> EgressExtractOutcome:
         headers_arg = inv.arguments.get("headers", {})
