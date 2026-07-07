@@ -333,6 +333,15 @@ class EgressResponseExtractor:
             status=outcome.response.status,
         )
 
+    async def ledger_state(self, *, egress_id: str) -> str | None:
+        """Read the idempotency-ledger state for a committed egress_id.
+
+        Thin public accessor over the relay client's ledger so the web.fetch
+        dispatcher can classify an action-deadline timeout as in-doubt without
+        reaching through the private ``_relay_client`` (#347 blocker 2).
+        """
+        return await self._relay_client.ledger.get_state(egress_id=egress_id)
+
 
 __all__ = [
     "EgressExtractOutcome",

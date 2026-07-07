@@ -933,3 +933,29 @@ async def test_d1_proceed_verdict_falls_through_to_extraction(
     assert outcome.deduplicated is False
     assert isinstance(outcome.result, Extracted)
     assert outcome.result == extracted
+
+
+# ---------------------------------------------------------------------------
+# Test 14 — ledger_state delegates to relay_client.ledger.get_state (#339 PR4b-audit)
+# ---------------------------------------------------------------------------
+
+
+async def test_ledger_state_delegates_to_relay_ledger(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """``ledger_state`` is a thin delegate over ``relay_client.ledger.get_state``.
+
+    The web.fetch dispatcher's timeout arm (#347 blocker 2) needs to read the
+    ledger state for a committed egress_id without reaching through the
+    private ``_relay_client`` attribute. Drive the fake relay's stubbed ledger
+    (``_StubLedger.state``, default ``"committed_no_response"``) and assert
+    the accessor returns exactly what the ledger yields.
+    """
+    extractor_obj, ledger, _spy_extract = _make_extractor(
+        relay_outcome=_make_fired_response(),
+        authorized_nonce=authorized_t3_nonce,
+    )
+
+    state = await extractor_obj.ledger_state(egress_id="c" * 64)
+
+    assert state == ledger.state == "committed_no_response"
