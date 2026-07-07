@@ -25,7 +25,7 @@ no auto-discovery for plain callables, so callers import them explicitly::
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -44,6 +44,7 @@ from alfred.security.dlp import OutboundDlp
 from tests.helpers.egress_doubles import (
     _await_relay_ready,
     _CannedResponse,
+    _FakeClient,
     _FireCounter,
     make_fake_external_world,
 )
@@ -144,6 +145,7 @@ def _assembly_gate() -> CapabilityGate:
 async def boot_loopback_relay(
     *,
     allowlist: frozenset[tuple[str, int]],
+    wrap_client: Callable[[_FakeClient], Any] | None = None,
 ) -> AsyncIterator[tuple[EgressRelay, int, _FireCounter, _CannedResponse]]:
     """Boot a real loopback ``EgressRelay`` with a faked upstream client.
 
@@ -160,12 +162,28 @@ async def boot_loopback_relay(
       BEFORE the first dispatch to control what the faked upstream serves
       (e.g. Task 5's FIX-11 containment-regression marker).
 
+    ``wrap_client`` — optional decorator applied to each freshly-opened
+    ``_FakeClient`` (:func:`make_fake_external_world`'s ``open_client``
+    factory is called internally; ``wrap_client``, when given, wraps ITS
+    return value rather than replacing the factory outright). Use this to
+    observe what the relay forwards upstream — e.g. a header-capturing
+    decorator — without hand-rolling a second copy of this bind/serve/
+    shutdown dance (#339 PR4b-broker Task-6 review, FIX-B). See
+    ``test_tool_assembly.py``'s ``_HeaderCapturingClient`` for the canonical
+    pattern. The yielded ``fire_counter``/``canned`` still come from the SAME
+    :func:`make_fake_external_world` call the wrapped client is built from,
+    so wrapping keeps fire-counting accurate for free.
+
     On exit (including on an exception propagating through the ``async
     with`` block) the relay is signalled to shut down and its serve task is
     awaited with a 5s timeout — mirrors the inline try/finally dance
     ``test_tool_assembly.py`` used before this extraction.
     """
     open_client_factory, fire_counter, canned = make_fake_external_world()
+
+    def _resolved_open_client() -> Any:
+        client = open_client_factory()
+        return wrap_client(client) if wrap_client is not None else client
 
     srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
     port: int = srv.sockets[0].getsockname()[1]
@@ -182,7 +200,7 @@ async def boot_loopback_relay(
         bind_host="127.0.0.1",
         port=port,
         resolve=lambda _h: "1.1.1.1",
-        open_client=open_client_factory,
+        open_client=_resolved_open_client,
         response_byte_cap=4096,
         upstream_deadline_s=10.0,
     )

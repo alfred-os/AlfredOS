@@ -47,6 +47,7 @@ A 5-lens `/review-plan` fleet (security, architect, test, reviewer, error) confi
 ## File Structure
 
 **Source:**
+
 - `src/alfred/security/secrets.py` — add `SecretSubstitutionNotAllowed(AlfredError)`, the `_SECRET_PLACEHOLDER` / `_VALID_SECRET_NAME` regexes, and `SecretBroker.substitute()`.
 - `src/alfred/plugins/web_fetch/auth_allowlist.py` — **new** — the closed `WEB_FETCH_AUTH_SECRET_ALLOWLIST` constant + a `_SecretSubstituter` Protocol for the dispatcher's broker seam.
 - `src/alfred/audit/audit_row_schemas.py:50` — add `header_secret_refused` + `secret_substitution_refused` to the `DlpScanResult` Literal.
@@ -58,6 +59,7 @@ A 5-lens `/review-plan` fleet (security, architect, test, reviewer, error) confi
 - `docs/subsystems/security.md` — DLP-positioning correction (core DLP sole broker-secret defence; gateway `broker=None`).
 
 **Tests:**
+
 - `tests/unit/security/test_secrets.py` — `substitute()` unit tests.
 - `tests/unit/audit/test_audit_row_schemas.py:355` — extend the `DlpScanResult` lockstep set.
 - `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py` — header-secret-refused + substitution unit tests; **update** `test_real_url_sent_on_wire_with_redacted_headers` (:272).
@@ -73,10 +75,12 @@ A 5-lens `/review-plan` fleet (security, architect, test, reviewer, error) confi
 ## Task 1: `SecretBroker.substitute()` + `SecretSubstitutionNotAllowed`
 
 **Files:**
+
 - Modify: `src/alfred/security/secrets.py` (add exception near `:123`; add regexes + method near `get` at `:626`)
 - Test: `tests/unit/security/test_secrets.py`
 
 **Interfaces:**
+
 - Consumes: existing `SecretBroker.get(name) -> str` (raises `UnknownSecretError`), `SUPPORTED_SECRETS`, `alfred.errors.AlfredError`.
 - Produces:
   - `SecretSubstitutionNotAllowed(AlfredError)` with attribute `.ref: str`.
@@ -260,12 +264,14 @@ EOF
 ## Task 2: Allowlist constant + two `DlpScanResult` tokens + lockstep + i18n
 
 **Files:**
+
 - Create: `src/alfred/plugins/web_fetch/auth_allowlist.py`
 - Modify: `src/alfred/audit/audit_row_schemas.py:50`
 - Modify: `locale/en/LC_MESSAGES/alfred.po`
 - Test: `tests/unit/audit/test_audit_row_schemas.py:355`, `tests/unit/plugins/web_fetch/test_i18n_keys.py`
 
 **Interfaces:**
+
 - Produces:
   - `WEB_FETCH_AUTH_SECRET_ALLOWLIST: Final[frozenset[str]]` (== `frozenset()`), plus a `_SecretSubstituter` Protocol (`substitute(text, *, allowed_secrets) -> str`).
   - `DlpScanResult` gains `"header_secret_refused"`, `"secret_substitution_refused"`.
@@ -359,12 +365,14 @@ msgstr "The request was refused because it referenced a secret that is not permi
 - [ ] **Step 6: Run extract + compile, then the tests**
 
 Run:
+
 ```bash
 uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
 uv run pybabel update --no-fuzzy-matching -i /tmp/alfred.pot -d locale
 uv run pybabel compile -d locale
 uv run pytest tests/unit/audit/test_audit_row_schemas.py::test_dlp_scan_result_literal_includes_new_values tests/unit/plugins/web_fetch/test_i18n_keys.py -v
 ```
+
 Expected: PASS. (The `t()` call sites for these keys land in Task 3; `pybabel extract` will re-touch `#:` refs then — re-run `compile` if so.)
 
 - [ ] **Step 7: Type-check + commit**
@@ -390,12 +398,14 @@ EOF
 ## Task 3: Wire the defence + substitution into `dispatch_web_fetch` (+ thread the broker)
 
 **Files:**
+
 - Modify: `src/alfred/plugins/web_fetch/fetch_dispatcher.py` (Step 1b + 1c; new params on `dispatch_web_fetch`)
 - Modify: `src/alfred/orchestrator/builtin_tools.py:69` (`build_web_fetch_tool`)
 - Modify: `src/alfred/orchestrator/tool_assembly.py:67` (`build_tool_registry`)
 - Test: `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py`, `tests/unit/orchestrator/test_builtin_tools.py`
 
 **Interfaces:**
+
 - Consumes: `SecretBroker.substitute` (Task 1); `WEB_FETCH_AUTH_SECRET_ALLOWLIST`, `_SecretSubstituter` (Task 2); the new `DlpScanResult` tokens (Task 2).
 - Produces: `dispatch_web_fetch(..., broker: _SecretSubstituter, auth_secret_allowlist: frozenset[str] = WEB_FETCH_AUTH_SECRET_ALLOWLIST)`; `build_web_fetch_tool(..., broker: _SecretSubstituter, auth_secret_allowlist: frozenset[str] = WEB_FETCH_AUTH_SECRET_ALLOWLIST)`; `build_tool_registry(..., broker: SecretBroker)`.
 
@@ -636,11 +646,13 @@ EOF
 ## Task 4: ADR-0048
 
 **Files:**
+
 - Create: `docs/adr/0048-web-fetch-authenticated-fetch-secret-substitution.md`
 
 - [ ] **Step 1: Write the ADR** (mirror the format of `docs/adr/0047-web-fetch-handle-cap-reattach-and-inbound-canary.md`)
 
 Sections and content (fill from spec §9):
+
 - **Status:** Accepted (on #339 PR4b-broker merge) · **Date:** 2026-07-07 · **Slice:** #339 PR4b-broker · **Relates to:** ADR-0017 (DLP-before-substitute), ADR-0036 (gateway holds no vault), ADR-0040 (connectivity-free core), ADR-0041 (fused fetch+extract), #347 (blocker 4).
 - **Context:** G7-2.5 shipped unauthenticated GET-only web.fetch; HARD rule #6 requires authenticated calls to inject secrets via the broker. #339 is the first live `dispatch_web_fetch` caller.
 - **Decision:** `{{secret:<name>}}` in header values, resolved by `SecretBroker.substitute()` after core DLP and before `_RawToolRequest`, gated by a closed empty-by-default `WEB_FETCH_AUTH_SECRET_ALLOWLIST`; raw secrets in URL/headers refused at the core DLP boundary; substitution on header values only.
@@ -671,10 +683,12 @@ EOF
 ## Task 5: Adversarial `de-2026-019` (dlp_egress) + security sign-off
 
 **Files:**
+
 - Create: `tests/adversarial/dlp_egress/broker_secret_exfil.yaml`
 - Create: `tests/adversarial/dlp_egress/test_de_2026_019_broker_secret_exfil.py`
 
 **Interfaces:**
+
 - Consumes: `build_web_fetch_tool` (Task 3); a fire-spy relay/extractor; the `AdversarialPayload` schema (`tests/adversarial/payload_schema.py`). Mirror `tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py` (fixture-filter + REAL dispatch + fire-spy).
 
 - [ ] **Step 1: Write the payload YAML** (`de-2026-019`, next-free id; `de-`=dlp_egress)
@@ -709,6 +723,7 @@ merge_blocker: true
 - [ ] **Step 2: Write the harness test** (mirror `test_cap_2026_006_tool_arg_injection.py`)
 
 Structure:
+
 1. A `_FireSpy` extractor whose `handle` records that it was called (the "relay dialled" signal) and must NOT fire.
 2. Build the real `web.fetch` tool via `build_web_fetch_tool` with a REAL `SecretBroker` (env has `anthropic_api_key` set to a benign value, to prove it's still refused off-allowlist) + the default empty `auth_secret_allowlist` + a real `OutboundDlp` whose broker knows a planted raw secret.
 3. Three parametrised scenarios, each asserting `WebFetchError` (or the domain refusal), the expected `dlp_scan_result` audit token, and `fire_spy.called is False`:
@@ -773,6 +788,7 @@ Dispatch `alfred-security-engineer` for corpus sign-off (hard merge gate) — ca
 ## Task 6: security.md correction, positive-path integration test, docs, full verification
 
 **Files:**
+
 - Modify: `docs/subsystems/security.md`
 - Modify: `tests/integration/orchestrator/test_tool_assembly.py` / `test_act_loop_real_chain.py` / `test_tool_dispatch_timeout_audit_postgres.py` + `tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py` (thread `broker` through the `build_web_fetch_tool` / `build_tool_registry` callers)
 
@@ -795,6 +811,7 @@ In the outbound-DLP / egress section, add/adjust the audit-vocabulary and DLP-po
 - [ ] **Step 5: Full verification (release-blocking — touches `src/alfred/security/`)**
 
 Run:
+
 ```bash
 make check
 uv run pytest tests/unit -q
@@ -802,6 +819,7 @@ uv run pytest tests/adversarial -q
 uv run pytest tests/integration/orchestrator -q
 uv run pybabel compile --statistics -d locale
 ```
+
 Expected: all green. (The macOS integration lane can flake under load — verify any suspect in isolation and trust Linux CI, per project norms. Docker Hub `postgres:18` pull flakes → re-run.)
 
 - [ ] **Step 6: Markdown-lint the docs**
@@ -836,6 +854,7 @@ Per the standing cadence: autosquash any fixups → push → FULL `/review-pr` f
 ## Self-Review
 
 **Spec coverage** (against `docs/superpowers/specs/2026-07-07-issue-339-pr4b-broker-authenticated-fetch-design.md`):
+
 - §3 substitute() primitive → Task 1. ✓
 - §4 empty allowlist → Task 2. ✓
 - §5 data-flow wiring (Steps 1b/1c, broker threading) → Task 3. ✓
