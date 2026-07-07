@@ -179,6 +179,7 @@ markers = [
   # their own ``socket.getaddrinfo`` monkeypatch instead of getting the
   # web_fetch conftest's autouse "public-IP" stub on top.
   "no_getaddrinfo_stub: opt out of the web_fetch conftest's autouse getaddrinfo stub",
+  "real_llm: spends real provider tokens against a live LLM; nightly-only, skip-unless ALFRED_SMOKE_PROVIDER_KEY. Deselected from every per-commit lane via -m 'not real_llm'.",
 ]
 
 [tool.coverage.run]
