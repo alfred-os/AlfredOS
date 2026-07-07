@@ -67,6 +67,7 @@ from alfred.providers.base import CompletionRequest, CompletionResponse, ToolCal
 from alfred.providers.router import ProviderRouter
 from alfred.security.quarantine import Extracted, T3DerivedData
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
+from alfred.security.secrets import SecretBroker
 from alfred.security.tiers import T2, CapabilityGateNonce, tag
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.integration.orchestrator.conftest import _assembly_gate, _settings, boot_loopback_relay
@@ -262,6 +263,12 @@ async def test_loop_drives_real_web_fetch_then_clock_then_answers(
                 extractor=mock_extractor,
                 recorder=recorder,
                 outbound_dlp=identity_outbound_dlp(),
+                # This test exercises the act-phase loop's tool chain, not
+                # authenticated fetch — a real, empty-env SecretBroker with
+                # the default empty WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps
+                # auth entirely out of scope here (#339 PR4b-broker Task 6,
+                # FIX-5).
+                broker=SecretBroker(env={}),
                 audit_writer=audit_writer,
                 session_scope=_real_session_scope,
                 rate_limiter=rate_limiter,

@@ -81,6 +81,7 @@ from alfred.security.quarantine import (
     T3DerivedData,
 )
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
+from alfred.security.secrets import SecretBroker
 from alfred.security.tiers import CapabilityGateNonce
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.dlp import identity_outbound_dlp
@@ -573,6 +574,11 @@ async def test_per_user_handle_cap_refuses_sixth_pre_network() -> None:
         return None
 
     rate_limiter = SimpleNamespace(check_and_increment=_permissive_rl)
+    # This test exercises handle_cap exhaustion, not authenticated fetch — a
+    # real, empty-env SecretBroker with the default empty
+    # WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps auth entirely out of scope here
+    # (#339 PR4b-broker Task 6, FIX-5).
+    broker = SecretBroker(env={})
 
     def _dispatch(i: int, extractor: object) -> Coroutine[Any, Any, EgressExtractOutcome]:
         return dispatch_web_fetch(
@@ -588,6 +594,7 @@ async def test_per_user_handle_cap_refuses_sixth_pre_network() -> None:
             config=config,
             rate_limiter=rate_limiter,  # type: ignore[arg-type]
             outbound_dlp=identity_outbound_dlp(),
+            broker=broker,
             audit=audit,  # type: ignore[arg-type]
             extractor=extractor,  # type: ignore[arg-type]
             handle_cap=cap,  # type: ignore[arg-type]
