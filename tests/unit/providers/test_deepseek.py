@@ -189,7 +189,8 @@ async def test_sent_tool_name_matches_openai_function_name_grammar() -> None:
     )
     kw = fake_client.chat.completions.create.await_args.kwargs
     sent_name = kw["tools"][0]["function"]["name"]
-    assert re.fullmatch(r"[a-zA-Z0-9_-]+", sent_name) is not None
+    # Full grammar incl. the 64-char max OpenAI/DeepSeek enforce (sanitize caps it).
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", sent_name) is not None
 
 
 @pytest.mark.asyncio

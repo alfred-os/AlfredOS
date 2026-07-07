@@ -173,7 +173,8 @@ async def test_sent_tool_name_matches_anthropic_function_name_grammar() -> None:
         CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
     )
     sent_name = fake_client.messages.create.await_args.kwargs["tools"][0]["name"]
-    assert re.fullmatch(r"[a-zA-Z0-9_-]+", sent_name) is not None
+    # Full Anthropic grammar incl. the 1..64-char length bound sanitize enforces.
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", sent_name) is not None
 
 
 @pytest.mark.asyncio
