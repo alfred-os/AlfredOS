@@ -251,6 +251,29 @@ async def test_response_tool_calls_parsed_and_stop_reason_mapped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_response_tool_call_unmapped_name_passes_through_unchanged() -> None:
+    # Anti-spoofing guarantee: name_map.get(returned, returned) must fall
+    # through unchanged when the provider echoes a name that is NOT in this
+    # request's tools (a genuinely empty map trivially exercises the same
+    # code path but proves nothing about a REAL, non-empty map). Declare a
+    # real tool (web.fetch) so the map is non-trivial, then have the mocked
+    # response echo a DIFFERENT, unmapped wire name — proving it is NOT
+    # silently remapped onto the real tool. It flows to dispatch_tool's
+    # unknown_tool refusal downstream (tool_dispatch.py), never resolving to
+    # web.fetch.
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(
+        return_value=_openai_toolcall_response("{}", name="some_other_tool")
+    )
+    provider = DeepSeekProvider(client=fake_client, model="deepseek-chat")
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    res = await provider.complete(
+        CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+    )
+    assert res.tool_calls == (ToolCall(id="c1", name="some_other_tool", arguments={}),)
+
+
+@pytest.mark.asyncio
 async def test_plain_text_response_maps_end_turn() -> None:
     fake_client = MagicMock()
     fake_client.chat.completions.create = AsyncMock(return_value=_openai_ok_response("hello"))

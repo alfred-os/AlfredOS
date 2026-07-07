@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-07 23:39+0100\n"
+"POT-Creation-Date: 2026-07-07 23:56+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2956,12 +2956,14 @@ msgstr ""
 "the host-side reservation. This indicates a plugin defect. Inspect the "
 "audit log: alfred audit log --event tool.web.fetch --since 1h."
 
-#: src/alfred/providers/_tool_names.py:60
+#: src/alfred/providers/_tool_names.py:90
 msgid "providers.tool_name_collision"
 msgstr ""
 "Tool names {name_a} and {name_b} both sanitize to the provider-safe name "
-"{safe_name}; refusing to build an ambiguous tool-name map. Rename one of "
-"the tools so their provider-safe names differ."
+"{safe_name}; refusing to build an ambiguous tool-name map. Tool names "
+"come from ToolDefinitions in first-party code (for example "
+"src/alfred/orchestrator/builtin_tools.py) or an MCP plugin manifest — "
+"rename one so their provider-safe names differ."
 
 #: src/alfred/providers/base.py:177
 msgid "providers.tool_use_unsupported"

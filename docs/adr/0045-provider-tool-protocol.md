@@ -72,6 +72,19 @@ structural invariant (the frozen provider contract), hence an ADR.
 - The live comms cutover (**#338**) is a separate epic, gated on #340's real
   quarantine child before go-live (design spec §2); this seam neither blocks nor
   unblocks it.
+- **Provider function-name grammar is narrower than AlfredOS's canonical tool
+  names, and is sanitized ONLY at the wire.** OpenAI/DeepSeek require
+  `^[a-zA-Z0-9_-]+$`; Anthropic additionally caps length at
+  `^[a-zA-Z0-9_-]{1,64}$`. AlfredOS's canonical tool names are dotted (e.g.
+  `web.fetch`) and unbounded in length. `providers/_tool_names.py` sanitizes
+  to that intersection grammar (dots and other unsafe characters -> `_`,
+  hash-disambiguated truncation past 64 chars) immediately before the SDK
+  call, and reverse-maps the provider's echoed name back to the canonical
+  form on receive — `dispatch_tool`, the audit log, and i18n keys never see
+  the sanitized wire form. This was caught by the #339 real-LLM smoke's
+  first live run (PR #406), not by the fixture-based unit suite, since every
+  fixture up to that point round-tripped `tool.name` through the mock
+  boundary unchanged.
 
 ## Alternatives considered
 
