@@ -44,6 +44,8 @@ CONSTANT_NAMES: Final[tuple[str, ...]] = (
     "STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS",
     # #339 PR2 — tool.dispatch chokepoint audit family.
     "TOOL_DISPATCH_FIELDS",
+    # #339 PR4b — enriched action-deadline timeout row (#347 blocker 2).
+    "TOOL_DISPATCH_TIMEOUT_FIELDS",
 )
 
 
@@ -512,13 +514,18 @@ def test_tool_dispatch_fields_closed_set() -> None:
 
 
 def test_tool_dispatch_outcome_literal_closed_set() -> None:
-    """ToolDispatchOutcome's Literal pins the 13-token closed vocabulary.
+    """ToolDispatchOutcome's Literal pins the 14-token closed vocabulary.
 
     FIX-5 override (#339 PR2 plan-review): includes ``unexpected_error``
     for a defensive catch-all arm the later ``dispatch_tool`` chokepoint
     adds. Mirrors the ``RateLimitBucket`` / ``DlpScanResult`` exact-set
     pattern so a stray extra literal, a dropped existing one, or a typo
     all surface here.
+
+    FOLD-LAYER FIX-3 (#339 PR4b): adds ``unexpected_timeout`` to
+    distinguish a stray/unexpected bare ``TimeoutError`` (the retained
+    defensive arm) from the well-understood action-deadline ``timeout``
+    (the enriched ``WebFetchActionTimeout`` path, #347 blocker 2).
     """
     from typing import get_args
 
@@ -538,4 +545,28 @@ def test_tool_dispatch_outcome_literal_closed_set() -> None:
         "canary_tripped",
         "dlp_canary",
         "unexpected_error",
+        "unexpected_timeout",
+    }
+
+
+def test_tool_dispatch_timeout_fields_is_superset_of_tool_dispatch() -> None:
+    """TOOL_DISPATCH_TIMEOUT_FIELDS supersets TOOL_DISPATCH_FIELDS (#339 PR4b).
+
+    The enriched action-deadline timeout row (#347 blocker 2) carries every
+    ``tool.dispatch`` field plus the four in-doubt-forensics fields
+    (``egress_id``, ``destination_host``, ``in_doubt``, ``ledger_state``).
+    Same ``event="tool.dispatch"`` family, same pattern as
+    ``PLUGIN_LIFECYCLE_CRASHED_FIELDS = PLUGIN_LIFECYCLE_FIELDS | {...}``.
+    """
+    assert audit_row_schemas.TOOL_DISPATCH_FIELDS.issubset(
+        audit_row_schemas.TOOL_DISPATCH_TIMEOUT_FIELDS
+    )
+    timeout_only_fields = (
+        audit_row_schemas.TOOL_DISPATCH_TIMEOUT_FIELDS - audit_row_schemas.TOOL_DISPATCH_FIELDS
+    )
+    assert timeout_only_fields == {
+        "egress_id",
+        "destination_host",
+        "in_doubt",
+        "ledger_state",
     }
