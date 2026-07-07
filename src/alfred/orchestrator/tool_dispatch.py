@@ -92,6 +92,30 @@ async def dispatch_tool(
         or a clearance denial is a turn halt, never a recoverable tool result.
     """
 
+    def _base_dispatch_subject(
+        *, tool_name: str, result_tier: str | None, dispatch_outcome: str
+    ) -> dict[str, object | None]:
+        """The 8 keys every ``tool.dispatch`` audit subject carries (§10).
+
+        Shared by the ``_audit`` closure below (``TOOL_DISPATCH_FIELDS``) and
+        the enriched ``WebFetchActionTimeout`` arm
+        (``TOOL_DISPATCH_TIMEOUT_FIELDS``) so the two base shapes cannot drift
+        apart (reviewer DRY finding, FIX H). The enriched arm spreads this
+        base dict and adds its four forensic keys
+        (egress_id/destination_host/in_doubt/ledger_state).
+        """
+        return {
+            "tool_name": tool_name,
+            "call_id": call.id,
+            "call_index": call_index,
+            "result_tier": result_tier,
+            "dispatch_outcome": dispatch_outcome,
+            "triggering_user_id": user_id,
+            "correlation_id": correlation_id,
+            # §10 audit-graph disambiguator (arch-002).
+            "phase": f"tool_dispatch:{tool_name}:{call_index}",
+        }
+
     async def _audit(
         *,
         dispatch_outcome: str,
@@ -104,17 +128,11 @@ async def dispatch_tool(
             schema_name="TOOL_DISPATCH_FIELDS",
             event="tool.dispatch",
             actor_user_id=user_id,
-            subject={
-                "tool_name": tool_name,
-                "call_id": call.id,
-                "call_index": call_index,
-                "result_tier": result_tier,
-                "dispatch_outcome": dispatch_outcome,
-                "triggering_user_id": user_id,
-                "correlation_id": correlation_id,
-                # §10 audit-graph disambiguator (arch-002).
-                "phase": f"tool_dispatch:{tool_name}:{call_index}",
-            },
+            subject=_base_dispatch_subject(
+                tool_name=tool_name,
+                result_tier=result_tier,
+                dispatch_outcome=dispatch_outcome,
+            ),
             trust_tier_of_trigger="T2",
             result=result,
             cost_estimate_usd=0.0,
@@ -221,14 +239,11 @@ async def dispatch_tool(
             event="tool.dispatch",
             actor_user_id=user_id,
             subject={
-                "tool_name": external.name,
-                "call_id": call.id,
-                "call_index": call_index,
-                "result_tier": "T3",
-                "dispatch_outcome": "timeout",
-                "triggering_user_id": user_id,
-                "correlation_id": correlation_id,
-                "phase": f"tool_dispatch:{external.name}:{call_index}",
+                **_base_dispatch_subject(
+                    tool_name=external.name,
+                    result_tier="T3",
+                    dispatch_outcome="timeout",
+                ),
                 "egress_id": exc.egress_id,
                 "destination_host": exc.destination_host,
                 "in_doubt": exc.in_doubt,
@@ -267,7 +282,7 @@ async def dispatch_tool(
             tool_name=external.name,
             result_tier="T3",
         )
-        return t("orchestrator.tool.timeout", tool=external.name)
+        return t("orchestrator.tool.timeout_unexpected", tool=external.name)
     except Exception:
         # sec-003 defensive arm (placed LAST): a bug, a new error type, or an
         # un-enumerated canary must never escape unaudited (HARD rule #7).

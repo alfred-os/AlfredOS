@@ -198,6 +198,55 @@ class FetchDispatchConfig:
         object.__setattr__(self, "allowlist", allowlist)
 
 
+async def _classify_action_timeout(
+    *,
+    extractor: EgressResponseExtractor,
+    egress_id: str,
+    destination_host: str,
+    correlation_id: str,
+) -> WebFetchActionTimeout:
+    """Build the :class:`WebFetchActionTimeout` for a post-deadline overrun (#347
+    blocker 2).
+
+    Reads the egress-idempotency ledger state under a bounded guard so a
+    correlated DB fault can never mask the in-doubt row (FIX-1, HARD rule #7). On
+    a read failure OR a read that overruns its own bounded ``asyncio.timeout``
+    (both ``Exception`` subclasses), returns ``in_doubt=True`` with the distinct
+    ``ledger_state="read_unavailable"`` sentinel — NOT ``None`` (``None`` means
+    "no row -> never fired -> in_doubt=False", the opposite safe direction).
+
+    This never raises: the caller raises the returned exception (with ``from
+    None`` to suppress the noisy cancellation-internals chain). See the module
+    docstring's ``WebFetchActionTimeout`` Raises entry for the accepted external-
+    ``CancelledError`` residual (this guard catches ``Exception``, not
+    ``BaseException``).
+    """
+    try:
+        # Bounded: this path already breached its deadline; don't let a slow/hung
+        # ledger extend it or hold the handle_cap slot.
+        async with asyncio.timeout(_LEDGER_READ_TIMEOUT_SECONDS):
+            state = await extractor.ledger_state(egress_id=egress_id)
+    except Exception as read_exc:
+        _log.error(
+            "web_fetch.timeout.ledger_read_failed",
+            egress_id=egress_id,
+            error_type=type(read_exc).__name__,
+            correlation_id=correlation_id,
+        )
+        return WebFetchActionTimeout(
+            egress_id=egress_id,
+            destination_host=destination_host,
+            in_doubt=True,
+            ledger_state="read_unavailable",
+        )
+    return WebFetchActionTimeout(
+        egress_id=egress_id,
+        destination_host=destination_host,
+        in_doubt=state == "committed_no_response",
+        ledger_state=state,
+    )
+
+
 async def dispatch_web_fetch(
     *,
     url: str,
@@ -556,39 +605,19 @@ async def dispatch_web_fetch(
         except TimeoutError:
             # #347 blocker 2: the fused fetch+extract overran the action deadline.
             # asyncio.timeout has already converted CancelledError->TimeoutError and
-            # cleared its cancel scope, so this await runs un-cancelled. The outer
-            # ``finally`` still releases the handle_cap slot after this raise.
+            # cleared its cancel scope, so the bounded ledger read below runs
+            # un-cancelled. The outer ``finally`` still releases the handle_cap slot
+            # after this raise. ``from None``: the deadline TimeoutError carries no
+            # forensic payload (the typed exception's fields do) — suppress the noisy
+            # cancellation-internals chain.
             egress_id = compute_egress_id(egress_ctx, call_index=call_index)
-            try:
-                # Bounded: this path already breached its deadline; don't let a
-                # slow/hung ledger extend it or hold the handle_cap slot.
-                async with asyncio.timeout(_LEDGER_READ_TIMEOUT_SECONDS):
-                    state = await extractor.ledger_state(egress_id=egress_id)
-            except Exception as read_exc:
-                # Bookkeeping must NEVER mask the in-doubt timeout (HARD #7).
-                # A distinct sentinel — NOT None (None means "no row -> never
-                # fired -> in_doubt=False"); a read failure is the OPPOSITE safe
-                # direction, so force in_doubt=True.
-                _log.error(
-                    "web_fetch.timeout.ledger_read_failed",
-                    egress_id=egress_id,
-                    error_type=type(read_exc).__name__,
-                    correlation_id=correlation_id,
-                )
-                raise WebFetchActionTimeout(
-                    egress_id=egress_id,
-                    destination_host=domain,
-                    in_doubt=True,
-                    ledger_state="read_unavailable",
-                ) from None
-            # ``from None``: the deadline TimeoutError carries no forensic payload
-            # (the fields do); suppress the noisy cancellation-internals chain.
-            raise WebFetchActionTimeout(
+            timeout_exc = await _classify_action_timeout(
+                extractor=extractor,
                 egress_id=egress_id,
                 destination_host=domain,
-                in_doubt=state == "committed_no_response",
-                ledger_state=state,
-            ) from None
+                correlation_id=correlation_id,
+            )
+            raise timeout_exc from None
 
         # Step 5: success / soft-refusal audit row (C3) with the real status (C7).
         #

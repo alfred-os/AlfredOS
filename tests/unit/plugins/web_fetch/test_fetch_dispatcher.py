@@ -612,6 +612,34 @@ async def test_action_deadline_timeout_in_doubt_false_when_state_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_action_deadline_timeout_in_doubt_false_when_committed_with_response() -> None:
+    """FIX J (test-engineer + CodeRabbit review, #339 PR4b-audit): a hung
+    extractor whose ledger row is ``committed_with_response`` is the OTHER
+    safe case — the side effect fired AND a response was already recorded
+    before the deadline, so ``in_doubt`` must be False. Distinct from the
+    ``committed_no_response`` in-doubt=True case above AND from the
+    ``state is None`` sibling (never fired). Locks the
+    ``in_doubt=state == "committed_no_response"`` classification branch in
+    ``fetch_dispatcher.py`` — a mutation to the constant ``in_doubt=True``
+    would make this test fail."""
+    never_set = asyncio.Event()
+
+    async def _hang(**_kwargs: Any) -> EgressExtractOutcome:
+        await never_set.wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _hang
+    extractor.ledger_state = AsyncMock(return_value="committed_with_response")
+
+    with pytest.raises(WebFetchActionTimeout) as excinfo:
+        await _dispatch(extractor=extractor, action_deadline_seconds=0.05)
+
+    assert excinfo.value.in_doubt is False
+    assert excinfo.value.ledger_state == "committed_with_response"
+
+
+@pytest.mark.asyncio
 async def test_action_deadline_timeout_ledger_read_failure_forces_in_doubt() -> None:
     """FIX-1: the post-timeout ledger read is CORRELATED with the timeout (the
     same DB stress can blow both). A read failure must NEVER swallow the
