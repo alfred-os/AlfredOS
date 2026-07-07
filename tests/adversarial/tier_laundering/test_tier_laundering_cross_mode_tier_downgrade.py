@@ -185,6 +185,9 @@ async def test_egress_response_extractor_fired_path_never_returns_raw_body(
         async def record_response(self, **_kw: Any) -> None:
             return None
 
+        async def get_state(self, **_kw: Any) -> str | None:
+            return None
+
         async def prune_expired(self, **_kw: Any) -> int:
             return 0
 
@@ -283,6 +286,9 @@ async def test_egress_response_extractor_deduplicated_path_skips_extractor(
             return IntentFresh()
 
         async def record_response(self, **_kw: Any) -> None:
+            return None
+
+        async def get_state(self, **_kw: Any) -> str | None:
             return None
 
         async def prune_expired(self, **_kw: Any) -> int:

@@ -89,6 +89,7 @@ class _StubLedger:
 
     commit_result: CommitIntentResult = field(default_factory=IntentFresh)
     record_calls: list[dict[str, Any]] = field(default_factory=list)
+    state: str | None = "committed_no_response"
 
     async def commit_intent(self, **_kwargs: Any) -> CommitIntentResult:
         return self.commit_result
@@ -97,6 +98,9 @@ class _StubLedger:
         self.record_calls.append(
             {"egress_id": egress_id, "response": response, "language": language}
         )
+
+    async def get_state(self, **_kwargs: Any) -> str | None:
+        return self.state
 
     async def prune_expired(self, **_kwargs: Any) -> int:
         return 0

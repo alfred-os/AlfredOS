@@ -158,6 +158,17 @@ class EgressIdempotencyStore(Protocol):
         """
         ...
 
+    async def get_state(self, *, egress_id: str) -> str | None:
+        """Read the committed state of an intent WITHOUT firing or mutating.
+
+        Returns ``"committed_no_response"`` (intent committed, response not yet
+        recorded — the in-doubt state), ``"committed_with_response"`` (completed),
+        or ``None`` (no row — nothing was committed). A pure read: unlike
+        ``commit_intent`` it performs no INSERT and cannot re-fire a side effect,
+        so it is safe to call from a post-timeout audit path (#347 blocker 2).
+        """
+        ...
+
     async def prune_expired(self, *, older_than: dt.datetime) -> int:
         """Delete rows committed before ``older_than`` (TTL sweep); returns the count."""
         ...
@@ -234,6 +245,13 @@ class PostgresEgressIdempotencyStore:
             if existing == _STATE_WITH_RESPONSE:
                 return
             raise EgressLedgerStateError(egress_id=egress_id)
+
+    async def get_state(self, *, egress_id: str) -> str | None:
+        async with self._session_scope() as session:
+            row = (
+                await session.execute(_SELECT_STATE_SQL, {"egress_id": egress_id})
+            ).scalar_one_or_none()
+            return cast("str | None", row)
 
     async def prune_expired(self, *, older_than: dt.datetime) -> int:
         async with self._session_scope() as session:
