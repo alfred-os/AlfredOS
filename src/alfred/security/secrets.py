@@ -113,6 +113,13 @@ _GIT_WALK_MAX_DEPTH: Final[int] = 12
 # Used by the AST-scan test (imported via ``SUPPORTED_SECRETS``).
 _ENV_PREFIX = "ALFRED_"
 
+# ``{{secret:<name>}}`` placeholder resolved by ``SecretBroker.substitute`` at the
+# tool-call boundary (HARD rule #6). The inner group is deliberately permissive
+# (any non-brace run) so a MALFORMED name is caught and refused rather than passed
+# through literally; the strict name charset is validated separately.
+_SECRET_PLACEHOLDER: Final = re.compile(r"\{\{secret:([^{}]*)\}\}")
+_VALID_SECRET_NAME: Final = re.compile(r"\A[a-z0-9_.]+\Z")
+
 # Cumulative count of redactor pattern overflow events across the process.
 # Tests assert this; production wiring to Prometheus lands in Slice 3 (an ADR
 # is required to introduce ``prometheus_client``; the seam is here so that
@@ -122,6 +129,25 @@ alfred_redactor_pattern_overflow_total: int = 0
 
 class UnknownSecretError(KeyError):
     """Raised when a caller asks for a secret name that is not registered."""
+
+
+class SecretSubstitutionNotAllowed(AlfredError):  # noqa: N818 -- name pinned by #339 PR4b-broker Task 1 interface spec
+    """A ``{{secret:<name>}}`` reference that is not permitted in this context.
+
+    Confused-deputy defence (mirrors
+    :class:`alfred.comms_mcp.adapter_credential_resolver.CoreAdapterCredentialResolver`'s
+    closed ``_ADAPTER_SECRET_ALLOWLIST``): the referenced name is off the caller's
+    closed ``allowed_secrets`` set, or is malformed. Carries the (possibly
+    attacker-influenced) ``ref`` for internal correlation ONLY — the message is a
+    FIXED string, and callers audit the closed ``secret_substitution_refused``
+    token, never the raw ``ref`` (no unbounded attacker text into audit/logs).
+    """
+
+    __slots__ = ("ref",)
+
+    def __init__(self, ref: str) -> None:
+        super().__init__("secret reference not permitted")
+        self.ref = ref
 
 
 class SecretBrokerConfigError(AlfredError):
@@ -638,6 +664,35 @@ class SecretBroker:
         if value is None or value == "":
             raise UnknownSecretError(f"{name} (env {env_name}, file key '{name}') is not set")
         return value
+
+    def substitute(self, text: str, *, allowed_secrets: frozenset[str]) -> str:
+        """Replace every ``{{secret:<name>}}`` placeholder in ``text`` with the real
+        secret value.
+
+        ``<name>`` MUST match ``[a-z0-9_.]+``, be in ``allowed_secrets`` (the caller's
+        closed, context-specific allowlist), AND resolve via :meth:`get` (i.e. be in
+        ``SUPPORTED_SECRETS`` and provisioned). A ``text`` with no placeholder is
+        returned byte-for-byte unchanged.
+
+        This method resolves placeholders ONLY. It assumes ``text`` is already
+        DLP-clean of RAW secret values (ADR-0017: DLP scans the placeholder frame
+        BEFORE substitution) and does not itself detect raw secrets.
+
+        Raises:
+            SecretSubstitutionNotAllowed: ``<name>`` is malformed or off-allowlist
+                (confused-deputy defence; never a broker passthrough of an
+                attacker-named secret).
+            UnknownSecretError: ``<name>`` is allowlisted but not a known/provisioned
+                secret (delegated from :meth:`get`).
+        """
+
+        def _replace(match: re.Match[str]) -> str:
+            ref = match.group(1)
+            if not _VALID_SECRET_NAME.match(ref) or ref not in allowed_secrets:
+                raise SecretSubstitutionNotAllowed(ref)
+            return self.get(ref)
+
+        return _SECRET_PLACEHOLDER.sub(_replace, text)
 
     def has(self, name: str) -> bool:
         """Return True iff `name` is a registered secret with a non-empty value.
