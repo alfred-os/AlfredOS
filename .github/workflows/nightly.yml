@@ -2,7 +2,11 @@ name: Nightly
 
 on:
   schedule:
+    # 06:00 UTC — drives the e2e + adversarial jobs (gated per-job below).
     - cron: "0 6 * * *"
+    # 21:30 UTC — inside DeepSeek's off-peak discount window (16:30–00:30 UTC,
+    # ~50–75% cheaper) — drives the real-llm-smoke job ONLY (gated per-job below).
+    - cron: "30 21 * * *"
   workflow_dispatch:
 
 # Schedule-driven; do not cancel overlapping runs.
@@ -18,6 +22,9 @@ jobs:
   e2e:
     name: End-to-end
     runs-on: ubuntu-latest
+    # Off-peak split (see `on.schedule`): the 06:00 cron drives e2e + adversarial;
+    # the 21:30 cron drives real-llm-smoke only; workflow_dispatch runs all three.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * *' }}
     # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()`
     # in job-level `if:` at workflow-parse time (HTTP 422 "Unrecognized
     # function: 'hashFiles'") — the function is only valid inside step
@@ -81,6 +88,8 @@ jobs:
   adversarial:
     name: Adversarial test suite
     runs-on: ubuntu-latest
+    # Runs on the 06:00 cron (or manual dispatch), not the 21:30 off-peak cron.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * *' }}
     # No job-level `hashFiles()` guard (see e2e job above for rationale).
     timeout-minutes: 60
     steps:
@@ -107,6 +116,9 @@ jobs:
   real-llm-smoke:
     name: Real-LLM act-loop smoke
     runs-on: ubuntu-latest
+    # Runs ONLY on the 21:30 UTC cron — DeepSeek's off-peak window (~50–75%
+    # cheaper) — or on manual dispatch; skipped on the 06:00 peak cron.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '30 21 * * *' }}
     timeout-minutes: 25
     permissions:
       contents: read  # Minimal: read repo content; testcontainers use the host docker socket.
