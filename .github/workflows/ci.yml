@@ -967,7 +967,7 @@ jobs:
         # 100% trust-boundary gates) is skipped — leaving the gates
         # paper-only on every push. #184 item 3.
         run: |
-          uv run pytest tests/integration -q --cov=src/alfred --cov-append --cov-branch --cov-fail-under=0
+          uv run pytest tests/integration -q --cov=src/alfred --cov-append --cov-branch --cov-fail-under=0 -m "not real_llm"
       - name: Assert the connectivity-free-core kernel proof RUNS (not skipped) — #245 paper-gate guard
         # The runtime egress/DNS proof is the enforcement-of-record for the connectivity-free
         # core (ADR-0042 / Spec C §4.2). A `skipif(docker unavailable)` LOUD skip is still a
@@ -1098,7 +1098,7 @@ jobs:
         # artifact (a second uploader of that name would collide with amd64's);
         # arm64 is a run-to-green portability signal.
         run: |
-          uv run pytest tests/integration -q --cov=src/alfred --cov-branch --cov-fail-under=0
+          uv run pytest tests/integration -q --cov=src/alfred --cov-branch --cov-fail-under=0 -m "not real_llm"
 
   integration-privileged:
     # Axis 2 (privileged-Linux depth) — closes #245 Problem 1. The
@@ -1373,7 +1373,7 @@ jobs:
             "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
             "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" \
             "${UV_BIN}" run pytest tests/integration tests/smoke -q \
-            -p no:cacheprovider --cov-fail-under=0
+            -p no:cacheprovider --cov-fail-under=0 -m "not real_llm"
       - name: Assert the gateway real-spawn test RUNS (not skipped) — #245 paper-gate guard
         # test-104: the deterministic precondition above guarantees the skipif is
         # False (euid 0 + bwrap + ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON), but a
@@ -1970,10 +1970,15 @@ jobs:
         # Secrets are scoped via env:, never interpolated into the
         # run: block — the workflow-injection guard in the security
         # reminder hook is satisfied.
+        #
+        # No per-commit test consumes ALFRED_SMOKE_PROVIDER_KEY today (the
+        # real-LLM smoke is nightly-only, tests/integration/orchestrator/,
+        # deselected via `-m "not real_llm"` on the lanes above). Do NOT
+        # add a tests/smoke consumer without moving spend to nightly.
         env:
           ALFRED_SMOKE_DISCORD_TOKEN: ${{ secrets.ALFRED_SMOKE_DISCORD_TOKEN }}
           ALFRED_SMOKE_PROVIDER_KEY: ${{ secrets.ALFRED_SMOKE_PROVIDER_KEY }}
-        run: uv run pytest tests/smoke -v
+        run: uv run pytest tests/smoke -v -m "not real_llm"
 
   setup-script-smoke:
     name: Setup script smoke (${{ matrix.os }})
