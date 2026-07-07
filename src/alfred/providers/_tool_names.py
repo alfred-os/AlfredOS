@@ -54,14 +54,16 @@ def sanitize_tool_name(name: str) -> str:
     unsafe character -> no substitution). If the result exceeds
     :data:`_MAX_PROVIDER_TOOL_NAME_LENGTH`, it is truncated to
     :data:`_TRUNCATED_PREFIX_LENGTH` characters and suffixed with an
-    8-hex-digit sha1 digest of the ORIGINAL (pre-sanitize) ``name`` — this
+    8-hex-digit sha256 digest of the ORIGINAL (pre-sanitize) ``name`` — this
     keeps the result deterministic (same input -> same output) while
     disambiguating two distinct long names that happen to share the same
-    truncated prefix.
+    truncated prefix. The digest is a non-cryptographic disambiguator, not a
+    security primitive (``usedforsecurity=False``); sha256 over sha1 satisfies
+    the SAST weak-hash rule at no functional cost.
     """
     safe = _UNSAFE_TOOL_NAME_CHAR.sub("_", name)
     if len(safe) > _MAX_PROVIDER_TOOL_NAME_LENGTH:
-        digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()[
+        digest = hashlib.sha256(name.encode(), usedforsecurity=False).hexdigest()[
             :_HASH_DIGEST_LENGTH
         ]
         safe = f"{safe[:_TRUNCATED_PREFIX_LENGTH]}_{digest}"
