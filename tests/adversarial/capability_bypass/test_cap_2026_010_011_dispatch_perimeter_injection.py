@@ -13,17 +13,10 @@ from typing import Final
 from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.i18n import t
-from alfred.orchestrator.builtin_tools import build_web_fetch_tool
 from alfred.orchestrator.tool_dispatch import dispatch_tool
-from alfred.orchestrator.tool_registry import ToolRegistry
-from alfred.plugins.web_fetch.allowlist import AllowlistEntry
-from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.providers.base import ToolCall
-from alfred.security.secrets import SecretBroker
 from tests.adversarial.capability_bypass._tool_arg_injection_doubles import (
-    RateLimiterNeverConsulted,
-    RelayNeverFiresExtractor,
-    SpyHandleCap,
+    build_refusing_web_fetch_registry,
     payload_by_id,
 )
 from tests.adversarial.payload_schema import AdversarialPayload
@@ -37,31 +30,12 @@ _CTX: Final[TurnEgressContext] = TurnEgressContext(
 )
 
 
-def _registry_with_real_web_fetch(writer: _CapturingAuditWriter) -> ToolRegistry:
-    config = FetchDispatchConfig(
-        manifest_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        operator_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        session_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        manifest_commit_hash="test-commit",
-    )
-    web_fetch_spec = build_web_fetch_tool(
-        extractor=RelayNeverFiresExtractor(),  # type: ignore[arg-type]
-        config=config,
-        rate_limiter=RateLimiterNeverConsulted(),  # type: ignore[arg-type]
-        handle_cap=SpyHandleCap(),  # type: ignore[arg-type]
-        outbound_dlp=identity_outbound_dlp(),
-        broker=SecretBroker(env={}),
-        audit=writer,  # type: ignore[arg-type]
-    )
-    return ToolRegistry([web_fetch_spec])
-
-
 async def _dispatch(writer: _CapturingAuditWriter, call: ToolCall) -> str:
     return await dispatch_tool(
         call,
         0,
         ctx=_CTX,
-        registry=_registry_with_real_web_fetch(writer),
+        registry=build_refusing_web_fetch_registry(writer, safe_domain=_SAFE_DOMAIN),
         gate=make_tool_dispatch_gate(),
         dlp=identity_outbound_dlp(),
         audit=writer,  # type: ignore[arg-type]

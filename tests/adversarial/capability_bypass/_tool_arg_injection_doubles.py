@@ -17,7 +17,13 @@ from __future__ import annotations
 import pytest
 
 from alfred.egress.egress_response_extract import EgressExtractOutcome
+from alfred.orchestrator.builtin_tools import build_web_fetch_tool
+from alfred.orchestrator.tool_registry import ToolRegistry
+from alfred.plugins.web_fetch.allowlist import AllowlistEntry
+from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
+from alfred.security.secrets import SecretBroker
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.dlp import identity_outbound_dlp
 
 
 class RelayNeverFiresExtractor:
@@ -53,6 +59,32 @@ class SpyHandleCap:
         self, *, user_id: str, handle_id: str, correlation_id: str | None = None
     ) -> None:
         return None
+
+
+def build_refusing_web_fetch_registry(
+    writer: object, *, safe_domain: str = "safe.example.com"
+) -> ToolRegistry:
+    """Build a real ToolRegistry with the T3 web.fetch tool whose three-way
+    allowlist permits ONLY ``safe_domain`` (all tiers), wired with the
+    raise-if-reached fire-spies + an unreached SpyHandleCap. Any off-allowlist
+    URL is refused pre-egress; the fire-spies prove the relay/rate-limiter never
+    run. Shared by the cap-2026-006..011 tool-arg-injection modules."""
+    config = FetchDispatchConfig(
+        manifest_allowed_entries=(AllowlistEntry(domain=safe_domain),),
+        operator_allowed_entries=(AllowlistEntry(domain=safe_domain),),
+        session_allowed_entries=(AllowlistEntry(domain=safe_domain),),
+        manifest_commit_hash="test-commit",
+    )
+    web_fetch_spec = build_web_fetch_tool(
+        extractor=RelayNeverFiresExtractor(),  # type: ignore[arg-type]
+        config=config,
+        rate_limiter=RateLimiterNeverConsulted(),  # type: ignore[arg-type]
+        handle_cap=SpyHandleCap(),  # type: ignore[arg-type]
+        outbound_dlp=identity_outbound_dlp(),
+        broker=SecretBroker(env={}),
+        audit=writer,  # type: ignore[arg-type]
+    )
+    return ToolRegistry([web_fetch_spec])
 
 
 def payload_by_id(
