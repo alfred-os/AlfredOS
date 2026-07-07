@@ -61,6 +61,11 @@ import pytest
 # semantically AND structurally to the rate-limit subsystem; the
 # tls_failure body contains neither, so a fuzzy swap surfaces.
 _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = {
+    # PR4b-audit (#339, #347 blocker 2): the action-deadline timeout body is
+    # intentionally payload-blind (no egress_id / destination_host) — audit
+    # hygiene, see WebFetchActionTimeout's docstring. Fingerprint anchors on
+    # "deadline" so a fuzzy swap with a neighbouring body surfaces.
+    "web.fetch.error.action_timeout": ({}, ("deadline",)),
     "web.fetch.error.content_handle_expired": (
         {"handle_id": "wf_test_handle"},
         ("handle", "expired"),
