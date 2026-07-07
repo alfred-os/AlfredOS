@@ -49,7 +49,6 @@ import pytest
 
 from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
 from alfred.egress.egress_id import TurnEgressContext
-from alfred.egress.egress_response_extract import EgressExtractOutcome
 from alfred.i18n import t
 from alfred.orchestrator.builtin_tools import build_web_fetch_tool
 from alfred.orchestrator.tool_dispatch import dispatch_tool
@@ -58,6 +57,11 @@ from alfred.plugins.web_fetch.allowlist import AllowlistEntry
 from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.providers.base import ToolCall
 from alfred.security.secrets import SecretBroker
+from tests.adversarial.capability_bypass._tool_arg_injection_doubles import (
+    RateLimiterNeverConsulted,
+    RelayNeverFiresExtractor,
+    SpyHandleCap,
+)
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.egress_doubles import _CapturingAuditWriter
@@ -104,56 +108,6 @@ def tool_arg_injection_payload(
     return matches[0]
 
 
-class _RelayNeverFiresExtractor:
-    """Fire-spy proving the egress relay NEVER fires for an off-allowlist URL.
-
-    The three-way allowlist check (spec §7.4 step 2) runs strictly BEFORE the
-    rate limiter (step 3) and the relay fire (step 4) inside
-    ``dispatch_web_fetch`` — ``handle`` must never be invoked when the
-    allowlist refuses first. Raising (rather than silently recording a call
-    count) makes a defense regression fail the test immediately, at the exact
-    call site, instead of relying on a separate post-hoc assertion.
-    """
-
-    async def handle(self, **_kwargs: object) -> EgressExtractOutcome:
-        raise AssertionError(
-            "EgressResponseExtractor.handle() was called for an off-allowlist "
-            "URL — the allowlist refusal must fire BEFORE the relay/extractor "
-            "ever runs (cap-2026-006 defense breach)"
-        )
-
-
-class _RateLimiterNeverConsulted:
-    """Fire-spy proving the rate limiter is never consulted either — the
-    allowlist check (step 2) strictly precedes the rate-limit check (step 3)."""
-
-    async def check_and_increment(self, *, domain: str, user_id: str) -> None:
-        raise AssertionError(
-            "RateLimiter.check_and_increment() was called for an off-allowlist "
-            "URL — the allowlist refusal must fire BEFORE the rate limiter runs "
-            "(cap-2026-006 defense breach)"
-        )
-
-
-class _SpyHandleCap:
-    """Permissive fake ``HandleCap`` — required by ``build_web_fetch_tool``'s
-    signature but NEVER reached: the allowlist refusal (step 2) fires strictly
-    BEFORE the handle-cap reserve (step 3b), so this fake is construction-only
-    plumbing, not a defense under test here. It is intentionally NOT a
-    fire-spy (unlike ``_RelayNeverFiresExtractor`` /
-    ``_RateLimiterNeverConsulted`` above) — asserting the cap is never
-    consulted would just duplicate the ordering already pinned by those two
-    fire-spies plus this test's own allowlist-refusal outcome."""
-
-    async def try_reserve(self, *, user_id: str, handle_id: str, handle_ttl_seconds: int) -> None:
-        return None
-
-    async def release(
-        self, *, user_id: str, handle_id: str, correlation_id: str | None = None
-    ) -> None:
-        return None
-
-
 async def test_tool_arg_injection_offlist_url_refused(
     tool_arg_injection_payload: AdversarialPayload,
 ) -> None:
@@ -185,10 +139,10 @@ async def test_tool_arg_injection_offlist_url_refused(
     # WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps auth entirely out of scope here
     # (#339 PR4b-broker Task 6, FIX-5).
     web_fetch_spec = build_web_fetch_tool(
-        extractor=_RelayNeverFiresExtractor(),  # type: ignore[arg-type]
+        extractor=RelayNeverFiresExtractor(),  # type: ignore[arg-type]
         config=config,
-        rate_limiter=_RateLimiterNeverConsulted(),  # type: ignore[arg-type]
-        handle_cap=_SpyHandleCap(),  # type: ignore[arg-type]
+        rate_limiter=RateLimiterNeverConsulted(),  # type: ignore[arg-type]
+        handle_cap=SpyHandleCap(),  # type: ignore[arg-type]
         outbound_dlp=identity_outbound_dlp(),
         broker=SecretBroker(env={}),
         audit=writer,  # type: ignore[arg-type]
