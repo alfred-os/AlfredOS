@@ -90,10 +90,9 @@ Perimeter hardening — `dispatch_tool` resolution and validation:
   (`shell.exec` / `fs.read`), betting `dispatch_tool` dispatches by name unchecked. Refused with
   `dispatch_outcome="unknown_tool"` and the benign `orchestrator.tool.unknown_tool` string; the
   tool is never resolved or dispatched.
-- `cap-2026-011` — malformed arguments. A `web.fetch` call padded with an attacker-chosen extra
-  field (`headers`/`method`) or missing the required `url`, betting `arguments_conform`'s
-  reject-extra / required-presence check is skipped. Refused with
-  `dispatch_outcome="invalid_arguments"`.
+- `cap-2026-011` — malformed arguments. A `web.fetch` call that omits the required `url` (supplying
+  an attacker-chosen `headers` map as a decoy), betting `arguments_conform`'s required-presence
+  check is skipped. Refused with `dispatch_outcome="invalid_arguments"`.
 
 The exact `dispatch_outcome` token for the URL-shape entries (007–009) — whether
 `AllowlistIntersection` classifies a literal-IP / non-HTTP-scheme / suffix-spoof host as
@@ -172,9 +171,10 @@ Template: `tests/integration/orchestrator/test_act_loop_real_chain.py`. The new 
   answer. This is the core end-to-end proof.
 - Containment (HARD rule #5, load-bearing when `web.fetch` fired): the raw upstream marker
   (`"raw-upstream-secret"`, planted in the loopback upstream body) NEVER appears in any planner
-  request message (system + history + tool messages), and `fire_counter.value == 1` confirms the
-  marker-bearing bytes were genuinely produced. A containment regression that fed raw T3 to the
-  planner would surface the marker and fail.
+  request message (system + history + tool messages), and `fire_counter.value >= 1` (a real model
+  may fetch more than once across the loop's iterations) confirms the marker-bearing bytes were
+  genuinely produced. A containment regression that fed raw T3 to the planner would surface the
+  marker and fail.
 
 The liveness assertion is the unconditional smoke signal; the containment assertion is the
 security invariant that becomes load-bearing exactly when the directive prompt succeeds in

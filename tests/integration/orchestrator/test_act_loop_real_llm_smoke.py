@@ -140,6 +140,18 @@ class _CapturingRouter:
         return await self._inner.complete(request)
 
 
+def _parsed_or_none(content: str) -> object | None:
+    """Parse a fed-back tool message as JSON, or None if it isn't JSON.
+
+    web.fetch's structured extract is json.dumps'd; clock.now's result is a
+    plain ISO string. The containment check only matches the web.fetch extract,
+    so a non-JSON message must be skipped, not raise JSONDecodeError."""
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
 @skip_unless_key
 @pytest.mark.asyncio
 async def test_real_deepseek_drives_web_fetch_loop_end_to_end(
@@ -291,7 +303,7 @@ async def test_real_deepseek_drives_web_fetch_loop_end_to_end(
                 m for request in capturing.requests for m in request.messages if m.role == "tool"
             ]
             assert any(
-                json.loads(m.content)
+                _parsed_or_none(m.content)
                 == {"text": "hello from the echo child", "intent": "informational"}
                 for m in fed_back_tool_messages
             )
