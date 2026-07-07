@@ -1288,9 +1288,8 @@ See spec §6.2, [ExtractionMode](#extractionmode), and
 
 The exception hierarchy for `web.fetch` failures
 (`src/alfred/plugins/web_fetch/errors.py`, shipped PR-S3-5).
-Subclasses: `WebFetchDomainNotAllowed`, `WebFetchTlsError`,
-`WebFetchRateLimited`, `WebFetchMimeTypeNotAllowed`,
-`WebFetchSizeLimitExceeded`. All user-facing error strings route
+Subclasses: `WebFetchDomainNotAllowed`, `WebFetchRateLimited`,
+`WebFetchActionTimeout`, `WebFetchHandleIdMismatch`. All user-facing error strings route
 through `t()` (CLAUDE.md i18n rule #1). The hierarchy is fail-loud —
 no `except Exception: pass` is permitted on a `WebFetchError`; the
 plugin surfaces the typed subclass and the orchestrator translates it
