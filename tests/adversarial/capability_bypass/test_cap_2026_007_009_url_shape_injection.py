@@ -17,17 +17,10 @@ import pytest
 from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.i18n import t
-from alfred.orchestrator.builtin_tools import build_web_fetch_tool
 from alfred.orchestrator.tool_dispatch import dispatch_tool
-from alfred.orchestrator.tool_registry import ToolRegistry
-from alfred.plugins.web_fetch.allowlist import AllowlistEntry
-from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.providers.base import ToolCall
-from alfred.security.secrets import SecretBroker
 from tests.adversarial.capability_bypass._tool_arg_injection_doubles import (
-    RateLimiterNeverConsulted,
-    RelayNeverFiresExtractor,
-    SpyHandleCap,
+    build_refusing_web_fetch_registry,
     payload_by_id,
 )
 from tests.adversarial.payload_schema import AdversarialPayload
@@ -66,23 +59,8 @@ async def test_url_shape_injection_refused_pre_egress(
     assert arguments["url"] == attacker_url
     assert payload.expected_outcome == "refused"
 
-    config = FetchDispatchConfig(
-        manifest_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        operator_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        session_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        manifest_commit_hash="test-commit",
-    )
     writer = _CapturingAuditWriter()
-    web_fetch_spec = build_web_fetch_tool(
-        extractor=RelayNeverFiresExtractor(),  # type: ignore[arg-type]
-        config=config,
-        rate_limiter=RateLimiterNeverConsulted(),  # type: ignore[arg-type]
-        handle_cap=SpyHandleCap(),  # type: ignore[arg-type]
-        outbound_dlp=identity_outbound_dlp(),
-        broker=SecretBroker(env={}),
-        audit=writer,  # type: ignore[arg-type]
-    )
-    registry = ToolRegistry([web_fetch_spec])
+    registry = build_refusing_web_fetch_registry(writer, safe_domain=_SAFE_DOMAIN)
 
     call = ToolCall(id=payload_id, name="web.fetch", arguments=dict(arguments))
     out = await dispatch_tool(

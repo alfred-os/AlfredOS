@@ -50,17 +50,10 @@ import pytest
 from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.i18n import t
-from alfred.orchestrator.builtin_tools import build_web_fetch_tool
 from alfred.orchestrator.tool_dispatch import dispatch_tool
-from alfred.orchestrator.tool_registry import ToolRegistry
-from alfred.plugins.web_fetch.allowlist import AllowlistEntry
-from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.providers.base import ToolCall
-from alfred.security.secrets import SecretBroker
 from tests.adversarial.capability_bypass._tool_arg_injection_doubles import (
-    RateLimiterNeverConsulted,
-    RelayNeverFiresExtractor,
-    SpyHandleCap,
+    build_refusing_web_fetch_registry,
 )
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.dlp import identity_outbound_dlp
@@ -126,28 +119,13 @@ async def test_tool_arg_injection_offlist_url_refused(
 
     # Real per-session config: the effective allowlist covers ONLY
     # `safe.example.com` across all three tiers — `attacker.example.net` is
-    # outside it at every tier, so the intersection refuses.
-    config = FetchDispatchConfig(
-        manifest_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        operator_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        session_allowed_entries=(AllowlistEntry(domain=_SAFE_DOMAIN),),
-        manifest_commit_hash="test-commit",
-    )
-    writer = _CapturingAuditWriter()
-    # This test exercises the three-way domain allowlist, not authenticated
-    # fetch — a real, empty-env SecretBroker with the default empty
+    # outside it at every tier, so the intersection refuses. This test
+    # exercises the three-way domain allowlist, not authenticated fetch — the
+    # shared helper's real, empty-env SecretBroker with the default empty
     # WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps auth entirely out of scope here
     # (#339 PR4b-broker Task 6, FIX-5).
-    web_fetch_spec = build_web_fetch_tool(
-        extractor=RelayNeverFiresExtractor(),  # type: ignore[arg-type]
-        config=config,
-        rate_limiter=RateLimiterNeverConsulted(),  # type: ignore[arg-type]
-        handle_cap=SpyHandleCap(),  # type: ignore[arg-type]
-        outbound_dlp=identity_outbound_dlp(),
-        broker=SecretBroker(env={}),
-        audit=writer,  # type: ignore[arg-type]
-    )
-    registry = ToolRegistry([web_fetch_spec])
+    writer = _CapturingAuditWriter()
+    registry = build_refusing_web_fetch_registry(writer, safe_domain=_SAFE_DOMAIN)
 
     call = ToolCall(id=_PAYLOAD_ID, name="web.fetch", arguments=dict(arguments))
     out = await dispatch_tool(
