@@ -1,8 +1,9 @@
 # PR4c — tool-arg-injection corpus breadth + nightly real-LLM smoke (issue #339, the finale)
 
-Status: DESIGN — holding at ratification gate (best-judgment defaults taken while the
-requester was away; see "Open decisions for ratification"). Do NOT proceed to
-writing-plans until ratified.
+Status: DESIGN + PLAN + FOCUSED PLAN-REVIEW complete (4-lens findings folded into the plan);
+HOLDING before subagent-driven TDD for the requester's ratification of the §7 forks.
+Best-judgment defaults were taken while the requester was away and vetted by plan-review. Plan:
+`docs/superpowers/plans/2026-07-07-issue-339-pr4c-corpus-and-real-llm-smoke.md`.
 
 Branch: `339-pr4c-corpus-and-real-llm-smoke` off `main` @ `ee6bb88d`.
 
@@ -198,24 +199,33 @@ Placement:
 - File: `tests/integration/orchestrator/test_act_loop_real_llm_smoke.py`, marked
   `@pytest.mark.real_llm` (new marker registered in `pyproject.toml`
   `[tool.pytest.ini_options] markers`).
-- Per-commit lanes: add `-m "not real_llm"` to every per-commit pytest invocation that collects
-  `tests/integration` (belt). The skip-unless-key gate is the suspenders (no key in per-commit
-  lanes → skip even if collected). The exact lanes to amend are enumerated during the plan by
-  grepping `ci.yml` for `pytest tests/integration`.
+- Spend-safety holds primarily by PLACEMENT: the smoke lives in
+  `tests/integration/orchestrator/`, which the per-commit `Smoke` job (`pytest tests/smoke -v`,
+  ci.yml:1976 — the ONLY per-commit lane carrying `ALFRED_SMOKE_PROVIDER_KEY`) does not collect.
+  The `skipif` guard + the `-m "not real_llm"` deselects are defense-in-depth.
+- Per-commit lanes: add `-m "not real_llm"` to the three keyless `tests/integration` lanes
+  (`Integration` ~ci.yml:970, `integration-arm64` ~1101, `integration-privileged` ~1375) AND to
+  the key-bearing `Smoke` lane (~1976) — the latter is the belt that actually guards spend if a
+  `real_llm` test is ever relocated into `tests/smoke/`. Re-grep for exact line numbers (they shift).
 - New nightly job `real-llm-smoke` in `nightly.yml`: ubuntu-latest, `uv sync --frozen --dev`,
-  testcontainers via the host docker socket (Postgres 18 + Redis 8, like the adversarial job —
-  NO `docker compose up`), `env: ALFRED_SMOKE_PROVIDER_KEY: ${{ secrets.ALFRED_SMOKE_PROVIDER_KEY }}`
+  testcontainers via the host docker socket (Postgres 18 + Redis 8 — NO `docker compose up`; this
+  is the first nightly job to use testcontainers, so the shape mirrors the per-commit integration
+  job, not the container-free `adversarial` job), `env: ALFRED_SMOKE_PROVIDER_KEY: ${{ secrets.ALFRED_SMOKE_PROVIDER_KEY }}`
   scoped via `env:` (never interpolated into `run:`), running
   `uv run pytest tests/integration/orchestrator/test_act_loop_real_llm_smoke.py -m real_llm -v`.
-  Bounded `timeout-minutes`. Retry via `pytest-rerunfailures --reruns 2 --reruns-delay 5` if the
-  dep is present (add it as a dev-dep if absent) to absorb LLM nondeterminism; do NOT use
-  `continue-on-error` (it would mask a real loop regression, and nightly jobs are already
-  independent so a red smoke does not fail the adversarial job).
+  Bounded `timeout-minutes` (20). Retry via a DEP-FREE bounded shell loop (3 attempts, 5s backoff,
+  every conditional in an `if` so `set -e` is safe) — chosen over `pytest-rerunfailures` to avoid a
+  new dev-dep (CLAUDE.md) and to get fresh testcontainers per attempt (more robust vs an infra/pull
+  flake). Do NOT use `continue-on-error` (it would mask a real loop regression; nightly jobs are
+  already independent so a red smoke does not fail the adversarial job). The job must NEVER become a
+  required status check (schedule-only; structurally cannot report on a PR head).
 
-`ALFRED_SMOKE_PROVIDER_KEY` is already declared in the per-commit `ci.yml` `smoke` job but
-consumed by zero test; this PR gives it its first consumer, in the nightly job. The operator
-must provision the repo secret with a throwaway low-balance DeepSeek key after merge (documented
-on the PR, like the PR-E Discord-token precedent).
+`ALFRED_SMOKE_PROVIDER_KEY` is already declared in the per-commit `Smoke` job (ci.yml:1975) but
+consumed by zero test; this PR gives it its first consumer, in the nightly job (and annotates the
+per-commit declaration so no one wires a per-commit spend). The operator must provision the repo
+secret with a throwaway low-balance DeepSeek key after merge (documented on the PR, like the PR-E
+Discord-token precedent). Until provisioned the nightly job reports "1 skipped" green — a paper-
+gate, called out on the PR so it is not mistaken for coverage.
 
 ## 5. Out of scope
 
@@ -247,11 +257,20 @@ When merged: `#339` epic CLOSES.
 
 ## 7. Open decisions for ratification
 
-1. Scope: ONE PR (section 2). Alternative: 2-way split. Best-judgment = one PR.
+A focused 4-lens plan-review (security, test-engineer, devops, reviewer) vetted the plan and
+ENDORSED all four decisions below (fork #3 conditional on the containment fix, now folded). The
+decisions stand as best-judgment pending the requester's explicit ratification.
+
+1. Scope: ONE PR (section 2). Alternative: 2-way split. Best-judgment = one PR. (All three lenses
+   endorsed one PR — both halves are test-only, no ADR, no `src/alfred/` change.)
 2. Corpus breadth: five payloads (007–011). 007–009 are the core URL-argument mandate; 010–011
-   harden the `dispatch_tool` perimeter. Trim to 007–009 if the perimeter pair is judged out of
-   the "injection-driven-URL" theme.
+   harden the `dispatch_tool` perimeter. Keep all five (endorsed); trim to 007–009 only if the
+   perimeter pair is judged out of the "injection-driven-URL" theme.
 3. Smoke path: drives the `web.fetch` T3 leg (exercises the security-critical path) rather than
-   `clock.now`-only (simpler, no T3 chain) or a tool-agnostic tolerant assertion. Best-judgment =
-   web.fetch T3 leg with a directive prompt + robust liveness assertion + nightly retry.
-4. Retry vs continue-on-error on the nightly job: retry (`--reruns 2`), no `continue-on-error`.
+   `clock.now`-only (simpler, no T3 chain). Best-judgment = web.fetch T3 leg with a directive
+   prompt + a non-vacuous `_CapturingRouter` containment triple + nightly retry. (Endorsed — the
+   T3 leg is the only meaningful end-to-end proof for a security-hardened epic; `clock.now` crosses
+   no trust boundary.)
+4. Retry on the nightly job: a DEP-FREE bounded shell loop (3 attempts, 5s backoff), no
+   `continue-on-error`. (Reconciled from an earlier `--reruns 2` draft to avoid a new dev-dep and
+   get fresh testcontainers per attempt.)
