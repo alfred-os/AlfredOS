@@ -32,8 +32,19 @@ _DEFAULT_ACTION_DEADLINE_SECONDS: Final[int] = 30
 # slow-but-live fetch is never evicted mid-flight while still counting.
 _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS: Final[int] = 120
 
+# #339 PR4b-audit (#347 blocker 2 / FIX-1): the bound on the POST-timeout ledger
+# read the dispatcher performs to classify an action-deadline overrun as
+# in-doubt. That read is CORRELATED with the timeout (the same DB stress that
+# blew the action deadline can also make the ledger slow) — bounding it stops a
+# slow/hung ledger from extending the already-breached deadline or holding the
+# handle_cap slot open any longer than necessary. Deliberately short (a single
+# indexed point-read, not a fetch) and independent of
+# ``_DEFAULT_ACTION_DEADLINE_SECONDS``.
+_LEDGER_READ_TIMEOUT_SECONDS: Final[float] = 5.0
+
 
 __all__ = [
     "_DEFAULT_ACTION_DEADLINE_SECONDS",
     "_DEFAULT_HANDLE_RESERVATION_TTL_SECONDS",
+    "_LEDGER_READ_TIMEOUT_SECONDS",
 ]

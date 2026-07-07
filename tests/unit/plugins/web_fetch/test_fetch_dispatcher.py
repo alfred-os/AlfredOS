@@ -23,7 +23,11 @@ dlp, audit, rate_limiter). The branches covered are:
   * Domain not allowed / rate-limited → typed audit row + re-raise.
   * DLP-scan exception → ``dlp_scan_error`` row + ``<REDACTED_DLP_FAILURE>``
     + re-raise.
-  * Action-deadline expiry → ``TimeoutError`` surfaced.
+  * Action-deadline expiry → enriched ``WebFetchActionTimeout`` surfaced (not a
+    bare ``TimeoutError``), carrying ``egress_id`` / ``in_doubt`` /
+    ``ledger_state`` (#347 blocker 2). A correlated ledger-read failure still
+    surfaces the exception, forcing ``in_doubt=True`` /
+    ``ledger_state="read_unavailable"`` (PR4b-audit FIX-1).
   * Broadening-cap → ``manifest_broadening_capped`` row, at most once / session.
   * Status-code clamp (plausible HTTP code 100-599 else None).
   * Real URL on the wire + per-value header redaction.
@@ -38,7 +42,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import structlog
 
-from alfred.egress.egress_id import TurnEgressContext
+from alfred.egress.egress_id import TurnEgressContext, compute_egress_id
 from alfred.egress.egress_response_extract import (
     EgressExtractOutcome,
     EgressResponseExtractor,
@@ -50,6 +54,7 @@ from alfred.plugins.web_fetch.constants import (
     _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
 )
 from alfred.plugins.web_fetch.errors import (
+    WebFetchActionTimeout,
     WebFetchDomainNotAllowed,
     WebFetchError,
     WebFetchRateLimited,
@@ -527,14 +532,16 @@ async def test_dlp_scan_exception_redacts_userinfo_and_query_in_audit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Action-deadline expiry — TimeoutError surfaced
+# Action-deadline expiry — enriched WebFetchActionTimeout surfaced (#347
+# blocker 2 / PR4b-audit FIX-1)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_action_deadline_expiry_surfaces_timeout() -> None:
-    """An extractor that overruns the action-deadline surfaces ``TimeoutError``
-    (the orchestrator's supervisor.action_timeout family audits it)."""
+    """An extractor that overruns the action-deadline surfaces the enriched
+    ``WebFetchActionTimeout`` — NOT a bare ``TimeoutError`` — so the forensic
+    egress_id/in_doubt/ledger_state fields are never lost (#347 blocker 2)."""
 
     async def _slow_handle(**_kwargs: Any) -> EgressExtractOutcome:
         await asyncio.sleep(10)
@@ -542,9 +549,99 @@ async def test_action_deadline_expiry_surfaces_timeout() -> None:
 
     extractor = AsyncMock(spec=EgressResponseExtractor)
     extractor.handle = _slow_handle
+    extractor.ledger_state = AsyncMock(return_value=None)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(WebFetchActionTimeout):
         await _dispatch(extractor=extractor, action_deadline_seconds=0.01)
+
+
+@pytest.mark.asyncio
+async def test_action_deadline_timeout_in_doubt_true_when_committed_no_response() -> None:
+    """FIX-1 happy path: a hung extractor whose ledger row is
+    ``committed_no_response`` surfaces ``WebFetchActionTimeout(in_doubt=True)``
+    with the egress_id/destination_host/ledger_state the forensic
+    ``tool.dispatch`` row needs (#347 blocker 2). The hang is a real
+    never-set ``asyncio.Event().wait()`` (not ``asyncio.sleep``) so the
+    extractor is verifiably still in-flight when the action deadline fires —
+    it can only unblock via the outer ``asyncio.timeout`` cancellation."""
+    never_set = asyncio.Event()
+
+    async def _hang(**_kwargs: Any) -> EgressExtractOutcome:
+        await never_set.wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _hang
+    extractor.ledger_state = AsyncMock(return_value="committed_no_response")
+    spy = _SpyHandleCap()
+
+    with pytest.raises(WebFetchActionTimeout) as excinfo:
+        await _dispatch(extractor=extractor, handle_cap=spy, action_deadline_seconds=0.05)
+
+    exc = excinfo.value
+    assert exc.in_doubt is True
+    assert exc.ledger_state == "committed_no_response"
+    assert exc.destination_host == "example.com"
+    assert exc.egress_id == compute_egress_id(_CTX, call_index=0)
+    extractor.ledger_state.assert_awaited_once_with(egress_id=exc.egress_id)
+    # The finally still releases the handle_cap slot after the raise.
+    assert spy.released == spy.reserved
+    assert len(spy.released) == 1
+
+
+@pytest.mark.asyncio
+async def test_action_deadline_timeout_in_doubt_false_when_state_none() -> None:
+    """A ledger row that never committed (``state is None`` — the side effect
+    never fired) is the SAFE case: ``in_doubt`` is False, distinct from the
+    ``committed_no_response`` in-doubt case above."""
+    never_set = asyncio.Event()
+
+    async def _hang(**_kwargs: Any) -> EgressExtractOutcome:
+        await never_set.wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _hang
+    extractor.ledger_state = AsyncMock(return_value=None)
+
+    with pytest.raises(WebFetchActionTimeout) as excinfo:
+        await _dispatch(extractor=extractor, action_deadline_seconds=0.05)
+
+    assert excinfo.value.in_doubt is False
+    assert excinfo.value.ledger_state is None
+
+
+@pytest.mark.asyncio
+async def test_action_deadline_timeout_ledger_read_failure_forces_in_doubt() -> None:
+    """FIX-1: the post-timeout ledger read is CORRELATED with the timeout (the
+    same DB stress can blow both). A read failure must NEVER swallow the
+    forensic timeout (HARD rule #7) — it forces the safe-direction
+    ``in_doubt=True`` / ``ledger_state="read_unavailable"`` sentinel and logs
+    loud."""
+    never_set = asyncio.Event()
+
+    async def _hang(**_kwargs: Any) -> EgressExtractOutcome:
+        await never_set.wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    extractor = AsyncMock(spec=EgressResponseExtractor)
+    extractor.handle = _hang
+    extractor.ledger_state = AsyncMock(side_effect=RuntimeError("ledger db down"))
+
+    with (
+        structlog.testing.capture_logs() as caps,
+        pytest.raises(WebFetchActionTimeout) as excinfo,
+    ):
+        await _dispatch(extractor=extractor, action_deadline_seconds=0.05)
+
+    exc = excinfo.value
+    assert exc.in_doubt is True
+    assert exc.ledger_state == "read_unavailable"
+
+    read_fail_logs = [c for c in caps if c.get("event") == "web_fetch.timeout.ledger_read_failed"]
+    assert len(read_fail_logs) == 1
+    assert read_fail_logs[0]["error_type"] == "RuntimeError"
+    assert read_fail_logs[0]["correlation_id"] == "corr-1"
 
 
 @pytest.mark.asyncio
@@ -822,8 +919,8 @@ async def test_release_on_canary_trip() -> None:
 
 @pytest.mark.asyncio
 async def test_release_on_timeout() -> None:
-    """An action-deadline expiry (``TimeoutError``) still releases the reserved
-    slot."""
+    """An action-deadline expiry (``WebFetchActionTimeout``) still releases the
+    reserved slot."""
     spy = _SpyHandleCap()
 
     async def _slow_handle(**_kwargs: Any) -> EgressExtractOutcome:
@@ -832,8 +929,9 @@ async def test_release_on_timeout() -> None:
 
     extractor = AsyncMock(spec=EgressResponseExtractor)
     extractor.handle = _slow_handle
+    extractor.ledger_state = AsyncMock(return_value=None)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(WebFetchActionTimeout):
         await _dispatch(extractor=extractor, handle_cap=spy, action_deadline_seconds=0.01)
 
     assert len(spy.released) == 1
