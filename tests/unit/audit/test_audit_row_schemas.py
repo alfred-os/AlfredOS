@@ -394,6 +394,8 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
         "provider_unavailable",
         "post_stage_refused",
         "nonce_check_failed",
+        "header_secret_refused",  # NEW #339 PR4b-broker — raw secret in a header
+        "secret_substitution_refused",  # NEW #339 PR4b-broker — off-allowlist {{secret:*}}
     }
 
 

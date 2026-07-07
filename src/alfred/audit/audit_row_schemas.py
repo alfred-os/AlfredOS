@@ -57,6 +57,8 @@ DlpScanResult = Literal[
     "mime_type_not_allowed",  # G7-2.5 — D1 pre-extract MIME refusal (response_inspection)
     "size_limit_exceeded",  # G7-2.5 — D1 pre-extract size refusal (response_inspection)
     "handle_cap_exceeded",  # RE-ADDED #339 PR4a — per-user concurrent-fetch refusal (spec §7.10)
+    "header_secret_refused",  # #339 PR4b-broker — raw secret detected in a request header
+    "secret_substitution_refused",  # #339 PR4b-broker — off-allowlist {{secret:*}} reference
     # Quarantined-extractor refusal tokens (TypedRefusalReason reach-through).
     # The re-homed dispatcher drives the quarantined extractor on the success path;
     # when that extractor refuses, the dispatcher surfaces the TypedRefusalReason as
@@ -84,6 +86,13 @@ pre-extract policy tokens ``mime_type_not_allowed`` / ``size_limit_exceeded``
 (``response_inspection._SoftRefusal.subject_token``, surfaced via
 ``EgressExtractOutcome.policy_refusal_token``). The ``handle_cap_exceeded``
 token was re-added in #339 PR4a for per-user concurrent-fetch refusal.
+
+``header_secret_refused`` and ``secret_substitution_refused`` were added in
+#339 PR4b-broker for the authenticated-``web.fetch`` confused-deputy defence
+(ADR-0048): the re-homed dispatcher emits ``header_secret_refused`` when DLP
+detects a raw (non-placeholder) secret value in a request header, and
+``secret_substitution_refused`` when a ``{{secret:<name>}}`` placeholder names
+a secret outside :data:`~alfred.plugins.web_fetch.auth_allowlist.WEB_FETCH_AUTH_SECRET_ALLOWLIST`.
 
 The ``dlp_scan_result`` subject field is free-JSON (no DB CHECK constraint); this
 Literal is the documentary contract pinned in lockstep by
