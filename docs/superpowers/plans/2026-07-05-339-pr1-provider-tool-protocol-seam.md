@@ -396,6 +396,16 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 
 - [ ] **Step 1: Write the failing tests** (append to `test_deepseek.py`):
 
+> **FIX (#406):** the `_openai_toolcall_response` / `test_response_tool_calls_parsed_and_stop_reason_mapped`
+> snippet below (first fixture in this block) asserts `tc.function.name = "web.fetch"` flows to/from the
+> wire UNCHANGED. #406 disproves this: OpenAI/DeepSeek reject a raw dotted name
+> (`^[a-zA-Z0-9_-]+$` forbids `.`), so the wire name is sanitized to `web_fetch` on send and
+> reverse-mapped back to `web.fetch` on parse (`alfred.providers._tool_names`). The shipped fixture
+> (`tests/unit/providers/test_deepseek.py::test_response_tool_calls_parsed_and_stop_reason_mapped`)
+> sets `tc.function.name = "web_fetch"` (the sanitized wire form) precisely because a real provider
+> never echoes the dotted canonical name. This snippet is left as historical record, not a corrected
+> reference.
+
 ```python
 from alfred.providers.base import ProviderMalformedToolArgumentsError
 

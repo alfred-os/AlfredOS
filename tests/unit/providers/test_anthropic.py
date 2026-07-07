@@ -221,6 +221,33 @@ async def test_response_tool_use_blocks_parsed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_response_tool_use_unmapped_name_passes_through_unchanged() -> None:
+    # Anti-spoofing guarantee: name_map.get(returned, returned) must fall
+    # through unchanged when the provider echoes a name that is NOT in this
+    # request's tools (a genuinely empty map trivially exercises the same
+    # code path but proves nothing about a REAL, non-empty map). Declare a
+    # real tool (web.fetch) so the map is non-trivial, then have the mocked
+    # response echo a DIFFERENT, unmapped wire name — proving it is NOT
+    # silently remapped onto the real tool. It flows to dispatch_tool's
+    # unknown_tool refusal downstream (tool_dispatch.py), never resolving to
+    # web.fetch.
+    fake_client = MagicMock()
+    resp = MagicMock()
+    tool_block = MagicMock(type="tool_use", id="c1", input={})
+    tool_block.name = "some_other_tool"  # name= is a reserved MagicMock ctor kwarg
+    resp.content = [tool_block]
+    resp.usage = MagicMock(input_tokens=5, output_tokens=3)
+    resp.stop_reason = "tool_use"
+    fake_client.messages.create = AsyncMock(return_value=resp)
+    provider = AnthropicProvider(client=fake_client, model="claude-sonnet-4-6")
+    td = ToolDefinition(name="web.fetch", description="fetch", input_schema={"type": "object"})
+    res = await provider.complete(
+        CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
+    )
+    assert res.tool_calls == (ToolCall(id="c1", name="some_other_tool", arguments={}),)
+
+
+@pytest.mark.asyncio
 async def test_plain_text_response_still_end_turn() -> None:
     fake_client = MagicMock()
     fake_client.messages.create = AsyncMock(return_value=_anthropic_text_response("hi"))

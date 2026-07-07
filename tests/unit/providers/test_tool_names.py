@@ -40,6 +40,36 @@ class TestSanitizeToolName:
     def test_output_always_matches_provider_grammar(self, name: str) -> None:
         assert _PROVIDER_SAFE_NAME.fullmatch(sanitize_tool_name(name)) is not None
 
+    def test_over_64_char_name_sanitizes_to_at_most_64_chars(self) -> None:
+        # A real future case: MCP tool names of the shape
+        # mcp__plugin_{name}_{server}__{tool} routinely exceed Anthropic's
+        # ^[a-zA-Z0-9_-]{1,64}$ bound even after char-class sanitization.
+        long_name = "mcp__plugin_" + ("x" * 60) + "__server__tool"
+        assert len(long_name) > 64
+        safe = sanitize_tool_name(long_name)
+        assert len(safe) <= 64
+        assert _PROVIDER_SAFE_NAME.fullmatch(safe) is not None
+
+    def test_over_64_char_sanitization_is_deterministic(self) -> None:
+        long_name = "a" * 100
+        assert sanitize_tool_name(long_name) == sanitize_tool_name(long_name)
+
+    def test_distinct_long_names_sharing_a_55_char_prefix_produce_different_safe_names(
+        self,
+    ) -> None:
+        # Two canonical names that agree on their first 55 sanitized
+        # characters but diverge after that would silently collide under a
+        # naive truncate-to-64; the trailing hash disambiguates them.
+        shared_prefix = "x" * 55
+        name_a = shared_prefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        name_b = shared_prefix + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        assert sanitize_tool_name(name_a) != sanitize_tool_name(name_b)
+
+    def test_short_all_unsafe_char_name_still_maps_char_for_char(self) -> None:
+        # Existing (<=64) behaviour is unchanged: no hash suffix, no
+        # truncation — every unsafe character is replaced 1:1.
+        assert sanitize_tool_name(":/: :") == "_____"
+
 
 class TestBuildToolNameMap:
     def test_maps_safe_name_to_canonical(self) -> None:

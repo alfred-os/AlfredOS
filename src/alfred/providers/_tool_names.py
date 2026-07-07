@@ -7,14 +7,20 @@ canonical dotted name (``web.fetch``, ``clock.now`` — see
 ``alfred.orchestrator.builtin_tools``). OpenAI/DeepSeek require function
 names matching ``^[a-zA-Z0-9_-]+$`` and Anthropic requires
 ``^[a-zA-Z0-9_-]{1,64}$``; both forbid dots, so a raw ``tool.name`` 400s at
-the first live call. Sanitization is applied ONLY at the provider<->SDK
-boundary (``deepseek.py`` / ``anthropic_native.py``); every other subsystem
-keeps seeing the canonical dotted name — this module is single-purpose so
-that boundary can't leak.
+the first live call. The 64-char bound is ENFORCED here (not just cited) —
+a canonical name whose char-class-sanitized form exceeds 64 chars (a real
+future case: MCP tool names of the shape
+``mcp__plugin_{name}_{server}__{tool}`` routinely exceed it) is truncated
+and disambiguated with a content hash so it still fits both grammars.
+Sanitization is applied ONLY at the provider<->SDK boundary
+(``deepseek.py`` / ``anthropic_native.py``); every other subsystem keeps
+seeing the canonical dotted name — this module is single-purpose so that
+boundary can't leak.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 
@@ -27,15 +33,39 @@ from alfred.providers.base import ProviderToolNameCollisionError, ToolDefinition
 # means the same pass is safe to reuse across both adapters.
 _UNSAFE_TOOL_NAME_CHAR = re.compile(r"[^a-zA-Z0-9_-]")
 
+# Anthropic's hard upper bound (^[a-zA-Z0-9_-]{1,64}$); OpenAI/DeepSeek have
+# no length bound, so enforcing the tighter one keeps a single sanitized
+# name valid on both wires.
+_MAX_PROVIDER_TOOL_NAME_LENGTH = 64
+
+# Truncated names keep this many original characters, leaving room for the
+# "_" separator + 8 hex digits of disambiguating hash so the total stays
+# within _MAX_PROVIDER_TOOL_NAME_LENGTH (55 + 1 + 8 == 64).
+_TRUNCATED_PREFIX_LENGTH = 55
+_HASH_DIGEST_LENGTH = 8
+
 
 def sanitize_tool_name(name: str) -> str:
-    """Replace every character outside ``[a-zA-Z0-9_-]`` with ``_``.
+    """Sanitize ``name`` into the provider-safe grammar ``^[a-zA-Z0-9_-]{1,64}$``.
 
-    Pure and deterministic; idempotent on an already-safe name (no unsafe
-    character -> no substitution, so re-sanitizing a sanitized name is a
-    no-op). ``web.fetch`` -> ``web_fetch``, ``clock.now`` -> ``clock_now``.
+    Pure and deterministic. First replaces every character outside
+    ``[a-zA-Z0-9_-]`` with ``_`` (``web.fetch`` -> ``web_fetch``,
+    ``clock.now`` -> ``clock_now``); idempotent on an already-safe name (no
+    unsafe character -> no substitution). If the result exceeds
+    :data:`_MAX_PROVIDER_TOOL_NAME_LENGTH`, it is truncated to
+    :data:`_TRUNCATED_PREFIX_LENGTH` characters and suffixed with an
+    8-hex-digit sha1 digest of the ORIGINAL (pre-sanitize) ``name`` — this
+    keeps the result deterministic (same input -> same output) while
+    disambiguating two distinct long names that happen to share the same
+    truncated prefix.
     """
-    return _UNSAFE_TOOL_NAME_CHAR.sub("_", name)
+    safe = _UNSAFE_TOOL_NAME_CHAR.sub("_", name)
+    if len(safe) > _MAX_PROVIDER_TOOL_NAME_LENGTH:
+        digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()[
+            :_HASH_DIGEST_LENGTH
+        ]
+        safe = f"{safe[:_TRUNCATED_PREFIX_LENGTH]}_{digest}"
+    return safe
 
 
 def build_tool_name_map(tools: Sequence[ToolDefinition]) -> Mapping[str, str]:
