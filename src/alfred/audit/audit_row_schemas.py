@@ -287,6 +287,11 @@ ToolDispatchOutcome = Literal[
     "canary_tripped",  # inbound canary in the T3 response (escalation)
     "dlp_canary",  # canary in the EXTRACTED T2 (escalation)
     "unexpected_error",  # defensive catch-all arm; type(exc).__name__ only
+    # A stray/unexpected bare TimeoutError (the retained defensive arm), as
+    # distinct from the well-understood action-deadline "timeout" above (the
+    # enriched WebFetchActionTimeout path, #347 blocker 2). Free-JSON
+    # dispatch_outcome subject value only — no DB CHECK constraint, no migration.
+    "unexpected_timeout",
 ]
 """Granular per-dispatch outcome recorded in
 ``TOOL_DISPATCH_FIELDS['dispatch_outcome']`` (spec §10). The closed ``result``
@@ -311,6 +316,25 @@ TOOL_DISPATCH_FIELDS: Final[frozenset[str]] = frozenset(
 """Fields for the ``tool.dispatch`` audit family (#339 PR2). NEVER carries raw
 tool arguments, the fetched URL/body, or ``str(exc)`` — only safe tokens +
 attribution (HARD rule #7 / spec §5.6)."""
+
+TOOL_DISPATCH_TIMEOUT_FIELDS: Final[frozenset[str]] = TOOL_DISPATCH_FIELDS | frozenset(
+    {
+        # sha256 egress-id of the timed-out logical call (deterministic; no T3).
+        "egress_id",
+        # The bare destination host ONLY (never the URL/path/query/userinfo).
+        "destination_host",
+        # True when the ledger is committed_no_response — the side effect may have
+        # fired before the deadline and its outcome is unknown (#347 blocker 2).
+        "in_doubt",
+        # The ledger's committed state: "committed_no_response" |
+        # "committed_with_response" | None (no row — timed out before commit).
+        "ledger_state",
+    }
+)
+"""Superset of :data:`TOOL_DISPATCH_FIELDS` for the enriched action-deadline
+``tool.dispatch`` timeout row (#347 blocker 2). Same ``event="tool.dispatch"``
+family; the extra fields make the in-doubt side effect forensically auditable
+(HARD rule #7). NEVER carries the URL/body or ``str(exc)``."""
 
 # ---------------------------------------------------------------------------
 # supervisor.breaker.* family
