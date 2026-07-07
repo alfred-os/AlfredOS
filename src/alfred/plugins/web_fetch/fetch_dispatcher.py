@@ -234,10 +234,23 @@ async def dispatch_web_fetch(
       fused fetch+extract overran ``action_deadline_seconds``. Packages
       ``egress_id`` / ``in_doubt`` / ``ledger_state`` for the enriched,
       non-skippable ``tool.dispatch`` timeout row (#347 blocker 2). If the
-      post-timeout ledger read itself fails (correlated DB stress), the
-      exception still surfaces — with ``in_doubt=True`` and
+      post-timeout ledger read itself raises OR overruns its own bounded
+      ``asyncio.timeout`` (both are ``Exception`` subclasses — correlated DB
+      stress), the typed exception still surfaces — with ``in_doubt=True`` and
       ``ledger_state="read_unavailable"`` — rather than being lost (HARD
       rule #7: bookkeeping must never mask an in-doubt timeout).
+
+      RESIDUAL (accepted, matching the ADR-0041/ADR-0047 residual pattern): the
+      read guard catches ``Exception``, not ``BaseException``. A genuine
+      EXTERNAL ``asyncio.CancelledError`` (turn-abort / supervisor cancellation,
+      distinct from this scope's own action-deadline) landing during the bounded
+      ledger read propagates uncaught and no ``tool.dispatch`` row is written for
+      that call. This is deliberate structured-concurrency behaviour — a cancel
+      during teardown must propagate, never be swallowed to write bookkeeping
+      (mirrors the ``except Exception`` handle_cap-release guard below, #339 PR4a
+      FIX-8). The at-most-once/in-doubt property is preserved (the ledger row is
+      untouched); only the audit row is skipped on this narrow external-cancel
+      window.
     """
     # Step 1: OutboundDlp on both fields (spec §7.9b). The DLP surface is a
     # single ``scan(text: str) -> str``; run it once per field.
