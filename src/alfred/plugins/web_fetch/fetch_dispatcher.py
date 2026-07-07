@@ -36,9 +36,12 @@ allowlist + inbound-canary scan move to the C2 pre-extract seam
 Residual (ADR-0041 / §7, tracked #339): no live ``dispatch_web_fetch`` caller
 exists until #339 wires the tool-calling loop (after G7-3). The ``language``
 source (HARD rule #3) landed in PR3; the per-user fairness bound lands here in
-PR4a (this change — the reserve-before-network gate + release-in-``finally``
-below). Broker secret-injection for authenticated fetch is still deferred —
-that is PR4b, not this change.
+PR4a (the reserve-before-network gate + release-in-``finally`` below). PR4b
+(#347 blocker 4, this change) wires broker secret-injection for authenticated
+fetch: a raw secret in a header value refuses (Step 1b) and an allowlisted
+``{{secret:<name>}}`` placeholder is resolved via
+:meth:`alfred.security.secrets.SecretBroker.substitute` (Step 1c), both BEFORE
+the Step 3b ``handle_cap`` reserve (ADR-0048).
 
 Core-side responsibilities (in order):
 
@@ -46,14 +49,26 @@ Core-side responsibilities (in order):
      a redacted URL the gateway cannot fetch is never sent, and a raw
      secret-bearing URL is never forwarded) and redact-and-send the header
      values (spec §7.9b).
+  1b. Header raw-secret defence (#339 PR4b-broker, ADR-0048): a header value
+      the DLP scan redacted (a raw secret was present) refuses loud rather
+      than sending the redacted form — mirrors the URL arm above.
+  1c. Broker ``{{secret:<name>}}`` substitution (#339 PR4b-broker, ADR-0048):
+      resolves an allowlisted, provisioned placeholder into the real secret
+      value for the wire request; an off-allowlist / unprovisioned / malformed
+      reference refuses loud. Runs AFTER DLP (ADR-0017: the placeholder frame
+      is DLP-clean text, not a raw secret) and BEFORE the Step 3b handle_cap
+      reserve — the empty default
+      :data:`~alfred.plugins.web_fetch.auth_allowlist.WEB_FETCH_AUTH_SECRET_ALLOWLIST`
+      means every placeholder refuses today; placing substitution any later
+      would leak a per-user concurrency slot on every such refusal.
   2. :class:`alfred.plugins.web_fetch.allowlist.AllowlistIntersection`
      three-way check + ``web.allowlist.manifest_broadening_capped`` audit row
      (spec §7.4).
   3. :class:`alfred.plugins.web_fetch.rate_limit.RateLimiter`
      Lua-atomic ``check_and_increment`` (spec §7.7).
   4. Build a :class:`~alfred.egress.relay_protocol._RawToolRequest` (REAL url on
-     the wire, redacted headers) and fire it through the extractor under the
-     per-action deadline (``asyncio.timeout(action_deadline_seconds)``).
+     the wire, substituted+redacted headers) and fire it through the extractor
+     under the per-action deadline (``asyncio.timeout(action_deadline_seconds)``).
 
 Audit invariant (rvw-001 / Cluster 4): every emit site goes through
 ``await audit.append_schema(fields=..., schema_name=..., subject=...)`` with the
@@ -72,7 +87,7 @@ import asyncio
 import math
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NoReturn
 from urllib.parse import urlparse
 
 import structlog
@@ -80,12 +95,17 @@ import structlog
 from alfred.audit.audit_row_schemas import (
     WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS,
     WEB_FETCH_FIELDS,
+    DlpScanResult,
 )
 from alfred.egress.egress_id import compute_egress_id
 from alfred.egress.relay_protocol import _RawToolRequest
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.i18n import t
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry, AllowlistIntersection
+from alfred.plugins.web_fetch.auth_allowlist import (
+    WEB_FETCH_AUTH_SECRET_ALLOWLIST,
+    _SecretSubstituter,
+)
 from alfred.plugins.web_fetch.constants import (
     _DEFAULT_ACTION_DEADLINE_SECONDS,
     _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
@@ -99,6 +119,7 @@ from alfred.plugins.web_fetch.errors import (
 )
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.security.quarantine import Extracted
+from alfred.security.secrets import SecretSubstitutionNotAllowed, UnknownSecretError
 
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
@@ -260,6 +281,8 @@ async def dispatch_web_fetch(
     rate_limiter: RateLimiter,
     handle_cap: HandleCap,
     outbound_dlp: OutboundDlp,
+    broker: _SecretSubstituter,
+    auth_secret_allowlist: frozenset[str] = WEB_FETCH_AUTH_SECRET_ALLOWLIST,
     audit: AuditWriter,
     extractor: EgressResponseExtractor,
     action_deadline_seconds: float = _DEFAULT_ACTION_DEADLINE_SECONDS,
@@ -348,17 +371,26 @@ async def dispatch_web_fetch(
         )
         raise
 
-    # C1 / C12: the DLP redacted the URL → a secret lives in the URL itself.
-    # Refuse loud rather than EITHER forwarding the raw secret-bearing URL OR
-    # sending a redacted URL the gateway cannot resolve. The audit row carries
-    # the redacted ``clean_url`` (safe) + the refusal token.
-    #
     # M3 / CR-5: ``domain`` is the bare HOST (never ``netloc``) so it is uniform
     # across the audit ``domain`` AND the PRD §7.7 per-domain rate-limit bucket —
     # a ``user:pass@host:port`` variant cannot leak userinfo into the audit row or
     # fragment (evade) the per-host rate limit.
     domain = _safe_hostname(clean_url)
-    if clean_url != url:
+
+    async def _refuse(*, dlp_scan_result: DlpScanResult, message_key: str) -> NoReturn:
+        """FIX-10 (DRY): the URL / header / substitution pre-network refusals
+        below share this exact ``WEB_FETCH_FIELDS`` subject shape — nothing to
+        report yet (no status, no handle, no rate-limit bucket). Closes over
+        ``clean_url`` / ``domain`` (bound just above) and the enclosing scope's
+        ``user_id`` / ``correlation_id`` / ``config`` / ``audit``.
+
+        ``from None`` (FIX-8): suppresses the exception chain so a downstream
+        traceback render never echoes the (possibly attacker-influenced) secret
+        name carried in ``UnknownSecretError.__str__`` (a ``KeyError`` subclass
+        whose message embeds the requested name — see ``SecretBroker.get``).
+        The raised ``WebFetchError``'s own message is a FIXED, closed-vocabulary
+        catalog string; it never echoes ``dlp_scan_result`` or any caller input.
+        """
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
             schema_name="WEB_FETCH_FIELDS",
@@ -373,7 +405,7 @@ async def dispatch_web_fetch(
                 "rate_limit_bucket": None,
                 "manifest_commit_hash": config.manifest_commit_hash,
                 "trust_tier_of_result": "T3",
-                "dlp_scan_result": "url_secret_refused",
+                "dlp_scan_result": dlp_scan_result,
                 "canary_tripped": False,
                 "triggering_user_id": user_id,
                 "correlation_id": correlation_id,
@@ -383,7 +415,57 @@ async def dispatch_web_fetch(
             cost_estimate_usd=0.0,
             trace_id=correlation_id,
         )
-        raise WebFetchError(t("web.fetch.error.url_secret_refused"))
+        raise WebFetchError(t(message_key)) from None
+
+    # C1 / C12: the DLP redacted the URL → a secret lives in the URL itself.
+    # Refuse loud rather than EITHER forwarding the raw secret-bearing URL OR
+    # sending a redacted URL the gateway cannot resolve.
+    if clean_url != url:
+        await _refuse(
+            dlp_scan_result="url_secret_refused",
+            message_key="web.fetch.error.url_secret_refused",
+        )
+
+    # Step 1b (#339 PR4b-broker, ADR-0048): a RAW secret in a header value (DLP
+    # redacted it) is refused, not redact-and-sent — HARD rule #6. A
+    # {{secret:*}} placeholder is benign text to DLP (no redaction), so it does
+    # NOT trip this arm; it is resolved in Step 1c below. Placed immediately
+    # after the URL refusal above and BEFORE Step 2's allowlist check / Step
+    # 3b's handle_cap reserve (FIX-1 / plan-review CRITICAL) — see Step 1c's
+    # docstring note for why the ordering matters.
+    if any(clean_headers[name] != value for name, value in headers.items()):
+        await _refuse(
+            dlp_scan_result="header_secret_refused",
+            message_key="web.fetch.error.header_secret_refused",
+        )
+
+    # Step 1c (#339 PR4b-broker, ADR-0048): resolve {{secret:<name>}}
+    # placeholders in header values via the broker, AFTER DLP (ADR-0017: the
+    # placeholder frame is already DLP-clean text, not a raw secret) and
+    # BEFORE the relay frame — and, critically, BEFORE the Step 3b handle_cap
+    # reserve (FIX-1 / plan-review CRITICAL): with the empty-by-default
+    # ``WEB_FETCH_AUTH_SECRET_ALLOWLIST`` every placeholder refuses here, so
+    # running substitution any later (e.g. just before ``_RawToolRequest``)
+    # would reserve-then-refuse on every such call — leaking a per-user
+    # concurrency slot per refusal, a planner-inducible self-DoS. Off-allowlist
+    # / malformed / unprovisioned references refuse loud (HARD rule #6/#7).
+    #
+    # FIX-9 totality: a broker BACKEND fault (anything other than
+    # ``SecretSubstitutionNotAllowed`` / ``UnknownSecretError``) propagates
+    # uncaught from ``substitute()`` here and is caught by ``dispatch_tool``'s
+    # outer ``except Exception -> unexpected_error/fault`` arm one layer up
+    # (loud audit there — the PR4a FIX-9 / handle_cap-reserve precedent). A
+    # second arm here would double-audit the same fault.
+    try:
+        auth_headers = {
+            name: broker.substitute(value, allowed_secrets=auth_secret_allowlist)
+            for name, value in clean_headers.items()
+        }
+    except (SecretSubstitutionNotAllowed, UnknownSecretError):
+        await _refuse(
+            dlp_scan_result="secret_substitution_refused",
+            message_key="web.fetch.error.secret_substitution_refused",
+        )
 
     # Step 2: Three-way allowlist intersection (spec §7.4).
     #
@@ -556,7 +638,7 @@ async def dispatch_web_fetch(
     # transport error. See the ``finally`` block below for the release itself.
     try:
         raw_request = _RawToolRequest(
-            method="GET", url=url, headers=clean_headers, body="", idempotent=True
+            method="GET", url=url, headers=auth_headers, body="", idempotent=True
         )
         try:
             async with asyncio.timeout(action_deadline_seconds):

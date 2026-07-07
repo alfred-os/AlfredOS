@@ -31,11 +31,20 @@ dlp, audit, rate_limiter). The branches covered are:
   * Broadening-cap → ``manifest_broadening_capped`` row, at most once / session.
   * Status-code clamp (plausible HTTP code 100-599 else None).
   * Real URL on the wire + per-value header redaction.
+  * Header raw-secret refusal (Step 1b, #339 PR4b-broker) → ``result="refused"``
+    / ``header_secret_refused`` row + no reserve, no extractor call.
+  * Broker ``{{secret:*}}`` substitution (Step 1c, #339 PR4b-broker): an
+    off-allowlist / unprovisioned reference refuses (``secret_substitution_refused``,
+    no reserve, no extractor call, no secret-name leak via ``__context__`` —
+    FIX-8's ``from None``); an allowlisted + provisioned reference is
+    substituted into the wire headers AFTER DLP and never appears in an audit
+    subject.
 """
 
 from __future__ import annotations
 
 import asyncio
+import traceback
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -70,6 +79,7 @@ from alfred.security.quarantine import (
     T3DerivedData,
     TypedRefusal,
 )
+from alfred.security.secrets import SecretBroker
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -201,7 +211,19 @@ class _SpyHandleCap:
 
 
 async def _dispatch(**overrides: Any) -> EgressExtractOutcome:
-    """Call ``dispatch_web_fetch`` with sensible defaults, overridable per-test."""
+    """Call ``dispatch_web_fetch`` with sensible defaults, overridable per-test.
+
+    FIX-2 (PR4b-broker plan-review fold): the default ``broker`` is a REAL
+    :class:`SecretBroker` (env-only, zero secrets provisioned) — NOT a
+    passthrough fake. Enforcement (the confused-deputy allowlist check +
+    ``UnknownSecretError`` on an unprovisioned name) lives INSIDE
+    ``SecretBroker.substitute`` itself; a passthrough fake never raises, so
+    ``test_off_allowlist_placeholder_refused_audits_and_skips_extractor``
+    could not pass against one. A real broker with no placeholder in the
+    header value is a no-op passthrough anyway (the ``{{secret:*}}`` regex
+    simply doesn't match), so every pre-existing test above — none of which
+    references a placeholder — is unaffected.
+    """
     kwargs: dict[str, Any] = {
         "url": "https://example.com/page",
         "headers": {"User-Agent": "alfred"},
@@ -216,6 +238,8 @@ async def _dispatch(**overrides: Any) -> EgressExtractOutcome:
         "audit": _build_audit(),
         "extractor": _build_extractor(outcome=_make_extracted_outcome()),
         "handle_cap": _SpyHandleCap(),
+        "broker": SecretBroker(env={}),
+        "auth_secret_allowlist": frozenset(),
     }
     kwargs.update(overrides)
     return await dispatch_web_fetch(**kwargs)
@@ -269,30 +293,31 @@ async def test_extractor_called_with_threaded_ctx_call_index_schema() -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_url_sent_on_wire_with_redacted_headers() -> None:
-    """The REAL url crosses the wire (the gateway must fetch it); header VALUES
-    are DLP-redacted per-value before the relay sees them."""
+async def test_real_url_sent_on_wire_with_clean_headers() -> None:
+    """The REAL url crosses the wire (the gateway must fetch it); CLEAN header
+    values (no DLP redaction, no ``{{secret:*}}`` placeholder) pass through to
+    the relay unchanged. A redacted (secret-bearing) header now REFUSES — see
+    ``test_header_raw_secret_refused_audits_and_skips_extractor`` — so the old
+    mixed clean+secret case this test used to cover is gone; this test pins
+    the surviving multi-header no-redaction / no-substitution else-path
+    (FIX-11 coverage)."""
     extractor = _build_extractor(outcome=_make_extracted_outcome())
-
-    def _redact(s: str) -> str:
-        return "[REDACTED]" if s.startswith("Bearer ") else s
-
     dlp = MagicMock()
-    dlp.scan = MagicMock(side_effect=_redact)
+    dlp.scan = MagicMock(side_effect=lambda s: s)  # nothing redacted
 
     await _dispatch(
         extractor=extractor,
         outbound_dlp=dlp,
         url="https://example.com/page",
-        headers={"Authorization": "Bearer sk-abc123", "User-Agent": "alfred"},
+        headers={"User-Agent": "alfred", "Accept": "text/html"},
     )
 
     raw_request = extractor.handle.await_args.kwargs["raw_request"]
     assert raw_request.url == "https://example.com/page"
     assert raw_request.method == "GET"
     assert raw_request.idempotent is True
-    assert raw_request.headers["Authorization"] == "[REDACTED]"
     assert raw_request.headers["User-Agent"] == "alfred"
+    assert raw_request.headers["Accept"] == "text/html"
 
 
 @pytest.mark.asyncio
@@ -1202,3 +1227,233 @@ async def test_cancelled_error_propagates_and_releases_slot() -> None:
 
     assert len(spy.released) == 1
     assert spy.released == spy.reserved
+
+
+# ---------------------------------------------------------------------------
+# #339 PR4b-broker Task 3 — header raw-secret defence (Step 1b) + broker
+# substitution (Step 1c). FIX-1 (plan-review CRITICAL): BOTH steps sit
+# immediately after the URL url_secret_refused block and BEFORE Step 2 (the
+# allowlist check) / Step 3b (the handle_cap reserve) — refusing an
+# off-allowlist placeholder must never reserve, and then leak, a per-user
+# concurrency slot.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_header_raw_secret_refused_audits_and_skips_extractor() -> None:
+    """A RAW secret in a header (DLP redacts it) is refused pre-network — not
+    redact-and-sent — with a header_secret_refused row; the extractor never
+    fires."""
+    audit = _build_audit()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=lambda s: "[REDACTED]" if s.startswith("Bearer ") else s)
+
+    with pytest.raises(WebFetchError):
+        await _dispatch(
+            audit=audit,
+            outbound_dlp=dlp,
+            extractor=extractor,
+            headers={"Authorization": "Bearer sk-raw"},
+        )
+
+    extractor.handle.assert_not_awaited()
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "refused"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "header_secret_refused"
+
+
+@pytest.mark.asyncio
+async def test_header_raw_secret_refused_message_routes_through_i18n() -> None:
+    """The header-secret ``WebFetchError`` surface is catalogued (i18n hard
+    rule) — mirrors the existing URL-secret i18n pin."""
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=lambda s: "[REDACTED]" if s.startswith("Bearer ") else s)
+
+    with pytest.raises(WebFetchError) as excinfo:
+        await _dispatch(outbound_dlp=dlp, headers={"Authorization": "Bearer sk-raw"})
+
+    assert "secret" in str(excinfo.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_off_allowlist_placeholder_refused_audits_and_skips_extractor() -> None:
+    """An off-allowlist {{secret:*}} reference is refused (empty allowlist) with
+    a secret_substitution_refused row; the extractor never fires."""
+    audit = _build_audit()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    with pytest.raises(WebFetchError):
+        await _dispatch(
+            audit=audit,
+            extractor=extractor,
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset(),  # explicit empty (the #339 default)
+        )
+
+    extractor.handle.assert_not_awaited()
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "refused"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "secret_substitution_refused"
+
+
+@pytest.mark.asyncio
+async def test_off_allowlist_placeholder_refused_message_routes_through_i18n() -> None:
+    """The substitution-refusal ``WebFetchError`` surface is catalogued (i18n
+    hard rule)."""
+    with pytest.raises(WebFetchError) as excinfo:
+        await _dispatch(
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset(),
+        )
+
+    message = str(excinfo.value).lower()
+    assert "allowlist" in message
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_placeholder_substituted_into_wire_headers() -> None:
+    """A placeholder whose name is allowlisted + provisioned is substituted
+    into the relay request AFTER DLP; the real value never appears in an
+    audit subject."""
+    audit = _build_audit()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    class _FakeBroker:
+        def substitute(self, text: str, *, allowed_secrets: frozenset[str]) -> str:
+            return text.replace("{{secret:deepseek_api_key}}", "sk-REAL")
+
+    await _dispatch(
+        audit=audit,
+        extractor=extractor,
+        broker=_FakeBroker(),
+        headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+        auth_secret_allowlist=frozenset({"deepseek_api_key"}),
+    )
+
+    raw_request = extractor.handle.await_args.kwargs["raw_request"]
+    assert raw_request.headers["Authorization"] == "Bearer sk-REAL"
+    # The real value is never in any audit subject (headers are not an audit field).
+    for call in audit.append_schema.await_args_list:
+        assert "sk-REAL" not in repr(call.kwargs["subject"])
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_placeholder_with_real_broker_substitutes_provisioned_secret() -> None:
+    """FIX-2 positive-path coverage against the REAL ``SecretBroker`` (not just
+    the brief's ``_FakeBroker``): a fixture secret provisioned on the broker
+    and allowlisted for this call is substituted in verbatim, proving
+    ``SecretBroker.substitute`` itself — not merely the Protocol shape — is
+    wired correctly end to end."""
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+    broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-fixture-real-value"})
+
+    await _dispatch(
+        extractor=extractor,
+        broker=broker,
+        headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+        auth_secret_allowlist=frozenset({"deepseek_api_key"}),
+    )
+
+    raw_request = extractor.handle.await_args.kwargs["raw_request"]
+    assert raw_request.headers["Authorization"] == "Bearer sk-fixture-real-value"
+
+
+@pytest.mark.asyncio
+async def test_header_placeholder_refusal_reserves_no_slot() -> None:
+    """FIX-1 (plan-review CRITICAL): a Step-1c substitution refusal happens
+    BEFORE Step 3b's handle_cap reserve — refusing every off-allowlist
+    placeholder (the empty default allowlist means EVERY placeholder refuses)
+    must never reserve, and thus never need to release, a per-user
+    concurrency slot. A reserve-then-refuse ordering would be a
+    planner-inducible self-DoS (an attacker-controlled placeholder burns a
+    slot on every refused call)."""
+    spy = _SpyHandleCap()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    with pytest.raises(WebFetchError):
+        await _dispatch(
+            extractor=extractor,
+            handle_cap=spy,
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset(),
+        )
+
+    extractor.handle.assert_not_awaited()
+    assert spy.reserved == []
+    assert spy.released == []
+
+
+@pytest.mark.asyncio
+async def test_header_raw_secret_refusal_reserves_no_slot() -> None:
+    """Symmetric with the Step-1c test above: a Step-1b raw-secret refusal is
+    also earlier than the Step 3b reserve, so it never reserves a slot
+    either."""
+    spy = _SpyHandleCap()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=lambda s: "[REDACTED]" if s.startswith("Bearer ") else s)
+
+    with pytest.raises(WebFetchError):
+        await _dispatch(
+            extractor=extractor,
+            handle_cap=spy,
+            outbound_dlp=dlp,
+            headers={"Authorization": "Bearer sk-raw"},
+        )
+
+    extractor.handle.assert_not_awaited()
+    assert spy.reserved == []
+    assert spy.released == []
+
+
+@pytest.mark.asyncio
+async def test_off_allowlist_placeholder_refusal_does_not_leak_secret_name_via_context() -> None:
+    """FIX-8: ``_refuse`` raises ``WebFetchError(...) from None``, so
+    ``__cause__`` is ``None`` and ``__suppress_context__`` is ``True`` — a
+    downstream traceback render (structlog / ``traceback.format_exception``,
+    which both honour ``__suppress_context__``) never echoes the
+    (attacker-influenced) secret name carried in ``UnknownSecretError``'s
+    ``str()`` (it is a ``KeyError`` subclass whose message embeds the name —
+    see ``SecretBroker.get``). Uses an ALLOWLISTED-but-UNPROVISIONED secret
+    name so the broker's real ``get()`` raises ``UnknownSecretError``
+    (the ``SecretSubstitutionNotAllowed`` arm never echoes the ref in its own
+    ``str()``, so it doesn't exercise this leak path)."""
+    broker = SecretBroker(env={})  # no secrets provisioned
+
+    with pytest.raises(WebFetchError) as excinfo:
+        await _dispatch(
+            broker=broker,
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset({"deepseek_api_key"}),
+        )
+
+    exc = excinfo.value
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "deepseek_api_key" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_no_placeholder_header_substitutes_to_itself() -> None:
+    """FIX-11 coverage: coverage.py does not instrument dict-comprehension
+    conditionals — pin the else-path where ``broker.substitute`` is called on
+    a header value with no ``{{secret:*}}`` placeholder and returns it
+    byte-for-byte unchanged (proven against a REAL ``SecretBroker``, not a
+    passthrough fake, so the no-op behaviour is the broker's actual
+    ``re.sub`` no-match path, not a test double's shortcut)."""
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+    broker = SecretBroker(env={})
+
+    await _dispatch(
+        extractor=extractor,
+        broker=broker,
+        headers={"X-Custom": "no-placeholder-here"},
+        auth_secret_allowlist=frozenset(),
+    )
+
+    raw_request = extractor.handle.await_args.kwargs["raw_request"]
+    assert raw_request.headers["X-Custom"] == "no-placeholder-here"

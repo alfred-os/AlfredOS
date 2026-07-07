@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import QuarantinedExtractor
     from alfred.security.quarantine_transport import T3BodyRecorder
+    from alfred.security.secrets import SecretBroker
 
 
 def _utc_now() -> datetime:
@@ -71,6 +72,7 @@ def build_tool_registry(
     extractor: QuarantinedExtractor,
     recorder: T3BodyRecorder,
     outbound_dlp: OutboundDlp,
+    broker: SecretBroker,
     audit_writer: AuditWriter,
     session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
     rate_limiter: RateLimiter,
@@ -96,6 +98,12 @@ def build_tool_registry(
         outbound_dlp: The boot ``OutboundDlp`` — the relay client's core-side
             redaction pass AND ``build_web_fetch_tool``'s dispatch-time DLP
             scanner.
+        broker: The daemon's ``SecretBroker`` (#339 PR4b-broker, #351
+            config-as-interface convention: a stateful SERVICE, passed by
+            plain DI rather than pulled from config) — resolves an
+            allowlisted ``{{secret:<name>}}`` header placeholder into the
+            real secret value at ``dispatch_web_fetch``'s Step 1c, gated by
+            the empty-default ``WEB_FETCH_AUTH_SECRET_ALLOWLIST``.
         audit_writer: The durable audit sink for both the relay client's
             refusal rows and ``dispatch_web_fetch``'s per-fetch audit rows.
         session_scope: The async session scope the egress extractor's
@@ -128,6 +136,7 @@ def build_tool_registry(
         rate_limiter=rate_limiter,
         handle_cap=handle_cap,
         outbound_dlp=outbound_dlp,
+        broker=broker,
         audit=audit_writer,
     )
     clock_spec = build_clock_tool(now=now)
