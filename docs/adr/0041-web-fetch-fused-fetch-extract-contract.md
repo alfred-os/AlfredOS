@@ -41,9 +41,10 @@
 >    effect occurred".
 >
 > **Scope: this closes #347 blocker 2 only.** The **C8 canary-`record_response`-cancellation
-> residual** and the **DB-down durable-reconcile residual** (both listed under
-> Negative/accepted below) remain **OPEN** — this change does not touch the canary
-> `record_response` write path or reconciliation against a down ledger backend. See
+> residual** (a distinct bullet under Negative/accepted below) and the **DB-down
+> durable-reconcile residual** (the ADR-0040 reservation note above) remain **OPEN** — this
+> change does not touch the canary `record_response` write path or reconciliation against a
+> down ledger backend. See
 > [docs/subsystems/security.md](../subsystems/security.md#trust-boundary-contract) for the
 > audit-vocabulary entry and [ADR-0046](0046-dual-llm-tool-result-flow.md) for the
 > tool-result-flow cross-reference. (Factual amendment; status flips stay with the
