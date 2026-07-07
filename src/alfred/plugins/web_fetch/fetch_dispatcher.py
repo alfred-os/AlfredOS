@@ -81,6 +81,7 @@ from alfred.audit.audit_row_schemas import (
     WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS,
     WEB_FETCH_FIELDS,
 )
+from alfred.egress.egress_id import compute_egress_id
 from alfred.egress.relay_protocol import _RawToolRequest
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.i18n import t
@@ -88,8 +89,10 @@ from alfred.plugins.web_fetch.allowlist import AllowlistEntry, AllowlistIntersec
 from alfred.plugins.web_fetch.constants import (
     _DEFAULT_ACTION_DEADLINE_SECONDS,
     _DEFAULT_HANDLE_RESERVATION_TTL_SECONDS,
+    _LEDGER_READ_TIMEOUT_SECONDS,
 )
 from alfred.plugins.web_fetch.errors import (
+    WebFetchActionTimeout,
     WebFetchDomainNotAllowed,
     WebFetchError,
     WebFetchRateLimited,
@@ -227,7 +230,14 @@ async def dispatch_web_fetch(
       audited as ``dlp_scan_result="handle_cap_exceeded"``.
     * :class:`~alfred.egress.response_inspection.InboundCanaryTripped` — an
       inbound canary was reflected in the response (after a loud audit row).
-    * :class:`TimeoutError` — the extract overran ``action_deadline_seconds``.
+    * :class:`~alfred.plugins.web_fetch.errors.WebFetchActionTimeout` — the
+      fused fetch+extract overran ``action_deadline_seconds``. Packages
+      ``egress_id`` / ``in_doubt`` / ``ledger_state`` for the enriched,
+      non-skippable ``tool.dispatch`` timeout row (#347 blocker 2). If the
+      post-timeout ledger read itself fails (correlated DB stress), the
+      exception still surfaces — with ``in_doubt=True`` and
+      ``ledger_state="read_unavailable"`` — rather than being lost (HARD
+      rule #7: bookkeeping must never mask an in-doubt timeout).
     """
     # Step 1: OutboundDlp on both fields (spec §7.9b). The DLP surface is a
     # single ``scan(text: str) -> str``; run it once per field.
@@ -479,7 +489,8 @@ async def dispatch_web_fetch(
     #
     # #339 PR4a (FIX-8): Step 4 + Step 5 are wrapped in a try/finally so the
     # per-user slot reserved above is released on EVERY exit path — success,
-    # soft refusal, InboundCanaryTripped re-raise, TimeoutError, or a generic
+    # soft refusal, InboundCanaryTripped re-raise, WebFetchActionTimeout (PR4b-audit
+    # FIX-1, converted from the raw action-deadline TimeoutError), or a generic
     # transport error. See the ``finally`` block below for the release itself.
     try:
         raw_request = _RawToolRequest(
@@ -529,6 +540,42 @@ async def dispatch_web_fetch(
                 trace_id=correlation_id,
             )
             raise
+        except TimeoutError:
+            # #347 blocker 2: the fused fetch+extract overran the action deadline.
+            # asyncio.timeout has already converted CancelledError->TimeoutError and
+            # cleared its cancel scope, so this await runs un-cancelled. The outer
+            # ``finally`` still releases the handle_cap slot after this raise.
+            egress_id = compute_egress_id(egress_ctx, call_index=call_index)
+            try:
+                # Bounded: this path already breached its deadline; don't let a
+                # slow/hung ledger extend it or hold the handle_cap slot.
+                async with asyncio.timeout(_LEDGER_READ_TIMEOUT_SECONDS):
+                    state = await extractor.ledger_state(egress_id=egress_id)
+            except Exception as read_exc:
+                # Bookkeeping must NEVER mask the in-doubt timeout (HARD #7).
+                # A distinct sentinel — NOT None (None means "no row -> never
+                # fired -> in_doubt=False"); a read failure is the OPPOSITE safe
+                # direction, so force in_doubt=True.
+                _log.error(
+                    "web_fetch.timeout.ledger_read_failed",
+                    egress_id=egress_id,
+                    error_type=type(read_exc).__name__,
+                    correlation_id=correlation_id,
+                )
+                raise WebFetchActionTimeout(
+                    egress_id=egress_id,
+                    destination_host=domain,
+                    in_doubt=True,
+                    ledger_state="read_unavailable",
+                ) from None
+            # ``from None``: the deadline TimeoutError carries no forensic payload
+            # (the fields do); suppress the noisy cancellation-internals chain.
+            raise WebFetchActionTimeout(
+                egress_id=egress_id,
+                destination_host=domain,
+                in_doubt=state == "committed_no_response",
+                ledger_state=state,
+            ) from None
 
         # Step 5: success / soft-refusal audit row (C3) with the real status (C7).
         #
@@ -606,7 +653,8 @@ async def dispatch_web_fetch(
         return outcome
     finally:
         # Release the per-user slot on EVERY exit path (#339 PR4a): success, soft
-        # refusal, InboundCanaryTripped re-raise, TimeoutError, transport error.
+        # refusal, InboundCanaryTripped re-raise, WebFetchActionTimeout, transport
+        # error.
         # FIX-8: wrap in try/except Exception (NOT BaseException, so CancelledError
         # still propagates) so a non-RedisError from release() can never MASK the
         # in-flight security exception. release() already swallows RedisError
