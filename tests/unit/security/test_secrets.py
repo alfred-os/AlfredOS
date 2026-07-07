@@ -1288,3 +1288,27 @@ class TestSecretSubstitution:
                 allowed_secrets=frozenset({"deepseek_api_key"}),
             )
         assert "sk-live" not in str(exc.value)
+
+    def test_substitute_fast_path_skips_regex_when_no_placeholder_marker(self) -> None:
+        # perf-001: text with no ``{{secret:`` marker takes the early-return
+        # fast path, entirely bypassing the ``_SECRET_PLACEHOLDER`` regex sub.
+        # Uses text that DOES contain other brace content (not a secret
+        # placeholder) to prove the check is specifically for the ``{{secret:``
+        # literal prefix, not merely "no braces at all" — distinct from
+        # ``test_substitute_no_placeholder_returns_text_unchanged`` above,
+        # which covers the plain-no-braces case.
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        text = "template {other} {{not-a-secret}} value"
+        assert broker.substitute(text, allowed_secrets=frozenset({"deepseek_api_key"})) == text
+
+    def test_substitute_sub_path_still_runs_when_marker_present(self) -> None:
+        # The sibling branch of the fast-path check above: text that DOES
+        # contain the ``{{secret:`` marker takes the regex-sub path (not the
+        # early return) — both branches of the perf-001 guard are exercised
+        # (100% branch coverage).
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        out = broker.substitute(
+            "prefix {{secret:deepseek_api_key}} suffix",
+            allowed_secrets=frozenset({"deepseek_api_key"}),
+        )
+        assert out == "prefix sk-live suffix"

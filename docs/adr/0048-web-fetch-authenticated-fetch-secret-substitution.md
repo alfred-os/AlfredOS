@@ -43,9 +43,9 @@ comms adapter credentials.
 
 A planner-authored request header may contain a `{{secret:<name>}}` placeholder. `SecretBroker.substitute()`
 (`src/alfred/security/secrets.py:668`) resolves it
-(`src/alfred/plugins/web_fetch/fetch_dispatcher.py:447`) — **after** core DLP has scanned the header
+(`src/alfred/plugins/web_fetch/fetch_dispatcher.py:461`) — **after** core DLP has scanned the header
 value and **before** the wire `_RawToolRequest` is built
-(`src/alfred/plugins/web_fetch/fetch_dispatcher.py:645`) — gated by a closed,
+(`src/alfred/plugins/web_fetch/fetch_dispatcher.py:640`) — gated by a closed,
 empty-by-default allowlist, `WEB_FETCH_AUTH_SECRET_ALLOWLIST`
 (`src/alfred/plugins/web_fetch/auth_allowlist.py:17`). A raw (non-placeholder) secret value in a
 URL or header is refused at the core DLP boundary, never redacted-and-sent. Substitution applies to
@@ -61,18 +61,26 @@ strings.
    substitution ever runs. `substitute()` does not itself detect raw secrets.
 2. **Closed allowlist ∩ `SUPPORTED_SECRETS` — confused-deputy defence.** A placeholder resolves only
    if `<name>` is in *both* the caller's `allowed_secrets` and the broker's `SUPPORTED_SECRETS`
-   registry (`secrets.py:668-695`). An unknown or off-allowlist name raises
-   `SecretSubstitutionNotAllowed` — never a broker passthrough of an attacker-named secret. This
-   mirrors `adapter_credential_resolver`'s closed `_ADAPTER_SECRET_ALLOWLIST`.
+   registry (`secrets.py:668-695`). A **malformed or off-(caller's)-allowlist** name raises
+   `SecretSubstitutionNotAllowed` — never a broker passthrough of an attacker-named secret. A
+   well-formed, allowlisted name that is not itself a known/provisioned `SUPPORTED_SECRETS` entry
+   raises `UnknownSecretError` instead (delegated from `SecretBroker.get`) — the two exceptions are
+   distinct arms, not interchangeable (`fetch_dispatcher.py`'s Step 1c catches both and logs the
+   discriminating `error_type`, never the ref, before refusing). This mirrors
+   `adapter_credential_resolver`'s closed `_ADAPTER_SECRET_ALLOWLIST`.
 3. **Raw secret in URL/header → refuse, never redact-and-send.** `url_secret_refused` (G7-2.5,
-   unchanged) and the new `header_secret_refused` (`fetch_dispatcher.py:441-445`) both raise loud
+   unchanged) and the new `header_secret_refused` (`fetch_dispatcher.py:436-440`) both raise loud
    rather than forwarding a DLP-redacted value the destination could never authenticate with.
-4. **The secret is never persisted, audited, logged, or ledgered, nor in the DLP/planner
+4. **The secret is never persisted in plaintext, audited, logged, nor in the DLP/planner
    representation.** `WEB_FETCH_FIELDS` carries no headers field, so audit rows never see a
-   header value. The egress ledger's `commit_intent` hashes the request **body**
-   (`src/alfred/memory/egress_idempotency.py:63`), and `web.fetch`'s body is always `""` — the
-   substituted value never reaches the ledger. Refusal audit rows and log lines carry the secret
-   *name* only (`SecretSubstitutionNotAllowed`'s payload), never the value.
+   header value. The egress ledger's `commit_intent` folds the (already-substituted) request
+   headers into `compute_egress_body_hash()`'s one-way sha256 integrity digest, alongside the
+   request descriptor and the redacted body (`src/alfred/egress/relay_client.py:245-249`,
+   `src/alfred/egress/egress_id.py:78`) — the digest is a fixed-width hash, never recoverable back
+   to the header value, so a substituted secret contributes to it without being stored anywhere in
+   plaintext. Refusal audit rows and log lines carry the secret *name* only
+   (`SecretSubstitutionNotAllowed`'s payload, or the forensic `error_type` log the Step 1c `except`
+   arm emits), never the value.
 
 ## Positioning: core DLP is the sole broker-secret defence
 
@@ -108,15 +116,42 @@ for secrets the core substituted.
   substituted in production; the fixture test's token is a non-pattern value that passes the
   loopback relay leg). A general fix — a gateway auth-header allowance — is future work, deferred
   until a real authenticated integration lands.
-- **Exception-context name residual.** The `_refuse` helper's `raise ... from None` suppresses but
-  cannot clear `__context__`; a caught `UnknownSecretError` (whose `str()` embeds the secret
-  *name*, never a value) remains attached there. Two narrow windows follow: (a) `from None` cannot
-  clear `__context__` outright, and (b) an audit-write failure inside `_refuse` during a
-  substitution refusal would chain the un-suppressed `UnknownSecretError`. Both leak only a secret
-  *name* (HARD rule #6 — values — still holds), only under a simultaneous audit-infrastructure
-  failure, and are unreachable in #339 (the empty allowlist means only the
-  `SecretSubstitutionNotAllowed` arm fires in practice, whose `str()` does not echo the reference).
-  Traceback and structlog rendering are verified clean of the suppressed context.
+- **Exception-context name residual.** The raised `WebFetchError`'s containment is structural, not
+  a product of traceback suppression: `.ref` (the possibly attacker-influenced secret name) never
+  appears in `WebFetchError.__str__` / `__repr__` / `.args` — its message is the FIXED catalog
+  string from `t(message_key)`. `_refuse`'s `raise ... from None` additionally sets
+  `__suppress_context__ = True` (governing DEFAULT traceback rendering, e.g.
+  `traceback.format_exception`), but does **not** clear `__context__` itself — the caught
+  `UnknownSecretError` (whose `str()` embeds the secret *name*, never a value) remains attached
+  there and reachable to any code that inspects `exc.__context__` directly rather than going
+  through the suppressed default renderer. Two narrow windows follow: (a) a direct `__context__`
+  read bypasses the suppression, and (b) an audit-write failure inside `_refuse` during a
+  substitution refusal would raise a NEW exception that chains the un-suppressed
+  `UnknownSecretError` (no `from None` on that separate raise) into a rendered traceback. Both leak
+  only a secret *name* (HARD rule #6 — values — still holds), only under a direct `__context__`
+  inspection or a simultaneous audit-infrastructure failure, and are unreachable in #339 (the empty
+  allowlist means only the `SecretSubstitutionNotAllowed` arm fires in practice, whose `str()` does
+  not echo the reference). Traceback and structlog rendering are verified clean of the suppressed
+  context.
+- **Forward gate: a per-secret↔destination binding is REQUIRED before any live allowlist entry.**
+  `WEB_FETCH_AUTH_SECRET_ALLOWLIST` gates by SECRET NAME only — a planner that can name an
+  allowlisted secret can pair it, via the `url` argument the same call also controls, with ANY
+  domain the three-way `AllowlistIntersection` permits. Populating a real entry without ALSO adding
+  a secret↔domain binding (Option B below — rejected as the *sole* mechanism for #339's
+  empty-allowlist scope, but promoted here to a REQUIRED precondition for any future entry) reopens
+  the exact confused-deputy shape this ADR closes: an infra secret meant for one destination could
+  be sent, by planner choice, to a different allowlisted domain. This is not optional hardening — a
+  future PR that populates a live allowlist entry without a domain binding does not satisfy this
+  ADR's confused-deputy invariant (Invariant 2) and must not merge on the strength of this ADR
+  alone.
+- **One-broker pin (forward-looking, #338).** The Positioning section below treats core-side
+  `OutboundDlp` (broker-bound) as the sole broker-secret defence for a *single* live secret set.
+  When #338 wires the first live `dispatch_web_fetch` caller, `build_tool_registry`'s `broker=`
+  kwarg MUST be the SAME `SecretBroker` instance backing that caller's `outbound_dlp=` — never a
+  second, independently constructed broker. Two divergent instances would let a secrets hot-reload
+  land on one but not the other, silently splitting the DLP-scan snapshot (Stage 1 redaction) from
+  the `substitute()` snapshot and breaking the DLP-before-substitute ordering Invariant 1 depends
+  on. See `docs/subsystems/security.md`'s matching pin.
 
 ### Neutral
 
@@ -145,7 +180,12 @@ Bind a secret to a domain in operator config; the dispatcher looks up the bindin
 domain, and the planner never writes a `{{secret:*}}` placeholder at all. Tighter (zero planner
 secret-name surface) but diverges from blocker 4's literal wording ("the caller supplies a broker
 `SecretId` per auth header") and does not produce the reusable `substitute()` primitive
-`stdio_transport.py` is waiting on.
+`stdio_transport.py` is waiting on. **Rejected as the SOLE mechanism for #339's empty-allowlist
+scope — but the domain-binding idea it proposes is not discarded.** The Consequences → Negative
+"Forward gate" entry above promotes it to a REQUIRED precondition: no future PR may populate a live
+`WEB_FETCH_AUTH_SECRET_ALLOWLIST` entry on the strength of the name-only allowlist alone; it must
+also add a secret↔destination binding of this shape, or an equivalent, before that entry can be
+considered safe.
 
 ### Option C — defence + ADR + primitive only, no positive wiring
 

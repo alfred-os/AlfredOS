@@ -286,6 +286,8 @@ Extend the assertion set in `tests/unit/audit/test_audit_row_schemas.py::test_dl
         "secret_substitution_refused",  # NEW #339 PR4b-broker — off-allowlist {{secret:*}}
 ```
 
+> Superseded by FIX-3/FIX-4: i18n lands in Task 3 via the _FINGERPRINTS pattern.
+
 Add to `tests/unit/plugins/web_fetch/test_i18n_keys.py` (follow the file's per-key-fingerprint pattern — assert `t(key)` is non-empty and distinct, not merely `!= key`):
 
 ```python
@@ -564,6 +566,8 @@ Import at the top: `from alfred.plugins.web_fetch.auth_allowlist import WEB_FETC
         )
 ```
 
+> Superseded by FIX-1 (FOLD layer): Step 1b/1c go BEFORE the handle_cap reserve.
+
 **Step 1c — substitution (after DLP, before `_RawToolRequest`).** Replace the `_RawToolRequest(... headers=clean_headers ...)` build (`:558`) so it uses substituted headers. Put the substitution just before the `try:` at `:557`:
 
 ```python
@@ -692,6 +696,8 @@ EOF
 - Consumes: `build_web_fetch_tool` (Task 3); a fire-spy relay/extractor; the `AdversarialPayload` schema (`tests/adversarial/payload_schema.py`). Mirror `tests/adversarial/capability_bypass/test_cap_2026_006_tool_arg_injection.py` (fixture-filter + REAL dispatch + fire-spy).
 
 - [ ] **Step 1: Write the payload YAML** (`de-2026-019`, next-free id; `de-`=dlp_egress)
+
+> Superseded by FIX-7: no merge_blocker field (extra="forbid").
 
 ```yaml
 # broker_secret_exfil.yaml — dlp_egress adversarial payload (#339 PR4b-broker).

@@ -384,12 +384,18 @@ async def dispatch_web_fetch(
         ``clean_url`` / ``domain`` (bound just above) and the enclosing scope's
         ``user_id`` / ``correlation_id`` / ``config`` / ``audit``.
 
-        ``from None`` (FIX-8): suppresses the exception chain so a downstream
-        traceback render never echoes the (possibly attacker-influenced) secret
-        name carried in ``UnknownSecretError.__str__`` (a ``KeyError`` subclass
-        whose message embeds the requested name — see ``SecretBroker.get``).
-        The raised ``WebFetchError``'s own message is a FIXED, closed-vocabulary
-        catalog string; it never echoes ``dlp_scan_result`` or any caller input.
+        ``from None`` (FIX-8): the PRIMARY containment is structural, not
+        traceback-suppression — the raised ``WebFetchError``'s own message is a
+        FIXED, closed-vocabulary catalog string; ``.ref`` (the possibly
+        attacker-influenced secret name) never appears in its ``__str__`` /
+        ``__repr__`` / ``.args``, and it never echoes ``dlp_scan_result`` or any
+        other caller input. ``from None`` additionally sets
+        ``__suppress_context__ = True``, which governs DEFAULT traceback
+        rendering (e.g. ``traceback.format_exception``) so a downstream render
+        does not print the chained ``UnknownSecretError.__str__`` (a
+        ``KeyError`` subclass whose message embeds the requested name — see
+        ``SecretBroker.get``) — but it does NOT clear ``__context__`` itself;
+        that reference remains reachable to code that inspects it directly.
         """
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
@@ -461,7 +467,17 @@ async def dispatch_web_fetch(
             name: broker.substitute(value, allowed_secrets=auth_secret_allowlist)
             for name, value in clean_headers.items()
         }
-    except (SecretSubstitutionNotAllowed, UnknownSecretError):
+    except (SecretSubstitutionNotAllowed, UnknownSecretError) as exc:
+        # err-001: log the exception TYPE NAME ONLY (never ``exc.ref``, ``str(exc)``,
+        # or any secret) so an operator can forensically distinguish an
+        # off-allowlist/malformed probe (SecretSubstitutionNotAllowed) from an
+        # unprovisioned-but-allowlisted secret (UnknownSecretError) without either
+        # leaking the referenced name into the log stream.
+        _log.warning(
+            "web_fetch.secret_substitution_refused",
+            error_type=type(exc).__name__,
+            correlation_id=correlation_id,
+        )
         await _refuse(
             dlp_scan_result="secret_substitution_refused",
             message_key="web.fetch.error.secret_substitution_refused",

@@ -1302,7 +1302,10 @@ async def test_off_allowlist_placeholder_refused_audits_and_skips_extractor() ->
 @pytest.mark.asyncio
 async def test_off_allowlist_placeholder_refused_message_routes_through_i18n() -> None:
     """The substitution-refusal ``WebFetchError`` surface is catalogued (i18n
-    hard rule)."""
+    hard rule). PR #403 review: the msgstr no longer says "allowlist" (that
+    word collided with the unrelated ``alfred web allowlist add`` domain
+    command and named an operator lever that does not exist this release) —
+    pin the reworded "not permitted" + audit-log-breadcrumb text instead."""
     with pytest.raises(WebFetchError) as excinfo:
         await _dispatch(
             headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
@@ -1310,7 +1313,91 @@ async def test_off_allowlist_placeholder_refused_message_routes_through_i18n() -
         )
 
     message = str(excinfo.value).lower()
-    assert "allowlist" in message
+    assert "permitted" in message
+    assert "audit log" in message
+
+
+@pytest.mark.asyncio
+async def test_off_allowlist_placeholder_refused_logs_forensic_discriminator() -> None:
+    """err-001 (PR #403 review): Step 1c's ``except (SecretSubstitutionNotAllowed,
+    UnknownSecretError)`` arm logs the exception TYPE NAME ONLY — never
+    ``exc.ref``, ``str(exc)``, or any secret — BEFORE calling ``_refuse``. This
+    is the forensic signal that lets an operator distinguish an off-allowlist /
+    malformed probe (``SecretSubstitutionNotAllowed``, this test) from an
+    unprovisioned secret (``UnknownSecretError``, the sibling test below)
+    without leaking the referenced name into the log stream."""
+    with (
+        structlog.testing.capture_logs() as caps,
+        pytest.raises(WebFetchError),
+    ):
+        await _dispatch(
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset(),
+        )
+
+    refusal_logs = [c for c in caps if c.get("event") == "web_fetch.secret_substitution_refused"]
+    assert len(refusal_logs) == 1
+    log = refusal_logs[0]
+    assert log["error_type"] == "SecretSubstitutionNotAllowed"
+    assert log["correlation_id"] == "corr-1"
+    assert "deepseek_api_key" not in repr(log)
+
+
+@pytest.mark.asyncio
+async def test_off_allowlist_placeholder_refused_logs_unknown_secret_discriminator() -> None:
+    """Sibling discriminator case: an ALLOWLISTED-but-UNPROVISIONED secret name
+    makes ``SecretBroker.get`` raise ``UnknownSecretError`` (not
+    ``SecretSubstitutionNotAllowed``) — the forensic log's ``error_type``
+    distinguishes the two arms, matching ``_classify_action_timeout``'s
+    established ``error_type=type(exc).__name__`` discriminator pattern."""
+    broker = SecretBroker(env={})  # deepseek_api_key allowlisted but unset
+
+    with (
+        structlog.testing.capture_logs() as caps,
+        pytest.raises(WebFetchError),
+    ):
+        await _dispatch(
+            broker=broker,
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset({"deepseek_api_key"}),
+        )
+
+    refusal_logs = [c for c in caps if c.get("event") == "web_fetch.secret_substitution_refused"]
+    assert len(refusal_logs) == 1
+    assert refusal_logs[0]["error_type"] == "UnknownSecretError"
+    assert "deepseek_api_key" not in repr(refusal_logs[0])
+
+
+@pytest.mark.asyncio
+async def test_broker_backend_fault_propagates_uncaught_not_converted_to_refusal() -> None:
+    """test-002 / FIX-9 totality (PR #403 review): a broker BACKEND fault — a
+    plain ``RuntimeError`` that is NEITHER ``SecretSubstitutionNotAllowed`` NOR
+    ``UnknownSecretError`` — propagates OUT of ``dispatch_web_fetch`` uncaught.
+    The Step-1c ``except`` arm is narrowly typed to the two refusal exceptions;
+    it must NOT swallow (and mis-convert to ``secret_substitution_refused``) an
+    unrelated backend fault (e.g. a future remote secret store's transport
+    error). The fault is audited ONE LAYER UP by ``dispatch_tool``'s outer
+    ``except Exception`` arm, not by a second arm here (module docstring's
+    FIX-9 note, mirroring the PR4a handle_cap-reserve precedent) — so NO local
+    ``tool.web.fetch`` audit row is written."""
+    audit = _build_audit()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    class _FaultyBroker:
+        def substitute(self, text: str, *, allowed_secrets: frozenset[str]) -> str:
+            raise RuntimeError("secret store connection reset")
+
+    with pytest.raises(RuntimeError, match="secret store connection reset"):
+        await _dispatch(
+            audit=audit,
+            extractor=extractor,
+            broker=_FaultyBroker(),
+            headers={"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+            auth_secret_allowlist=frozenset({"deepseek_api_key"}),
+        )
+
+    extractor.handle.assert_not_awaited()
+    assert audit.append_schema.await_count == 0
 
 
 @pytest.mark.asyncio

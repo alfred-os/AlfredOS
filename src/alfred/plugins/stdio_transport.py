@@ -119,8 +119,9 @@ log = structlog.get_logger(__name__)
 #   primitive wired into ``web.fetch``'s dispatcher — but it is a different
 #   shape from this Protocol's ASYNC ``dict -> dict`` surface. Converging
 #   this transport onto the concrete method is a documented follow-up (see
-#   ADR-0048 §13), not done here. The Protocol future-proofs the transport
-#   against the broker's evolving surface in the meantime.
+#   ADR-0048's Consequences -> Neutral async-Protocol convergence note), not
+#   done here. The Protocol future-proofs the transport against the broker's
+#   evolving surface in the meantime.
 #
 # Both Protocols are ``runtime_checkable`` so the supervisor bootstrap
 # can ``isinstance`` check without importing the concrete adapter.
@@ -170,7 +171,8 @@ class _SecretBrokerSubstitute(Protocol):
     -> str``), wired into ``web.fetch``'s dispatcher. It does not satisfy
     this Protocol (async, ``dict[str, Any] -> dict[str, Any]``) — converging
     ``stdio_transport`` onto the concrete method is a deferred follow-up
-    (ADR-0048 §13), not this PR.
+    (ADR-0048's Consequences -> Neutral async-Protocol convergence note), not
+    this PR.
     """
 
     async def substitute(self, params: dict[str, Any], /) -> dict[str, Any]: ...

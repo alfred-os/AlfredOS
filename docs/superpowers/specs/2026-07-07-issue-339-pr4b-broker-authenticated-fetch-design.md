@@ -93,8 +93,14 @@ The PR4b-audit merge shifted line numbers; these are re-confirmed against the me
   forwarded **verbatim** (only `Idempotency-Key` is added on replay). A secret substituted into
   headers survives to the gateway.
 - **Egress ledger** (`src/alfred/memory/egress_idempotency.py:63`): `commit_intent(...,
-  body_hash, ...)` stores a **body** hash, not headers. Body is `""` → the ledger never sees the
-  secret.
+  body_hash, ...)` stores an integrity hash the relay client computes
+  (`src/alfred/egress/relay_client.py:245-249`, pre-existing since #333, not new here) by folding
+  the request headers — including any substituted secret — into `compute_egress_body_hash()`'s
+  one-way sha256 digest alongside the descriptor and the redacted body. **Correction (PR #403
+  review): "the ledger never sees the secret" is imprecise** — the substituted header value DOES
+  contribute to the hash input. The digest is a fixed-width sha256 output, never recoverable back
+  to the header value, so the RAW secret is never stored in *plaintext* anywhere, including the
+  ledger.
 - **Gateway relay** (`src/alfred/gateway/egress_relay.py:225,447-468`): built with
   `OutboundDlp(broker=None, …)` (stages 2+3 only). It re-scans `body + URL + forwarded header
   values` and **denies (`DLP_REDACTED`) on ANY change** — it is a *detector*, not a re-redacter
@@ -241,14 +247,14 @@ during `writing-plans`.
 | Surface | Why the secret is absent |
 | --- | --- |
 | Audit rows | `WEB_FETCH_FIELDS` has no headers field; only `url`/`domain` are recorded, and those are the DLP-clean values. |
-| Egress ledger | `commit_intent` hashes the **body**; web.fetch body is `""`. Headers are never hashed/stored. |
+| Egress ledger | `commit_intent`'s integrity hash folds the (already-substituted) headers into `compute_egress_body_hash()`'s one-way sha256 digest alongside the descriptor and the redacted body (pre-existing since #333) — **correction (PR #403 review):** headers are NOT "never hashed"; they ARE an input to the hash. The digest is never recoverable back to a plaintext header value, so no header — secret-bearing or not — is ever stored in *plaintext* in the ledger. |
 | `egress_id` | `compute_egress_id(ctx, call_index)` is positional — independent of header content. |
 | Logs | The secret value is never passed to a logger; refusals log the secret *name* (safe) via the closed vocabulary. |
 | Core→gateway relay frame | Carries the substituted value (it must, to authenticate) — this is the trusted `alfred_internal` leg. The secret is *in transit* here, never *persisted* here. |
 
 The substituted secret **does** travel the trusted relay leg to the gateway and out to the
 destination (that is what authenticated fetch means). "Never on the wire" in prior notes is
-imprecise: the invariant is **never persisted/audited/logged/ledgered**, and **never in the
+imprecise: the invariant is **never persisted in plaintext, audited, or logged**, and **never in the
 DLP-scanned or planner-facing representation**.
 
 ---
