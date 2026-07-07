@@ -2907,6 +2907,10 @@ msgstr ""
 " live under `web_fetch.user_daily_budget` / "
 "`web_fetch.operator_daily_budget`."
 
+#: src/alfred/plugins/web_fetch/errors.py:105
+msgid "web.fetch.error.action_timeout"
+msgstr "web.fetch exceeded its action deadline."
+
 #: src/alfred/plugins/web_fetch/errors.py:96
 msgid "web.fetch.error.handle_id_mismatch"
 msgstr ""

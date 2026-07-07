@@ -15,6 +15,7 @@ import pytest
 
 from alfred.errors import AlfredError
 from alfred.plugins.web_fetch.errors import (
+    WebFetchActionTimeout,
     WebFetchCanaryTripped,
     WebFetchDomainNotAllowed,
     WebFetchError,
@@ -33,6 +34,21 @@ def test_domain_not_allowed_is_web_fetch_error() -> None:
 
 def test_rate_limited_is_web_fetch_error() -> None:
     assert issubclass(WebFetchRateLimited, WebFetchError)
+
+
+def test_action_timeout_is_web_fetch_error() -> None:
+    """Positive pin (FOLD-LAYER FIX-4) -- contrast the negative
+    ``test_canary_tripped_is_NOT_web_fetch_error`` pin below.
+    ``WebFetchActionTimeout`` deliberately DOES subclass ``WebFetchError``:
+    the recoverable-return semantics fit (an action-deadline timeout is an
+    operational condition the orchestrator can surface and recover from),
+    unlike the canary trip's halting security-event semantics. Because it
+    IS a ``WebFetchError``, the ``dispatch_tool`` ``except`` arm ordering
+    is load-bearing (see the class docstring in errors.py) -- this pin
+    just fixes the taxonomy choice so a future refactor cannot silently
+    move it out of the tree without tripping a test.
+    """
+    assert issubclass(WebFetchActionTimeout, WebFetchError)
 
 
 def test_canary_tripped_is_NOT_web_fetch_error() -> None:  # noqa: N802 -- emphasis intentional; the NOT is load-bearing
@@ -62,12 +78,36 @@ def test_canary_tripped_carries_source_url_and_handle_id() -> None:
     assert err.handle_id == "abc-123"
 
 
+def test_web_fetch_action_timeout_carries_forensic_fields() -> None:
+    exc = WebFetchActionTimeout(
+        egress_id="d" * 64,
+        destination_host="example.com",
+        in_doubt=True,
+        ledger_state="committed_no_response",
+    )
+    assert isinstance(exc, WebFetchError)  # taxonomy: catchable as WebFetchError
+    assert exc.egress_id == "d" * 64
+    assert exc.destination_host == "example.com"
+    assert exc.in_doubt is True
+    assert exc.ledger_state == "committed_no_response"
+    # Message is a fixed operator string — it must NOT interpolate the forensic
+    # data (host/egress_id) into the message body (audit hygiene).
+    assert "example.com" not in str(exc)
+    assert "d" * 64 not in str(exc)
+
+
 @pytest.mark.parametrize(
     "exc",
     [
         WebFetchDomainNotAllowed("d.example"),
         WebFetchRateLimited("per_user"),
         WebFetchCanaryTripped(source_url="https://x.example", handle_id="id"),
+        WebFetchActionTimeout(
+            egress_id="e" * 64,
+            destination_host="d.example",
+            in_doubt=False,
+            ledger_state=None,
+        ),
     ],
 )
 def test_every_exception_is_raise_able(exc: Exception) -> None:

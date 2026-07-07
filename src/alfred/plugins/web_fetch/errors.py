@@ -76,6 +76,39 @@ class WebFetchRateLimited(WebFetchError):  # noqa: N818 -- name pinned by spec �
         self.bucket: RateLimitBucket = bucket
 
 
+class WebFetchActionTimeout(WebFetchError):  # noqa: N818 -- forensic event, name pinned by #347 blocker-2
+    """The fused fetch+extract overran its per-action deadline (spec §7, #347 blocker 2).
+
+    Carries the forensic fields the orchestrator-wiring chokepoint records on the
+    enriched ``tool.dispatch`` timeout row. The side effect may have fired before
+    the deadline (``in_doubt``); the message body carries NO forensic data (audit
+    hygiene) — the structured attributes do.
+
+    DELIBERATELY a ``WebFetchError`` subclass (FOLD-LAYER FIX-4) — unlike
+    ``WebFetchCanaryTripped`` below, an action-deadline timeout is a
+    recoverable operational condition, not a halting security event. BECAUSE
+    it subclasses ``WebFetchError``, ``dispatch_tool``'s ``except`` arm
+    ordering is load-bearing: its handler MUST precede the generic
+    ``except WebFetchError`` arm, or a future reorder silently swallows these
+    forensic fields into the generic tool-error row instead of the enriched
+    timeout row.
+    """
+
+    def __init__(
+        self,
+        *,
+        egress_id: str,
+        destination_host: str,
+        in_doubt: bool,
+        ledger_state: str | None,
+    ) -> None:
+        super().__init__(t("web.fetch.error.action_timeout"))
+        self.egress_id = egress_id
+        self.destination_host = destination_host
+        self.in_doubt = in_doubt
+        self.ledger_state = ledger_state
+
+
 class WebFetchHandleIdMismatch(WebFetchError):  # noqa: N818 -- spec §3 host equality check
     """The plugin returned a ContentHandle whose id differs from the
     host-side pre-minted reservation (spec §3).
@@ -123,6 +156,7 @@ class WebFetchCanaryTripped(AlfredError):  # noqa: N818 -- SECURITY EVENT, name 
 
 
 __all__ = [
+    "WebFetchActionTimeout",
     "WebFetchCanaryTripped",
     "WebFetchDomainNotAllowed",
     "WebFetchError",
