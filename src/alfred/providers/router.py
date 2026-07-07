@@ -9,6 +9,7 @@ from alfred.providers.base import (
     CompletionResponse,
     Provider,
     ProviderMalformedToolArgumentsError,
+    ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
 )
 
@@ -16,7 +17,14 @@ _log = structlog.get_logger()
 
 # Provider tool-protocol errors are NOT transient provider failures, so the
 # router must NOT try the fallback on them (that would mask the real cause).
-_TOOL_PROTOCOL_ERRORS = (ProviderToolUnsupportedError, ProviderMalformedToolArgumentsError)
+# A tool-name collision is a deterministic config error: the fallback builds
+# the SAME name-map from the SAME tools and would raise identically — retrying
+# it is pointless and mislabels the cause, so it re-raises here too.
+_TOOL_PROTOCOL_ERRORS = (
+    ProviderToolUnsupportedError,
+    ProviderMalformedToolArgumentsError,
+    ProviderToolNameCollisionError,
+)
 
 
 class ProviderRouter:
