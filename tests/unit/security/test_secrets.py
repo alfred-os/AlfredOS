@@ -25,6 +25,7 @@ from alfred.security.secrets import (
     SecretBrokerNotAFileError,
     SecretBrokerPermissionsError,
     SecretBrokerUnreadableError,
+    SecretSubstitutionNotAllowed,
     UnknownSecretError,
     _resolve_secrets_path,
     _secret_is_gitignored,
@@ -1200,3 +1201,90 @@ class TestRedactorCache:
         broker._bump_redactor_version()
         out = broker.redact("token sk-x")
         assert "[REDACTED:deepseek_api_key]" in out
+
+
+class TestSecretSubstitution:
+    """`{{secret:<name>}}` placeholder resolution — the primitive authenticated
+    web.fetch (PR4b-broker, #347 blocker 4) consumes at the tool-call boundary.
+    """
+
+    def test_substitute_no_placeholder_returns_text_unchanged(self) -> None:
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        text = "Bearer static-token"
+        assert broker.substitute(text, allowed_secrets=frozenset({"deepseek_api_key"})) == text
+
+    def test_substitute_fills_allowed_placeholder_preserving_surrounding_text(self) -> None:
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        out = broker.substitute(
+            "Bearer {{secret:deepseek_api_key}}",
+            allowed_secrets=frozenset({"deepseek_api_key"}),
+        )
+        assert out == "Bearer sk-live"
+
+    def test_substitute_multiple_placeholders(self) -> None:
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "A", "ALFRED_ANTHROPIC_API_KEY": "B"})
+        out = broker.substitute(
+            "{{secret:deepseek_api_key}}:{{secret:anthropic_api_key}}",
+            allowed_secrets=frozenset({"deepseek_api_key", "anthropic_api_key"}),
+        )
+        assert out == "A:B"
+
+    def test_substitute_off_allowlist_ref_refuses(self) -> None:
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        with pytest.raises(SecretSubstitutionNotAllowed) as exc:
+            broker.substitute("{{secret:deepseek_api_key}}", allowed_secrets=frozenset())
+        assert exc.value.ref == "deepseek_api_key"
+
+    def test_substitute_allowed_but_unprovisioned_raises_unknown_secret(self) -> None:
+        broker = SecretBroker(env={})  # deepseek_api_key not set
+        with pytest.raises(UnknownSecretError):
+            broker.substitute(
+                "{{secret:deepseek_api_key}}",
+                allowed_secrets=frozenset({"deepseek_api_key"}),
+            )
+
+    def test_substitute_malformed_ref_refuses_without_echoing_attacker_text(self) -> None:
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        with pytest.raises(SecretSubstitutionNotAllowed):
+            broker.substitute(
+                "{{secret:Bad Name!}}", allowed_secrets=frozenset({"deepseek_api_key"})
+            )
+        # The fixed message must NOT interpolate the raw ref (log-injection guard).
+        assert "Bad Name" not in str(SecretSubstitutionNotAllowed("Bad Name!"))
+
+    def test_substitute_empty_name_refuses(self) -> None:
+        # {{secret:}} — the placeholder regex's permissive inner group matches
+        # the empty string; _VALID_SECRET_NAME (`[a-z0-9_.]+`, one-or-more)
+        # then rejects it. Guards against a degenerate ref reaching `get()`.
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        with pytest.raises(SecretSubstitutionNotAllowed) as exc:
+            broker.substitute("{{secret:}}", allowed_secrets=frozenset({"deepseek_api_key"}))
+        assert exc.value.ref == ""
+
+    def test_substitute_allowlisted_but_not_supported_raises_unknown_secret(self) -> None:
+        # A name that IS in the caller's allowed_secrets but is NOT a
+        # SUPPORTED_SECRETS entry — proves the `get()` delegation enforces the
+        # SUPPORTED_SECRETS intersection independently of the caller-supplied
+        # allowlist (distinct from test_substitute_allowed_but_unprovisioned_
+        # raises_unknown_secret, which uses a real-but-unset SUPPORTED name).
+        broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": "sk-live"})
+        with pytest.raises(UnknownSecretError):
+            broker.substitute(
+                "{{secret:not_a_real_secret}}",
+                allowed_secrets=frozenset({"not_a_real_secret"}),
+            )
+
+    def test_substitute_second_placeholder_refusal_emits_no_partial_output(self) -> None:
+        # Two placeholders, first allowlisted + provisioned, second off-allowlist.
+        # re.sub evaluates the replacement function lazily per-match, so the
+        # first substitution must not leak into the exception the second
+        # raises — no partial output escapes on refusal.
+        broker = SecretBroker(
+            env={"ALFRED_DEEPSEEK_API_KEY": "sk-live", "ALFRED_ANTHROPIC_API_KEY": "an-live"}
+        )
+        with pytest.raises(SecretSubstitutionNotAllowed) as exc:
+            broker.substitute(
+                "{{secret:deepseek_api_key}} {{secret:anthropic_api_key}}",
+                allowed_secrets=frozenset({"deepseek_api_key"}),
+            )
+        assert "sk-live" not in str(exc.value)
