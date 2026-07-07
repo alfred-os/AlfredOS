@@ -445,15 +445,26 @@ from alfred.plugins.web_fetch.errors import (  # add WebFetchActionTimeout to th
 ```python
         except TimeoutError:
             # #347 blocker 2: the fused fetch+extract overran the action deadline.
-            # We own the ledger here (via the extractor); read the REAL committed
-            # state and package the in-doubt fact into a typed exception so the
-            # orchestrator-wiring chokepoint writes the enriched, non-skippable
-            # tool.dispatch row (HARD rule #7). asyncio.timeout has already
-            # converted the CancelledError to TimeoutError, so the surrounding
-            # task is no longer being cancelled and this await is safe. The outer
-            # ``finally`` still releases the handle_cap slot after this raise.
+            # SUPERSEDED BY FIX-1 (see the fold-layer at the top of this plan) —
+            # the ledger read MUST be guarded, or a correlated DB fault masks the
+            # in-doubt row. The guarded form that actually shipped:
             egress_id = compute_egress_id(egress_ctx, call_index=call_index)
-            state = await extractor.ledger_state(egress_id=egress_id)
+            try:
+                async with asyncio.timeout(_LEDGER_READ_TIMEOUT_SECONDS):
+                    state = await extractor.ledger_state(egress_id=egress_id)
+            except Exception as read_exc:
+                _log.error(
+                    "web_fetch.timeout.ledger_read_failed",
+                    egress_id=egress_id,
+                    error_type=type(read_exc).__name__,
+                    correlation_id=correlation_id,
+                )
+                raise WebFetchActionTimeout(
+                    egress_id=egress_id,
+                    destination_host=domain,
+                    in_doubt=True,
+                    ledger_state="read_unavailable",
+                ) from None
             raise WebFetchActionTimeout(
                 egress_id=egress_id,
                 destination_host=domain,
