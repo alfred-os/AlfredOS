@@ -1648,3 +1648,60 @@ standalone ADR) per the project's docs-003 disposition.
 See [Discord probe (`alfred.gateway.discord_probe`)](#discord-probe-alfredgatewaydiscord_probe),
 [ADR-0039 §Amendments (G6-7-7)](adr/0039-gateway-adapter-inbound-bridge.md#amendments),
 and [docs/subsystems/comms.md](subsystems/comms.md).
+
+## committed_no_response
+
+One of two CHECK-constrained (`ck_egress_idempotency_state`) terminal states an
+`egress_idempotency` ledger row can hold
+(`src/alfred/memory/egress_idempotency.py`, Spec C §5). `commit_intent` stamps
+this state on a fresh insert, before the external side effect fires. A row
+that stays in this state means the intent was durably committed but no
+response was ever recorded against it — the side effect MAY have fired (the
+caller could have crashed, been cancelled, or hit a network partition between
+commit and `record_response`). A later `commit_intent` on the same
+`egress_id` sees this state and returns `IntentInDoubt`; a direct read via
+`get_state` returns the literal string `"committed_no_response"`. The store
+only ever reports this state — it never re-fires or guesses the true
+outcome. This is the ledger-level fact the audit-row [`in_doubt`](#in_doubt)
+flag is derived from.
+
+See [committed_with_response](#committed_with_response), [in_doubt](#in_doubt),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## committed_with_response
+
+The other CHECK-constrained terminal state an `egress_idempotency` ledger row
+can hold (`src/alfred/memory/egress_idempotency.py`, Spec C §5) — reached when
+`record_response` advances a [`committed_no_response`](#committed_no_response)
+row after the external side effect returns (or is classified as a soft or
+canary refusal). `commit_intent` on a row already in this state returns
+`IntentReplayComplete`, and the caller replays the stored T2 response
+directly rather than re-firing or re-extracting raw T3 (HARD rule #5). The
+`ck_egress_idempotency_response_matches_state` CHECK guarantees the `response`
+column is non-`NULL` whenever a row is in this state.
+
+See [committed_no_response](#committed_no_response) and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## in_doubt
+
+A `bool` field on the enriched `tool.dispatch` audit row
+(`TOOL_DISPATCH_TIMEOUT_FIELDS`, `src/alfred/audit/audit_row_schemas.py`) and
+a constructor field on `WebFetchActionTimeout`
+(`src/alfred/plugins/web_fetch/errors.py`) — the #339 PR4b-audit closure of #347
+blocker 2. `True` when the egress-idempotency ledger's state at
+action-deadline classification time is
+[`committed_no_response`](#committed_no_response): the side effect this call
+attempted may already have fired, and its outcome is unknown. A ledger-read
+failure DURING that classification (the read itself times out or the store
+errors) also forces `in_doubt=True`, paired with the sentinel
+`ledger_state="read_unavailable"` — a read failure is the unsafe direction,
+never silently folded into "no side effect occurred". `in_doubt=False` when
+the ledger state is `None` (no row was ever committed — the deadline fired
+before the call reached the ledger) or
+[`committed_with_response`](#committed_with_response) (the call completed and
+was recorded before the deadline read ran).
+
+See [committed_no_response](#committed_no_response),
+[committed_with_response](#committed_with_response), [WebFetchError](#webfetcherror),
+and [docs/subsystems/security.md](subsystems/security.md).

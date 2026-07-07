@@ -85,6 +85,12 @@ classes of outcome:
 - **Recoverable (T2 error `tool_result`, planner adapts):** unknown tool, invalid
   arguments, gate-denied, domain-not-allowed, rate-limited, tool-error, timeout.
 
+  The `timeout` outcome (and its defensive `unexpected_timeout` sibling) carries
+  additional forensic fields (`egress_id` / `destination_host` / `in_doubt` /
+  `ledger_state`) on the audit row — the #339 PR4b-audit closure of #347 blocker 2. See
+  the 2026-07-07 amendment to [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md)
+  and [docs/subsystems/security.md](../subsystems/security.md#trust-boundary-contract).
+
 **5. Intra-turn tool history is ephemeral (D3).** The in-turn tool-call transcript built
 across a turn's iterations is not persisted to episodic memory in #339 — only the final
 assistant answer is, as today. This keeps the `Episode.role` DB CHECK (`user` /
