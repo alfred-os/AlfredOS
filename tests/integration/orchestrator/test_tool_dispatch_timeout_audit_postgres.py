@@ -127,9 +127,7 @@ def _mock_quarantined_child() -> AsyncMock:
     return AsyncMock()
 
 
-async def _select_audit_subjects(
-    engine: Any, *, event: str, trace_id: str
-) -> list[dict[str, Any]]:
+async def _select_audit_subjects(engine: Any, *, event: str, trace_id: str) -> list[dict[str, Any]]:
     """Query ``audit_log.subject`` JSON payloads for one (event, trace_id) pair.
 
     Mirrors the inline ``engine.connect()`` + ``sa.select(AuditEntry.subject)``
