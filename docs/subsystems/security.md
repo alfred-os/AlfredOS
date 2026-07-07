@@ -288,6 +288,69 @@ T3 for every tool; only a hardcoded first-party allowlist may claim ≤T2 and sk
 both crossings. See [ADR-0046](../adr/0046-dual-llm-tool-result-flow.md) for the
 full invariant.
 
+**Action-deadline timeout audit (#339 PR4b-audit, #347 blocker 2).** HARD rule #7
+forbids a silent in-doubt side effect: if `dispatch_web_fetch`'s fused
+fetch+extract overruns `action_deadline_seconds`, the network call may already
+have fired even though the turn never saw a response. `dispatch_tool` writes a
+single enriched `tool.dispatch` row via `TOOL_DISPATCH_TIMEOUT_FIELDS`
+(`TOOL_DISPATCH_FIELDS | {egress_id, destination_host, in_doubt,
+ledger_state}`, `src/alfred/audit/audit_row_schemas.py`) carrying:
+
+- `egress_id` — the sha256 egress-id of the timed-out logical call
+  (deterministic; no T3 content).
+- `destination_host` — the bare destination host only, never the URL, path,
+  query, or userinfo.
+- `in_doubt` (see [glossary](../glossary.md#in_doubt)) — `True` when the
+  egress-idempotency ledger is
+  [`committed_no_response`](../glossary.md#committed_no_response) — the side
+  effect may have fired and its outcome is unknown.
+- `ledger_state` — the ledger's committed state:
+  [`committed_no_response`](../glossary.md#committed_no_response),
+  [`committed_with_response`](../glossary.md#committed_with_response), or
+  `None` (no row — the deadline fired before the call was ever committed).
+
+Two arms classify the timeout, and their `except`-clause ORDER is load-bearing
+in `dispatch_tool`:
+
+1. **Enriched arm — `except WebFetchActionTimeout`.** `WebFetchActionTimeout`
+   (`src/alfred/plugins/web_fetch/errors.py`) is deliberately a `WebFetchError`
+   subclass — an action-deadline overrun is a recoverable operational
+   condition, not a halting security event — so this arm MUST precede the
+   generic `except WebFetchError` arm below it, or the reorder silently
+   swallows the forensic fields into the plain `tool_error` row.
+   `dispatch_web_fetch` raises it with `dispatch_outcome="timeout"`. On a
+   ledger-read failure during classification (the read itself times out or
+   the store errors), it raises instead with `in_doubt=True` and the sentinel
+   `ledger_state="read_unavailable"` — a read failure is the unsafe-but-safe
+   direction, never silently folded into "no side effect occurred".
+2. **Defensive arm — `except TimeoutError`.** A bare `TimeoutError` from any
+   other source (not the web.fetch action-deadline path, which is always the
+   typed exception above). Still audited (HARD rule #7 totality) but tagged
+   `dispatch_outcome="unexpected_timeout"` — a distinct token from the
+   enriched `"timeout"` — plus a loud `structlog` warning so a stray bare
+   `TimeoutError` stays greppable.
+
+**Only fires when the action deadline is the tighter bound.** The gateway
+relay client's own per-call `asyncio.timeout` defaults to 30s
+(`_DEFAULT_PER_CALL_TIMEOUT`, `src/alfred/egress/relay_client.py`) — the same
+default as `action_deadline_seconds`. If an operator raises the action
+deadline above the relay's per-call timeout, the relay's `asyncio.timeout`
+fires first and raises `RelayIOPlaneUnavailableError` (not a `WebFetchError`
+subclass), which reaches `dispatch_tool`'s generic `except Exception` arm and
+writes a plain `unexpected_error`/`fault` row — not the enriched timeout row.
+
+**Idempotent re-fire on future replay (#338 residual).** `dispatch_web_fetch`
+builds its `_RawToolRequest` with `idempotent=True`. On a future #338 resume,
+the same `egress_id` re-derives deterministically; `commit_intent` sees the
+durable `committed_no_response` row and returns `IntentInDoubt`
+(`src/alfred/memory/egress_idempotency.py`). Because the request is
+idempotent, the relay client forwards `egress_id` as the remote
+`Idempotency-Key` header and RE-FIRES rather than refusing — it does not
+raise `EgressInDoubtError`. One logical call can therefore produce a second
+audit trail across the resume boundary; #338's replay-journaling design must
+account for this rather than assume a fired-once guarantee at the audit-row
+level.
+
 **Act-phase loop (#339 PR3).** The agentic act-phase loop
 (`src/alfred/orchestrator/`) is the driver of the ADR-0046 invariant above —
 each iteration's tool dispatch runs through this same `dispatch_tool` chokepoint,
@@ -350,6 +413,7 @@ Discord egress bridge decision record.
 - [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Decision 1 (nonce gate), Decision 3 (two-axis naming), Decision 7 (wire-format versioning anchors).
 - [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md) — Slice-4 containerised quarantined LLM commitment.
 - [ADR-0046](../adr/0046-dual-llm-tool-result-flow.md) — the tool-result-flow trust boundary: `dispatch_tool`'s downgrade + DLP crossing for T3 tool results, and the `result_tier`-defaults-to-T3 rule.
+- [ADR-0041 amendment (2026-07-07)](../adr/0041-web-fetch-fused-fetch-extract-contract.md) — the action-deadline `TimeoutError` audit closure (#347 blocker 2): `except`-order invariant, single-row-at-`dispatch_tool` invariant, `in_doubt` derivation.
 - Spec C G7-2c (#333) — the §4.3 tool-egress response path (in-core `EgressResponseExtractor`) routes T3 upstream tool-response bodies through the SAME gate-checked `quarantined_to_structured` seam — never a parallel extractor — and the dedup ledger stores only the post-extraction T2, never raw T3. See the [Spec C egress control-plane design](../superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md).
 - Sibling subsystems: [plugins.md](plugins.md), [identity.md](identity.md), [hooks.md](hooks.md).
-- Glossary: [trust tier](../glossary.md#trust-tier), [T3 (untrusted-ingestion tier)](../glossary.md#t3-untrusted-ingestion-tier), [CapabilityGateNonce](../glossary.md#capabilitygatenonce), [dual-LLM split](../glossary.md#dual-llm-split), [RealGate](../glossary.md#realgate), [GatePolicy](../glossary.md#gatepolicy), [GrantRow](../glossary.md#grantrow), [QuarantinedExtractor](../glossary.md#quarantinedextractor), [ExtractionMode](../glossary.md#extractionmode), [TypedRefusalReason](../glossary.md#typedrefusalreason), [ProviderCapability](../glossary.md#providercapability), [alfred_quarantined_llm](../glossary.md#alfred_quarantined_llm), [quarantine.ingest](../glossary.md#quarantineingest), [quarantine.extract](../glossary.md#quarantineextract), [Extracted](../glossary.md#extracted), [TypedRefusal](../glossary.md#typedrefusal), [ExtractionResult](../glossary.md#extractionresult).
+- Glossary: [trust tier](../glossary.md#trust-tier), [T3 (untrusted-ingestion tier)](../glossary.md#t3-untrusted-ingestion-tier), [CapabilityGateNonce](../glossary.md#capabilitygatenonce), [dual-LLM split](../glossary.md#dual-llm-split), [RealGate](../glossary.md#realgate), [GatePolicy](../glossary.md#gatepolicy), [GrantRow](../glossary.md#grantrow), [QuarantinedExtractor](../glossary.md#quarantinedextractor), [ExtractionMode](../glossary.md#extractionmode), [TypedRefusalReason](../glossary.md#typedrefusalreason), [ProviderCapability](../glossary.md#providercapability), [alfred_quarantined_llm](../glossary.md#alfred_quarantined_llm), [quarantine.ingest](../glossary.md#quarantineingest), [quarantine.extract](../glossary.md#quarantineextract), [Extracted](../glossary.md#extracted), [TypedRefusal](../glossary.md#typedrefusal), [ExtractionResult](../glossary.md#extractionresult), [in_doubt](../glossary.md#in_doubt), [committed_no_response](../glossary.md#committed_no_response), [committed_with_response](../glossary.md#committed_with_response).

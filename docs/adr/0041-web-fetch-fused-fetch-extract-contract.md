@@ -18,6 +18,37 @@
 > See [ADR-0047](0047-web-fetch-handle-cap-reattach-and-inbound-canary.md). (Factual amendment;
 > the ADR-0015/0016 amendment precedent — status flips stay with the maintainer.)
 
+> **Amendment (2026-07-07, #339 PR4b-audit — #347 blocker 2 closed).** The "Action-deadline
+> `TimeoutError` surfaces un-audited at the dispatcher" residual noted under Negative/accepted
+> below is **closed**. `dispatch_web_fetch` now raises a typed `WebFetchActionTimeout`
+> (`src/alfred/plugins/web_fetch/errors.py`) carrying `egress_id` / `destination_host` /
+> `in_doubt` / `ledger_state`; `dispatch_tool` (`src/alfred/orchestrator/tool_dispatch.py`)
+> writes one enriched `tool.dispatch` row via `TOOL_DISPATCH_TIMEOUT_FIELDS`
+> (`src/alfred/audit/audit_row_schemas.py`) before returning. Three invariants pin this shut:
+>
+> 1. The `except WebFetchActionTimeout` arm MUST precede `except WebFetchError` in
+>    `dispatch_tool` — `WebFetchActionTimeout` is a `WebFetchError` subclass, and Python
+>    resolves `except` clauses top-down; reordering would silently swallow the forensic
+>    fields into the generic `tool_error` row (subclass-before-base).
+> 2. Exactly ONE audit row is written, at the orchestrator wiring (`dispatch_tool`) — not a
+>    second `tool.web.fetch` row at the dispatcher (`dispatch_web_fetch`). This is consistent
+>    with this ADR's existing layering (the dispatcher does not audit the timeout itself); the
+>    Negative/accepted bullet below is closed by adding the audit one layer up, not by
+>    re-layering where the audit lives.
+> 3. `in_doubt = (ledger_state == "committed_no_response")`. A ledger-read failure during
+>    classification forces the sentinel `ledger_state="read_unavailable"` with `in_doubt=True`
+>    — the unsafe-but-safe direction; a read failure is never silently treated as "no side
+>    effect occurred".
+>
+> **Scope: this closes #347 blocker 2 only.** The **C8 canary-`record_response`-cancellation
+> residual** and the **DB-down durable-reconcile residual** (both listed under
+> Negative/accepted below) remain **OPEN** — this change does not touch the canary
+> `record_response` write path or reconciliation against a down ledger backend. See
+> [docs/subsystems/security.md](../subsystems/security.md#trust-boundary-contract) for the
+> audit-vocabulary entry and [ADR-0046](0046-dual-llm-tool-result-flow.md) for the
+> tool-result-flow cross-reference. (Factual amendment; status flips stay with the
+> maintainer.)
+
 > **ADR-0040 reservation note.** ADR-0040 is reserved for the comprehensive Spec-C egress ADR
 > landing human-gated at G7-5. It is already referenced in `docker-compose.yaml`,
 > `gateway/egress_relay.py`, `egress_audit.py`, `egress_relay_audit.py`, and two gateway tests
