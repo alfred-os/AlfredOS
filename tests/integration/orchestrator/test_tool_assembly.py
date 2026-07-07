@@ -34,29 +34,48 @@ phase; ``test_act_loop_real_chain.py`` is that proof).
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any, Final
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alfred.audit.log import AuditWriter
-from alfred.egress.egress_id import TurnEgressContext
+from alfred.egress.egress_id import TurnEgressContext, compute_egress_id
+from alfred.gateway.egress_relay import EgressRelay
+from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
-from alfred.memory.models import AuditEntry
+from alfred.memory.models import AuditEntry, EgressIdempotency
+from alfred.orchestrator.builtin_tools import build_web_fetch_tool
 from alfred.orchestrator.tool_assembly import build_tool_registry
 from alfred.orchestrator.tool_dispatch import dispatch_tool
+from alfred.orchestrator.tool_registry import ToolRegistry
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry
+from alfred.plugins.web_fetch.assembly import build_web_fetch_egress_extractor
 from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.plugins.web_fetch.handle_cap import HandleCap
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.providers.base import ToolCall
+from alfred.security.canary_matcher import CanaryMatcher
+from alfred.security.dlp import OutboundDlp, redact_secret_shapes
 from alfred.security.quarantine import Extracted, T3DerivedData
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
+from alfred.security.secrets import SecretBroker
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.dlp import identity_outbound_dlp
+from tests.helpers.egress_doubles import (
+    _await_relay_ready,
+    _FakeClient,
+    _FireCounter,
+    make_fake_external_world,
+)
 from tests.integration.orchestrator.conftest import _assembly_gate, _settings, boot_loopback_relay
 
 pytestmark = pytest.mark.integration
@@ -68,6 +87,13 @@ _FAKE_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({(_FAKE_HOST, _FAKE_PORT
 _FORBIDDEN_HOST = "attacker.example.net"
 _FORBIDDEN_URL = f"https://{_FORBIDDEN_HOST}/steal"
 _FIXED_NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+
+# FIX-13/FIX-14 (#339 PR4b-broker Task 6): a benign fixture auth token for the
+# authenticated-fetch positive-path test below. Provably NOT shaped like a
+# real secret — see the `redact_secret_shapes` pin inside the test — so a
+# substituted header carrying it clears the gateway's stage-2 regex re-scan
+# instead of being denied `DLP_REDACTED` (spec §7 positive-path residual).
+_BENIGN_AUTH_TOKEN: Final[str] = "benign-fixture-token-value"  # noqa: S105 -- fixture value, not a real credential
 
 
 @pytest.mark.asyncio
@@ -126,6 +152,12 @@ async def test_build_tool_registry_end_to_end(
                 extractor=mock_extractor,
                 recorder=recorder,
                 outbound_dlp=identity_outbound_dlp(),
+                # This test exercises the registry-assembly wiring, not
+                # authenticated fetch — a real, empty-env SecretBroker with
+                # the default empty WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps
+                # auth entirely out of scope here (#339 PR4b-broker Task 6,
+                # FIX-5).
+                broker=SecretBroker(env={}),
                 audit_writer=audit_writer,
                 session_scope=lambda: session_scope(factory),
                 rate_limiter=rate_limiter,
@@ -214,6 +246,278 @@ async def test_build_tool_registry_end_to_end(
         # ``engine.dispose()`` (nested try/finally mirrors the
         # shutdown/serve_task + engine.dispose() nesting in
         # ``test_web_fetch_assembly.py``).
+        try:
+            await rate_limiter.close()
+        finally:
+            try:
+                await handle_cap.aclose()
+            finally:
+                await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# FIX-13/FIX-14 (#339 PR4b-broker Task 6) — header-capturing loopback relay
+#
+# ``boot_loopback_relay`` (conftest.py) hardcodes ``make_fake_external_world()``'s
+# plain ``_FakeClient`` factory — sufficient for every OTHER test in this
+# directory, none of which needs to observe what the gateway's upstream
+# client actually received. The authenticated-fetch positive-path test below
+# is the one caller that does: it must prove a broker-substituted secret
+# survives past the GATEWAY's second-pass DLP re-scan (spec §7 residual), not
+# merely past the dispatcher (already unit-covered in
+# ``test_fetch_dispatcher.py::test_allowlisted_placeholder_substituted_into_wire_headers``).
+# ``_HeaderCapturingClient`` is a thin decorator over ``_FakeClient`` (never a
+# reimplementation of its body/response/fire-count behaviour) and
+# ``_boot_loopback_relay_capturing_headers`` mirrors ``boot_loopback_relay``'s
+# bind/serve/shutdown dance exactly, swapping only the ``open_client`` factory.
+# ---------------------------------------------------------------------------
+
+
+class _HeaderCapturingClient:
+    """Decorates a ``_FakeClient`` to additionally record the last forwarded
+    request's headers into a shared, mutable ``capture`` dict-holder.
+
+    The relay opens a FRESH client per request (``egress_relay.py``'s
+    ``_open_client()`` seam) — mirrors the ``_FireCounter`` shared-holder
+    pattern in ``tests.helpers.egress_doubles`` rather than a plain instance
+    attribute, since a per-instance attribute would not be visible outside
+    the (short-lived) client itself.
+    """
+
+    def __init__(self, inner: _FakeClient, capture: dict[str, dict[str, str]]) -> None:
+        self._inner = inner
+        self._capture = capture
+
+    def build_request(
+        self, method: str, url: str, *, headers: dict[str, str], content: Any
+    ) -> httpx.Request:
+        self._capture["headers"] = dict(headers)
+        return self._inner.build_request(method, url, headers=headers, content=content)
+
+    async def send(
+        self, request: httpx.Request, *, follow_redirects: bool, stream: bool = False
+    ) -> Any:
+        return await self._inner.send(request, follow_redirects=follow_redirects, stream=stream)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+@asynccontextmanager
+async def _boot_loopback_relay_capturing_headers(
+    *, allowlist: frozenset[tuple[str, int]]
+) -> AsyncIterator[tuple[int, _FireCounter, dict[str, dict[str, str]]]]:
+    """``boot_loopback_relay`` (conftest.py), with a header-capturing upstream.
+
+    Yields ``(port, fire_counter, capture)`` — ``capture["headers"]`` holds the
+    LAST forwarded request's headers once a fetch has fired (absent before
+    that). See the module note above for why this is a local variant rather
+    than an extension of the shared fixture.
+    """
+    open_client_factory, fire_counter, _canned = make_fake_external_world()
+    capture: dict[str, dict[str, str]] = {}
+
+    def _capturing_factory() -> _HeaderCapturingClient:
+        return _HeaderCapturingClient(open_client_factory(), capture)
+
+    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port: int = srv.sockets[0].getsockname()[1]
+    srv.close()
+    await srv.wait_closed()
+
+    gateway_dlp = OutboundDlp(
+        broker=None, audit=lambda **_kw: None, canary=CanaryMatcher(tokens=[])
+    )
+    relay = EgressRelay(
+        tool_allowlist=allowlist,
+        dlp=gateway_dlp,
+        audit=record_egress_relay,
+        bind_host="127.0.0.1",
+        port=port,
+        resolve=lambda _h: "1.1.1.1",
+        open_client=_capturing_factory,
+        response_byte_cap=4096,
+        upstream_deadline_s=10.0,
+    )
+    shutdown = asyncio.Event()
+    serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
+    try:
+        await _await_relay_ready(port, serve_task)
+    except BaseException:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+        raise
+
+    try:
+        yield port, fire_counter, capture
+    finally:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_build_tool_registry_authenticated_fetch_positive_path(
+    migrated_url: str,
+    redis_url: str,
+    authorized_t3_nonce: CapabilityGateNonce,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-13/FIX-14 (#339 PR4b-broker Task 6, ADR-0048 §7): a fixture-bound
+    ``{{secret:deepseek_api_key}}`` header placeholder is substituted by
+    ``SecretBroker.substitute`` and the real value survives past the
+    GATEWAY's loopback relay (second-pass DLP re-scan included) to the
+    upstream client — proving the end-to-end positive path documented in
+    ADR-0048 §7, not just the dispatcher-level substitution the unit tests
+    (``test_fetch_dispatcher.py``) already cover in isolation. The stored T2
+    ledger row and every audit row for this call carry no secret.
+
+    ``build_tool_registry`` always calls ``build_web_fetch_tool`` with the
+    PRODUCTION empty ``WEB_FETCH_AUTH_SECRET_ALLOWLIST`` default (no
+    ``auth_secret_allowlist=`` override at that call site — see
+    ``tool_assembly.py``) — by design, #339 ships live authenticated fetch
+    OFF. This test therefore calls ``build_web_fetch_tool`` directly with a
+    FIXTURE allowlist, the same lower-level pattern
+    ``test_tool_dispatch_timeout_audit_postgres.py`` uses, rather than going
+    through ``build_tool_registry``.
+    """
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = _assembly_gate()
+    extracted = Extracted(
+        data=T3DerivedData({"text": "hello from the echo child", "intent": "informational"}),
+        extraction_mode="native_constrained",
+    )
+    mock_extractor = AsyncMock()
+    mock_extractor.extract = AsyncMock(return_value=extracted)
+
+    rate_limiter = RateLimiter(redis_url=redis_url)
+    handle_cap = HandleCap(redis_url=redis_url)
+
+    engine = create_async_engine(migrated_url, future=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    audit_writer = AuditWriter(session_factory=lambda: session_scope(factory))
+
+    config = FetchDispatchConfig(
+        manifest_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
+        operator_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
+        session_allowed_entries=(AllowlistEntry(domain=_FAKE_HOST),),
+        manifest_commit_hash="test-commit",
+    )
+
+    # The fixture broker provisions ONLY deepseek_api_key, with a value that
+    # is provably benign (FIX-14 below) — never a real credential, and never
+    # allowlisted in production (the closed WEB_FETCH_AUTH_SECRET_ALLOWLIST
+    # ships empty — see auth_allowlist.py).
+    broker = SecretBroker(env={"ALFRED_DEEPSEEK_API_KEY": _BENIGN_AUTH_TOKEN})
+    fixture_allowlist = frozenset({"deepseek_api_key"})
+
+    correlation_id = "corr-auth-positive"
+    ctx = TurnEgressContext(adapter_id="ada-auth", inbound_id="in-auth", session_id="sess-auth")
+    egress_id = compute_egress_id(ctx, call_index=0)
+
+    try:
+        async with _boot_loopback_relay_capturing_headers(allowlist=_FAKE_ALLOWLIST) as (
+            port,
+            fire_counter,
+            capture,
+        ):
+            web_fetch_extractor = build_web_fetch_egress_extractor(
+                settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
+                gate=gate,
+                extractor=mock_extractor,
+                recorder=recorder,
+                outbound_dlp=identity_outbound_dlp(),
+                audit_writer=audit_writer,
+                session_scope=lambda: session_scope(factory),
+            )
+            spec = build_web_fetch_tool(
+                extractor=web_fetch_extractor,
+                config=config,
+                rate_limiter=rate_limiter,
+                handle_cap=handle_cap,
+                outbound_dlp=identity_outbound_dlp(),
+                broker=broker,
+                auth_secret_allowlist=fixture_allowlist,
+                audit=audit_writer,
+            )
+            registry = ToolRegistry([spec])
+
+            out = await dispatch_tool(
+                ToolCall(
+                    id="call-auth",
+                    name="web.fetch",
+                    arguments={
+                        "url": _FAKE_URL,
+                        "headers": {"Authorization": "Bearer {{secret:deepseek_api_key}}"},
+                    },
+                ),
+                0,
+                ctx=ctx,
+                registry=registry,
+                gate=gate,
+                dlp=identity_outbound_dlp(),
+                audit=audit_writer,
+                user_id="user-auth",
+                correlation_id=correlation_id,
+                language="en",
+            )
+
+            # The fetch succeeded end-to-end (not refused) — the planner got
+            # the extracted {text, intent} JSON, same shape as the
+            # unauthenticated positive path in
+            # test_build_tool_registry_end_to_end above.
+            assert json.loads(out) == {
+                "text": "hello from the echo child",
+                "intent": "informational",
+            }
+            assert fire_counter.value == 1
+
+            # --- §7 positive-path proof: the SUBSTITUTED header reached the
+            #     loopback upstream, past BOTH the core dispatcher AND the
+            #     gateway's second-pass DLP re-scan. --------------------------
+            substituted_header_value = f"Bearer {_BENIGN_AUTH_TOKEN}"
+            assert "headers" in capture
+            assert capture["headers"]["Authorization"] == substituted_header_value
+
+            # FIX-14: pin that the benign fixture token does NOT match the
+            # gateway's stage-2 generic-API-key-shape regex — the exact
+            # `redact_secret_shapes` regex `OutboundDlp` runs identically at
+            # the gateway (`broker=None`, spec §7). Had this pin failed, the
+            # substituted header above would have been denied (DLP_REDACTED)
+            # rather than forwarded, and `fire_counter.value == 1` above
+            # would never have been reached.
+            assert redact_secret_shapes(substituted_header_value) == substituted_header_value
+
+        # --- FIX-13 non-vacuous secret-absence guard ---------------------------
+        # Positive control FIRST: prove the scan itself would catch the
+        # fixture value if it were present, before trusting the negative
+        # result below (mirrors the PR3 FIX-11 non-vacuous
+        # containment-regression guard's structure: prove the detector
+        # works, THEN trust its silence).
+        assert _BENIGN_AUTH_TOKEN in f"leaked {_BENIGN_AUTH_TOKEN} here"
+
+        async with engine.connect() as conn:
+            audit_rows = (
+                await conn.execute(
+                    sa.select(AuditEntry.subject).where(AuditEntry.trace_id == correlation_id)
+                )
+            ).fetchall()
+            ledger_response = (
+                await conn.execute(
+                    sa.select(EgressIdempotency.response).where(
+                        EgressIdempotency.egress_id == egress_id
+                    )
+                )
+            ).scalar_one()
+        # Sanity: the query above found rows worth scanning — an empty result
+        # would make the absence assertions below vacuous.
+        assert audit_rows
+        assert _BENIGN_AUTH_TOKEN not in json.dumps([dict(row.subject) for row in audit_rows])
+        assert ledger_response is not None
+        assert _BENIGN_AUTH_TOKEN not in ledger_response
+    finally:
+        # CR trivial: guard each close INDEPENDENTLY — see the sibling
+        # test's identical rationale above.
         try:
             await rate_limiter.close()
         finally:

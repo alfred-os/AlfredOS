@@ -191,9 +191,51 @@ analog lives in the plugins subsystem — see
   `state.proposal.dispatch_dlp_scan_failed` and likewise aborts. Full
   subsystem write-up lands in PR-S4-11.
 
+- **DLP positioning for broker secrets — core-side is the SOLE defence
+  (#339 PR4b-broker blocker 4, [ADR-0048](../adr/0048-web-fetch-authenticated-fetch-secret-substitution.md)):**
+  `OutboundDlp` runs at TWO points on the tool-egress relay leg (`mode-b`,
+  "Egress planes" item 2 below), but they are **not** symmetric
+  defence-in-depth for *broker* secrets:
+  - **Core side** (`dispatch_web_fetch`, broker set): scans the URL and every
+    header value *before* substitution — the placeholder frame, per
+    [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md)'s
+    DLP-before-substitute ordering. A raw known secret in a header refuses
+    (`dlp_scan_result="header_secret_refused"`, mirrors the pre-existing
+    `url_secret_refused`) rather than being redacted-and-sent. Only after this
+    scan passes does `SecretBroker.substitute()` resolve any
+    `{{secret:<name>}}` placeholder — gated by the closed
+    `WEB_FETCH_AUTH_SECRET_ALLOWLIST` (empty by default in #339); an
+    off-allowlist or unprovisioned reference refuses
+    (`dlp_scan_result="secret_substitution_refused"`). The substituted value
+    flows only into the relay request frame that follows this scan — never
+    back into an earlier-scanned string.
+  - **Gateway side** (`egress_relay.py`, [ADR-0036](../adr/0036-gateway-adapter-hosting-inversion.md):
+    gateway holds no vault): constructed with `broker=None`, so it runs only
+    the secret-independent stages (generic API-key-shape regex + canary). It
+    is a **detector**, not a re-redacter — it *denies* (`DLP_REDACTED`) if its
+    re-scan of `body + URL + forwarded header values` differs from what the
+    core sent, rather than redacting and forwarding.
+  - **Consequence:** because the gateway never holds the broker, it cannot
+    recognize a *broker* secret that doesn't happen to match its pattern/canary
+    stages — core-side DLP is therefore the **sole** broker-secret defence.
+    The two passes remain real defence-in-depth for pattern-shaped and
+    canary-tagged content (the pre-existing two-layer claim below), just not
+    for broker secrets specifically.
+  - **Accepted residual:** a *substituted* secret whose value happens to match
+    the gateway's stage-2 regex would be denied fail-closed at the gateway,
+    breaking that authenticated fetch. Moot while `WEB_FETCH_AUTH_SECRET_ALLOWLIST`
+    ships empty (nothing is ever substituted in production); see ADR-0048 §7
+    for the full analysis.
+
 ### Secret broker (`src/alfred/security/secrets.py`)
 
-See [glossary: SecretBroker](../glossary.md#secretbroker).
+See [glossary: SecretBroker](../glossary.md#secretbroker). `SecretBroker.substitute(text,
+*, allowed_secrets)` (#339 PR4b-broker) resolves `{{secret:<name>}}` placeholders in a
+string — the primitive the DLP-positioning note above wires into `dispatch_web_fetch`.
+`<name>` must be in both the caller's `allowed_secrets` (a closed, per-context allowlist —
+confused-deputy defence, mirrors `adapter_credential_resolver`'s
+`_ADAPTER_SECRET_ALLOWLIST`) and the broker's own `SUPPORTED_SECRETS`; either miss refuses
+loudly (`SecretSubstitutionNotAllowed` / `UnknownSecretError`), never a silent passthrough.
 
 ## Internal model
 
@@ -408,8 +450,11 @@ subsystem interacts with three distinct egress consumers, all routed through the
    proxied `httpx.AsyncClient`; the gateway L7 CONNECT forward-proxy enforces the
    destination allowlist and audits every connection (mode a, TLS-passthrough).
 2. **Tool egress relay** — gateway inspecting relay for mode-(b) tool calls (web-fetch);
-   the gateway re-runs `OutboundDlp` as an independent second pass over the
-   DLP-redacted body, providing two-layer content enforcement.
+   the gateway re-runs `OutboundDlp` as a second pass over the DLP-redacted body,
+   providing two-layer content enforcement for pattern-shaped and canary-tagged
+   content. It is **not** a second layer of defence for *broker* secrets — the
+   gateway holds no vault (`broker=None`) — see the DLP subsection's "DLP
+   positioning for broker secrets" note above.
 3. **Discord-adapter egress** — the gateway-hosted Discord bwrap child (Spec C G7-4,
    ADR-0043) runs `--unshare-net` (empty netns); its sole egress path is a bind-mounted
    AF_UNIX socket on the gateway-only `alfred_discord_egress` volume, served by a second

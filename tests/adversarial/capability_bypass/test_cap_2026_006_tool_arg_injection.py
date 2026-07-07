@@ -57,6 +57,7 @@ from alfred.orchestrator.tool_registry import ToolRegistry
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry
 from alfred.plugins.web_fetch.fetch_dispatcher import FetchDispatchConfig
 from alfred.providers.base import ToolCall
+from alfred.security.secrets import SecretBroker
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.egress_doubles import _CapturingAuditWriter
@@ -179,12 +180,17 @@ async def test_tool_arg_injection_offlist_url_refused(
         manifest_commit_hash="test-commit",
     )
     writer = _CapturingAuditWriter()
+    # This test exercises the three-way domain allowlist, not authenticated
+    # fetch — a real, empty-env SecretBroker with the default empty
+    # WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps auth entirely out of scope here
+    # (#339 PR4b-broker Task 6, FIX-5).
     web_fetch_spec = build_web_fetch_tool(
         extractor=_RelayNeverFiresExtractor(),  # type: ignore[arg-type]
         config=config,
         rate_limiter=_RateLimiterNeverConsulted(),  # type: ignore[arg-type]
         handle_cap=_SpyHandleCap(),  # type: ignore[arg-type]
         outbound_dlp=identity_outbound_dlp(),
+        broker=SecretBroker(env={}),
         audit=writer,  # type: ignore[arg-type]
     )
     registry = ToolRegistry([web_fetch_spec])

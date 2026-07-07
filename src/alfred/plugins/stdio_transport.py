@@ -114,9 +114,13 @@ log = structlog.get_logger(__name__)
 #   the structural Protocol lets the supervisor wire an adapter without
 #   the transport hard-depending on the in-flux concrete class.
 # * ``alfred.security.secrets.SecretBroker`` exposes ``get(name) -> str``
-#   today. The orchestrator-level ``substitute(params) -> dict`` lands
-#   alongside the plugin host (separate PR). The Protocol future-proofs
-#   the transport against the broker's evolving surface.
+#   today. ``SecretBroker.substitute()`` now exists (#339 PR4b-broker) — a
+#   SYNC ``substitute(text: str, *, allowed_secrets: frozenset[str]) -> str``
+#   primitive wired into ``web.fetch``'s dispatcher — but it is a different
+#   shape from this Protocol's ASYNC ``dict -> dict`` surface. Converging
+#   this transport onto the concrete method is a documented follow-up (see
+#   ADR-0048 §13), not done here. The Protocol future-proofs the transport
+#   against the broker's evolving surface in the meantime.
 #
 # Both Protocols are ``runtime_checkable`` so the supervisor bootstrap
 # can ``isinstance`` check without importing the concrete adapter.
@@ -159,6 +163,14 @@ class _SecretBrokerSubstitute(Protocol):
     Async because PR-S3-5 backs substitution with a remote secret
     store. Slice-1 broker.get is synchronous; the substitute path is
     independently evolving — this Protocol decouples the transport.
+
+    Breadcrumb (#339 PR4b-broker): the CONCRETE
+    ``alfred.security.secrets.SecretBroker.substitute()`` now exists — sync,
+    single-string (``substitute(text: str, *, allowed_secrets: frozenset[str])
+    -> str``), wired into ``web.fetch``'s dispatcher. It does not satisfy
+    this Protocol (async, ``dict[str, Any] -> dict[str, Any]``) — converging
+    ``stdio_transport`` onto the concrete method is a deferred follow-up
+    (ADR-0048 §13), not this PR.
     """
 
     async def substitute(self, params: dict[str, Any], /) -> dict[str, Any]: ...

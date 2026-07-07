@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-07 16:01+0100\n"
+"POT-Creation-Date: 2026-07-07 17:14+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2903,7 +2903,7 @@ msgstr ""
 msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 
-#: src/alfred/plugins/stdio_transport.py:629
+#: src/alfred/plugins/stdio_transport.py:641
 #: src/alfred/plugins/web_fetch/errors.py:153
 msgid "security.canary_tripped"
 msgstr ""

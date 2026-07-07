@@ -99,6 +99,7 @@ from alfred.plugins.web_fetch.handle_cap import HandleCap
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.providers.base import ToolCall
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
+from alfred.security.secrets import SecretBroker
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.integration.orchestrator.conftest import _assembly_gate, _settings, boot_loopback_relay
@@ -225,6 +226,12 @@ async def test_action_deadline_timeout_emits_enriched_in_doubt_row(
                 rate_limiter=rate_limiter,
                 handle_cap=handle_cap,
                 outbound_dlp=identity_outbound_dlp(),
+                # This test exercises the action-deadline timeout, not
+                # authenticated fetch — a real, empty-env SecretBroker with
+                # the default empty WEB_FETCH_AUTH_SECRET_ALLOWLIST keeps
+                # auth entirely out of scope here (#339 PR4b-broker Task 6,
+                # FIX-5).
+                broker=SecretBroker(env={}),
                 audit=audit_writer,
                 # FIX-2(c): 0.5s — long enough to clear the real commit +
                 # round-trip under container-load jitter (0.1s races it),
