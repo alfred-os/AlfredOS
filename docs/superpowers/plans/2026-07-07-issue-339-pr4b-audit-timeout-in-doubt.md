@@ -22,6 +22,91 @@
 
 ---
 
+## Plan-review fixes (FOLD THESE FIRST — they OVERRIDE the task bodies below)
+
+A 5-lens focused plan-review (security / error / test / core / reviewer) ran against rev.1. Verdict: **APPROVE-WITH-FIXES** across the board; `alfred-security-engineer` will NOT grant PR-time sign-off without FIX-1 + FIX-2 landed. Each implementer dispatch MUST paste the FIX items applicable to its task.
+
+**FIX-1 [HIGH — corroborated ×4] — guard the post-timeout ledger read so a DB fault never masks the in-doubt row (Task 4 Step 4).** `state = await extractor.ledger_state(...)` is a Postgres round-trip whose failure is *correlated* with the timeout that just fired (DB stress). If it raises, `WebFetchActionTimeout` is never built, the raw DB error propagates to `dispatch_tool`'s `except Exception` → a generic `unexpected_error`/`fault` row losing `egress_id`/`destination_host`/`in_doubt`/`ledger_state` — the exact forensic row blocker-2 exists to guarantee, gone precisely when it matters. Replace Task 4 Step 4's arm with:
+
+```python
+        except TimeoutError:
+            # #347 blocker 2: the fused fetch+extract overran the action deadline.
+            # asyncio.timeout has already converted CancelledError->TimeoutError and
+            # cleared its cancel scope, so this await runs un-cancelled. The outer
+            # ``finally`` still releases the handle_cap slot after this raise.
+            egress_id = compute_egress_id(egress_ctx, call_index=call_index)
+            try:
+                # Bounded: this path already breached its deadline; don't let a
+                # slow/hung ledger extend it or hold the handle_cap slot.
+                async with asyncio.timeout(_LEDGER_READ_TIMEOUT_SECONDS):
+                    state = await extractor.ledger_state(egress_id=egress_id)
+            except Exception as read_exc:
+                # Bookkeeping must NEVER mask the in-doubt timeout (HARD #7).
+                # A distinct sentinel — NOT None (None means "no row -> never
+                # fired -> in_doubt=False"); a read failure is the OPPOSITE safe
+                # direction, so force in_doubt=True.
+                _log.error(
+                    "web_fetch.timeout.ledger_read_failed",
+                    egress_id=egress_id,
+                    error_type=type(read_exc).__name__,
+                    correlation_id=correlation_id,
+                )
+                raise WebFetchActionTimeout(
+                    egress_id=egress_id,
+                    destination_host=domain,
+                    in_doubt=True,
+                    ledger_state="read_unavailable",
+                ) from None
+            # ``from None``: the deadline TimeoutError carries no forensic payload
+            # (the fields do); suppress the noisy cancellation-internals chain.
+            raise WebFetchActionTimeout(
+                egress_id=egress_id,
+                destination_host=domain,
+                in_doubt=state == "committed_no_response",
+                ledger_state=state,
+            ) from None
+```
+
+Add `_LEDGER_READ_TIMEOUT_SECONDS = 5.0` (or similar short constant) near the other dispatcher constants. `_log` already exists in `fetch_dispatcher.py` (used at ~:619). Add a dispatcher unit test where `ledger_state` RAISES → assert `WebFetchActionTimeout` still surfaces with `in_doubt=True`, `ledger_state="read_unavailable"`, and the loud log fired.
+
+**FIX-2 [gating — corroborated ×4] — Task 7 as sketched will not run. Three concrete bugs (see the corrected Task 7 Step 1 sketch below, already patched):**
+
+**(a) The mock does not hang.** `AsyncMock(side_effect=lambda *a, **k: asyncio.sleep(10))` returns an un-awaited coroutine (a non-coroutine `side_effect`), so `extract` completes instantly and the deadline never fires. Use a real async hang on a never-set event (deterministic, not a fixed sleep):
+
+```python
+never_set = asyncio.Event()
+async def _hang(*a: object, **k: object) -> object:
+    await never_set.wait()
+mock_extractor.extract = _hang  # or AsyncMock(side_effect=_hang)
+```
+
+**(b) No `ledger=` kwarg.** `build_web_fetch_egress_extractor(..., ledger=store, ...)` has NO `ledger=` param (`assembly.py:107` takes `session_scope=` and builds the store internally → `TypeError`). Pass `session_scope=session_scope` (+ the real `settings/gate/recorder/outbound_dlp/audit_writer/extractor=mock_extractor` kwargs, copied from `test_act_loop_real_chain.py:259-271` / `assembly.py`). Build a SEPARATE `PostgresEgressIdempotencyStore(session_scope=session_scope)` (same DSN → same row) purely for the `get_state` assertion. Correct the Self-Review §2 claim that `ledger=store` is a real kwarg.
+
+**(c) Racy deadline + wrong allowlist type.** `action_deadline_seconds=0.1` races the real commit+round-trip (flaky); `boot_loopback_relay(allowlist={"example.com"})` passes `set[str]` but the relay wants `frozenset[tuple[str,int]]` (`conftest.py:145`), with matching `AllowlistEntry(domain="example.com")` in all three FetchDispatchConfig tiers. Use `action_deadline_seconds=0.5` + `frozenset({("example.com", 443)})`. With the (a) infinite hang the deadline reliably lands DURING extraction (after commit+fire → `fire_counter==1`, `committed_no_response`).
+
+**FIX-3 [MED — error/reviewer] — distinguish the retained defensive bare `except TimeoutError` (Task 6 Step 5).** Reusing `dispatch_outcome="timeout"` conflates the well-understood action-deadline (now always typed `WebFetchActionTimeout`) with a stray timeout from an unexpected source. Add a distinct token `"unexpected_timeout"` to the `ToolDispatchOutcome` Literal (`audit_row_schemas.py` — subject-JSON field, NO DB migration) and emit it (with `result="refused"`, generic `TOOL_DISPATCH_FIELDS`) from the retained arm, plus a `_log.warning("orchestrator.tool.unexpected_timeout", ...)` so a stray timeout is greppable. Keep the arm (recoverable UX + 100%-branch second arm via the synthetic unit test).
+
+**FIX-4 [MED — error] — type-anchor the anti-swallow guarantee (Task 3 + Task 6).** `WebFetchActionTimeout(WebFetchError)` places a forensically-critical event inside the operational-error net; the codebase deliberately kept `WebFetchCanaryTripped` OUT of the `WebFetchError` tree for exactly this reason (`errors.py:9-13`, pinned by a `not issubclass` test). Subclassing IS defensible here (the recoverable-return semantics fit, unlike the halting canary), but pin the intent: add `assert issubclass(WebFetchActionTimeout, WebFetchError)` in `test_errors.py` AND a comment in `errors.py` stating the subclass relationship makes the `dispatch_tool` arm-ordering load-bearing. Keep the behavioural `test_action_timeout_not_swallowed_by_web_fetch_error_arm` test.
+
+**FIX-5 [MED — test/core/reviewer] — broaden the fake-store grep + fix the rationale (Task 1 Step 5).** Six+ test files define fake ledgers with `commit_intent`; the plan greps only two. Runtime impact is nil (nothing `isinstance`-checks the `@runtime_checkable` Protocol; mypy/pyright are `src`-only), so the "keep the Protocol satisfiable" rationale is inaccurate — the real reason is call-reachability of the new timeout path. Reword, and broaden to `grep -rln "async def commit_intent" tests/`; add a no-op `get_state` returning `None` to every fake (`tests/adversarial/dlp_egress/test_egress_no_orphan_and_inflight.py`, `test_de_egress_inbound_canary_unwired.py`, `test_de_egress_io_plane_down_audit.py` `_AlwaysInDoubtLedger`, `tests/adversarial/tier_laundering/...`, plus the two unit files).
+
+**FIX-6 [MED — core] — document the #338 resume re-fire consequence (Task 8).** The in-doubt `committed_no_response` row is durable; on a #338 resume the same `egress_id` re-derives, `commit_intent` returns `IntentInDoubt`, and because web.fetch builds `_RawToolRequest(idempotent=True)` the relay REFIRES with an Idempotency-Key (does not refuse) → a second audit trail for one logical call. Add a sentence to `docs/subsystems/security.md` + the ADR-0041 amendment so #338's replay journaling is not surprised.
+
+**FIX-7 [MED — test/reviewer] — assertion-shape sweep after Task 6 (Task 6 Step 8 + Task 8 Step 5).** The literal-substring grep misses variable-driven (`== expected`) and exact-key-set (`set(subject.keys()) == {...}`) assertions on `tool.dispatch` rows. Explicitly RUN `tests/integration/orchestrator/` (both `test_act_loop_real_chain.py` and `test_tool_assembly.py` query `event="tool.dispatch"`) — the unit-scoped runs miss them (PR3/PR4a lesson). Add the four new subject-field names to the grep and grep for `keys()` / `subject ==` shape checks.
+
+**FIX-8 [LOW cluster]:** (a) update `dispatch_web_fetch`'s docstring Raises section: `TimeoutError` → `WebFetchActionTimeout` (Task 4). (b) Add `in_doubt`, `committed_no_response`, `committed_with_response` to `docs/glossary.md`, linked from the security.md audit-vocab note (Task 8 — PR4a docs-sweep lesson). (c) Task 7 Step 2 is a green-on-write CAPSTONE, not red-first — reword. (d) Task 4 unit-test helpers: `_fetch_config()` MUST allowlist `example.com` (else `WebFetchDomainNotAllowed` fires before the timeout); `_fake_handle_cap()` needs both `try_reserve` and `release`; name the helper source modules. (e) Add a security.md note: the enriched arm only fires when `action-deadline < relay per-call timeout (30s)` — a larger deadline lets the relay's own `asyncio.timeout` fire first → `RelayIOPlaneUnavailableError` (generic fault row), not the enriched arm.
+
+### Open questions — RESOLVED by plan-review
+
+1. **One row vs two → ONE enriched row at `dispatch_tool`.** Faithful to the blocker ("at the orchestrator wiring") AND to ADR-0041's layering (the dispatcher deliberately does NOT audit timeout). Not a regression — the pre-PR4b path already audited only at the chokepoint. `destination_host` preserves host correlation. Document the `tool.web.fetch`-stream gap for operators.
+2. **Retain the defensive bare `except TimeoutError` → RETAIN**, with FIX-3's distinct `unexpected_timeout` outcome + warning. Dropping it would silently convert the recoverable-timeout contract to a halt.
+3. **ADR → amendment on ADR-0041, no standalone ADR.** ADR-0041 already records this as a named #339 obligation (lines 132-135). Make it a clearly-headed, numbered section stating the THREE invariants (arm-ordering; single-row-at-wiring; `in_doubt = committed_no_response`), scoped to **blocker-2 only** (the C8 canary cancellation-window + DB-down residuals stay OPEN — do not over-read the close-out). One-line cross-ref from ADR-0046.
+4. **`action_deadline_seconds` threading → build the spec DIRECTLY in Task 7** (`build_web_fetch_tool` already accepts it; `build_tool_registry` does not thread it — leave a configurable per-turn deadline to #338). Lower blast radius.
+
+**Process note:** the PR-time review fleet MUST include `alfred-architect` (5-6 subsystem span) + `alfred-security-engineer` (the #347 M4 sign-off), not just the general fleet. Security-sign-off gates: FIX-1 + FIX-2 landed & tested. The hostile-slow-server adversarial corpus entry is a tracked follow-up (Task 7's no-leak assertion is the floor for this PR).
+
+---
+
 ## File Structure
 
 New/modified files, one responsibility each:
@@ -665,22 +750,44 @@ git commit -m "feat(orchestrator): enrich the tool.dispatch action-deadline time
 async def test_action_deadline_timeout_emits_enriched_in_doubt_row(
     migrated_url: str, redis_url: str, authorized_t3_nonce: object
 ) -> None:
-    async with boot_loopback_relay(allowlist={"example.com"}) as (relay, port, fire_counter, canned):
-        # Mock quarantined child that HANGS during extraction so the deadline
-        # fires AFTER the relay commits+fires the intent but BEFORE record_response.
+    # FIX-2(c): frozenset[tuple[str,int]] allowlist, NOT set[str].
+    async with boot_loopback_relay(allowlist=frozenset({("example.com", 443)})) as (
+        relay, port, fire_counter, canned,
+    ):
+        # FIX-2(a): a REAL async hang on a never-set event (deterministic). A plain
+        # AsyncMock(side_effect=lambda: asyncio.sleep(10)) returns an un-awaited
+        # coroutine and does NOT hang — the deadline would never fire.
+        never_set = asyncio.Event()
+
+        async def _hang(*a: object, **k: object) -> object:
+            await never_set.wait()
+            raise AssertionError("unreachable")
+
         mock_extractor = _mock_quarantined_child()
-        mock_extractor.extract = AsyncMock(side_effect=lambda *a, **k: asyncio.sleep(10))
+        mock_extractor.extract = _hang
 
         session_scope = _real_session_scope(migrated_url)
-        store = PostgresEgressIdempotencyStore(session_scope=session_scope)
+        store = PostgresEgressIdempotencyStore(session_scope=session_scope)  # for get_state assertion
         rate_limiter, handle_cap = _real_limiters(redis_url)
         audit = _real_audit_writer(session_scope)  # writes to Postgres audit_log
 
-        extractor = build_web_fetch_egress_extractor(..., ledger=store, extractor=mock_extractor, ...)
+        # FIX-2(b): build_web_fetch_egress_extractor has NO `ledger=` kwarg — it
+        # builds the store from session_scope internally. Pass session_scope + the
+        # real settings/gate/recorder/outbound_dlp/audit_writer/extractor kwargs
+        # (copy from test_act_loop_real_chain.py / assembly.py).
+        extractor = build_web_fetch_egress_extractor(
+            settings=_settings(monkeypatch, relay_url=f"tcp://127.0.0.1:{port}"),
+            gate=_assembly_gate(...),
+            extractor=mock_extractor,
+            recorder=T3BodyRecorder(nonce=authorized_t3_nonce, staging=QuarantineStagingMap()),
+            outbound_dlp=_identity_dlp(),
+            audit_writer=audit,
+            session_scope=session_scope,
+        )
         spec = build_web_fetch_tool(
             extractor=extractor, config=_config(port), rate_limiter=rate_limiter,
             handle_cap=handle_cap, outbound_dlp=_identity_dlp(), audit=audit,
-            action_deadline_seconds=0.1,   # << force the deadline
+            action_deadline_seconds=0.5,   # FIX-2(c): 0.5s > commit+round-trip, < relay 30s
         )
         registry = ToolRegistry(external={"web.fetch": spec}, internal={})
 
@@ -802,9 +909,6 @@ git push -u origin 339-pr4b-audit-timeout-in-doubt
 
 **3. Type consistency:** `get_state(*, egress_id: str) -> str | None` is used identically in Task 1 (store), Task 2 (extractor delegate), Task 4 (dispatcher read). `WebFetchActionTimeout(*, egress_id, destination_host, in_doubt, ledger_state)` fields match across Tasks 3/4/6/7. `TOOL_DISPATCH_TIMEOUT_FIELDS` field names (`egress_id`/`destination_host`/`in_doubt`/`ledger_state`) match the emit subject in Task 6 and the asserts in Task 7. `dispatch_outcome="timeout"` + `result="refused"` consistent (in-domain).
 
-## Open questions for plan-review (fold as an override layer if the fleet flags)
+## Open questions — RESOLVED
 
-- **ADR: amendment note vs standalone ADR** for the durable in-doubt timeout-audit contract. Default = amendment note on ADR-0041/0046 (fulfills existing obligation). Security/architect to confirm.
-- **One row vs two.** This plan emits ONE enriched row at `dispatch_tool` (blocker wording: "at the orchestrator wiring"). The dispatcher does the ledger read + raises but writes no separate `tool.web.fetch` timeout row (asymmetric with the canary/rate-limit arms that DO write a dispatcher-layer row). Confirm the single-row choice is acceptable (vs a `tool.web.fetch` timeout row at the dispatcher too, matching the other arms).
-- **Retain vs drop the defensive bare `except TimeoutError`.** Retained here (recoverable + generic row + covered by a synthetic unit test) to preserve the existing recoverable-timeout contract and HARD-#7 totality. Alternative: drop it and let `except Exception` re-raise (halt) a stray timeout. Confirm.
-- **`action_deadline_seconds` threading.** Task 7 builds the `web.fetch` spec directly to force a tiny deadline (avoids threading `action_deadline_seconds` through `build_tool_registry`). Confirm this is preferable to a `build_tool_registry` param (which #338 will likely add anyway for a configurable deadline).
+All four are resolved by the 5-lens plan-review; see **"Open questions — RESOLVED by plan-review"** in the Plan-review fixes section near the top. Summary: (1) single enriched row at `dispatch_tool`; (2) retain the defensive bare `except TimeoutError` with a distinct `unexpected_timeout` outcome (FIX-3); (3) amendment on ADR-0041 (three invariants, blocker-2 scope) — no standalone ADR; (4) build the `web.fetch` spec directly in Task 7 (no `build_tool_registry` threading).
