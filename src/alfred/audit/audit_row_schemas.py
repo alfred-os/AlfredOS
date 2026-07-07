@@ -327,7 +327,9 @@ TOOL_DISPATCH_TIMEOUT_FIELDS: Final[frozenset[str]] = TOOL_DISPATCH_FIELDS | fro
         # fired before the deadline and its outcome is unknown (#347 blocker 2).
         "in_doubt",
         # The ledger's committed state: "committed_no_response" |
-        # "committed_with_response" | None (no row — timed out before commit).
+        # "committed_with_response" | None (no row — timed out before commit) |
+        # "read_unavailable" (the post-timeout ledger read itself failed —
+        # FIX-1 sentinel, pairs with a forced in_doubt=True).
         "ledger_state",
     }
 )
