@@ -307,11 +307,14 @@ def test_dynamic_result_sites_are_documented() -> None:
       rate_limited / domain_not_allowed / dlp_scan_error / capped), all already
       in-domain — they are covered by the literal subset guard above, so the
       file no longer appears in this dynamic-site list.
-    * ``egress/relay_client.py:375`` — ``result=result`` in ``_audit_refused``;
+    * ``egress/relay_client.py:428`` — ``result=result`` in ``_audit_refused``;
       the three reachable values are ``"in_doubt"``, ``"io_plane_unavailable"``,
       and ``"denied"`` — all in-domain (the first two added by migration 0024;
       ``"denied"`` was already in-domain since migration 0007). Manually audited
-      in the G7-2c-1 C1 pass (#333).
+      in the G7-2c-1 C1 pass (#333). #339 PR4b-audit's devex operator-sweep
+      commit shifted the line (423 -> 428) by inserting a 5-line
+      AUDIT-INTERACTION comment above ``_DEFAULT_PER_CALL_TIMEOUT`` — the site
+      itself and its reachable values are unchanged.
     * ``orchestrator/core.py`` — #339 PR3 (act-phase loop, task 2) replaced the
       single ``result=charge_result if charge_result == "budget_overrun" else
       "success"`` completed-row IfExp with TWO dynamic sites: the SAME IfExp
@@ -356,7 +359,9 @@ def test_dynamic_result_sites_are_documented() -> None:
             # G7-2c-1 (#333) — _audit_refused result param; reachable values:
             # "in_doubt" | "io_plane_unavailable" | "denied" (all in-domain,
             # migration 0024 added the first two; "denied" was already in-domain).
-            "src/alfred/egress/relay_client.py:423",
+            # #339 PR4b-audit devex operator-sweep commit shifted the line
+            # (423 -> 428) by inserting a 5-line comment above; site unchanged.
+            "src/alfred/egress/relay_client.py:428",
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
@@ -398,8 +403,13 @@ def test_dynamic_result_sites_are_documented() -> None:
             # this helper; the site itself (and its reachable values) is
             # unchanged — the enriched timeout arm's own `result="refused"` is a
             # STATIC literal, already covered by the subset guard above, so it
-            # needs no entry here.
-            "src/alfred/orchestrator/tool_dispatch.py:119",
+            # needs no entry here. The PR4b-audit review-fix batch (FIX H) shifted
+            # it again (119 -> 137) by extracting the shared
+            # ``_base_dispatch_subject`` helper above ``_audit`` (DRY: both
+            # ``_audit`` and the enriched ``WebFetchActionTimeout`` arm now build
+            # their subject's common 8 keys through it) — the ``result=result``
+            # forwarding site itself is unchanged.
+            "src/alfred/orchestrator/tool_dispatch.py:137",
             # web_fetch/fetch_dispatcher.py: the G7-2.5 re-home (#333) deleted the
             # dynamic ``result=dlp_result`` site (the plugin-payload-derived value
             # tracked as #326). Every result= site in the re-homed dispatcher is

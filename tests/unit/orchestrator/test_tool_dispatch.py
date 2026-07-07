@@ -344,7 +344,13 @@ async def test_bare_timeout_error_falls_back_to_generic_row() -> None:
     action-deadline) source still audits (the generic row, tagged
     "unexpected_timeout" to distinguish it from the enriched "timeout" token
     above) + returns the recoverable string (HARD #7 totality) + logs loudly
-    so a stray bare TimeoutError stays greppable."""
+    so a stray bare TimeoutError stays greppable.
+
+    devex review FIX C (#339 PR4b-audit): the planner-facing message ALSO
+    uses the distinct "orchestrator.tool.timeout_unexpected" catalog key —
+    NOT the enriched arm's "orchestrator.tool.timeout" — so a tool-caller can
+    tell a well-classified action-deadline timeout apart from a bug-shaped
+    unexpected one."""
     writer = _CapturingAuditWriter()
     with structlog.testing.capture_logs() as caps:
         out = await _dispatch(
@@ -354,7 +360,7 @@ async def test_bare_timeout_error_falls_back_to_generic_row() -> None:
             dlp=_NoopDlp(),
             writer=writer,
         )
-    assert out == t("orchestrator.tool.timeout", tool="web.fetch")
+    assert out == t("orchestrator.tool.timeout_unexpected", tool="web.fetch")
     row = writer.rows[-1]
     assert row["schema_name"] == "TOOL_DISPATCH_FIELDS"
     assert row["subject"]["dispatch_outcome"] == "unexpected_timeout"

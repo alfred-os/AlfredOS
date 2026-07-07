@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-07 10:49+0100\n"
+"POT-Creation-Date: 2026-07-07 12:23+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2517,36 +2517,46 @@ msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "
 "configured together."
 
-#: src/alfred/orchestrator/tool_dispatch.py:129
+#: src/alfred/orchestrator/tool_dispatch.py:147
 msgid "orchestrator.tool.unknown_tool"
 msgstr "Unknown tool: {tool}."
 
-#: src/alfred/orchestrator/tool_dispatch.py:138
+#: src/alfred/orchestrator/tool_dispatch.py:156
 msgid "orchestrator.tool.invalid_arguments"
 msgstr "Invalid arguments for {tool}."
 
-#: src/alfred/orchestrator/tool_dispatch.py:151
+#: src/alfred/orchestrator/tool_dispatch.py:169
 msgid "orchestrator.tool.not_permitted"
 msgstr "Tool {tool} is not permitted."
 
-#: src/alfred/orchestrator/tool_dispatch.py:202
+#: src/alfred/orchestrator/tool_dispatch.py:220
 msgid "orchestrator.tool.rate_limited"
 msgstr "Tool {tool} is rate limited."
 
-#: src/alfred/orchestrator/tool_dispatch.py:210
+#: src/alfred/orchestrator/tool_dispatch.py:228
 msgid "orchestrator.tool.domain_not_allowed"
 msgstr "Tool {tool} refused: destination not allowed."
 
-#: src/alfred/orchestrator/tool_dispatch.py:242
-#: src/alfred/orchestrator/tool_dispatch.py:270
+#: src/alfred/orchestrator/tool_dispatch.py:257
 msgid "orchestrator.tool.timeout"
 msgstr "Tool {tool} timed out."
 
-#: src/alfred/orchestrator/tool_dispatch.py:250
+#: src/alfred/orchestrator/tool_dispatch.py:265
 msgid "orchestrator.tool.error"
 msgstr "Tool {tool} failed."
 
-#: src/alfred/orchestrator/tool_dispatch.py:290
+# devex review FIX C (#339 PR4b-audit): the defensive bare ``except
+# TimeoutError`` arm previously reused "orchestrator.tool.timeout" verbatim,
+# so a tool-caller could not tell a well-classified action-deadline timeout
+# (the arm above) apart from a bug-shaped unexpected one (this key). Distinct
+# msgid so the two stay distinguishable at the planner boundary.
+#: src/alfred/orchestrator/tool_dispatch.py:285
+msgid "orchestrator.tool.timeout_unexpected"
+msgstr ""
+"Tool {tool} timed out unexpectedly (internal fault); see the audit log "
+"(dispatch_outcome=unexpected_timeout)."
+
+#: src/alfred/orchestrator/tool_dispatch.py:305
 msgid "orchestrator.tool.refused"
 msgstr "Tool {tool} refused: {reason}."
 
@@ -2910,7 +2920,9 @@ msgstr ""
 
 #: src/alfred/plugins/web_fetch/errors.py:105
 msgid "web.fetch.error.action_timeout"
-msgstr "web.fetch exceeded its action deadline."
+msgstr ""
+"web.fetch exceeded its action deadline. Inspect the audit log: alfred "
+"audit log --event tool.dispatch --since 1h."
 
 #: src/alfred/plugins/web_fetch/errors.py:129
 msgid "web.fetch.error.handle_id_mismatch"
@@ -2919,7 +2931,7 @@ msgstr ""
 "the host-side reservation. This indicates a plugin defect. Inspect the "
 "audit log: alfred audit log --event tool.web.fetch --since 1h."
 
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:324
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:386
 msgid "web.fetch.error.url_secret_refused"
 msgstr ""
 "web.fetch refused: the request URL was redacted by the outbound DLP scan "
