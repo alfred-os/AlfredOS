@@ -158,7 +158,7 @@ def test_broker_secret_exfil_payload_schema_valid(
     assert revalidated == broker_secret_exfil_payload
     assert broker_secret_exfil_payload.category == "dlp_egress"
     assert broker_secret_exfil_payload.ingestion_path == "web.fetch"
-    assert broker_secret_exfil_payload.expected_outcome == "caught_by_dlp"
+    assert broker_secret_exfil_payload.expected_outcome == "refused"
 
     payload_fields = broker_secret_exfil_payload.payload
     assert isinstance(payload_fields, dict)

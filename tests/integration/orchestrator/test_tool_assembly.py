@@ -421,6 +421,7 @@ async def test_build_tool_registry_authenticated_fetch_positive_path(
                 "intent": "informational",
             }
             assert fire_counter.value == 1
+            mock_extractor.extract.assert_awaited_once()
 
             # --- §7 positive-path proof: the SUBSTITUTED header reached the
             #     loopback upstream, past BOTH the core dispatcher AND the

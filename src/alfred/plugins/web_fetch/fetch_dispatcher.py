@@ -293,8 +293,10 @@ async def dispatch_web_fetch(
     on success OR on a soft pre-extract refusal (MIME/size — the outcome's
     ``result`` is a :class:`~alfred.security.quarantine.TypedRefusal`). Raises:
 
-    * :class:`WebFetchError` — a secret in the URL (refuse-on-secret) or a
-      DLP-scan failure.
+    * :class:`WebFetchError` — a secret in the URL (refuse-on-secret), a
+      DLP-scan failure, a raw secret in a header (``header_secret_refused``),
+      or an off-allowlist/malformed ``{{secret:*}}`` header reference
+      (``secret_substitution_refused``).
     * :class:`WebFetchDomainNotAllowed` — URL outside the three-way allowlist.
     * :class:`WebFetchRateLimited` — rate-limit refusal (carries the bucket);
       includes the pre-network ``"handle_cap"`` bucket (#339 PR4a, Step 3b) —
