@@ -66,4 +66,11 @@ orchestrator:
   # Per-action deadline in seconds (spec §10.5).
   # asyncio.timeout wraps the entire handle_user_message turn.
   # Configurable here; default 30s matches spec §10.5.
+  # NOTE: raising this above the gateway relay's per-call timeout (default 30s,
+  # _DEFAULT_PER_CALL_TIMEOUT in src/alfred/egress/relay_client.py) means the
+  # relay's own asyncio.timeout fires FIRST on a slow web.fetch — losing the
+  # enriched in_doubt/ledger_state timeout audit row (#347 blocker 2). Keep this
+  # <= the relay timeout, or raise both together. See
+  # docs/subsystems/security.md ("Only fires when the action deadline is the
+  # tighter bound").
   action_deadline_seconds: 30

@@ -76,6 +76,11 @@ if TYPE_CHECKING:
 # high-latency origins should tune via action-deadline (spec §10.5) rather than
 # raising this — the per-relay deadline is a local network bound, not an end-to-end
 # application timeout.
+# AUDIT INTERACTION (#347 blocker 2): the enriched in_doubt/ledger_state web.fetch
+# timeout row is only produced when the action-deadline is the TIGHTER bound. If
+# action-deadline is raised above this per-call timeout, THIS timeout fires first
+# and surfaces RelayIOPlaneUnavailableError (a generic fault row), not the enriched
+# timeout row. So raise action-deadline and this timeout together, not one alone.
 _DEFAULT_PER_CALL_TIMEOUT: float = 30.0
 
 # Default maximum frame size (bytes). 64 MiB is generous for a tool response;

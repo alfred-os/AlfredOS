@@ -302,12 +302,16 @@ ledger_state}`, `src/alfred/audit/audit_row_schemas.py`) carrying:
   query, or userinfo.
 - `in_doubt` (see [glossary](../glossary.md#in_doubt)) — `True` when the
   egress-idempotency ledger is
-  [`committed_no_response`](../glossary.md#committed_no_response) — the side
-  effect may have fired and its outcome is unknown.
-- `ledger_state` — the ledger's committed state:
+  [`committed_no_response`](../glossary.md#committed_no_response) (the side
+  effect may have fired and its outcome is unknown) OR when the ledger read
+  itself failed (`ledger_state="read_unavailable"`, below). `False` only when
+  the ledger positively shows the call never committed or completed.
+- `ledger_state` — the ledger state observed during classification:
   [`committed_no_response`](../glossary.md#committed_no_response),
-  [`committed_with_response`](../glossary.md#committed_with_response), or
-  `None` (no row — the deadline fired before the call was ever committed).
+  [`committed_with_response`](../glossary.md#committed_with_response),
+  `read_unavailable` (the post-timeout ledger read itself failed — the FIX-1
+  sentinel, pairs with a forced `in_doubt=True`), or `None` (no row — the
+  deadline fired before the call was ever committed).
 
 Two arms classify the timeout, and their `except`-clause ORDER is load-bearing
 in `dispatch_tool`:
@@ -350,6 +354,17 @@ raise `EgressInDoubtError`. One logical call can therefore produce a second
 audit trail across the resume boundary; #338's replay-journaling design must
 account for this rather than assume a fired-once guarantee at the audit-row
 level.
+
+**Operator inspection surface (tracked follow-up).** The enriched forensic
+fields land in the `audit_log.subject` JSON and are queryable directly (SQL, or
+`alfred audit graph` once its backend is wired). The operator CLI's `alfred audit
+log` / `graph` renderers print a fixed column set and do NOT yet surface
+`dispatch_outcome` or the new `egress_id` / `in_doubt` / `ledger_state` fields —
+a pre-existing gap shared by every `tool.dispatch` outcome (not specific to the
+timeout row), tracked as a follow-up to extend the renderers (a `--json`/full-
+`subject` dump). Until then, correlate an `egress_id` to the ledger via a direct
+query on `egress_idempotency` — see the
+[web.fetch action-timeout runbook](../runbooks/web-fetch-action-timeout.md).
 
 **Act-phase loop (#339 PR3).** The agentic act-phase loop
 (`src/alfred/orchestrator/`) is the driver of the ADR-0046 invariant above —
