@@ -325,3 +325,13 @@ async def test_broker_secret_exfil_refused_pre_relay(
     assert fetch_row["subject"]["dlp_scan_result"] == expected_token
     assert fetch_row["result"] == "refused"
     assert set(fetch_row["subject"].keys()) == set(WEB_FETCH_FIELDS)
+
+    # test-001 (PR #403 review, CodeRabbit): a non-vacuous secret-absence
+    # assertion over the WHOLE captured audit set (not just the one
+    # WEB_FETCH_FIELDS row asserted above) — pins the "no secret in the audit
+    # trail" property this corpus entry exists to prove, for BOTH the planted
+    # raw secret (scenarios 1/2) and the benign-but-real secret named by the
+    # off-allowlist placeholder (scenario 3).
+    serialized_rows = repr(audit.rows)
+    assert _PLANTED_SECRET not in serialized_rows
+    assert _BENIGN_ANTHROPIC_KEY not in serialized_rows

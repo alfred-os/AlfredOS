@@ -685,6 +685,14 @@ class SecretBroker:
             UnknownSecretError: ``<name>`` is allowlisted but not a known/provisioned
                 secret (delegated from :meth:`get`).
         """
+        # perf-001: the overwhelming majority of calls carry no placeholder at
+        # all (e.g. every clean header value) — skip the regex substitution
+        # entirely rather than running ``re.sub`` over text with nothing to
+        # replace. ``"{{secret:"`` is the fixed literal prefix every valid (or
+        # malformed) placeholder starts with, so this is a safe, byte-for-byte
+        # early return, not a heuristic that could miss a real placeholder.
+        if "{{secret:" not in text:
+            return text
 
         def _replace(match: re.Match[str]) -> str:
             ref = match.group(1)

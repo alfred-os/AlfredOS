@@ -125,7 +125,8 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # #339 PR4b-broker Task 3 (ADR-0048): Step 1b's raw-secret-in-header
     # defence. Payload-blind (NO header name / NO secret in the surface) — the
     # message names the symptom + the actionable fix (use the broker instead
-    # of sending the raw value).
+    # of sending the raw value) + (PR #403 review) the same audit-log
+    # breadcrumb the substitution-refusal msgstr carries, for consistency.
     "web.fetch.error.header_secret_refused": (
         {},
         ("header", "broker"),
@@ -133,11 +134,14 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # #339 PR4b-broker Task 3 (ADR-0048): Step 1c's off-allowlist /
     # unprovisioned {{secret:*}} substitution refusal. Payload-blind (NO
     # secret name in the surface — see the FIX-8 `from None` no-leak test in
-    # test_fetch_dispatcher.py) — the message names the symptom + the
-    # actionable fix (ask an operator to allowlist the name).
+    # test_fetch_dispatcher.py) — the message names the symptom + points at
+    # the audit-log breadcrumb (PR #403 review: the earlier "ask an operator
+    # to allowlist it" wording was a dead end — no operator lever for the
+    # auth-secret allowlist exists this release, and "allowlist" collides
+    # with the unrelated `alfred web allowlist add` domain command).
     "web.fetch.error.secret_substitution_refused": (
         {},
-        ("allowlist",),
+        ("audit log", "permitted"),
     ),
 }
 
@@ -217,10 +221,15 @@ def test_i18n_key_resolves_with_fingerprint(key: str) -> None:
 # rendered message. ``config/policies.yaml`` anchors the file the operator
 # edits; the YAML path (``web_fetch.<knob>``) anchors which line. Not every
 # lever is a YAML knob, though: the two #339 PR4b-broker entries below name a
-# non-YAML remediation lever instead (an architectural fix — use the broker
-# — or a human-escalation path — ask an operator to allowlist the name) since
+# non-YAML remediation lever instead — an architectural fix (use the broker)
+# for the header case, or the audit-log breadcrumb (`alfred audit log
+# --event tool.web.fetch`) for the substitution case — since
 # ``WEB_FETCH_AUTH_SECRET_ALLOWLIST`` ships as a closed, empty, non-operator-
-# configurable Python constant in #339 (no YAML surface exists to point at).
+# configurable Python constant in #339 (no YAML surface, and no operator
+# lever, exists to point at this release; PR #403 review dropped the earlier
+# "ask an operator to allowlist it" wording, which named a lever that does
+# not exist and collided with the unrelated `alfred web allowlist add`
+# domain-allowlist command).
 _REMEDIATION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "web.fetch.error.rate_limited",
@@ -235,7 +244,7 @@ _REMEDIATION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "web.fetch.error.secret_substitution_refused",
-        ("allowlist",),
+        ("audit log",),
     ),
 )
 

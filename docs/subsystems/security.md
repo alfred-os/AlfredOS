@@ -224,8 +224,20 @@ analog lives in the plugins subsystem — see
   - **Accepted residual:** a *substituted* secret whose value happens to match
     the gateway's stage-2 regex would be denied fail-closed at the gateway,
     breaking that authenticated fetch. Moot while `WEB_FETCH_AUTH_SECRET_ALLOWLIST`
-    ships empty (nothing is ever substituted in production); see ADR-0048 §7
-    for the full analysis.
+    ships empty (nothing is ever substituted in production); see
+    [ADR-0048](../adr/0048-web-fetch-authenticated-fetch-secret-substitution.md)'s
+    Consequences → the gateway-re-scan positive-path residual for the full
+    analysis.
+  - **One-broker pin (forward-looking, #338).** When #338 wires the first live
+    `dispatch_web_fetch` caller, `build_tool_registry`'s `broker=` kwarg MUST be
+    the SAME `SecretBroker` instance backing that caller's `outbound_dlp=` —
+    never a second, independently constructed broker. Two divergent instances
+    would let a secrets hot-reload land on one but not the other, silently
+    splitting the DLP-scan snapshot (Stage 1 redaction) from the
+    `substitute()` snapshot and breaking the DLP-before-substitute ordering
+    ([ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md))
+    this section depends on. See ADR-0048's matching Consequences → Negative
+    pin.
 
 ### Secret broker (`src/alfred/security/secrets.py`)
 

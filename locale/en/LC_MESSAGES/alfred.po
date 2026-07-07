@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-07 17:14+0100\n"
+"POT-Creation-Date: 2026-07-07 18:10+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1658,13 +1658,17 @@ msgstr ""
 msgid "web.fetch.error.header_secret_refused"
 msgstr ""
 "The request was refused because a header contained a secret value. "
-"Reference the secret through the broker instead of sending its value."
+"Reference the secret through the broker instead of sending its value. "
+"Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h"
+" (look for dlp_scan_result=header_secret_refused)."
 
 #: src/alfred/i18n/_339_pr4b_broker_reserve.py:39
 msgid "web.fetch.error.secret_substitution_refused"
 msgstr ""
-"The request was refused because it referenced a secret that is not on the"
-" web.fetch allowlist. Ask an operator to allowlist it."
+"The request was refused because it referenced a secret that is not "
+"permitted for web.fetch. Authenticated web.fetch is not enabled in this "
+"release. Inspect the audit log: alfred audit log --event tool.web.fetch "
+"--since 1h (look for dlp_scan_result=secret_substitution_refused)."
 
 #: src/alfred/i18n/_deferred_key_anchors.py:68
 msgid "cli.plugin.grant.status.approved"
@@ -2903,7 +2907,7 @@ msgstr ""
 msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 
-#: src/alfred/plugins/stdio_transport.py:641
+#: src/alfred/plugins/stdio_transport.py:643
 #: src/alfred/plugins/web_fetch/errors.py:153
 msgid "security.canary_tripped"
 msgstr ""
@@ -3074,14 +3078,14 @@ msgstr ""
 "directory containing a '.git' marker, or set ALFRED_SECRETS_FILE to a "
 "path outside one."
 
-#: src/alfred/security/secrets.py:609 src/alfred/security/secrets.py:855
+#: src/alfred/security/secrets.py:609 src/alfred/security/secrets.py:863
 msgid "secrets.file_malformed"
 msgstr ""
 "Secrets file '{path}' is not valid TOML. Fix the file's TOML syntax (a "
 "flat table of name = \"value\" entries) and its UTF-8 encoding, then "
 "retry."
 
-#: src/alfred/security/secrets.py:619 src/alfred/security/secrets.py:861
+#: src/alfred/security/secrets.py:619 src/alfred/security/secrets.py:869
 msgid "secrets.file_unreadable"
 msgstr ""
 "Secrets file '{path}' could not be read: {reason}. Check the file and its"
