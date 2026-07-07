@@ -54,6 +54,7 @@ from alfred.orchestrator.tool_dispatch import dispatch_tool
 from alfred.providers.base import ToolCall
 from tests.adversarial.capability_bypass._tool_arg_injection_doubles import (
     build_refusing_web_fetch_registry,
+    payload_by_id,
 )
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.dlp import identity_outbound_dlp
@@ -78,27 +79,10 @@ _CTX: Final[TurnEgressContext] = TurnEgressContext(
 def tool_arg_injection_payload(
     corpus_payloads: tuple[AdversarialPayload, ...],
 ) -> AdversarialPayload:
-    """Filter the session-scoped corpus to this wiring-smoke payload.
-
-    Fails loudly if the payload is missing/duplicated so a future rename or
-    delete surfaces here (the drift-guard pattern shared across the corpus;
-    mirrors ``cap-2026-005``'s ``sink_containment_payload`` fixture).
-    """
-    matches = [p for p in corpus_payloads if p.id == _PAYLOAD_ID]
-    if not matches:
-        msg = (
-            f"adversarial corpus is missing payload id={_PAYLOAD_ID!r}; expected at "
-            "tests/adversarial/capability_bypass/"
-            "cap-2026-006-tool-arg-injection-offlist-url-refused.yaml"
-        )
-        raise pytest.UsageError(msg)
-    if len(matches) != 1:
-        msg = (
-            f"adversarial corpus has {len(matches)} entries for id={_PAYLOAD_ID!r}; "
-            "expected exactly one. Corpus IDs must be unique — fix the duplicate."
-        )
-        raise pytest.UsageError(msg)
-    return matches[0]
+    """Filter the session-scoped corpus to this wiring-smoke payload via the
+    shared ``payload_by_id`` drift-guard (fails loudly on a missing/duplicate
+    id — the same guard the cap-2026-007..011 modules use)."""
+    return payload_by_id(corpus_payloads, _PAYLOAD_ID)
 
 
 async def test_tool_arg_injection_offlist_url_refused(
