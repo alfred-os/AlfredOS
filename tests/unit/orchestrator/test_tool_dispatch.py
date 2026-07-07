@@ -19,14 +19,16 @@ from typing import ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 
-from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS
+from alfred.audit.audit_row_schemas import TOOL_DISPATCH_FIELDS, TOOL_DISPATCH_TIMEOUT_FIELDS
 from alfred.audit.log import AuditWriter
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.egress_response_extract import EgressExtractOutcome
 from alfred.egress.response_inspection import InboundCanaryTripped
 from alfred.errors import AlfredError
 from alfred.hooks.capability import CapabilityGate
+from alfred.i18n import t
 from alfred.orchestrator import tool_dispatch as tool_dispatch_module
 from alfred.orchestrator.tool_dispatch import dispatch_tool
 from alfred.orchestrator.tool_registry import (
@@ -37,6 +39,7 @@ from alfred.orchestrator.tool_registry import (
     ToolSpec,
 )
 from alfred.plugins.web_fetch.errors import (
+    WebFetchActionTimeout,
     WebFetchDomainNotAllowed,
     WebFetchError,
     WebFetchRateLimited,
@@ -258,7 +261,10 @@ async def test_t3_typed_refusal_returns_benign_string() -> None:
         (WebFetchDomainNotAllowed(domain="attacker.example.net"), "domain_not_allowed", "refused"),
         (WebFetchRateLimited(bucket="per_domain"), "rate_limited", "rate_limited"),
         (WebFetchError("boom"), "tool_error", "refused"),
-        (TimeoutError(), "timeout", "refused"),
+        # A bare (non-web.fetch-action-deadline) TimeoutError is the RETAINED
+        # defensive fallback arm — distinct "unexpected_timeout" token from the
+        # enriched WebFetchActionTimeout path below (#339 PR4b-audit).
+        (TimeoutError(), "unexpected_timeout", "refused"),
     ],
 )
 async def test_t3_recoverable_exceptions(
@@ -274,6 +280,93 @@ async def test_t3_recoverable_exceptions(
     )
     assert writer.rows[-1]["subject"]["dispatch_outcome"] == outcome_token
     assert writer.rows[-1]["result"] == result_token
+
+
+async def test_timeout_writes_enriched_audit_row() -> None:
+    """The action-deadline timeout row carries the forensic fields the
+    dispatcher packaged on the exception (#347 blocker 2) and returns the SAME
+    recoverable string as before (unchanged planner-facing UX)."""
+    writer = _CapturingAuditWriter()
+    out = await _dispatch(
+        _url_call(),
+        _ext_spec(
+            raises=WebFetchActionTimeout(
+                egress_id="e" * 64,
+                destination_host="example.com",
+                in_doubt=True,
+                ledger_state="committed_no_response",
+            )
+        ),
+        gate=make_tool_dispatch_gate(),
+        dlp=_NoopDlp(),
+        writer=writer,
+    )
+    assert out == t("orchestrator.tool.timeout", tool="web.fetch")
+    row = writer.rows[-1]
+    assert row["schema_name"] == "TOOL_DISPATCH_TIMEOUT_FIELDS"
+    assert row["subject"]["dispatch_outcome"] == "timeout"
+    assert row["subject"]["egress_id"] == "e" * 64
+    assert row["subject"]["destination_host"] == "example.com"
+    assert row["subject"]["in_doubt"] is True
+    assert row["subject"]["ledger_state"] == "committed_no_response"
+    assert row["result"] == "refused"
+
+
+async def test_action_timeout_not_swallowed_by_web_fetch_error_arm() -> None:
+    """Ordering regression: ``WebFetchActionTimeout`` IS a ``WebFetchError``
+    subclass, so its ``except`` arm MUST precede the generic
+    ``except WebFetchError`` arm — otherwise the generic arm swallows it and
+    writes the generic ``tool_error`` row with none of the forensic fields."""
+    writer = _CapturingAuditWriter()
+    await _dispatch(
+        _url_call(),
+        _ext_spec(
+            raises=WebFetchActionTimeout(
+                egress_id="f" * 64,
+                destination_host="h.example",
+                in_doubt=False,
+                ledger_state=None,
+            )
+        ),
+        gate=make_tool_dispatch_gate(),
+        dlp=_NoopDlp(),
+        writer=writer,
+    )
+    row = writer.rows[-1]
+    # NOT "TOOL_DISPATCH_FIELDS" / "tool_error" — that would mean the generic
+    # `except WebFetchError` arm caught it first, losing the forensic fields.
+    assert row["schema_name"] == "TOOL_DISPATCH_TIMEOUT_FIELDS"
+    assert row["subject"]["dispatch_outcome"] == "timeout"
+
+
+async def test_bare_timeout_error_falls_back_to_generic_row() -> None:
+    """Defensive: a bare ``TimeoutError`` from an unexpected (non-web.fetch-
+    action-deadline) source still audits (the generic row, tagged
+    "unexpected_timeout" to distinguish it from the enriched "timeout" token
+    above) + returns the recoverable string (HARD #7 totality) + logs loudly
+    so a stray bare TimeoutError stays greppable."""
+    writer = _CapturingAuditWriter()
+    with structlog.testing.capture_logs() as caps:
+        out = await _dispatch(
+            _url_call(),
+            _ext_spec(raises=TimeoutError()),
+            gate=make_tool_dispatch_gate(),
+            dlp=_NoopDlp(),
+            writer=writer,
+        )
+    assert out == t("orchestrator.tool.timeout", tool="web.fetch")
+    row = writer.rows[-1]
+    assert row["schema_name"] == "TOOL_DISPATCH_FIELDS"
+    assert row["subject"]["dispatch_outcome"] == "unexpected_timeout"
+    assert row["result"] == "refused"
+    warnings = [
+        c for c in caps if c.get("event") == "orchestrator.tool_dispatch.unexpected_timeout"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["tool_name"] == "web.fetch"
+    # A silent downgrade to info/debug would defeat "stays greppable" above —
+    # pin the level so a future edit to `_log.warning(...)` is caught here.
+    assert warnings[0]["log_level"] == "warning"
 
 
 # --------------------------------------------------------------------------- #
@@ -441,3 +534,59 @@ async def test_audit_subject_satisfies_real_writer_symmetric_validation() -> Non
     persisted = session.add.call_args[0][0]
     assert set(persisted.subject.keys()) == set(TOOL_DISPATCH_FIELDS)
     assert persisted.subject["dispatch_outcome"] == "dispatched"
+
+
+async def test_timeout_audit_subject_satisfies_real_writer_symmetric_validation() -> None:
+    """The enriched ``WebFetchActionTimeout`` branch (#347 blocker 2) through the
+    REAL ``AuditWriter.append_schema`` symmetric-key gate — it must NOT raise,
+    and the persisted subject's keys must EXACTLY equal
+    ``TOOL_DISPATCH_TIMEOUT_FIELDS``.
+
+    Companion to ``test_audit_subject_satisfies_real_writer_symmetric_validation``
+    above, which only drives the 8-key base ``TOOL_DISPATCH_FIELDS`` schema
+    through the real writer. The timeout arm builds its OWN 12-key subject dict
+    inline (it does not go through the shared ``_audit`` closure), so a future
+    missing/extra/typo'd key there would pass every ``_CapturingAuditWriter``-
+    backed test in this module (that double bypasses the symmetric-key check
+    entirely) and only raise ``ValueError`` at runtime. Driving the branch
+    through the real writer here closes that gap: if ``dispatch_tool``'s
+    ``except WebFetchActionTimeout`` arm ever drifts from
+    ``TOOL_DISPATCH_TIMEOUT_FIELDS`` — a dropped key, an extra key, or a typo'd
+    name — ``append_schema``'s symmetric check raises and this test fails.
+    """
+    writer, session = _real_audit_writer()
+    registry = ToolRegistry(
+        [
+            _ext_spec(
+                raises=WebFetchActionTimeout(
+                    egress_id="e" * 64,
+                    destination_host="example.com",
+                    in_doubt=True,
+                    ledger_state="committed_no_response",
+                )
+            )
+        ]
+    )
+    out = await dispatch_tool(
+        _url_call(),
+        0,
+        ctx=_CTX,
+        registry=registry,
+        gate=make_tool_dispatch_gate(),
+        dlp=_NoopDlp(),
+        audit=writer,
+        user_id="u",
+        correlation_id="c",
+        language="en",
+    )
+    assert out == t("orchestrator.tool.timeout", tool="web.fetch")
+    # append_schema did not raise ⇒ the enriched subject key-set matched the
+    # TOOL_DISPATCH_TIMEOUT_FIELDS superset schema exactly (symmetric check).
+    session.add.assert_called_once()
+    persisted = session.add.call_args[0][0]
+    assert set(persisted.subject.keys()) == set(TOOL_DISPATCH_TIMEOUT_FIELDS)
+    assert persisted.subject["dispatch_outcome"] == "timeout"
+    assert persisted.subject["egress_id"] == "e" * 64
+    assert persisted.subject["destination_host"] == "example.com"
+    assert persisted.subject["in_doubt"] is True
+    assert persisted.subject["ledger_state"] == "committed_no_response"
