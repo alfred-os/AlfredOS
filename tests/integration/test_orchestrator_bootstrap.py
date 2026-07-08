@@ -219,16 +219,22 @@ def test_build_orchestrator_reuses_injected_components(
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "not-a-real-secret-bootstrap-test-placeholder")
     settings = Settings()  # type: ignore[call-arg]  # reason: Settings.__init__ is untyped pending task-17
 
+    injected_router = MagicMock()
+    injected_session_scope = MagicMock()
     orch = _bootstrap.build_orchestrator(
         settings,
         broker=MagicMock(),
-        router=MagicMock(),
+        router=injected_router,
         # A MagicMock resolver satisfies the ctor's get_operator()/version_counter reads.
         resolver=MagicMock(),
-        session_scope=MagicMock(),
+        session_scope=injected_session_scope,
     )
     assert isinstance(orch, Orchestrator)
     build_broker_spy.assert_not_called()
     build_router_spy.assert_not_called()
     build_session_scope_spy.assert_not_called()
     install_spy.assert_not_called()
+    # Non-rebuild alone doesn't prove the injected instances are the ones held —
+    # assert identity so a hypothetical fallback-construction path can't pass (CR).
+    assert orch._router is injected_router
+    assert orch._session_scope is injected_session_scope
