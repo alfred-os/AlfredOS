@@ -119,6 +119,8 @@ def test_boot_threads_same_nonce_into_comms_graph(
         outbound_dlp: object,
         t3_nonce: object,
         policies_ref: object,
+        real_gate: object,
+        router_override: object = None,
     ) -> object:
         captured.append(t3_nonce)
         graph = await original(
@@ -127,6 +129,8 @@ def test_boot_threads_same_nonce_into_comms_graph(
             outbound_dlp=outbound_dlp,  # type: ignore[arg-type]
             t3_nonce=t3_nonce,  # type: ignore[arg-type]
             policies_ref=policies_ref,
+            real_gate=real_gate,  # type: ignore[arg-type]
+            router_override=router_override,  # type: ignore[arg-type]
         )
         built_graphs.append(graph)
         return graph

@@ -190,16 +190,23 @@ def test_enabled_adapter_spawns_and_registers(
 
     # Spy on the inbound orchestrator's late-bind seam so we can assert the
     # outbound sender was wired (the round-trip ack path is live).
+    #
+    # #338 PR2 cutover: production now wires RealTurnOrchestratorAdapter (the
+    # deterministic-echo CommsInboundOrchestratorAdapter is no longer constructed
+    # on this path — it stays only as the documented rollback fallback, see
+    # tests/unit/comms_mcp/test_daemon_runtime.py). This test drives no live
+    # inbound turn (the wire-params check below constructs its own
+    # OutboundMessageRequest directly), so only the spy target class changes.
     bound_senders: list[Any] = []
-    from alfred.comms_mcp.daemon_runtime import CommsInboundOrchestratorAdapter
+    from alfred.comms_mcp.real_turn_adapter import RealTurnOrchestratorAdapter
 
-    original_bind = CommsInboundOrchestratorAdapter.bind_outbound_sender
+    original_bind = RealTurnOrchestratorAdapter.bind_outbound_sender
 
     def _spy_bind(self: Any, sender: Any) -> None:
         bound_senders.append(sender)
         original_bind(self, sender)
 
-    monkeypatch.setattr(CommsInboundOrchestratorAdapter, "bind_outbound_sender", _spy_bind)
+    monkeypatch.setattr(RealTurnOrchestratorAdapter, "bind_outbound_sender", _spy_bind)
 
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 0, result.output

@@ -130,6 +130,12 @@ def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
         # ALFRED_DEEPSEEK_API_KEY is a REQUIRED Settings field; mirror the dispatch
         # smoke's placeholder so the daemon boots.
         env["ALFRED_DEEPSEEK_API_KEY"] = "not-a-real-secret-smoke-test-placeholder"
+        # #338 PR2: the daemon now builds a REAL ProviderRouter inside
+        # _build_comms_boot_graph (the deterministic-echo adapter is gone), and
+        # build_router's EgressClient.from_settings raises IOPlaneUnavailableError
+        # fail-closed when this is unset (connectivity-free core, no direct-egress
+        # fallback). A dummy value is enough — no live turn is driven here.
+        env["ALFRED_EGRESS_PROXY_URL"] = "http://proxy.invalid:3128"
         env["ALFRED_STATE_GIT_PATH"] = str(state_git)
         env["ALFRED_DATABASE_URL"] = async_url
         # Opt the comms adapter in — this is the lever that drives the daemon boot
@@ -144,6 +150,25 @@ def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
             env["ALFRED_QUARANTINE_CHILD_PYTHON"] = _CHILD_PYTHON
 
         subprocess.run(["uv", "run", "alfred", "migrate"], env=env, check=True)
+        # #338 PR2: _build_comms_boot_graph now constructs a REAL Orchestrator,
+        # whose constructor synchronously calls identity_resolver.get_operator()
+        # at BOOT time (not just at first turn) — the daemon refuses to come up
+        # with zero operator users. Seed one before starting the daemon.
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "alfred",
+                "user",
+                "add",
+                "--name",
+                "smoke-operator",
+                "--authorization",
+                "operator",
+            ],
+            env=env,
+            check=True,
+        )
 
         daemon = subprocess.Popen(["uv", "run", "alfred", "daemon", "start"], env=env)
         try:

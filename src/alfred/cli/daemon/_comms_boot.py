@@ -80,17 +80,18 @@ if TYPE_CHECKING:
     from alfred.comms_mcp.adapter_credential_resolver import CoreAdapterCredentialResolver
     from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
     from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
-    from alfred.comms_mcp.daemon_runtime import (
-        CommsInboundOrchestratorAdapter,
-        OutboundSenderLike,
-    )
+    from alfred.comms_mcp.daemon_runtime import OutboundSenderLike
     from alfred.comms_mcp.forwarded_inbound_receiver import (
         GatewayForwardedInboundReceiver,
         _ForwardedCollaborators,
     )
     from alfred.comms_mcp.protocol import OutboundMessageRequest
+    from alfred.comms_mcp.real_turn_adapter import RealTurnOrchestratorAdapter
     from alfred.config.settings import Settings
+    from alfred.hooks.capability import CapabilityGate
+    from alfred.identity.resolver import IdentityResolver
     from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
+    from alfred.providers.router import ProviderRouter
     from alfred.security.dlp import OutboundDlpProtocol
     from alfred.security.quarantine_transport import QuarantineStdioTransport
     from alfred.security.tiers import CapabilityGateNonce
@@ -509,13 +510,25 @@ class _CommsBootGraph:
     held here (passed by DI, never re-fetched from the module slot) so the gate's
     ``is``-identity check holds — the factory docstring forbids stashing it in any
     module global outside ``alfred.security.tiers``.
+
+    ``resolver`` (#338 PR2 cutover): the RAW :class:`IdentityResolver` (arch-001)
+    — NOT just ``resolver_bridge``, the sync wrapper. Exposed alongside the
+    bridge because ``build_orchestrator`` (below) REUSES this exact instance so
+    the process-global ``install_identity_factories_for_settings`` is not
+    re-fired and the promoted ``version_counter`` stays the single coherent
+    instance across the resolver + the orchestrator's budget guard.
     """
 
     secret_broker: object
     resolver_bridge: object
+    resolver: IdentityResolver
     extractor_bridge: object
     burst_limiter: object
-    inbound_orchestrator: CommsInboundOrchestratorAdapter
+    # #338 PR2 cutover: the REAL privileged-turn adapter (was the deterministic-
+    # echo CommsInboundOrchestratorAdapter). Satisfies the SAME _OrchestratorLike
+    # Protocol, so every Spec A/B idempotency/replay caller below (the forwarded-
+    # inbound registry, the per-adapter InboundMessageHandler) is untouched.
+    inbound_orchestrator: RealTurnOrchestratorAdapter
     t3_nonce: CapabilityGateNonce
     # The LIVE quarantine transport (owns the bwrap child via its ChildIO). Held so
     # the daemon can reap the child on EVERY exit path (PR-S4-11c-2b / CR #255).
@@ -609,14 +622,17 @@ async def _build_comms_boot_graph(
     outbound_dlp: OutboundDlpProtocol,
     t3_nonce: CapabilityGateNonce,
     policies_ref: object,
+    real_gate: CapabilityGate,
+    router_override: ProviderRouter | None = None,
 ) -> _CommsBootGraph:
     """Construct the pre-Supervisor comms graph (PR-S4-11b construction step 1-5).
 
     Built ONLY when at least one adapter is enabled. Assembles the secret broker,
     the sync identity-resolver bridge, the REAL quarantined extractor over a LIVE
     bwrap-spawned quarantined child (PR-S4-11c-2b go-live flip) + its body-shaped
-    bridge, the burst limiter, and the inbound orchestrator adapter whose outbound
-    sender is bound per-adapter after the runner exists.
+    bridge, the burst limiter, and the REAL-TURN inbound orchestrator adapter
+    (#338 PR2 cutover) whose outbound sender is bound per-adapter after the
+    runner exists.
 
     ``async`` because the extractor build spawns the quarantined child
     (``spawn_quarantine_child_io``). FAIL-CLOSED: on a non-Linux / unprovisioned
@@ -630,6 +646,19 @@ async def _build_comms_boot_graph(
     inbound body ``TaggedContent[T3]`` and stages it in the SAME single-use
     :class:`QuarantineStagingMap` the ``QuarantineStdioTransport`` drains — closing
     the inline-over-wire content path (ADR-0029) in production.
+
+    ``real_gate`` (#338 PR2, REQUIRED): the RAW seeded :class:`CapabilityGate` the
+    :class:`RealTurnOrchestratorAdapter` uses for its per-turn
+    ``t3.downgrade_to_orchestrator`` clearance check — the SAME instance the
+    daemon boot path builds + asserts live BEFORE this graph is constructed
+    (never the ``_SupervisorBootGate`` wrapper, which exposes only the
+    backing-store-availability surface).
+
+    ``router_override`` (#338 PR2, test seam, default ``None``): production
+    ALWAYS builds the real, egress-proxied ``ProviderRouter`` (never leave this
+    non-``None`` outside a test) — the param exists so a boot-graph unit test can
+    inject an offline double instead of requiring a live gateway proxy + a real
+    provider secret.
     """
     from typing import cast
 
@@ -637,13 +666,18 @@ async def _build_comms_boot_graph(
     # build_boot_session_scope is a shared real-infra constructor that STAYS in
     # _commands. Imported at CALL time so a conftest patch of
     # ``_commands.build_boot_session_scope`` is still honoured (the test seam).
-    from alfred.cli._bootstrap import build_broker, install_identity_factories_for_settings
+    from alfred.cli._bootstrap import (
+        _episodic_factory,
+        build_broker,
+        build_orchestrator,
+        build_router,
+        build_working_memory_pool,
+        install_identity_factories_for_settings,
+    )
     from alfred.cli.daemon._commands import build_boot_session_scope
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge, SyncIdentityResolverBridge
-    from alfred.comms_mcp.daemon_runtime import (
-        CommsInboundOrchestratorAdapter,
-        _build_comms_inbound_extractor,
-    )
+    from alfred.comms_mcp.daemon_runtime import _build_comms_inbound_extractor
+    from alfred.comms_mcp.real_turn_adapter import RealTurnOrchestratorAdapter
     from alfred.memory.forwarded_dispatch_attempts import (
         PostgresForwardedDispatchAttemptStore,
     )
@@ -733,12 +767,51 @@ async def _build_comms_boot_graph(
         # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
         # same structural mismatch the per-adapter handlers below carry an ignore for.
         burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
-        inbound_orchestrator = CommsInboundOrchestratorAdapter(
-            extractor_bridge=extractor_bridge,
-            # The stubbed ack dispatch routes the ack through this DLP chokepoint
-            # before it crosses the wire (G5 #237; CLAUDE.md hard rule #4). The same
-            # concrete ``OutboundDlp`` the extractor's post-stage scan uses.
+        # #338 PR2 cutover: the REAL privileged-turn adapter. Assemble the
+        # Orchestrator by REUSING the graph's already-built broker + resolver
+        # (FOLD-1 — never build_orchestrator(settings) bare, which double-builds
+        # the broker + re-fires the process-global install_identity_factories) plus
+        # a freshly-built PROXIED router. Egress tools are DEFERRED (#338 scope):
+        # no tool_registry is passed, so the Act loop runs one completion and the
+        # (registry, gate, outbound_dlp) trio guard at core.py:973 is never reached.
+        # router_override is the OFFLINE test seam; production builds the real
+        # proxied router (build_router -> EgressClient.from_settings raises
+        # IOPlaneUnavailableError when ALFRED_EGRESS_PROXY_URL is unset; the
+        # deepseek key raises UnknownSecretError — both routed to an audited
+        # refuse-boot arm in _commands.py, FOLD-2).
+        router = (
+            router_override
+            if router_override is not None
+            else build_router(secret_broker, settings)
+        )
+        orchestrator = build_orchestrator(
+            settings,
+            # FOLD-R7: broker passed per build_orchestrator's docstring to avoid a
+            # throwaway build_broker; it is UNUSED here because `router` is injected
+            # (broker only feeds build_router, which is skipped). No redaction risk:
+            # the log redactor is process-global (configure_logging). The ADR-0048
+            # one-broker-instance invariant binds the FUTURE build_tool_registry
+            # broker (tools-on), not this call.
+            broker=secret_broker,
+            router=router,
+            resolver=resolver,
+            session_scope=build_boot_session_scope(settings),
+            # extraction runs at the adapter->bridge boundary, not the orchestrator funnel
+            quarantined_extractor=None,
+        )
+        working_memory_pool = build_working_memory_pool(
+            settings,
+            episodic_factory=_episodic_factory,
+            session_scope=build_boot_session_scope(settings),
+        )
+        inbound_orchestrator = RealTurnOrchestratorAdapter(
+            orchestrator=orchestrator,
+            working_memory_pool=working_memory_pool,
+            # RAW RealGate for the t3.downgrade_to_orchestrator check (seeded grant reused)
+            gate=real_gate,
+            audit_writer=audit,
             outbound_dlp=cast("OutboundDlp", outbound_dlp),
+            extractor_bridge=extractor_bridge,
         )
         # Spec A G0: the durable accept-once store. Owns its ``session_scope`` over
         # the SHARED DSN-cached engine (the ``audit_writer`` shape), so it is
@@ -816,6 +889,7 @@ async def _build_comms_boot_graph(
         return _CommsBootGraph(
             secret_broker=secret_broker,
             resolver_bridge=resolver_bridge,
+            resolver=resolver,
             extractor_bridge=extractor_bridge,
             burst_limiter=burst_limiter,
             inbound_orchestrator=inbound_orchestrator,

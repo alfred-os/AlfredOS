@@ -634,6 +634,10 @@ async def _start_async() -> None:
                 outbound_dlp=outbound_dlp,
                 t3_nonce=t3_nonce,
                 policies_ref=snapshot_ref,
+                # #338 PR2: the RAW real_gate (NOT the _SupervisorBootGate wrapper) —
+                # the RealTurnOrchestratorAdapter needs the full CapabilityGate surface
+                # for its per-turn t3.downgrade_to_orchestrator clearance check.
+                real_gate=real_gate,
             )
         except SecretBrokerConfigError as exc:
             # #368 defense-in-depth: _build_comms_boot_graph builds its own

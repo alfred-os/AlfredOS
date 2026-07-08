@@ -128,6 +128,24 @@ def test_chat_survives_daemon_restart_and_paints_reconnecting_banner(tmp_path: P
     """
     env = _live_stack_env(tmp_path)
     subprocess.run(["uv", "run", "alfred", "migrate"], env=env, check=True)
+    # #338 PR2: the daemon's comms boot graph now constructs a REAL Orchestrator,
+    # whose constructor synchronously calls identity_resolver.get_operator() at
+    # BOOT time — the daemon refuses to come up with zero operator users.
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "alfred",
+            "user",
+            "add",
+            "--name",
+            "smoke-operator",
+            "--authorization",
+            "operator",
+        ],
+        env=env,
+        check=True,
+    )
 
     daemon = _spawn(["uv", "run", "alfred", "daemon", "start"], env=env)
     gateway: subprocess.Popen[bytes] | None = None
@@ -211,6 +229,11 @@ def _live_stack_env(tmp_path: Path) -> dict[str, str]:
     env["ALFRED_ENVIRONMENT"] = "test"
     env["ALFRED_ENV"] = "test"
     env["ALFRED_DEEPSEEK_API_KEY"] = "not-a-real-key-smoke-placeholder"
+    # #338 PR2: the daemon now builds a REAL ProviderRouter inside
+    # _build_comms_boot_graph; build_router's EgressClient.from_settings raises
+    # IOPlaneUnavailableError fail-closed when this is unset. A dummy value is
+    # enough — no live turn is driven by this smoke's restart-survival assertions.
+    env["ALFRED_EGRESS_PROXY_URL"] = "http://proxy.invalid:3128"
     env["ALFRED_STATE_GIT_PATH"] = str(state_git)
     # The socket-carrier leg the gateway dials — enabling it drives the daemon's
     # _build_comms_boot_graph (and, post go-live flip, the bwrap quarantine-child spawn).
