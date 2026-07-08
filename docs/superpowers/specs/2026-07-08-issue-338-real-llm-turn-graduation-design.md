@@ -182,8 +182,8 @@ folded below and are AUTHORITATIVE where they touch a section — read them firs
   before the planner request + a marker in a schema-dropped framing field. §10 corrected.
 - **FOLD-8 (Medium punch list).** (a) benign refusal reply goes through a named `t()`
   key rendering in `{user.language}` (rev-001); (b) `display_name` must be threaded to
-  the `ingest(...)` call, not just added to `ResolvedInbound` — or use
-  `resolver.show(slug=...)` (rev-002/comms); (c) add an inbound-injection adversarial
+  the `ingest(...)` call, not just added to `ResolvedInbound` (PR1 widens
+  `ResolvedInbound` + the bridge populates it, rev-002/comms); (c) add an inbound-injection adversarial
   corpus entry + canary — first live downgrade consumer (sec-002/test-006); (d) pin
   **ADR-0027** (the ADR that deferred this bridge), not "0041 vicinity"; decide
   new-ADR-vs-amendment (arch-003); (e) reconcile the stale `core.py:1104-1111` comments
@@ -280,7 +280,7 @@ the boundary auditable at one site.
   `_bootstrap.py`) and injected into the adapter; the adapter brackets
   acquire/release per turn.
 - **Identity widening:** `ResolvedInbound` (`inbound.py:83-99`) gains a
-  `display_name` (or the adapter does a resolver `show(slug=...)` lookup) so the
+  `display_name` (populated by the identity bridge from the resolved `User`) so the
   adapter can build a full `UserLike`.
 
 ## 5. Resume-safety analysis
@@ -329,7 +329,7 @@ row shape (turn total on `subject.turn_cost_usd`).
 | `TurnEgressContext.session_id` | `resolved.canonical_user_id` |
 | `UserLike.slug` | `resolved.canonical_user_id` |
 | `UserLike.language` | `resolved.language` |
-| `UserLike.display_name` | resolver widening / `show(slug=...)` (gap today) |
+| `UserLike.display_name` | `resolved.display_name` (the widened `ResolvedInbound`, PR1) |
 
 `handle_user_message` gains an optional `egress_context: TurnEgressContext | None =
 None`, threaded to `_handle_turn` and consumed at `core.py:762` instead of the
@@ -343,8 +343,8 @@ now satisfies constraint 4 and future-proofs the tools-on wire.
 - **PR1 — core seams + assembly refactor (behaviour-neutral, no live caller).**
   (a) optional `egress_context` param on `handle_user_message`/`_handle_turn` with
   synthesis fallback (inert in #338 but forward-prep; PR1 test asserts branch
-  selection, FOLD-8h); (b) `display_name` sourcing (widen `ResolvedInbound` AND thread
-  it to `ingest`, or `resolver.show(slug=...)` — FOLD-8b); (c) the FOLD-1 DI-refactor
+  selection, FOLD-8h); (b) `display_name` sourcing (widen `ResolvedInbound` + the
+  bridge populates it + thread to `ingest` — FOLD-8b); (c) the FOLD-1 DI-refactor
   of `build_orchestrator` (accept pre-built broker/router/resolver/session_scope,
   defaulting to build — existing test callers unchanged). Proven by contract/unit
   tests. Daemon still echoes → `main` stays coherent (seam-first precedent: #339 PR1,
