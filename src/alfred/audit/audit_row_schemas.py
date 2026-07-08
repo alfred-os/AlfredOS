@@ -1437,6 +1437,21 @@ EGRESS_RELAY_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# comms.inbound.real_turn.refused family (#338 PR2 Task 1)
+# ---------------------------------------------------------------------------
+#
+# #338 PR2: the adapter-owned LOUD refusal row for a real-turn boundary failure
+# (downgrade gate-DENY / malformed payload / BudgetError / turn-error / send-error).
+# content-FREE — the PEPPERED inbound-id hash + the closed-vocab stage + the
+# exception CLASS name only (never str(exc) — could embed T3-derived text). Keyed
+# by inbound_id_hash like the sibling COMMS_INBOUND_DISPATCH_FAILED_FIELDS; per-user
+# attribution rides actor_user_id=canonical_user_id RAW at the emit site (matching
+# orchestrator.turn, core.py:1049). FOLD-5 / FOLD-R2 / CLAUDE.md hard rule #7.
+COMMS_INBOUND_TURN_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"adapter_id", "inbound_id_hash", "refusal_stage", "error_class", "observed_at"}
+)
+
+# ---------------------------------------------------------------------------
 # Audit fieldset roster (test surface)
 # ---------------------------------------------------------------------------
 #
@@ -1496,4 +1511,7 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "GATEWAY_ADAPTER_SPAWN_ABORTED_FIELDS",
     # Spec C (#333) G7-2c-1 egress-relay refusal family (payload-blind; ADR-0036).
     "EGRESS_RELAY_REFUSED_FIELDS",
+    # #338 PR2 Task 1: the RealTurnOrchestratorAdapter adapter-owned loud refusal
+    # row (content-free; downgrade-deny / malformed / budget / turn-error / send-error).
+    "COMMS_INBOUND_TURN_REFUSED_FIELDS",
 )

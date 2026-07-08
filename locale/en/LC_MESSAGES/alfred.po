@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-07 23:56+0100\n"
+"POT-Creation-Date: 2026-07-08 23:51+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1451,6 +1451,14 @@ msgstr "Comms dispatch ingest result is missing a required key; refusing to send
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
+#: src/alfred/comms_mcp/real_turn_adapter.py:195
+msgid "comms.inbound.real_turn.extraction_refused"
+msgstr "Sorry, I couldn't process that message. Please try rephrasing."
+
+#: src/alfred/comms_mcp/real_turn_adapter.py:203
+msgid "comms.inbound.real_turn.unexpected_extract_kind"
+msgstr "Unexpected extraction result kind reached the real-turn adapter."
+
 #: src/alfred/egress/egress_id.py:135
 msgid "egress.id_integrity_mismatch"
 msgstr ""
@@ -2520,23 +2528,23 @@ msgstr ""
 "quarantined_extractor; the comms inbound trust-boundary funnel is not "
 "wired."
 
-#: src/alfred/orchestrator/core.py:810
+#: src/alfred/orchestrator/core.py:821
 msgid "orchestrator.tool.budget_exhausted_mid_turn"
 msgstr "I ran out of budget partway through this request."
 
-#: src/alfred/orchestrator/core.py:911
+#: src/alfred/orchestrator/core.py:922
 msgid "orchestrator.tool.budget_overrun_mid_turn"
 msgstr "This request went over budget, so I stopped before running more tools."
 
-#: src/alfred/orchestrator/core.py:923
+#: src/alfred/orchestrator/core.py:934
 msgid "orchestrator.tool.too_many_tool_calls"
 msgstr "That request needed too many tools at once, so I stopped for safety."
 
-#: src/alfred/orchestrator/core.py:937
+#: src/alfred/orchestrator/core.py:948
 msgid "orchestrator.tool.max_iterations_reached"
 msgstr "I reached the limit on tool steps for this request without finishing it."
 
-#: src/alfred/orchestrator/core.py:965
+#: src/alfred/orchestrator/core.py:976
 msgid "orchestrator.tool.dispatch_seams_unwired"
 msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "
@@ -2956,7 +2964,7 @@ msgstr ""
 "the host-side reservation. This indicates a plugin defect. Inspect the "
 "audit log: alfred audit log --event tool.web.fetch --since 1h."
 
-#: src/alfred/providers/_tool_names.py:90
+#: src/alfred/providers/_tool_names.py:92
 msgid "providers.tool_name_collision"
 msgstr ""
 "Tool names {name_a} and {name_b} both sanitize to the provider-safe name "
