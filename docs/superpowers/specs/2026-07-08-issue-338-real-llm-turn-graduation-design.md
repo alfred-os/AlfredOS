@@ -1,9 +1,11 @@
 # Issue #338 — Real-LLM turn graduation (live comms cutover) — design
 
-Status: **DRAFT, holding at the design-approval gate.** Written on best-judgment
-while the requester was away (per the launch authorization: "best-judgment + let
-plan-review vet if the requester is away"). Do NOT proceed to writing-plans /
-implementation until the requester ratifies the scope decision in §3.
+Status: **DRAFT rev.2 — 8-lens `/review-plan` folded (§3a), holding at the
+design-approval gate.** Written on best-judgment while the requester was away (per
+the launch authorization: "best-judgment + let plan-review vet if the requester is
+away"); the fleet then vetted it (0 runtime Criticals; shape endorsed; 6 Highs
+folded). Do NOT proceed to writing-plans / implementation until the requester
+ratifies the scope decision in §3 (+ §3a corrections).
 
 Date: 2026-07-08. Branch: `338-real-llm-turn-graduation` (off `main` @ `5c85af84`).
 Related: epic #338; closed prerequisite #339 (LLM tool-calling mechanism); #340
@@ -113,6 +115,89 @@ The launch prompt's "`build_tool_registry` → `build_orchestrator` → the Act 
 describes the eventual end-state; the journal + ADR-0048 gates it calls out are the
 **prerequisites** for turning egress tools on, and belong to the follow-up.
 
+**Reply addressing (FOLD-6):** #338 is scoped to **DM/1:1 replies** (the echo adapter
+is already `dm`-only). `InboundMessageNotification` carries no channel/thread target
+id, so a Discord *group* reply cannot be targeted; group `addressing_mode` derivation
+(and the wire-widening it needs) is an explicit follow-up, not #338.
+
+## 3a. Plan-review findings folded (rev.2 — 2026-07-08)
+
+An 8-lens `/review-plan` fleet (architect, reviewer, test, security, comms, core,
+provider, memory) reviewed rev.1. **0 Criticals in the runtime design; the shape
+is endorsed** (dual-LLM invariant verified sound, the adapter seam is a genuine
+adapter, the scope split is defensible + correctly gated). These corrections are
+folded below and are AUTHORITATIVE where they touch a section — read them first.
+
+- **FOLD-1 (High, core-001/comms — VERIFIED).** `build_orchestrator(settings)` builds
+  its OWN broker/router/resolver/session_scope and re-fires the **process-global**
+  `install_identity_factories_for_settings` (`_bootstrap.py:211` — "a single shared
+  engine per process keeps the version counter coherent"). `_build_comms_boot_graph`
+  already builds a broker (`:656`) + resolver (`:657`); calling `build_orchestrator`
+  there double-builds them and diverges the version-counter contract the inbound
+  resolver bridge relies on. **Fix:** DI-refactor `build_orchestrator` to accept the
+  pre-built `broker`/`router`/`resolver`/`session_scope` (optional params, default to
+  building — preserves existing test callers), OR add a daemon-side assembly that
+  reuses the graph's components and constructs `Orchestrator(...)` directly. §4 is
+  corrected accordingly.
+- **FOLD-2 (High, prov-001/arch-002/core-002 — VERIFIED).** `build_router` calls
+  `EgressClient.from_settings` first (`_bootstrap.py:165`), which raises
+  `IOPlaneUnavailableError` when `ALFRED_EGRESS_PROXY_URL` is unset. The daemon
+  comms-graph build (`_commands.py:631`) catches `SecretBrokerConfigError` /
+  `QuarantineChildSpawnError` / `_ForwardedInboundRegistryMisconfiguredError` but NOT
+  `IOPlaneUnavailableError` — so #338 (first boot caller of `build_router`) introduces
+  an un-audited fail-closed boot path (the #368 anti-pattern). **Fix:** add an
+  `IOPlaneUnavailableError` refuse-boot arm (and cover the router's
+  `deepseek_api_key` `UnknownSecretError`, prov-002) → audited `daemon.boot.failed` +
+  exit 2. NOTE (core-004): the `SecretBrokerConfigError` guard already exists at
+  `_commands.py:638` — #338's work is getting `build_orchestrator` called *behind* it,
+  not adding it.
+- **FOLD-3 (High, core-003/comms/mem — turn placement + resume).** Run the turn inside
+  the **dispatch-edge envelope**, not in `ingest`: an `ingest`-time turn exception
+  (BudgetError / provider outage / deadline) is *outside* the forwarded-path `dispatch`
+  try/except (`inbound.py:872` vs `:884`), so it bypasses the `dispatch_failed` audit
+  and replays up to the poison ceiling (**up to 5 duplicate paid completions**). §4/§5
+  corrected: `ingest` prepares inputs; the real turn + outbound send run in `dispatch`.
+- **FOLD-4 (High, mem-001 — §5 was WRONG).** `handle_user_message` commits **episodic
+  rows** (append-only, no `inbound_id` dedup) and charges the **in-process budget**
+  (`core.py:852`) in its own `session_scope` (`core.py:423`) — durable side-effects a
+  forwarded-path re-run double-applies (transcript pollution + double budget-charge),
+  independent of egress tools. §5 is rewritten: EITHER document these as bounded
+  residuals (≤twice, no-partition-crossing, tested) OR make the durable writes
+  `inbound_id`-idempotent. Best-judgment: **document as bounded residual for #338**
+  (the deferred replay-journal is the durable fix), with a bounded-to-twice test.
+- **FOLD-5 (High, sec-001/test-002/comms/rev-003 — refusal/error leg).** The downgrade
+  gate-DENY (`AlfredError`), BudgetError, and turn-error branches need a LOUD audit row
+  owned by the adapter (HARD#7) — `check_content_clearance` writes NO audit on a policy
+  deny (verified). Plus a specified benign i18n reply (FOLD-8) and tests. §4/§10 add
+  the error-leg contract.
+- **FOLD-6 (High → scope, comms-High-2).** `InboundMessageNotification` carries no
+  channel/thread target id, so a Discord *group* reply can't be targeted. **#338 is
+  scoped to DM/1:1 replies** (matches conversational-first + the echo adapter's
+  `dm`-only reply); group addressing + the wire widening is an explicit follow-up. §3
+  scope amended.
+- **FOLD-7 (Critical test-design, test-001 — VERIFIED).** Because the quarantine child
+  is the **echo** child, extracted T2 `text` == the raw T3 body byte-for-byte, so a
+  body-scan HARD#5 test false-fails. The non-vacuous guard is **provenance-based**:
+  assert the `downgrade_to_orchestrator` receipt (`downgrade_explicit=True`) fired
+  before the planner request + a marker in a schema-dropped framing field. §10 corrected.
+- **FOLD-8 (Medium punch list).** (a) benign refusal reply goes through a named `t()`
+  key rendering in `{user.language}` (rev-001); (b) `display_name` must be threaded to
+  the `ingest(...)` call, not just added to `ResolvedInbound` — or use
+  `resolver.show(slug=...)` (rev-002/comms); (c) add an inbound-injection adversarial
+  corpus entry + canary — first live downgrade consumer (sec-002/test-006); (d) pin
+  **ADR-0027** (the ADR that deferred this bridge), not "0041 vicinity"; decide
+  new-ADR-vs-amendment (arch-003); (e) reconcile the stale `core.py:1104-1111` comments
+  that still call the journal "a hard #338 prerequisite" (arch-004); (f) explicit 100%
+  line+branch target on the boundary translator + the `cost_actual_usd`=terminal-only
+  negative assertion + real-PG/Redis resume seam + TDD-first (test-003/004/005/007,
+  sec-004); (g) state the seeded-grant reuse explicitly (sec-003); (h) `egress_context`
+  is inert in #338 (no dispatch reads it) — thread it now as forward-prep but its PR1
+  test can only assert branch selection (rev-004/core-006); (i) `UserLike` is a Protocol
+  — build a concrete impl (rev-005); (j) make the "all-three-or-none" seam wiring
+  explicit so PR2 never trips the `core.py:962` `dispatch_seams_unwired` guard (prov-004);
+  (k) note the pool hands a shared buffer per `(persona, canonical_user_id)` — safe for
+  the single-adapter cutover via leg serialization, revisit for multi-adapter (mem-002).
+
 ## 4. Architecture
 
 Replace the echo `CommsInboundOrchestratorAdapter` with a
@@ -154,6 +239,14 @@ dispatch(ingested):
     → await sender.send_outbound(request)                                    # late-bound seam, unchanged
 ```
 
+**Turn placement (FOLD-3):** the sketch above shows the turn under `ingest` for
+readability, but the real turn + outbound send run inside the **`dispatch`-edge
+envelope** so that on the forwarded path a turn failure takes the audited
+`dispatch_failed` + bounded-replay path (`inbound.py:884`) rather than propagating
+uncaught from `ingest` (`:872`) up to the poison ceiling. `ingest` prepares the turn
+inputs (extract → downgrade → tag T2 → build `user`/`egress`); `dispatch` acquires
+the pool buffer, runs `handle_user_message`, and sends the DLP-scanned answer.
+
 **Why the downgrade lives in the adapter, not in `handle_user_message`:** the
 orchestrator's contract already takes *already-cleared* `TaggedContent[T1|T2]` (the
 smoke test proves it; T3 is refused at `core.py:396-399`). The adapter is the
@@ -168,11 +261,15 @@ the boundary auditable at one site.
   the real `Orchestrator`, the `WorkingMemoryPool`, the boot `RealGate`, the
   `AuditWriter`, the `OutboundDlp`, and the late-bound `OutboundSenderLike`. Holds
   the same `bind_outbound_sender` seam.
-- **`build_orchestrator` call** wired into `_build_comms_boot_graph`, threading the
-  already-built broker/router/resolver. For the conversational cutover the tool
-  registry stays absent (empty); the orchestrator's tool-path `gate`/`outbound_dlp`
-  ctor seams are for the tools-on follow-up. The daemon-side refuse-boot guard (#370)
-  routes a `SecretBrokerConfigError` through the audited `_refuse_boot` path.
+- **Orchestrator assembly** (per FOLD-1 — NOT a bare `build_orchestrator(settings)`
+  call, which double-builds the broker + re-fires the process-global identity
+  factories). DI-refactor `build_orchestrator` to accept the graph's already-built
+  `broker`/`router`/`resolver`/`session_scope`, or add a daemon-side builder that
+  reuses them and constructs `Orchestrator(...)` directly. For the conversational
+  cutover the tool registry stays absent (empty); the tool-path `gate`/`outbound_dlp`
+  ctor seams are the tools-on follow-up. Per FOLD-2 the assembly adds an
+  `IOPlaneUnavailableError` (+ router-key `UnknownSecretError`) refuse-boot arm
+  alongside the existing `SecretBrokerConfigError` guard (`_commands.py:638`).
 - **`WorkingMemoryPool`** built at boot (`build_working_memory_pool`,
   `_bootstrap.py`) and injected into the adapter; the adapter brackets
   acquire/release per turn.
@@ -187,16 +284,26 @@ the boundary auditable at one site.
   (at-most-once; a lost turn is user-recoverable by resending). No egress ⇒ no
   ledger ⇒ mem-001 not reachable. **Fully safe under the existing oracle.**
 - **Forwarded path (gateway-hosted, `commit_at_dispatch_edge=True`):** commit after
-  successful dispatch. A crash in the narrow dispatch→commit window replays the
-  frame → the turn re-runs → a duplicate LLM call + possible duplicate reply. This
-  is within Spec B's **already-accepted, ceilinged at-least-once envelope** (ADR-0039
-  item 4). For a conversational turn the only cost is a wasted completion + a rare
-  double-reply — NOT a security double-fire (no external side-effect beyond the
-  reply). Documented as an accepted residual; the deterministic-replay **journal**
-  (tools-on follow-up, §9) is what tightens this when egress side-effects go live.
+  successful dispatch. A turn/send failure (not just a narrow crash window — any
+  outbound-send failure with the process alive) leaves the frame un-committed and
+  replays it → the turn re-runs. **Correction (FOLD-4, was wrong in rev.1):** this is
+  NOT side-effect-free even without egress tools. `handle_user_message` commits
+  **episodic rows** in its own `session_scope` (`core.py:423`) — append-only
+  `record`, no `inbound_id` dedup — and charges the **in-process budget**
+  (`core.py:852`) BEFORE `dispatch`/`commit_once`. So a forwarded re-run
+  double-writes the transcript (polluting the next rehydrate) and double-charges the
+  budget, on top of the duplicate paid completion. Placing the turn in the
+  `dispatch`-edge envelope (FOLD-3) bounds the replay to the poison ceiling and gives
+  it an audited `dispatch_failed` trail, but does not de-duplicate the episodic/budget
+  writes. **Disposition for #338:** accept as a bounded residual — the writes are
+  bounded-to-≤-ceiling and never cross a user partition; a test pins "at most twice,
+  same partition". The deterministic-replay **journal** (tools-on follow-up, §9) is
+  the durable fix; an alternative in-scope hardening is to make the episodic write +
+  budget charge `inbound_id`-idempotent (deferred unless plan-review escalates it).
 
-Because tools are deferred, **no journal ADR and no `temp=0` are required in #338**
-(both are mem-001 defenses for the egress-tool path).
+Because egress tools are deferred, **this epic needs no journal ADR and no `temp=0`**
+(both are mem-001-egress defenses); the episodic/budget double-apply above is the
+residual that IS in play and is handled as stated.
 
 ## 6. Audit cost model (constraint 1)
 
@@ -227,20 +334,25 @@ now satisfies constraint 4 and future-proofs the tools-on wire.
 
 ## 8. PR decomposition
 
-- **PR1 — core seams (behaviour-neutral, no live caller).** (a) optional
-  `egress_context` param on `handle_user_message`/`_handle_turn` with synthesis
-  fallback; (b) `ResolvedInbound`/resolver `display_name` widening. Proven by
-  contract/unit tests. Daemon still echoes → `main` stays coherent (seam-first
-  precedent: #339 PR1, G7-2a). *Plan-review may fold PR1 into PR2 if it is too thin
-  to stand alone.*
+- **PR1 — core seams + assembly refactor (behaviour-neutral, no live caller).**
+  (a) optional `egress_context` param on `handle_user_message`/`_handle_turn` with
+  synthesis fallback (inert in #338 but forward-prep; PR1 test asserts branch
+  selection, FOLD-8h); (b) `display_name` sourcing (widen `ResolvedInbound` AND thread
+  it to `ingest`, or `resolver.show(slug=...)` — FOLD-8b); (c) the FOLD-1 DI-refactor
+  of `build_orchestrator` (accept pre-built broker/router/resolver/session_scope,
+  defaulting to build — existing test callers unchanged). Proven by contract/unit
+  tests. Daemon still echoes → `main` stays coherent (seam-first precedent: #339 PR1,
+  G7-2a). *Plan-review may re-partition PR1/PR2.*
 - **PR2 — the daemon cutover (behaviour change; security-reviewed; UAT).**
-  `RealTurnOrchestratorAdapter` (extract → downgrade → tag T2 → pool-bracketed
-  `handle_user_message(egress_context=real)` → answer envelope; `dispatch` sends via
-  DLP), swap into `_build_comms_boot_graph`, `build_orchestrator` call + boot
-  `WorkingMemoryPool`, daemon-side refuse-boot guard (#370), cost-model-shape test,
-  resume-safety tests (direct at-most-once; forwarded at-least-once residual), and a
+  `RealTurnOrchestratorAdapter` (`ingest` prepares: extract → gate-checked downgrade →
+  tag T2 → build `user`/`egress`; `dispatch` runs the pool-bracketed
+  `handle_user_message(egress_context=real)` + sends the DLP-scanned answer — FOLD-3),
+  the error/refusal-leg audit contract (FOLD-5), swap into `_build_comms_boot_graph`
+  using the reused-components assembly + boot `WorkingMemoryPool`, the
+  `IOPlaneUnavailableError`/`UnknownSecretError` refuse-boot arms (FOLD-2), the
+  provenance HARD#5 + cost-shape + bounded-residual resume tests (§10), and a
   real-message → real-answer UAT. Touches the dual-LLM boundary → security sign-off +
-  adversarial suite are release-blocking.
+  adversarial suite + 100% boundary coverage are release-blocking.
 
 ## 9. Out of scope — the tools-on follow-up (new issue)
 
@@ -262,32 +374,57 @@ Deferred, with forward gates recorded here so the follow-up inherits them:
 
 - **PR1:** unit tests — `egress_context` override path vs synthesis fallback (both
   branches); resolved `display_name` presence.
-- **PR2:** integration — real-chain turn on the direct path (live echo quarantine
-  child → downgrade → real router completion → answer sent), asserting HARD#5 (the
-  planner request never contains raw T3), the `orchestrator.turn` cost-row shape,
-  and pool acquire/release symmetry; the `TypedRefusal` benign-reply branch;
-  resume tests for both idempotency edges; refuse-boot guard (#370). Adversarial
-  suite is release-blocking (dual-LLM boundary touched). Real-provider behaviour is
-  covered by the existing nightly smoke; #338 adds no per-commit paid calls.
+- **PR2:** integration over real Postgres/Redis + the live echo quarantine child.
+  - **HARD#5 — provenance-based, NOT a body-scan (FOLD-7).** The echo child echoes
+    the body into `data.text`, so extracted T2 `text` == the raw T3 body; a
+    whole-request scan would false-fail. Assert instead that the
+    `downgrade_to_orchestrator` receipt (`downgrade_explicit=True`) was written
+    before the planner request, plus a marker placed in a framing field the schema
+    drops (proving the planner input came through the gate-checked seam, not a raw
+    passthrough).
+  - **Error/refusal legs (FOLD-5):** `TypedRefusal` → benign `t()` reply; downgrade
+    gate-DENY (`AlfredError`) and BudgetError → the adapter's loud audit row + the
+    turn halts (no reply leaked). Each asserts the audit row shape.
+  - **Cost model:** the `orchestrator.turn` completed-row shape — `subject.turn_cost_usd`
+    = turn total AND the negative assertion that `cost_actual_usd` is terminal-only
+    (`core.py:1025-1048`).
+  - Pool acquire/release symmetry incl. the release-in-`finally` exception path;
+    resume tests for both idempotency edges with a forwarded-path crash-injection seam
+    (assert episodic/budget double-apply is bounded to ≤twice, same partition);
+    the `IOPlaneUnavailableError`/`UnknownSecretError` refuse-boot arms (FOLD-2).
+  - **New adversarial corpus entry** (inbound real-turn injection + canary — first live
+    downgrade consumer, FOLD-8c). Adversarial suite + **explicit 100% line+branch**
+    on the boundary translator are release-blocking (dual-LLM boundary touched).
+  - Real-provider behaviour is a **manual UAT** for #338 (the existing nightly smoke
+    uses `http_client=None` + tools-on, so it does NOT cover the new proxied
+    conversational chain, prov-003); #338 adds no per-commit paid calls.
+- **TDD-first:** every leg lands failing-test-first.
 
 ## 11. ADRs
 
-- Amend the ADR that records the comms inbound path (ADR-0027 lineage / ADR-0041
-  vicinity) to note the privileged-turn graduation and the echo→real adapter swap.
+- **ADR-0027** is the exact ADR — it deferred this privileged-orchestrator bridge
+  (FOLD-8d). #338 lands the dual-LLM *privileged half* in production for the first
+  time, which arguably warrants a NEW ADR rather than an amendment; decide at plan
+  time. Also reconcile the now-stale `core.py:1104-1111` comments that still call the
+  replay journal "a hard #338 prerequisite" (FOLD-8e) — #338's narrowed scope moves it
+  to the follow-up.
 - The deterministic-replay journal ADR is authored in the **tools-on follow-up**,
   not here.
 - CLAUDE.md / PRD edits remain human-gated.
 
 ## 12. Risks & residuals
 
-- **Forwarded-path double-reply** under a dispatch→commit crash (§5) — accepted,
-  ceilinged; tightened by the journal follow-up.
-- **`display_name` widening** touches the identity resolver seam — keep it additive
-  and covered by the identity tests.
-- **Protocol-surface fit:** the adapter maps three methods onto one turn; ingest
-  running the turn (and dispatch only sending) mirrors the echo adapter's
-  ingest/dispatch split and keeps the observable send inside the forwarded-path
-  commit-after-dispatch logic.
-- **`build_orchestrator` sufficiency:** for the conversational turn it is nearly
-  sufficient as-is; the tool-path ctor seams (`tool_registry`/`gate`/`outbound_dlp`)
-  are threaded in the tools-on follow-up, not #338.
+- **Forwarded-path double-apply** on re-run — episodic double-write + budget
+  double-charge (§5, FOLD-4), accepted as a bounded residual (≤twice, same partition,
+  tested); the journal follow-up (or in-scope `inbound_id`-idempotent writes) is the
+  durable fix.
+- **`display_name` widening** touches the identity resolver seam — keep it additive,
+  thread it to the `ingest` call, cover it with the identity tests.
+- **Protocol-surface fit:** the adapter maps three methods onto one turn; per FOLD-3
+  `ingest` prepares inputs and `dispatch` runs the turn + send, keeping the failure
+  path inside the forwarded commit-after-dispatch envelope.
+- **`build_orchestrator` is NOT sufficient as-is** (FOLD-1): a bare
+  `build_orchestrator(settings)` call double-builds the broker + re-fires the
+  process-global identity factories. The DI-refactor (or a component-reusing
+  daemon-side builder) is required. The tool-path ctor seams
+  (`tool_registry`/`gate`/`outbound_dlp`) stay deferred to the tools-on follow-up.
