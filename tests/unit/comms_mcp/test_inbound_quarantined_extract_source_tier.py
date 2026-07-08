@@ -39,6 +39,28 @@ async def test_extract_called_with_t3() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ingest_receives_display_name() -> None:
+    """The resolved ``display_name`` is threaded into the ``ingest(...)`` call (#338 PR1).
+
+    Guards the ``inbound.py`` seam (``display_name=resolved.display_name``) that the
+    PR2 real-turn adapter consumes to build the turn's ``UserLike``. Without this
+    assertion a dropped/renamed forwarding would be caught by nothing (the live echo
+    adapter ignores the kwarg, so only this seam-level check protects it).
+    """
+    orch = SpyOrchestrator()
+    await process_inbound_message(
+        make_notification(),
+        identity_resolver=SpyIdentityResolver(returns=make_resolved(display_name="Ada Lovelace")),
+        orchestrator=orch,
+        burst_limiter=SpyBurstLimiter(),
+        audit_writer=SpyAuditWriter(),
+        secret_broker=SpySecretBroker(),
+    )
+    assert orch.ingest_calls == 1
+    assert orch.last_ingest_kwargs["display_name"] == "Ada Lovelace"
+
+
+@pytest.mark.asyncio
 async def test_ingest_then_dispatch_after_extract() -> None:
     call_order: list[str] = []
     orch = SpyOrchestrator(call_order=call_order)
