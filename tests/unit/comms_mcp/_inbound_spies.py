@@ -24,12 +24,14 @@ def make_resolved(
     persona: str = "alfred",
     language: str = "en-US",
     adapter_id: str = "alfred_comms_test",
+    display_name: str = "Test User",
 ) -> ResolvedInbound:
     return ResolvedInbound(
         canonical_user_id=canonical_user_id,
         persona=persona,
         language=language,
         adapter_id=adapter_id,
+        display_name=display_name,
     )
 
 

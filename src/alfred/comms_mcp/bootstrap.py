@@ -201,6 +201,7 @@ class SyncIdentityResolverBridge:
             persona=_DEFAULT_PERSONA,
             language=user.language,
             adapter_id=adapter_id,
+            display_name=user.display_name,
         )
 
 
