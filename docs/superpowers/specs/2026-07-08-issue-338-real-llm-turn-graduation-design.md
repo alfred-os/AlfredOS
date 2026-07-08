@@ -212,8 +212,10 @@ quarantined_extract(body, canonical_user_id, source_tier="T3")
     → Extracted | TypedRefusal
 
 ingest(notification, extracted, canonical_user_id, addressing_signal, language):
+    # ingest ONLY PREPARES inputs — the turn does NOT run here (FOLD-3).
     if TypedRefusal:
-        → build a benign i18n reply envelope; the planner NEVER runs
+        → return {refusal_reply: <benign i18n string>, adapter_id, target_platform_id,
+                  addressing_mode}                                            # no turn will run
     else (Extracted):
         → cleared = downgrade_to_orchestrator(extracted.data, gate=<boot gate>,
                                               audit_writer=<boot audit>)      # HARD #5
@@ -224,6 +226,13 @@ ingest(notification, extracted, canonical_user_id, addressing_signal, language):
         → egress  = TurnEgressContext(adapter_id=notification.adapter_id,     # constraint 4
                                       inbound_id=notification.inbound_id,
                                       session_id=canonical_user_id)
+    → return {prepared: (content, user, egress), adapter_id, target_platform_id,
+              addressing_mode}
+
+dispatch(ingested):                                                          # FOLD-3: the turn runs HERE
+    if ingested carries a refusal_reply:
+        → answer = ingested.refusal_reply
+    else:                                                                    # run the pool-bracketed turn
         → wm = await pool.acquire(("alfred", canonical_user_id))
           try:
               answer = await orchestrator.handle_user_message(
@@ -231,21 +240,18 @@ ingest(notification, extracted, canonical_user_id, addressing_signal, language):
                   egress_context=egress)                                      # new optional param
           finally:
               await pool.release(("alfred", canonical_user_id), wm)
-    → return {answer, adapter_id, target_platform_id, addressing_mode}
-
-dispatch(ingested):
     → scanned = outbound_dlp.scan_for_outbound(answer)                       # HARD #4, mirrors echo
     → OutboundMessageRequest(..., body=scanned, addressing_mode=...)
     → await sender.send_outbound(request)                                    # late-bound seam, unchanged
 ```
 
-**Turn placement (FOLD-3):** the sketch above shows the turn under `ingest` for
-readability, but the real turn + outbound send run inside the **`dispatch`-edge
-envelope** so that on the forwarded path a turn failure takes the audited
-`dispatch_failed` + bounded-replay path (`inbound.py:884`) rather than propagating
-uncaught from `ingest` (`:872`) up to the poison ceiling. `ingest` prepares the turn
-inputs (extract → downgrade → tag T2 → build `user`/`egress`); `dispatch` acquires
-the pool buffer, runs `handle_user_message`, and sends the DLP-scanned answer.
+**Turn placement (FOLD-3):** as the sketch shows, `ingest` only prepares the turn
+inputs (extract → downgrade → tag T2 → build `user`/`egress`) and the real turn +
+outbound send run inside the **`dispatch`-edge envelope**. This is load-bearing: on
+the forwarded path a turn failure then takes the audited `dispatch_failed` +
+bounded-replay path (`inbound.py:884`) rather than propagating uncaught from `ingest`
+(`:872`) up to the poison ceiling. `dispatch` acquires the pool buffer, runs
+`handle_user_message`, and sends the DLP-scanned answer.
 
 **Why the downgrade lives in the adapter, not in `handle_user_message`:** the
 orchestrator's contract already takes *already-cleared* `TaggedContent[T1|T2]` (the

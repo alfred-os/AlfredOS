@@ -400,11 +400,11 @@ class Orchestrator:
         references in the plugin host's content store (spec §3.1, §7.3).
         ``working_memory`` is the pool-acquired buffer for this
         (persona, user.slug) pair; the adapter owns its lifecycle (acquire
-        before, release in finally). ``egress_context`` — when the live
-        comms inbound path supplies the real ``(adapter_id, inbound_id,
-        session_id)`` identity; ``None`` (the default) synthesizes it
-        deterministically from the turn ``trace_id`` for the ``alfred
-        chat``/fixture path (#338).
+        before, release in finally). ``egress_context`` is the per-turn
+        :class:`TurnEgressContext` the live comms inbound path passes so the
+        egress ledger anchors to the real ``(adapter_id, inbound_id,
+        session_id)`` identity; ``None`` (the default) synthesizes it from the
+        ``trace_id`` for the ``alfred chat``/fixture path (#338).
 
         Raises:
             BudgetError: pre-check refusal — or, for the 7th audit branch,
@@ -1112,14 +1112,17 @@ class Orchestrator:
         the anchor is synthesized DETERMINISTICALLY from the turn identity (as
         G7-2's synthetic driver did). ``inbound_id`` is the turn ``trace_id``
         (the committed inbound identity on this path); ``session_id`` is the
-        requesting user's slug. #338 REPLACES this synthesis with the real
-        adapter/inbound/session identity carried by the live comms inbound.
+        requesting user's slug. #338 ADDS an injected-context path (the live
+        comms inbound passes a real ``TurnEgressContext`` to
+        ``handle_user_message``); this synthesis is RETAINED as the
+        ``alfred chat``/fixture default when no context is supplied.
 
         Replay note (spec §5): within a turn the same ``trace_id`` yields the
         same anchor, so ``compute_egress_id(ctx, call_index)`` is stable for a
-        fixed dispatch sequence. Cross-turn at-most-once under re-planning is a
-        hard #338 prerequisite (journal the dispatch sequence), NOT provided
-        here — #339 has no live resume so it is not reachable.
+        fixed dispatch sequence. Cross-turn at-most-once under re-planning (the
+        deterministic-replay journal) is a tools-on follow-up concern, NOT
+        #338's conversational scope — #339 has no live resume so it is not
+        reachable.
         """
         return TurnEgressContext(
             adapter_id="orchestrator.synthetic",

@@ -472,8 +472,25 @@ def build_orchestrator(
     broker is not double-built and the PROCESS-GLOBAL
     ``install_identity_factories_for_settings`` (which keeps the version
     counter coherent across surfaces) is not re-fired. Each param defaults to
-    ``None`` -> build it, so existing callers are unchanged. ``quarantined_extractor``
-    is injected, never built here (PR-S4-11c-2).
+    ``None`` -> build it, so existing callers are unchanged.
+
+    Injection preconditions the PR2 caller must satisfy (all moot on the
+    default build path):
+
+    * ``broker`` and ``router`` go together — ``broker`` only feeds
+      ``build_router`` here, so injecting ``router`` alone silently builds and
+      discards a throwaway broker. Per ADR-0048's one-broker-instance
+      invariant the injected broker must be the same instance backing the
+      outbound-DLP / logging redactor.
+    * an injected ``resolver`` must already carry the promoted
+      ``version_counter`` (i.e. one produced by
+      ``install_identity_factories_for_settings``); a bare resolver fails at
+      ``build_budget_guard``.
+
+    ``quarantined_extractor`` is injected, never built here (PR-S4-11c-2); the
+    orchestrator's ``quarantined_extract`` funnel raises loudly if invoked
+    while it is ``None`` (CLAUDE.md hard rule #7), so an un-wired extractor can
+    never silently no-op the trust boundary.
     """
     # sec-001 / #370: this builder intentionally keeps the RAW ``build_broker``
     # (NOT the CLI ``build_broker_or_die``). ``build_orchestrator`` is the daemon
