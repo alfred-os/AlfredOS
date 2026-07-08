@@ -382,6 +382,7 @@ class Orchestrator:
         user: UserLike,
         content: TaggedContent[T1] | TaggedContent[T2],
         working_memory: WorkingMemory,
+        egress_context: TurnEgressContext | None = None,
     ) -> str:
         """Process one user turn end-to-end and return the assistant reply.
 
@@ -399,7 +400,11 @@ class Orchestrator:
         references in the plugin host's content store (spec §3.1, §7.3).
         ``working_memory`` is the pool-acquired buffer for this
         (persona, user.slug) pair; the adapter owns its lifecycle (acquire
-        before, release in finally).
+        before, release in finally). ``egress_context`` — when the live
+        comms inbound path supplies the real ``(adapter_id, inbound_id,
+        session_id)`` identity; ``None`` (the default) synthesizes it
+        deterministically from the turn ``trace_id`` for the ``alfred
+        chat``/fixture path (#338).
 
         Raises:
             BudgetError: pre-check refusal — or, for the 7th audit branch,
@@ -433,6 +438,7 @@ class Orchestrator:
                     content=content,
                     working_memory=working_memory,
                     trace_id=trace_id,
+                    egress_context=egress_context,
                     _user_id=user.slug,
                     _correlation_id=trace_id,
                 )
@@ -673,6 +679,7 @@ class Orchestrator:
         content: TaggedContent[T1] | TaggedContent[T2],
         working_memory: WorkingMemory,
         trace_id: str,
+        egress_context: TurnEgressContext | None = None,
     ) -> str:
         # ``trace_id`` is supplied by ``handle_user_message`` so the top-level
         # cancellation-audit row and the per-phase audit rows share the same
@@ -756,10 +763,14 @@ class Orchestrator:
         # matches the variable name, not the value; suppressed below.
         final_result_token = "success"  # noqa: S105
         final_exit_reason: str | None = None  # set only on a non-normal exit
-        # Loop-invariant — depends only on trace_id + user, both fixed for the
-        # whole turn — so it is synthesized once here rather than re-derived
-        # on every dispatch inside the loop below.
-        ctx = self._synthesize_egress_context(trace_id=trace_id, user=user)
+        # Loop-invariant — a provided egress_context, else one derived from
+        # trace_id + user (all fixed for the turn) — so it is resolved once here
+        # rather than re-derived on every dispatch inside the loop below.
+        ctx = (
+            egress_context
+            if egress_context is not None
+            else self._synthesize_egress_context(trace_id=trace_id, user=user)
+        )
 
         for iteration in range(loop_constants.MAX_TOOL_ITERATIONS):
             request = CompletionRequest(

@@ -653,3 +653,46 @@ class TestActLoopEscalationPropagation:
 
         with pytest.raises(AlfredError):
             await _drive_turn(orch)
+
+
+# ---------------------------------------------------------------------------
+# #338 PR1: optional egress_context on the privileged turn (behaviour-neutral
+# core seam — no production caller yet; PR2's comms adapter wires the real
+# TurnEgressContext through the daemon boot graph).
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_user_message_uses_provided_egress_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provided egress_context short-circuits the per-turn synthesis."""
+    router = MagicMock()
+    router.complete = AsyncMock(return_value=_text_response("ok"))
+    orch = _make_orchestrator(router=router, budget=_make_no_op_budget())
+    spy = MagicMock(wraps=orch._synthesize_egress_context)
+    monkeypatch.setattr(orch, "_synthesize_egress_context", spy)
+    provided = TurnEgressContext(adapter_id="discord", inbound_id="ib-1", session_id="alice-slug")
+    await orch.handle_user_message(
+        user=_stub_user(),
+        content=_tag_t2("hello"),
+        working_memory=_make_working_memory(),
+        egress_context=provided,
+    )
+    spy.assert_not_called()
+
+
+async def test_handle_user_message_synthesizes_when_no_egress_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no egress_context (the default), the turn synthesizes as before."""
+    router = MagicMock()
+    router.complete = AsyncMock(return_value=_text_response("ok"))
+    orch = _make_orchestrator(router=router, budget=_make_no_op_budget())
+    spy = MagicMock(wraps=orch._synthesize_egress_context)
+    monkeypatch.setattr(orch, "_synthesize_egress_context", spy)
+    await orch.handle_user_message(
+        user=_stub_user(),
+        content=_tag_t2("hello"),
+        working_memory=_make_working_memory(),
+    )
+    spy.assert_called_once()
