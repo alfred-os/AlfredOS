@@ -109,6 +109,7 @@ class _RecordedResolver:
             persona="alfred",
             language="en-US",
             adapter_id=adapter_id,
+            display_name="Test User",
         )
 
 

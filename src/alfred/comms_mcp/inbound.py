@@ -85,18 +85,19 @@ class ResolvedInbound:
     """Host-side identity resolution result for an inbound comms message.
 
     Carries exactly what the downstream steps need — the canonical user id, the
-    addressed persona, the user's BCP-47 language, and the adapter id — and
-    nothing that should cross the stdio boundary outward. The real
-    :class:`alfred.identity.resolver.IdentityResolver` is sync and returns a
-    ``User``; the comms host (Wave 3) bridges that into this frozen value so the
-    inbound entrypoint stays decoupled from the ORM and the canonical id is the
-    only identity token it handles.
+    addressed persona, the user's BCP-47 language, the adapter id, and the
+    user's display name — and nothing that should cross the stdio boundary
+    outward. The real :class:`alfred.identity.resolver.IdentityResolver` is
+    sync and returns a ``User``; the comms host (Wave 3) bridges that into this
+    frozen value so the inbound entrypoint stays decoupled from the ORM and the
+    canonical id is the only identity token it handles.
     """
 
     canonical_user_id: str
     persona: str
     language: str
     adapter_id: str
+    display_name: str
 
 
 @runtime_checkable
@@ -875,6 +876,7 @@ async def process_inbound_message(
         canonical_user_id=resolved.canonical_user_id,
         addressing_signal=notification.addressing_signal,
         language=resolved.language,
+        display_name=resolved.display_name,
     )
     if commit_at_dispatch_edge:
         # Dispatched edge (ADR-0039 item 4): commit + observe AFTER a successful
