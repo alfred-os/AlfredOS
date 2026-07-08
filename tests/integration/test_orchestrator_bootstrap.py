@@ -190,3 +190,45 @@ async def test_build_orchestrator_drives_one_turn(
                 assert audit_rows[0].result == "success"
         finally:
             await verify_engine.dispose()
+
+
+def test_build_orchestrator_reuses_injected_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injected broker/router/resolver/session_scope are NOT rebuilt, and the
+    process-global identity-factory install is NOT re-fired (FOLD-1, #338).
+
+    Construction-only: no DB container — session_scope is injected and
+    build_budget_guard/Orchestrator.__init__ open no connection at build time.
+    """
+    from unittest.mock import MagicMock
+
+    build_broker_spy = MagicMock(side_effect=AssertionError("broker rebuilt"))
+    build_router_spy = MagicMock(side_effect=AssertionError("router rebuilt"))
+    build_session_scope_spy = MagicMock(side_effect=AssertionError("session_scope rebuilt"))
+    install_spy = MagicMock(side_effect=AssertionError("identity factories re-fired"))
+    monkeypatch.setattr(_bootstrap, "build_broker", build_broker_spy)
+    monkeypatch.setattr(_bootstrap, "build_router", build_router_spy)
+    monkeypatch.setattr(_bootstrap, "build_session_scope", build_session_scope_spy)
+    monkeypatch.setattr(_bootstrap, "install_identity_factories_for_settings", install_spy)
+
+    # Settings reads env only (no connection until session_scope is used, which
+    # is injected here) — mirror the env pinning the other tests use (:111-116).
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "not-a-real-secret-bootstrap-test-placeholder")
+    settings = Settings()  # type: ignore[call-arg]  # reason: Settings.__init__ is untyped pending task-17
+
+    orch = _bootstrap.build_orchestrator(
+        settings,
+        broker=MagicMock(),
+        router=MagicMock(),
+        # A MagicMock resolver satisfies the ctor's get_operator()/version_counter reads.
+        resolver=MagicMock(),
+        session_scope=MagicMock(),
+    )
+    assert isinstance(orch, Orchestrator)
+    build_broker_spy.assert_not_called()
+    build_router_spy.assert_not_called()
+    build_session_scope_spy.assert_not_called()
+    install_spy.assert_not_called()
