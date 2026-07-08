@@ -459,27 +459,21 @@ def build_working_memory_pool(
 def build_orchestrator(
     settings: Settings,
     *,
+    broker: SecretBroker | None = None,
+    router: ProviderRouter | None = None,
+    resolver: IdentityResolver | None = None,
+    session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     quarantined_extractor: QuarantinedExtractorLike | None = None,
 ) -> Orchestrator:
     """Assemble a privileged :class:`Orchestrator` from operator settings.
 
-    This is the production construction site the daemon inbound path (PR-S4-
-    11c-3) will call — before this PR ``Orchestrator(`` existed only in tests.
-    It composes the existing bootstrap helpers (``build_broker`` →
-    ``build_router``, ``install_identity_factories_for_settings``,
-    ``build_session_scope``) with :func:`build_budget_guard`.
-
-    ``quarantined_extractor`` is INJECTED (default ``None``), never built here:
-    constructing the extractor is the security-suite-gated job of PR-S4-11c-2.
-    Coupling extractor construction into this builder would invert the
-    dependency ordering of the graduation-closer epic — so the seam stays a
-    parameter. The orchestrator's ``quarantined_extract`` funnel raises loudly
-    if it is invoked while ``None`` (CLAUDE.md hard rule #7), so an un-wired
-    extractor can never silently no-op the trust boundary.
-
-    The working-memory pool is a SEPARATE builder
-    (:func:`build_working_memory_pool`): the orchestrator no longer holds the
-    buffer — the adapter brackets acquire/release around each turn.
+    The daemon inbound assembly (#338 PR2) injects the boot graph's
+    already-built ``broker``/``router``/``resolver``/``session_scope`` so the
+    broker is not double-built and the PROCESS-GLOBAL
+    ``install_identity_factories_for_settings`` (which keeps the version
+    counter coherent across surfaces) is not re-fired. Each param defaults to
+    ``None`` -> build it, so existing callers are unchanged. ``quarantined_extractor``
+    is injected, never built here (PR-S4-11c-2).
     """
     # sec-001 / #370: this builder intentionally keeps the RAW ``build_broker``
     # (NOT the CLI ``build_broker_or_die``). ``build_orchestrator`` is the daemon
@@ -488,15 +482,12 @@ def build_orchestrator(
     # ``_refuse_boot`` path (exit 2 + a ``daemon.boot.failed`` row) — never the
     # CLI's ``typer.Exit``. It is unwired today (no live caller); #370 tracks
     # adding the correct daemon-side guard when it graduates.
-    broker = build_broker(settings)
-    router = build_router(broker, settings)
-    resolver = install_identity_factories_for_settings(settings)
-    session_scope = build_session_scope(settings)
-    # ``install_identity_factories_for_settings`` promotes ``version_counter``
-    # onto the resolver instance dynamically (PR-B Phase 1; Phase 5 makes it a
-    # typed property). Until then mypy sees the concrete resolver as missing
-    # the ``_BudgetResolverLike`` member, so narrow the type at the seam — the
-    # attribute is provably present because the builder above set it.
+    broker = broker if broker is not None else build_broker(settings)
+    router = router if router is not None else build_router(broker, settings)
+    resolver = (
+        resolver if resolver is not None else install_identity_factories_for_settings(settings)
+    )
+    session_scope = session_scope if session_scope is not None else build_session_scope(settings)
     budget = build_budget_guard(resolver, settings)  # type: ignore[arg-type]  # reason: resolver.version_counter is the dynamically-promoted PR-B Phase 1 attribute; Phase 5 lifts it to a typed property
     return Orchestrator(
         identity_resolver=resolver,
