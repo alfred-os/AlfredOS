@@ -375,8 +375,13 @@ def test_dynamic_result_sites_are_documented() -> None:
             # still no behavioural change. The PR3 review-fix batch (#399 A4)
             # shifted it again (890 -> 900) by hoisting `ctx =
             # self._synthesize_egress_context(...)` above the loop — the site
-            # itself is unchanged.
-            "src/alfred/orchestrator/core.py:900",
+            # itself is unchanged. #338 PR1 shifted it again (900 -> 911) by
+            # adding the optional `egress_context` param + docstring note to
+            # `handle_user_message`/`_handle_turn` and widening the `ctx =`
+            # assignment into a provided-over-synthesized ternary — the site
+            # itself is unchanged (still `result=charge_result if ... else
+            # "success"`).
+            "src/alfred/orchestrator/core.py:911",
             # #339 PR3 task 2 — the NEW terminal `completed` row forwards
             # final_result_token, a closed-vocab local (success/budget_blocked/
             # budget_overrun/refused, all in-domain). Task 3 added
@@ -392,8 +397,12 @@ def test_dynamic_result_sites_are_documented() -> None:
             # terminal-iteration dispatch guard above it and deleting the
             # now-unreachable trailing `for...else` clause (net +9 lines), then
             # the t()'d dispatch-seams-unwired raise shifted it -1 — the site
-            # itself is still unchanged.
-            "src/alfred/orchestrator/core.py:1042",
+            # itself is still unchanged. #338 PR1 shifted it again
+            # (1042 -> 1053) for the same reason as the :911 site above (the
+            # optional `egress_context` param/docstring/ternary, all above
+            # this point in the file) — the site itself is unchanged (still
+            # `result=final_result_token`).
+            "src/alfred/orchestrator/core.py:1053",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
