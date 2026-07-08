@@ -25,14 +25,18 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+from uuid import uuid4
 
 import structlog
 
 from alfred.audit import audit_row_schemas  # FOLD-R10
+from alfred.budget.guard import BudgetError
 from alfred.comms_mcp import audit_hash  # FOLD-R10: audit_hash lives in comms_mcp, NOT alfred.audit
+from alfred.comms_mcp.protocol import OutboundMessageRequest
 from alfred.errors import AlfredError
 from alfred.i18n import set_language, t
+from alfred.orchestrator.core import _ALFRED_PERSONA_ID as _PERSONA
 from alfred.security.quarantine import Extracted, TypedRefusal, downgrade_to_orchestrator
 from alfred.security.tiers import T2, tag
 
@@ -53,21 +57,19 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 # #338 is single-persona (DM/1:1). The pool is keyed (persona, canonical_user_id);
-# "alfred" is the only enabled persona this slice. Group/multi-persona addressing is
-# an explicit follow-up (FOLD-6). FOLD-R20 (Task 2 concern): ``dispatch``'s pool
-# acquire must key off the SAME shared persona-id constant the orchestrator writes
-# episodic under + the pool rehydrates by (``core._ALFRED_PERSONA_ID``) rather than
-# a fresh "alfred" literal that could silently desync from rehydrate on a future
-# rename. Not imported here — Task 1 has no pool-acquiring code (that is
-# ``dispatch``, Task 2 scope); importing it now would be an unused top-level
-# import (ruff F401). VERIFIED (Task 1, #338): importing
-# ``alfred.orchestrator.core`` from this module does NOT create a real import
-# cycle — ``alfred.orchestrator.core`` already imports
+# "alfred" is the only enabled persona this slice. Group/multi-persona addressing
+# is an explicit follow-up (FOLD-6). FOLD-R20: ``_PERSONA`` (imported above as
+# ``_ALFRED_PERSONA_ID``) is the SAME shared persona-id constant the orchestrator
+# writes episodic under and the pool rehydrates by (``working_pool.py:116``), so
+# ``dispatch``'s pool-acquire key can never silently desync from rehydrate on a
+# future persona rename — a fresh "alfred" literal here would risk exactly that.
+# RE-VERIFIED (Task 2, #338): importing ``alfred.orchestrator.core`` at module
+# level does not create an import cycle — it imports
 # ``alfred.comms_mcp.observability`` (a sibling leaf module, not this one), and
 # ``alfred.comms_mcp/__init__.py`` never imports ``real_turn_adapter``, so the
 # dependency stays acyclic even though the two packages now reference each other
-# overall. Confirmed by direct import smoke-test; Task 2 should import
-# ``_ALFRED_PERSONA_ID`` alongside its ``dispatch`` implementation.
+# overall (confirmed: this module's test suite collects and passes cleanly, which
+# a real cycle would prevent).
 
 # DM/1:1 reply (FOLD-6) — matches the echo adapter's dm-only reply leg.
 _ADDRESSING_MODE: Literal["dm"] = "dm"
@@ -78,6 +80,23 @@ _ADDRESSING_MODE: Literal["dm"] = "dm"
 _RefusalStage = Literal[
     "downgrade_denied", "downgrade_malformed", "budget_denied", "turn_error", "send_failed"
 ]
+
+
+class _HasInboundIdentity(Protocol):
+    """Structural shape ``_emit_refused`` reads off its ``notification`` arg.
+
+    Both the wire ``notification`` object ``ingest`` receives and ``dispatch``'s
+    ``_NotificationView`` (a ``_PreparedTurn`` adapter, below) satisfy this. A
+    small Protocol instead of ``Any`` so a call site with a missing/misnamed
+    field fails mypy at the call site rather than surfacing as an
+    ``AttributeError`` inside the audit-emission path.
+    """
+
+    @property
+    def adapter_id(self) -> str: ...
+
+    @property
+    def inbound_id(self) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +142,27 @@ class _HaltNoReply:
 
 
 type _IngestOutcome = _PreparedTurn | _RefusalReply | _HaltNoReply
+
+
+@dataclass(frozen=True, slots=True)
+class _NotificationView:
+    """Adapt a ``_PreparedTurn`` to the ``adapter_id``/``inbound_id`` shape ``_emit_refused`` reads.
+
+    ``dispatch``'s BudgetError / turn-error legs have no wire ``notification``
+    object on hand — only the already-prepared turn — so this view lets those
+    legs reuse ``_emit_refused`` (Task 1) without threading a second parameter
+    shape through the error-handling call sites.
+    """
+
+    _prepared: _PreparedTurn
+
+    @property
+    def adapter_id(self) -> str:
+        return self._prepared.egress.adapter_id
+
+    @property
+    def inbound_id(self) -> str:
+        return self._prepared.egress.inbound_id
 
 
 class RealTurnOrchestratorAdapter:
@@ -245,7 +285,12 @@ class RealTurnOrchestratorAdapter:
         )
 
     async def _emit_refused(
-        self, notification: Any, *, canonical_user_id: str, stage: _RefusalStage, exc: BaseException
+        self,
+        notification: _HasInboundIdentity,
+        *,
+        canonical_user_id: str,
+        stage: _RefusalStage,
+        exc: BaseException,
     ) -> None:
         """Write the LOUD, content-free adapter-owned refusal row (FOLD-5 / rule #7).
 
@@ -281,3 +326,152 @@ class RealTurnOrchestratorAdapter:
             cost_estimate_usd=0.0,
             trace_id=inbound_id_hash,
         )
+
+    def _require_sender(self) -> OutboundSenderLike:
+        """Return the bound sender or raise loudly (no silent failure, rule #7).
+
+        Reuses the echo adapter's ``sender_unbound`` catalog msgid (grepped in
+        ``daemon_runtime.py`` — same operator-facing meaning) rather than minting
+        a duplicate ``sender_not_bound`` entry for an identical message.
+        """
+        if self._sender is None:
+            _log.error("comms.daemon_runtime.sender_unbound")
+            raise RuntimeError(t("comms.daemon_runtime.sender_unbound"))
+        return self._sender
+
+    async def dispatch(self, ingested: object) -> None:
+        """Run the turn (FOLD-3) then send the DLP-scanned answer — or the benign reply.
+
+        On the FORWARDED path this runs inside ``process_inbound_message``'s
+        ``dispatch`` try/except (inbound.py:885): a re-raised turn error takes the
+        audited ``dispatch_failed`` + bounded-replay path. BudgetError + the
+        downgrade-deny (handled in ``ingest``) are DETERMINISTIC — the adapter
+        audits them loudly and HALTS (no reply, no re-raise) so the frame commits
+        rather than burning the replay ceiling on a completion that will re-fail.
+        Genuinely transient turn errors (provider outage / deadline) DO re-raise so
+        the forwarded leg can retry within the poison ceiling.
+
+        FOLD-R25: on a forwarded replay both this adapter's ``turn_error`` row AND
+        the inbound path's ``dispatch_failed`` row write — INTENTIONAL: they are
+        distinct events (adapter-semantic turn fault vs inbound-transport dispatch
+        fault) and both are content-free.
+        """
+        sender = self._require_sender()
+        if isinstance(ingested, _HaltNoReply):
+            return
+        if isinstance(ingested, _RefusalReply):
+            await self._send(
+                sender,
+                ingested.adapter_id,
+                ingested.target_platform_id,
+                ingested.reply,
+                notification=None,
+                canonical_user_id=None,
+            )
+            return
+        if not isinstance(ingested, _PreparedTurn):  # defensive — the ingest union is closed
+            raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
+
+        set_language(ingested.user.language)
+        key = (_PERSONA, ingested.user.slug)
+        note = _NotificationView(ingested)
+        # FOLD-R1 (Critical): hold the per-key turn mutex across acquire -> turn ->
+        # release so two same-user frames (the comms pump dispatches concurrently,
+        # comms_runner.py:663) cannot race the ONE shared WorkingMemory buffer the
+        # pool hands out for this key.
+        lock = await self._turn_lock_for(key)
+        async with lock:
+            wm = await self._pool.acquire(key)
+            try:
+                answer = await self._orchestrator.handle_user_message(
+                    user=ingested.user,
+                    content=ingested.content,
+                    working_memory=wm,
+                    egress_context=ingested.egress,
+                )
+            except BudgetError as exc:
+                # Deterministic: audit loudly + halt (no reply, no replay). FOLD-5.
+                await self._emit_refused(
+                    note, canonical_user_id=ingested.user.slug, stage="budget_denied", exc=exc
+                )
+                return
+            except Exception as exc:
+                # Unknown/transient: audit loudly, then RE-RAISE so the forwarded
+                # path's dispatch_failed handler + bounded replay take over (direct
+                # path loses it, at-most-once, acceptable — FOLD-R22 confirms the
+                # pump contains it). `Exception`, not `BaseException`, so
+                # cancellation tears down cleanly.
+                await self._emit_refused(
+                    note, canonical_user_id=ingested.user.slug, stage="turn_error", exc=exc
+                )
+                raise
+            finally:
+                await self._pool.release(key, wm)
+
+        # Send OUTSIDE the mutex (the buffer work is done) but with its own
+        # audited envelope (FOLD-R11): a scan/send failure gets a loud adapter row
+        # then re-raises (forwarded -> dispatch_failed + replay; direct ->
+        # propagate).
+        await self._send(
+            sender,
+            ingested.adapter_id,
+            ingested.target_platform_id,
+            answer,
+            notification=note,
+            canonical_user_id=ingested.user.slug,
+        )
+
+    async def _turn_lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
+        """Get-or-create the per-(persona, slug) turn mutex (FOLD-R1)."""
+        async with self._locks_guard:
+            lock = self._turn_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._turn_locks[key] = lock
+            return lock
+
+    async def _send(
+        self,
+        sender: OutboundSenderLike,
+        adapter_id: str,
+        target_platform_id: str,
+        body: str,
+        *,
+        notification: _NotificationView | None,
+        canonical_user_id: str | None,
+    ) -> None:
+        """DLP-scan the body (rule #4) + send it as a DM (FOLD-6), audited (FOLD-R11).
+
+        On a scan/send failure with turn context (``notification`` +
+        ``canonical_user_id`` both present) the adapter writes a loud
+        ``send_failed`` row then re-raises; the refusal-reply send (no turn
+        context — ``ingest``'s ``_RefusalReply`` leg) just re-raises (the inbound
+        path audits it on the forwarded edge). A DLP CANARY trip is signalled in
+        the scan RESULT, not an exception (unchanged from the echo path) — it does
+        not raise here.
+
+        FOLD-R18: this DLP-scan -> ``OutboundMessageRequest`` -> send sequence
+        duplicates ``CommsInboundOrchestratorAdapter.dispatch``
+        (``daemon_runtime.py``). Retained rather than extracted into a shared
+        helper: the echo adapter is the documented rollback fallback for this
+        cutover (module docstring) and stays byte-for-byte independent of this
+        one so a rollback cannot be broken by a shared-helper change made for the
+        real-turn path.
+        """
+        try:
+            scanned = self._outbound_dlp.scan_for_outbound(body)
+            request = OutboundMessageRequest(
+                adapter_id=adapter_id,
+                idempotency_key=uuid4(),
+                target_platform_id=target_platform_id,
+                body=scanned,
+                attachments_refs=(),
+                addressing_mode=_ADDRESSING_MODE,
+            )
+            await sender.send_outbound(request)
+        except Exception as exc:
+            if notification is not None and canonical_user_id is not None:
+                await self._emit_refused(
+                    notification, canonical_user_id=canonical_user_id, stage="send_failed", exc=exc
+                )
+            raise
