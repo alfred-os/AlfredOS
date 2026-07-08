@@ -14,7 +14,7 @@
 - **Out of scope (PR2 / follow-ups):** the `RealTurnOrchestratorAdapter`, the `_build_comms_boot_graph` swap, the `IOPlaneUnavailableError`/`UnknownSecretError` refuse-boot arms, the tool registry / egress / journal / temp=0 work. Do NOT touch `src/alfred/security/`, the daemon boot graph, or any tool/egress path.
 - **TDD-first.** Every change lands failing-test-first (write test → run-fail → implement → run-pass → commit).
 - **Typing.** `mypy --strict` + `pyright` clean. PEP 604 unions, no `Any` without justification, frozen/immutable by default.
-- **Conventional Commits with a literal `#338` AFTER the colon in EVERY commit subject** (a `(scope)` does not satisfy the `pr-validate-commits` gate). Commit `type` is lowercase letters only (no digits) — use `feat`/`refactor`/`test`/`chore`.
+- **Conventional Commits with a literal `#338` AFTER the colon in EVERY commit subject.** A descriptive `(scope)` is fine (`feat(comms): … #338` passes the `pr-validate-commits` gate); what fails is putting the issue number *in* the scope (`feat(338): …`) instead of after the colon. Commit `type` is lowercase letters only (no digits) — use `feat`/`refactor`/`test`/`chore`.
 - **`make check` before every push** (`uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pyright src/` + unit + integration). Check the real exit code — `| tail` masks it.
 - **No `--no-verify`; no pre-commit hook skipping.**
 - PR1 does not touch `src/alfred/security/`, so the adversarial suite is NOT release-blocking for this PR (still run `make check`).
