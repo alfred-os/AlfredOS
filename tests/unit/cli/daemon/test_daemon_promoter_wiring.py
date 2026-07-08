@@ -295,6 +295,7 @@ async def test_graph_aclose_skips_close_for_non_content_store() -> None:
     graph = _CommsBootGraph(
         secret_broker=object(),
         resolver_bridge=object(),
+        resolver=object(),  # type: ignore[arg-type]  # unused by aclose
         extractor_bridge=object(),
         burst_limiter=object(),
         inbound_orchestrator=object(),  # type: ignore[arg-type]

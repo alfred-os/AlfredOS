@@ -53,7 +53,7 @@ import os
 import struct
 from collections.abc import AsyncIterator, Coroutine, Iterator
 from contextlib import asynccontextmanager, suppress
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from alfred_tui.cohost import _make_socket_inbound_sink, _serve_wire
@@ -90,11 +90,13 @@ from alfred.identity.models import PlatformIdentity, User
 from alfred.memory.hooks_audit_sink import EpisodicAuditSink
 from alfred.memory.models import Base
 from alfred.plugins.comms_socket_transport import CommsSocketListener, dial_comms_socket
+from alfred.providers.router import ProviderRouter
 from alfred.security import tiers as _tiers
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
+from tests.helpers.routers import FixedAnswerRouter
 
 pytestmark = pytest.mark.integration
 
@@ -119,10 +121,16 @@ _TIMEOUT_S = 20.0
 _LAUNCHER_TEST_UID = getpass.getuser()
 _LAUNCHER_REQUIRES_ROOT = os.uname().sysname == "Linux" and os.geteuid() != 0
 
-# The ack content the daemon's stubbed dispatch emits (``daemon_runtime._ACK_CONTENT``).
-# The ack is routed through the outbound DLP chokepoint + wrapped in a valid
-# OutboundMessageRequest (G5 #237 / hard rule #4); the cohost renders ``body[0]``.
-_ACK_CONTENT = "ack"
+# FOLD-R19 (#338 PR2): this is the TEST-LOCAL expected reply content — NOT
+# ``daemon_runtime._ACK_CONTENT`` (that module constant still backs the RETAINED
+# echo adapter's own tests, ``tests/unit/comms_mcp/test_daemon_runtime.py``; it is
+# NOT edited here). Production now drives a REAL privileged turn
+# (RealTurnOrchestratorAdapter); this proof injects a ``router_override`` (a
+# ``FixedAnswerRouter``) so the turn completes offline, deterministically, to
+# THIS canned answer. The reply is still routed through the outbound DLP
+# chokepoint + wrapped in a valid OutboundMessageRequest (G5 #237 / hard rule
+# #4); the cohost renders ``body[0]``.
+_ACK_CONTENT = "scripted-real-turn-answer"
 
 
 class _EchoingChildDouble:
@@ -230,6 +238,18 @@ def _boot_gate_with_tui_load_grant() -> RealGate:
                 content_tier=None,
                 proposal_branch="test-fixture",
             ),
+            # #338 PR2: the RealTurnOrchestratorAdapter's ingest() gate-checks
+            # t3.downgrade_to_orchestrator on every real turn (this proof drives
+            # one) — without this grant the downgrade is denied and the turn
+            # halts with no reply (_HaltNoReply), which would silently break the
+            # ack-content assertions below rather than fail loud at the cause.
+            GrantRow(
+                plugin_id="t3.downgrade_to_orchestrator",
+                subscriber_tier="system",
+                hookpoint="t3.downgrade_to_orchestrator",
+                content_tier="T3",
+                proposal_branch="test-fixture",
+            ),
         }
     )
     return RealGate(
@@ -250,6 +270,14 @@ def _seed_bound_user(sync_url: str) -> None:
     ``_ADAPTER_KIND_TO_PLATFORM`` table currently OMITS ``"tui"``, so this resolve
     raises ``UnknownAdapterKindError`` today (the second of the two real chain gaps
     this proof surfaces).
+
+    #338 PR2: also seeds a SEPARATE household-operator row. ``build_orchestrator``
+    (inside the real turn now driven by this proof) constructs a real
+    ``Orchestrator``, whose constructor synchronously calls
+    ``identity_resolver.get_operator()`` — a distinct requirement from ``alice``'s
+    platform binding (there must be exactly ONE ``authorization=operator`` row;
+    ``alice`` stays STANDARD so this proof does not conflate "the addressed user"
+    with "the household operator").
     """
     sync_engine = create_engine(sync_url, future=True)
     try:
@@ -269,6 +297,15 @@ def _seed_bound_user(sync_url: str) -> None:
                     user_id=user.id,
                     platform=Platform.TUI.value,
                     platform_id=_PLATFORM_USER_ID,
+                )
+            )
+            session.add(
+                User(
+                    slug="the-operator",
+                    display_name="the-operator",
+                    authorization=Authorization.OPERATOR.value,
+                    daily_budget_usd=5.0,
+                    language=_USER_LANGUAGE,
                 )
             )
     finally:
@@ -435,6 +472,11 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,
                 policies_ref=None,
+                real_gate=gate,
+                # #338 PR2: offline test seam — the real, egress-proxied
+                # build_router is never reached; the turn completes to this one
+                # canned answer (retargeted _ACK_CONTENT, FOLD-R19).
+                router_override=cast(ProviderRouter, FixedAnswerRouter(answer=_ACK_CONTENT)),
             )
 
             # ---- Boot the REAL daemon socket carrier (binds comms-tui.sock) ----

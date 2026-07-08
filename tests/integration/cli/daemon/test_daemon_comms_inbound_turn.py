@@ -68,7 +68,7 @@ import os
 import struct
 from collections.abc import AsyncIterator, Coroutine, Iterator
 from contextlib import asynccontextmanager, suppress
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -95,11 +95,13 @@ from alfred.identity.models import PlatformIdentity, User
 from alfred.memory.hooks_audit_sink import EpisodicAuditSink
 from alfred.memory.models import Base
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
+from alfred.providers.router import ProviderRouter
 from alfred.security import tiers as _tiers
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
+from tests.helpers.routers import FixedAnswerRouter
 
 
 class _EchoingChildDouble:
@@ -237,6 +239,15 @@ def _boot_gate_with_comms_load_grant() -> CapabilityGate:
                 content_tier=None,
                 proposal_branch="test-fixture",
             ),
+            # #338 PR2: the RealTurnOrchestratorAdapter's ingest() gate-checks
+            # t3.downgrade_to_orchestrator on every real turn this proof drives.
+            GrantRow(
+                plugin_id="t3.downgrade_to_orchestrator",
+                subscriber_tier="system",
+                hookpoint="t3.downgrade_to_orchestrator",
+                content_tier="T3",
+                proposal_branch="test-fixture",
+            ),
         }
     )
     return RealGate(
@@ -311,7 +322,13 @@ class _RecordingSupervisor:
 
 
 def _seed_discord_bound_user(sync_url: str) -> None:
-    """Seed a Discord-bound ``alice`` so the resolver maps the inbound to her."""
+    """Seed a Discord-bound ``alice`` so the resolver maps the inbound to her.
+
+    #338 PR2: also seeds a SEPARATE household-operator row — ``build_orchestrator``
+    (inside the real turn now driven by ``_build_comms_boot_graph``) constructs a real
+    ``Orchestrator``, whose constructor synchronously calls
+    ``identity_resolver.get_operator()``. ``alice`` stays STANDARD.
+    """
     sync_engine = create_engine(sync_url, future=True)
     try:
         sync_factory = sessionmaker(sync_engine, expire_on_commit=False, future=True)
@@ -330,6 +347,15 @@ def _seed_discord_bound_user(sync_url: str) -> None:
                     user_id=user.id,
                     platform=Platform.DISCORD.value,
                     platform_id=_PLATFORM_USER_ID,
+                )
+            )
+            session.add(
+                User(
+                    slug="the-operator",
+                    display_name="the-operator",
+                    authorization=Authorization.OPERATOR.value,
+                    daily_budget_usd=5.0,
+                    language=_USER_LANGUAGE,
                 )
             )
     finally:
@@ -487,6 +513,11 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
                 # promoter), so the store is never written to here; pass ``None`` for
                 # the policies ref since this turn exercises no per-session quota deref.
                 policies_ref=None,
+                real_gate=gate,
+                # #338 PR2: offline test seam — this proof asserts the T3-promotion
+                # audit row, not reply content, so the real, egress-proxied
+                # build_router is never reached.
+                router_override=cast(ProviderRouter, FixedAnswerRouter()),
             )
             runner = await _spawn_comms_adapter(
                 adapter_id=_ADAPTER_ID,
@@ -531,7 +562,19 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
             # -> outbound.message request). The plugin's handle_outbound_message
             # buffered it; adapter.health reports the buffer depth, and the runner
             # correlates that REQUEST/response (adapter.health IS a request).
-            delivered = await runner.send_request("adapter.health", {})
+            #
+            # #338 PR2: poll rather than a single immediate check — the REAL turn
+            # (working-memory pool acquire/release + a completion call through
+            # the injected router) adds async work between the T3-promotion
+            # commit (just awaited above) and the outbound ack actually reaching
+            # the plugin's buffer, unlike the old echo path's near-synchronous ack.
+            deadline = asyncio.get_running_loop().time() + _TIMEOUT_S
+            delivered: dict[str, Any] = {}
+            while asyncio.get_running_loop().time() < deadline:
+                delivered = await runner.send_request("adapter.health", {})
+                if int(str(delivered["queue_depth"])) >= 1:
+                    break
+                await asyncio.sleep(0.02)
             assert int(str(delivered["queue_depth"])) >= 1, delivered
         # End the audit-writer context only after the assertions that need it.
     finally:

@@ -48,7 +48,7 @@ import os
 import shutil
 from collections.abc import AsyncIterator, Coroutine, Iterator
 from contextlib import asynccontextmanager, suppress
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -71,11 +71,13 @@ from alfred.identity.models import PlatformIdentity, User
 from alfred.memory.hooks_audit_sink import EpisodicAuditSink
 from alfred.memory.models import Base
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
+from alfred.providers.router import ProviderRouter
 from alfred.security import tiers as _tiers
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
+from tests.helpers.routers import FixedAnswerRouter
 
 pytestmark = pytest.mark.integration
 
@@ -147,6 +149,15 @@ def _boot_gate_with_comms_load_grant() -> RealGate:
                 content_tier=None,
                 proposal_branch="test-fixture",
             ),
+            # #338 PR2: the RealTurnOrchestratorAdapter's ingest() gate-checks
+            # t3.downgrade_to_orchestrator on every real turn this proof drives.
+            GrantRow(
+                plugin_id="t3.downgrade_to_orchestrator",
+                subscriber_tier="system",
+                hookpoint="t3.downgrade_to_orchestrator",
+                content_tier="T3",
+                proposal_branch="test-fixture",
+            ),
         }
     )
     return RealGate(
@@ -206,6 +217,16 @@ class _RecordingSupervisor:
 
 
 def _seed_discord_bound_user(sync_url: str) -> None:
+    """Seed the Discord-bound canonical user PLUS the household operator.
+
+    #338 PR2: ``build_orchestrator`` (inside the real turn now driven by
+    ``_build_comms_boot_graph``) constructs a real ``Orchestrator``, whose
+    constructor synchronously calls ``identity_resolver.get_operator()`` — a
+    distinct requirement from the Discord-bound user's platform identity
+    (there must be exactly ONE ``authorization=operator`` row). The bound user
+    stays STANDARD so this proof does not conflate "the addressed user" with
+    "the household operator".
+    """
     sync_engine = create_engine(sync_url, future=True)
     try:
         sync_factory = sessionmaker(sync_engine, expire_on_commit=False, future=True)
@@ -224,6 +245,15 @@ def _seed_discord_bound_user(sync_url: str) -> None:
                     user_id=user.id,
                     platform=Platform.DISCORD.value,
                     platform_id=_PLATFORM_USER_ID,
+                )
+            )
+            session.add(
+                User(
+                    slug="the-operator",
+                    display_name="the-operator",
+                    authorization=Authorization.OPERATOR.value,
+                    daily_budget_usd=5.0,
+                    language=_USER_LANGUAGE,
                 )
             )
     finally:
@@ -339,6 +369,11 @@ async def test_daemon_flip_drives_real_bwrap_child_and_lands_extracted_row(
                 # per-adapter promoter shares. ``alfred_comms_test`` is empty-set
                 # (None promoter), so the store is never written to here.
                 policies_ref=None,
+                real_gate=gate,
+                # #338 PR2: offline test seam — this proof doesn't assert reply
+                # content, only that the extracted/T3-promoted rows land, so the
+                # real, egress-proxied build_router is never reached.
+                router_override=cast(ProviderRouter, FixedAnswerRouter()),
             )
             await _spawn_comms_adapter(
                 adapter_id=_ADAPTER_ID,

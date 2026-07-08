@@ -81,6 +81,37 @@ def fake_audit_writer() -> FakeAuditWriter:
     return FakeAuditWriter()
 
 
+class _FakeOperatorResolver:
+    """Stands in for ``IdentityResolver`` — no real Postgres touched.
+
+    #338 PR2: ``_build_comms_boot_graph`` now constructs a REAL ``Orchestrator``,
+    whose constructor SYNCHRONOUSLY calls ``identity_resolver.get_operator()`` to
+    cache the household operator for the orchestrator's lifetime (``core.py:308``)
+    — a pre-existing ``Orchestrator.__init__`` contract, not something #338
+    introduces. This boot-wiring harness is meant to stay hermetic (no real
+    Postgres), so it needs a canned operator rather than a real resolver hitting a
+    real DB. ``version_counter`` mirrors ``install_identity_factories_for_settings``'s
+    promoted-attribute contract (``build_orchestrator``'s ``build_budget_guard``
+    reads it at construction, though it never queries eagerly itself).
+    """
+
+    def __init__(self) -> None:
+        from alfred.identity import IdentityVersionCounter
+
+        self.version_counter = IdentityVersionCounter()
+
+    def get_operator(self) -> Any:
+        from alfred.identity.models import Authorization, User
+
+        return User(
+            slug="daemon-boot-fixture-operator",
+            display_name="daemon-boot-fixture-operator",
+            authorization=Authorization.OPERATOR.value,
+            daily_budget_usd=5.0,
+            language="en-US",
+        )
+
+
 def apply_boot_success_patches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -129,6 +160,25 @@ def apply_boot_success_patches(
     # reset grants no privilege; it only prevents cross-test mint poisoning.
     reset_boot_epoch_for_tests()
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    # #338 PR2: comms-enabled boot tests now build a REAL ProviderRouter inside
+    # _build_comms_boot_graph (the deterministic-echo adapter is gone), and
+    # build_router's EgressClient.from_settings raises IOPlaneUnavailableError
+    # fail-closed when this is unset/blank (the connectivity-free core has no
+    # direct-egress fallback). A dummy value is enough — this construction never
+    # actually dials it (no real turn is driven by these boot-wiring tests); only
+    # the router's httpx.AsyncClient is built, pointed at the proxy. Harmless for
+    # every non-comms boot test too (the router is only built when comms adapters
+    # are enabled).
+    monkeypatch.setenv("ALFRED_EGRESS_PROXY_URL", "http://proxy.invalid:3128")
+    # #338 PR2: _build_comms_boot_graph's lazy import re-reads THIS seam (the
+    # SOURCE module) at call time, so patching it here (not a _comms_boot-local
+    # name) is what actually intercepts it. Without this, build_orchestrator's
+    # real Orchestrator.__init__ synchronously queries a real Postgres for the
+    # operator user — this harness has none (see _FakeOperatorResolver).
+    monkeypatch.setattr(
+        "alfred.cli._bootstrap.install_identity_factories_for_settings",
+        lambda _settings: _FakeOperatorResolver(),
+    )
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", raising=False)
     monkeypatch.setattr(
         "alfred.config._environment_loader._DEFAULT_ETC_PATH",
