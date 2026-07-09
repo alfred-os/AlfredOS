@@ -844,9 +844,13 @@ trust Linux CI (per the repo convention).
 
 - [ ] **Step 4: Re-confirm the child dispatcher coverage gate**
 
+FIX-7: match the `ci.yml` gate, which asserts 100% on BOTH
+`provider_dispatch.py` AND `providers/base.py` (`ProviderUnavailableError`
+is a bare class, so it stays 100% via import-coverage alone).
+
 ```bash
 uv run coverage run -m pytest tests/unit/quarantine/test_quarantined_extractor_dispatch.py
-uv run coverage report --include='src/alfred/security/quarantine_child/provider_dispatch.py' --fail-under=100
+uv run coverage report --include='src/alfred/providers/base.py,src/alfred/security/quarantine_child/provider_dispatch.py' --fail-under=100
 ```
 
 Expected: `100%`.

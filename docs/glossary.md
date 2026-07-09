@@ -1270,16 +1270,16 @@ See spec §4.3, §4.8, and
 
 A [`ProviderCapability`](#providercapability) enum value indicating the
 provider supports `response_format={"type": "json_object"}` but does
-NOT enforce a schema. DeepSeek-chat is the Slice-3 `JSON_OBJECT_MODE`
-provider; [`QuarantinedExtractor`](#quarantinedextractor) routes it
-through the same retry-and-validate path as the
-`prompt_embedded_fallback` [`ExtractionMode`](#extractionmode). The
-selected mode is recorded in the audit row as
-`extraction_mode="json_object_unconstrained"` to distinguish
-best-effort post-hoc validation (DeepSeek) from true schema enforcement
-(Anthropic, OpenAI). The distinction is forensic-load-bearing:
-extraction failures in `JSON_OBJECT_MODE` are weighted toward
-schema-incompatibility rather than provider-side malformation.
+NOT enforce a schema. DeepSeek-chat declares `JSON_OBJECT_MODE`, but
+since #340 fork b the quarantined-LLM dispatcher no longer branches on
+it: dispatch is two-way, closed on `NATIVE_CONSTRAINED_GENERATION`
+alone. A provider lacking `NATIVE_CONSTRAINED_GENERATION` — including
+DeepSeek-chat — routes through `prompt_embedded_fallback`
+[`ExtractionMode`](#extractionmode); its audit rows record
+`extraction_mode="prompt_embedded_fallback"`. The
+`"json_object_unconstrained"` `ExtractionMode` value is RESERVED (not
+selected at runtime) — retained for audit-row continuity and a future
+`response_format` seam extension.
 
 See spec §6.2, [ExtractionMode](#extractionmode), and
 [docs/subsystems/security.md](subsystems/security.md).

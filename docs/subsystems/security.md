@@ -90,10 +90,13 @@ and no plugin can acquire capabilities that were not explicitly granted.
   in #168.
 - `ProviderCapability` — `src/alfred/providers/base.py:22` — `StrEnum`
   whose values steer the quarantined-LLM extraction mode selection:
-  `NATIVE_CONSTRAINED_GENERATION` → Anthropic tool-use shape;
-  `JSON_OBJECT_MODE` → DeepSeek json_object path; neither → fallback.
-  Also pre-declares `TOOL_USE`, `VISION`, `LONG_CONTEXT_1M` for future
-  routing. Shipped in PR-S3-4 (#TBD).
+  `NATIVE_CONSTRAINED_GENERATION` → `native_constrained` tool-use shape
+  (Anthropic, OpenAI); no `NATIVE_CONSTRAINED_GENERATION` (including
+  DeepSeek's `JSON_OBJECT_MODE`) → `prompt_embedded_fallback` (#340
+  fork b removed the DeepSeek json-object dispatch branch — see
+  `docs/subsystems/quarantine.md`). Also pre-declares `TOOL_USE`,
+  `VISION`, `LONG_CONTEXT_1M` for future routing. Shipped in PR-S3-4
+  (#TBD).
 - `quarantined_to_structured(handle, schema, *, extractor, gate)` —
   `src/alfred/security/quarantine.py:637` — the ONLY path by which
   T3-derived content reaches orchestrator-readable structured form.
