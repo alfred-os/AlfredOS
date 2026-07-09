@@ -12,6 +12,7 @@ from alfred.providers.base import (
     Message,
     ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
+    ProviderUnavailableError,
     ToolDefinition,
 )
 from alfred.providers.router import ProviderRouter
@@ -129,3 +130,27 @@ async def test_router_does_not_fall_back_on_malformed_tool_args() -> None:
     with pytest.raises(ProviderMalformedToolArgumentsError):
         await router.complete(CompletionRequest(messages=[Message(role="user", content="x")]))
     fallback.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_on_provider_unavailable() -> None:
+    # ProviderUnavailableError is deliberately NOT in _TOOL_PROTOCOL_ERRORS — a
+    # transient transport failure SHOULD fall back to the secondary provider,
+    # unlike the deterministic tool-protocol errors above. This is a regression
+    # test proving the router's broad `except Exception` fallback still catches
+    # it (i.e. no future edit accidentally adds it to _TOOL_PROTOCOL_ERRORS).
+    primary = AsyncMock()
+    primary.name = "primary"
+    primary.complete = AsyncMock(side_effect=ProviderUnavailableError("down"))
+    fallback = AsyncMock()
+    fallback.name = "fallback"
+    ok = CompletionResponse(
+        content="ok", tokens_in=1, tokens_out=1, cost_usd=0.0, model="fallback-model"
+    )
+    fallback.complete = AsyncMock(return_value=ok)
+    router = ProviderRouter(primary=primary, fallback=fallback)
+
+    result = await router.complete(CompletionRequest(messages=[Message(role="user", content="hi")]))
+
+    assert result is ok
+    fallback.complete.assert_awaited_once()

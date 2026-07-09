@@ -156,6 +156,20 @@ class ProviderToolNameCollisionError(AlfredError):
     ambiguity unnoticed."""
 
 
+class ProviderUnavailableError(AlfredError):
+    """The provider SDK/transport call failed (connection error, timeout, 5xx).
+
+    Raised by each adapter's ``complete()`` at the SDK-call boundary so callers
+    (the router; the quarantine child's ``provider_dispatch``) get ONE typed
+    error instead of the provider-specific ``anthropic``/``openai`` hierarchies.
+    The quarantine child maps this to ``TypedRefusal(reason="provider_unavailable")``
+    so audit consumers can tell provider outages apart from model-output failures.
+
+    Deliberately NOT in ``router._TOOL_PROTOCOL_ERRORS`` — a transient transport
+    failure SHOULD fall back to the secondary provider (contrast a deterministic
+    tool-protocol error, which would fail identically on the fallback)."""
+
+
 def ensure_tool_capability(
     *,
     has_tools: bool,

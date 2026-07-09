@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import httpx
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import APIError, AsyncAnthropic
 from anthropic.types import (
     ContentBlock,
     MessageParam,
@@ -28,6 +28,7 @@ from anthropic.types import (
 )
 from anthropic.types.tool_param import InputSchema
 
+from alfred.i18n import t
 from alfred.providers._tool_names import build_tool_name_map, sanitize_tool_name
 from alfred.providers.base import (
     CompletionRequest,
@@ -35,6 +36,7 @@ from alfred.providers.base import (
     ForcedTool,
     Message,
     ProviderCapability,
+    ProviderUnavailableError,
     StopReason,
     ToolCall,
     ToolChoice,
@@ -281,7 +283,15 @@ class AnthropicProvider:
         if request.tools and request.tool_choice != "none":
             kwargs["tools"] = _anthropic_tools(request.tools)
             kwargs["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
-        response = await self._client.messages.create(**kwargs)
+        try:
+            response = await self._client.messages.create(**kwargs)
+        except (APIError, httpx.HTTPError) as exc:
+            # Map the SDK/transport failure to the neutral seam error at the
+            # adapter boundary (the only place the SDK types are in scope). Never
+            # surface the raw exc text — it can carry provider-supplied strings.
+            raise ProviderUnavailableError(
+                t("providers.provider_unavailable", provider=self.name, model=self._model)
+            ) from exc
         # Parse text + tool_use blocks (no longer discards non-text blocks).
         text, tool_calls = _parse_anthropic_content(response.content, name_map)
         usage = response.usage

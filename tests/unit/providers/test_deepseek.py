@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import APIConnectionError
 
 from alfred.providers.base import (
     CompletionRequest,
@@ -15,10 +17,21 @@ from alfred.providers.base import (
     ProviderMalformedToolArgumentsError,
     ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
+    ProviderUnavailableError,
     ToolCall,
     ToolDefinition,
 )
 from alfred.providers.deepseek import DeepSeekProvider
+
+
+@pytest.fixture
+def deepseek_provider() -> DeepSeekProvider:
+    """Reusable provider over a mocked ``_client`` — mirrors the
+    ``anthropic_provider`` fixture in test_anthropic.py (FIX-3): AsyncMock's
+    child-attribute chaining keeps ``client.chat.completions.create`` an
+    AsyncMock so the SDK/transport-error-mapping test can set ``.side_effect``
+    directly."""
+    return DeepSeekProvider(client=AsyncMock(), model="deepseek-chat")
 
 
 @pytest.mark.asyncio
@@ -383,3 +396,49 @@ async def test_plain_assistant_history_serializes_without_tool_calls() -> None:
     )
     msgs = fake_client.chat.completions.create.await_args.kwargs["messages"]
     assert msgs[1] == {"role": "assistant", "content": "hello"}  # no stray tool_calls key
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_sdk_error_to_provider_unavailable(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    deepseek_provider._client.chat.completions.create.side_effect = APIConnectionError(
+        request=httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await deepseek_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_httpx_error_to_provider_unavailable(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    deepseek_provider._client.chat.completions.create.side_effect = httpx.ConnectError("boom")
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await deepseek_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_provider_unavailable_message_omits_raw_sdk_exc_text(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    # Mirrors test_anthropic.py's identically-named test (FIX-5 hygiene
+    # property): the mapped error's message must identify the provider/model
+    # but must NOT render the raw SDK exception text — that text can carry
+    # provider-supplied strings the operator-facing t() catalog should not
+    # blindly interpolate. deepseek.py's except clause is byte-identical to
+    # anthropic_native.py's (`except (APIError, httpx.HTTPError)`), so this
+    # property holds today via shared code, but only a DeepSeek-specific test
+    # would catch a future DeepSeek-only regression.
+    deepseek_provider._client.chat.completions.create.side_effect = httpx.ConnectError(
+        "leaked-upstream-detail-9f3c"
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        await deepseek_provider.complete(req)
+    message = str(exc_info.value)
+    assert "deepseek" in message
+    assert "deepseek-chat" in message
+    assert "leaked-upstream-detail-9f3c" not in message
