@@ -21,9 +21,12 @@ class IdentityError(AlfredError):
 class IdentityResolutionError(IdentityError):
     """Raised when ``IdentityResolver.resolve`` is forced to fail loudly.
 
-    Used by ``get_operator()`` when zero or >1 operator users exist — adapter
-    startup surfaces a friendly hint pointing at ``alfred user add
-    --authorization operator``.
+    Used by ``get_operator()`` when zero or >1 operator users exist — the
+    message (routed through ``t()``, see ``identity.operator_not_seeded_*``)
+    names the copy-pasteable remedy: ``alfred user add --name <name>
+    --authorization operator`` for the zero-operator case, or ``alfred user
+    list`` + ``alfred user set --authorization trusted <slug>`` for the
+    corrupt multi-operator case.
     """
 
 

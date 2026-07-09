@@ -425,8 +425,15 @@ def test_dynamic_result_sites_are_documented() -> None:
             # now a LITERAL (ok / refused / quarantined / rate_limited /
             # domain_not_allowed / dlp_scan_error / capped) — covered by the
             # subset guard above, so the file no longer appears here.
-            # audit_result param; post_stage_refused (C1) now in-domain.
-            "src/alfred/security/quarantine.py:1261",
+            # audit_result param; post_stage_refused (C1) now in-domain. #338
+            # PR2 review (FOLD-R16) shifted it (1261 -> 1263): two new
+            # module-level imports (`from alfred.errors import AlfredError` +
+            # `from alfred.i18n import t`, net +2 lines) were added above this
+            # site so the new `DowngradeDeniedError` class (defined further
+            # down, after this site) can reference `AlfredError` at class-def
+            # time — the site itself (still `result=audit_result`) is
+            # unchanged.
+            "src/alfred/security/quarantine.py:1263",
             "src/alfred/supervisor/core.py:692",  # result_label local
             # --- direct AuditEntry(...) construction path (H1) ---
             "src/alfred/audit/log.py:96",  # AuditWriter.append forwards result -> AuditEntry(...)

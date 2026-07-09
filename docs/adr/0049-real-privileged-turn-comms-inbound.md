@@ -156,6 +156,20 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
 - `CommsInboundOrchestratorAdapter` (the echo adapter) is retained as the
   documented rollback fallback (per ADR-0027 Decision 3) but is now dead on the
   production path — a bit-rot risk if this cutover is never revisited.
+- **New trust surface: `display_name` reaches the privileged prompt outside
+  the downgrade seam (accepted, guarded).** Unlike the extracted T3 body —
+  always gate-checked through `downgrade_to_orchestrator` before it reaches
+  the orchestrator — the platform-supplied, adversary-influenced
+  `display_name` metadata (`RealTurnOrchestratorAdapter`'s
+  `_InboundUser.display_name`) flows straight into `render_persona_prompt`'s
+  `requesting_user_name` substitution with NO T3→T2 downgrade step. This is
+  correct-by-design (it is resolved identity metadata, not extracted T3 body
+  content, so CLAUDE.md hard rule #5 does not apply), but it is a real,
+  untrusted, platform-influenced input reaching the PRIVILEGED persona
+  prompt. The only containment is `render_persona_prompt`'s `html.escape` of
+  every `<user_context>` substitution, pinned by the `pi-2026-014`
+  adversarial corpus entry
+  (`tests/adversarial/prompt_injection/test_pi_2026_014_inbound_display_name_injection.py`).
 
 ### Neutral
 
@@ -173,6 +187,19 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
   `core.py:1108`) — behaviour-neutral for every existing caller (`alfred chat`,
   fixtures, tests); the real identity now threads through for the comms caller,
   future-proofing the tools-on wire without activating it.
+- **The HARD#5 provenance test uses a schema-extracting child double, not the
+  production echo child.**
+  `tests/integration/comms_mcp/test_real_turn_inbound_boundary.py`'s
+  provenance proof substitutes `_ExtractionAwareChildDouble` (which performs
+  the SAME `CommsBodyExtraction{text, intent}` schema-shaped extraction a
+  real quarantined LLM would) rather than the `_EchoingChildDouble` every
+  other integration test in this tree uses — the echo double's verbatim-echo
+  behaviour would make the "the schema drops framing keys" property
+  untestable. Production today runs the echo child (the real quarantine
+  child is #340), so this provenance property MUST be RE-VALIDATED against
+  the real extractor's actual schema once #340 lands — the double is a
+  faithful stand-in for the CONTRACT, not proof the contract holds against
+  the eventual real implementation.
 
 ## Alternatives considered
 

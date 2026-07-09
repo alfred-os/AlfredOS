@@ -230,11 +230,23 @@ def test_get_operator_zero_raises(
     session_factory: sessionmaker[Session],
     rate_limiter: NullRateLimiter,
 ) -> None:
-    """``get_operator`` on a deployment with no operator raises loudly."""
+    """``get_operator`` on a deployment with no operator raises loudly.
+
+    i18n-001 (#338 PR2 review): the raised message must name a
+    copy-pasteable remedy — ``alfred user add`` has a REQUIRED ``--name``
+    flag (``identity/cli.py``), so a remedy missing it is a dead end. The
+    message reaches the operator verbatim via CLI catch blocks that do
+    ``except IdentityResolutionError as exc: typer.echo(str(exc))``.
+    """
     resolver = _build_resolver(session_factory, rate_limiter)
 
-    with pytest.raises(IdentityResolutionError):
+    with pytest.raises(IdentityResolutionError) as exc_info:
         resolver.get_operator()
+
+    message = str(exc_info.value)
+    assert "--name" in message
+    assert "alfred user add" in message
+    assert "--authorization operator" in message
 
 
 def test_get_operator_multi_raises(
@@ -268,8 +280,16 @@ def test_get_operator_multi_raises(
             ]
         )
 
-    with pytest.raises(IdentityResolutionError):
+    with pytest.raises(IdentityResolutionError) as exc_info:
         resolver.get_operator()
+
+    # i18n-001 (#338 PR2 review): the multi-operator remedy must name a
+    # command that actually exists — ``alfred user list`` to discover the
+    # colliding slugs, then ``alfred user set --authorization trusted
+    # <slug>`` to demote each extra.
+    message = str(exc_info.value)
+    assert "alfred user list" in message
+    assert "alfred user set --authorization trusted" in message
 
 
 # --------------------------------------------------------------------------- #

@@ -24,6 +24,7 @@ from alfred.comms_mcp.real_turn_adapter import (
     _PreparedTurn,
     _RefusalReply,
 )
+from alfred.errors import AlfredError
 from alfred.security.quarantine import Extracted, TypedRefusal
 from alfred.security.tiers import T2
 from tests.helpers.gates import make_quarantined_extract_chain_gate
@@ -220,6 +221,55 @@ async def test_ingest_downgrade_deny_writes_loud_audit_and_halts() -> None:
     assert isinstance(refusal_subject, dict)
     assert refusal_subject["refusal_stage"] == "downgrade_denied"
     assert "hi alfred" not in str(refusal_rows[0])  # no raw content leaks into the row
+
+
+class _RaisingAudit:
+    """``AuditWriter`` double whose ``append_schema`` raises a bare ``AlfredError``.
+
+    Stands in for a transient, NON-deny failure inside
+    ``downgrade_to_orchestrator`` (e.g. an audit-write fault) — distinct from
+    the gate's typed :class:`~alfred.security.quarantine.DowngradeDeniedError`.
+    """
+
+    async def append_schema(self, **kwargs: object) -> None:
+        raise AlfredError("simulated transient audit-write failure")
+
+    async def append(self, **kwargs: object) -> None:  # pragma: no cover - unused here
+        raise AlfredError("simulated transient audit-write failure")
+
+
+@pytest.mark.asyncio
+async def test_ingest_non_deny_alfred_error_propagates_not_swallowed() -> None:
+    """FOLD-R16 (#338 PR2 review): only ``DowngradeDeniedError`` is caught.
+
+    ``ingest``'s ``except`` around ``downgrade_to_orchestrator`` used to catch
+    the broad ``AlfredError`` — any OTHER ``AlfredError`` raised inside that
+    call (e.g. a transient audit-write fault, simulated here) would have been
+    silently swallowed into a content-free ``_HaltNoReply`` (a committed
+    no-reply turn with no indication anything unexpected happened). Narrowing
+    the catch to the typed ``DowngradeDeniedError`` means a non-deny
+    ``AlfredError`` now propagates loudly instead.
+    """
+    # Constructed directly (not via ``_adapter()``, which is typed to
+    # ``_RecordingAudit``) — ``_RaisingAudit`` duck-types the same
+    # ``append_schema``/``append`` surface ``RealTurnOrchestratorAdapter`` calls.
+    adapter = RealTurnOrchestratorAdapter(
+        orchestrator=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called by ingest
+        working_memory_pool=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called by ingest
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
+        audit_writer=_RaisingAudit(),  # type: ignore[arg-type]  # reason: _RaisingAudit duck-types AuditWriter.append_schema/append only
+        outbound_dlp=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called by ingest
+        extractor_bridge=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called by ingest
+    )
+    with pytest.raises(AlfredError, match="simulated transient audit-write failure"):
+        await adapter.ingest(
+            notification=_notification(),
+            extracted=_extracted("hi alfred"),
+            canonical_user_id="u-1",
+            addressing_signal=SimpleNamespace(),
+            language="en-US",
+            display_name="Ada",
+        )
 
 
 @pytest.mark.asyncio
