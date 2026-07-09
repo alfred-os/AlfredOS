@@ -157,7 +157,11 @@ class ProviderToolNameCollisionError(AlfredError):
 
 
 class ProviderUnavailableError(AlfredError):
-    """The provider SDK/transport call failed (connection error, timeout, 5xx).
+    """A TRANSIENT/retryable provider failure: connection error, timeout,
+    rate-limit, or a 5xx status. Deterministic 4xx failures (auth, bad-request,
+    permission, not-found, etc.) are NOT mapped to this error — they propagate
+    as the raw SDK error, since masking a config/host-side bug as a retryable
+    outage would hide it from the operator instead of surfacing it loud.
 
     Raised by each adapter's ``complete()`` at the SDK-call boundary so callers
     (the router; the quarantine child's ``provider_dispatch``) get ONE typed

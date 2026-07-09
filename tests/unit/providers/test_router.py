@@ -151,6 +151,7 @@ async def test_router_falls_back_on_provider_unavailable() -> None:
     router = ProviderRouter(primary=primary, fallback=fallback)
 
     result = await router.complete(CompletionRequest(messages=[Message(role="user", content="hi")]))
+    primary.complete.assert_awaited_once()  # non-vacuity: the primary was actually attempted
 
     assert result is ok
     fallback.complete.assert_awaited_once()

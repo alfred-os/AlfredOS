@@ -13,7 +13,13 @@ from typing import Any, cast
 
 import httpx
 import structlog
-from anthropic import APIError, AsyncAnthropic
+from anthropic import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncAnthropic,
+    RateLimitError,
+)
 from anthropic.types import (
     ContentBlock,
     MessageParam,
@@ -285,13 +291,23 @@ class AnthropicProvider:
             kwargs["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
         try:
             response = await self._client.messages.create(**kwargs)
-        except (APIError, httpx.HTTPError) as exc:
-            # Map the SDK/transport failure to the neutral seam error at the
-            # adapter boundary (the only place the SDK types are in scope). Never
-            # surface the raw exc text — it can carry provider-supplied strings.
+        except (APIConnectionError, APITimeoutError, RateLimitError, httpx.HTTPError) as exc:
+            # Transient/retryable transport failure. Map to the neutral seam error
+            # at the adapter boundary (the only place the SDK types are in scope).
+            # Never surface the raw exc text — it can carry provider-supplied strings.
             raise ProviderUnavailableError(
                 t("providers.provider_unavailable", provider=self.name, model=self._model)
             ) from exc
+        except APIStatusError as exc:
+            # 5xx = a transient upstream outage -> provider-unavailable; deterministic
+            # 4xx (auth/bad-request/permission/not-found/etc.) propagates loud as the
+            # raw SDK error — a config/host-side bug must not be masked as a
+            # retryable outage the router would silently fall back past.
+            if exc.status_code >= 500:
+                raise ProviderUnavailableError(
+                    t("providers.provider_unavailable", provider=self.name, model=self._model)
+                ) from exc
+            raise
         # Parse text + tool_use blocks (no longer discards non-text blocks).
         text, tool_calls = _parse_anthropic_content(response.content, name_map)
         usage = response.usage

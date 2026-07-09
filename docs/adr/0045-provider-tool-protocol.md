@@ -112,3 +112,14 @@ hierarchies. It is deliberately excluded from `router._TOOL_PROTOCOL_ERRORS`
 (a transport failure should fall back to the secondary provider). No change to the
 frozen `CompletionRequest`/`CompletionResponse` models. This keeps the quarantine
 child free of any SDK import (the in-core HTTP-egress import guard).
+
+### 2026-07-10 — narrow the mapping to transient failures only (#340 PR1 review fix)
+
+The adapter `except` clauses map ONLY transient/retryable provider failures —
+connection errors, timeouts, rate-limits, and 5xx status errors — to
+`ProviderUnavailableError`. A deterministic 4xx (auth, bad-request, permission,
+not-found, etc.) is a config/host-side bug, not a transient outage; it propagates
+as the raw `anthropic`/`openai` SDK error instead. The original mapping caught the
+SDK's root `APIError`, which wrongly classified every deterministic 4xx as
+fall-back-eligible alongside genuine outages — masking a misconfiguration as a
+retryable failure the router would silently route around.

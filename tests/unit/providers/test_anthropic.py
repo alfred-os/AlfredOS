@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from anthropic import APIConnectionError
+from anthropic import APIConnectionError, APIStatusError, BadRequestError, RateLimitError
 
 from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.base import (
@@ -379,3 +379,55 @@ async def test_provider_unavailable_message_omits_raw_sdk_exc_text(
     assert "anthropic" in message
     assert "claude-haiku-4-5" in message
     assert "leaked-upstream-detail-9f3c" not in message
+
+
+@pytest.mark.asyncio
+async def test_complete_propagates_deterministic_4xx_unmapped(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    # A deterministic 4xx (bad request / auth / permission / not-found) is a
+    # config/host-side bug, NOT a transient outage. It must propagate as the raw
+    # SDK error rather than being mapped to ProviderUnavailableError — the router
+    # treats ProviderUnavailableError as fall-back-eligible, and silently retrying
+    # a request that will always 400 would mask the real misconfiguration.
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(400, request=request)
+    anthropic_provider._client.messages.create.side_effect = BadRequestError(
+        "bad request", response=response, body=None
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(BadRequestError):
+        await anthropic_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_5xx_status_error_to_provider_unavailable(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    # A 5xx is a transient upstream outage, unlike a deterministic 4xx — it
+    # DOES map to ProviderUnavailableError so the router can fall back.
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(500, request=request)
+    anthropic_provider._client.messages.create.side_effect = APIStatusError(
+        "server error", response=response, body=None
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await anthropic_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_rate_limit_error_to_provider_unavailable(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    # RateLimitError (429) is retryable/transient — it maps to
+    # ProviderUnavailableError even though it subclasses APIStatusError, because
+    # it is caught by the earlier, more specific except clause.
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(429, request=request)
+    anthropic_provider._client.messages.create.side_effect = RateLimitError(
+        "rate limited", response=response, body=None
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await anthropic_provider.complete(req)
