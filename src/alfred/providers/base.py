@@ -33,19 +33,22 @@ StopReason = Literal["end_turn", "tool_use", "max_tokens", "stop_sequence", "oth
 class ProviderCapability(StrEnum):
     """Closed-set capabilities a provider may declare (spec §6.1).
 
-    The quarantined-LLM dispatch path (spec §6.2) branches on these:
+    The quarantined-LLM extractor's dispatch path (spec §6.2) selects its
+    mode from these:
 
     * ``NATIVE_CONSTRAINED_GENERATION`` → Anthropic tool-use shape;
       schema-constrained at the provider level. The only path that
       guarantees the response is JSON-schema-valid by construction.
-    * ``JSON_OBJECT_MODE`` → DeepSeek's ``response_format={"type":
-      "json_object"}``; produces JSON but is NOT schema-constrained.
-      The host validates with Pydantic after the call (spec §6.2
-      reclassification).
-    * neither → ``prompt_embedded_fallback``; schema embedded in the
+    * otherwise → ``prompt_embedded_fallback``; schema embedded in the
       user prompt, response parsed as JSON, validated with Pydantic.
 
-    ``TOOL_USE``, ``VISION``, ``LONG_CONTEXT_1M`` are pre-declared per
+    ``JSON_OBJECT_MODE`` (DeepSeek's ``response_format={"type":
+    "json_object"}``) is still DECLARED for provider routing, but as of
+    #340 fork (b) it is NO LONGER a quarantine-extractor dispatch selector:
+    a JSON-object-capable provider without ``NATIVE_CONSTRAINED_GENERATION``
+    (e.g. ``deepseek-chat``) now routes to ``prompt_embedded_fallback`` (the
+    ``json_object_unconstrained`` ``ExtractionMode`` member is retained,
+    reserved). ``TOOL_USE``, ``VISION``, ``LONG_CONTEXT_1M`` are pre-declared per
     PRD §6.6 line 290 so the routing layer can resolve provider
     fallbacks by capability without subclass-level extension.
 
