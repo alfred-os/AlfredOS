@@ -206,6 +206,36 @@ async def test_dispatch_send_failure_audits_send_failed_and_reraises() -> None:
     assert stages == ["send_failed"]
 
 
+async def test_dispatch_refusal_send_failure_reraises_without_audit() -> None:
+    """A send failure on the ``_RefusalReply`` leg has NO turn context to audit.
+
+    Covers the ``notification is None`` / ``canonical_user_id is None`` arm of
+    ``_send``'s except block (the ``ingest``-leg refusal reply carries no
+    notification/canonical_user_id — only the forwarded/direct dispatch-error
+    handlers in ``process_inbound_message`` see this failure). The adapter
+    re-raises WITHOUT writing a ``send_failed`` row (there is no turn to
+    attribute it to) — distinct from ``test_dispatch_send_failure_audits_...``
+    above, which drives the ``_PreparedTurn`` leg where turn context exists.
+    """
+    audit = _RecordingAudit()
+
+    class _RaisingSender:
+        async def send_outbound(self, request):
+            raise ConnectionError("wire down")
+
+    adapter = _adapter(
+        orchestrator=_Orchestrator(answer="unused"), audit=audit, sender=_RaisingSender()
+    )
+    with pytest.raises(ConnectionError):
+        await adapter.dispatch(
+            _RefusalReply(reply="benign", adapter_id="tui", target_platform_id="plat-9")
+        )
+    refusal_rows = [
+        r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ]
+    assert refusal_rows == []  # no turn context -> no adapter-owned audit row
+
+
 async def test_dispatch_holds_turn_mutex_across_the_turn() -> None:
     """FOLD-R1 (Critical): the per-(persona, slug) lock is HELD for the WHOLE
     acquire -> handle_user_message -> release span, not released early — this is
@@ -226,6 +256,23 @@ async def test_dispatch_holds_turn_mutex_across_the_turn() -> None:
 
     assert observed_locked == [True]  # locked WHILE the turn ran
     assert adapter._turn_locks[("alfred", "u-1")].locked() is False  # released after
+
+
+async def test_turn_lock_for_reuses_existing_lock_for_same_key() -> None:
+    """``_turn_lock_for``'s get-or-create: a SECOND call for the same key REUSES
+    the lock (the ``lock is not None`` branch), never minting a second one that
+    would let two same-key turns bypass each other."""
+    adapter = _adapter(orchestrator=_Orchestrator(answer="first"))
+    await adapter.dispatch(_prepared())  # first call -> creates the lock (dict was empty)
+
+    key = ("alfred", "u-1")
+    created_lock = adapter._turn_locks[key]
+    assert len(adapter._turn_locks) == 1
+
+    await adapter.dispatch(_prepared())  # second call, SAME key -> must reuse it
+
+    assert len(adapter._turn_locks) == 1  # no second entry minted
+    assert adapter._turn_locks[key] is created_lock  # the SAME lock object
 
 
 async def test_dispatch_before_bind_raises_runtime_error() -> None:

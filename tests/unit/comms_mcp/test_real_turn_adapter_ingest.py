@@ -112,6 +112,44 @@ def _adapter(*, gate: CapabilityGate, audit: _RecordingAudit) -> RealTurnOrchest
 
 
 @pytest.mark.asyncio
+async def test_quarantined_extract_delegates_to_bridge() -> None:
+    """``quarantined_extract`` is a pure delegation to the injected extractor bridge.
+
+    Identical in shape to the echo adapter's own delegation (FOLD-R18) — this
+    pins that the adapter forwards ``body``/``canonical_user_id``/``source_tier``
+    verbatim and returns the bridge's result unchanged, with no logic of its own.
+    """
+
+    class _RecordingBridge:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def extract(self, *, body, canonical_user_id, source_tier):
+            self.calls.append(
+                {"body": body, "canonical_user_id": canonical_user_id, "source_tier": source_tier}
+            )
+            return _extracted("bridge result")
+
+    bridge = _RecordingBridge()
+    adapter = RealTurnOrchestratorAdapter(
+        orchestrator=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called here
+        working_memory_pool=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called here
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
+        audit_writer=_RecordingAudit(),
+        outbound_dlp=SimpleNamespace(),  # type: ignore[arg-type]  # reason: not called here
+        extractor_bridge=bridge,  # type: ignore[arg-type]  # reason: duck-types the extract() seam
+    )
+    result = await adapter.quarantined_extract(
+        {"text": "hi"}, canonical_user_id="u-9", source_tier="T3"
+    )
+    assert bridge.calls == [
+        {"body": {"text": "hi"}, "canonical_user_id": "u-9", "source_tier": "T3"}
+    ]
+    assert isinstance(result, Extracted)
+    assert result.data["text"] == "bridge result"
+
+
+@pytest.mark.asyncio
 async def test_ingest_typed_refusal_returns_benign_reply() -> None:
     adapter = _adapter(
         gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True), audit=_RecordingAudit()
@@ -182,3 +220,43 @@ async def test_ingest_downgrade_deny_writes_loud_audit_and_halts() -> None:
     assert isinstance(refusal_subject, dict)
     assert refusal_subject["refusal_stage"] == "downgrade_denied"
     assert "hi alfred" not in str(refusal_rows[0])  # no raw content leaks into the row
+
+
+@pytest.mark.asyncio
+async def test_ingest_downgrade_malformed_text_writes_loud_audit_and_halts() -> None:
+    """FOLD-R24: the defensive ``text``-type-guard is a DISTINCT stage from a gate deny.
+
+    The ``CommsBodyExtraction`` schema pins ``text: str`` at the extractor, so
+    this branch is purely defensive (a same-process protocol violation would
+    have already been caught upstream) — but it must still fail loud rather
+    than silently proceeding with a non-str payload.
+    """
+    audit = _RecordingAudit()
+    adapter = _adapter(
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True), audit=audit
+    )
+    # A downgraded payload missing the (schema-pinned) str "text" field — the
+    # defensive guard this branch exists for.
+    malformed = Extracted(
+        data={"text": 12345, "intent": "greeting"},  # type: ignore[arg-type]
+        extraction_mode="native_constrained",
+    )
+    outcome = await adapter.ingest(
+        notification=_notification(),
+        extracted=malformed,
+        canonical_user_id="u-1",
+        addressing_signal=SimpleNamespace(),
+        language="en-US",
+        display_name="Ada",
+    )
+    assert isinstance(outcome, _HaltNoReply)
+    assert outcome.stage == "downgrade_malformed"
+    refusal_rows = [
+        r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ]
+    assert len(refusal_rows) == 1
+    refusal_subject = refusal_rows[0]["subject"]
+    assert isinstance(refusal_subject, dict)
+    # DISTINCT stage from "downgrade_denied" (FOLD-R24) — a malformed payload is
+    # not a gate policy deny.
+    assert refusal_subject["refusal_stage"] == "downgrade_malformed"
