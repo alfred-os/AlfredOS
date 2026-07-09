@@ -64,6 +64,90 @@ real client, the extract-branch swap, refuse-boot, provenance re-validation,
 
 ---
 
+## Plan-review fixes (rev.2 — FOLD THESE FIRST; they OVERRIDE the task bodies)
+
+A focused 4-lens `/review-plan` (reviewer, test, security, provider) verified the
+design/seam-mapping as byte-correct (0 Critical) and confirmed behaviour-neutrality
+(the only privileged-path catcher, `core.py:829 except Exception`, fires
+identically on `ProviderUnavailableError`). Two High plan-bugs + precision items are
+folded here — apply as you execute the tasks.
+
+**FIX-1 (High, 4-lens — Task 2 Step 6): ONE shared `try`** (already corrected inline
+in Step 6). Wrap BOTH `_call_provider` and `_validate_response` in a single `try`
+so a `ProviderMalformedToolArgumentsError` (empty/malformed forced-tool response)
+is retry-eligible and can never escape uncaught (HARD #7).
+
+**FIX-2 (High, 4-lens — Task 2 Step 2): MIGRATE the json-object tests, do not
+blanket-delete.** The 15 tests in `test_quarantined_extractor_dispatch.py` are the
+sole coverage of the retry/budget/bad-JSON/non-object branches. Per-test disposition:
+
+- `test_dispatch_uses_native_path_for_native_constrained_provider` → rewrite to
+  `_tool_use_response` (folded into Step 2's `test_native_constrained_reads_tool_call_arguments`).
+- `test_dispatch_uses_json_object_path_for_json_mode_provider` → repurpose: a
+  `JSON_OBJECT_MODE`-only provider now routes to `prompt_embedded_fallback`
+  (fork b); use `_text_response`, assert `extraction_mode == "prompt_embedded_fallback"`
+  and `sent.tools == ()`.
+- `test_dispatch_uses_fallback_for_no_capability_provider` → migrate
+  `_json_object_response` → `_text_response`.
+- `test_native_path_wins_when_provider_has_both_capabilities` → rewrite to
+  `_tool_use_response` (NATIVE+JSON → native_constrained).
+- `test_dispatch_retries_on_json_decode_error_then_succeeds`,
+  `test_dispatch_returns_typed_refusal_on_retry_exhaustion`,
+  `test_dispatch_short_circuits_on_wall_clock_budget_breach`,
+  `test_dispatch_treats_non_object_json_as_retry_eligible`,
+  `test_dispatch_retry_path_does_not_carry_prior_response_text` → migrate their fakes
+  `_json_object_response` → `_text_response` (the fallback path still runs
+  `_validate_response`, preserving retry-loop / wall-clock-budget / non-object
+  coverage). KEEP their assertions.
+- `test_dispatch_returns_provider_unavailable_on_httpx_error` → rename to
+  `..._on_provider_error`, inject `ProviderUnavailableError("down")` (folded into
+  Step 2's `test_provider_unavailable_maps_to_typed_refusal`).
+- `test_dispatch_propagates_non_validation_errors` → inject a generic `RuntimeError`
+  (not httpx) and assert it PROPAGATES (HARD #7 "everything else propagates").
+- `test_cached_parsed_schema_refuses_non_object_json`,
+  `test_categorise_validator_error_maps_*`,
+  `test_build_extraction_prompt_retry_does_not_leak_pydantic_loc` → KEEP unchanged.
+- ADD `test_categorise_validator_error_maps_malformed_tool_args_to_schema_mismatch`
+  (the new `ProviderMalformedToolArgumentsError` → `"schema_mismatch"` branch).
+- Delete the `_native_tool_use_response` / `_json_object_response` helper defs only
+  after every referencing test is migrated.
+
+**FIX-3 (Medium — Task 1 Step 7): DeepSeek fixture note.** Mirror Step 1: if
+`test_deepseek.py` has no reusable `deepseek_provider` fixture, add one building
+`DeepSeekProvider(client=AsyncMock(), model="deepseek-chat")`.
+
+**FIX-4 (Low, 3-lens — Task 3 Step 2): a SECOND stale httpx comment.** Besides the
+go-live egress gate, `tests/unit/security/test_quarantine_child_import_closure.py`
+module docstring (~L20-22: "The `provider_dispatch` import (which pulls `httpx`…)")
+is now false — update it too. (Step 2's wording: the go-live gate's httpx-importer
+line is an INLINE comment, not a "module docstring".)
+
+**FIX-5 (Low — Task 1): test the "no raw exc text" claim.** Add an adapter test
+asserting `str(ProviderUnavailableError(...))` contains the provider name + model
+but NOT the injected SDK exception's text (proves `t()` does not render raw `exc`).
+
+**FIX-6 (Low — Task 2): update `provider_dispatch.py`'s own docstrings.** The module
+docstring, `dispatch_extraction`, and `_call_provider` docstrings still describe the
+3-branch / json-object / `httpx` model — rewrite them to the fork-b two-branch seam.
+
+**FIX-7 (Low — Task 4 verification): the coverage gate also covers `base.py`.** The
+`ci.yml` gate asserts 100% on BOTH `provider_dispatch.py` AND `providers/base.py`;
+`ProviderUnavailableError` is a bare class (import-covered) so base.py stays 100% —
+include base.py in the Step-4 coverage check.
+
+**FIX-8 (note only): observable audit `error_type`.** On the privileged turn a
+provider outage's audit `error_type` now records `ProviderUnavailableError` instead
+of the raw `anthropic`/`openai` class name (redaction-positive; behaviour otherwise
+unchanged). Expected, not a regression.
+
+**FORK-B non-default note (rev-005):** routing deepseek-chat from json-object to
+`prompt_embedded_fallback` is a slight reliability downgrade for the (non-default)
+deepseek-as-quarantine config (default is Anthropic / native_constrained). The
+fuller labelled-tool-use path for deepseek-chat is deferred (needs a new
+`ExtractionMode` member) — ratified under fork (b); no action this PR.
+
+---
+
 ## File Structure
 
 - `src/alfred/providers/base.py` — ADD `ProviderUnavailableError(AlfredError)`
@@ -446,7 +530,9 @@ async def test_provider_unavailable_maps_to_typed_refusal() -> None:
     assert result == {"kind": "typed_refusal", "reason": "provider_unavailable"}
 ```
 
-Add `_SCHEMA_JSON = json.dumps({"type": "object", "properties": {"text": {"type": "string"}, "intent": {"type": "string"}}, "required": ["text", "intent"]})` near the top, and import `CompletionRequest`, `ForcedTool`, `ProviderUnavailableError`. Delete every test that referenced the removed `json_object_unconstrained` dispatch mode or the `response_format=` call shape.
+Add `_SCHEMA_JSON = json.dumps({"type": "object", "properties": {"text": {"type": "string"}, "intent": {"type": "string"}}, "required": ["text", "intent"]})` near the top, and import `CompletionRequest`, `ForcedTool`, `ProviderUnavailableError`.
+
+**Do NOT blanket-delete the json-object tests — MIGRATE them** (rev-002/test-002/prov-001/sec-002, 4-lens: they are the sole coverage of the retry-loop / wall-clock-budget / bad-JSON / non-object branches; deleting them fails the 100% gate at Step 9). Apply the per-test disposition in the "Plan-review fixes" fold section at the top of this plan: the retry/exhaustion/budget-breach/non-object tests move their fakes from `_json_object_response` to `_text_response` (the surviving fallback path still routes through `_validate_response`, exercising the same retry branches); `test_dispatch_returns_provider_unavailable_on_httpx_error` is renamed to inject `ProviderUnavailableError`; `test_dispatch_propagates_non_validation_errors` injects a generic `RuntimeError`; the two `_native_tool_use_response` tests move to `_tool_use_response`.
 
 - [ ] **Step 3: Run to verify the rewritten tests fail against the old dispatcher**
 
@@ -544,9 +630,14 @@ async def _call_provider(
 
 - [ ] **Step 6: Update `dispatch_extraction` error handling; drop `import httpx`**
 
-In `dispatch_extraction` (~L209-247): replace the `except httpx.HTTPError` arm with
-a `ProviderUnavailableError` arm, and add `ProviderMalformedToolArgumentsError` to
-the retry-eligible catch:
+In `dispatch_extraction` (~L209-247): replace the TWO separate `try` blocks
+(the `_call_provider` call and the `_validate_response` call) with **ONE** `try`
+wrapping BOTH. This is load-bearing (rev-001/sec-001/test-001, 4-lens): if
+`_call_provider` raises `ProviderMalformedToolArgumentsError` (empty/malformed
+forced-tool response) while it sits in a `try` that only catches
+`ProviderUnavailableError`, the error escapes `dispatch_extraction` uncaught —
+skipping the typed-refusal/audit write (HARD #7 hole). One shared try makes the
+malformed-args path retry-eligible and audit-safe:
 
 ```python
         try:
@@ -556,14 +647,17 @@ the retry-eligible catch:
                 provider=provider,
                 extraction_mode=extraction_mode,
             )
-        except ProviderUnavailableError:
-            # Distinct from cannot_extract: a provider outage, not a model-output
-            # failure, so audit consumers can tell them apart (err-002).
-            return {"kind": "typed_refusal", "reason": "provider_unavailable"}
-        try:
             validated = _validate_response(raw_response, schema_json)
             return {"kind": "extracted", "data": validated, "extraction_mode": extraction_mode}
+        except ProviderUnavailableError:
+            # Terminal (NOT retry-eligible): a provider outage, not a model-output
+            # failure, so audit consumers can tell them apart (err-002).
+            return {"kind": "typed_refusal", "reason": "provider_unavailable"}
         except (ValidationError, json.JSONDecodeError, ProviderMalformedToolArgumentsError) as exc:
+            # ONE try wraps BOTH the provider call and validation so an empty/
+            # malformed forced-tool response (ProviderMalformedToolArgumentsError,
+            # raised by _call_provider) is retry-eligible and can never escape
+            # dispatch_extraction uncaught — HARD #7 (rev-001/sec-001/test-001).
             retry_category = _categorise_validator_error(exc)
 ```
 
