@@ -111,11 +111,13 @@ A focused 9-lens fleet (architect, reviewer, test, security[crux], error, core, 
 ## Task 1: `RealTurnOrchestratorAdapter` — construction, `quarantined_extract`, and `ingest` (prepare-only) with the gate-checked downgrade
 
 **Files:**
+
 - Create: `src/alfred/comms_mcp/real_turn_adapter.py`
 - Modify: `src/alfred/audit/audit_row_schemas.py` (add `COMMS_INBOUND_TURN_REFUSED_FIELDS`)
 - Test: `tests/unit/comms_mcp/test_real_turn_adapter_ingest.py`
 
 **Interfaces:**
+
 - Consumes: `downgrade_to_orchestrator` (`security/quarantine.py:1444`), `tag`/`T2` (`security/tiers.py`), `Extracted`/`TypedRefusal` (`security/quarantine.py`), `TurnEgressContext` (`egress/egress_id.py`), `AuditWriter`/`OutboundDlp`/`RealGate`/`Orchestrator`/`WorkingMemoryPool` (types), `OutboundSenderLike` (`comms_mcp/daemon_runtime.py:105`), `audit_hash` (module is `alfred.comms_mcp.audit_hash` — `inbound.py:52` imports `from alfred.comms_mcp import audit_hash`; FOLD-R10).
 - Produces: `class RealTurnOrchestratorAdapter` with `__init__(*, orchestrator, working_memory_pool, gate, audit_writer, outbound_dlp, extractor_bridge)`, `bind_outbound_sender(sender)`, `async quarantined_extract(body, *, canonical_user_id, source_tier) -> ExtractionResult`, `async ingest(**kwargs) -> _IngestOutcome`. `_InboundUser(slug, display_name, language)` frozen dataclass (satisfies `UserLike`). Descriptor union `_IngestOutcome = _PreparedTurn | _RefusalReply | _HaltNoReply`. Task 2 consumes these in `dispatch`.
 
@@ -568,6 +570,7 @@ class RealTurnOrchestratorAdapter:
 ```
 
 > **Implementer notes:**
+>
 > - FOLD-R2 (RESOLVED — do not improvise): the row is keyed by `inbound_id_hash = audit_hash.hash_inbound_id(notification.inbound_id)` (the existing peppered hasher; `hash_canonical_user_id` does NOT exist and must NOT be invented), and per-user attribution rides `actor_user_id=canonical_user_id` RAW (security-confirmed: an internal resolved slug, raw-eligible, used raw everywhere in the audit log — e.g. `orchestrator.turn`, `core.py:1049`). `audit_hash.set_broker(...)` runs at `inbound.py:707` before this fires in production; unit tests wire it (FOLD-R12).
 > - `result="refused"` is CONFIRMED valid `ck_audit_log_result` vocab (security review — no migration needed).
 > - `Extracted(data=...)` in the test constructs `T3DerivedData` from a dict — mirror how the quarantine unit tests build an `Extracted` (they may use a `NewType` cast helper); adjust the `# type: ignore` accordingly.
@@ -608,16 +611,19 @@ git commit -m "feat(comms): RealTurnOrchestratorAdapter ingest prepares the gate
 ## Task 2: `RealTurnOrchestratorAdapter.dispatch` — the pool-bracketed turn + DLP-scanned send + BudgetError/turn-error legs
 
 **Files:**
+
 - Modify: `src/alfred/comms_mcp/real_turn_adapter.py` (add `dispatch` + `_require_sender`)
 - Test: `tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py`
 
 **Interfaces:**
+
 - Consumes: Task 1's `_PreparedTurn`/`_RefusalReply`/`_HaltNoReply`, `_ADDRESSING_MODE`, `_PERSONA`, `_emit_refused`; `Orchestrator.handle_user_message(*, user, content, working_memory, egress_context)`; `WorkingMemoryPool.acquire(key)/release(key, wm)`; `OutboundDlp.scan_for_outbound(str) -> ScannedOutboundBody`; `OutboundMessageRequest`; `BudgetError` (`budget/guard.py`).
 - Produces: `async dispatch(self, ingested: object) -> None`.
 
 - [ ] **Step 1: Write the failing dispatch tests.**
 
 > **Apply before running (two folds the skeleton below does NOT yet reflect):**
+>
 > - **FOLD-R9:** the `_Dlp` stub + `.body.value` assertions are INVALID — `OutboundMessageRequest.body` is `ScannedOutboundBody` (a NewType over `tuple[str, OutboundDlpScanResult]`) in a frozen/`extra="forbid"` model, so `_send` raises `ValidationError`. Use a real broker-backed `OutboundDlp` (see `tests/helpers/dlp.py`) and assert `request.body[0]` (mirror the echo adapter's dispatch tests).
 > - **FOLD-R12:** every test that reaches `_emit_refused` (budget/turn-error/send-failed legs) must call `audit_hash.set_broker(<test broker>)` (or the test seam) in setup, else `MissingAuditHashPepperError` fires.
 > - **FOLD-R5:** add a pre-bind test — construct the adapter WITHOUT `bind_outbound_sender` and assert `dispatch(_prepared())` raises the loud `RuntimeError` (covers the `sender is None` branch the 100%-branch gate needs).
@@ -917,6 +923,7 @@ class _NotificationView:
 ```
 
 > **Implementer notes:**
+>
 > - `_emit_refused`'s signature currently types the first arg `Any`; that already accepts `_NotificationView`. Keep it `Any`, or introduce a small `_HasInboundIdentity` Protocol (`adapter_id`/`inbound_id`) and type both call paths to it — prefer the Protocol for mypy strictness.
 > - `t("comms.daemon_runtime.sender_not_bound")` / `dispatch_bad_ingested` may already exist (the echo adapter uses `dispatch_bad_ingested` — reuse it; grep the catalog). Add `sender_not_bound` only if the echo adapter's pre-bind message key differs.
 > - `OutboundMessageRequest.body` requires the `ScannedOutboundBody` type minted by `scan_for_outbound` — the real `OutboundDlp` returns it; the test `_Dlp` returns a stand-in. Confirm the field name (`body`) + that `attachments_refs=()` / `addressing_mode="dm"` validate (echo adapter `daemon_runtime.py:208-215`).
@@ -942,12 +949,14 @@ git commit -m "feat(comms): RealTurnOrchestratorAdapter dispatch runs the pool-b
 This task is the **behaviour flip**. The moment `_build_comms_boot_graph` builds a `ProviderRouter`, the graph gains a hard egress-proxy dependency, so the assembly, the `router_override` test seam, the field swap, and the echo-ack test reconciliation land **together** and leave the tree green.
 
 **Files:**
+
 - Modify: `src/alfred/cli/daemon/_comms_boot.py`
 - Modify: `src/alfred/cli/daemon/_commands.py` (pass `real_gate=real_gate` at the call site — `:631`)
 - Modify: `tests/integration/cli/daemon/test_chat_gateway_socket_turn.py`, `tests/unit/cli/daemon/test_daemon_comms_spawn.py`
 - Test: `tests/unit/cli/daemon/test_comms_boot_graph_real_turn.py`
 
 **Interfaces:**
+
 - Consumes: `RealTurnOrchestratorAdapter` (Task 1/2), `build_orchestrator`/`build_router`/`build_working_memory_pool`/`_episodic_factory` (`cli/_bootstrap.py`), `build_boot_session_scope` (`_commands.py:171`).
 - Produces: `_CommsBootGraph.resolver` (new field); `_build_comms_boot_graph(*, ..., real_gate, router_override=None)`; `inbound_orchestrator: RealTurnOrchestratorAdapter` on the graph.
 
@@ -1076,6 +1085,7 @@ Replace the echo build (`:736-742`) with:
 Add `resolver=resolver` to the `_CommsBootGraph(...)` return (`:816`). Import `ProviderRouter`, `CapabilityGate`, `RealTurnOrchestratorAdapter`.
 
 > **Implementer notes:**
+>
 > - `build_router`/`build_orchestrator`/`build_working_memory_pool` raise-capable ctors now run inside the post-spawn `try` (`:698-830`) whose `except` reaps the live bwrap child + ContentStore — so an `IOPlaneUnavailableError`/`UnknownSecretError` from `build_router` correctly reaps before propagating (CR #255 posture preserved). Verify the router build sits INSIDE that `try`.
 > - `quarantined_extractor=None`: the orchestrator's own extract funnel is unused (the adapter extracts via the bridge); `None` keeps it fail-loud if ever invoked. Confirm `build_orchestrator` tolerates `None` (it does — `_bootstrap.py:515`).
 
@@ -1099,6 +1109,7 @@ Add `resolver=resolver` to the `_CommsBootGraph(...)` return (`:816`). Import `P
 Run: `grep -rln "_build_comms_boot_graph" tests/`
 
 The referencing files: `tests/integration/cli/daemon/{test_chat_gateway_socket_turn,test_daemon_comms_inbound_turn,test_forwarded_inbound_gateway_to_core_turn,test_daemon_comms_flip_real_spawn,test_gateway_real_probe_spawn_forwarded_inbound}.py`, `tests/smoke/{test_gateway_chat_restart_smoke,test_slice4_daemon_comms_spawn}.py`, `tests/unit/cli/daemon/{test_comms_boot_graph_status_observer,test_daemon_boot_t3_nonce,test_daemon_comms_spawn,test_daemon_idempotency_store_wired,test_daemon_promoter_wiring}.py`. Per caller:
+
 - **Every** direct `_build_comms_boot_graph(...)` call gains `real_gate=<a fixture RealGate>` (build-only callers, e.g. `test_comms_boot_graph_status_observer`, also set a dummy `ALFRED_EGRESS_PROXY_URL` so the real `build_router` build succeeds offline).
 - **Turn-driving** callers pass `router_override=<scripted router returning a canned answer>` and assert the canned answer (NOT `"ack"`).
 - `test_daemon_comms_spawn.py` monkeypatches `CommsInboundOrchestratorAdapter.bind_outbound_sender` and asserts `body: ["ack", ...]` — retarget to the new adapter + the scripted answer via `router_override`.
@@ -1129,12 +1140,14 @@ git commit -m "feat(comms): wire RealTurnOrchestratorAdapter into the daemon com
 `_build_comms_boot_graph` is the first boot caller of `build_router`; an unset `ALFRED_EGRESS_PROXY_URL` (→ `IOPlaneUnavailableError`) or a missing `deepseek_api_key` (→ `UnknownSecretError`) must become an **audited** `daemon.boot.failed` + exit 2, not an uncaught traceback (the #368 anti-pattern).
 
 **Files:**
+
 - Modify: `src/alfred/cli/daemon/_commands.py` (add two `except` arms to the `:631` try)
 - Modify: the boot-failure-reason module (where `SecretsConfigFailedFailure` etc. live — grep `class SecretsConfigFailedFailure`)
 - i18n: new `daemon.boot.*` msgids
 - Test: `tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py`
 
 **Interfaces:**
+
 - Consumes: `IOPlaneUnavailableError` (`egress/errors.py:23`), `UnknownSecretError` (`security/secrets.py:130`), `_refuse_boot` (NoReturn), the existing `*Failure` reason pattern.
 - Produces: new failure reason(s) + refuse-boot arms.
 
@@ -1262,9 +1275,11 @@ git commit -m "feat(daemon): audited refuse-boot on unavailable egress plane + m
 Release-blocking: this proves the boundary translator over real Postgres/Redis + the live echo quarantine child with a scripted router, and drives the adapter to **100% line AND branch coverage**.
 
 **Files:**
+
 - Test: `tests/integration/comms_mcp/test_real_turn_inbound_boundary.py`
 
 **Interfaces:**
+
 - Consumes: the real graph (Task 3) with a `router_override` scripted router; the real echo quarantine child; real PG/Redis via testcontainers; `process_inbound_message` (drive both `commit_at_dispatch_edge=False` direct and `=True` forwarded).
 
 - [ ] **Step 1: HARD#5 provenance test (FOLD-7 — NOT a body-scan).** The echo child makes extracted T2 `text` == the raw T3 body byte-for-byte, so a whole-request scan false-fails. Assert provenance instead:
@@ -1320,6 +1335,7 @@ git commit -m "test(comms): provenance HARD#5 + cost + bounded-resume for the re
 `display_name` is platform-influenced/UNTRUSTED once it enters the privileged persona prompt (`core.py:727`). This is the first live downgrade consumer; the corpus must pin that a crafted `display_name` is treated as data, not instructions. Uses the `alfred-adversarial-corpus` skill.
 
 **Files:**
+
 - Create: `tests/adversarial/prompt_injection/de-2026-0NN_inbound_display_name_injection.yaml` + its test (mirror an existing `prompt_injection` payload; next free `de-` id — grep `de-2026-` across `tests/adversarial/` and take the next).
 
 - [ ] **Step 1:** Invoke the `alfred-adversarial-corpus` skill; read an existing `prompt_injection` payload + its test as the template. Confirm the `AdversarialPayload` schema (`extra="forbid"`; fields `id/category/threat/ingestion_path/payload/expected_outcome/provenance/references[+note/out_of_scope]`).
@@ -1348,6 +1364,7 @@ git commit -m "test(adversarial): inbound display_name injection corpus entry + 
 ## Task 7: ADR-0049, docstring reconciliation, i18n compile, final verification
 
 **Files:**
+
 - Create: `docs/adr/0049-real-privileged-turn-comms-inbound.md`
 - Modify: `src/alfred/orchestrator/core.py` (docstring `:1104-1111`)
 
