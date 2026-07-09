@@ -14,9 +14,16 @@ was wheel-excluded and unreachable inside the sandbox. The child is spawned via
 
 This ``__init__.py`` is a package marker. The MCP entry point lives in
 :mod:`alfred.security.quarantine_child.__main__`. The provider-dispatch helpers
-(capability-branched ``native_constrained`` / ``json_object_unconstrained`` /
-``prompt_embedded_fallback`` paths) live in
-:mod:`alfred.security.quarantine_child.provider_dispatch` and are module-private
-(consumed by the child entry point only — orchestrator-side callers go through
-:class:`alfred.security.quarantine.QuarantinedExtractor`).
+live in :mod:`alfred.security.quarantine_child.provider_dispatch` and are
+module-private (consumed by the child entry point only — orchestrator-side
+callers go through :class:`alfred.security.quarantine.QuarantinedExtractor`).
+
+Two runtime dispatch branches, closed-domain on the provider's declared
+``ProviderCapability`` set (fork b, #340): ``native_constrained`` (forced
+tool-use, schema-constrained by the provider) and ``prompt_embedded_fallback``
+(schema embedded in the prompt, validated host-side). The
+``json_object_unconstrained`` member of
+:data:`alfred.security.quarantine.ExtractionMode` is RESERVED — no shipped
+provider is JSON-object-only, so it is never selected at runtime (see that
+module's reserved-note).
 """

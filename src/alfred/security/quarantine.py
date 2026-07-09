@@ -268,6 +268,9 @@ TypedRefusalReason = Literal[
 # continuity, so the closed set is enforced at the type level.
 ExtractionMode = Literal[
     "native_constrained",
+    # RESERVED (not selected at runtime since #340 fork b): the dispatcher no
+    # longer routes any provider through DeepSeek json-object mode. The member is
+    # retained for audit-row continuity + a future response_format seam extension.
     "json_object_unconstrained",
     "prompt_embedded_fallback",
 ]

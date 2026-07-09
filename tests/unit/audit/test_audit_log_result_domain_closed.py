@@ -432,8 +432,13 @@ def test_dynamic_result_sites_are_documented() -> None:
             # site so the new `DowngradeDeniedError` class (defined further
             # down, after this site) can reference `AlfredError` at class-def
             # time — the site itself (still `result=audit_result`) is
-            # unchanged.
-            "src/alfred/security/quarantine.py:1263",
+            # unchanged. #340 PR1 Task 2 shifted it again (1263 -> 1266): a
+            # 3-line RESERVED comment was added above the
+            # `json_object_unconstrained` member of `ExtractionMode` (far
+            # above this point in the file) documenting that the dispatcher
+            # no longer selects it at runtime (fork b) — the site itself
+            # (still `result=audit_result`) is unchanged.
+            "src/alfred/security/quarantine.py:1266",
             "src/alfred/supervisor/core.py:692",  # result_label local
             # --- direct AuditEntry(...) construction path (H1) ---
             "src/alfred/audit/log.py:96",  # AuditWriter.append forwards result -> AuditEntry(...)
