@@ -343,8 +343,10 @@ _SANCTIONED_SPAWN_SITE = "security/quarantine_child_io.py"
 
 # The quarantined-LLM child entry module + the network-egress imports a real-LLM
 # child would pull in. The live echo loop (``_run_mcp_server``) imports none of
-# these at module scope; ``provider_dispatch`` (the only ``httpx`` importer) is a
-# LAZY in-function import on the ``handle_extract`` path the live loop never calls.
+# these at module scope. As of #340 PR1, ``provider_dispatch`` itself is
+# egress-free too — it drives an INJECTED provider and imports no httpx/SDK; the
+# egress-capable import lands in PR2's ``_build_provider`` (the real-client
+# construction), which this gate will assert against at go-live.
 # PR-S4-11c-2b0 (ADR-0030): the child moved INTO the wheel under
 # ``src/alfred/security/quarantine_child/__main__.py`` — the egress-import
 # invariant follows it to its new home.
