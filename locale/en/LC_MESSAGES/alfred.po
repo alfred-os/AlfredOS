@@ -1089,9 +1089,9 @@ msgstr ""
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
-"`alfred user add --authorization operator` to bootstrap one, or `alfred "
-"user set --authorization trusted <slug>` to demote extras down to a "
-"single operator, then retry."
+"`alfred user add --name <name> --authorization operator` to bootstrap "
+"one, or `alfred user set --authorization trusted <slug>` to demote "
+"extras down to a single operator, then retry."
 
 #: src/alfred/cli/daemon/_commands.py:913
 #: src/alfred/i18n/_slice_4_reserve.py:121

@@ -52,6 +52,7 @@ A focused 9-lens fleet (architect, reviewer, test, security[crux], error, core, 
 - **FOLD-R13 (rev-006/arch-004) — failure-reason module.** The `*Failure` reason classes live in `src/alfred/cli/daemon/_failures.py` subclassing `_BootFailureBase(BaseModel)` with `failure_reason: Literal[...]` — NOT `_boot_failures.py`. Fix the file table + Task 4 file list + the `git add` path.
 - **FOLD-R14 (arch-003/CORE-2/rev-010) — Task 7 Step 2 is already done.** The `_synthesize_egress_context` docstring on `main @ 042aab2f` already reads "the deterministic-replay journal … is a tools-on follow-up concern, NOT #338's conversational scope." **FOLD:** demote Task 7 Step 2 to VERIFY-ONLY (`grep core.py for any residual 'prerequisite' framing; edit only if found`); pin the citation to `_synthesize_egress_context` (~`core.py:1108`).
 - **FOLD-R15 (prov-eng-1; coordinator-corrected) — the FOLD-2 `UnknownSecretError` arm is unreachable via real boot.** `deepseek_api_key` is a REQUIRED Settings field (`settings.py:86` + validator `:440`), so a missing/placeholder key trips the required-field `SettingsError` guard (`_commands.py:304-309/:344`) BEFORE `_build_comms_boot_graph` calls `build_router` (`:631`). NOTE (coordinator cross-check): that earlier guard DOES emit an audited `daemon.boot.failed` row (type `EnvironmentNotSetFailure`) — it is NOT a bare no-audit `typer.Exit`. Net effect unchanged: the router-key arm is dead on the `_start_async` path. **FOLD (Task 4):** KEEP the arm as defense-in-depth (matching the existing "unreachable-today" `SecretBrokerConfigError` precedent) but reframe its test to drive `build_router`/`_build_comms_boot_graph` DIRECTLY with a broker whose router-key lookup raises `UnknownSecretError` (NOT `_start_async` with the key unset). The sibling `IOPlaneUnavailableError` arm IS reachable (`egress_proxy_url` is optional) and its `_start_async` test is valid.
+  - **Erratum (Task 7, post-hoc):** Task 3's review (`.superpowers/sdd/task-3-report.md`) surfaced a THIRD, previously un-enumerated refuse-boot gap sitting right next to this one: `build_orchestrator`'s `Orchestrator.__init__` synchronously calls `identity_resolver.get_operator()` (`core.py:308`), which raises `IdentityResolutionError` (`identity/resolver.py:191/197`) on zero or more-than-one seeded `authorization=operator` user. Before Task 4 this propagated as an uncaught crash out of `_start_async` (exit 1, no audit row) — the same #368 anti-pattern the two FOLD-2 arms above exist to close, but it is NOT one of them (it fires from the orchestrator-assembly call, not from `build_router`). This was a Task-3-review must-carry, folded directly into Task 4's implementation (shipped in `9c512bfb`) rather than re-planned as a fourth task. See the Task 4 erratum note below for what shipped.
 - **FOLD-R16 (err-001) — the broad `except AlfredError` in ingest.** The downgrade deny is a bare `AlfredError` (`quarantine.py:1498`) — today the ONLY `AlfredError` `downgrade_to_orchestrator` raises pre-audit (error-reviewer verified), so the catch is correct NOW but brittle: a future transient `AlfredError` inside the downgrade would be silently converted to a committed no-reply. **FOLD:** add a narrow-contract comment pinning this assumption + a note to revisit if `downgrade_to_orchestrator` grows another `AlfredError` path; prefer catching the narrowest deny available.
 - **FOLD-R17 (TE-5) — cost-model assertion non-discriminating.** With the empty-registry single completion, `cost_actual_usd` (terminal) == `subject.turn_cost_usd` (turn total) numerically. **FOLD:** assert the row SHAPE (both fields present; `subject.turn_cost_usd` is the turn total per `core.py:1025-1048`) and NOTE the single-completion equality is expected — the negative assertion is a schema/semantics pin, not a numeric discriminator this slice.
 - **FOLD-R18 (rev-007) — DRY.** `quarantined_extract` (delegates to `extractor_bridge.extract`) and the outbound-send path (`scan_for_outbound → OutboundMessageRequest → send_outbound`) + `_require_sender` duplicate the echo adapter. **FOLD:** extract a shared module-level helper for the DLP-scan→request→send and the extract delegation (both adapters import it), OR justify the retained duplication in a comment (the echo class is the documented rollback fallback). Prefer the shared helper.
@@ -1123,7 +1124,7 @@ git commit -m "feat(comms): wire RealTurnOrchestratorAdapter into the daemon com
 
 ---
 
-## Task 4: FOLD-2 refuse-boot arms — `IOPlaneUnavailableError` + router-key `UnknownSecretError`
+## Task 4: FOLD-2 refuse-boot arms — `IOPlaneUnavailableError` + router-key `UnknownSecretError` (+ erratum: `IdentityResolutionError`)
 
 `_build_comms_boot_graph` is the first boot caller of `build_router`; an unset `ALFRED_EGRESS_PROXY_URL` (→ `IOPlaneUnavailableError`) or a missing `deepseek_api_key` (→ `UnknownSecretError`) must become an **audited** `daemon.boot.failed` + exit 2, not an uncaught traceback (the #368 anti-pattern).
 
@@ -1200,6 +1201,45 @@ Register the new `failure_reason` literals wherever the closed `DAEMON_BOOT_FAIL
 Import `IOPlaneUnavailableError` (`from alfred.egress.errors import IOPlaneUnavailableError`) + `UnknownSecretError` (`from alfred.security.secrets import UnknownSecretError`).
 
 > **Implementer note:** `UnknownSecretError` is a `KeyError` subclass — order the `except` arms so it does not accidentally shadow another `KeyError`-derived catch; place it AFTER `SecretBrokerConfigError`. Confirm no earlier arm catches `KeyError`/`AlfredError` broadly (would swallow these). `IOPlaneUnavailableError` is an `AlfredError` — ensure no earlier broad `AlfredError` arm exists.
+
+> **Erratum (Task 7, post-hoc) — a THIRD arm shipped alongside the two above.** This
+> plan enumerated only the two FOLD-2 arms (`IOPlaneUnavailableError` /
+> `UnknownSecretError`), both raised inside `build_router`. Task 3's implementation
+> review (`.superpowers/sdd/task-3-report.md`) surfaced a sibling gap the plan never
+> enumerated: Task 3's cutover to a real `Orchestrator` assembly means
+> `build_orchestrator(...)` now runs `Orchestrator.__init__`, which synchronously
+> calls `identity_resolver.get_operator()` (`core.py:308`) to cache the household
+> operator — raising `IdentityResolutionError` (`identity/resolver.py:191/197`) on
+> zero or more-than-one seeded `authorization=operator` user. Before this arm it
+> propagated as an uncaught crash out of `_start_async` (exit 1, no audit row) — the
+> same #368 anti-pattern this whole task exists to close. This was folded into Task 4
+> as a Task-3-review must-carry (not re-planned as a separate task) and shipped in
+> `9c512bfb` alongside the two planned arms:
+>
+> ```python
+>         except IdentityResolutionError:
+>             # #338 PR2 (Task-3-review must-carry): _build_comms_boot_graph now
+>             # assembles a REAL Orchestrator, whose constructor synchronously calls
+>             # identity_resolver.get_operator() (core.py:308) -- raising this when zero
+>             # or more than one operator user exists (identity/resolver.py:191/197).
+>             await _refuse_boot(
+>                 audit,
+>                 OperatorNotSeededFailure(),
+>                 t("daemon.boot.operator_not_seeded"),
+>                 boot_id=boot_id,
+>                 environment_source=source,
+>             )
+> ```
+>
+> New failure reason `OperatorNotSeededFailure` (`failure_reason: Literal["operator_not_seeded"]`,
+> `src/alfred/cli/daemon/_failures.py:311`), imported alongside the other two, registered
+> in the same closed `DAEMON_BOOT_FAILED_FIELDS` reason vocab, and covered by `test_daemon_boot_egress_refuse.py`'s
+> zero-operator + multi-operator refuse-boot tests. Net operational consequence: **every
+> comms-enabled `alfred daemon start` now hard-requires exactly one pre-seeded
+> `authorization=operator` user** (an operator must run `alfred user add --name <name>
+> --authorization operator` before first boot with comms enabled) — previously the
+> daemon never touched identity resolution before a live turn. This precondition is
+> recorded in ADR-0049.
 
 - [ ] **Step 5: Add the i18n msgids** (`daemon.boot.egress_plane_unavailable`, `daemon.boot.router_secret_missing`) — brace-free, operator-facing remediation copy (e.g. `"Cannot start: the egress proxy (ALFRED_EGRESS_PROXY_URL) is not configured. The core cannot reach any provider without it."`). `pybabel extract`/`update`/`compile`.
 
