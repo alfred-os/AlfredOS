@@ -94,9 +94,12 @@ from alfred.cli.daemon._failures import (
     CommsMultiAdapterUnsupportedFailure,
     CommsPromoterMisconfiguredFailure,
     DaemonBootFailure,
+    EgressPlaneUnavailableFailure,
     EnvironmentNotSetFailure,
+    OperatorNotSeededFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
+    RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
@@ -114,8 +117,25 @@ from alfred.config._environment_loader import (
     EnvironmentSource,
     load_environment,
 )
+
+# #338 PR2 (FOLD-2): ``_build_comms_boot_graph`` is the first boot caller of
+# ``build_router``, which builds the egress-proxied ``ProviderRouter`` the
+# ``RealTurnOrchestratorAdapter`` needs. ``EgressClient.from_settings`` raises this
+# fail-closed when ``ALFRED_EGRESS_PROXY_URL`` is unset/blank (the connectivity-free
+# core has no direct-egress fallback) — caught at the call site below so the daemon
+# refuses boot audited (exit 2) rather than crash uncaught (#368 anti-pattern).
+from alfred.egress.errors import IOPlaneUnavailableError
 from alfred.hooks.errors import HookError
 from alfred.i18n import t
+
+# #338 PR2 (Task-3-review must-carry, NOT one of the plan's originally-enumerated
+# FOLD-2 pair): ``_build_comms_boot_graph`` now assembles a REAL ``Orchestrator``,
+# whose constructor synchronously calls ``identity_resolver.get_operator()``
+# (``core.py:308``) and raises this when zero or more than one operator user
+# exists (``identity/resolver.py:191/197``). Caught at the call site below so a
+# comms-enabled boot with no (or a corrupt multi-operator) seeded identity refuses
+# audited (exit 2) instead of crashing uncaught (#368 anti-pattern).
+from alfred.identity.errors import IdentityResolutionError
 from alfred.plugins.errors import ManifestError
 
 # PR-S4-11c-2b: the comms-graph build spawns the live bwrap quarantined child;
@@ -124,7 +144,14 @@ from alfred.plugins.errors import ManifestError
 # boot-wiring unit tests can monkeypatch the spawn seam (``spawn_quarantine_child_io``)
 # without a real subprocess and still raise this through the boot path.
 from alfred.security.quarantine_child_io import QuarantineChildSpawnError
-from alfred.security.secrets import SecretBrokerConfigError
+
+# #338 PR2 (FOLD-2, defense-in-depth): ``UnknownSecretError`` is a ``KeyError``
+# subclass raised by ``build_router``'s ``secret_broker.get("deepseek_api_key")``.
+# Unreachable via a real boot today (the required-field ``SettingsError`` guard
+# trips first — FOLD-R15), kept for the same reason ``SecretBrokerConfigError``'s
+# sibling arm below is kept. No broad ``KeyError``/``AlfredError`` catch precedes
+# either arm in this try, so ordering among these three new arms is unconstrained.
+from alfred.security.secrets import SecretBrokerConfigError, UnknownSecretError
 from alfred.supervisor.core import Supervisor
 
 if TYPE_CHECKING:
@@ -686,6 +713,61 @@ async def _start_async() -> None:
             # line is unreachable defence-in-depth for the type checker's flow, matching
             # the sibling _refuse_boot arms.
             raise AssertionError("unreachable") from exc  # pragma: no cover
+        except IOPlaneUnavailableError:
+            # FOLD-2 (#338 PR2): _build_comms_boot_graph's Orchestrator assembly calls
+            # build_router, which calls EgressClient.from_settings FIRST — raising this
+            # fail-closed when ALFRED_EGRESS_PROXY_URL is unset/blank. Unlike the secrets
+            # arms above, this IS reachable via a real boot: egress_proxy_url is an
+            # OPTIONAL Settings field, so no earlier required-field guard trips first.
+            # The connectivity-free core (Spec C / ADR-0042) has no direct-egress
+            # fallback, so REFUSE boot fail-closed (audited, exit 2) rather than crash
+            # uncaught (CLAUDE.md hard rule #7 — the #368 anti-pattern).
+            await _refuse_boot(
+                audit,
+                EgressPlaneUnavailableFailure(),
+                t("daemon.boot.egress_plane_unavailable"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except UnknownSecretError:
+            # FOLD-2 (#338 PR2, defense-in-depth): the same build_router call resolves
+            # the DeepSeek provider key via secret_broker.get("deepseek_api_key"), which
+            # raises this (a KeyError subclass) when the key is unprovisioned.
+            # UNREACHABLE via a real _start_async boot TODAY (FOLD-R15): deepseek_api_key
+            # is a REQUIRED Settings field, so a missing/placeholder key already trips
+            # the earlier required-field SettingsError guard (audited as
+            # EnvironmentNotSetFailure) before _build_comms_boot_graph ever runs. Kept
+            # for the same reason the (also unreachable-today) SecretBrokerConfigError
+            # arm above is kept — a future decoupling of the Settings field from the
+            # broker lookup must still refuse fail-closed rather than crash uncaught
+            # (CLAUDE.md hard rule #7). The operator message names only the missing KEY
+            # CLASS, never a secret value.
+            await _refuse_boot(
+                audit,
+                RouterSecretMissingFailure(),
+                t("daemon.boot.router_secret_missing"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except IdentityResolutionError:
+            # #338 PR2 (Task-3-review must-carry): _build_comms_boot_graph now
+            # assembles a REAL Orchestrator, whose constructor synchronously calls
+            # identity_resolver.get_operator() (core.py:308) — raising this when zero
+            # or more than one operator user exists (identity/resolver.py:191/197).
+            # REACHABLE via a real boot (a fresh install with no seeded operator, or a
+            # corrupt multi-operator state). Before this arm it propagated as an
+            # UNCAUGHT crash out of _start_async (exit 1, no audit row) — the #368
+            # anti-pattern. REFUSE boot fail-closed (audited, exit 2) instead (CLAUDE.md
+            # hard rule #7). The SAME reason covers both the zero- and
+            # multiple-operator cases — the resolver's own message differs, but this
+            # arm does not (and the audit row stays content-free either way).
+            await _refuse_boot(
+                audit,
+                OperatorNotSeededFailure(),
+                t("daemon.boot.operator_not_seeded"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
 
     # Supervisor construction + pidfile + start live INSIDE the try so the finally
     # reaps the live quarantine child (comms_graph) on a failure of ANY of them, not
