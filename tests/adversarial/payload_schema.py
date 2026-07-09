@@ -77,6 +77,12 @@ IngestionPath = Literal[
     "proposal_dispatch_failure",  # OutboundDlp scan of failure_detail
     "comms_inbound_message",  # raw platform body before identity resolution
     "stdio_fd3_key_delivery",  # provider-key fd-3 framing
+    # #338 PR2 addition: resolved identity display_name entering the
+    # privileged persona system prompt (render_persona_prompt) WITHOUT a
+    # T3->T2 downgrade gate — distinct from `comms_inbound_message` (raw
+    # platform BODY, pre-identity-resolution, gated by quarantined_extract);
+    # this is resolved identity METADATA that skips that gate by design.
+    "comms_inbound_display_name",
 ]
 
 ExpectedOutcome = Literal[
