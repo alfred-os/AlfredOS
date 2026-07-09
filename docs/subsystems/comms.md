@@ -371,10 +371,19 @@ The daemon's inbound quarantined extraction is **live in production**. When
 spawned via `spawn_quarantine_child_io` — the ADR-0027 fixture extractor is gone
 (see the ADR-0027 PR-S4-11c-2b amendment). The boot-minted authorised T3 nonce
 drives a real `T3BodyRecorder` that tags the inbound body `TaggedContent[T3]` and
-stages it for the inline-over-wire content path (ADR-0029). The 2b child runs a
-**deterministic-echo loop** — no real LLM, no network egress — so the open-egress
-gap (`#230`, above) still contains nothing that can use it; the real LLM lands in
-PR-S4-11c-2c.
+stages it for the inline-over-wire content path (ADR-0029). The 2b child still runs
+a **deterministic-echo loop** — no real LLM, no network egress in the quarantined
+child — so the open-egress gap (`#230`, above) still contains nothing that can use
+it; the real quarantined-LLM child lands in `#340`.
+
+**The PRIVILEGED side now runs a real LLM turn.** `#338` PR2 / [ADR-0049](../adr/0049-real-privileged-turn-comms-inbound.md)
+retired the earlier "the real LLM lands in PR-S4-11c-2c" plan: `_build_comms_boot_graph`
+now wires `RealTurnOrchestratorAdapter` (`src/alfred/comms_mcp/real_turn_adapter.py`) as
+the `_OrchestratorLike` implementation, which gate-checks the T3→T2 downgrade
+(`downgrade_to_orchestrator`) and calls the real `Orchestrator.handle_user_message` —
+a genuine privileged-provider round trip, egress tools deferred. This is distinct from,
+and does not change, the quarantined child's own real-LLM graduation (`#340`), which
+the paragraph above still governs.
 
 **Fail-closed dev-host behaviour — operators read this before enabling a comms
 adapter.** The quarantined child is `[sandbox] kind = "full"` (bwrap), so a daemon
@@ -393,9 +402,32 @@ constructs none of the quarantine graph and is unaffected.
 The child's provider key is resolved from the secret broker by the fixed id
 `quarantine_provider_api_key` (`config/routing.yaml [quarantine] secret_id`). When
 unset it falls back to a documented placeholder with a loud `structlog` warning —
-the 2b echo child reads, scrubs, and discards it without a provider call.
-PR-S4-11c-2c flips the unset path to refuse-boot once the child makes a real
-provider call.
+the 2b echo child reads, scrubs, and discards it without a provider call. `#340`
+flips the unset path to refuse-boot once the child makes a real provider call.
+
+**Three new refuse-boot arms guard the privileged `RealTurnOrchestratorAdapter`
+construction (`#338` PR2).** `_build_comms_boot_graph` now also builds the
+egress-proxied `ProviderRouter` and resolves the household operator BEFORE the
+adapter can serve a turn; each failure mode is audited and refuses boot fail-closed
+(exit 2), never an uncaught crash:
+
+- `egress_plane_unavailable` — `ALFRED_EGRESS_PROXY_URL` is unset or blank.
+  The connectivity-free core (Spec C) has no direct-egress fallback, so
+  `EgressClient.from_settings` raises `IOPlaneUnavailableError` and boot refuses.
+- `router_secret_missing` — the primary provider secret (`deepseek_api_key`)
+  could not be resolved from the secret broker when building the router.
+  Defense-in-depth: unreachable via a real boot today because the required
+  `Settings.deepseek_api_key` field already trips an earlier `SettingsError`
+  guard (audited `environment_not_set`) first.
+- `operator_not_seeded` — `Orchestrator.__init__` synchronously calls
+  `identity_resolver.get_operator()` (`orchestrator/core.py:308`), which raises
+  `IdentityResolutionError` when zero or more than one live operator user
+  exists. Reachable on a fresh install with comms enabled but no operator
+  seeded yet, or a corrupt multi-operator state — the operator-facing message
+  (routed through `t()`, see `identity.operator_not_seeded_*`) names the
+  copy-pasteable remedy (`alfred user add --name <name> --authorization
+  operator`, or `alfred user list` + `alfred user set --authorization
+  trusted <slug>` to demote extras).
 
 ### Spec B G6-3: the gateway adapter credential path (core-injects-at-spawn)
 

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-09 01:17+0100\n"
+"POT-Creation-Date: 2026-07-09 09:17+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1076,22 +1076,24 @@ msgstr ""
 "Cannot start: the egress proxy (ALFRED_EGRESS_PROXY_URL) is not "
 "configured or is blank. The connectivity-free core has no direct-egress "
 "fallback and cannot reach any provider without it. Set it to the gateway "
-"L7 CONNECT proxy (compose default http://alfred-gateway:8889) and retry."
+"L7 CONNECT proxy (compose default http://alfred-gateway:8889) and re-run "
+"`alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:748
 msgid "daemon.boot.router_secret_missing"
 msgstr ""
-"Cannot start: the primary provider secret could not be resolved from the "
-"secret broker. Check the secrets file / environment variable for the "
-"configured provider key and retry."
+"Cannot start: the primary provider secret (`deepseek_api_key`) could not "
+"be resolved from the secret broker. Check the secrets file / environment "
+"variable for that key and re-run `alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:767
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
 "`alfred user add --name <name> --authorization operator` to bootstrap "
-"one, or `alfred user set --authorization trusted <slug>` to demote "
-"extras down to a single operator, then retry."
+"one, or run `alfred user list` to find the extra slugs and `alfred user "
+"set --authorization trusted <slug>` to demote each down to a single "
+"operator, then re-run `alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:913
 #: src/alfred/i18n/_slice_4_reserve.py:121
@@ -1463,7 +1465,7 @@ msgstr ""
 "it. Refusing to boot."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:203
-#: src/alfred/comms_mcp/real_turn_adapter.py:373
+#: src/alfred/comms_mcp/real_turn_adapter.py:380
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
@@ -1472,15 +1474,15 @@ msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:236
-#: src/alfred/comms_mcp/real_turn_adapter.py:339
+#: src/alfred/comms_mcp/real_turn_adapter.py:346
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:235
+#: src/alfred/comms_mcp/real_turn_adapter.py:240
 msgid "comms.inbound.real_turn.extraction_refused"
 msgstr "Sorry, I couldn't process that message. Please try rephrasing."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:243
+#: src/alfred/comms_mcp/real_turn_adapter.py:248
 msgid "comms.inbound.real_turn.unexpected_extract_kind"
 msgstr "Unexpected extraction result kind reached the real-turn adapter."
 
@@ -2532,6 +2534,25 @@ msgstr ""
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
 
+# ---------------------------------------------------------------------------
+# IdentityResolver.get_operator() operator-facing remedy text (#338 PR2
+# review i18n-001). Routed through t() because a generic
+# ``except IdentityResolutionError as exc: typer.echo(str(exc), err=True)``
+# CLI catch (identity/cli.py's bind/unbind/remove/set handlers) can surface
+# this message to an operator verbatim.
+#: src/alfred/identity/resolver.py:199
+msgid "identity.operator_not_seeded_zero"
+msgstr ""
+"No operator user exists. Run `alfred user add --name <name> "
+"--authorization operator` to bootstrap one."
+
+#: src/alfred/identity/resolver.py:202
+msgid "identity.operator_not_seeded_multi"
+msgstr ""
+"Multiple operator users exist ({slugs}). This is a corrupt state; run "
+"`alfred user list` to see all users, then demote all but one via `alfred "
+"user set --authorization trusted <slug>`."
+
 #: src/alfred/memory/egress_idempotency.py:124
 msgid "egress.ledger_unknown_egress_id"
 msgstr ""
@@ -3028,11 +3049,11 @@ msgstr ""
 "egress was REFUSED and the trip recorded for the operator. This is a "
 "security event — inspect the audit log to find the originating turn."
 
-#: src/alfred/security/quarantine.py:1426
+#: src/alfred/security/quarantine.py:1425
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:1498
+#: src/alfred/security/quarantine.py:1511
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 

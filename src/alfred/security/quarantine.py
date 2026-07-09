@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NewType, cast, get_arg
 import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from alfred.errors import AlfredError
 from alfred.hooks import (
     SYSTEM_ONLY_TIERS,
     SYSTEM_OPERATOR_TIERS,
@@ -47,6 +48,7 @@ from alfred.hooks import (
     get_registry,
     invoke,
 )
+from alfred.i18n import t
 from alfred.security.tiers import T3
 
 # CR-156 round-7 / CR-158 T5: ``invoke`` is bound at module scope so
@@ -1420,9 +1422,6 @@ async def quarantined_to_structured(
         hookpoint="quarantine.dereference",
         content_tier="T3",
     ):
-        from alfred.errors import AlfredError
-        from alfred.i18n import t
-
         raise AlfredError(t("security.quarantine.dereference_denied"))
     return await extractor.extract(handle, schema)
 
@@ -1430,6 +1429,23 @@ async def quarantined_to_structured(
 # ---------------------------------------------------------------------------
 # downgrade_to_orchestrator — full impl (PR-S3-4 Task 8)
 # ---------------------------------------------------------------------------
+
+
+class DowngradeDeniedError(AlfredError):
+    """The capability gate denied a T3-derived→orchestrator downgrade.
+
+    Raised by :func:`downgrade_to_orchestrator` when
+    ``gate.check_content_clearance(..., hookpoint="t3.downgrade_to_orchestrator",
+    content_tier="T3")`` returns ``False`` (#338 PR2 review FOLD-R16). A
+    dedicated subclass — rather than a bare :class:`AlfredError` — lets
+    callers (notably
+    :meth:`alfred.comms_mcp.real_turn_adapter.RealTurnOrchestratorAdapter.ingest`)
+    narrow their ``except`` to THIS specific denial. A broad
+    ``except AlfredError`` would also silently swallow any OTHER
+    :class:`AlfredError` raised later in the same call chain (e.g. a
+    transient provider/audit failure), committing the turn with no reply
+    instead of propagating the unexpected failure loudly.
+    """
 
 
 # Closed-vocabulary downgrade-reason tags. The audit row carries this
@@ -1492,10 +1508,7 @@ async def downgrade_to_orchestrator(
         hookpoint="t3.downgrade_to_orchestrator",
         content_tier="T3",
     ):
-        from alfred.errors import AlfredError
-        from alfred.i18n import t
-
-        raise AlfredError(t("security.quarantine.downgrade_denied"))
+        raise DowngradeDeniedError(t("security.quarantine.downgrade_denied"))
 
     from alfred.audit import audit_row_schemas
 

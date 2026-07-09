@@ -409,14 +409,17 @@ class _RealStack:
         self,
         *,
         body: Mapping[str, object],
-        canonical_user_id: str = _ALICE_SLUG,
         platform_user_id: str = _ALICE_PLATFORM_ID,
         inbound_id: str | None = None,
         commit_at_dispatch_edge: bool = False,
         idempotency_store: PostgresInboundIdempotencyStore | None = None,
         attempt_store: PostgresForwardedDispatchAttemptStore | None = None,
     ) -> None:
-        del canonical_user_id  # resolved host-side from platform_user_id; kept for readability
+        # Identity is resolved host-side from platform_user_id — there is no
+        # canonical_user_id input to this seam (CR-cloud, #338 PR2 review: the
+        # prior `canonical_user_id: str = _ALICE_SLUG` param was immediately
+        # `del`'d and could silently mislead a future caller passing a
+        # mismatched value with no error).
         notification = InboundMessageNotification(
             adapter_id=_ADAPTER_ID,
             inbound_id=inbound_id or uuid.uuid4().hex,

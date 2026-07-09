@@ -37,7 +37,12 @@ from alfred.comms_mcp.protocol import OutboundMessageRequest
 from alfred.errors import AlfredError
 from alfred.i18n import set_language, t
 from alfred.orchestrator.core import _ALFRED_PERSONA_ID as _PERSONA
-from alfred.security.quarantine import Extracted, TypedRefusal, downgrade_to_orchestrator
+from alfred.security.quarantine import (
+    DowngradeDeniedError,
+    Extracted,
+    TypedRefusal,
+    downgrade_to_orchestrator,
+)
 from alfred.security.tiers import T2, tag
 
 if TYPE_CHECKING:
@@ -242,14 +247,16 @@ class RealTurnOrchestratorAdapter:
         if not isinstance(extracted, Extracted):  # pragma: no cover - exhaustive union
             raise RuntimeError(t("comms.inbound.real_turn.unexpected_extract_kind"))
         try:
-            # FOLD-R16: `downgrade_to_orchestrator` raises ONLY a bare AlfredError on
-            # a gate policy deny pre-audit today (quarantine.py:1498). This catch is
-            # correct now but brittle — REVISIT if that helper grows another
-            # AlfredError path (a transient fault would be silently committed here).
+            # FOLD-R16 (#338 PR2 review): `downgrade_to_orchestrator` raises the typed
+            # `DowngradeDeniedError` (a narrow `AlfredError` subclass) on a gate policy
+            # deny — narrowing the catch to it (rather than the broad `AlfredError`)
+            # means a future, unrelated `AlfredError` raised inside that call (e.g. a
+            # transient audit-write fault) propagates loudly instead of being silently
+            # committed here as a no-reply turn.
             cleared = await downgrade_to_orchestrator(
                 extracted.data, gate=self._gate, audit_writer=self._audit
             )
-        except AlfredError as exc:
+        except DowngradeDeniedError as exc:
             await self._emit_refused(
                 notification, canonical_user_id=canonical_user_id, stage="downgrade_denied", exc=exc
             )

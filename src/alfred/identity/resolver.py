@@ -53,6 +53,7 @@ from babel import Locale, UnknownLocaleError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from alfred.i18n import t
 from alfred.identity.errors import (
     IdentityResolutionError,
     LastOperatorRemovalRefusedError,
@@ -172,9 +173,16 @@ class IdentityResolver:
         """Return the single live operator user.
 
         Raises :class:`IdentityResolutionError` if zero or more than one
-        operator exists — the CLI surfaces a friendly hint pointing at
-        ``alfred user add --authorization operator`` or
-        ``alfred user set --replace-operator`` respectively.
+        operator exists. The message is routed through ``t()`` (i18n-001,
+        #338 PR2 review) rather than hardcoded — several CLI catch blocks
+        (``identity/cli.py``'s ``bind``/``unbind``/``remove``/``set``
+        handlers) do a generic ``except IdentityResolutionError as exc:
+        typer.echo(str(exc), err=True)``, so this message can reach an
+        operator verbatim. It names a copy-pasteable remedy: zero-operator
+        points at ``alfred user add --name <name> --authorization
+        operator``; the multi-operator (corrupt-state) case points at
+        ``alfred user list`` (to find the slugs) followed by ``alfred user
+        set --authorization trusted <slug>`` for each extra.
         """
         with self._session_factory() as session:
             operators = (
@@ -188,16 +196,10 @@ class IdentityResolver:
                 .all()
             )
         if not operators:
-            raise IdentityResolutionError(
-                "No operator user exists. Run `alfred user add --authorization operator` "
-                "to bootstrap one."
-            )
+            raise IdentityResolutionError(t("identity.operator_not_seeded_zero"))
         if len(operators) > 1:
             slugs = ", ".join(sorted(u.slug for u in operators))
-            raise IdentityResolutionError(
-                f"Multiple operator users exist ({slugs}). This is a corrupt state; "
-                "demote all but one via `alfred user set --authorization trusted <slug>`."
-            )
+            raise IdentityResolutionError(t("identity.operator_not_seeded_multi", slugs=slugs))
         return operators[0]
 
     def show(self, *, slug: str) -> User | None:
