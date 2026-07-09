@@ -321,24 +321,32 @@ which extraction path `QuarantinedExtractor` dispatches:
 | --- | --- | --- |
 | Anthropic | Tool-use shape | `NATIVE_CONSTRAINED_GENERATION` |
 | OpenAI | Strict structured-outputs (`strict: true` mandatory) | `NATIVE_CONSTRAINED_GENERATION` |
-| DeepSeek-chat | JSON mode (no schema enforcement) | `JSON_OBJECT_MODE` |
+| DeepSeek-chat | JSON mode (declared, not dispatch-selected) | `JSON_OBJECT_MODE` |
 
-`JSON_OBJECT_MODE` routes through the retry-and-validate path,
-identical to `prompt_embedded_fallback`. The audit row records
-`extraction_mode="json_object_unconstrained"` to preserve forensic
-traceability: operators can distinguish true schema enforcement from
-best-effort validation. The closed `ExtractionMode` Literal:
+Dispatch is two-way, closed on `NATIVE_CONSTRAINED_GENERATION` alone
+(#340 fork b): a provider declaring it uses the `native_constrained`
+tool-use path; every other provider — including DeepSeek-chat, which
+declares `JSON_OBJECT_MODE` but not `NATIVE_CONSTRAINED_GENERATION` —
+uses `prompt_embedded_fallback`. The DeepSeek-style JSON-object-mode
+runtime branch is REMOVED: no shipped provider is JSON-object-only, and
+every constrained-capable provider declares a native tool-use path. The
+closed `ExtractionMode` Literal:
 
 ```python
 ExtractionMode = Literal[
     "native_constrained",
+    # RESERVED (not selected at runtime since #340 fork b): retained for
+    # audit-row continuity + a future response_format seam extension.
     "json_object_unconstrained",
     "prompt_embedded_fallback",
 ]
 ```
 
-Drift on this Literal breaks audit-row continuity, so the closed set is
-enforced at the type level.
+`json_object_unconstrained` is RESERVED, not selected at runtime —
+deepseek-chat audit rows record
+`extraction_mode="prompt_embedded_fallback"`. Drift on this Literal
+breaks audit-row continuity, so the closed set is enforced at the type
+level.
 
 ### Retry-guidance hygiene
 

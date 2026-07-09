@@ -258,7 +258,7 @@ map as:
 | ExtractionMode | Today (aspirational) | #339 seam target |
 | --- | --- | --- |
 | `native_constrained` | `complete(tools=[{name,description,input_schema}], tool_choice={type:tool,name})` → `response.tool_use_input` | `complete(CompletionRequest(tools=(ToolDefinition(name, description, input_schema=schema),), tool_choice=ForcedTool(name)))` → `response.tool_calls[0].arguments` |
-| `prompt_embedded_fallback` | `complete(messages=[...])` → `response.content` | `complete(CompletionRequest(messages=(Message(role="user", content=prompt),)))` → `response.content` |
+| `prompt_embedded_fallback` | `complete(messages=[...])` → `response.content` | `complete(CompletionRequest(messages=[Message(role="user", content=prompt)]))` → `response.content` |
 | `json_object_unconstrained` | `complete(response_format={type:json_object})` → `response.content` | **no seam expression** — see §4.2 |
 
 `native_constrained` and `prompt_embedded_fallback` map cleanly. The `arguments`
@@ -275,18 +275,23 @@ be expressed on it. Three options:
   the DeepSeek adapter. Faithful to the 3-mode model; but re-opens the frozen,
   security-reviewed #339 provider models → needs an ADR (provider-seam change) and
   widens blast radius to the privileged provider path.
-- **(b) RECOMMENDED — reconcile the constrained path to tool-use.** Select the
-  tool-use (`native_constrained`) shape when the provider declares
-  `NATIVE_CONSTRAINED_GENERATION` **or** `TOOL_USE`; else
-  `prompt_embedded_fallback`. This covers every shipped constrained-capable
-  provider (Anthropic + `deepseek-chat` both declare `TOOL_USE`), so **no live
-  capability is lost today** — no shipped provider is JSON-object-only. **rev.2
-  (fold 7):** PR1 REMOVES the `json_object_unconstrained` runtime dispatcher
-  branch (a retained-but-dead branch cannot hit the §4.5 100%-branch target); the
-  `ExtractionMode` Literal member is kept type-only-reserved with a doc note. Real
-  `response_format` support is deferred to option (a) if/when a JSON-object-only
-  provider ever ships. No frozen-seam change; smallest blast radius; aligns with
-  the default (Anthropic tool-use) and #339's `TOOL_USE` wiring.
+- **(b) RECOMMENDED — reconcile the constrained path to tool-use, gated on
+  `NATIVE_CONSTRAINED_GENERATION` alone.** Select the tool-use
+  (`native_constrained`) shape when the provider declares
+  `NATIVE_CONSTRAINED_GENERATION`; else `prompt_embedded_fallback`.
+  **IMPLEMENTED (minimal form):** the dispatcher branches on
+  `NATIVE_CONSTRAINED_GENERATION` ONLY — `deepseek-chat` declares `TOOL_USE`
+  but not `NATIVE_CONSTRAINED_GENERATION`, so it routes through
+  `prompt_embedded_fallback`, not a distinctly-labelled tool-use mode. A fuller
+  variant that also routes a `TOOL_USE`-but-not-native provider through a
+  labelled tool-use mode (needing a new `ExtractionMode` member) is DEFERRED —
+  not part of this PR. **rev.2 (fold 7):** PR1 REMOVES the
+  `json_object_unconstrained` runtime dispatcher branch (a retained-but-dead
+  branch cannot hit the §4.5 100%-branch target); the `ExtractionMode` Literal
+  member is kept type-only-reserved with a doc note. Real `response_format`
+  support is deferred to option (a) if/when a JSON-object-only provider ever
+  ships. No frozen-seam change; smallest blast radius; aligns with the default
+  (Anthropic tool-use).
 - **(c) Keep the aspirational json_object branch.** Rejected — that is the
   "shape no adapter implements" problem PR1 exists to fix.
 
