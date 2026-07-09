@@ -16,10 +16,13 @@ from alfred.cli.daemon._failures import (
     CommsAdapterSpawnFailedFailure,
     CommsAdapterUnknownKindFailure,
     CommsPromoterMisconfiguredFailure,
+    EgressPlaneUnavailableFailure,
     EnvironmentNotSetFailure,
     LauncherNotPolicyResolvingFailure,
+    OperatorNotSeededFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
+    RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
     SnapshotRefInitFailedFailure,
     T3NonceRegistrationFailedFailure,
@@ -44,6 +47,9 @@ from alfred.cli.daemon._failures import (
         (CommsAdapterBindFailedFailure, "comms_adapter_bind_failed"),
         (CommsAdapterUnknownKindFailure, "comms_adapter_unknown_kind"),
         (CommsPromoterMisconfiguredFailure, "comms_promoter_misconfigured"),
+        (EgressPlaneUnavailableFailure, "egress_plane_unavailable"),
+        (RouterSecretMissingFailure, "router_secret_missing"),
+        (OperatorNotSeededFailure, "operator_not_seeded"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:

@@ -266,6 +266,73 @@ class CommsPromoterMisconfiguredFailure(_BootFailureBase):
     adapter_id: str = ""
 
 
+class EgressPlaneUnavailableFailure(_BootFailureBase):
+    """The egress plane (``ALFRED_EGRESS_PROXY_URL``) is unset/blank at boot (#338 PR2).
+
+    ``_build_comms_boot_graph`` is the first boot caller of
+    :func:`alfred.cli._bootstrap.build_router`, which builds a REAL, egress-proxied
+    :class:`alfred.providers.router.ProviderRouter` for the
+    :class:`alfred.comms_mcp.real_turn_adapter.RealTurnOrchestratorAdapter` (the
+    deterministic-echo adapter is gone). ``build_router`` calls
+    :meth:`alfred.egress.client.EgressClient.from_settings` FIRST, which raises
+    :class:`alfred.egress.errors.IOPlaneUnavailableError` when the proxy URL is
+    unset/blank — the connectivity-free core (Spec C / ADR-0042) has no
+    direct-egress fallback. REFUSE fail-closed (CLAUDE.md hard rule #7) rather than
+    let this propagate as an uncaught traceback (the #368 anti-pattern) out of
+    ``_start_async``. Reachable in practice: unlike ``deepseek_api_key``,
+    ``egress_proxy_url`` is an OPTIONAL ``Settings`` field, so no earlier
+    required-field guard trips first.
+    """
+
+    failure_reason: Literal["egress_plane_unavailable"] = "egress_plane_unavailable"
+
+
+class RouterSecretMissingFailure(_BootFailureBase):
+    """The router's ``deepseek_api_key`` secret lookup raised at boot (#338 PR2).
+
+    The same ``build_router`` call (see :class:`EgressPlaneUnavailableFailure`)
+    resolves the DeepSeek provider key via
+    ``secret_broker.get("deepseek_api_key")``, which raises
+    :class:`alfred.security.secrets.UnknownSecretError` (a ``KeyError`` subclass)
+    when the key is unprovisioned. UNREACHABLE via a real ``_start_async`` boot
+    TODAY: ``deepseek_api_key`` is a REQUIRED ``Settings`` field, so a missing key
+    already trips the earlier required-field ``SettingsError`` guard (itself
+    audited as ``EnvironmentNotSetFailure``) before ``_build_comms_boot_graph``
+    ever runs. Kept as DEFENSE-IN-DEPTH — mirroring the ``SecretsConfigFailedFailure``
+    "unreachable-today" precedent at the sibling ``_build_comms_boot_graph`` call
+    site — so a future decoupling of the Settings field from the broker lookup
+    (or a broker-layer secrets-file drift) still refuses fail-closed (audited,
+    exit 2) rather than crash uncaught (CLAUDE.md hard rule #7).
+    """
+
+    failure_reason: Literal["router_secret_missing"] = "router_secret_missing"
+
+
+class OperatorNotSeededFailure(_BootFailureBase):
+    """No single live operator user exists when the comms boot graph assembles (#338 PR2).
+
+    #338 PR2's cutover to :class:`alfred.comms_mcp.real_turn_adapter.RealTurnOrchestratorAdapter`
+    makes ``_build_comms_boot_graph`` build a REAL
+    :class:`alfred.orchestrator.core.Orchestrator`. Its constructor SYNCHRONOUSLY
+    calls ``identity_resolver.get_operator()`` (``core.py:308``) to cache the
+    household operator for the orchestrator's lifetime, which raises
+    :class:`alfred.identity.errors.IdentityResolutionError` when ZERO or MORE THAN
+    ONE operator user exists (``identity/resolver.py:191/197``). Before this arm
+    that propagated as an UNCAUGHT crash out of ``_start_async`` (exit 1, no audit
+    row) — the #368 anti-pattern this whole failure family exists to close
+    (CLAUDE.md hard rule #7). Not one of the plan's originally-enumerated FOLD-2
+    pair; carried forward from the Task-3 review as a must-fix sibling gap. The
+    operator-facing message names the concrete remedy (``alfred user add
+    --authorization operator``); the SAME reason covers both the zero- and
+    multiple-operator cases (the resolver's message differs, but the CLI's
+    ``except`` arm — and this discriminator — does not distinguish them; the
+    audit row's content-free contract carries no operator-identifying detail
+    either way).
+    """
+
+    failure_reason: Literal["operator_not_seeded"] = "operator_not_seeded"
+
+
 class CommsMultiAdapterUnsupportedFailure(_BootFailureBase):
     """More than one comms adapter is enabled — unsupported in this cut (FIX 4).
 
@@ -298,7 +365,10 @@ DaemonBootFailure = Annotated[
     | CommsAdapterBindFailedFailure
     | CommsAdapterUnknownKindFailure
     | CommsPromoterMisconfiguredFailure
-    | CommsMultiAdapterUnsupportedFailure,
+    | CommsMultiAdapterUnsupportedFailure
+    | EgressPlaneUnavailableFailure
+    | RouterSecretMissingFailure
+    | OperatorNotSeededFailure,
     Field(discriminator="failure_reason"),
 ]
 """Discriminated union over the daemon-boot refusal modes (spec §3.4 +
@@ -309,4 +379,6 @@ PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ADR-0031 ``comms_adapter_bind_failed`` +
 #374 ``comms_adapter_unknown_kind`` +
 PR-S4-235-1 ``comms_promoter_misconfigured`` +
-FIX 4 ``comms_multi_adapter_unsupported``)."""
+FIX 4 ``comms_multi_adapter_unsupported`` +
+#338 PR2 ``egress_plane_unavailable`` / ``router_secret_missing`` (FOLD-2) +
+``operator_not_seeded`` (Task-3-review must-carry))."""

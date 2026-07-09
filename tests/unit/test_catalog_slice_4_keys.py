@@ -144,6 +144,13 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # classifier-bearing adapter kind that yields a None sub-payload promoter
     # refuses boot fail-closed rather than tripping M2 on the first message.
     "daemon.boot.comms_promoter_misconfigured",
+    # #338 PR2 Task 4 (FOLD-2 + Task-3-review must-carry): the RealTurnOrchestratorAdapter
+    # cutover makes _build_comms_boot_graph assemble a REAL egress-proxied ProviderRouter +
+    # a REAL Orchestrator; these three faults were previously UNCAUGHT (the #368
+    # anti-pattern) and now refuse boot audited.
+    "daemon.boot.egress_plane_unavailable",
+    "daemon.boot.router_secret_missing",  # unreachable-today defense-in-depth (FOLD-R15)
+    "daemon.boot.operator_not_seeded",
     "daemon.stop.no_daemon",
     "daemon.stop.stale_pidfile",
     "daemon.status.not_running",
