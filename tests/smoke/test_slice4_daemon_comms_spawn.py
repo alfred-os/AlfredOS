@@ -153,22 +153,11 @@ def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
         # #338 PR2: _build_comms_boot_graph now constructs a REAL Orchestrator,
         # whose constructor synchronously calls identity_resolver.get_operator()
         # at BOOT time (not just at first turn) — the daemon refuses to come up
-        # with zero operator users. Seed one before starting the daemon.
-        subprocess.run(
-            [
-                "uv",
-                "run",
-                "alfred",
-                "user",
-                "add",
-                "--name",
-                "smoke-operator",
-                "--authorization",
-                "operator",
-            ],
-            env=env,
-            check=True,
-        )
+        # with zero operators. No explicit seeding is needed: the 0003->0004
+        # migration's ``_install_operator`` unconditionally backfills exactly one
+        # operator (slug ``operator``, idempotent ON CONFLICT), which satisfies
+        # ``get_operator()``. Adding a SECOND operator here via ``alfred user add
+        # --authorization operator`` would fail "operator already exists" (exit 2).
 
         daemon = subprocess.Popen(["uv", "run", "alfred", "daemon", "start"], env=env)
         try:

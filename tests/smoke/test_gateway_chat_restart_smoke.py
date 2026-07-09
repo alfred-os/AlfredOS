@@ -130,22 +130,12 @@ def test_chat_survives_daemon_restart_and_paints_reconnecting_banner(tmp_path: P
     subprocess.run(["uv", "run", "alfred", "migrate"], env=env, check=True)
     # #338 PR2: the daemon's comms boot graph now constructs a REAL Orchestrator,
     # whose constructor synchronously calls identity_resolver.get_operator() at
-    # BOOT time — the daemon refuses to come up with zero operator users.
-    subprocess.run(
-        [
-            "uv",
-            "run",
-            "alfred",
-            "user",
-            "add",
-            "--name",
-            "smoke-operator",
-            "--authorization",
-            "operator",
-        ],
-        env=env,
-        check=True,
-    )
+    # BOOT time — the daemon refuses to come up with zero operators. No explicit
+    # seeding is needed: the 0003->0004 migration's ``_install_operator``
+    # unconditionally backfills exactly one operator (slug ``operator``,
+    # idempotent ON CONFLICT), which satisfies ``get_operator()``. Adding a SECOND
+    # operator via ``alfred user add --authorization operator`` would fail
+    # "operator already exists" (exit 2).
 
     daemon = _spawn(["uv", "run", "alfred", "daemon", "start"], env=env)
     gateway: subprocess.Popen[bytes] | None = None
