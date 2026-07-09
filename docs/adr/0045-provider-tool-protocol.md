@@ -98,3 +98,17 @@ structural invariant (the frozen provider contract), hence an ADR.
   `TOOL_USE`.** Rejected: that is capability routing (explicitly deferred) and
   would silently change the cost/behaviour profile of every tool turn; refuse
   loud instead.
+
+## Amendments
+
+### 2026-07-09 — additive `ProviderUnavailableError` (#340 PR1)
+
+**#340 PR1** adds one additive error type to the seam,
+`alfred.providers.base.ProviderUnavailableError(AlfredError)`. Each adapter maps
+its SDK/transport failures (`anthropic`/`openai` API errors, `httpx`) to it at the
+adapter boundary so downstream callers — the router and the quarantine child's
+`provider_dispatch` — get one typed error instead of the provider-specific
+hierarchies. It is deliberately excluded from `router._TOOL_PROTOCOL_ERRORS`
+(a transport failure should fall back to the secondary provider). No change to the
+frozen `CompletionRequest`/`CompletionResponse` models. This keeps the quarantine
+child free of any SDK import (the in-core HTTP-egress import guard).
