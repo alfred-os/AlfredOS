@@ -17,12 +17,14 @@ Two invariants, both load-bearing:
   ``alfred.memory`` (per-user stores), nor the secret broker. The child sees only
   the extraction schemas + ``ProviderCapability``.
 
-The ``provider_dispatch`` import (which pulls ``httpx`` — an egress-capable
-client) is a LAZY in-function import on the dead ``handle_extract`` path, so it is
-NOT on the module-scope closure the live deterministic-echo loop reaches. That
-laziness is separately enforced by the go-live egress gate
-(``test_quarantined_llm_not_yet_spawned_while_egress_open.py``); here we assert the
-forbidden-privileged-module bound on the module-scope closure.
+The ``provider_dispatch`` import is a LAZY in-function import on the dead
+``handle_extract`` path, so it is NOT on the module-scope closure the live
+deterministic-echo loop reaches. As of #340 PR1, ``provider_dispatch`` itself is
+also egress-free (it drives an INJECTED provider and imports no httpx/SDK) — the
+egress-capable import lands in PR2's ``_build_provider``. That laziness (and, at
+go-live, that import's egress-capability) is separately enforced by the go-live
+egress gate (``test_quarantined_llm_not_yet_spawned_while_egress_open.py``); here
+we assert the forbidden-privileged-module bound on the module-scope closure.
 """
 
 from __future__ import annotations
