@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from anthropic import APIConnectionError
 
 from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.base import (
@@ -15,9 +17,19 @@ from alfred.providers.base import (
     ProviderCapability,
     ProviderToolNameCollisionError,
     ProviderToolUnsupportedError,
+    ProviderUnavailableError,
     ToolCall,
     ToolDefinition,
 )
+
+
+@pytest.fixture
+def anthropic_provider() -> AnthropicProvider:
+    """Reusable provider over a mocked ``_client`` — AsyncMock's child-attribute
+    chaining (``client.messages.create`` stays an AsyncMock without explicit
+    wiring) lets the SDK/transport-error-mapping tests set ``.side_effect``
+    directly without needing a canned success response."""
+    return AnthropicProvider(client=AsyncMock(), model="claude-haiku-4-5")
 
 
 @pytest.mark.asyncio
@@ -323,3 +335,47 @@ async def test_anthropic_refuses_loud_when_model_lacks_tool_use() -> None:
             CompletionRequest(messages=[Message(role="user", content="x")], tools=(td,))
         )
     fake_client.messages.create.assert_not_awaited()  # refuse BEFORE building the request
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_sdk_error_to_provider_unavailable(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    # anthropic_provider is the fixture whose _client is a mock; make the
+    # network call raise the SDK's connection error.
+    anthropic_provider._client.messages.create.side_effect = APIConnectionError(
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await anthropic_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_httpx_error_to_provider_unavailable(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    anthropic_provider._client.messages.create.side_effect = httpx.ConnectError("boom")
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await anthropic_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_provider_unavailable_message_omits_raw_sdk_exc_text(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    # FIX-5: the mapped error's message must identify the provider/model but
+    # must NOT render the raw SDK exception text — that text can carry
+    # provider-supplied strings the operator-facing t() catalog should not
+    # blindly interpolate.
+    anthropic_provider._client.messages.create.side_effect = httpx.ConnectError(
+        "leaked-upstream-detail-9f3c"
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        await anthropic_provider.complete(req)
+    message = str(exc_info.value)
+    assert "anthropic" in message
+    assert "claude-haiku-4-5" in message
+    assert "leaked-upstream-detail-9f3c" not in message

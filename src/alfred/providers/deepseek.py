@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 import structlog
-from openai import AsyncOpenAI
+from openai import APIError, AsyncOpenAI
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionFunctionToolParam,
@@ -37,6 +37,7 @@ from alfred.providers.base import (
     Message,
     ProviderCapability,
     ProviderMalformedToolArgumentsError,
+    ProviderUnavailableError,
     StopReason,
     ToolCall,
     ToolChoice,
@@ -298,7 +299,12 @@ class DeepSeekProvider:
         if request.tools:
             kwargs["tools"] = _openai_tools(request.tools)
             kwargs["tool_choice"] = _openai_tool_choice(request.tool_choice)
-        response = await self._client.chat.completions.create(**kwargs)
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except (APIError, httpx.HTTPError) as exc:
+            raise ProviderUnavailableError(
+                t("providers.provider_unavailable", provider=self.name, model=self._model)
+            ) from exc
         msg = response.choices[0].message
         usage = response.usage
         tool_calls = _parse_openai_tool_calls(msg.tool_calls, self._model, name_map)

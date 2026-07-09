@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-09 09:17+0100\n"
+"POT-Creation-Date: 2026-07-09 21:09+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3019,7 +3019,12 @@ msgstr ""
 "src/alfred/orchestrator/builtin_tools.py) or an MCP plugin manifest — "
 "rename one so their provider-safe names differ."
 
-#: src/alfred/providers/base.py:177
+#: src/alfred/providers/anthropic_native.py:293
+#: src/alfred/providers/deepseek.py:306
+msgid "providers.provider_unavailable"
+msgstr "The {provider} provider ({model}) is currently unavailable."
+
+#: src/alfred/providers/base.py:191
 msgid "providers.tool_use_unsupported"
 msgstr ""
 "Provider {provider} (model {model}) does not support tool use; refusing "
@@ -3027,7 +3032,7 @@ msgstr ""
 "config (for example an Anthropic model, or deepseek-chat rather than "
 "deepseek-reasoner)."
 
-#: src/alfred/providers/deepseek.py:187 src/alfred/providers/deepseek.py:191
+#: src/alfred/providers/deepseek.py:188 src/alfred/providers/deepseek.py:192
 msgid "providers.malformed_tool_arguments"
 msgstr ""
 "Provider {provider} (model {model}) returned malformed arguments (not a "
