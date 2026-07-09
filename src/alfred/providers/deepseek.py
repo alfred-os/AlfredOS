@@ -13,7 +13,13 @@ from typing import Any
 
 import httpx
 import structlog
-from openai import APIError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    RateLimitError,
+)
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionFunctionToolParam,
@@ -301,10 +307,23 @@ class DeepSeekProvider:
             kwargs["tool_choice"] = _openai_tool_choice(request.tool_choice)
         try:
             response = await self._client.chat.completions.create(**kwargs)
-        except (APIError, httpx.HTTPError) as exc:
+        except (APIConnectionError, APITimeoutError, RateLimitError, httpx.HTTPError) as exc:
+            # Transient/retryable transport failure. Map to the neutral seam error
+            # at the adapter boundary (the only place the SDK types are in scope).
+            # Never surface the raw exc text — it can carry provider-supplied strings.
             raise ProviderUnavailableError(
                 t("providers.provider_unavailable", provider=self.name, model=self._model)
             ) from exc
+        except APIStatusError as exc:
+            # 5xx = a transient upstream outage -> provider-unavailable; deterministic
+            # 4xx (auth/bad-request/permission/not-found/etc.) propagates loud as the
+            # raw SDK error — a config/host-side bug must not be masked as a
+            # retryable outage the router would silently fall back past.
+            if exc.status_code >= 500:
+                raise ProviderUnavailableError(
+                    t("providers.provider_unavailable", provider=self.name, model=self._model)
+                ) from exc
+            raise
         msg = response.choices[0].message
         usage = response.usage
         tool_calls = _parse_openai_tool_calls(msg.tool_calls, self._model, name_map)

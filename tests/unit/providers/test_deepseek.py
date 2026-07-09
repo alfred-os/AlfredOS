@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from openai import APIConnectionError
+from openai import APIConnectionError, APIStatusError, BadRequestError, RateLimitError
 
 from alfred.providers.base import (
     CompletionRequest,
@@ -442,3 +442,55 @@ async def test_provider_unavailable_message_omits_raw_sdk_exc_text(
     assert "deepseek" in message
     assert "deepseek-chat" in message
     assert "leaked-upstream-detail-9f3c" not in message
+
+
+@pytest.mark.asyncio
+async def test_complete_propagates_deterministic_4xx_unmapped(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    # A deterministic 4xx (bad request / auth / permission / not-found) is a
+    # config/host-side bug, NOT a transient outage. It must propagate as the raw
+    # SDK error rather than being mapped to ProviderUnavailableError — the router
+    # treats ProviderUnavailableError as fall-back-eligible, and silently retrying
+    # a request that will always 400 would mask the real misconfiguration.
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    response = httpx.Response(400, request=request)
+    deepseek_provider._client.chat.completions.create.side_effect = BadRequestError(
+        "bad request", response=response, body=None
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(BadRequestError):
+        await deepseek_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_5xx_status_error_to_provider_unavailable(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    # A 5xx is a transient upstream outage, unlike a deterministic 4xx — it
+    # DOES map to ProviderUnavailableError so the router can fall back.
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    response = httpx.Response(500, request=request)
+    deepseek_provider._client.chat.completions.create.side_effect = APIStatusError(
+        "server error", response=response, body=None
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await deepseek_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_rate_limit_error_to_provider_unavailable(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    # RateLimitError (429) is retryable/transient — it maps to
+    # ProviderUnavailableError even though it subclasses APIStatusError, because
+    # it is caught by the earlier, more specific except clause.
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    response = httpx.Response(429, request=request)
+    deepseek_provider._client.chat.completions.create.side_effect = RateLimitError(
+        "rate limited", response=response, body=None
+    )
+    req = CompletionRequest(messages=[Message(role="user", content="hi")])
+    with pytest.raises(ProviderUnavailableError):
+        await deepseek_provider.complete(req)
