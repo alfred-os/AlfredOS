@@ -73,12 +73,21 @@ def recv_passed_fd(control_end: socket.socket) -> tuple[bytes, int]:
     for level, typ, cmsg in ancdata:
         if level == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
             fds.frombytes(cmsg[: len(cmsg) - (len(cmsg) % fds.itemsize)])
-    if flags & socket.MSG_CTRUNC:
+
+    def _refuse_and_close(reason: str) -> ControlFdBrokerError:
+        # Close every descriptor the kernel installed before we refuse — a malformed frame
+        # (truncated OR not-exactly-one) must not leak a fd into this process. Which of the two
+        # refusals a >1-fd frame triggers is kernel-specific (macOS/BSD sets MSG_CTRUNC on the
+        # over-full 1-fd buffer; Linux instead delivers the extra fd and trips the count check),
+        # so BOTH arcs must close.
         for fd in fds:
             os.close(fd)
-        raise ControlFdBrokerError("ancillary_truncated")
+        return ControlFdBrokerError(reason)
+
+    if flags & socket.MSG_CTRUNC:
+        raise _refuse_and_close("ancillary_truncated")
     if len(fds) != 1:
-        raise ControlFdBrokerError("expected_exactly_one_fd")
+        raise _refuse_and_close("expected_exactly_one_fd")
     return msg, int(fds[0])
 
 
