@@ -59,6 +59,25 @@ spawn — the half-spawned child is terminated and a loud
 key. The scrubbed allowlist env (never ``dict(os.environ)``) keeps an operator's
 exported ``ANTHROPIC_API_KEY`` / ``DISCORD_BOT_TOKEN`` out of the adversary-facing
 ``kind="full"`` child; the provider key crosses ONLY over fd 3.
+
+**Opt-in control-fd plumbing (#340 PR2a, ADR-0050 dormancy invariant).**
+:func:`spawn_quarantine_child_io` grows a ``control_fd: bool = False`` parameter:
+when set, a SECOND fd — literal fd 4, peer to ``_PROVIDER_KEY_FD = 3`` — carries
+one end of an ``AF_UNIX`` socketpair (:func:`alfred.egress.control_fd_broker.
+make_control_socketpair`) into the child, so the empty-netns quarantine child can
+later receive a pre-connected gateway socket over SCM_RIGHTS
+(:func:`alfred.egress.control_fd_broker.broker_connected_socket`, called from the
+parent side via :meth:`_SubprocessChildIO.broker_socket`). Both fd-3 and fd-4
+dup2s share the SAME synchronous zero-``await`` window described above — a
+second clobbered-selector hazard would exist for fd 4 exactly as for fd 3 if it
+were installed outside that window. The default is ``False`` and the live/echo
+spawn (the daemon's only caller today) never passes ``control_fd=True`` — this
+is PRECURSOR INFRA, dormant until PR2b's go-live cutover (ADR-0050): the
+default-off spawn is BEHAVIOURALLY unchanged (``pass_fds=(3,)`` only, no
+socketpair construction, no second dup2). The one added syscall on the live
+path — a ``os.set_inheritable(3, True)`` after the fd-3 ``dup2`` — is a
+provable no-op: ``os.dup2`` already leaves its target inheritable, so the
+child inherits exactly what it did before.
 """
 
 from __future__ import annotations
@@ -66,6 +85,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import socket
 import struct
 import subprocess
 import sys
@@ -74,6 +94,9 @@ from typing import IO
 
 import structlog
 
+from alfred.egress import control_fd_broker
+from alfred.egress._config_protocols import EgressProxyConfig
+from alfred.egress.control_fd_broker import make_control_socketpair
 from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.plugins._comms_child_env import _scrubbed_base
@@ -103,6 +126,20 @@ _CHILD_PYTHON_ENV = "ALFRED_QUARANTINE_CHILD_PYTHON"
 # The literal fd the provider key is delivered over (ADR-0015 #218). The child
 # reads ``os.read(3)`` — this is a hard-coded convention, not an env-named fd.
 _PROVIDER_KEY_FD = 3
+
+# The literal fd the pre-connected gateway socket is brokered over (#340 PR2a,
+# ADR-0050), peer to _PROVIDER_KEY_FD = 3. Only installed when the caller opts
+# in via ``control_fd=True`` — the default-off live/echo spawn never touches it.
+_CONTROL_FD = 4
+
+# The wheel-co-located diagnostic probe entry the docker C1/C2 test (Task 4)
+# drives directly. Inert in production — never referenced by any live caller.
+_BROKERED_PROBE_MODULE = "alfred.security.quarantine_child._brokered_probe"
+
+# child_module is a CLOSED SET, never a free string — a free module would be a
+# spawn-arbitrary-module hole (the child inherits fd 3 [+ fd 4 when control_fd
+# is set]). Only the real child or the docker probe may be spawned.
+_ALLOWED_CHILD_MODULES: frozenset[str] = frozenset({_CHILD_MODULE, _BROKERED_PROBE_MODULE})
 
 # 4-byte big-endian length prefix — peer to the child loop's framing.
 _LENGTH_HEADER_BYTES = 4
@@ -231,11 +268,28 @@ class _SubprocessChildIO:
     ``Popen.stdin`` pipe and flushes; ``read_frame`` does the blocking pipe read in
     an executor thread so a wedged child never blocks the event loop, bounded by
     ``asyncio.wait_for``.
+
+    ``broker_socket`` is a CONCRETE method here only — NOT part of the
+    :class:`alfred.security.quarantine_transport.ChildIO` Protocol in PR2a (that
+    widening is deferred to PR2b, when ``QuarantineStdioTransport.dispatch``
+    actually calls it; widening now would break the existing ``ChildIO`` test
+    doubles under pyright for no live benefit). ``control_parent`` is ``None``
+    unless the spawn opted into ``control_fd=True`` (#340 PR2a, ADR-0050); when
+    present, this instance OWNS it (CR-#255 single-teardown seam) — closed by
+    ``aclose`` or by the spawn's own failure-handling arcs, never both.
     """
 
-    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        control_parent: socket.socket | None = None,
+        egress_config: EgressProxyConfig | None = None,
+    ) -> None:
         self._process = process
         self._closed = False
+        self._control_parent = control_parent
+        self._egress_config = egress_config
 
     def write_frame(self, frame: bytes) -> None:
         """Ship one already-framed length-prefixed request onto child stdin."""
@@ -285,12 +339,31 @@ class _SubprocessChildIO:
                 t("security.quarantine_child.read_frame_failed")
             ) from exc
 
+    async def broker_socket(self) -> None:
+        """Broker one connected gateway socket to the child (#340 PR2a: docker probe only).
+
+        Delegates to :func:`alfred.egress.control_fd_broker.broker_connected_socket`
+        over the owned parent control-end. A fail-loud refusal (CLAUDE.md hard rule
+        #7, not pragma'd out — this IS a security branch) when the instance was
+        never given a control-end or a proxy config: the caller opted OUT of
+        ``control_fd`` at spawn time, or (defensively) constructed this instance
+        directly without one.
+        """
+        if self._control_parent is None or self._egress_config is None:
+            raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
+        await control_fd_broker.broker_connected_socket(
+            parent_end=self._control_parent, proxy_config=self._egress_config
+        )
+
     async def aclose(self) -> None:
-        """Terminate + reap the child (idempotent)."""
+        """Terminate + reap the child (idempotent); close the owned control-end, if any."""
         if self._closed:
             return
         self._closed = True
         await _terminate_and_reap(self._process)
+        if self._control_parent is not None:
+            with contextlib.suppress(OSError):
+                self._control_parent.close()
 
 
 async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
@@ -304,7 +377,13 @@ async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
         await loop.run_in_executor(None, process.wait)
 
 
-async def spawn_quarantine_child_io(*, provider_key: str) -> _SubprocessChildIO:
+async def spawn_quarantine_child_io(
+    *,
+    provider_key: str,
+    control_fd: bool = False,
+    child_module: str = _CHILD_MODULE,
+    egress_config: EgressProxyConfig | None = None,
+) -> _SubprocessChildIO:
     """Spawn the bwrap-sandboxed quarantined-LLM child + deliver its key over fd 3.
 
     The robust spawn pattern (ADR-0015 #218 + the fd3_key_delivery docstring):
@@ -332,33 +411,99 @@ async def spawn_quarantine_child_io(*, provider_key: str) -> _SubprocessChildIO:
        in one atomic ``writev`` (it closes the write-end itself, on success AND
        refusal).
 
+    **Opt-in control-fd (#340 PR2a, ADR-0050 dormancy invariant).** When
+    ``control_fd=True`` (default ``False`` — the live/echo spawn never sets it), a
+    second AF_UNIX socketpair (:func:`make_control_socketpair`) is built; the
+    child-end is dup'd onto literal fd 4 in the SAME synchronous zero-``await``
+    window as the fd-3 dance above (a second clobbered-selector hazard would exist
+    for fd 4 exactly as for fd 3 otherwise); the parent-end is kept and handed to
+    the returned :class:`_SubprocessChildIO` for a later
+    :meth:`_SubprocessChildIO.broker_socket` call. ``control_fd=True`` REQUIRES an
+    ``egress_config`` — a misconfigured opt-in refuses loudly rather than silently
+    spawning without a broker.
+
+    Both a pipe read-end and a socketpair child-end normally land on some fd well
+    above the ``(3, 4)`` target range (the kernel picks the lowest FREE fd; the
+    dormant spawn ambiently keeps 3 and 4 occupied). If a source ever DID land on
+    a target — a source fd is lifted above the whole target range FIRST, before
+    ANY prior occupant is saved or ANY dup2 runs — so neither the save-of-a-prior-
+    occupant nor a dup2-onto-a-target can alias a source we still need to read
+    from. Each source is then closed EXACTLY ONCE: the lifted alias always (it is
+    the parent's now-redundant copy after ``pass_fds`` hands the target to the
+    child), and the pre-lift original ADDITIONALLY only if it was actually moved
+    (otherwise the original IS the alias — closing both would double-close).
+
+    ``child_module`` is validated against the closed :data:`_ALLOWED_CHILD_MODULES`
+    set before anything is opened: a free module string would let a caller spawn
+    an arbitrary module with fd 3 [+ fd 4] inherited — a capability-widening hole.
+
     A :class:`ProviderKeyDeliveryError` (partial write / EAGAIN / OSError) or an OS
-    spawn failure REFUSES the spawn: the half-spawned child is terminated and a
+    spawn failure REFUSES the spawn: the half-spawned child is terminated, any
+    owned control-parent socket is closed (no fd leak on the refusal path), and a
     loud :class:`QuarantineChildSpawnError` is raised (CLAUDE.md hard rule #7).
     """
+    if child_module not in _ALLOWED_CHILD_MODULES:
+        raise QuarantineChildSpawnError(t("security.quarantine_child.child_module_not_allowed"))
+    if control_fd and egress_config is None:
+        raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
+
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, True)  # noqa: FBT003 - os.set_inheritable bool is positional only
 
-    # Save any prior parent fd 3 so a clobber is reversible, then dup the pipe
-    # read-end onto LITERAL fd 3.
-    saved_fd3: int | None = None
-    with contextlib.suppress(OSError):
-        saved_fd3 = os.dup(_PROVIDER_KEY_FD)
+    control_parent: socket.socket | None = None
+    control_child_fd: int | None = None
+    if control_fd:
+        control_parent, control_child = make_control_socketpair()
+        # Detach to a raw fd int for the dup2 dance below (core-001: the parent
+        # never holds a live Python socket object pointed at the CHILD's end).
+        control_child_fd = control_child.detach()
+
+    literal_targets: tuple[int, ...] = (
+        (_PROVIDER_KEY_FD, _CONTROL_FD) if control_fd else (_PROVIDER_KEY_FD,)
+    )
+
+    def _lift_above_targets(fd: int) -> tuple[int, bool]:
+        """Return ``(usable_fd, moved)``. Dup ``fd`` above the target range if it collides.
+
+        Looping (not a single dup) covers the pathological case where the FIRST
+        dup also lands on the (other) target — practically never with real fds,
+        but the loop keeps the invariant "the returned fd is never one of
+        ``literal_targets``" true unconditionally rather than by construction.
+        """
+        moved = False
+        while fd in literal_targets:
+            fd = os.dup(fd)
+            moved = True
+        return fd, moved
+
+    read_src, read_moved = _lift_above_targets(read_fd)
+    control_src, control_moved = (
+        _lift_above_targets(control_child_fd) if control_child_fd is not None else (None, False)
+    )
+
+    # Save any prior occupant of each target so a clobber is reversible. Sources
+    # were lifted above the range above, so this loop can only ever capture a
+    # PRIOR occupant — never alias a source we still need.
+    saved: dict[int, int] = {}
+    for fd in literal_targets:
+        with contextlib.suppress(OSError):
+            saved[fd] = os.dup(fd)
+
     process: subprocess.Popen[bytes] | None = None
     try:
-        # --- fd-3-clobber window OPENS. NO ``await`` until it CLOSES below. ---
-        os.dup2(read_fd, _PROVIDER_KEY_FD)
-        argv = [
-            _launcher_path(),
-            _PLUGIN_ID,
-            _child_python(),
-            "-m",
-            _CHILD_MODULE,
-        ]
+        # --- fd-clobber window OPENS. NO ``await`` until it CLOSES below (#237; now
+        # BOTH fd 3 and fd 4 are clobbered process-wide when control_fd is set — the
+        # await-free discipline still protects the loop selector for both). ---
+        os.dup2(read_src, _PROVIDER_KEY_FD)
+        os.set_inheritable(_PROVIDER_KEY_FD, True)  # noqa: FBT003
+        if control_src is not None:
+            os.dup2(control_src, _CONTROL_FD)
+            os.set_inheritable(_CONTROL_FD, True)  # noqa: FBT003
+        argv = [_launcher_path(), _PLUGIN_ID, _child_python(), "-m", child_module]
         try:
             # SYNCHRONOUS spawn (no ``await``): ``Popen`` forks the child without
             # running the event loop, so the loop never polls its (temporarily
-            # clobbered) selector fd. The child inherits the dup'd fd 3 at fork via
+            # clobbered) selector fd. The child inherits the dup'd fd(s) at fork via
             # ``pass_fds``; ``close_fds`` defaults to True and keeps every other
             # inherited fd out of the adversary-facing child.
             process = subprocess.Popen(  # noqa: S603 - argv is module-internal, not user input
@@ -367,23 +512,45 @@ async def spawn_quarantine_child_io(*, provider_key: str) -> _SubprocessChildIO:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=_child_env(),
-                pass_fds=(_PROVIDER_KEY_FD,),
+                pass_fds=literal_targets,
             )
         except OSError as exc:
             _log.error("security.quarantine_child.spawn_failed", error_class=type(exc).__name__)
+            # L-3: a failed Popen must not leak the owned parent control-end either
+            # — not just the key-delivery-failure arc below.
+            if control_parent is not None:
+                with contextlib.suppress(OSError):
+                    control_parent.close()
             raise QuarantineChildSpawnError(t("security.quarantine_child.spawn_failed")) from exc
     finally:
-        # --- fd-3-clobber window CLOSES (no ``await`` ran above). ---
-        # Restore the parent's prior fd 3 (or close the dup we installed) and drop
-        # the parent's copy of the read-end — the child has its own via pass_fds.
-        if saved_fd3 is not None:
-            os.dup2(saved_fd3, _PROVIDER_KEY_FD)
-            os.close(saved_fd3)
-        else:
+        # --- fd-clobber window CLOSES (no ``await`` ran above). ---
+        # Restore each target's prior occupant (or clear the target we installed).
+        for fd in literal_targets:
+            if fd in saved:
+                os.dup2(saved[fd], fd)
+                os.close(saved[fd])
+            else:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        # Close each source EXACTLY ONCE: the lifted alias always (the parent's
+        # copy is redundant once ``pass_fds`` hands the target to the child), and
+        # the pre-lift original ADDITIONALLY only if a lift actually happened
+        # (otherwise the original IS the alias — closing both would double-close).
+        for original, src, moved in (
+            (read_fd, read_src, read_moved),
+            (control_child_fd, control_src, control_moved),
+        ):
+            if src is None:
+                continue
             with contextlib.suppress(OSError):
-                os.close(_PROVIDER_KEY_FD)
-        with contextlib.suppress(OSError):
-            os.close(read_fd)
+                os.close(src)
+            # ``moved`` is only ever True when ``original`` was a real fd (the
+            # control-side entry pairs ``None`` with ``moved=False`` always) — the
+            # ``original is not None`` guard is for mypy's benefit, not a real
+            # runtime possibility.
+            if moved and original is not None:
+                with contextlib.suppress(OSError):
+                    os.close(original)
 
     # Deliver the provider key over the pipe write-end (it closes write_fd itself).
     try:
@@ -391,11 +558,14 @@ async def spawn_quarantine_child_io(*, provider_key: str) -> _SubprocessChildIO:
     except ProviderKeyDeliveryError as exc:
         _log.error("security.quarantine_child.provider_key_delivery_failed", reason=exc.reason)
         await _terminate_and_reap(process)
+        if control_parent is not None:
+            with contextlib.suppress(OSError):
+                control_parent.close()
         raise QuarantineChildSpawnError(
             t("security.quarantine_child.provider_key_delivery_failed")
         ) from exc
 
-    return _SubprocessChildIO(process)
+    return _SubprocessChildIO(process, control_parent=control_parent, egress_config=egress_config)
 
 
 __all__ = [

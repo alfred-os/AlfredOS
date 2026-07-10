@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-09 21:09+0100\n"
+"POT-Creation-Date: 2026-07-10 14:08+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3019,12 +3019,13 @@ msgstr ""
 "src/alfred/orchestrator/builtin_tools.py) or an MCP plugin manifest — "
 "rename one so their provider-safe names differ."
 
-#: src/alfred/providers/anthropic_native.py:293
-#: src/alfred/providers/deepseek.py:306
+#: src/alfred/providers/anthropic_native.py:299
+#: src/alfred/providers/anthropic_native.py:308
+#: src/alfred/providers/deepseek.py:315 src/alfred/providers/deepseek.py:324
 msgid "providers.provider_unavailable"
 msgstr "The {provider} provider ({model}) is currently unavailable."
 
-#: src/alfred/providers/base.py:191
+#: src/alfred/providers/base.py:198
 msgid "providers.tool_use_unsupported"
 msgstr ""
 "Provider {provider} (model {model}) does not support tool use; refusing "
@@ -3032,7 +3033,7 @@ msgstr ""
 "config (for example an Anthropic model, or deepseek-chat rather than "
 "deepseek-reasoner)."
 
-#: src/alfred/providers/deepseek.py:188 src/alfred/providers/deepseek.py:192
+#: src/alfred/providers/deepseek.py:194 src/alfred/providers/deepseek.py:198
 msgid "providers.malformed_tool_arguments"
 msgstr ""
 "Provider {provider} (model {model}) returned malformed arguments (not a "
@@ -3054,33 +3055,42 @@ msgstr ""
 "egress was REFUSED and the trip recorded for the operator. This is a "
 "security event — inspect the audit log to find the originating turn."
 
-#: src/alfred/security/quarantine.py:1425
+#: src/alfred/security/quarantine.py:1428
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:1511
+#: src/alfred/security/quarantine.py:1514
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:243
+#: src/alfred/security/quarantine_child_io.py:294
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:261
+#: src/alfred/security/quarantine_child_io.py:312
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:285
+#: src/alfred/security/quarantine_child_io.py:336
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:374
+#: src/alfred/security/quarantine_child_io.py:350
+#: src/alfred/security/quarantine_child_io.py:445
+msgid "security.quarantine_child.broker_unconfigured"
+msgstr "Quarantine child egress broker is not configured."
+
+#: src/alfred/security/quarantine_child_io.py:443
+msgid "security.quarantine_child.child_module_not_allowed"
+msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
+
+#: src/alfred/security/quarantine_child_io.py:521
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:395
+#: src/alfred/security/quarantine_child_io.py:562
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "
