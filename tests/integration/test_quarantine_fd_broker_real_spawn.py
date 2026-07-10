@@ -43,6 +43,7 @@ debian:bookworm`` (see procedural_local_docker_for_ci_only_failures in project m
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -78,6 +79,9 @@ _DOCKER_ONLY = pytest.mark.skipif(
 # The child's single usability write over the brokered fd; the stub echoes it and the
 # HARD #5 assertion pins the stub's first-received bytes to it (nothing core-prepended).
 _PING = b"ping"
+# Bound each accepted stub connection's recv so a child that connects then stalls fails
+# closed (the handler thread ends, its conn fd is closed) instead of wedging forever.
+_STUB_RECV_TIMEOUT_S = 10.0
 
 
 class _StubProxy:
@@ -115,20 +119,29 @@ class _StubProxy:
 
     def _echo(self, conn: socket.socket) -> None:
         with conn:
-            # Coalesce a (astronomically unlikely, but API-legal) fragmented first write
-            # so the recorded first bytes are the full ``_PING``, never a short read.
-            data = b""
-            while len(data) < len(_PING):
-                chunk = conn.recv(64)
-                if not chunk:
-                    break
-                data += chunk
-            if data:
-                # Record BEFORE echoing so the recording is complete before the
-                # child's own ``recv`` (which returns only after this ``sendall``)
-                # unblocks — a happens-before that makes the assertion race-free.
-                with self._lock:
-                    self._first_bytes.append(bytes(data))
+            # A child that connects then stalls must NOT wedge this handler — bound the
+            # recv so it fails closed (thread ends, conn fd closed) rather than owning the
+            # accepted socket forever.
+            conn.settimeout(_STUB_RECV_TIMEOUT_S)
+            try:
+                # Coalesce a (API-legal, astronomically unlikely) fragmented first write
+                # so the recorded first bytes are the full ``_PING``, never a short read.
+                data = b""
+                while len(data) < len(_PING):
+                    chunk = conn.recv(64)
+                    if not chunk:
+                        break
+                    data += chunk
+            except OSError:
+                return  # stalled / broken client: give up — the test fails loud elsewhere
+            if len(data) < len(_PING):
+                return  # EOF before a full ping — no recording (the HARD #5 assert goes RED)
+            # Record BEFORE echoing so the recording is complete before the child's own
+            # ``recv`` (which returns only after this ``sendall``) unblocks — a
+            # happens-before that makes the assertion race-free.
+            with self._lock:
+                self._first_bytes.append(bytes(data))
+            with contextlib.suppress(OSError):
                 conn.sendall(data)
 
     def first_bytes(self) -> list[bytes]:
@@ -140,16 +153,20 @@ class _StubProxy:
 
         The stub shares the test process, so an in-flight ``conn`` would otherwise be
         transiently counted in ``/proc/self/fd`` and race the core-side fd-leak snapshot.
-        Joining the (short-lived) echo threads makes their ``with conn:`` close happen
-        BEFORE the snapshot, so the count reflects only fds the core actually owns.
+        Joining the (recv-bounded) echo threads makes their ``with conn:`` close happen
+        BEFORE the snapshot, so the count reflects only fds the core actually owns. The
+        join timeout exceeds the per-conn recv timeout so a stalled handler is still
+        reaped rather than left as a dangling daemon.
         """
         with self._lock:
             threads = list(self._conn_threads)
         for handler in threads:
-            handler.join(timeout=5)
+            handler.join(timeout=_STUB_RECV_TIMEOUT_S + 1)
 
     def close(self) -> None:
-        self._sock.close()
+        self._sock.close()  # unblock _serve's accept
+        self._t.join(timeout=5)  # let the accept loop exit
+        self.settle()  # reap the recv-bounded handlers so no conn fd / thread leaks on teardown
 
 
 class _Cfg:
@@ -182,22 +199,26 @@ async def test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect(
     """
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     proxy = _StubProxy()
-    io = await qcio.spawn_quarantine_child_io(
-        provider_key="probe-key-placeholder",  # the probe never reads fd 3 — no LLM call
-        control_fd=True,
-        child_module=qcio._BROKERED_PROBE_MODULE,
-        egress_config=_Cfg(proxy.host, proxy.port),
-    )
+    io: qcio._SubprocessChildIO | None = None
     try:
+        # Spawn INSIDE the try so a spawn failure still runs `proxy.close()` in `finally`
+        # (the proxy's listener + threads would otherwise leak). Mirrors the sibling
+        # `test_quarantine_child_real_spawn.py` cleanup discipline.
+        io = await qcio.spawn_quarantine_child_io(
+            provider_key="probe-key-placeholder",  # the probe never reads fd 3 — no LLM call
+            control_fd=True,
+            child_module=qcio._BROKERED_PROBE_MODULE,
+            egress_config=_Cfg(proxy.host, proxy.port),
+        )
         fd_counts: list[int] = []
         for _ in range(2):  # >=2 sequential passes to the SAME still-alive child
             await io.broker_socket()
             verdict = await _read_verdict(io)
             # C1: the child's fresh connect had NO route (empty netns). The probe sets
-            # this True ONLY for a route-absence errno — a non-route failure would NOT
-            # prove an empty netns, so it must not satisfy the negative control.
+            # this True ONLY for ENETUNREACH — a non-route failure would NOT prove an
+            # empty netns, so it must not satisfy the negative control (ADR-0050 §2).
             assert verdict["c1_enetunreach"] is True, (
-                f"C1 negative control expected a route-absence errno (empty netns); "
+                f"C1 negative control expected ENETUNREACH (empty netns); "
                 f"got errno {verdict['c1_errno']}"
             )
             assert verdict["c2_live"] is True  # C2: getpeername/SO_ERROR — a live socket crossed
@@ -216,5 +237,10 @@ async def test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect(
             f"expected the child's {_PING!r} first on each connection, got {proxy.first_bytes()!r}"
         )
     finally:
-        await io.aclose()
-        proxy.close()
+        # Nest so `proxy.close()` runs even if `io.aclose()` raises, and skip `aclose`
+        # if the spawn itself failed (`io is None`).
+        try:
+            if io is not None:
+                await io.aclose()
+        finally:
+            proxy.close()

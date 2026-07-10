@@ -1434,6 +1434,9 @@ jobs:
         # workflow-injection-safe convention (step-output via env:, never ${{ }} spliced
         # into run:). The main run step above already EXECUTES this file as part of the
         # full `tests/integration` corpus; this is the not-silently-skipped proof.
+        # NOTE: the test path appears TWICE below — the `if: hashFiles(...)` guard AND the
+        # `pytest` arg. Keep them in sync: a rename that updates only one silently disarms
+        # this gate (the #245 failure mode at the meta level).
         if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/test_quarantine_fd_broker_real_spawn.py') != ''
         env:
           ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
@@ -1452,7 +1455,9 @@ jobs:
             echo "::error::brokered-fd real-spawn leg SKIPPED on the privileged lane — paper-gate hazard (#245); ALFRED_QUARANTINE_CHILD_PYTHON / bwrap / euid-0 provisioning regressed."
             exit 1
           fi
-          grep -q "1 passed" /tmp/broker_fd_spawn.out || { echo "::error::brokered-fd real-spawn leg did not report '1 passed'."; exit 1; }
+          # Token-boundary match so a hypothetical "11 passed" can't satisfy the exactly-
+          # one-test contract (the file has a single test).
+          grep -qE "(^|[^0-9])1 passed([^0-9]|$)" /tmp/broker_fd_spawn.out || { echo "::error::brokered-fd real-spawn leg did not report exactly '1 passed'."; exit 1; }
       - name: Run the bwrap-gated sandbox-escape adversarial corpus (#248)
         # Guard on the corpus harness existing too (not just `has_spawn`, derived
         # from tests/integration|smoke): on a stacked branch where those suites
