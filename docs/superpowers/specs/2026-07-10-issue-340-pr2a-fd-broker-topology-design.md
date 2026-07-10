@@ -1,8 +1,10 @@
 # #340 PR2a — SCM_RIGHTS fd-broker topology mechanism (core-side) — design
 
-**Status:** **best-judgment THIN-CUT per the 5-lens panel; HOLDING at ratification.** This
-doc REVERSES the earlier "precursor infra + stub round-trip" (fat-cut) selection — see §2 for
-why, and ratify the thin cut (or redirect to the fat cut) before `writing-plans`.
+**Status:** **rev.2 — best-judgment THIN-CUT; 7-lens `/review-plan` folded (0 Critical, 3 High
+[all one corroborated issue], 14 Medium, 20 Low, 0 disputed, 0 gaps); HOLDING at ratification.**
+This doc REVERSES the earlier "precursor infra + stub round-trip" (fat-cut) selection — see §2 for
+why, and ratify the thin cut (or redirect to the fat cut) before `writing-plans`. The `/review-plan`
+folds (§13) OVERRIDE the rev.1 body where they conflict.
 **Date:** 2026-07-10
 **Epic:** [#340](https://github.com/alfred-os/AlfredOS/issues/340) — Real-LLM quarantine child (2c).
 **Follows:** PR1 (provider-seam reconciliation, MERGED, main `9c347580`) → the fd-broker feasibility
@@ -80,7 +82,7 @@ does. This is a far more defensible seam than "does runtime behaviour change?".
 | Shipped bwrap policy edit (CA bind, `keep_fds=[3,4]`) | ❌ **not needed** (see §7) | ✅ |
 | `_build_provider` flip / extract-branch swap / refuse-boot | ❌ | ✅ |
 | Provider `max_retries=0` / teardown / timeout / cost | ❌ | ✅ |
-| HARD #5 provenance re-validation | mechanism-level only (ciphertext) | full (real extractor schema) |
+| HARD #5 provenance re-validation | mechanism-level only (**core wrote zero bytes**) | full (real extractor schema) |
 
 PR2b remains the substantial security PR; the thin cut does not hollow it out.
 
@@ -149,12 +151,19 @@ Surface (mirrors `fd3_key_delivery.py`; pure functions, injected config — no g
   SOCK_STREAM)`; the **child end** is `set_inheritable(True)` (non-CLOEXEC so bwrap inherits it; PEP 446
   makes fds CLOEXEC by default); the **parent end** stays non-inheritable (default) so the child gets
   no copy of it.
-- `broker_connected_socket(*, parent_end, proxy_config) -> None` — resolves `host:port` from
-  `proxy_config.egress_proxy_url` (fail-closed `IOPlaneUnavailableError` if unset/blank, identical to
-  `EgressClient.from_settings`), then, **off-loop** (`asyncio.to_thread` / `run_in_executor` — pick the
-  module's existing idiom; SCM_RIGHTS `sendmsg`/`recvmsg` have no asyncio ancillary helper):
-  1. `sock = socket.create_connection((host, port))` — **blocking** (never set `O_NONBLOCK`: it rides
-     the shared file description across the SCM_RIGHTS pass).
+- `broker_connected_socket(*, parent_end, proxy_config) -> None` — resolves `host:port` by
+  `urlsplit`-ing `proxy_config.egress_proxy_url` (mirror `EgressClient`; handle a missing port loudly —
+  do NOT re-parse by hand), fail-closed `IOPlaneUnavailableError` if unset/blank (identical to
+  `EgressClient.from_settings`), then, **off-loop** (use `run_in_executor(None, …)` — the module's
+  existing `_blocking_read_exactly` idiom, kept consistent; SCM_RIGHTS `sendmsg`/`recvmsg` have no
+  asyncio ancillary helper):
+  1. `sock = socket.create_connection((host, port), timeout=<bounded>)` — a **bounded connect timeout**
+     (core-002: an unset proxy raises `IOPlaneUnavailableError`, but a *set-but-unreachable* proxy would
+     otherwise wedge the executor thread; a connect-timeout maps to a loud `ControlFdBrokerError`).
+     Then **`sock.settimeout(None)`** BEFORE the pass — `create_connection(timeout=)` leaves `O_NONBLOCK`
+     set on the returned socket, and that flag rides the shared file description across the SCM_RIGHTS
+     pass; restoring blocking mode honours the child-side blocking-recv contract (the "never leave
+     `O_NONBLOCK` set on the passed fd" invariant).
   2. `parent_end.sendmsg([frame], [(SOL_SOCKET, SCM_RIGHTS, array('i', [sock.fileno()]))])` — the data
      `frame` carries **≥1 byte** always (an ancillary-only `sendmsg` over `SOCK_STREAM` can drop the fd)
      and is **length-checked** (`sent == len(frame)` else refuse — the partial-data-write hole the spike
@@ -165,14 +174,18 @@ Surface (mirrors `fd3_key_delivery.py`; pure functions, injected config — no g
      an EPIPE mid-`sendmsg` on child death), which must map to a loud `ControlFdBrokerError`, never a
      hang or a leaked half-open gateway connection.
 - `ControlFdBrokerError(AlfredError)` — **rooted at `AlfredError`** (unlike `ProviderKeyDeliveryError`'s
-  bare `Exception`), closed-vocabulary `reason` for the `SANDBOX_REFUSED` audit row; any operator-facing
-  string goes through `t()` (HARD i18n).
-- **OTel trace context** propagates across the broker boundary (core mandate; the throwaway spike omitted it).
+  bare `Exception`), closed-vocabulary `reason`; any operator-facing string goes through `t()` (HARD
+  i18n). **PR2a defines the error type + its reason vocabulary only** — the `SANDBOX_REFUSED` audit-ROW
+  write (and its test) is PR2b: PR2a has no live caller of the broker on the audited path (only the
+  docker probe drives it), so a "PR2a wires the audit row" claim would be an HARD #7 overstatement
+  (rev-002/sec-008). §8 item 7 is corrected accordingly.
 
 The `broker_connected_socket` failure of "gateway unreachable" reuses the **same typed
 `IOPlaneUnavailableError`** `EgressClient` raises; broker faults fold into the existing supervisor
 breaker path (via `QuarantineChildSpawnError` at spawn-time, and the extractor's existing refusal per
-call) — **no parallel silent channel** (HARD #7).
+call) — **no parallel silent channel** (HARD #7). **OTel trace context is NOT wired in PR2a** — it
+belongs on the fd-0 request frame that PR2b introduces (prov-005/rev-005); wiring it onto the bare
+broker frame now would be premature. (Deferred to §11.)
 
 ### 4.2 `spawn_quarantine_child_io` — opt-in control-fd plumbing (EDIT)
 
@@ -184,7 +197,11 @@ and `keep_fds` is declaration-only so the child would inherit fd 4 regardless of
 
 When `control_fd=True` (docker test only):
 
-- `make_control_socketpair()` is called **before** the clobber window opens.
+- `make_control_socketpair()` is called **before** the clobber window opens. **Detach the child-end to
+  a raw int** for the window (`child_fd = child_end.detach()` / operate on `child_end.fileno()`): the
+  `dup2`/save/restore machinery must act on **raw detached fds, not live `socket` objects** — mixing a
+  `socket` object into the fd-int dance reintroduces the object-vs-fd aliasing the raw-int fd-3 path
+  already avoids (core-001).
 - **Both** fd 3 (key) and fd 4 (control child-end) are `dup2`'d onto their literal numbers inside the
   **same synchronous zero-`await` window** as today's fd-3 dance, with:
   - **both** prior fd 3 **and** fd 4 saved and restored in the `finally` (today only `saved_fd3` is
@@ -193,6 +210,9 @@ When `control_fd=True` (docker test only):
   - the **source-aliasing guard** ported from the spike (`while src in (3,4): src = os.dup(src)` for
     *both* sources) **and its temp-dups closed** in the `finally` (the spike leaks them — invisible in
     green because its fds landed above the targets; the real per-turn hot path will leak);
+  - the `finally` **also closes the parent's copy of the socketpair child-end fd** (the fd-4 analog of
+    today's `os.close(read_fd)` for the fd-3 pipe read-end — core-001: the current single-fd code has no
+    such close for a second descriptor, so it must be added or the parent leaks the child-end each spawn);
   - `set_inheritable(True)` on both literal targets; `pass_fds=(3, 4)`.
 - The **parent control-end is owned by `_SubprocessChildIO`** (stored on it, closed in `aclose`) — NOT
   returned as a bare tuple. This preserves the CR-#255 single-teardown seam (all child teardown routes
@@ -215,8 +235,11 @@ probe child inherits fd 3 + fd 4).
 `src/alfred/security/quarantine_child/_brokered_probe.py` — a diagnostic entry (the `--self-test`
 / `_daemon_probes` precedent), **inert in production**, spawned only by the docker test. It ships
 **inside the wheel** so it lands under the policy's `/usr` ro-bind (ADR-0030) — no policy widening, no
-extra bind (a `tests/`-resident child cannot exec under the bound interpreter). It reconstructs the
-inherited control socket (fd 4), `recvmsg`s the passed fd, and reports:
+extra bind (a `tests/`-resident child cannot exec under the bound interpreter). It is a **thin
+`# pragma: no cover` subprocess-entry** (like `__main__.py`'s `main()`); its reusable `recvmsg`/frame
+mechanics are factored into a unit-covered helper so only the netns-only C1 line is pragma'd (§9, H1).
+It reconstructs the inherited control socket (fd 4), `recvmsg`s the passed fd, writes its verdict to
+**stdout (fd 1)** — never back over fd 4 (§5, sec-002) — and reports:
 
 - **C1 negative control:** a *fresh* `socket.create_connection((literal_ip, 443))` MUST fail
   `ENETUNREACH` — proves the netns is genuinely empty and the round-trip could only use the passed fd.
@@ -248,21 +271,31 @@ constructs no httpx client.
  ── per probe pass (driven by the docker test) ──
    child_io.broker_socket():
      off-loop: create_connection(gateway-proxy)
-     sendmsg(parent, [≥1 byte], SCM_RIGHTS=tcp_fd) ►  recvmsg(control) → tcp_fd
+     sendmsg(parent, [≥1 byte], SCM_RIGHTS=tcp_fd) ►  recvmsg(control fd 4) → tcp_fd   (fd 4 = SEND-ONLY)
      tcp.close()  (finally; refcount drops)           C2: getpeername/SO_ERROR (live) ; detach
                                                        C1: fresh socket → ENETUNREACH (empty netns)
                                                        minimal plaintext I/O over tcp_fd (usable)
-                                    ◄── framed result (C1/C2/usability verdicts) ── over fd 4
+   read_frame() (STDOUT / fd 1)  ◄── framed C1/C2/usability verdict ── write to fd 1  (existing seam)
    child_io.aclose(): terminate+reap, close `parent`
 ```
 
 Two sequential probe passes to the **same still-alive child** validate the per-call-over-long-lived
 model (a fresh SCM_RIGHTS pass over the *same* persistent control fd).
 
+**fd 4 is strictly ONE-WAY, core→child (sec-002 + core-003).** The probe returns its C1/C2/usability
+verdict over **stdout (fd 1)**, read by the existing `_SubprocessChildIO.read_frame` seam — NOT back
+over fd 4. Two reasons: (a) `read_frame` is a *pipe* read and structurally cannot carry `SCM_RIGHTS`
+anyway, so the verdict channel was always stdout; (b) more importantly, **the core never `recv`s on
+the fd-4 parent-end**, which closes reverse-fd-injection *by construction* — a compromised child cannot
+pass a fd back into the privileged core because the core never reads the ancillary buffer on that
+socket. (PR2b residuals, recorded in §11: if a future design ever reads fd 4, it must use a plain
+`recv` with **no** ancillary/CMSG buffer, add a unit guard that `control_fd_broker`'s parent-end is
+never `recvmsg`'d, `shutdown(SHUT_RD)` the parent-end, and defensively parse the child's reply bytes.)
+
 **Intra-pass ordering contract (core lens):** the core brokers the socket (`sendmsg` on fd 4) and the
-child `recvmsg`s fd 4 **before** the child blocks on any other read — documented in the transport + the
-probe loop so a split-channel deadlock cannot arise. (In PR2b's real `dispatch`, the broker step
-precedes the ingest/extract frames.)
+child `recvmsg`s fd 4 **before** the child writes its verdict to stdout / blocks on any other read —
+documented in the transport + the probe loop so a split-channel deadlock cannot arise. (In PR2b's real
+`dispatch`, the broker step precedes the ingest/extract frames.)
 
 ---
 
@@ -290,13 +323,21 @@ forward-gate**.
 
 ## 7. Guards & security posture (PR2a)
 
-- **NEW raw-socket-egress ratchet.** `control_fd_broker` is the FIRST sanctioned in-core
-  `create_connection`+`sendmsg(SCM_RIGHTS)`-toward-gateway site, and **no existing guard sees it** (G4
-  explicitly exempts raw sockets — a conscious residual, ADR-0042 §3, where the kernel netns is the
+- **NEW raw-socket-egress ratchet.** `control_fd_broker` is the FIRST sanctioned in-core site that
+  passes a *network-connected* fd to a sandboxed child, and **no existing guard sees it** (G4 explicitly
+  exempts raw sockets — a conscious residual, ADR-0042 §3, where the kernel netns is the
   enforcement-of-record). PR2a adds an AST ratchet (mirroring `test_only_sanctioned_quarantined_llm_
-  spawn_site`) making `control_fd_broker.py` the **sole** allowlisted site for that pattern in
-  `src/alfred/`; a second raw-socket-egress site trips red. This ratchets the new capability so it can't
-  proliferate — the raw-socket analog of "`EgressClient` is the only httpx constructor".
+  spawn_site`) making `control_fd_broker.py` the **sole** allowlisted site for that pattern.
+  **The pattern must be pinned on the distinctive CONJUNCTION (sec-001), not on `create_connection`
+  alone** (which is trivially bypassable via `socket.socket(AF_INET*, …)` + `.connect()`, and bare
+  `sendmsg(…, SCM_RIGHTS)` is a *pervasive* fd-passing signal — either half alone is a bad discriminator):
+  key on **an INET connect/construct (`socket.create_connection` OR `socket.socket(AF_INET/AF_INET6)`
+  followed by `.connect()`) AND a `sendmsg(…, SCM_RIGHTS, …)` in the same module.** This is a **narrow,
+  consciously-documented AST residual** in the ADR-0042 tradition — NOT the full-strength "`EgressClient`
+  is the only httpx constructor" gate (which keys on the more distinctive `httpx.AsyncClient(...)`
+  construction). The rev.1 "raw-socket analog of the httpx constructor gate" framing over-claimed and is
+  corrected here; the residual (an obfuscated raw-socket egress evading the AST match) is the same class
+  of accepted static-analysis gap G4 already documents, backstopped by the child's empty netns.
 - **G2 stays green; the shipped policy is NOT edited (and needs no throwaway copy).** The control-fd setup
   lives INSIDE `spawn_quarantine_child_io` (the only sanctioned spawn site — no second site). **PR2a does
   not touch `config/sandbox/quarantined-llm.linux.bwrap.policy`:** the probe test runs under the
@@ -353,12 +394,28 @@ ADR-0050 realises it. It records:
    raw-socket-egress ratchet is what bounds it), and the child-side ratchet flips PR2b will make and why
    they're safe (empty netns → `import socket` grants no route).
 5. The **CONNECT-location decision** (§6: child-does-CONNECT reference) + the **#358 forward-gate**.
-6. Why the **Discord AF_UNIX bridge cannot be reused** (ADR-0043 is a plaintext TCP→unix byte-splice;
-   HARD #5 requires the child to terminate TLS itself — a plaintext relay would expose raw T3 at the
-   splice). Cross-ref ADR-0015 (the fd-3 sibling resource-passing primitive).
+6. Why the **Discord AF_UNIX bridge cannot be reused** (arch-001, corrected — the rev.1 rationale was a
+   FALSE inference). The ADR-0043 bridge is NOT a plaintext relay: the Discord adapter child *also*
+   terminates TLS end-to-end, so the byte-splice carries TLS **ciphertext** — "a plaintext relay would
+   expose raw T3" is wrong, and "the child terminates TLS" does not distinguish the two designs. The
+   real, structural reasons the bridge can't be reused: (a) the quarantine child is hosted in the
+   **connectivity-free core**, so the gateway-egress socket the Discord bridge mounts cannot be mounted
+   here without reopening the G7-3 cutover; and (b) the Discord path uses `aiohttp`, which **exposes no
+   fd hook**, so ADR-0043 itself reserved the SCM_RIGHTS fd-broker for the in-house child. Cross-ref
+   ADR-0015 (the fd-3 sibling resource-passing primitive).
 7. The **per-extraction core-side egress audit row** decision (should the signed core log record each
-   brokered-socket target host:port, not just the gateway-local CONNECT audit — ADR-0040 residual vii):
-   PR2a wires the loud-failure audit; the durable per-call egress row is decided before PR2b go-live.
+   brokered-socket target host:port, not just the gateway-local CONNECT audit — ADR-0040 residual vii).
+   **PR2a does NOT wire this audit row** (rev-002/sec-008: no live caller — only the docker probe drives
+   the broker; a "PR2a wires the audit" claim would overstate). PR2a records the loud-failure error type
+   + reason vocabulary; the durable per-call egress-audit row + its write-path test are a **hard PR2b
+   pre-gate** decided before go-live (sec-007).
+8. **The dormancy contract as an explicit, auditable invariant** (arch-003, `requires_human_judgment`).
+   PR2a's whole safety rests on a *software* guard — `control_fd=False` by default keeps the live child
+   with no control fd — layered over the *kernel* empty netns. ADR-0050 must state this two-layer
+   dormancy invariant explicitly, and it becomes a **PR2b sign-off checklist item** ("the control fd is
+   opt-in-off until this PR flips it; the flip is the security-posture change under review").
+9. A **back-reference from ADR-0040's residual panel to sibling ADR-0050** (arch-004), so the
+   connectivity-free-core model's residual list points at the mechanism that consumes residuals iv/vii.
 
 **Human-gated doc drift to FLAG in the PR (do NOT edit — CLAUDE.md self-improvement rule #4):**
 CLAUDE.md security rule ("never open an external socket directly from core") wants a one-line carve-out
@@ -378,32 +435,54 @@ and `docs/subsystems/{quarantine,security}.md` are for `alfred-docs-author` at *
   precondition (no silent vanish). Drives real `spawn_quarantine_child_io(control_fd=True,
   child_module=_BROKERED_PROBE_MODULE)` against a minimal stdlib stub proxy; asserts: **C1**
   (ENETUNREACH), **C2** (getpeername/SO_ERROR live), **minimal usability** round-trip, **≥2 sequential
-  passes**, **fd-count stable** across passes (`/proc/self/fd` flat — guards close-after-sendmsg),
-  **HARD #5 mechanism** (core wrote zero bytes).
-- **"Assert the docker leg RAN (not skipped)" paper-gate** in `integration-privileged` (mirror the #245
-  guards): a deterministic pre-check that the brokered probe's preconditions hold, so a silent
-  provisioning regression can't make the proof skip-and-green. **This is the single biggest paper-gate
-  risk** — the brokered path is release-blocking only if CI proves it executed.
+  passes**, **fd-count stable** across passes (sample the **CORE process** `/proc/self/fd` — flat —
+  guards close-after-sendmsg on the *core* side, which is where the leak would be; test-004), **HARD #5
+  mechanism** (core wrote zero bytes).
+- **"Assert the docker leg RAN (not skipped)" paper-gate** in `integration-privileged` — mirror **BOTH
+  halves** of the #245 pattern (test-006/dev-003): not only the deterministic precondition **pre-check**
+  (the brokered probe's provisioning holds) but also the **runtime skip-parse** (parse the pytest
+  `-rs`/report to assert the brokered test node actually *ran*, not merely that preconditions looked OK)
+  — the #245 comment itself notes the pre-check alone is insufficient. **This is the single biggest
+  paper-gate risk** — the brokered path is release-blocking only if CI proves it executed.
 - **Unit tests (no bwrap/root — carry the coverage):**
   - `control_fd_broker`: `make_control_socketpair` inheritability; `broker_connected_socket` over a real
     `socketpair` — SCM_RIGHTS pass, **partial-`sendmsg` refusal**, **≥1-byte** frame, `IOPlaneUnavailableError`
     on blank proxy URL, close-in-`finally` on a mid-send raise, EPIPE→`ControlFdBrokerError`.
   - `spawn_quarantine_child_io`: the `child_module` frozen-allowlist rejection; the opt-in default
-    (live path passes no control fd); the two-fd save/restore + aliasing-guard temp-dup close (mockable
-    at the `os.dup2`/`pass_fds` boundary).
-  - `_SubprocessChildIO`: `aclose` closes the parent control-end idempotently.
-- **Explicit named 100% per-file coverage gate for `control_fd_broker.py`** in `coverage-gates` (it lives
-  in `egress/`, OUTSIDE the `security/*` glob — mirror the named `quarantine_child_io.py` gate so a
-  reviewer sees it). Its mechanics are fully unit-testable; the docker leg proves only C1/C2, which the
-  unit lane cannot.
-- **The raw-socket-egress ratchet guard** (§7) + the **dormant-mechanism corpus payload** (§7).
+    (live path passes no control fd); the two-fd save/restore + aliasing-guard temp-dup close + the
+    socketpair-child-end close (mockable at the `os.dup2`/`pass_fds` boundary).
+  - `_SubprocessChildIO`: `aclose` closes the parent control-end idempotently; **`broker_socket()`
+    itself unit-exercised** with a mocked `control_fd_broker.broker_connected_socket` (test-002 — it
+    lives in the named-gated `quarantine_child_io.py`, so an unexercised `broker_socket` breaks that
+    100% gate).
+- **`_brokered_probe.py` coverage treatment (H1 — the corroborated High: rev-001/test-001/dev-001).**
+  The probe sits under `src/alfred/security/quarantine_child/`, which the **recursive** `security/*`
+  100% gate (`--include='src/alfred/security/*'`, confirmed to recurse) covers against the *unit* suite
+  — but its body runs docker-only (that leg uploads no coverage), so as-placed it makes the gate
+  **unsatisfiable on `main`** (the exact anti-pattern §2 rejects). Resolution: keep the probe a **thin
+  `# pragma: no cover` subprocess-entry** (the `__main__.py` precedent — `main()` there is already
+  pragma'd as a subprocess entry), and **factor its reusable mechanics** (the `recvmsg`/`SCM_RIGHTS`
+  extraction + frame parsing) into a **unit-covered helper** (in `control_fd_broker` or a sibling) so
+  the only pragma'd lines are the genuinely netns-only ones (the C1 `ENETUNREACH` probe *cannot* be
+  unit-covered — it requires the empty netns). Writing-plans picks pragma-vs-relocate and records it;
+  either way the `security/*` gate must stay green without pragma'ing security-critical *logic*.
+- **Explicit named 100% per-file coverage gate for `control_fd_broker.py`** — wired in **BOTH** the unit
+  `--include` list AND the combined `coverage-gates` `--include` list (arch-002/test-005/dev-002: there
+  is **no** `egress/*` glob — `egress/` files are protected only by enumerated `--include` entries, and
+  the two-gates convention every `egress/*` file follows must be honoured; mirror the named
+  `quarantine_child_io.py` gate so a reviewer sees it). Its mechanics are fully unit-testable; the docker
+  leg proves only C1/C2, which the unit lane cannot.
+- **The raw-socket-egress ratchet guard** (§7) + the **dormant-mechanism corpus payload** (§7) —
+  the payload's node-id **must be registered in `adversarial.yml`'s hardcoded collected-node enumeration
+  and marked `@_bwrap_required`** (test-003), or the release-blocking gate is blind to its silent
+  deletion.
 
 **Adversarial suite is release-blocking** (PR2a edits `src/alfred/security/`); run it even though PR2a is
 behaviour-neutral on the live path.
 
 ---
 
-## 10. Decisions (best-judgment; RATIFY §11 forks 1–2 before writing-plans)
+## 10. Decisions (best-judgment; RATIFY forks 1–2 below before writing-plans)
 
 1. **Scope = THIN cut** (core-side broker + opt-in fd-4 plumbing + ratchet + ADR-0050 + docker C1/C2
    probe). Child-side transport + `_CONSTRUCT_ALLOWLIST` + shipped-policy edit + `_build_provider` flip +
@@ -426,19 +505,31 @@ subclass → `httpx.AsyncClient` → injected into `AnthropicProvider`) + its `_
 paired with a **fine-grained fd-bound-client invariant**; the shipped bwrap policy edit (narrow
 `/etc/ssl/certs` bind + `keep_fds=[3,4]`) + anchor churn; `_build_provider` real-adapter flip + extract-branch
 swap; **refuse-boot** on unset key; the provider-lens must-fixes — **parameterize `max_retries` on
-`AnthropicProvider.from_settings` AND `DeepSeekProvider.from_settings`** (both hardcode `2`; the
-`max_retries=0` taming is an SDK-ctor arg the injected client cannot carry — without this the spike's
-arm-1 re-dial silently returns), a **per-extraction teardown contract** (the long-lived child else
-accumulates httpx clients), `follow_redirects=False` explicit + no client-level timeout (rider-4), the
-**timeout hierarchy** (host read-frame > child `_MAX_TOTAL_WALL_CLOCK_SECONDS` ≥ SDK read — fold 5),
-`max_tokens` threading (fold 8), the **cost channel** (every extraction is now a billable call with no
-cost path out of the child today), an **SSLContext module-scope singleton** (the spike builds per-transport
-— a genuine correction), a `proxy_headers` seam for #358; the **tool-use canned body** so the docker
-round-trip exercises the real `native_constrained` decode (a plain-text body drives the *refusal* path)
-and asserts a real `Extracted`; broadening G3 / a companion guard to declare `brokered_egress` egress-capable
-with a reachability assertion; `sbx-2026-005` rewrite (a socket is brokered live) + capability-envelope
-assertions; the full HARD #5 provenance re-validation against the real extractor schema; the
-T3-steers-extraction adversarial corpus; a real-provider connectivity smoke; the **human sign-off**.
+`AnthropicProvider.from_settings` AND `DeepSeekProvider.from_settings`** (Anthropic's `from_settings`
+hardcodes `2`; DeepSeek inherits the SDK default rather than hardcoding it — prov-002 phrasing fix — so
+both paths still need an explicit `max_retries=0` override; the `max_retries=0` taming is an SDK-ctor
+arg the injected client cannot carry, so without this the spike's arm-1 re-dial silently returns), a
+**per-extraction teardown contract** (the long-lived child else accumulates httpx clients),
+`follow_redirects=False` explicit + no client-level timeout (rider-4); the **timeout hierarchy**
+(prov-001 — the rev.1 "host read-frame > child budget ≥ SDK read" was **inverted** by the shipped
+constants: child `_MAX_TOTAL_WALL_CLOCK_SECONDS = 30s` is SMALLER than the Anthropic SDK read `60s`,
+so the fix is to **LOWER the quarantine SDK read below the 30s budget** — host read-frame > child
+budget > SDK read — not raise the budget above the 30s action-deadline); `max_tokens` threading;
+the **cost channel** (every extraction is now a billable call with no cost path out of the child today
+— the cost metadata must ride the existing **fd-1 reply frame** into the standard per-call
+metrics/budget record — prov-004); an **SSLContext module-scope singleton** (the spike builds
+per-transport — a genuine correction); a `proxy_headers` seam for #358; **OTel trace context on the
+fd-0 request frame** (deferred from PR2a §4.1 — prov-005/rev-005); the **tool-use canned body** so the
+docker round-trip exercises the real `native_constrained` decode (a plain-text body drives the
+*refusal* path) and asserts a real `Extracted`; keeping the child-side transport **provider-AGNOSTIC**
+(it must serve DeepSeek's fork-b `prompt_embedded_fallback` path too, not just Anthropic — prov-003);
+broadening G3 / a companion guard to declare `brokered_egress` egress-capable with a reachability
+assertion; `sbx-2026-005` rewrite (a socket is brokered live) + capability-envelope assertions; the
+fd-4-reverse-read hardening if ever read (plain `recv` no-CMSG + a "no `recvmsg` on the parent-end"
+unit guard + `shutdown(SHUT_RD)` — sec-002 residual); the full HARD #5 provenance re-validation against
+the real extractor schema; the T3-steers-extraction adversarial corpus; a real-provider connectivity
+smoke; the durable **per-call core-side egress-audit row** (§8 item 7); a broker **Prometheus metric**
+(dev-004); the **human sign-off**.
 
 ---
 
@@ -454,3 +545,59 @@ a ratchet loosening + a coverage break + a spike re-proof into the non-sign-off 
 `max_retries`/teardown/cost + test's tool-use-body/coverage-factoring move to PR2b with the child-side
 transport (§11). Security's "genuine dormancy" conditions (opt-in fd, no shipped-policy edit, real guard
 coverage not filename-invisibility) are satisfied by the thin cut *by construction*.
+
+---
+
+## 13. Plan-review fold log (7-lens `/review-plan`, rev.2 — 2026-07-10)
+
+Reviewers: architect, reviewer, test-engineer, security-engineer, core-engineer, provider-engineer,
+devops-engineer + the review-coordinator. **37 findings: 0 Critical, 3 High (one corroborated issue),
+14 Medium, 20 Low. 0 disputed, 0 gaps, 0 retracted.** 6 cross-checks dispatched, **6/6 confirmed.**
+Security verdict: the thin cut is *sound and ratifiable*; the dormancy argument verified airtight
+against the tree. Folds below OVERRIDE the rev.1 body where they conflict.
+
+**High — corroborated ×3 (rev-001 + test-001 + dev-001), the one must-fix:**
+- **Probe `security/*` coverage-gate break** → §9 H1 + §4.3: thin `# pragma: no cover` subprocess-entry
+  (the `__main__.py` precedent) with reusable mechanics factored into a unit-covered helper.
+
+**Medium — cross-check-confirmed (6/6), folded with the added residuals:**
+- **arch-001** (sec-confirmed) → §8 item 6 rewritten: the Discord byte-splice carries TLS *ciphertext*;
+  the real non-reuse reasons are connectivity-free-core hosting + aiohttp-has-no-fd-hook.
+- **sec-002 + core-003** (sec + core confirmed; SAME underlying issue) → §5 + §4.3: verdict returns over
+  **stdout**; **fd 4 strictly one-way** (core never `recv`s it) → reverse-fd-injection closed by
+  construction; PR2b residuals (plain `recv` no-CMSG, no-`recvmsg` guard, `shutdown(SHUT_RD)`) → §11.
+- **sec-001** (core-confirmed) → §7: ratchet pinned on the **conjunction** (INET connect/construct AND
+  `sendmsg(SCM_RIGHTS)` in one module); the "httpx-gate analog" over-claim corrected to a documented
+  AST residual.
+- **core-002** (prov-confirmed) → §4.1: bounded connect timeout + **`settimeout(None)` before the pass**
+  (`create_connection(timeout=)` leaves `O_NONBLOCK` set — honours the never-`O_NONBLOCK` invariant).
+- **test-002** (dev-confirmed) → §9: `broker_socket()` unit-exercised (else the named `quarantine_child_io.py`
+  gate breaks).
+- **test-003** (dev-confirmed) → §7/§9: register the new payload in `adversarial.yml`'s node enumeration
+  + `@_bwrap_required`.
+
+**Corroborated clusters (peer-confirmed, no cross-check) — folded:**
+- control_fd_broker **two-gates** in BOTH `--include` lists, no `egress/*` glob (arch-002/test-005/dev-002) → §9.
+- **"wires the audit" overstatement** (rev-002/sec-008) → §4.1 + §8 item 7: PR2a defines the error type
+  only; the audit-row write is PR2b.
+- **"(ciphertext)" mislabel** (rev-003/sec-003) → §2 table "core wrote zero bytes".
+- **OTel premature** (rev-005/prov-005) → moved to §11 (fd-0 request frame, PR2b).
+- **core-side fd leak** (core-001/test-004) → §4.2 (close the socketpair child-end in `finally`; raw fds
+  not socket objects) + §9 (fd-count test samples the CORE process).
+- **broker urlsplit/missing-port** (core-004/prov-006) → §4.1.
+- **paper-gate both #245 halves** (test-006/dev-003) → §9 (runtime skip-parse, not just pre-check).
+
+**Single-reviewer, carried forward (in-domain, low-stakes or PR2b-agenda — not blocking):**
+- Provider §11 precision: **prov-001** timeout inversion (30s < 60s; LOWER the SDK read), **prov-002**
+  DeepSeek inherits the SDK default (not "hardcode 2"), **prov-003** transport must stay
+  provider-agnostic, **prov-004** cost rides the fd-1 frame — all folded into §11.
+- **arch-003** (`requires_human_judgment`) → §8 item 8: dormancy contract as an explicit auditable
+  invariant + a PR2b sign-off checklist item.
+- **arch-004** → §8 item 9 (ADR-0040 residual-panel back-reference). **dev-004** → §11 (broker Prometheus
+  metric, PR2b). **sec-004** (tree-wide `child_module` guard), **sec-005** (sentinel-byte content),
+  **sec-006** (probe import-isolation), **rev-004** (signature/idiom polish) — writing-plans nits, noted.
+
+**One open item for the maintainer at ratification (arch-003, `requires_human_judgment`):** confirm the
+two-layer dormancy invariant (opt-in-off software guard over the kernel empty netns) is the right
+contract to make explicit + auditable in ADR-0050, and that the `control_fd`-flip in PR2b is the correct
+security-posture boundary for the sign-off.
