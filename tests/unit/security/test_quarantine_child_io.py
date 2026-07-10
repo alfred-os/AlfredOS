@@ -618,3 +618,127 @@ async def test_read_frame_failure_drain_error_does_not_preempt_spawn_error(
         assert "security.quarantine_child.child_stderr" not in events  # nothing to log
     finally:
         await cio.aclose()
+
+
+# --- #251: aclose drain + stderr-pipe close ---------------------------------
+
+
+async def test_aclose_drains_stderr_after_reap_for_wedged_child(
+    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+) -> None:
+    """aclose drains the stderr the read_frame arm skipped (the wedged/timeout case)."""
+    import structlog.testing
+
+    release = threading.Event()
+
+    class _HangingStdout:
+        def read(self, n: int) -> bytes:
+            release.wait(timeout=30)
+            return b""  # pragma: no cover - the wait_for fires first
+
+    proc = _spawn_capture["proc"]
+    proc.stdout = _HangingStdout()
+    proc.stderr = _FakeStderr(b"child wedged: stderr buffer full")
+    monkeypatch.setattr(child_io_mod, "_READ_FRAME_TIMEOUT_S", 0.05)
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(QuarantineChildSpawnError):
+            await cio.read_frame()  # child still "running" -> arm skips the drain
+        release.set()
+        await cio.aclose()  # _terminate_and_reap flips poll() -> exited -> drain runs
+    events = [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+    assert len(events) == 1
+    assert "buffer full" in events[0]["child_stderr"]
+
+
+async def test_child_stderr_logged_at_most_once(_spawn_capture: dict[str, Any]) -> None:
+    """read_frame drained+logged -> aclose does NOT re-emit (idempotency flag)."""
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stdout = _FakeStdout([b"\x00\x00"])  # truncated -> read_frame raises
+    proc.stderr = _FakeStderr(b"boom reason")
+    proc.returncode = 1  # exited
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(QuarantineChildSpawnError):
+            await cio.read_frame()
+        await cio.aclose()
+    events = [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+    assert len(events) == 1  # exactly one, from read_frame; aclose is a no-op
+
+
+async def test_aclose_empty_stderr_emits_no_event(_spawn_capture: dict[str, Any]) -> None:
+    """A clean exit with empty stderr emits no child_stderr noise."""
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.returncode = 0  # exited, and the fixture stderr defaults to b""
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        await cio.aclose()
+    assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+
+
+async def test_aclose_all_control_stderr_emits_no_event(_spawn_capture: dict[str, Any]) -> None:
+    """Non-empty but all-control stderr sanitizes to None -> no event."""
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stderr = _FakeStderr(b"\n\r\n\t   ")
+    proc.returncode = 0
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        await cio.aclose()
+    assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+
+
+async def test_aclose_over_cap_stderr_is_truncated_with_marker(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """An over-cap child stderr surfaces the truncation marker (not a silent clip).
+
+    Integration-level proof that the drain reads one byte past the log cap so
+    ``_sanitize_child_stderr``'s ``…[truncated]`` marker actually fires end-to-end
+    (with read-cap == log-cap it never could — a long diagnostic was silently
+    clipped, exactly when the "there's more" hint matters most).
+    """
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stderr = _FakeStderr(b"x" * (child_io_mod._STDERR_LOG_CAP_BYTES + 500))
+    proc.returncode = 0
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        await cio.aclose()
+    events = [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+    assert len(events) == 1
+    field = events[0]["child_stderr"]
+    assert field.endswith(child_io_mod._STDERR_TRUNCATION_MARKER)
+    assert len(field) == child_io_mod._STDERR_LOG_CAP_BYTES + len(
+        child_io_mod._STDERR_TRUNCATION_MARKER
+    )
+
+
+async def test_aclose_closes_stderr_pipe(_spawn_capture: dict[str, Any]) -> None:
+    """aclose closes the stderr pipe (fd hygiene) — after draining it."""
+    proc = _spawn_capture["proc"]
+    proc.returncode = 0
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    await cio.aclose()
+    assert proc.stderr.closed is True
+
+
+async def test_aclose_with_no_stderr_pipe_is_safe(_spawn_capture: dict[str, Any]) -> None:
+    """A None stderr pipe (defensive) neither crashes nor emits an event."""
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stderr = None
+    proc.returncode = 0
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        await cio.aclose()  # must not raise AttributeError on None.close()
+    assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]

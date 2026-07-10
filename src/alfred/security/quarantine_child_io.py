@@ -464,8 +464,15 @@ class _SubprocessChildIO:
                 return
             self._stderr_drained = True  # set before the read: a read failure won't retry
             loop = asyncio.get_running_loop()
+            # Read ONE byte past the log cap so an over-cap child actually trips
+            # ``_sanitize_child_stderr``'s truncation marker: with read-cap == log-cap
+            # the decoded char count could never exceed the cap and a long stderr was
+            # silently clipped (no "…[truncated]" hint — exactly when it matters most).
+            # The read stays bounded (the child exited, so the write-end is closed —
+            # a guarantee that rests on the kind="full" bwrap PID-namespace reaping,
+            # under which no grandchild can outlive the child holding this fd).
             raw = await loop.run_in_executor(
-                None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES
+                None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES + 1
             )
             if not raw:
                 return
@@ -478,11 +485,26 @@ class _SubprocessChildIO:
             _log.warning("security.quarantine_child.stderr_drain_failed", exc_info=True)
 
     async def aclose(self) -> None:
-        """Terminate + reap the child (idempotent); close the owned control-end, if any."""
+        """Terminate+reap the child; drain+log its stderr; close pipe/control-end.
+
+        Idempotent. Once ``_terminate_and_reap`` returns (best-effort SIGTERM +
+        off-loop reap), ``_log_child_stderr`` drains the stderr the ``read_frame``
+        arm skipped on a wedged/timeout child (#251) — its own ``poll()`` gate still
+        guards the read, so a not-yet-exited child is simply skipped, never blocked
+        on. The stderr pipe fd is then closed (it is the pipe this IO owns
+        end-to-end and the only one never read/closed before — stdin/stdout are left
+        to ``Popen`` GC to avoid racing an orphaned ``read_frame`` executor thread
+        still reading stdout).
+        """
         if self._closed:
             return
         self._closed = True
         await _terminate_and_reap(self._process)
+        await self._log_child_stderr()
+        stderr = self._process.stderr
+        if stderr is not None:
+            with contextlib.suppress(OSError):
+                stderr.close()
         if self._control_parent is not None:
             with contextlib.suppress(OSError):
                 self._control_parent.close()

@@ -829,3 +829,13 @@ spec) is authoritative.
   `_stderr_drained` BEFORE the read so a failure isn't retried;
   `test_read_frame_failure_drain_error_does_not_preempt_spawn_error` covers the arm
   and proves the primary error survives.
+- **Final whole-branch review — truncation marker made reachable + PID-containment
+  note.** With read-cap == log-cap the `…[truncated]` marker could never fire in the
+  real drain path → an over-4096-byte diagnostic was silently clipped. FIX: the
+  drain reads `_STDERR_LOG_CAP_BYTES + 1` bytes so an over-cap child trips the
+  marker; `test_aclose_over_cap_stderr_is_truncated_with_marker` proves it
+  end-to-end. Also documented that the drain's "cannot block" rests on the
+  `kind="full"` bwrap PID-namespace reaping (no grandchild outlives the child
+  holding the stderr write-end). Both Minors; all other final-review triage items
+  (residual `Co/Cn/Mn`; silent `stderr.close()` mirroring the sibling teardown
+  idiom; a test-file pragma comment) accepted as no-action.

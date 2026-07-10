@@ -98,7 +98,11 @@ def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
   a space; collapse runs of whitespace; `strip()`. Result is single-line. Stripping
   `Cf` closes the "Trojan Source" bidi display-spoof, a control-char-free attack the
   child could otherwise smuggle into an operator's terminal (task-review fold).
-- Truncate to `cap` characters; append `…[truncated]` if it was longer.
+- Truncate to `cap` characters; append `…[truncated]` if it was longer. The drain
+  caller reads `_STDERR_LOG_CAP_BYTES + 1` bytes (one past the log cap) so an
+  over-cap child's stderr actually trips this marker end-to-end — otherwise
+  read-cap == log-cap makes the decoded char count unable to exceed the cap and a
+  long diagnostic is silently clipped (final-review fold).
 - Return `None` when the sanitized string is empty (nothing to log).
 
 ```python
@@ -157,8 +161,11 @@ async def _log_child_stderr(self) -> None:
             return
         self._stderr_drained = True  # set before the read: a read failure won't retry
         loop = asyncio.get_running_loop()
+        # Read one byte PAST the log cap so an over-cap child trips the truncation
+        # marker (with read-cap == log-cap the decoded char count could never exceed
+        # cap → a long stderr was silently clipped with no "…[truncated]" hint).
         raw = await loop.run_in_executor(
-            None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES
+            None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES + 1
         )
         if not raw:
             return
