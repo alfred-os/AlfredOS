@@ -34,13 +34,15 @@ from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
 _CONTROL_FD = 4
 # A routable public IP — a fresh connect MUST fail ENETUNREACH in the empty netns.
 _LITERAL_IP = ("1.1.1.1", 443)
-# A fresh connect from a genuinely EMPTY netns has NO route, so the kernel fails it
-# with a route-absence errno (ENETUNREACH observed in the bwrap child; the others are
-# kernel-variance siblings). A reachable-but-filtered network would instead give
-# ETIMEDOUT/ECONNREFUSED, and a firewall EPERM — none of which prove an empty netns, so
-# they must NOT satisfy the C1 negative control (else a broken --unshare-net could
-# false-green when the literal IP merely happens to be unreachable for another reason).
-_EMPTY_NETNS_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN})
+# A fresh connect from a genuinely EMPTY netns has NO route at all, so the kernel fails
+# it with ENETUNREACH (empirically errno 101 in the bwrap child; ADR-0050 §2). A
+# reachable-but-filtered network gives ETIMEDOUT/ECONNREFUSED and a firewall EPERM —
+# none of which prove an empty netns — so ``c1_enetunreach`` is True ONLY for exactly
+# ENETUNREACH, never any OSError (else a broken --unshare-net could false-green when the
+# literal IP merely happens to be unreachable for another reason). Pinning the exact
+# errno (not a route-absence family) keeps the negative control coherent with ADR-0050
+# §2 and matches what an empty netns actually produces.
+_EMPTY_NETNS_ERRNO = errno.ENETUNREACH
 # Bound the plaintext usability round-trip: a stub that never echoes must trip a loud
 # socket timeout, not wedge the probe loop (and, through it, the docker test) forever.
 _USABILITY_TIMEOUT_S = 10.0
@@ -90,7 +92,7 @@ def _probe_once(  # pragma: no cover - needs the empty netns
         socket.create_connection(_LITERAL_IP, timeout=3).close()
         c1 = {"c1_enetunreach": False, "c1_errno": 0}
     except OSError as exc:
-        c1 = {"c1_enetunreach": exc.errno in _EMPTY_NETNS_ERRNOS, "c1_errno": exc.errno or 0}
+        c1 = {"c1_enetunreach": exc.errno == _EMPTY_NETNS_ERRNO, "c1_errno": exc.errno or 0}
     return {**c1, "c2_live": so_error == 0, "peer": peer, "usable": usable}
 
 
@@ -105,20 +107,23 @@ def main() -> None:  # pragma: no cover - subprocess entry (docker-only)
     while True:
         try:
             verdict = _probe_once(control_end)
+            # INSIDE the try: a closed stdout makes ``_write_verdict`` raise
+            # ``BrokenPipeError`` (an ``OSError``), which must yield the single
+            # diagnostic line below — never a bare traceback.
+            _write_verdict(verdict)
         except (OSError, ValueError, ControlFdBrokerError) as exc:
-            # Control channel EOF (``recv_passed_fd`` raises ``ControlFdBrokerError``
+            # Control-channel EOF (``recv_passed_fd`` raises ``ControlFdBrokerError``
             # when the parent closes its end — an ``AlfredError``, NOT an ``OSError``),
-            # a malformed SCM_RIGHTS frame, or a usability timeout: the test tore the
-            # child down, or a real fault occurred. Emit a single line to stderr —
-            # drained + sanitized host-side (#251) — so a docker-leg failure is
-            # attributable instead of a silent exit / traceback.
+            # a malformed SCM_RIGHTS frame, a usability timeout, or a broken stdout on
+            # ``_write_verdict``: the test tore the child down, or a real fault occurred.
+            # Emit ONE line to stderr — drained + sanitized host-side (#251) — so a
+            # docker-leg failure is attributable instead of a silent exit / traceback.
             print(
-                f"brokered-probe: probe loop stopped ({type(exc).__name__})",
+                f"brokered-probe: probe loop stopped ({type(exc).__name__}: {exc})",
                 file=sys.stderr,
                 flush=True,
             )
             return
-        _write_verdict(verdict)
 
 
 if __name__ == "__main__":  # pragma: no cover - subprocess entry point
