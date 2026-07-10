@@ -198,14 +198,16 @@ When the extraction result is a `TypedRefusal`, the `reason` field is one of:
 > **Child stderr diagnostics (#251).** When a spawn/extract failure above manifests
 > as a torn or timed-out reply (e.g. the launcher refuses — "Missing sandbox policy
 > file" / "fd-3 key read fails" rows), the host now drains the quarantined child's
-> stderr and surfaces the child-side reason as a **sanitized, single-line
-> `security.quarantine_child.child_stderr`** structlog field (logged at `error` on the
-> `read_frame` failure path, alongside `security.quarantine_child.read_frame_failed`;
-> at `warning` on teardown). If the drain itself fails, look for
-> `security.quarantine_child.stderr_drain_failed` (carries `error_class`). The field
-> is bounded (`…[truncated]` marks an over-cap clip), control/format-char-stripped
-> (no forged log lines / terminal-escape / bidi spoof), and secret-redacted — so it
-> may show sanitized T3-derived text; treat it as operational-log-tier, not audit.
+> stderr and surfaces the child-side reason in the **`child_stderr` field** of a
+> **`security.quarantine_child.child_stderr`** structlog event (logged at `error` on
+> the `read_frame` failure path, alongside the `security.quarantine_child.read_frame_failed`
+> event; at `warning` on teardown). Filter on the event name; read the reason from the
+> `child_stderr` field. If the drain itself fails, look for the
+> `security.quarantine_child.stderr_drain_failed` event (carries an `error_class`
+> field). The `child_stderr` value is bounded (`…[truncated]` marks an over-cap clip),
+> control/format-char-stripped (no forged log lines / terminal-escape / bidi spoof),
+> and secret-redacted — so it may show sanitized T3-derived text; treat it as
+> operational-log-tier, not audit.
 
 ## Cross-references
 

@@ -229,13 +229,14 @@ A related, deliberately-narrower disclosure exists on the failure path. When a
 spawn/extract fails (torn or timed-out reply), the host-side child-IO
 (`src/alfred/security/quarantine_child_io.py`) drains the quarantined child's
 stderr — best-effort, bounded, only once the child has exited — and surfaces the
-child-side reason as a **sanitized, single-line `security.quarantine_child.child_stderr`**
-structlog field (never raw-inherited; control/format chars stripped so no forged
-log line / terminal-escape / bidi spoof survives; passed through the bootstrap
-leaf-redactor). Unlike the audit-row rule above, this field CAN carry sanitized
-T3-derived stderr text into the operational-log plane — an accepted, bounded
-residual (the orchestrator still never reads it, and it is not audit-tier). See
-the #251 design spec §6 for the full residual + the canary forward-gate.
+child-side reason in the **`child_stderr` field** of a
+**`security.quarantine_child.child_stderr`** structlog event (never raw-inherited;
+the `child_stderr` value is sanitized, single-line, control/format-char-stripped so
+no forged log line / terminal-escape / bidi spoof survives, and passed through the
+bootstrap leaf-redactor). Unlike the audit-row rule above, this field CAN carry
+sanitized T3-derived stderr text into the operational-log plane — an accepted,
+bounded residual (the orchestrator still never reads it, and it is not audit-tier).
+See the #251 design spec §6 for the full residual + the canary forward-gate.
 
 ## Internal model
 
