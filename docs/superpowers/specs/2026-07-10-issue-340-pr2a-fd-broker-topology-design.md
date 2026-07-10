@@ -1,10 +1,12 @@
 # #340 PR2a — SCM_RIGHTS fd-broker topology mechanism (core-side) — design
 
-**Status:** **rev.2 — best-judgment THIN-CUT; 7-lens `/review-plan` folded (0 Critical, 3 High
-[all one corroborated issue], 14 Medium, 20 Low, 0 disputed, 0 gaps); HOLDING at ratification.**
-This doc REVERSES the earlier "precursor infra + stub round-trip" (fat-cut) selection — see §2 for
-why, and ratify the thin cut (or redirect to the fat cut) before `writing-plans`. The `/review-plan`
-folds (§13) OVERRIDE the rev.1 body where they conflict.
+**Status:** **rev.2 — RATIFIED 2026-07-10.** Thin cut (§2/§10), child-does-CONNECT reference (§6), and
+the `arch-003` two-layer dormancy invariant (§8 item 8) all confirmed by the maintainer. 7-lens
+`/review-plan` folded (0 Critical, 3 High [all one corroborated issue], 14 Medium, 20 Low, 0 disputed,
+0 gaps; 6/6 cross-checks confirmed; §13). This doc REVERSES the earlier "precursor infra + stub
+round-trip" (fat-cut) selection — see §2. The `/review-plan` folds (§13) OVERRIDE the rev.1 body where
+they conflict. **NEXT:** #251 standalone stderr-drain PR lands before PR2a implementation; this spec
+now drives `writing-plans` for PR2a.
 **Date:** 2026-07-10
 **Epic:** [#340](https://github.com/alfred-os/AlfredOS/issues/340) — Real-LLM quarantine child (2c).
 **Follows:** PR1 (provider-seam reconciliation, MERGED, main `9c347580`) → the fd-broker feasibility
