@@ -806,4 +806,26 @@ After all three tasks are green (do NOT push without the user — outward-facing
 - **Branch-coverage inventory (no new pragmas):** `_read_stderr_bytes`
   (None / loop-cap-exit / EOF-break), `_sanitize_child_stderr` (empty→None /
   content / >cap), `_log_child_stderr` (drained / poll-None / not-raw /
-  sanitized-None), `aclose` (stderr not-None / None) — each has a dedicated test.
+  sanitized-None / drain-raises), `aclose` (stderr not-None / None) — each has a
+  dedicated test.
+
+## Task-review fold log (during execution — OVERRIDES task bodies above)
+
+Findings from the per-task security reviews, folded into the shipped code + tests.
+Where a code block above still shows the pre-fold shape, the shipped code (and the
+spec) is authoritative.
+
+- **Task 1 — sanitizer widened `Cc` → `Cc`+`Cf`.** The original `Cc`-only strip left
+  Unicode `Cf` format chars (bidi overrides U+202E, isolates U+2066-2069, zero-width
+  U+200B, BOM U+FEFF) surviving → "Trojan Source" terminal display-spoof on the most
+  adversary-facing surface. FIX: `_STRIPPED_UNICODE_CATEGORIES = frozenset({"Cc",
+  "Cf"})`; `test_sanitize_child_stderr_strips_bidi_and_zero_width_format_chars`
+  (built via `chr(cp)` → ruff-safe; non-vacuous — asserts legit text survives).
+- **Task 2 — drain made best-effort-never-raises.** The unguarded pipe I/O in
+  `_log_child_stderr` could let an `OSError` from the read preempt the caller's
+  contracted `QuarantineChildSpawnError` (hard rule #7 / §6 invariant violation).
+  FIX: wrap the post-exit-gate body in `try/except Exception` → loud
+  `security.quarantine_child.stderr_drain_failed` (never silent); set
+  `_stderr_drained` BEFORE the read so a failure isn't retried;
+  `test_read_frame_failure_drain_error_does_not_preempt_spawn_error` covers the arm
+  and proves the primary error survives.

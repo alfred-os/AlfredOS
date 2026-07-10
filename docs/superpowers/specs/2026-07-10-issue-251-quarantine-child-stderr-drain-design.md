@@ -137,30 +137,36 @@ self._stderr_drained = False  # in __init__
 async def _log_child_stderr(self) -> None:
     """Drain (iff exited) + structured-log the child's stderr, at most once.
 
-    Idempotent AND exit-gated. Order matters:
+    Exit-gated, idempotent, AND best-effort-never-raises. Order matters:
       1. If already drained → return (consumed pipe; nothing to re-read).
       2. If the child has NOT exited (``poll() is None``) → return WITHOUT setting
          the flag. Draining a live child could block on a wedged process. The
          ``read_frame`` arm hits this on the timeout/wedged path; ``aclose``
          retries after ``_terminate_and_reap`` guarantees exit.
-      3. Child exited → read (off-loop), SET the flag, log iff non-empty. Emits
-         ``security.quarantine_child.child_stderr`` ONLY when there is content —
-         no empty-field noise on the happy teardown.
+      3. Child exited → SET the flag (before the read, so a read failure is not
+         retried), read (off-loop), log iff non-empty.
+    A diagnostic-drain failure (e.g. an ``OSError`` on the pipe) must NEVER preempt
+    the caller's ``QuarantineChildSpawnError`` (hard rule #7 + §6): the body past
+    the exit gate is wrapped so any failure is surfaced LOUDLY as
+    ``stderr_drain_failed`` (never silent), mirroring ``_terminate_and_reap``.
     """
     if self._stderr_drained:
         return
-    if self._process.poll() is None:  # still running — do NOT set the flag
-        return
-    loop = asyncio.get_running_loop()
-    raw = await loop.run_in_executor(
-        None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES
-    )
-    self._stderr_drained = True
-    if not raw:
-        return
-    sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES)
-    if sanitized is not None:
-        _log.warning("security.quarantine_child.child_stderr", child_stderr=sanitized)
+    try:
+        if self._process.poll() is None:  # still running — do NOT set the flag
+            return
+        self._stderr_drained = True  # set before the read: a read failure won't retry
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES
+        )
+        if not raw:
+            return
+        sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES)
+        if sanitized is not None:
+            _log.warning("security.quarantine_child.child_stderr", child_stderr=sanitized)
+    except Exception:  # best-effort: never preempt the caller's error (hard rule #7)
+        _log.warning("security.quarantine_child.stderr_drain_failed", exc_info=True)
 ```
 
 `process.poll()` is a non-blocking `waitpid(WNOHANG)` — cheap on the loop thread,
@@ -248,7 +254,11 @@ unit-reachable.
 
 - **Hard rule #7 (no silent failures).** The drain makes a previously-silent
   failure LOUD with its cause; it never swallows an error — the
-  `QuarantineChildSpawnError` still propagates unchanged.
+  `QuarantineChildSpawnError` still propagates unchanged. The drain itself is
+  **best-effort-never-raises** (enforced in `_log_child_stderr`, not just
+  asserted): a diagnostic-read failure surfaces LOUDLY as `stderr_drain_failed`
+  and cannot preempt the primary `QuarantineChildSpawnError` — a secondary
+  diagnostic must never mask the primary error (task-review fold).
 - **Log-injection defense.** Control chars collapsed at the source → no forged
   log lines / terminal escapes under either renderer.
 - **Secret leakage.** The `child_stderr` field passes through the bootstrap

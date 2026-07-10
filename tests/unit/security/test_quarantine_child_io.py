@@ -101,9 +101,10 @@ class _FakeStderr:
 
 
 class _FakePopen:
-    def __init__(self, stdout_frames: list[bytes]) -> None:
+    def __init__(self, stdout_frames: list[bytes], stderr_bytes: bytes = b"") -> None:
         self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(stdout_frames)
+        self.stderr = _FakeStderr(stderr_bytes)
         self.returncode: int | None = None
         self.terminate_calls = 0
         self.wait_calls = 0
@@ -522,3 +523,98 @@ def test_read_stderr_bytes_caps_at_limit() -> None:
 def test_read_stderr_bytes_no_pipe_returns_empty() -> None:
     proc = types.SimpleNamespace(stderr=None)
     assert child_io_mod._read_stderr_bytes(proc, 4096) == b""  # type: ignore[arg-type]
+
+
+async def test_read_frame_failure_logs_child_stderr_when_exited(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """A torn read_frame on an EXITED child surfaces its stderr reason (harm 1)."""
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stdout = _FakeStdout([b"\x00\x00"])  # truncated header -> _TruncatedFrameError
+    proc.stderr = _FakeStderr(b"supervisor.plugin.sandbox_refused reason=environment_not_set")
+    proc.returncode = 1  # child has EXITED -> poll() gate passes, drain proceeds
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(QuarantineChildSpawnError),
+        ):
+            await cio.read_frame()
+        events = [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+        assert len(events) == 1
+        assert "environment_not_set" in events[0]["child_stderr"]
+    finally:
+        await cio.aclose()
+
+
+async def test_read_frame_failure_skips_stderr_when_child_still_running(
+    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+) -> None:
+    """A wedged (still-running) child is NOT drained at the failure point (no block)."""
+    import structlog.testing
+
+    release = threading.Event()
+
+    class _HangingStdout:
+        def read(self, n: int) -> bytes:
+            release.wait(timeout=30)
+            return b""  # pragma: no cover - the wait_for fires first
+
+    proc = _spawn_capture["proc"]
+    proc.stdout = _HangingStdout()
+    # If the drain were ever attempted on this running child it would read this;
+    # the poll()-gate must skip it (returncode stays None -> poll() is None).
+    proc.stderr = _FakeStderr(b"should-not-be-read-while-running")
+    monkeypatch.setattr(child_io_mod, "_READ_FRAME_TIMEOUT_S", 0.05)
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(QuarantineChildSpawnError),
+        ):
+            await cio.read_frame()
+        # No child_stderr event at the failure point — the child is still running.
+        assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+    finally:
+        release.set()
+        await cio.aclose()
+
+
+async def test_read_frame_failure_drain_error_does_not_preempt_spawn_error(
+    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+) -> None:
+    """A best-effort drain that itself raises must NOT mask the QuarantineChildSpawnError.
+
+    Hard rule #7 (spec §6): the diagnostic drain is best-effort — if the stderr read
+    raises (e.g. an OSError on the pipe), the caller's contracted
+    ``QuarantineChildSpawnError`` still propagates, and the drain failure surfaces
+    LOUDLY as ``stderr_drain_failed`` (never a silent swallow, never a substituted
+    exception).
+    """
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stdout = _FakeStdout([b"\x00\x00"])  # truncated header -> read_frame raises
+    proc.returncode = 1  # child EXITED -> drain proceeds past the poll() gate
+
+    def _boom(_process: Any, _cap: int) -> bytes:
+        raise OSError("stderr pipe read failed")
+
+    monkeypatch.setattr(child_io_mod, "_read_stderr_bytes", _boom)
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(QuarantineChildSpawnError),  # the PRIMARY error still wins
+        ):
+            await cio.read_frame()
+        events = {e["event"] for e in logs}
+        assert "security.quarantine_child.stderr_drain_failed" in events  # loud, not silent
+        assert "security.quarantine_child.child_stderr" not in events  # nothing to log
+    finally:
+        await cio.aclose()

@@ -360,6 +360,7 @@ class _SubprocessChildIO:
     ) -> None:
         self._process = process
         self._closed = False
+        self._stderr_drained = False
         self._control_parent = control_parent
         self._egress_config = egress_config
 
@@ -407,6 +408,7 @@ class _SubprocessChildIO:
             _log.error(
                 "security.quarantine_child.read_frame_failed", error_class=type(exc).__name__
             )
+            await self._log_child_stderr()
             raise QuarantineChildSpawnError(
                 t("security.quarantine_child.read_frame_failed")
             ) from exc
@@ -426,6 +428,54 @@ class _SubprocessChildIO:
         await control_fd_broker.broker_connected_socket(
             parent_end=self._control_parent, proxy_config=self._egress_config
         )
+
+    async def _log_child_stderr(self) -> None:
+        """Drain (iff the child has exited) + structured-log its stderr, at most once.
+
+        Exit-gated, idempotent, AND best-effort-never-raises (#251). Order matters:
+
+        1. Already drained -> return (the pipe is consumed; nothing to re-read).
+        2. Child NOT exited (``poll() is None``) -> return WITHOUT setting the flag.
+           Draining a live child could block on a wedged process; the ``read_frame``
+           arm hits this on the timeout/wedged path and ``aclose`` retries after
+           ``_terminate_and_reap`` guarantees exit.
+        3. Child exited -> SET the flag (before the read, so a read failure is not
+           retried), read off-loop, and emit
+           ``security.quarantine_child.child_stderr`` ONLY when there is printable
+           content (no empty-field noise on the happy teardown).
+
+        **Never raises** — a diagnostic-drain failure (e.g. an ``OSError`` reading
+        the pipe) must NOT preempt the caller's contracted
+        :class:`QuarantineChildSpawnError` (CLAUDE.md hard rule #7; spec §6). Any
+        failure past the exit gate is caught and surfaced LOUDLY as a
+        ``security.quarantine_child.stderr_drain_failed`` warning (never a silent
+        swallow) — mirroring :func:`_terminate_and_reap`'s best-effort posture. The
+        primary error the caller is about to ``raise`` is left untouched.
+
+        ``poll()`` is a non-blocking ``waitpid(WNOHANG)`` — it actively detects a
+        just-exited child (so the common EOF-after-exit case surfaces at the
+        ``read_frame`` arm without a prior ``wait``); after ``_terminate_and_reap``
+        it short-circuits on the cached ``returncode``.
+        """
+        if self._stderr_drained:
+            return
+        try:
+            if self._process.poll() is None:  # still running — do NOT set the flag
+                return
+            self._stderr_drained = True  # set before the read: a read failure won't retry
+            loop = asyncio.get_running_loop()
+            raw = await loop.run_in_executor(
+                None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES
+            )
+            if not raw:
+                return
+            sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES)
+            if sanitized is not None:
+                _log.warning("security.quarantine_child.child_stderr", child_stderr=sanitized)
+        except Exception:
+            # Best-effort diagnostic: NEVER preempt the caller's QuarantineChildSpawnError
+            # (hard rule #7). Fail LOUD (structured warning + exc_info), never silent.
+            _log.warning("security.quarantine_child.stderr_drain_failed", exc_info=True)
 
     async def aclose(self) -> None:
         """Terminate + reap the child (idempotent); close the owned control-end, if any."""
