@@ -10,6 +10,7 @@ class-level monkeypatch drives it), and the proxy-URL-to-(host, port) resolver
 from __future__ import annotations
 
 import array
+import os
 import socket
 import threading
 
@@ -77,40 +78,76 @@ def test_recv_passed_fd_no_fd_is_loud() -> None:
         child.close()
 
 
-def test_recv_passed_fd_ancillary_truncation_is_loud_and_closes_received_fds() -> None:
-    """Sending 2 fds into recv_passed_fd's 1-fd-sized ancillary buffer truncates (MSG_CTRUNC).
+def test_recv_passed_fd_ancillary_truncation_closes_received_fds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MSG_CTRUNC branch: recv_passed_fd closes any installed fd, then raises ancillary_truncated.
 
-    Fold-log H item 1: this exercises the MSG_CTRUNC branch explicitly (a coverage-gate
-    requirement, not merely implied by the zero-fd test above). Fold-log L-2: whatever fd
-    the kernel DID manage to install before truncating must be closed by recv_passed_fd
-    itself before it raises — this test's job is to prove the raise happens with the right
-    reason; the no-leak property is enforced by inspection of the implementation (a leaked
-    fd here is not independently observable from the test process without an fd-count probe,
-    since the "installed" copy lives in THIS process's own fd table alongside everything else
-    pytest already opened).
+    A real 2-fd frame into a 1-fd buffer sets MSG_CTRUNC on macOS/BSD but on Linux instead
+    delivers the extra fd (tripping the count check) — so the MSG_CTRUNC arc is driven
+    DETERMINISTICALLY via a class-level ``recvmsg`` monkeypatch (fold-log H item 1; a real
+    socket cannot be coaxed into a portable MSG_CTRUNC). The installed fd is a real ``dup`` that
+    recv_passed_fd must reclaim (fold-log L-2) — proven OBSERVABLY by the failing re-close below.
     """
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())  # a real, closeable fd recv_passed_fd must reclaim
+    cmsg = array.array("i", [victim]).tobytes()
+
+    def _fake_recvmsg(
+        self: socket.socket, bufsize: int, ancbufsize: int = 0, flags: int = 0
+    ) -> tuple[bytes, list[tuple[int, int, bytes]], int, None]:
+        return b"\x01", [(socket.SOL_SOCKET, socket.SCM_RIGHTS, cmsg)], socket.MSG_CTRUNC, None
+
+    monkeypatch.setattr(socket.socket, "recvmsg", _fake_recvmsg)
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    donor_a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    donor_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        parent.sendmsg(
-            [b"\x01"],
-            [
-                (
-                    socket.SOL_SOCKET,
-                    socket.SCM_RIGHTS,
-                    array.array("i", [donor_a.fileno(), donor_b.fileno()]),
-                )
-            ],
-        )
         with pytest.raises(ControlFdBrokerError) as exc:
             recv_passed_fd(child)
         assert exc.value.reason == "ancillary_truncated"
+        with pytest.raises(OSError):
+            os.close(victim)  # recv_passed_fd already reclaimed it — no leak
     finally:
         parent.close()
         child.close()
-        donor_a.close()
-        donor_b.close()
+        keeper.close()
+
+
+def test_recv_passed_fd_multi_fd_without_ctrunc_closes_and_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """len(fds) != 1 with fds installed (no MSG_CTRUNC): recv_passed_fd closes them + refuses.
+
+    This is the Linux signature of a >1-fd frame — the kernel delivers both descriptors rather
+    than setting MSG_CTRUNC, landing on the exactly-one-fd check. That refusal MUST also reclaim
+    every descriptor it received (a compromised child must not leak fds into this process by
+    over-stuffing a frame). Driven via a class-level ``recvmsg`` monkeypatch so the arc + its
+    fd-close are covered on every platform; the no-leak is proven by the failing re-closes.
+    """
+    keeper_a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    keeper_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    v_a = os.dup(keeper_a.fileno())
+    v_b = os.dup(keeper_b.fileno())
+    cmsg = array.array("i", [v_a, v_b]).tobytes()
+
+    def _fake_recvmsg(
+        self: socket.socket, bufsize: int, ancbufsize: int = 0, flags: int = 0
+    ) -> tuple[bytes, list[tuple[int, int, bytes]], int, None]:
+        return b"\x01", [(socket.SOL_SOCKET, socket.SCM_RIGHTS, cmsg)], 0, None
+
+    monkeypatch.setattr(socket.socket, "recvmsg", _fake_recvmsg)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            recv_passed_fd(child)
+        assert exc.value.reason == "expected_exactly_one_fd"
+        for v in (v_a, v_b):
+            with pytest.raises(OSError):
+                os.close(v)  # both received copies already reclaimed — no leak
+    finally:
+        parent.close()
+        child.close()
+        keeper_a.close()
+        keeper_b.close()
 
 
 def test_recv_passed_fd_non_scm_rights_cmsg_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
