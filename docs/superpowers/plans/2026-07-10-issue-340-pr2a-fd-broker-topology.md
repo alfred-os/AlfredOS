@@ -1,5 +1,7 @@
 # #340 PR2a — SCM_RIGHTS fd-broker topology (core-side) Implementation Plan
 
+> **rev.2 (2026-07-10):** a 3-lens focused plan-review (core + security + test) folded — see **"Plan-review fold log"** at the end. It found 1 Critical + gate-breaking Highs in the rev.1 task code (the Task-3 aliasing double-close/leak, coverage-gate breaks, a non-functional Task-8 paper-gate). **The fold log OVERRIDES the task bodies where they conflict — read it before implementing each task.** `FOLD-A`/`FOLD-B`, the Task-8 paper-gate, and the `make_control_socketpair` name are already applied inline.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Land the core-side SCM_RIGHTS reachability-broker + opt-in control-fd spawn plumbing so the empty-netns quarantine child can (in PR2b) receive a pre-connected gateway socket — proven here by a docker C1/C2 test — while the live echo child stays byte-for-byte unchanged.
@@ -597,31 +599,42 @@ async def spawn_quarantine_child_io(
     control_parent: socket.socket | None = None
     control_child_fd: int | None = None
     if control_fd:
-        control_parent, control_child = make_control_pair_for_spawn()
+        control_parent, control_child = make_control_socketpair()
         control_child_fd = control_child.detach()  # raw int for the fd dance (core-001: never a live socket)
 
-    # Guard source/target aliasing: if a source fd already sits on a literal target, dup it out of the
-    # way so the first dup2 does not clobber the second's source (spike launch.py). Track temps to close.
+    # --- CORRECTED fd dance (rev.2: FOLD-A, core-H1/security-H-3). The rev.1 aliasing cleanup
+    # double-closed read_fd/control_child_fd (they ended up BOTH explicitly closed AND in alias_temps)
+    # and, when a source started ON a target, let `saved` capture the source and "restore" (leak) it.
+    # Robust fix: move BOTH sources ABOVE the target range FIRST (so neither a dup2-onto-a-target nor
+    # the save-of-a-prior-occupant can touch a source), then close each source exactly once. ---
     literal_targets = (_PROVIDER_KEY_FD,) if not control_fd else (_PROVIDER_KEY_FD, _CONTROL_FD)
-    alias_temps: list[int] = []
-    while read_fd in literal_targets:
-        read_fd = os.dup(read_fd); alias_temps.append(read_fd)
-    if control_child_fd is not None:
-        while control_child_fd in literal_targets:
-            control_child_fd = os.dup(control_child_fd); alias_temps.append(control_child_fd)
+
+    def _lift_above_targets(fd: int) -> tuple[int, bool]:
+        """Return (usable_fd, moved). If ``fd`` sits on a target, dup it high; else return it as-is."""
+        moved = False
+        while fd in literal_targets:
+            fd = os.dup(fd)
+            moved = True
+        return fd, moved
+
+    read_src, read_moved = _lift_above_targets(read_fd)
+    control_src, control_moved = (
+        _lift_above_targets(control_child_fd) if control_child_fd is not None else (None, False)
+    )
 
     saved: dict[int, int] = {}
     for fd in literal_targets:
         with contextlib.suppress(OSError):
-            saved[fd] = os.dup(fd)
+            saved[fd] = os.dup(fd)  # sources are lifted above the range → this captures ONLY prior occupants
 
     process: subprocess.Popen[bytes] | None = None
     try:
-        # --- fd-clobber window OPENS. NO ``await`` until it CLOSES below (#237). ---
-        os.dup2(read_fd, _PROVIDER_KEY_FD)
+        # --- fd-clobber window OPENS. NO ``await`` until it CLOSES below (#237; now BOTH fd 3 and fd 4
+        # are clobbered process-wide — the await-free discipline still protects the loop selector). ---
+        os.dup2(read_src, _PROVIDER_KEY_FD)
         os.set_inheritable(_PROVIDER_KEY_FD, True)  # noqa: FBT003
-        if control_child_fd is not None:
-            os.dup2(control_child_fd, _CONTROL_FD)
+        if control_src is not None:
+            os.dup2(control_src, _CONTROL_FD)
             os.set_inheritable(_CONTROL_FD, True)  # noqa: FBT003
         argv = [_launcher_path(), _PLUGIN_ID, _child_python(), "-m", child_module]
         try:
@@ -634,21 +647,28 @@ async def spawn_quarantine_child_io(
             _log.error("security.quarantine_child.spawn_failed", error_class=type(exc).__name__)
             raise QuarantineChildSpawnError(t("security.quarantine_child.spawn_failed")) from exc
     finally:
-        # --- window CLOSES (no ``await`` ran above). Restore both literal fds; drop parent copies. ---
+        # --- window CLOSES (no ``await`` ran). Restore prior occupants (or clear the target). ---
         for fd in literal_targets:
             if fd in saved:
-                os.dup2(saved[fd], fd); os.close(saved[fd])
+                os.dup2(saved[fd], fd)
+                os.close(saved[fd])
             else:
                 with contextlib.suppress(OSError):
                     os.close(fd)
-        with contextlib.suppress(OSError):
-            os.close(read_fd)
-        if control_child_fd is not None:  # close the parent's copy of the socketpair child-end (core-001)
+        # Close each source EXACTLY ONCE. If lifted, close both the temp dup and the original; else the
+        # original alone (which is `*_src`). The child holds its own fd 3/4 via pass_fds, so dropping the
+        # parent copies here is correct.
+        for original, src, moved in (
+            (read_fd, read_src, read_moved),
+            (control_child_fd, control_src, control_moved),
+        ):
+            if src is None:
+                continue
             with contextlib.suppress(OSError):
-                os.close(control_child_fd)
-        for temp in alias_temps:
-            with contextlib.suppress(OSError):
-                os.close(temp)
+                os.close(src)
+            if moved:
+                with contextlib.suppress(OSError):
+                    os.close(original)
 
     try:
         deliver_provider_key_via_fd3(write_fd=write_fd, key=provider_key)
@@ -665,7 +685,11 @@ async def spawn_quarantine_child_io(
     return _SubprocessChildIO(process, control_parent=control_parent, egress_config=egress_config)
 ```
 
-Add a thin `make_control_pair_for_spawn` that re-exports `control_fd_broker.make_control_socketpair` (or import it directly — keep one name). Add `import socket` to the module imports. Add the three new `t()` keys in Step 5.
+> **FOLD-A coverage mandate (rev.2, H2/H3):** the aliasing (`_lift_above_targets` moved-True) branch and the finally `else: os.close(fd)` arc are NOT reachable with real `os.pipe`/socketpair under pytest (they return high fds). Unit-test them by **monkeypatching `os.dup2`/`os.dup`/`os.pipe`/`make_control_socketpair`** (the existing `test_quarantine_child_io.py` discipline — "do not actually dup onto fd 3 in-process; it clobbers the test runner"), forcing a source onto fd 3/4 and forcing the unsaved-target `else`. Also add the `control_fd=True + egress_config=None` raise and a `ProviderKeyDeliveryError` on a `control_fd=True` spawn (control-end close arc). This block is a starting point; TDD RED→GREEN on these tests is what verifies the final form.
+
+**FOLD-B (rev.2, M-3): keep `broker_socket` CONCRETE — do NOT widen the `ChildIO` Protocol in PR2a.** PR2a never dispatches `broker_socket` through a `ChildIO`-typed variable (only the docker probe calls it on the concrete `_SubprocessChildIO`), and adding a required Protocol method breaks three existing test doubles (`_RecordingChildIO`, `_FakeQuarantineChildIO`, `_EchoingChildDouble`) under pyright. So **Step 3 below (the Protocol edit) is DROPPED**; add `broker_socket` only on `_SubprocessChildIO`. The Protocol widening lands in PR2b when `QuarantineStdioTransport.dispatch` actually calls it. **Also remove the `# pragma: no cover` on `broker_socket`'s unconfigured guard** (M-1/L-3: it is a fail-loud security branch — §9 forbids pragma-ing security logic) and add a 3-line test: `_SubprocessChildIO(fake, control_parent=None, egress_config=None).broker_socket()` → raises `QuarantineChildSpawnError`.
+
+Use the name `make_control_socketpair` (imported directly from `control_fd_broker`) consistently in both the code and the import — the rev.1 `make_control_pair_for_spawn` alias is dropped (FOLD L1). Add `import socket` to the module imports. Add the two new `t()` keys in Step 5.
 
 - [ ] **Step 5: Add the i18n message keys**
 
@@ -1101,16 +1125,21 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
         run: uv run coverage report --include='src/alfred/egress/control_fd_broker.py' --fail-under=100 --show-missing
 ```
 
-- [ ] **Step 2: Add the both-halves brokered-leg "assert RAN" paper-gate** in `integration-privileged` (mirror the `#245` test-104 pattern at `ci.yml:1377-1408`): (a) the deterministic precondition **pre-check** (bwrap present, root, `ALFRED_QUARANTINE_CHILD_PYTHON` provisioned + importable), AND (b) the **runtime skip-parse** — run the brokered test with `-rs` and grep the report to assert the node `test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect` reports `PASSED` (not `SKIPPED`/`s`). Fail the job if the pre-check passes but the node did not run:
+- [ ] **Step 2: Add the both-halves brokered-leg "assert RAN" paper-gate** in `integration-privileged` — **COPY THE WORKING SIBLING VERBATIM** (`ci.yml:1398-1408`, the `#245` test-104 gate). The rev.1 snippet was broken twice (test-C1): (1) `pytest -rs -q` emits **no per-node `PASSED` line** (only dots + a `N passed` summary — a `PASSED` line needs `-rA`/`-rP`), and the pytest format is `PASSED <path>::<node>` (outcome FIRST), so the rev.1 grep matched nothing and the job was **permanently red even on success**; (2) the command lacked `sudo`/root + `ALFRED_QUARANTINE_CHILD_PYTHON`, so the skipif was always True → the test always SKIPPED. The correct gate runs the leg **as root with the provisioned interpreter**, fails on any `skipped`, and asserts `1 passed` (the file has one test):
 
 ```yaml
       - name: Assert the brokered-fd real-spawn leg RAN (not skipped)
         run: |
-          uv run pytest tests/integration/test_quarantine_fd_broker_real_spawn.py -rs -q \
-            | tee /tmp/broker.out
-          grep -Eq 'test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect (PASSED|.*::.*PASSED)' /tmp/broker.out \
-            || { echo '::error::brokered-fd leg did not run (skipped or absent) — release-blocking'; exit 1; }
+          sudo env "PATH=${UV_DIR}:${PATH}" "ALFRED_QUARANTINE_CHILD_PYTHON=${BOUND_PY}" \
+            "${UV_BIN}" run pytest tests/integration/test_quarantine_fd_broker_real_spawn.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/broker.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/broker.out; then
+            echo '::error::brokered-fd leg SKIPPED — release-blocking'; exit 1; fi
+          grep -q "1 passed" /tmp/broker.out \
+            || { echo '::error::brokered-fd leg did not report 1 passed'; exit 1; }
 ```
+
+(Reuse the exact `UV_DIR`/`UV_BIN`/`BOUND_PY` env the sibling `#245` step already sets in `integration-privileged` — do NOT reinvent them. The pre-check half is the sibling's existing "Assert spawn-enabling preconditions hold" step; extend it to also check the stub-proxy/probe preconditions if writing-plans finds a gap.)
 
 - [ ] **Step 3: Validate the workflow YAML**
 
@@ -1181,3 +1210,49 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 **Placeholder scan:** the `sbx-2026-0XX` id and the exact `ci.yml` line numbers are resolved at execution (`ls`/`grep`) — flagged inline, not left as prose TODOs. The docker `_await`/`_read_verdict` helper is illustrative and its resolution is spelled out (inline the await). No "add error handling"/"similar to Task N" placeholders.
 
 **Type consistency:** `ControlFdBrokerError.reason: str`, `make_control_socketpair() -> tuple[socket.socket, socket.socket]`, `recv_passed_fd(...) -> tuple[bytes, int]`, `broker_connected_socket(*, parent_end, proxy_config)`, `_SubprocessChildIO(process, *, control_parent, egress_config)`, `spawn_quarantine_child_io(*, provider_key, control_fd=False, child_module=_CHILD_MODULE, egress_config=None)`, `_CONTROL_FD = 4`, `_BROKERED_PROBE_MODULE` — consistent across Tasks 1–7.
+
+---
+
+## Plan-review fold log (3-lens focused: core + security + test, rev.2 — 2026-07-10)
+
+**1 Critical + gate-breaking Highs caught before TDD** (0 design objections — the design is ratified). No trust-boundary property is broken (dormancy holds, zero-app-byte core, one-way fd 4, ratchet passes clean — all three lenses confirm). **The folds below OVERRIDE the task bodies above where they conflict — read this log before implementing each task.** `FOLD-A` (Task-3 aliasing), `FOLD-B` (broker_socket concrete), the Task-8 paper-gate, and the `make_control_socketpair` name are already applied inline above.
+
+### Critical / High (must be done or the release-blocking gates fail on first `make check`)
+
+- **[C1 — Task 8] paper-gate rewritten** (applied inline): the rev.1 grep + missing root/provisioning made it permanently red AND blind to skips. Now copies the working `#245` sibling (sudo + `ALFRED_QUARANTINE_CHILD_PYTHON`, fail-on-`skipped`, assert `1 passed`).
+- **[H — Task 3 aliasing] FOLD-A applied inline** (double-close + read-end leak): lift both sources above the target range first, close each source once; unit-test the aliasing + `else`-restore arcs by monkeypatching `os.dup2`/`os.dup`/`os.pipe`/`make_control_socketpair`.
+- **[H — Task 1/2 control_fd_broker 100% gate] WRITE these coverage tests (do not defer):**
+  - `recv_passed_fd` **MSG_CTRUNC** branch → `sendmsg` **two** fds into the 1-fd ancillary buffer; assert `reason == "ancillary_truncated"`. (Also closes the >1-fd capability-envelope teeth gap — Task 6 M4.)
+  - `recv_passed_fd` inner `if level==SOL_SOCKET and typ==SCM_RIGHTS` **False** branch → monkeypatch `control_end.recvmsg` to return a non-`SCM_RIGHTS` cmsg; assert `expected_exactly_one_fd`. (A real socket can't produce this — needs the mock, or `# pragma: no branch` on the inner-if with justification.)
+  - `_connect_and_send` `short_data_send` → monkeypatch `parent_end.sendmsg` to return `0`; `sendmsg_failed` → monkeypatch it to raise `OSError`. Task 2 Step 5's "add if the report shows a miss" is UPGRADED to "write these explicitly" — the file is under a named 100% line+branch gate.
+- **[H — Task 3 quarantine_child_io 100% gate] add the new-branch tests + fix the regression list:**
+  - Force each new branch: `control_fd=True + egress_config=None` raise; the aliasing loop (monkeypatch `os.pipe`/`make_control_socketpair` so a source lands on 3/4); the finally unsaved-target `else` (monkeypatch `os.dup` to raise for fd 4); a `ProviderKeyDeliveryError` on a `control_fd=True` spawn (the `control_parent.close()` arc).
+  - **[M1] Monkeypatch `os.dup2` in the new tests** — do NOT run real `os.dup2(read_fd, 3)` in the pytest process (`test_quarantine_child_io.py:129`: "would clobber the test runner"). This is also the lever that makes the branch coverage deterministic.
+  - **Step 7 regression run must ALSO include** `tests/unit/security/test_quarantine_child_io.py` and `tests/unit/security/test_quarantine_child_io_i18n.py` (the i18n test enumerates the `security.quarantine_child.*` key set Step 5 grows).
+- **[H — Task 4 probe module-scope coverage] add a one-line import test** run under pytest/coverage: `import alfred.security.quarantine_child._brokered_probe as p; assert hasattr(p, "main")` (covers the module-scope lines; the function bodies stay `# pragma: no cover`). The rev.1 `python -c` in Step 2 runs OUTSIDE coverage and covers nothing → the `security/*` glob gate would go red (the H1 anti-pattern re-introduced at module scope). Alternative: add the file to `[tool.coverage.run] omit` — prefer the import test (matches how `__main__.py` module scope is covered).
+
+### Medium
+
+- **[M-1/L-3 — Task 3] `broker_socket` unconfigured guard:** remove its `# pragma: no cover` (FOLD-B, applied inline) and add the 3-line raise test — a fail-loud security branch must not be pragma'd (§9).
+- **[M-2 — Task 7] assert the real HARD #5 property:** the rev.1 usability check passes even if the core wrote a stray byte (the stub echoes it). `_StubProxy` must **record the first bytes it receives** on the brokered connection and the test must assert they equal `b"ping"` — nothing the core prepended. (This is the headline mechanism-level HARD #5 claim; without it Task 7 doesn't prove it.)
+- **[M6 — Task 7] write the inlined async form directly** — the rev.1 `_read_verdict`/`_await` helper is non-runnable (`_await` undefined; sync fn awaiting). `await io.read_frame()` inside the async test; the `raw[4:4+length]` strip is correct (`read_frame` returns header+body, verified `quarantine_child_io.py:274-279`).
+- **[M-4 — Task 5] add an anti-rot test** `test_sanctioned_site_actually_matches_the_conjunction()` asserting `control_fd_broker.py` trips both `_has_scm_rights_sendmsg` and the connect matcher (the sibling ships `test_sanctioned_spawn_site_actually_exists` for exactly this — else a refactor makes the ratchet vacuously permissive).
+- **[M5 — Task 5] register `test_only_sanctioned_raw_socket_egress_site` in `adversarial.yml`'s collected-node enumeration** (the sibling spawn-site guard is at `adversarial.yml:120`) — it runs in the main non-bwrap adversarial pass, so without registration a silent deletion is not caught by the release-blocking collected-node gate.
+- **[M2 — Task 2] fix the unreachable test** — connect to a **closed port on `127.0.0.1`** (immediate `ECONNREFUSED` → `gateway_unreachable`), not TEST-NET-3 `203.0.113.1:9` (blocks up to 10 s on a blackhole route).
+- **[M3 — Task 2] the live-fd test doesn't assert "closes core copy"** — rename it, or add a core-side `/proc/self/fd` count assertion, or cross-reference that Task 7 proves it. Also use `passed.close()` (not `detach()`) so the accept-thread EOFs and `t.join` returns immediately (L2).
+
+### Low (apply during TDD)
+
+- **[L-1 — Task 5] `_has_inet_connect` dead code:** the AF_INET/AF_INET6 block is unreachable (the loop `return True`s on any `.connect`/`create_connection` first). Simplify to "**any `.connect` OR `create_connection`** AND `sendmsg(SCM_RIGHTS)` in the same module" — confirmed no in-core false positive (SQLAlchemy/psycopg `.connect` sites carry no `SCM_RIGHTS`). Update the docstring/comment to match (don't claim AF_INET is required).
+- **[L-2 — Task 1] MSG_CTRUNC fd leak:** on truncation the kernel may install one fd before discarding; close any received fds before raising `ancillary_truncated`.
+- **[L-3 — Task 3] control-end + write_fd leak on the `Popen`-OSError path:** close `control_parent` (and let the pipe fds fall to the finally) in the spawn-failure branch too, not only in `aclose`/key-delivery-failure.
+- **[L-4 — Task 1] credential leak in the error message:** `_resolve_proxy_addr` interpolates `{proxy_url!r}` into `IOPlaneUnavailableError.detail`; if the proxy URL ever carries basic-auth (foreseeable with the #358 forward-gate) that surfaces the credential. Omit/redact the URL (log scheme/host/port only, the `EgressClient` precedent). NB: `detail=` English inside a `t()` frame is NOT an i18n violation (matches the existing `IOPlaneUnavailableError`).
+- **[L2 — Task 4] `passed.close()` not `detach()`** in `_probe_once` (the probe solely owns the SCM-received fd; `detach()` leaks one per loop). Add a one-line "stdout stays frame-only (no stray writes between frames)" note (L5).
+- **[L-5 — Task 9] record the probe's import-closure as an accepted residual in ADR-0050** (sec-006: `_brokered_probe` → `control_fd_broker` → `egress.errors`/`i18n`/`errors` is bounded by no guard; clean today but G1 measures only `__main__`). Also record the **fd-4 process-wide clobber widening** (fd 3 AND 4 now clobbered in the window) as an accepted risk (core-L4).
+- **[L-6 — Task 2] no outer deadline on the executor `sendmsg`:** theoretical (a 1-byte+1-fd frame to a fresh socketpair won't block), but HARD #7's "never a hang" argues for wrapping the `run_in_executor` in `asyncio.wait_for` with a short bound. Judgment call — note it.
+- **[L1 — Task 8] the named `control_fd_broker.py` gate must live in BOTH the `python` (unit) job AND the `coverage-gates` combined job** (the two-gates convention, `ci.yml:619`; there is no `egress/*` glob — `ci.yml:606`). The Step-1 snippet shows one line; add it to both `--include` lists.
+- **[L4 — Task 6] confirm a corpus loader/validator consumes `sbx_2026_0XX_brokered_fd_dormant.yaml`** (or mark its assertions documentation-only) — the enforcing test is a separate hand-written module that does not read the YAML.
+- **[L-7 — Task 6] the plan's dormancy tests are pure-unit (mock `Popen` + socketpair) and MUST NOT be `@_bwrap_required`** — that would skip them on normal CI and destroy their teeth. This deliberately deviates from spec §9's "mark `@_bwrap_required`"; the plan is correct — call it out so a reviewer doesn't "restore" the gate. The `adversarial.yml` enumeration uses **bare function names** (`grep -q "::${node}"`), not `path::node`.
+
+### Confirmed sound (do not second-guess)
+The zero-`await` window discipline; `_connect_and_send`'s `finally: sock.close()` covering a pre-sendmsg raise; the `settimeout(None)` O_NONBLOCK reasoning; `aclose` preserving the CR-#255 single-teardown seam; the ratchet passing clean on the current tree (no existing INET-connect + SCM_RIGHTS site; the Discord bridge is a byte-splice, not fd-passing); the `read_frame` header+body framing math in Task 7; the `ChildIO` runtime-checkable change being runtime-safe (but deferred anyway per FOLD-B); Task 3 Step 7's "G4-exempt" verification; the docker skipif De Morgan shape.
