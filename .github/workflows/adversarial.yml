@@ -110,6 +110,13 @@ jobs:
         # `test_sbx_corpus_executable.py`, the third in its sibling, so the trio
         # also fails loud if EITHER file vanishes. Capturing into `$collected` under
         # `set -e` fails the step on a non-zero collect (error/empty) before any grep.
+        #
+        # #340 PR2a Task 6 registers two more: the sbx-2026-015 dormant-mechanism
+        # corpus payload's mechanism-proof node-ids
+        # (`test_brokered_fd_dormant_mechanism.py`). Unlike the bwrap-gated pair
+        # above, these are PURE UNIT tests (mocked Popen + a real socketpair, no
+        # bwrap) that run — never skip — on this runner; registering them here means
+        # a silent deletion of the payload or its test file fails this gate too.
         if: steps.corpuscheck.outputs.has_corpus == 'true'
         run: |
           set -euo pipefail
@@ -118,7 +125,9 @@ jobs:
             test_sbx_2026_012_quarantine_child_does_not_leak_fd3_key \
             test_sbx_2026_013_live_spawned_child_host_escape_contained \
             test_only_sanctioned_quarantined_llm_spawn_site \
-            test_only_sanctioned_raw_socket_egress_site ; do
+            test_only_sanctioned_raw_socket_egress_site \
+            test_live_echo_spawn_passes_no_control_fd \
+            test_control_channel_refuses_a_second_or_zero_fd ; do
             if ! printf '%s\n' "$collected" | grep -q "::${node}"; then
               echo "::error::sandbox_escape payload ${node} missing from the required adversarial corpus"
               printf '%s\n' "$collected"
