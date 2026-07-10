@@ -157,7 +157,17 @@ _READ_FRAME_TIMEOUT_S = 15.0
 # de-fanged (control chars stripped -> no forged log lines / terminal escapes) and
 # masked by the bootstrap structlog leaf-redactor before it reaches a renderer.
 _STDERR_LOG_CAP_BYTES = 4096
-_STDERR_TRUNCATION_MARKER = "…[truncated]"
+_STDERR_TRUNCATION_MARKER = " …[truncated]"
+
+# Independent bound on the stderr-drain read (#251). The drain only runs once the
+# child has EXITED, so under the shipped kind="full" bwrap policy (PID-namespace
+# reaping — no grandchild outlives the child holding the write-end) the pipe read
+# returns promptly. This deadline is defence-in-depth: it does NOT rest that
+# liveness on the sandbox policy staying unchanged — a read that fails to return
+# (e.g. a future policy drops --unshare-pid and a reparented grandchild keeps the
+# write-end open) trips the bound and is caught as a best-effort ``stderr_drain_failed``
+# rather than hanging ``aclose`` forever. Short (the child is already dead).
+_STDERR_DRAIN_TIMEOUT_S = 2.0
 
 # Unicode categories stripped from child stderr before it becomes a log field.
 # ``Cc`` (C0/C1 controls) defeats forged log lines + ANSI terminal escapes; ``Cf``
@@ -298,7 +308,7 @@ def _read_stderr_bytes(process: subprocess.Popen[bytes], cap: int) -> bytes:
     return b"".join(chunks)
 
 
-def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
+def _sanitize_child_stderr(raw: bytes, *, cap: int, truncated: bool = False) -> str | None:
     """De-fang child stderr into a single-line structured-log field (or ``None``).
 
     The quarantined child is the most adversary-facing surface: its stderr may
@@ -309,10 +319,17 @@ def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
     ``\\n \\r \\t \\x1b`` / DEL, and ``Cf`` format chars incl. bidi overrides /
     zero-width) is replaced with a space; whitespace runs are collapsed and the
     result stripped, so the field is single-line-searchable and injection-proof
-    under BOTH the JSON and console renderers. Truncated to ``cap`` chars with a
-    marker. Returns ``None`` when nothing printable remains (no empty-field noise).
-    Secret-shape masking is handled DOWNSTREAM by the bootstrap structlog
-    leaf-redactor once this lands as a log field.
+    under BOTH the JSON and console renderers. Returns ``None`` when nothing
+    printable remains (no empty-field noise). Secret-shape masking is handled
+    DOWNSTREAM by the bootstrap structlog leaf-redactor once this lands as a log
+    field.
+
+    The ``…[truncated]`` marker is appended when the sanitized text exceeds ``cap``
+    chars OR when ``truncated`` is set — the caller passes ``truncated=True`` when
+    the RAW read hit its byte cap (more stderr existed than was read). The explicit
+    flag is load-bearing for multi-byte UTF-8: a byte-capped read can decode to
+    FEWER than ``cap`` chars, so ``len(collapsed) > cap`` alone would silently drop
+    the marker even though bytes were clipped. Marker beats a mid-collapse cap.
     """
     text = raw.decode("utf-8", errors="replace")
     despaced = "".join(
@@ -321,7 +338,7 @@ def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
     collapsed = " ".join(despaced.split())
     if not collapsed:
         return None
-    if len(collapsed) > cap:
+    if truncated or len(collapsed) > cap:
         return collapsed[:cap] + _STDERR_TRUNCATION_MARKER
     return collapsed
 
@@ -361,6 +378,12 @@ class _SubprocessChildIO:
         self._process = process
         self._closed = False
         self._stderr_drained = False
+        # Set iff a drain read TIMED OUT: the executor thread is still blocked in the
+        # real ``stderr.read()`` (holding the BufferedReader lock), so ``aclose`` must
+        # NOT close that pipe out from under it (the close would re-block). Only
+        # reachable if the write-end is held open past child exit (a broken bwrap
+        # PID-namespace assumption) — unreachable under the shipped kind="full" policy.
+        self._stderr_reader_orphaned = False
         self._control_parent = control_parent
         self._egress_config = egress_config
 
@@ -408,7 +431,9 @@ class _SubprocessChildIO:
             _log.error(
                 "security.quarantine_child.read_frame_failed", error_class=type(exc).__name__
             )
-            await self._log_child_stderr()
+            # failure=True -> the child_stderr diagnostic logs at ERROR, alongside the
+            # read_frame_failed error it explains (visible to error-level alerting).
+            await self._log_child_stderr(failure=True)
             raise QuarantineChildSpawnError(
                 t("security.quarantine_child.read_frame_failed")
             ) from exc
@@ -429,7 +454,7 @@ class _SubprocessChildIO:
             parent_end=self._control_parent, proxy_config=self._egress_config
         )
 
-    async def _log_child_stderr(self) -> None:
+    async def _log_child_stderr(self, *, failure: bool = False) -> None:
         """Drain (iff the child has exited) + structured-log its stderr, at most once.
 
         Exit-gated, idempotent, AND best-effort-never-raises (#251). Order matters:
@@ -440,17 +465,25 @@ class _SubprocessChildIO:
            arm hits this on the timeout/wedged path and ``aclose`` retries after
            ``_terminate_and_reap`` guarantees exit.
         3. Child exited -> SET the flag (before the read, so a read failure is not
-           retried), read off-loop, and emit
+           retried), read off-loop under a bounded deadline, and emit
            ``security.quarantine_child.child_stderr`` ONLY when there is printable
            content (no empty-field noise on the happy teardown).
 
-        **Never raises** — a diagnostic-drain failure (e.g. an ``OSError`` reading
-        the pipe) must NOT preempt the caller's contracted
-        :class:`QuarantineChildSpawnError` (CLAUDE.md hard rule #7; spec §6). Any
-        failure past the exit gate is caught and surfaced LOUDLY as a
-        ``security.quarantine_child.stderr_drain_failed`` warning (never a silent
-        swallow) — mirroring :func:`_terminate_and_reap`'s best-effort posture. The
-        primary error the caller is about to ``raise`` is left untouched.
+        ``failure`` selects the ``child_stderr`` severity: the ``read_frame``
+        failure arm passes ``failure=True`` -> logged at ``error`` so an operator
+        alerting at error-level sees the diagnostic ALONGSIDE the
+        ``read_frame_failed`` error it explains; ``aclose`` uses the default
+        ``warning`` (a clean teardown that merely had leftover stderr is not itself
+        an error).
+
+        **Never raises** — a diagnostic-drain failure (an ``OSError`` reading the
+        pipe, a ``TimeoutError`` on the bounded read, or a structlog-emit failure)
+        must NOT preempt the caller's contracted :class:`QuarantineChildSpawnError`
+        (CLAUDE.md hard rule #7; spec §6), nor skip ``aclose``'s fd cleanup. Every
+        failure past the exit gate — INCLUDING the fallback log emit itself — is
+        caught and surfaced LOUDLY as a ``stderr_drain_failed`` warning carrying an
+        explicit ``error_class`` field (never a silent swallow). The primary error
+        the caller is about to ``raise`` is left untouched.
 
         ``poll()`` is a non-blocking ``waitpid(WNOHANG)`` — it actively detects a
         just-exited child (so the common EOF-after-exit case surfaces at the
@@ -464,25 +497,47 @@ class _SubprocessChildIO:
                 return
             self._stderr_drained = True  # set before the read: a read failure won't retry
             loop = asyncio.get_running_loop()
-            # Read ONE byte past the log cap so an over-cap child actually trips
-            # ``_sanitize_child_stderr``'s truncation marker: with read-cap == log-cap
-            # the decoded char count could never exceed the cap and a long stderr was
-            # silently clipped (no "…[truncated]" hint — exactly when it matters most).
-            # The read stays bounded (the child exited, so the write-end is closed —
-            # a guarantee that rests on the kind="full" bwrap PID-namespace reaping,
-            # under which no grandchild can outlive the child holding this fd).
-            raw = await loop.run_in_executor(
-                None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES + 1
+            # Read ONE byte past the log cap: ``truncated`` (below) then detects a
+            # byte-overflow EXPLICITLY, so the ``…[truncated]`` marker fires even for
+            # multi-byte stderr that decodes to <= cap chars (a char-length check
+            # alone would silently drop the marker). Bounded by
+            # ``_STDERR_DRAIN_TIMEOUT_S`` so a write-end held open past child exit (a
+            # broken PID-namespace assumption) trips the deadline instead of hanging
+            # ``aclose`` forever — the timeout lands in the ``except`` below.
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, _read_stderr_bytes, self._process, _STDERR_LOG_CAP_BYTES + 1
+                ),
+                timeout=_STDERR_DRAIN_TIMEOUT_S,
             )
             if not raw:
                 return
-            sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES)
+            truncated = len(raw) > _STDERR_LOG_CAP_BYTES
+            sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES, truncated=truncated)
             if sanitized is not None:
-                _log.warning("security.quarantine_child.child_stderr", child_stderr=sanitized)
-        except Exception:
+                log = _log.error if failure else _log.warning
+                log("security.quarantine_child.child_stderr", child_stderr=sanitized)
+        except Exception as exc:
             # Best-effort diagnostic: NEVER preempt the caller's QuarantineChildSpawnError
-            # (hard rule #7). Fail LOUD (structured warning + exc_info), never silent.
-            _log.warning("security.quarantine_child.stderr_drain_failed", exc_info=True)
+            # (hard rule #7). Fail LOUD via an explicit ``error_class`` field — NOT
+            # ``exc_info`` (the bootstrap structlog chain has no traceback renderer, so
+            # ``exc_info`` emits nothing); mirrors the ``read_frame_failed`` handler.
+            # The fallback log is itself ``suppress``-wrapped so a structlog-emit failure
+            # cannot escape to preempt the primary error or skip ``aclose``'s fd cleanup.
+            # CANARY FORWARD GATE: once a canary-raising log processor is wired into the
+            # shared redactor (dlp.OutboundCanaryTripped; canary=None today), a canary
+            # token in child stderr would raise HERE — this ``except`` MUST then
+            # special-case + escalate it rather than demote it to stderr_drain_failed.
+            if isinstance(exc, TimeoutError):
+                # The read deadline fired but the executor thread is STILL reading the
+                # real pipe (holding its lock) — flag it so ``aclose`` skips the
+                # ``stderr.close()`` that would otherwise re-block on that lock.
+                self._stderr_reader_orphaned = True
+            with contextlib.suppress(Exception):
+                _log.warning(
+                    "security.quarantine_child.stderr_drain_failed",
+                    error_class=type(exc).__name__,
+                )
 
     async def aclose(self) -> None:
         """Terminate+reap the child; drain+log its stderr; close pipe/control-end.
@@ -494,7 +549,11 @@ class _SubprocessChildIO:
         on. The stderr pipe fd is then closed (it is the pipe this IO owns
         end-to-end and the only one never read/closed before — stdin/stdout are left
         to ``Popen`` GC to avoid racing an orphaned ``read_frame`` executor thread
-        still reading stdout).
+        still reading stdout). The close is SKIPPED when a drain read timed out
+        (``_stderr_reader_orphaned``): its executor thread is still holding the
+        ``BufferedReader`` lock, so closing here would re-block — that pipe is left to
+        ``Popen`` GC too (unreachable under the shipped kind="full" PID-namespace
+        policy, which closes the write-end on child exit).
         """
         if self._closed:
             return
@@ -502,7 +561,7 @@ class _SubprocessChildIO:
         await _terminate_and_reap(self._process)
         await self._log_child_stderr()
         stderr = self._process.stderr
-        if stderr is not None:
+        if stderr is not None and not self._stderr_reader_orphaned:
             with contextlib.suppress(OSError):
                 stderr.close()
         if self._control_parent is not None:
