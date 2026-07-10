@@ -293,7 +293,7 @@ async def test_provider_key_delivery_failure_closes_control_parent(
 ) -> None:
     """A fd-3 delivery failure on a ``control_fd=True`` spawn closes the parent control-end."""
     captured: dict[str, Any] = {}
-    real_make_pair = qcio.make_control_socketpair
+    real_make_pair = qcio.control_fd_broker.make_control_socketpair
 
     def _capturing_pair() -> tuple[socket.socket, socket.socket]:
         parent, child = real_make_pair()
@@ -309,7 +309,7 @@ async def test_provider_key_delivery_failure_closes_control_parent(
     def _fake_dup2(src: int, dst: int, *_a: Any, **_k: Any) -> int:
         return dst
 
-    monkeypatch.setattr(qcio, "make_control_socketpair", _capturing_pair)
+    monkeypatch.setattr(qcio.control_fd_broker, "make_control_socketpair", _capturing_pair)
     monkeypatch.setattr(qcio.subprocess, "Popen", _fake_popen)
     monkeypatch.setattr(qcio, "deliver_provider_key_via_fd3", _boom)
     monkeypatch.setattr(qcio.os, "dup2", _fake_dup2)
@@ -334,7 +334,7 @@ async def test_popen_oserror_closes_control_parent(monkeypatch: pytest.MonkeyPat
     either.
     """
     captured: dict[str, Any] = {}
-    real_make_pair = qcio.make_control_socketpair
+    real_make_pair = qcio.control_fd_broker.make_control_socketpair
 
     def _capturing_pair() -> tuple[socket.socket, socket.socket]:
         parent, child = real_make_pair()
@@ -347,7 +347,7 @@ async def test_popen_oserror_closes_control_parent(monkeypatch: pytest.MonkeyPat
     def _fake_dup2(src: int, dst: int, *_a: Any, **_k: Any) -> int:
         return dst
 
-    monkeypatch.setattr(qcio, "make_control_socketpair", _capturing_pair)
+    monkeypatch.setattr(qcio.control_fd_broker, "make_control_socketpair", _capturing_pair)
     monkeypatch.setattr(qcio.subprocess, "Popen", _boom_popen)
     monkeypatch.setattr(qcio, "deliver_provider_key_via_fd3", lambda **_k: None)
     monkeypatch.setattr(qcio.os, "dup2", _fake_dup2)

@@ -24,8 +24,9 @@ branch — the docker probe test drives a real bwrapped child and needs readable
 
 ## 1. What this is (and is NOT)
 
-PR2a ships the **core-side half** of the SCM_RIGHTS fd-broker as a **genuinely dormant,
-ratchet-free precursor**: the core primitive that opens a TCP socket toward the gateway L7 CONNECT
+PR2a ships the **core-side half** of the SCM_RIGHTS fd-broker as a **genuinely dormant precursor
+that loosens no existing egress ratchet** (it ADDS a new raw-socket-egress ratchet, §7, but relaxes
+none): the core primitive that opens a TCP socket toward the gateway L7 CONNECT
 proxy and hands the connected fd to the empty-netns quarantine child over an inherited AF_UNIX
 control fd, plus the spawn-time plumbing to deliver that control fd — **opt-in, defaulted off on the
 live path**. A docker-gated integration test proves the two properties only the real sandbox can
@@ -333,8 +334,10 @@ forward-gate**.
   **The pattern must be pinned on the distinctive CONJUNCTION (sec-001), not on `create_connection`
   alone** (which is trivially bypassable via `socket.socket(AF_INET*, …)` + `.connect()`, and bare
   `sendmsg(…, SCM_RIGHTS)` is a *pervasive* fd-passing signal — either half alone is a bad discriminator):
-  key on **an INET connect/construct (`socket.create_connection` OR `socket.socket(AF_INET/AF_INET6)`
-  followed by `.connect()`) AND a `sendmsg(…, SCM_RIGHTS, …)` in the same module.** This is a **narrow,
+  key on **any connect call (`socket.create_connection` OR a `.connect()`) AND a `sendmsg(…,
+  SCM_RIGHTS, …)` in the same module** (the as-shipped `_has_inet_connect` guard deliberately does NOT
+  additionally gate on `AF_INET`/`AF_INET6` construction — that companion check would be dead code once
+  the connect half already fires). This is a **narrow,
   consciously-documented AST residual** in the ADR-0042 tradition — NOT the full-strength "`EgressClient`
   is the only httpx constructor" gate (which keys on the more distinctive `httpx.AsyncClient(...)`
   construction). The rev.1 "raw-socket analog of the httpx constructor gate" framing over-claimed and is
@@ -475,9 +478,11 @@ and `docs/subsystems/{quarantine,security}.md` are for `alfred-docs-author` at *
   `quarantine_child_io.py` gate so a reviewer sees it). Its mechanics are fully unit-testable; the docker
   leg proves only C1/C2, which the unit lane cannot.
 - **The raw-socket-egress ratchet guard** (§7) + the **dormant-mechanism corpus payload** (§7) —
-  the payload's node-id **must be registered in `adversarial.yml`'s hardcoded collected-node enumeration
-  and marked `@_bwrap_required`** (test-003), or the release-blocking gate is blind to its silent
-  deletion.
+  the payload's node-ids **must be registered in `adversarial.yml`'s hardcoded collected-node
+  enumeration** (test-003), or the release-blocking gate is blind to its silent deletion. These
+  dormancy/capability-envelope tests are **PURE UNIT and must NOT be `@_bwrap_required`** (fold-log
+  L-7): they run on ordinary CI — a bwrap gate would skip the release-blocking assertions. Only the
+  C1/C2 docker probe (§9) is bwrap-gated.
 
 **Adversarial suite is release-blocking** (PR2a edits `src/alfred/security/`); run it even though PR2a is
 behaviour-neutral on the live path.

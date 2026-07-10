@@ -96,7 +96,6 @@ import structlog
 
 from alfred.egress import control_fd_broker
 from alfred.egress._config_protocols import EgressProxyConfig
-from alfred.egress.control_fd_broker import make_control_socketpair
 from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.plugins._comms_child_env import _scrubbed_base
@@ -453,7 +452,7 @@ async def spawn_quarantine_child_io(
     control_parent: socket.socket | None = None
     control_child_fd: int | None = None
     if control_fd:
-        control_parent, control_child = make_control_socketpair()
+        control_parent, control_child = control_fd_broker.make_control_socketpair()
         # Detach to a raw fd int for the dup2 dance below (core-001: the parent
         # never holds a live Python socket object pointed at the CHILD's end).
         control_child_fd = control_child.detach()
@@ -516,8 +515,13 @@ async def spawn_quarantine_child_io(
             )
         except OSError as exc:
             _log.error("security.quarantine_child.spawn_failed", error_class=type(exc).__name__)
-            # L-3: a failed Popen must not leak the owned parent control-end either
-            # — not just the key-delivery-failure arc below.
+            # A failed Popen skips ``deliver_provider_key_via_fd3`` (which is what
+            # otherwise closes ``write_fd``), so BOTH parent-owned fds must be closed
+            # here or repeated spawn failures leak one pipe write-end + one control
+            # socket per attempt (the ``finally`` below only reclaims ``read_fd`` and
+            # the fd-dance sources). ``read_fd`` falls to the ``finally``.
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
             if control_parent is not None:
                 with contextlib.suppress(OSError):
                     control_parent.close()
