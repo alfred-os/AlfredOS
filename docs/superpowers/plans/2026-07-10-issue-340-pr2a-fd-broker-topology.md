@@ -48,10 +48,12 @@
 ### Task 1: `control_fd_broker` primitives — error, socketpair, recv, proxy-addr
 
 **Files:**
+
 - Create: `src/alfred/egress/control_fd_broker.py`
 - Test: `tests/unit/egress/test_control_fd_broker.py`
 
 **Interfaces:**
+
 - Produces: `ControlFdBrokerError(AlfredError)` with `.reason: str`; `make_control_socketpair() -> tuple[socket.socket, socket.socket]`; `recv_passed_fd(control_end: socket.socket) -> tuple[bytes, int]`; `_resolve_proxy_addr(proxy_config: EgressProxyConfig) -> tuple[str, int]`.
 - Consumes: `alfred.egress._config_protocols.EgressProxyConfig` (`.egress_proxy_url: str | None`), `alfred.egress.errors.IOPlaneUnavailableError(*, detail: str)`, `alfred.errors.AlfredError`, `alfred.i18n.t`.
 
@@ -249,10 +251,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 2: `broker_connected_socket` — connect + SCM_RIGHTS + close-in-finally
 
 **Files:**
+
 - Modify: `src/alfred/egress/control_fd_broker.py`
 - Test: `tests/unit/egress/test_control_fd_broker.py`
 
 **Interfaces:**
+
 - Produces: `async broker_connected_socket(*, parent_end: socket.socket, proxy_config: EgressProxyConfig) -> None` (off-loop connect + `sendmsg(SCM_RIGHTS)` + close-in-`finally`); internal `_connect_and_send(parent_end, host, port) -> None`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -401,11 +405,13 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 3: opt-in control-fd plumbing on `spawn_quarantine_child_io` + `_SubprocessChildIO` ownership
 
 **Files:**
+
 - Modify: `src/alfred/security/quarantine_child_io.py`
 - Modify: `src/alfred/security/quarantine_transport.py:~100` (add `broker_socket` to the `ChildIO` Protocol)
 - Test: `tests/unit/security/test_quarantine_child_io_control_fd.py` (create)
 
 **Interfaces:**
+
 - Consumes: `alfred.egress.control_fd_broker.make_control_socketpair`, `broker_connected_socket`; `alfred.egress._config_protocols.EgressProxyConfig`.
 - Produces: `spawn_quarantine_child_io(*, provider_key: str, control_fd: bool = False, child_module: str = _CHILD_MODULE, egress_config: EgressProxyConfig | None = None) -> _SubprocessChildIO`; `_SubprocessChildIO.broker_socket() -> None` (async); module constant `_BROKERED_PROBE_MODULE = "alfred.security.quarantine_child._brokered_probe"`; `_ALLOWED_CHILD_MODULES: frozenset[str]`.
 
@@ -520,7 +526,7 @@ In `src/alfred/security/quarantine_transport.py`, inside `class ChildIO(Protocol
     async def broker_socket(self) -> None: ...
 ```
 
-Update the Protocol docstring one line: `` ``broker_socket`` brokers one connected gateway socket to the child via SCM_RIGHTS (no-op on the echo path; PR2a docker probe only).``
+Update the Protocol docstring one line to note that `broker_socket` brokers one connected gateway socket to the child via SCM_RIGHTS (no-op on the echo path; PR2a docker probe only).
 
 - [ ] **Step 4: Implement the plumbing in `quarantine_child_io.py`**
 
@@ -724,10 +730,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 4: the wheel-co-located probe child (`_brokered_probe.py`)
 
 **Files:**
+
 - Create: `src/alfred/security/quarantine_child/_brokered_probe.py`
 - Test: unit-covered indirectly via `recv_passed_fd` (Task 1); the probe body itself is `# pragma: no cover` (subprocess entry, docker-only — the `__main__.py:310` precedent).
 
 **Interfaces:**
+
 - Consumes: `alfred.egress.control_fd_broker.recv_passed_fd`, `ControlFdBrokerError`; the inherited control fd `4`.
 - Produces: a JSON verdict on **stdout** (fd 1): `{"c1_enetunreach": bool, "c1_errno": int, "c2_live": bool, "peer": [...], "usable": bool}`.
 
@@ -825,9 +833,11 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 5: the raw-socket-egress ratchet guard
 
 **Files:**
+
 - Create: `tests/adversarial/sandbox_escape/test_only_sanctioned_raw_socket_egress_site.py`
 
 **Interfaces:**
+
 - Consumes: an AST walk of `src/alfred/**/*.py`. Produces: a release-blocking guard.
 
 - [ ] **Step 1: Write the guard test (it must PASS immediately — the invariant already holds)**
@@ -915,11 +925,13 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 6: the dormant-mechanism adversarial corpus payload
 
 **Files:**
+
 - Create: `tests/adversarial/sandbox_escape/sbx_2026_0XX_brokered_fd_dormant.yaml` (pick the next free `sbx-2026-0XX` id via `ls tests/adversarial/sandbox_escape/sbx_2026_*.yaml`)
 - Create: `tests/adversarial/sandbox_escape/test_brokered_fd_dormant_mechanism.py`
 - Modify: `.github/workflows/adversarial.yml` (register the new test node-id)
 
 **Interfaces:**
+
 - Consumes: `spawn_quarantine_child_io` (the opt-in default), `recv_passed_fd`, the shipped policy.
 
 - [ ] **Step 1: Write the corpus YAML** (follow the existing `sbx_2026_005_*.yaml` shape — id, category `sandbox_escape`, threat-model ref, provenance, expected containment):
@@ -1005,11 +1017,13 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 7: docker-gated C1/C2 real-spawn integration test (GATED on #251)
 
 **Files:**
+
 - Create: `tests/integration/test_quarantine_fd_broker_real_spawn.py`
 
 **PRE-CONDITION:** #251 (child stderr drain) merged to `main` and this branch rebased onto it — otherwise a probe failure hangs / mis-attributes (spec §11.6). Do not execute this task before #251 lands.
 
 **Interfaces:**
+
 - Consumes: `spawn_quarantine_child_io(control_fd=True, child_module=_BROKERED_PROBE_MODULE, egress_config=...)`, `io.broker_socket()`, `io.read_frame()`. A minimal in-test stdlib stub TCP proxy standing in for the gateway.
 
 - [ ] **Step 1: Write the docker-gated test** (mirror the `_DOCKER_ONLY` skipif of `tests/integration/test_quarantine_child_real_spawn.py`):
@@ -1099,7 +1113,7 @@ async def test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect() -> None
 
 - [ ] **Step 2: Run under the privileged docker harness** (the sandbox adversarial pattern):
 
-Run: `docker run --rm --privileged -v "$PWD":/work -w /work debian:bookworm bash spikes/... ` → in-container: install bwrap + a provisioned `ALFRED_QUARANTINE_CHILD_PYTHON`, `pip install -e .`, then `uv run pytest tests/integration/test_quarantine_fd_broker_real_spawn.py -v`.
+Run: `docker run --rm --privileged -v "$PWD":/work -w /work debian:bookworm bash spikes/...` → in-container: install bwrap + a provisioned `ALFRED_QUARANTINE_CHILD_PYTHON`, `pip install -e .`, then `uv run pytest tests/integration/test_quarantine_fd_broker_real_spawn.py -v`.
 Expected: PASS (the C1/C2/usability/fd-stable assertions hold). Use the repo's existing `integration-privileged` provisioning recipe; do NOT add an arm64 leg (#269).
 
 - [ ] **Step 3: Commit**
@@ -1116,6 +1130,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 8: CI gates — named per-file coverage + the both-halves "assert RAN" paper-gate
 
 **Files:**
+
 - Modify: `.github/workflows/ci.yml`
 
 - [ ] **Step 1: Add the named 100% per-file gate for `control_fd_broker.py`** in the `coverage-gates` job, in **BOTH** the unit `--include` list AND the combined `--include` list (there is no `egress/*` glob — `egress/` files are protected only by enumerated entries; mirror the existing named `quarantine_child_io.py` gate). Example line to add alongside the existing named gates:
@@ -1160,6 +1175,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ### Task 9: ADR-0050 + human-gated doc-drift flag
 
 **Files:**
+
 - Create: `docs/adr/0050-quarantine-child-scm-rights-reachability-broker.md`
 
 - [ ] **Step 1: Write ADR-0050** (standard ADR shape: Context / Decision / Consequences / Alternatives). It MUST record, per spec §8 (rev.2, arch-001 corrected):
@@ -1255,4 +1271,5 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 - **[L-7 — Task 6] the plan's dormancy tests are pure-unit (mock `Popen` + socketpair) and MUST NOT be `@_bwrap_required`** — that would skip them on normal CI and destroy their teeth. This deliberately deviates from spec §9's "mark `@_bwrap_required`"; the plan is correct — call it out so a reviewer doesn't "restore" the gate. The `adversarial.yml` enumeration uses **bare function names** (`grep -q "::${node}"`), not `path::node`.
 
 ### Confirmed sound (do not second-guess)
+
 The zero-`await` window discipline; `_connect_and_send`'s `finally: sock.close()` covering a pre-sendmsg raise; the `settimeout(None)` O_NONBLOCK reasoning; `aclose` preserving the CR-#255 single-teardown seam; the ratchet passing clean on the current tree (no existing INET-connect + SCM_RIGHTS site; the Discord bridge is a byte-splice, not fd-passing); the `read_frame` header+body framing math in Task 7; the `ChildIO` runtime-checkable change being runtime-safe (but deferred anyway per FOLD-B); Task 3 Step 7's "G4-exempt" verification; the docker skipif De Morgan shape.
