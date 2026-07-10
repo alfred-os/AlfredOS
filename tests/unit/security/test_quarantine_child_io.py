@@ -30,6 +30,7 @@ discipline is asserted hermetically on macOS / non-root CI:
 
 from __future__ import annotations
 
+import asyncio
 import struct
 import sys
 import threading
@@ -90,8 +91,10 @@ class _FakeStderr:
     def __init__(self, data: bytes = b"") -> None:
         self._buf = bytearray(data)
         self.closed = False
+        self.read_calls = 0
 
     def read(self, n: int) -> bytes:
+        self.read_calls += 1
         chunk = bytes(self._buf[:n])
         del self._buf[:n]
         return chunk
@@ -510,6 +513,19 @@ def test_sanitize_child_stderr_truncates_over_cap_with_marker() -> None:
     assert len(out) == 4096 + len(child_io_mod._STDERR_TRUNCATION_MARKER)
 
 
+def test_sanitize_child_stderr_truncated_flag_forces_marker_when_under_cap() -> None:
+    # The explicit byte-overflow flag forces the marker even when the sanitized
+    # char count is under cap — load-bearing for multi-byte stderr whose byte-capped
+    # read decodes to fewer than `cap` chars (char-length alone would drop the marker).
+    out = child_io_mod._sanitize_child_stderr(b"short line", cap=4096, truncated=True)
+    assert out == "short line" + child_io_mod._STDERR_TRUNCATION_MARKER
+
+
+def test_sanitize_child_stderr_not_truncated_flag_no_marker() -> None:
+    out = child_io_mod._sanitize_child_stderr(b"short line", cap=4096, truncated=False)
+    assert out == "short line"
+
+
 def test_read_stderr_bytes_reads_all_under_cap() -> None:
     proc = types.SimpleNamespace(stderr=_FakeStderr(b"boom reason"))
     assert child_io_mod._read_stderr_bytes(proc, 4096) == b"boom reason"  # type: ignore[arg-type]
@@ -546,6 +562,9 @@ async def test_read_frame_failure_logs_child_stderr_when_exited(
         events = [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
         assert len(events) == 1
         assert "environment_not_set" in events[0]["child_stderr"]
+        # Logged at ERROR (failure=True) so error-level alerting sees it alongside
+        # the read_frame_failed error it explains.
+        assert events[0]["log_level"] == "error"
     finally:
         await cio.aclose()
 
@@ -579,6 +598,9 @@ async def test_read_frame_failure_skips_stderr_when_child_still_running(
             await cio.read_frame()
         # No child_stderr event at the failure point — the child is still running.
         assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+        # And the poll()-gate genuinely skipped the read — the stderr pipe was never
+        # touched (proves non-drain by mechanism, not merely by log-event absence).
+        assert proc.stderr.read_calls == 0
     finally:
         release.set()
         await cio.aclose()
@@ -613,11 +635,82 @@ async def test_read_frame_failure_drain_error_does_not_preempt_spawn_error(
             pytest.raises(QuarantineChildSpawnError),  # the PRIMARY error still wins
         ):
             await cio.read_frame()
-        events = {e["event"] for e in logs}
-        assert "security.quarantine_child.stderr_drain_failed" in events  # loud, not silent
-        assert "security.quarantine_child.child_stderr" not in events  # nothing to log
+        failed = [e for e in logs if e["event"] == "security.quarantine_child.stderr_drain_failed"]
+        assert len(failed) == 1  # loud, not silent
+        # The failure CLASS is surfaced as an explicit field (NOT exc_info, which the
+        # bootstrap chain renders as nothing) so an operator sees the cause.
+        assert failed[0]["error_class"] == "OSError"
+        assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
     finally:
         await cio.aclose()
+
+
+async def test_log_child_stderr_propagates_cancelled_error(
+    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+) -> None:
+    """A CancelledError inside the drain body PROPAGATES — never swallowed.
+
+    The best-effort guard is deliberately ``except Exception`` (not ``BaseException``)
+    so cooperative cancellation is honoured. This pins the invariant against a future
+    edit that broadens the catch (which would silently break task cancellation).
+    """
+
+    def _cancel(*_a: Any, **_k: Any) -> str | None:
+        raise asyncio.CancelledError
+
+    proc = _spawn_capture["proc"]
+    proc.stderr = _FakeStderr(b"some stderr")  # non-empty so the sanitize call is reached
+    proc.returncode = 0  # exited -> drain proceeds past the poll() gate
+    # Inject the cancellation on the loop thread (at the sanitize step, inside the try
+    # body) so it exercises the `except Exception` guard directly.
+    monkeypatch.setattr(child_io_mod, "_sanitize_child_stderr", _cancel)
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await cio._log_child_stderr()
+    finally:
+        # Restore a benign sanitizer so aclose's own drain doesn't re-raise Cancelled.
+        monkeypatch.undo()
+        await cio.aclose()
+
+
+async def test_log_child_stderr_read_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+) -> None:
+    """A stderr write-end held open past child exit trips the drain deadline (no hang).
+
+    Defence-in-depth for the ``_STDERR_DRAIN_TIMEOUT_S`` bound: if the exited child's
+    stderr never reaches EOF (a broken PID-namespace assumption), the bounded read
+    times out and surfaces ``stderr_drain_failed`` rather than hanging aclose forever.
+    """
+    import structlog.testing
+
+    release = threading.Event()
+
+    def _hang(_process: Any, _cap: int) -> bytes:
+        release.wait(timeout=30)
+        return b""  # pragma: no cover - the wait_for deadline fires first
+
+    proc = _spawn_capture["proc"]
+    proc.returncode = 0  # exited -> drain proceeds, but the read never returns
+    monkeypatch.setattr(child_io_mod, "_read_stderr_bytes", _hang)
+    monkeypatch.setattr(child_io_mod, "_STDERR_DRAIN_TIMEOUT_S", 0.05)
+
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        with structlog.testing.capture_logs() as logs:
+            await cio._log_child_stderr()  # must return promptly, not hang
+        failed = [e for e in logs if e["event"] == "security.quarantine_child.stderr_drain_failed"]
+        assert len(failed) == 1
+        assert failed[0]["error_class"] == "TimeoutError"
+        # The timeout orphaned the executor thread (still holding the pipe's lock), so
+        # aclose must SKIP the stderr close that would otherwise re-block on it.
+        assert cio._stderr_reader_orphaned is True
+        await cio.aclose()
+        assert proc.stderr.closed is False  # close skipped -> left to Popen GC
+    finally:
+        release.set()
 
 
 # --- #251: aclose drain + stderr-pipe close ---------------------------------
@@ -720,6 +813,35 @@ async def test_aclose_over_cap_stderr_is_truncated_with_marker(
     assert len(field) == child_io_mod._STDERR_LOG_CAP_BYTES + len(
         child_io_mod._STDERR_TRUNCATION_MARKER
     )
+    # aclose (clean teardown, not a read_frame failure) logs at WARNING severity.
+    assert events[0]["log_level"] == "warning"
+
+
+async def test_aclose_over_cap_multibyte_stderr_still_marks_truncation(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """Multi-byte over-cap stderr STILL trips the marker (the byte-overflow flag path).
+
+    A byte-capped read of multi-byte UTF-8 decodes to FEWER than ``cap`` chars, so a
+    char-length check alone would silently drop the marker. The explicit
+    ``truncated`` flag (raw hit its byte cap) forces it. "€" is 3 UTF-8 bytes, so
+    (cap+900 bytes) is well over the byte cap but ~1/3 the char count.
+    """
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    euro = "€".encode()  # 3 bytes / 1 char
+    proc.stderr = _FakeStderr(euro * (child_io_mod._STDERR_LOG_CAP_BYTES // 3 + 300))
+    proc.returncode = 0
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    with structlog.testing.capture_logs() as logs:
+        await cio.aclose()
+    events = [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+    assert len(events) == 1
+    field = events[0]["child_stderr"]
+    # Fewer than cap chars decoded (multi-byte), yet the marker fired via the flag.
+    assert field.endswith(child_io_mod._STDERR_TRUNCATION_MARKER)
+    assert len(field) < child_io_mod._STDERR_LOG_CAP_BYTES
 
 
 async def test_aclose_closes_stderr_pipe(_spawn_capture: dict[str, Any]) -> None:

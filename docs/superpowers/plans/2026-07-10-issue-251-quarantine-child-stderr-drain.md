@@ -839,3 +839,47 @@ spec) is authoritative.
   holding the stderr write-end). Both Minors; all other final-review triage items
   (residual `Co/Cn/Mn`; silent `stderr.close()` mirroring the sibling teardown
   idiom; a test-file pragma comment) accepted as no-action.
+- **`/review-pr` fleet (9 specialists + CodeRabbit) — folded batch (0 Critical, all
+  corroborated Mediums/Highs).** The shipped `_log_child_stderr` / `_sanitize_child_stderr`
+  DIFFER from the §4 code blocks above per these folds (this fold log is authoritative):
+  - **A (fallback log) [security+code-quality+architect]:** `stderr_drain_failed` now
+    logs `error_class=type(exc).__name__` (NOT `exc_info=True` — the bootstrap chain
+    has no traceback renderer, so it rendered nothing), and the fallback emit is
+    `contextlib.suppress(Exception)`-wrapped so a structlog-emit failure can't escape.
+    Added a CANARY forward-gate comment (once a canary-raising processor is wired, the
+    `except` must escalate `OutboundCanaryTripped`, not demote it).
+  - **B (drain timeout) [security]:** the drain read is wrapped in
+    `asyncio.wait_for(..., timeout=_STDERR_DRAIN_TIMEOUT_S=2.0)` so a write-end held
+    open past child exit trips the deadline instead of hanging aclose (defence-in-depth
+    over the PID-namespace assumption). `test_log_child_stderr_read_is_bounded` proves it.
+  - **C (multibyte truncation) [opus+CodeRabbit+code-quality+security]:** `_sanitize_child_stderr`
+    gained an explicit `truncated: bool` param; the caller sets it from `len(raw) > cap`
+    (byte-overflow), so the marker fires even when multi-byte stderr decodes to ≤ cap
+    chars. `test_aclose_over_cap_multibyte_stderr_still_marks_truncation` +
+    `test_sanitize_child_stderr_truncated_flag_forces_marker_when_under_cap`. Marker
+    now leads with a space (`" …[truncated]"`).
+  - **D (severity) [devex High]:** `_log_child_stderr(*, failure=False)`; the `read_frame`
+    arm passes `failure=True` → `child_stderr` at `error` (visible to error-level
+    alerting alongside `read_frame_failed`); aclose stays `warning`.
+  - **E (CancelledError) [error+test]:** `test_log_child_stderr_propagates_cancelled_error`
+    pins that `except Exception` (not `BaseException`) lets cancellation propagate.
+  - **F/G/H (docs+test):** spec §6 names T3-derived-content-to-ops-logs as a residual;
+    the slice-3 runbook + `docs/subsystems/quarantine.md` document the new diagnostic
+    events; the still-running test asserts `_FakeStderr.read_calls == 0` (non-drain by
+    mechanism, not just log-absence).
+  - **Declined (follow-ups / rationale):** pre-existing silent `contextlib.suppress` in
+    `_terminate_and_reap` (out of scope → follow-up issue); a shared read-loop
+    `_read_up_to` (the two loops have different error contracts); a cross-event
+    correlation id (scope; the severity fix co-surfaces them); the executor-hop
+    micro-opt (now required by the `wait_for` bound); Scope-B concurrent drain
+    (deferred as designed); untranslated `…[truncated]` marker (repo precedent,
+    `orchestrator/core.py`). Coverage held at 100% line+branch; adversarial green.
+  - **Focused re-review Minor (security `quarantine-stderr-drain-005` + code-quality,
+    both):** fold-B's `wait_for` orphans the executor thread still holding the
+    `BufferedReader` lock, so `aclose`'s `stderr.close()` could re-block on the drain-
+    timeout path (contradicting §4.3's "no concurrent stderr reader"). FIX:
+    `_log_child_stderr` sets `_stderr_reader_orphaned` on a `TimeoutError`, and
+    `aclose` SKIPS the `stderr.close()` when set (left to `Popen` GC) — restores the
+    §4.3 invariant + removes the latent aclose hang. `test_log_child_stderr_read_is_bounded`
+    now asserts the skip (`proc.stderr.closed is False`). Unreachable under the shipped
+    `--unshare-pid` policy. Both re-reviewers Approved.

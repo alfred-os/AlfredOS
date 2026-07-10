@@ -195,6 +195,18 @@ When the extraction result is a `TypedRefusal`, the `reason` field is one of:
 | `downgrade_to_orchestrator` gate denied | `AlfredError` raised; no downgrade audit row | Gate's own `security.capability_gate.*` audit family |
 | `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` in production | Refused unconditionally (sec-003) | Launcher exits non-zero; `supervisor.config_insecure` audit line if reached |
 
+> **Child stderr diagnostics (#251).** When a spawn/extract failure above manifests
+> as a torn or timed-out reply (e.g. the launcher refuses — "Missing sandbox policy
+> file" / "fd-3 key read fails" rows), the host now drains the quarantined child's
+> stderr and surfaces the child-side reason as a **sanitized, single-line
+> `security.quarantine_child.child_stderr`** structlog field (logged at `error` on the
+> `read_frame` failure path, alongside `security.quarantine_child.read_frame_failed`;
+> at `warning` on teardown). If the drain itself fails, look for
+> `security.quarantine_child.stderr_drain_failed` (carries `error_class`). The field
+> is bounded (`…[truncated]` marks an over-cap clip), control/format-char-stripped
+> (no forged log lines / terminal-escape / bidi spoof), and secret-redacted — so it
+> may show sanitized T3-derived text; treat it as operational-log-tier, not audit.
+
 ## Cross-references
 
 - [PRD §7.1](../../PRD.md#71-security--prompt-injection-defense) — dual-LLM split design requirement.

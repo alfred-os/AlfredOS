@@ -207,11 +207,18 @@ during normal operation).
 **Why stderr-only and NOT stdin/stdout.** The bounded `read_frame` path cancels
 its `asyncio.wait_for` on timeout but leaves the executor thread still blocked in
 `stdout.read()` (see `test_read_frame_is_bounded`). Closing `stdout` out from
-under that orphaned reader is a race. stderr has no such hazard:
+under that orphaned reader is a race. stderr normally has no such hazard:
 `_log_child_stderr` **awaits** the drain's executor read to completion before
-`aclose` proceeds to the close, so there is never a concurrent stderr reader. Any
-residual stdin/stdout parent-fd cleanup is left to CPython's `Popen` GC (as it is
-today); reclaiming those explicitly is not worth re-opening the stdout race.
+`aclose` proceeds, so there is normally no concurrent stderr reader. The one
+exception is the drain's OWN `asyncio.wait_for` bound (`_STDERR_DRAIN_TIMEOUT_S`,
+added for the `/review-pr` security finding): a drain that TIMES OUT orphans an
+executor thread still reading stderr, so `_log_child_stderr` sets
+`_stderr_reader_orphaned` and `aclose` then **skips** the `stderr.close()` for
+exactly that pipe (left to `Popen` GC), avoiding a close that would re-block on the
+reader's `BufferedReader` lock. That timeout path is unreachable under the shipped
+`kind="full"` PID-namespace policy (the write-end closes on child exit → the read
+returns EOF promptly). Residual stdin/stdout parent-fd cleanup is likewise left to
+`Popen` GC; reclaiming those explicitly is not worth re-opening the stdout race.
 
 ### 4.4 What is deliberately NOT done
 
@@ -270,7 +277,30 @@ unit-reachable.
   log lines / terminal escapes under either renderer.
 - **Secret leakage.** The `child_stderr` field passes through the bootstrap
   leaf-redactor (`_redact_value`, stage-1 broker + stage-2 generic-key regex)
-  like every other log field. The drain adds no new bypass.
+  like every other log field. The drain adds no new bypass. The `stderr_drain_failed`
+  fallback logs only `error_class` (the exception TYPE), never the child's bytes and
+  never `exc_info` (which the bootstrap chain would not render anyway).
+- **T3-derived-content disclosure to the ops-log plane (accepted residual).** The
+  quarantined child is precisely the process that touches T3 content, so a buggy /
+  adversarial extraction could embed T3-DERIVED (non-secret) fragments in its stderr,
+  which now flow — capped + sanitized + redactor-scanned, but NOT DLP-stripped of
+  arbitrary T3 text — into the operational-log/observability plane (PRD §7.5), whose
+  retention/access posture differs from the audit log (PRD §7.4). This does NOT break
+  the dual-LLM invariant (the privileged orchestrator never reads `child_stderr`) and
+  the field is bounded/de-fanged, so it is an accepted residual, not release-blocking —
+  the same hazard `docs/subsystems/quarantine.md` names for the sibling
+  `downgrade_to_orchestrator` audit path. Revisit if child stderr is ever routed
+  anywhere lower-trust than the operator log.
+- **Canary forward-gate.** Today `configure_logging` wires the redactor with
+  `canary=None`, so the shared log path cannot raise `OutboundCanaryTripped`. When
+  canary vocabulary IS wired, a canary token surfacing in child stderr would raise
+  inside `_log_child_stderr`'s try and be demoted to `stderr_drain_failed` by the
+  best-effort `except` — at that point the `except` MUST special-case + escalate it
+  (a code comment marks this gate).
+- **Bounded drain (no hang).** The drain read is `asyncio.wait_for`-bounded
+  (`_STDERR_DRAIN_TIMEOUT_S`), so liveness does not rest solely on the bwrap
+  PID-namespace reaping assumption — a write-end held open past child exit trips the
+  deadline (caught as `stderr_drain_failed`) instead of hanging `aclose`.
 - **No raw inherit.** The child's stderr is captured to a PIPE and surfaced only
   as a sanitized field — never `stderr=None` (host fd 2 raw inherit), which would
   be the actual injection hole.
