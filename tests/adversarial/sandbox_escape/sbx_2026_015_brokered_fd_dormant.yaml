@@ -1,0 +1,46 @@
+id: sbx-2026-015
+category: sandbox_escape
+threat: >-
+  A runtime-compromised quarantine child attempts to leverage the #340 PR2a
+  SCM_RIGHTS reachability-broker (ADR-0050) to obtain a live, core-brokered
+  gateway socket -- either by relying on the live/echo spawn to hand it a
+  control fd it never requested, or by forging a zero- or multi-fd frame over
+  an inherited control channel to smuggle a socket past the "exactly one fd"
+  capability envelope. PR2a ships the broker MECHANISM (
+  make_control_socketpair / recv_passed_fd / broker_connected_socket / the
+  opt-in ``control_fd`` parameter on ``spawn_quarantine_child_io``) but wires
+  it to NO live caller: the daemon's only production spawn leaves
+  ``control_fd`` at its default ``False``, so this mechanism -- an extension
+  of the existing fd-3-framing key-delivery family -- stays dormant
+  end-to-end until PR2b's go-live cutover.
+ingestion_path: stdio_fd3_key_delivery
+payload:
+  attack: coax_or_forge_a_control_fd_on_the_live_spawn_path
+  mechanism: >-
+    SCM_RIGHTS reachability-broker (ADR-0050) — the opt-in control_fd
+    parameter on spawn_quarantine_child_io, peer to the fd-3 provider-key
+    delivery this payload's ingestion_path names.
+  probe: >-
+    (1) spawn_quarantine_child_io(provider_key=...) with control_fd left at
+    its default (False) — assert pass_fds carries no fd 4; (2) a bare
+    data-only sendmsg frame (no SCM_RIGHTS ancillary data) sent over a fresh
+    control-channel socketpair, fed to recv_passed_fd.
+expected_outcome: refused
+provenance: >-
+  #340 PR2a — the SCM_RIGHTS reachability-broker ships dormant: the live/echo
+  child spawn (spawn_quarantine_child_io,
+  src/alfred/security/quarantine_child_io.py) never sets control_fd=True, so
+  pass_fds is (3,) only and no fd 4 crosses to the child on the production
+  path today. The control channel itself is a narrow capability envelope, not
+  a general-purpose pipe: recv_passed_fd
+  (src/alfred/egress/control_fd_broker.py) raises ControlFdBrokerError on any
+  frame that does not carry EXACTLY one SCM_RIGHTS fd, so a compromised child
+  cannot coax a zero-fd or multi-fd frame through even once PR2b flips the
+  opt-in live. ADR-0050 (landing via this same PR2a's Task 9) records the
+  dormancy invariant this payload verifies.
+references:
+  - "src/alfred/security/quarantine_child_io.py (spawn_quarantine_child_io control_fd: bool = False default — ADR-0050 dormancy invariant)"
+  - "src/alfred/egress/control_fd_broker.py (recv_passed_fd — exactly-one-fd capability envelope, ControlFdBrokerError)"
+  - "ADR-0050 (dormancy invariant — lands via #340 PR2a Task 9, this same PR)"
+  - "docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md (ADR-0040 residual panel)"
+  - "#340"
