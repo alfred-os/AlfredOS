@@ -264,6 +264,22 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/quarantine_child_io.py' \
             --fail-under=100
+      - name: Control-fd broker 100% line+branch coverage
+        # #340 PR2a (ADR-0050): ``control_fd_broker.py`` is the core-side SCM_RIGHTS
+        # reachability-broker for the quarantined child — the ONE sanctioned
+        # raw-socket egress-origination site in the whole codebase. It lives
+        # OUTSIDE ``src/alfred/security/``, so the ``security/*`` glob gate above
+        # does NOT catch it — this named gate is its ONLY 100% coverage
+        # protection. Fully covered by the unit tier
+        # (``tests/unit/egress/test_control_fd_broker.py``), so gating on
+        # unit-only ``.coverage`` data is sound. The combined ``coverage-gates``
+        # job names it too (the two-gates pattern — keep BOTH in sync when this
+        # file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/control_fd_broker.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/egress/control_fd_broker.py' \
+            --fail-under=100
       - name: Daemon control-plane trust-boundary 100% line+branch coverage
         # G6-2b-2c (#288, ADR-0038): the daemon control plane — a 0600 local-socket
         # request/response introspection RPC. ``_local_socket.py`` is the EXTRACTED
@@ -1591,6 +1607,16 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/comms_mcp/forwarded_inbound_receiver.py' \
+            --fail-under=100
+      - name: Control-fd broker 100% line+branch coverage (combined)
+        # Combined twin of the python-job gate (two-gates pattern, #340 PR2a,
+        # ADR-0050). ``control_fd_broker.py`` is the core-side SCM_RIGHTS
+        # reachability-broker for the quarantined child; keep the --include in
+        # lockstep with the python-job step.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/control_fd_broker.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/egress/control_fd_broker.py' \
             --fail-under=100
       - name: Comms-MCP trust-boundary 100% line+branch coverage (combined)
         # PR-S4-8 (#152) host-side comms-MCP foundations (spec §8). Every file
