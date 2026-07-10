@@ -33,6 +33,7 @@ from __future__ import annotations
 import struct
 import sys
 import threading
+import types
 from typing import Any
 
 import pytest
@@ -77,6 +78,26 @@ class _FakeStdout:
         chunk = bytes(self._buf[:n])
         del self._buf[:n]
         return chunk
+
+
+class _FakeStderr:
+    """A raw-pipe stderr stand-in: synchronous ``read(n)`` over a byte buffer.
+
+    Mirrors ``_FakeStdout`` (returns at most ``n`` bytes per call, ``b""`` at EOF)
+    and adds ``close()`` so the aclose stderr-pipe-close (Task 3) is observable.
+    """
+
+    def __init__(self, data: bytes = b"") -> None:
+        self._buf = bytearray(data)
+        self.closed = False
+
+    def read(self, n: int) -> bytes:
+        chunk = bytes(self._buf[:n])
+        del self._buf[:n]
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakePopen:
@@ -425,3 +446,79 @@ def test_subprocess_child_io_satisfies_childio_protocol() -> None:
     from alfred.security.quarantine_transport import ChildIO
 
     assert issubclass(_SubprocessChildIO, ChildIO)
+
+
+# --- #251: stderr drain helpers ---------------------------------------------
+
+
+def test_sanitize_child_stderr_plain_text_passes_through() -> None:
+    out = child_io_mod._sanitize_child_stderr(b"sandbox_refused reason=x", cap=4096)
+    assert out == "sandbox_refused reason=x"
+
+
+def test_sanitize_child_stderr_collapses_newlines_and_tabs_to_single_line() -> None:
+    out = child_io_mod._sanitize_child_stderr(b"line one\n\tline two\r\nline three", cap=4096)
+    # Single line, no control chars, whitespace runs collapsed to one space.
+    assert out == "line one line two line three"
+    assert "\n" not in out and "\r" not in out and "\t" not in out
+
+
+def test_sanitize_child_stderr_defangs_ansi_escapes() -> None:
+    # ESC (0x1b) is a Cc control char -> replaced; the inert "[31m"/"[0m" remain.
+    out = child_io_mod._sanitize_child_stderr(b"\x1b[31mRED\x1b[0m alert", cap=4096)
+    assert "\x1b" not in out
+    assert out == "[31mRED [0m alert"
+
+
+def test_sanitize_child_stderr_strips_bidi_and_zero_width_format_chars() -> None:
+    # "Trojan Source" defense: Cf format chars (bidi overrides / isolates,
+    # zero-width, BOM) are control-char-free but display-spoof a terminal, so they
+    # must be stripped just like Cc controls. None may survive into the log field.
+    # Built from code points (RLO/LRI/PDI/ZWSP/BOM) so no raw glyph enters the
+    # source -> ruff-safe (no ambiguous-unicode lint).
+    hostile = [chr(cp) for cp in (0x202E, 0x2066, 0x2069, 0x200B, 0xFEFF)]
+    raw = ("admin" + "".join(hostile) + "resu ok").encode("utf-8")
+    out = child_io_mod._sanitize_child_stderr(raw, cap=4096)
+    assert out is not None
+    for ch in hostile:
+        assert ch not in out
+    # Non-vacuous: the legitimate text MUST survive (guards a regression that
+    # over-strips) — hostile chars removed, real diagnostic content preserved.
+    assert "admin" in out and "resu ok" in out
+
+
+def test_sanitize_child_stderr_non_utf8_does_not_crash() -> None:
+    out = child_io_mod._sanitize_child_stderr(b"bad\xffbyte", cap=4096)
+    assert out is not None
+    assert "bad" in out and "byte" in out
+
+
+def test_sanitize_child_stderr_empty_returns_none() -> None:
+    assert child_io_mod._sanitize_child_stderr(b"", cap=4096) is None
+
+
+def test_sanitize_child_stderr_all_control_returns_none() -> None:
+    # Non-empty raw, but every char is control/whitespace -> collapses to "" -> None.
+    assert child_io_mod._sanitize_child_stderr(b"\n\r\n\t  ", cap=4096) is None
+
+
+def test_sanitize_child_stderr_truncates_over_cap_with_marker() -> None:
+    out = child_io_mod._sanitize_child_stderr(b"a" * 5000, cap=4096)
+    assert out is not None
+    assert out.endswith(child_io_mod._STDERR_TRUNCATION_MARKER)
+    assert len(out) == 4096 + len(child_io_mod._STDERR_TRUNCATION_MARKER)
+
+
+def test_read_stderr_bytes_reads_all_under_cap() -> None:
+    proc = types.SimpleNamespace(stderr=_FakeStderr(b"boom reason"))
+    assert child_io_mod._read_stderr_bytes(proc, 4096) == b"boom reason"  # type: ignore[arg-type]
+
+
+def test_read_stderr_bytes_caps_at_limit() -> None:
+    proc = types.SimpleNamespace(stderr=_FakeStderr(b"x" * 100))
+    assert child_io_mod._read_stderr_bytes(proc, 10) == b"x" * 10  # type: ignore[arg-type]
+
+
+def test_read_stderr_bytes_no_pipe_returns_empty() -> None:
+    proc = types.SimpleNamespace(stderr=None)
+    assert child_io_mod._read_stderr_bytes(proc, 4096) == b""  # type: ignore[arg-type]

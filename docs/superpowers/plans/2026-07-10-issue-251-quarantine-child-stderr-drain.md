@@ -74,9 +74,10 @@ CI (fake subprocess) — no real bwrap spawn.
     nothing buffered. `cap` is POSITIONAL (fed to `run_in_executor` in Task 2).
     Caller guarantees the child has exited.
   - `_sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None` — decode
-    (`errors="replace"`), replace every Unicode `Cc` control char with a space,
-    collapse whitespace runs, strip. Returns `None` when empty; truncates to `cap`
-    chars + `_STDERR_TRUNCATION_MARKER` when longer.
+    (`errors="replace"`), replace every char in `_STRIPPED_UNICODE_CATEGORIES`
+    (`Cc` controls + `Cf` format/bidi) with a space, collapse whitespace runs,
+    strip. Returns `None` when empty; truncates to `cap` chars +
+    `_STDERR_TRUNCATION_MARKER` when longer.
   - `_FakeStderr` test double (has `read(n) -> bytes` raw-pipe semantics, `close()`,
     `closed: bool`) — reused by Tasks 2 and 3.
 
@@ -234,17 +235,21 @@ def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
 
     The quarantined child is the most adversary-facing surface: its stderr may
     carry attacker-influenced bytes (newlines that forge log lines, ANSI escapes
-    that manipulate an operator's terminal, other C0/C1 control chars). Every
-    Unicode ``Cc`` control char (covers ``\\n \\r \\t \\x1b``, DEL, C1) is replaced
-    with a space; whitespace runs are collapsed and the result stripped, so the
-    field is single-line-searchable and injection-proof under BOTH the JSON and
-    console renderers. Truncated to ``cap`` chars with a marker. Returns ``None``
-    when nothing printable remains (no empty-field noise). Secret-shape masking is
+    that manipulate an operator's terminal, bidi overrides that display-spoof the
+    line, other C0/C1 control or format chars). Every char in a stripped Unicode
+    category (``Cc`` C0/C1 controls incl. ``\\n \\r \\t \\x1b`` / DEL, and ``Cf``
+    format chars incl. bidi overrides / zero-width) is replaced with a space;
+    whitespace runs are collapsed and the result stripped, so the field is
+    single-line-searchable and injection-proof under BOTH the JSON and console
+    renderers. Truncated to ``cap`` chars with a marker. Returns ``None`` when
+    nothing printable remains (no empty-field noise). Secret-shape masking is
     handled DOWNSTREAM by the bootstrap structlog leaf-redactor once this lands as
     a log field.
     """
     text = raw.decode("utf-8", errors="replace")
-    despaced = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
+    despaced = "".join(
+        " " if unicodedata.category(ch) in _STRIPPED_UNICODE_CATEGORIES else ch for ch in text
+    )
     collapsed = " ".join(despaced.split())
     if not collapsed:
         return None
@@ -714,11 +719,16 @@ uv run pytest tests/unit/security/test_quarantine_child_io.py -q
 
 Expected: all PASS.
 
-Confirm the security 100% line+branch gate for this file (mirrors ci.yml:265):
+Confirm the security 100% line+branch gate for this file (mirrors ci.yml:265).
+Use the MODULE form of `--cov` (the path form reports "No data to report"), and
+run ALL sibling suites that cover this file — `test_quarantine_child_io.py` alone
+only reaches ~87% (the control-fd spawn paths live in `_control_fd`):
 
 ```bash
-uv run pytest tests/unit/security/test_quarantine_child_io.py -q \
-  --cov=src/alfred/security/quarantine_child_io --cov-branch \
+uv run pytest tests/unit/security/test_quarantine_child_io.py \
+  tests/unit/security/test_quarantine_child_io_control_fd.py \
+  tests/unit/security/test_quarantine_child_io_i18n.py -q \
+  --cov=alfred.security.quarantine_child_io --cov-branch \
   --cov-report=term-missing --cov-fail-under=100
 ```
 
