@@ -81,8 +81,9 @@ def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
 
     The quarantined child is the most adversary-facing surface: its stderr may
     carry attacker-influenced bytes (embedded newlines that forge log lines, ANSI
-    escape sequences that manipulate an operator's terminal, other C0/C1 control
-    chars). Every control char is collapsed to a single space so the field is
+    escape sequences that manipulate an operator's terminal, bidi overrides that
+    display-spoof the line, other C0/C1 control or format chars). Every char in a
+    stripped Unicode category is collapsed to a single space so the field is
     single-line-searchable and injection-proof under BOTH the JSON and console
     renderers; the result is truncated to ``cap`` with a marker. Secret-shape
     masking is handled DOWNSTREAM by the bootstrap's structlog leaf-redactor
@@ -91,9 +92,12 @@ def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
 ```
 
 - Decode `errors="replace"` (a non-UTF-8 child stderr must never crash the drain).
-- Replace every control character (Unicode category `Cc`, which covers
-  `\n \r \t \x1b` and the rest of C0/C1) with a space; collapse runs of
-  whitespace; `strip()`. Result is single-line.
+- Replace every char in a stripped Unicode category — `Cc` (C0/C1 controls,
+  covering `\n \r \t \x1b` and DEL) **and** `Cf` (format chars: bidi overrides
+  U+202E / directional isolates U+2066-2069, zero-width U+200B / BOM U+FEFF) — with
+  a space; collapse runs of whitespace; `strip()`. Result is single-line. Stripping
+  `Cf` closes the "Trojan Source" bidi display-spoof, a control-char-free attack the
+  child could otherwise smuggle into an operator's terminal (task-review fold).
 - Truncate to `cap` characters; append `…[truncated]` if it was longer.
 - Return `None` when the sanitized string is empty (nothing to log).
 

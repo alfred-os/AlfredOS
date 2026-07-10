@@ -89,6 +89,7 @@ import socket
 import struct
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import IO
 
@@ -146,6 +147,27 @@ _LENGTH_HEADER_BYTES = 4
 # Bounded ``read_frame`` deadline (seconds): a wedged child must fail loud rather
 # than hang the inbound turn forever. Mirrors the #240 inbound-turn 15s bound.
 _READ_FRAME_TIMEOUT_S = 15.0
+
+# Bounded best-effort drain of the quarantined child's stderr (#251). The child is
+# spawned with ``stderr=PIPE``; on a failed/torn ``read_frame`` or on ``aclose`` the
+# host reads up to this many bytes — ONLY once the child has exited (so the drain
+# can never block on a wedged child) — and surfaces a SANITIZED single-line
+# ``child_stderr`` field through the structured logger. Never a raw inherit: the
+# quarantined child is the most adversary-facing surface, so its stderr is
+# de-fanged (control chars stripped -> no forged log lines / terminal escapes) and
+# masked by the bootstrap structlog leaf-redactor before it reaches a renderer.
+_STDERR_LOG_CAP_BYTES = 4096
+_STDERR_TRUNCATION_MARKER = "…[truncated]"
+
+# Unicode categories stripped from child stderr before it becomes a log field.
+# ``Cc`` (C0/C1 controls) defeats forged log lines + ANSI terminal escapes; ``Cf``
+# (format chars — bidi overrides U+202E, directional isolates U+2066-2069,
+# zero-width U+200B / BOM U+FEFF) defeats "Trojan Source" bidi display-spoofing, a
+# control-char-free attack the child (the most adversary-facing surface) could
+# otherwise smuggle into an operator's terminal rendering of the log line. Stripping
+# all of ``Cf`` also drops benign joiners (ZWJ/ZWNJ/soft-hyphen) — safety over
+# fidelity is the right call for a hardened diagnostic field (not operator copy).
+_STRIPPED_UNICODE_CATEGORIES: frozenset[str] = frozenset({"Cc", "Cf"})
 
 
 class QuarantineChildSpawnError(AlfredError):
@@ -251,6 +273,57 @@ def _blocking_read_exactly(stream: IO[bytes], count: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _read_stderr_bytes(process: subprocess.Popen[bytes], cap: int) -> bytes:
+    """Read up to ``cap`` bytes of the child's stderr. Caller guarantees exited.
+
+    A pure blocking reader for ``loop.run_in_executor`` (off-loop, same posture as
+    ``_blocking_read_exactly``). The child has already exited (the async caller's
+    ``poll()`` gate), so its stderr write-end is closed and the read cannot block.
+    Returns ``b""`` when there is no stderr pipe (defensive) or nothing was
+    buffered. ``cap`` is positional so the caller needs no ``functools.partial``.
+    """
+    stderr = process.stderr
+    if stderr is None:
+        return b""
+    chunks: list[bytes] = []
+    remaining = cap
+    while remaining > 0:
+        chunk = stderr.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _sanitize_child_stderr(raw: bytes, *, cap: int) -> str | None:
+    """De-fang child stderr into a single-line structured-log field (or ``None``).
+
+    The quarantined child is the most adversary-facing surface: its stderr may
+    carry attacker-influenced bytes (newlines that forge log lines, ANSI escapes
+    that manipulate an operator's terminal, bidi overrides that display-spoof the
+    line, other C0/C1 control or format chars). Every char in a stripped Unicode
+    category (:data:`_STRIPPED_UNICODE_CATEGORIES` — ``Cc`` C0/C1 controls incl.
+    ``\\n \\r \\t \\x1b`` / DEL, and ``Cf`` format chars incl. bidi overrides /
+    zero-width) is replaced with a space; whitespace runs are collapsed and the
+    result stripped, so the field is single-line-searchable and injection-proof
+    under BOTH the JSON and console renderers. Truncated to ``cap`` chars with a
+    marker. Returns ``None`` when nothing printable remains (no empty-field noise).
+    Secret-shape masking is handled DOWNSTREAM by the bootstrap structlog
+    leaf-redactor once this lands as a log field.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    despaced = "".join(
+        " " if unicodedata.category(ch) in _STRIPPED_UNICODE_CATEGORIES else ch for ch in text
+    )
+    collapsed = " ".join(despaced.split())
+    if not collapsed:
+        return None
+    if len(collapsed) > cap:
+        return collapsed[:cap] + _STDERR_TRUNCATION_MARKER
+    return collapsed
 
 
 class _SubprocessChildIO:
