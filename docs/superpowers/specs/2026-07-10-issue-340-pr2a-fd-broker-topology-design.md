@@ -409,7 +409,7 @@ ADR-0050 realises it. It records:
    brokered-socket target host:port, not just the gateway-local CONNECT audit — ADR-0040 residual vii).
    **PR2a does NOT wire this audit row** (rev-002/sec-008: no live caller — only the docker probe drives
    the broker; a "PR2a wires the audit" claim would overstate). PR2a records the loud-failure error type
-   + reason vocabulary; the durable per-call egress-audit row + its write-path test are a **hard PR2b
+   - reason vocabulary; the durable per-call egress-audit row + its write-path test are a **hard PR2b
    pre-gate** decided before go-live (sec-007).
 8. **The dormancy contract as an explicit, auditable invariant** (arch-003, `requires_human_judgment`).
    PR2a's whole safety rests on a *software* guard — `control_fd=False` by default keeps the live child
@@ -559,10 +559,12 @@ Security verdict: the thin cut is *sound and ratifiable*; the dormancy argument 
 against the tree. Folds below OVERRIDE the rev.1 body where they conflict.
 
 **High — corroborated ×3 (rev-001 + test-001 + dev-001), the one must-fix:**
+
 - **Probe `security/*` coverage-gate break** → §9 H1 + §4.3: thin `# pragma: no cover` subprocess-entry
   (the `__main__.py` precedent) with reusable mechanics factored into a unit-covered helper.
 
 **Medium — cross-check-confirmed (6/6), folded with the added residuals:**
+
 - **arch-001** (sec-confirmed) → §8 item 6 rewritten: the Discord byte-splice carries TLS *ciphertext*;
   the real non-reuse reasons are connectivity-free-core hosting + aiohttp-has-no-fd-hook.
 - **sec-002 + core-003** (sec + core confirmed; SAME underlying issue) → §5 + §4.3: verdict returns over
@@ -576,9 +578,10 @@ against the tree. Folds below OVERRIDE the rev.1 body where they conflict.
 - **test-002** (dev-confirmed) → §9: `broker_socket()` unit-exercised (else the named `quarantine_child_io.py`
   gate breaks).
 - **test-003** (dev-confirmed) → §7/§9: register the new payload in `adversarial.yml`'s node enumeration
-  + `@_bwrap_required`.
+  - `@_bwrap_required`.
 
 **Corroborated clusters (peer-confirmed, no cross-check) — folded:**
+
 - control_fd_broker **two-gates** in BOTH `--include` lists, no `egress/*` glob (arch-002/test-005/dev-002) → §9.
 - **"wires the audit" overstatement** (rev-002/sec-008) → §4.1 + §8 item 7: PR2a defines the error type
   only; the audit-row write is PR2b.
@@ -590,6 +593,7 @@ against the tree. Folds below OVERRIDE the rev.1 body where they conflict.
 - **paper-gate both #245 halves** (test-006/dev-003) → §9 (runtime skip-parse, not just pre-check).
 
 **Single-reviewer, carried forward (in-domain, low-stakes or PR2b-agenda — not blocking):**
+
 - Provider §11 precision: **prov-001** timeout inversion (30s < 60s; LOWER the SDK read), **prov-002**
   DeepSeek inherits the SDK default (not "hardcode 2"), **prov-003** transport must stay
   provider-agnostic, **prov-004** cost rides the fd-1 frame — all folded into §11.
