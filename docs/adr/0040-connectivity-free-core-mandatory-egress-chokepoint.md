@@ -6,6 +6,11 @@
   authentication mitigation tracked as
   [#358](https://github.com/alfred-os/AlfredOS/issues/358). (iv)–(vi) + the (ii) framing fix
   are from the ADR-0040 sign-off residual panel; (vii) surfaced in the follow-up PR review.
+- **Amended**: 2026-07-10 — see sibling [ADR-0050](0050-quarantine-child-scm-rights-reachability-broker.md)
+  (the 2c quarantine-child SCM_RIGHTS reachability-broker, `#340` PR2a), which records the
+  mechanism that touches residual (iv) (its core→gateway `connect()` inherits the same
+  confused-deputy/no-per-caller-authentication gap until `#358` lands) and residual (vii) (it
+  defers the durable per-extraction core-side egress-audit row to a hard PR2b pre-gate).
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
