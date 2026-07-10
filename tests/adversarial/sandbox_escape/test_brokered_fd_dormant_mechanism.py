@@ -23,6 +23,7 @@ whole point of registering their node-ids in the release-blocking gate (see
 
 from __future__ import annotations
 
+import array
 import contextlib
 import os
 import socket
@@ -131,18 +132,36 @@ async def test_live_echo_spawn_passes_no_control_fd(monkeypatch: pytest.MonkeyPa
 
 
 def test_control_channel_refuses_a_second_or_zero_fd() -> None:
-    """Capability envelope: exactly one fd per frame — a zero-fd frame is a loud refusal.
+    """Capability envelope: exactly one fd per frame — zero-fd OR multi-fd frames are refused.
 
-    A compromised child cannot coax the broker's control channel into
-    accepting a no-fd (or multi-fd) frame: ``recv_passed_fd`` raises
-    :class:`ControlFdBrokerError` rather than silently returning without a
-    socket.
+    A compromised child cannot coax the broker's control channel into (a) accepting
+    a no-fd frame (a silent socket-less return) or (b) smuggling a SECOND descriptor
+    through a single frame: ``recv_passed_fd`` raises :class:`ControlFdBrokerError`
+    in both cases.
     """
+    # (a) zero-fd frame: data only, no SCM_RIGHTS ancillary.
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        parent.sendall(b"\x01")  # data only — no SCM_RIGHTS ancillary fd
+        parent.sendall(b"\x01")
         with pytest.raises(ControlFdBrokerError):
             recv_passed_fd(child)
     finally:
         parent.close()
         child.close()
+
+    # (b) multi-fd frame: TWO SCM_RIGHTS descriptors in one frame. ``recv_passed_fd``
+    # sizes its ancillary buffer for exactly one fd, so the kernel truncates
+    # (``MSG_CTRUNC``) rather than admitting a second descriptor — a loud refusal.
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    donor_a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    donor_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        two_fds = array.array("i", [donor_a.fileno(), donor_b.fileno()])
+        parent.sendmsg([b"\x01"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, two_fds)])
+        with pytest.raises(ControlFdBrokerError):
+            recv_passed_fd(child)
+    finally:
+        parent.close()
+        child.close()
+        donor_a.close()
+        donor_b.close()

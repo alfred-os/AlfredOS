@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-10 14:08+0100\n"
+"POT-Creation-Date: 2026-07-10 16:31+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3063,34 +3063,34 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:294
+#: src/alfred/security/quarantine_child_io.py:296
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:312
+#: src/alfred/security/quarantine_child_io.py:314
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:336
+#: src/alfred/security/quarantine_child_io.py:338
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:350
-#: src/alfred/security/quarantine_child_io.py:445
+#: src/alfred/security/quarantine_child_io.py:352
+#: src/alfred/security/quarantine_child_io.py:447
 msgid "security.quarantine_child.broker_unconfigured"
 msgstr "Quarantine child egress broker is not configured."
 
-#: src/alfred/security/quarantine_child_io.py:443
+#: src/alfred/security/quarantine_child_io.py:445
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:521
+#: src/alfred/security/quarantine_child_io.py:528
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:562
+#: src/alfred/security/quarantine_child_io.py:569
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "

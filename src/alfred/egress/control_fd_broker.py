@@ -8,10 +8,11 @@ from EgressClient (which does httpx I/O over its proxied client); the raw-socket
 (tests/adversarial/sandbox_escape/test_only_sanctioned_raw_socket_egress_site.py) keeps this the
 sole INET-connect + sendmsg(SCM_RIGHTS) site in src/alfred.
 
-This module ships only the primitives (this file, #340 PR2a task 1): the error type, the control
-socketpair constructor, the fd-receive helper, and the proxy-URL resolver. The async
-``broker_connected_socket`` orchestration (open the INET socket, CONNECT-handshake it through the
-gateway proxy, and sendmsg the result over the control fd) is a separate task — see the PR2a plan.
+This module ships the primitives — the error type, the control socketpair constructor, the
+fd-receive helper, and the proxy-URL resolver — plus the async ``broker_connected_socket``
+orchestration: it opens the INET socket, CONNECT-handshakes it through the gateway proxy off-loop,
+and ``sendmsg``s the connected fd over the control fd. There is no live caller in #340 PR2a (the
+docker C1/C2 probe drives it directly); the per-extraction wiring lands in PR2b behind the sign-off.
 """
 
 from __future__ import annotations
