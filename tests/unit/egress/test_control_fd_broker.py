@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import array
 import socket
+import threading
 
 import pytest
 
 from alfred.egress.control_fd_broker import (
     ControlFdBrokerError,
+    _connect_and_send,
     _resolve_proxy_addr,
+    broker_connected_socket,
     make_control_socketpair,
     recv_passed_fd,
 )
@@ -53,7 +56,9 @@ def test_recv_passed_fd_returns_frame_and_one_fd() -> None:
         try:
             assert got.family == socket.AF_INET
         finally:
-            got.detach()  # the recvmsg'd fd aliases donor; don't double-close
+            # SCM_RIGHTS installed a DISTINCT descriptor in this process (not an alias of
+            # donor's fd) — close it here; donor is closed separately in its own finally below.
+            got.close()
     finally:
         parent.close()
         child.close()
@@ -149,3 +154,144 @@ def test_resolve_proxy_addr_missing_port_is_io_plane_unavailable() -> None:
 
 def test_resolve_proxy_addr_splits_host_port() -> None:
     assert _resolve_proxy_addr(_Cfg("http://alfred-gateway:8889")) == ("alfred-gateway", 8889)
+
+
+def _accept_once(listener: socket.socket) -> None:
+    """Accept exactly one connection and let it EOF-close; used to give ``_connect_and_send``'s
+    ``socket.create_connection`` a real peer to connect to."""
+    conn, _ = listener.accept()
+    conn.recv(16)  # let the client connect; we only need the connection to exist
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_broker_connected_socket_passes_a_live_fd() -> None:
+    """A live, connected socket crosses via SCM_RIGHTS with exactly the ``\\x01`` framing byte.
+
+    This does NOT (and, portably, cannot) assert that the core drops its own copy of the fd —
+    Task 7's docker integration test proves that via ``/proc/self/fd`` count stability, which is
+    Linux-only and would break on this macOS dev host if asserted here (fold-log M3).
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    t = threading.Thread(target=_accept_once, args=(listener,), daemon=True)
+    t.start()
+    parent, child = make_control_socketpair()
+    try:
+        await broker_connected_socket(parent_end=parent, proxy_config=_Cfg(f"http://{host}:{port}"))
+        data, fd = recv_passed_fd(child)
+        assert data == b"\x01"  # exactly the framing byte — zero application bytes (HARD #5)
+        passed = socket.socket(fileno=fd)
+        try:
+            assert passed.getpeername() == (host, port)  # a LIVE connected socket crossed
+            assert passed.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0
+            # settimeout(None) restored blocking after the timed connect
+            assert passed.getblocking() is True
+        finally:
+            # .close() (not .detach()): this is the DISTINCT descriptor SCM_RIGHTS installed in
+            # this process, so closing it lets the accept-thread observe EOF and t.join return
+            # promptly, and it does not double-close anything (fold-log M3 / Task-1 detach fix).
+            passed.close()
+    finally:
+        parent.close()
+        child.close()
+        # Join BEFORE closing the listener: create_connection completes the TCP handshake at the
+        # kernel level before the OS necessarily schedules the accept thread, so closing the
+        # listener fd first can abort a still-in-flight accept() (ConnectionAbortedError surfacing
+        # as PytestUnhandledThreadExceptionWarning). By the time broker_connected_socket returned,
+        # its finally: sock.close() + the passed.close() above closed the client end, so the
+        # accept thread's recv() has returned EOF and the thread is ending — join returns promptly.
+        t.join(timeout=2)
+        assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
+        listener.close()
+
+
+@pytest.mark.asyncio
+async def test_broker_connected_socket_unreachable_is_loud() -> None:
+    """A refused connection (closed port, immediate ECONNREFUSED) raises ``gateway_unreachable``.
+
+    Fold-log M2: bind-then-close a local port instead of dialing TEST-NET-3 (RFC 5737,
+    ``203.0.113.1``) — a TEST-NET-3 address blackholes rather than refusing, so the connect
+    blocks for the full 10s ``_CONNECT_TIMEOUT_S`` and makes this test slow/flaky. A closed
+    127.0.0.1 port refuses immediately.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    _, closed_port = probe.getsockname()
+    probe.close()  # nothing listens on this port now — connecting refuses immediately
+    parent, child = make_control_socketpair()
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            await broker_connected_socket(
+                parent_end=parent, proxy_config=_Cfg(f"http://127.0.0.1:{closed_port}")
+            )
+        assert exc.value.reason == "gateway_unreachable"
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fold-log H item 1 (coverage-gate MANDATORY): a ``sendmsg`` returning fewer bytes than the
+    1-byte frame (e.g. 0, a short write) must raise ``short_data_send`` loud, not silently report
+    success. ``socket.socket`` instances have no per-instance ``__dict__`` (same constraint noted
+    on ``test_recv_passed_fd_non_scm_rights_cmsg_is_loud`` above), so this patches the CLASS.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    t = threading.Thread(target=_accept_once, args=(listener,), daemon=True)
+    t.start()
+    parent, child = make_control_socketpair()
+
+    def _short_sendmsg(self: socket.socket, *args: object, **kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(socket.socket, "sendmsg", _short_sendmsg)
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            _connect_and_send(parent, host, port)
+        assert exc.value.reason == "short_data_send"
+    finally:
+        parent.close()
+        child.close()
+        # Join BEFORE closing the listener (see the happy-path test's finally for the rationale):
+        # _connect_and_send's finally: sock.close() closed the client end, so the accept thread's
+        # recv() has returned and the thread is ending — join returns promptly.
+        t.join(timeout=2)
+        assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
+        listener.close()
+
+
+def test_connect_and_send_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fold-log H item 1 (coverage-gate MANDATORY): a raw ``OSError`` from ``sendmsg`` (e.g.
+    ``EPIPE``) must raise ``sendmsg_failed`` loud, not propagate the raw ``OSError`` past this
+    module's boundary."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    t = threading.Thread(target=_accept_once, args=(listener,), daemon=True)
+    t.start()
+    parent, child = make_control_socketpair()
+
+    def _raising_sendmsg(self: socket.socket, *args: object, **kwargs: object) -> int:
+        raise OSError("simulated sendmsg failure")
+
+    monkeypatch.setattr(socket.socket, "sendmsg", _raising_sendmsg)
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            _connect_and_send(parent, host, port)
+        assert exc.value.reason == "sendmsg_failed"
+    finally:
+        parent.close()
+        child.close()
+        # Join BEFORE closing the listener (see the happy-path test's finally for the rationale):
+        # _connect_and_send's finally: sock.close() closed the client end, so the accept thread's
+        # recv() has returned and the thread is ending — join returns promptly.
+        t.join(timeout=2)
+        assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
+        listener.close()

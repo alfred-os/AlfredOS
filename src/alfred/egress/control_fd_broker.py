@@ -17,13 +17,18 @@ gateway proxy, and sendmsg the result over the control fd) is a separate task �
 from __future__ import annotations
 
 import array
+import asyncio
 import os
 import socket
 from urllib.parse import urlsplit
 
+import structlog
+
 from alfred.egress._config_protocols import EgressProxyConfig
 from alfred.egress.errors import IOPlaneUnavailableError
 from alfred.errors import AlfredError
+
+_log = structlog.get_logger(__name__)
 
 
 class ControlFdBrokerError(AlfredError):
@@ -97,4 +102,66 @@ def _resolve_proxy_addr(proxy_config: EgressProxyConfig) -> tuple[str, int]:
     return parts.hostname, parts.port
 
 
-__all__ = ["ControlFdBrokerError", "make_control_socketpair", "recv_passed_fd"]
+# Bounded connect toward the gateway proxy: a set-but-unreachable proxy must fail loud, not wedge
+# the executor thread (core-002). Distinct from the PR2b provider read-timeout hierarchy.
+_CONNECT_TIMEOUT_S = 10.0
+
+
+def _connect_and_send(parent_end: socket.socket, host: str, port: int) -> None:
+    """Blocking (executor-thread) body: connect, SCM_RIGHTS-pass the fd, close the core's copy.
+
+    The core writes ZERO application bytes to ``sock`` (HARD #5) — it only passes the descriptor.
+    The ``\\x01`` frame is the >=1 data byte an ancillary-only ``sendmsg`` over ``SOCK_STREAM``
+    requires so the kernel does not drop the fd.
+    """
+    try:
+        sock = socket.create_connection((host, port), timeout=_CONNECT_TIMEOUT_S)
+    except OSError as exc:
+        _log.error("egress.control_fd_broker.gateway_unreachable", error_class=type(exc).__name__)
+        raise ControlFdBrokerError("gateway_unreachable") from exc
+    try:
+        # create_connection(timeout=) leaves O_NONBLOCK set on the returned socket; that flag rides
+        # the shared file description across the SCM_RIGHTS pass. Restore blocking so the child's
+        # recv blocks.
+        sock.settimeout(None)
+        frame = b"\x01"
+        sent = parent_end.sendmsg(
+            [frame],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [sock.fileno()]))],
+        )
+        if sent != len(frame):
+            raise ControlFdBrokerError("short_data_send")
+    except ControlFdBrokerError:
+        raise
+    except OSError as exc:
+        _log.error("egress.control_fd_broker.sendmsg_failed", error_class=type(exc).__name__)
+        raise ControlFdBrokerError("sendmsg_failed") from exc
+    finally:
+        # SCM_RIGHTS DUPLICATED the descriptor (refcount 2) — drop the core's copy immediately or
+        # the child's later close sends no FIN and the core leaks one fd per broker. Safe: already
+        # duplicated into the socket buffer by the time sendmsg returned. Also covers a raise
+        # before/at sendmsg.
+        sock.close()
+
+
+async def broker_connected_socket(
+    *, parent_end: socket.socket, proxy_config: EgressProxyConfig
+) -> None:
+    """Broker ONE connected gateway socket to the child over ``parent_end`` (off-loop).
+
+    ``sendmsg``/``recvmsg`` with ``SCM_RIGHTS`` are blocking with no asyncio ancillary helper, so
+    the connect+send run in the default executor (the ``_blocking_read_exactly`` precedent).
+    Fail-closed: any failure raises :class:`ControlFdBrokerError` (or
+    :class:`IOPlaneUnavailableError` for an unset proxy) — never a hang (HARD #7).
+    """
+    host, port = _resolve_proxy_addr(proxy_config)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _connect_and_send, parent_end, host, port)
+
+
+__all__ = [
+    "ControlFdBrokerError",
+    "broker_connected_socket",
+    "make_control_socketpair",
+    "recv_passed_fd",
+]
