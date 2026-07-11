@@ -752,33 +752,24 @@ jobs:
     #     against the stubs it actually runs on, not the host runner's. This leg
     #     is the real portability signal for macOS-specific path / type drift.
     #
-    #     The UNIT suite is NOT run on macOS. ~77 unit tests under
-    #     tests/unit/plugins/web_fetch/, .../security/, .../config/ boot a real
-    #     Redis/Postgres via Testcontainers (no `@pytest.mark.integration` —
-    #     they import `testcontainers` directly), and the GitHub macOS runner
-    #     ships NO Docker daemon, so they ERROR at fixture setup with
-    #     `docker.errors.DockerException` (#245 first real run: 3731 passed /
-    #     77 errored). Those Docker-needing tests are not cleanly separable by a
-    #     single marker or path, so a deselect allowlist would rot the moment a
-    #     new Docker-backed unit test lands. Running the Docker-free unit subset
-    #     on macOS is deferred to the follow-up tracked in
-    #     docs/ci/required-checks.md (it needs a code change: a `requires_docker`
-    #     marker on the entangled tests). macOS still gets the highest-value,
-    #     zero-code-change, Docker-free layer today — lint + format + type-check.
+    #     The UNIT suite NOW runs on macOS (#246). The Testcontainers-backed
+    #     unit files (tests/unit/plugins/web_fetch/) are module-marked
+    #     `pytest.mark.docker`; the root-conftest collection hook skips them
+    #     cleanly when no daemon is reachable (the macOS runner ships none), so
+    #     the rest of tests/unit runs and gives the Darwin-vs-Linux divergence
+    #     signal that caught nothing before (e.g. the #340 PR2a recvmsg split).
+    #     No coverage gate — the per-subsystem 100% gates stay on the Linux job.
     #
-    #   * windows-latest — runs lint + format + mypy + pyright ONLY (same layer
-    #     as macOS). The unit suite is NOT Windows-clean either: dozens of tests
-    #     invoke the POSIX bash launcher (`/bin/sh`), `os.uname()`,
-    #     `os.geteuid()`, `signal.SIGKILL` and `subprocess(..., pass_fds=...)`
-    #     with NO `sys.platform == "win32"` skip-guard, so they would ERROR (not
-    #     skip) on Windows. Guarding them all is a cross-cutting code change out
-    #     of scope for this additive CI PR — tracked in the follow-up issue
-    #     referenced in docs/ci/required-checks.md. Lint/format/type-check ARE
-    #     portable, so Windows gets that layer today — and as of 2026-06-24
-    #     (#321 Phase 3) that layer is REQUIRED on Windows too: the
-    #     `continue-on-error` that kept it informational-until-green was dropped
-    #     after 6+ green PR cycles (#312–#319). The unit suite stays out of
-    #     scope on Windows (win32 skip-guards, #246).
+    #   * windows-latest — runs lint + format + mypy + pyright, and the unit
+    #     suite INFORMATIONALLY (`continue-on-error`, #246 Phase A). The Docker
+    #     files auto-skip (no daemon), but many tests still invoke POSIX-only
+    #     surface (`/bin/sh`, `os.uname()`, `os.geteuid()`, `signal.SIGKILL`,
+    #     `subprocess(..., pass_fds=...)`) with no `sys.platform == "win32"`
+    #     guard, so they ERROR rather than skip. Guarding them is a discover-
+    #     then-guard change against real CI data (#246 Phase B) — until then the
+    #     unit step is non-blocking so its failures are visible but do not fail
+    #     the required `Python cross-OS (windows-latest)` check. The static
+    #     layer (lint/format/type) stays REQUIRED (#321 Phase 3).
     #
     # Cost discipline: the heavy Integration/Smoke (Testcontainers, needs the
     # Docker daemon) stay Linux-only; this matrix only adds the cheap
@@ -791,13 +782,12 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
-    # Both matrix legs are now BLOCKING. The `continue-on-error` that kept the
-    # windows-latest leg informational-until-green was removed on 2026-06-24
-    # (#321 Phase 3) after the windows static-analysis layer ran green for 6+
-    # consecutive PR cycles (#312–#319). Both macos-latest and windows-latest
-    # must now pass. The unit suite is still NOT run on either non-Linux leg —
-    # only the portable lint/format/type layer — so the win32 unit-suite
-    # skip-guards tracked in #246 remain out of scope here.
+    # Both matrix legs' STATIC layer (lint/format/type) is BLOCKING — the
+    # `continue-on-error` that kept windows informational-until-green was
+    # removed 2026-06-24 (#321 Phase 3) after 6+ green cycles (#312–#319). The
+    # UNIT step is BLOCKING on macos-latest (proven green) and INFORMATIONAL on
+    # windows-latest (its own step-level `continue-on-error`, #246 Phase A) —
+    # Phase B removes that once win32 skip-guards make Windows green (#246).
     # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()` in
     # job-level `if:` at workflow-parse time. The first-step `check` probes for
     # pyproject.toml and every downstream step short-circuits on
@@ -858,12 +848,30 @@ jobs:
         # HOST OS, so without this the macOS/Windows legs would diverge from the
         # Linux `pyright` job.
         run: uv run pyright --pythonplatform Linux src/
-      # NOTE: no unit-test step. ~77 tests under tests/unit/ boot Redis/Postgres
-      # via Testcontainers and the GitHub macOS runner has no Docker daemon, so
-      # they error at fixture setup. The Docker-free unit subset on macOS is
-      # deferred to the follow-up tracked in docs/ci/required-checks.md (needs a
-      # `requires_docker` marker on the entangled tests). See the job-level
-      # comment for the full rationale.
+      # Unit suite on the non-Linux legs (#246). The Testcontainers-backed unit
+      # files are module-marked `pytest.mark.docker` and the root-conftest
+      # collection hook SKIPS them cleanly when no Docker daemon is reachable
+      # (neither runner has one) — so the suite runs without erroring at fixture
+      # setup. No coverage gate here: the per-subsystem 100% line+branch gates
+      # stay on the Linux `python` job (they need the combined unit+integration
+      # corpus). These are pass/fail portability runs.
+      - name: Unit tests (no coverage gate)
+        # ONE step for both legs; `continue-on-error` is the only difference, so
+        # a matrix expression keeps them from drifting (Phase B edits one place).
+        # BLOCKING on macos-latest (proven green — tests/unit is all-pass on
+        # Darwin with the Docker files skipping): the highest-value divergence
+        # signal — POSIX syscalls (recvmsg/MSG_CTRUNC, os.geteuid, SIGKILL,
+        # pass_fds) run on Darwin, catching the class of bug the #340 PR2a split
+        # hit. INFORMATIONAL on windows-latest (the expression → true): the win32
+        # failure surface is unknown + not locally validatable (POSIX-only tests
+        # need `sys.platform == "win32"` skip-guards), so the leg RUNS and
+        # surfaces it without blocking merge — the same de-risking the windows
+        # static layer used (#312–#319 → #321). #246 Phase B lands the win32
+        # guards and drops the continue-on-error.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
+        shell: bash
+        run: uv run pytest tests/unit -q
 
   integration:
     name: Integration
