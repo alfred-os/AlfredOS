@@ -345,7 +345,18 @@ EOF
                     # bound prefix and fails execvp under bwrap (ADR-0030).
                     EXEC_TARGET="${_INTERP_REAL}"
                 fi
-                exec "${BWRAP}" "${BWRAP_FLAGS[@]}" "${EXTRA_BINDS[@]}" \
+                # ``set -u`` + an empty bash array: Bash 3.2 (the /bin/bash on
+                # macOS) raises "unbound variable" when expanding "${arr[@]}" for a
+                # declared-but-empty array. The ``${arr[@]+"${arr[@]}"}`` guard
+                # expands to nothing when the array is empty and to its elements
+                # (word-per-element, quoted) otherwise — safe on Bash 3.2 AND Bash
+                # 4/5 (Linux), and byte-identical to an unguarded expansion wherever
+                # the array is non-empty. EXTRA_BINDS is empty unless the
+                # interp-prefix opt-in ran; BWRAP_FLAGS is empty only for a
+                # zero-flag policy. (Surfaced by the macOS unit CI leg, #246.)
+                exec "${BWRAP}" \
+                    ${BWRAP_FLAGS[@]+"${BWRAP_FLAGS[@]}"} \
+                    ${EXTRA_BINDS[@]+"${EXTRA_BINDS[@]}"} \
                     -- "${EXEC_TARGET}" "$@"
                 ;;
             macos)
