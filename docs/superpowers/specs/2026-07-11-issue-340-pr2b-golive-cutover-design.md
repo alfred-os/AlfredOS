@@ -107,8 +107,8 @@ Each item is independently correct regardless of go-live, and testable without a
 1. **P1a — `max_retries=0` on both `from_settings`.** Add a parameter (default preserving today's
    `2`, or flip the default — decide at plan time; the quarantine child passes `0`) so the injected-
    client path can disable SDK-level retries. The spike proved re-dial taming needs `max_retries=0`
-   on the SDK ctor (the injected `http_client` cannot carry it). Applies to `anthropic_native.py:253`
-   + `deepseek.py` (which currently passes no `max_retries` → SDK-default 2, so P1a *adds* the param
+   on the SDK ctor (the injected `http_client` cannot carry it). Applies to `anthropic_native.py:253` +
+   `deepseek.py` (which currently passes no `max_retries` → SDK-default 2, so P1a *adds* the param
    there). **Keep the `from_settings` default at `2`** — flipping it regresses the live #338 privileged
    path; only the quarantine child passes `0` explicitly (§19-D3). Unit-test both.
 2. **P1b — wire `max_tokens_per_extraction`.** Thread the routing.yaml `[quarantine]` value into
@@ -289,8 +289,8 @@ a factory the dispatcher rebinds inside its loop. Shape (core-lens seam, securit
   dispatch_extraction → _call_provider` into `CompletionRequest.max_tokens`.
 - **Empty-content short-circuit.** A missing handle → `content = b""` → three *real* paid `complete()`
   calls all failing validation. Add a child-side guard: `if not content: return cannot_extract` before
-  the loop (honours the `handle_extract` "missing → cannot_extract" contract without 3 paid round-trips
-  + 3 consumed sockets).
+  the loop (honours the `handle_extract` "missing → cannot_extract" contract without 3 paid round-trips +
+  3 consumed sockets).
 
 ## 9. Security-gate inversions + guards
 
@@ -398,8 +398,8 @@ provider + real-key is the nightly smoke follow-up. #269 (arm64 `/lib64`) unchan
 ## 14. Ratification forks (summary)
 
 1. **Decomposition** — Option A (prep PR → golive PR + nightly-smoke follow-up). 4-lens endorsed; §3.
-2. **Retry × one-shot socket** — host brokers `_MAX_RETRIES+1` up-front (concurrently), child consumes
-   + drains leftovers (non-blocking), fd-4 stays one-way. 4-lens endorsed; N=3 conditional on P1a; §6.
+2. **Retry × one-shot socket** — host brokers `_MAX_RETRIES+1` up-front (concurrently), child consumes +
+   drains leftovers (non-blocking), fd-4 stays one-way. 4-lens endorsed; N=3 conditional on P1a; §6.
 3. **Provider construction reshape** — a `BrokeredProviderSource` wrapper-provider (socket-free
    `capabilities()` + per-attempt `bind()` CM), NOT a bare factory handed to the egress-free
    dispatcher. §8. (Seam pinned by the core+security lenses.)
@@ -474,14 +474,22 @@ prep introduced that golive activates:
   misconfiguration as an extraction refusal (loses the loud fail; HARD #7 shape). Guard it upstream
   (2-lens corroborated).
 - **Make the child SDK read-timeout ↔ attempt-count a deliberate tuning decision.** With golive's
-  per-call `wait_for(remaining_budget)` the 20s budget is a hard ceiling, but "3 attempts × ~8s read
-  + backoff (0.5+1.0)" ≈ 25.5s > 20s, so attempt 3 gets a truncated ~2-3s remainder — effectively ~2
+  per-call `wait_for(remaining_budget)` the 20s budget is a hard ceiling, but "3 attempts × ~8s read +
+  backoff (0.5+1.0)" ≈ 25.5s > 20s, so attempt 3 gets a truncated ~2-3s remainder — effectively ~2
   solid attempts under a slow provider. Pick the SDK read timeout + `_MAX_RETRIES` so the intended
   attempt count actually fits the budget (provider-lens).
 - **The per-frame host bound is `2 × _READ_FRAME_TIMEOUT_S` (header + body = 50s theoretical).** It is
   capped at 30s only by the `asyncio.timeout(action_deadline_seconds)` outer wrap on the extraction
   path (`fetch_dispatcher.py:662`). If golive routes an extraction through a path lacking that wrap,
   add an equivalent outer bound (security-lens; golive sign-off checklist note).
+- **Floor-guard `alfred config set action-deadline` + document the safe band.** PR2b-prep raised the
+  host read-frame floor to 25s, so the operator-safe `action-deadline` band is now `(25s, 30s]` — but
+  `alfred config set action-deadline` writes `policies.yaml` with NO range validation (`cli/config.py`).
+  Post-golive, an operator setting it ≤ 25 tears a real extraction at the orchestrator deadline before
+  the framing/child bounds, surfacing as a misleading "action deadline exceeded" with no hint the value
+  is below the quarantine floor. Latent on today's echo child. Golive: floor-guard the config-set path
+  with a `t()`-wrapped message naming the floor + document the lower bound in the `policies.yaml` comment
+  (devex-lens).
 
 ## 18. Next
 
