@@ -67,6 +67,9 @@ _USER_ID: str = "user-canary-test-fixture"
 ScannerFactory = Callable[..., InboundCanaryScanner]
 
 
+pytestmark = pytest.mark.docker
+
+
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:
     with RedisContainer("redis:8-alpine") as r:
