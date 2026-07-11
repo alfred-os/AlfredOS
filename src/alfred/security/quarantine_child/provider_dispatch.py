@@ -92,6 +92,12 @@ from alfred.security.quarantine import (
 # The tool name forced on the native_constrained path (spec §6.2, #339 seam).
 _EXTRACT_TOOL_NAME = "extract_structured_data"
 
+# CompletionRequest's own max_tokens default, read from the model so an unset
+# per-extraction budget stays byte-identical to the provider seam's default
+# (no drift with base.py). Used when dispatch_extraction is called without a
+# max_tokens (P1b, #340) — golive threads the routing.yaml budget instead.
+_COMPLETION_DEFAULT_MAX_TOKENS: int = CompletionRequest.model_fields["max_tokens"].default
+
 # Maximum retries on validation / JSON-decode failure (spec §6.3). Total
 # attempts is ``_MAX_RETRIES + 1`` — one initial call plus this many
 # retries. Configurable per the spec via ``config/policies.yaml``
@@ -168,6 +174,7 @@ async def dispatch_extraction(
     schema_json: str,
     schema_version: int,  # noqa: ARG001 — accepted for ExtractionResult parity (audit row)
     provider: Any,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Dispatch a structured extraction via the quarantined LLM provider.
 
@@ -246,6 +253,7 @@ async def dispatch_extraction(
                 schema=parsed_schema,
                 provider=provider,
                 extraction_mode=extraction_mode,
+                max_tokens=max_tokens,
             )
             validated = _validate_response(raw_response, schema_json)
             return {
@@ -322,6 +330,7 @@ async def _call_provider(
     schema: dict[str, Any],
     provider: Any,
     extraction_mode: str,
+    max_tokens: int | None = None,
 ) -> str:
     """Dispatch the provider call for ``extraction_mode`` via the #339 seam.
 
@@ -350,6 +359,10 @@ async def _call_provider(
     instead of being silently retried here. This function no longer
     parses schema JSON itself.
     """
+    # Resolve max_tokens to CompletionRequest's OWN default when unset (P1b, #340) — its
+    # >0 validator rejects None, and reading the field default avoids drift with base.py.
+    # PR2b-golive threads the routing.yaml max_tokens_per_extraction here via the spawn env.
+    resolved_max_tokens: int = _COMPLETION_DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
     if extraction_mode == "native_constrained":
         request = CompletionRequest(
             messages=[Message(role="user", content=prompt)],
@@ -361,6 +374,7 @@ async def _call_provider(
                 ),
             ),
             tool_choice=ForcedTool(name=_EXTRACT_TOOL_NAME),
+            max_tokens=resolved_max_tokens,
         )
         response = await provider.complete(request)
         if not response.tool_calls:
@@ -371,7 +385,9 @@ async def _call_provider(
     # prompt_embedded_fallback: bare completion, no tools advertised.
     # The schema is embedded in the prompt and the validator catches
     # malformed output on the host.
-    request = CompletionRequest(messages=[Message(role="user", content=prompt)])
+    request = CompletionRequest(
+        messages=[Message(role="user", content=prompt)], max_tokens=resolved_max_tokens
+    )
     response = await provider.complete(request)
     return str(response.content)
 
