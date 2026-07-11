@@ -122,9 +122,14 @@ Each item is independently correct regardless of go-live, and testable without a
    aggregation seam/owner where privileged (#338) + quarantine cost sum into one turn record.
 4. **P1d — `_lift_above_targets` ≥2-iteration orphan.** Harden the fd-dance loop
    (`quarantine_child_io.py:668/747`) so a source landing on the *other* target across ≥2 dup
-   iterations cannot orphan an intermediate fd (triple-unreachable today, dormant). Unit-test via
-   monkeypatched `os.dup2`/`os.dup` (never real dup2-onto-3/4 in pytest). **Do not remove** the
-   `os.close(original)` balancing close under `moved=True`.
+   iterations cannot orphan an intermediate fd (triple-unreachable today, dormant). **As-shipped
+   correction (the prep plan rev.2 supersedes this line):** the nested-closure monkeypatch strategy
+   is un-coverable, so `_lift_above_targets` is **extracted to a module-level pure function**
+   `_lift_above_targets(fd, literal_targets, *, dup, close)` with injectable `dup`/`close` (defaulting
+   to `None` → resolved at call time so the spawn suite's `monkeypatch.setattr(os, "dup", …)` still
+   applies) and unit-tested **directly** across the 1/2/≥2-iteration branches. **Do not remove** the
+   `os.close(original)` balancing close under `moved=True`; the live `control_fd=False` path stays
+   byte-identical.
 5. **P1e — coherent timeout hierarchy (NOT behavior-neutral; §19-A3).** As shipped it is INVERTED and
    under-scoped. Four terms, not three: **`action_deadline (30) ≥ host read-frame ≥ child wall-clock
    budget ≥ SDK per-request read`**. Two traps: (a) `action_deadline` is the true outer bound and the
