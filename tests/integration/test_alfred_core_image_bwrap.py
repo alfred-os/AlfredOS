@@ -36,38 +36,13 @@ unavailable (e.g. macOS CI matrix step that doesn't expose docker).
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 
 import pytest
 
+from tests._docker_probe import docker_unavailable_reason
+
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
-
-
-def _docker_unavailable_reason() -> str | None:
-    """Return None when docker is usable, else a short reason string.
-
-    PR #217 error-reviewer closure: surface WHY docker is unreachable
-    so flaky-daemon vs absent-daemon are distinguishable in CI logs.
-    """
-    if shutil.which("docker") is None:
-        return "docker binary not on PATH"
-    try:
-        proc = subprocess.run(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        return "docker version probe timed out after 10s (daemon hung?)"
-    except OSError as exc:
-        return f"docker version probe raised OSError: {exc}"
-    if proc.returncode != 0:
-        return (
-            f"docker version probe exit {proc.returncode}: {proc.stderr.decode(errors='replace')!r}"
-        )
-    return None
 
 
 _IMAGE_TAG = "alfred-os-test:slice-4-comp-f"
@@ -77,7 +52,7 @@ _DOCKERFILE = "docker/alfred-core.Dockerfile"
 @pytest.fixture(scope="module")
 def alfred_core_image() -> str:
     """Build the ``alfred-core`` image once per module; yield the image tag."""
-    reason = _docker_unavailable_reason()
+    reason = docker_unavailable_reason()
     if reason is not None:
         pytest.skip(f"docker daemon unavailable: {reason}")
     build = subprocess.run(
