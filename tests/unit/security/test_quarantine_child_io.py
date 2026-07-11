@@ -864,3 +864,46 @@ async def test_aclose_with_no_stderr_pipe_is_safe(_spawn_capture: dict[str, Any]
     with structlog.testing.capture_logs() as logs:
         await cio.aclose()  # must not raise AttributeError on None.close()
     assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
+
+
+# ---------------------------------------------------------------------------
+# _lift_above_targets — the fd-dance helper (P1d, #340). Extracted to module
+# scope with injectable dup/close so the >=2-iteration branch is unit-testable
+# without a real dup2-onto-3/4 (which would clobber the pytest runner). The
+# fakes return monotonic non-cycling fds, mirroring the kernel's lowest-free-fd
+# behaviour — a cycling fake would fabricate a double-close that can't happen.
+# ---------------------------------------------------------------------------
+
+
+def test_lift_above_targets_two_iterations_closes_intermediate() -> None:
+    """dup(3)->4 (the OTHER target), dup(4)->7 (free): the intermediate 4 is closed
+    exactly once; the caller's original (3) is NOT closed here (the spawn cleanup loop
+    closes it under moved=True)."""
+    closed: list[int] = []
+    dups = iter([4, 7])
+    usable, moved = child_io_mod._lift_above_targets(
+        3, (3, 4), dup=lambda _fd: next(dups), close=closed.append
+    )
+    assert (usable, moved) == (7, True)
+    assert closed == [4]
+
+
+def test_lift_above_targets_single_iteration_closes_nothing() -> None:
+    """The live control_fd=False single-target path: one dup, no intermediate — the
+    ``if moved:`` TRUE arm never fires (moved is False on the only iteration)."""
+    closed: list[int] = []
+    usable, moved = child_io_mod._lift_above_targets(
+        3, (3,), dup=lambda _fd: 7, close=closed.append
+    )
+    assert (usable, moved) == (7, True)
+    assert closed == []
+
+
+def test_lift_above_targets_no_collision_is_a_noop() -> None:
+    """A source already above the target range: no dup, no close, moved False."""
+    calls: list[int] = []
+    usable, moved = child_io_mod._lift_above_targets(
+        5, (3, 4), dup=lambda fd: calls.append(fd) or 99, close=calls.append
+    )
+    assert (usable, moved) == (5, False)
+    assert calls == []
