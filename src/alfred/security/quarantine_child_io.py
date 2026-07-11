@@ -90,6 +90,7 @@ import struct
 import subprocess
 import sys
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
@@ -580,6 +581,43 @@ async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
         await loop.run_in_executor(None, process.wait)
 
 
+def _lift_above_targets(
+    fd: int,
+    literal_targets: tuple[int, ...],
+    *,
+    dup: Callable[[int], int] | None = None,
+    close: Callable[[int], None] | None = None,
+) -> tuple[int, bool]:
+    """Return ``(usable_fd, moved)``. Dup ``fd`` above the target range if it collides.
+
+    Looping (not a single dup) keeps the invariant "the returned fd is never one of
+    ``literal_targets``" true unconditionally rather than by construction. Each
+    intermediate dup THIS function created is closed before the next iteration (P1d,
+    #340): only the caller's ORIGINAL survives to the spawn cleanup loop (closed there
+    under ``moved``). Without this in-loop close a >=2-iteration lift (a source landing on
+    the OTHER target) orphans the first intermediate fd.
+
+    ``dup``/``close`` are injectable so the >=2-iteration branch is unit-testable without a
+    real ``dup2``-onto-3/4 (which would clobber the pytest runner). They default to
+    ``None`` — NOT ``os.dup``/``os.close`` directly — so the module-level ``os.dup`` is
+    resolved at CALL time (a def-time default would capture the real syscall and bypass the
+    spawn suite's ``monkeypatch.setattr(os, "dup", ...)``).
+    """
+    _dup = dup if dup is not None else os.dup
+    _close = close if close is not None else os.close
+    moved = False
+    while fd in literal_targets:
+        new_fd = _dup(fd)
+        if moved:
+            # ``fd`` is an intermediate WE created last iteration (not the caller's
+            # original) — close it so it isn't orphaned. The spawn cleanup loop closes the
+            # original under ``moved=True``; closing it here would double-close.
+            _close(fd)
+        fd = new_fd
+        moved = True
+    return fd, moved
+
+
 async def spawn_quarantine_child_io(
     *,
     provider_key: str,
@@ -665,23 +703,11 @@ async def spawn_quarantine_child_io(
         (_PROVIDER_KEY_FD, _CONTROL_FD) if control_fd else (_PROVIDER_KEY_FD,)
     )
 
-    def _lift_above_targets(fd: int) -> tuple[int, bool]:
-        """Return ``(usable_fd, moved)``. Dup ``fd`` above the target range if it collides.
-
-        Looping (not a single dup) covers the pathological case where the FIRST
-        dup also lands on the (other) target — practically never with real fds,
-        but the loop keeps the invariant "the returned fd is never one of
-        ``literal_targets``" true unconditionally rather than by construction.
-        """
-        moved = False
-        while fd in literal_targets:
-            fd = os.dup(fd)
-            moved = True
-        return fd, moved
-
-    read_src, read_moved = _lift_above_targets(read_fd)
+    read_src, read_moved = _lift_above_targets(read_fd, literal_targets)
     control_src, control_moved = (
-        _lift_above_targets(control_child_fd) if control_child_fd is not None else (None, False)
+        _lift_above_targets(control_child_fd, literal_targets)
+        if control_child_fd is not None
+        else (None, False)
     )
 
     # Save any prior occupant of each target so a clobber is reversible. Sources
