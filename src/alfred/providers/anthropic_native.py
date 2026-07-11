@@ -235,7 +235,13 @@ class AnthropicProvider:
 
     @classmethod
     def from_settings(
-        cls, api_key: str, model: str, *, http_client: httpx.AsyncClient | None = None
+        cls,
+        api_key: str,
+        model: str,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+        max_retries: int = 2,
+        timeout: httpx.Timeout | None = None,
     ) -> AnthropicProvider:
         # http_client is the G7-1 egress seam (Spec C, #333): a proxied client when
         # the gateway proxy is configured. The SDK builds its own (un-proxied) client
@@ -244,13 +250,18 @@ class AnthropicProvider:
         # un-proxied path is dead-by-kernel on the connectivity-free core.
         #
         # timeout + max_retries STAY on the SDK ctor (rider 4): the SDK applies
-        # timeout per-request and never inherits max_retries from the http_client,
-        # so anthropic's explicit max_retries=2 survives. max_retries=2 matches the
-        # SDK default but is stated explicitly: a transient failure on the fallback
-        # should retry once with backoff before surfacing to the orchestrator.
+        # timeout per-request and never inherits max_retries from the http_client, so
+        # they can only be set here. They are PARAMS (PR2b-prep, #340) whose DEFAULTS
+        # preserve the live privileged posture (max_retries=2, _HTTP_TIMEOUT). The
+        # quarantine child (PR2b-golive) passes max_retries=0 (a one-shot brokered
+        # socket cannot serve an SDK re-dial) + a short read timeout under its
+        # wall-clock budget.
         return cls(
             client=AsyncAnthropic(
-                api_key=api_key, timeout=_HTTP_TIMEOUT, max_retries=2, http_client=http_client
+                api_key=api_key,
+                timeout=timeout if timeout is not None else _HTTP_TIMEOUT,
+                max_retries=max_retries,
+                http_client=http_client,
             ),
             model=model,
         )
