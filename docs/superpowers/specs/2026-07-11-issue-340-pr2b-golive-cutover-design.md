@@ -462,6 +462,27 @@ provider + real-key is the nightly smoke follow-up. #269 (arm64 `/lib64`) unchan
 - **policies.yaml `quarantine.extraction_max_retries` loader** — `_MAX_RETRIES` is a constant today;
   wiring the config loader is orthogonal (if it lands, the host reads the same value it brokers for).
 
+### PR2b-prep review carry-forwards (golive MUST address)
+
+From the PR2b-prep whole-branch review (security + provider, both READY-TO-MERGE) — dormant paths
+prep introduced that golive activates:
+
+- **Validate `max_tokens_per_extraction > 0` at the config-load / spawn-env boundary (fail loud).**
+  When golive threads the routing.yaml value into `CompletionRequest(max_tokens=…)` inside
+  `_call_provider`'s `try`, a `<= 0` value raises pydantic `ValidationError` — which the retry loop
+  catches as retry-eligible → 3 identical failing attempts → `cannot_extract`, masking a config
+  misconfiguration as an extraction refusal (loses the loud fail; HARD #7 shape). Guard it upstream
+  (2-lens corroborated).
+- **Make the child SDK read-timeout ↔ attempt-count a deliberate tuning decision.** With golive's
+  per-call `wait_for(remaining_budget)` the 20s budget is a hard ceiling, but "3 attempts × ~8s read
+  + backoff (0.5+1.0)" ≈ 25.5s > 20s, so attempt 3 gets a truncated ~2-3s remainder — effectively ~2
+  solid attempts under a slow provider. Pick the SDK read timeout + `_MAX_RETRIES` so the intended
+  attempt count actually fits the budget (provider-lens).
+- **The per-frame host bound is `2 × _READ_FRAME_TIMEOUT_S` (header + body = 50s theoretical).** It is
+  capped at 30s only by the `asyncio.timeout(action_deadline_seconds)` outer wrap on the extraction
+  path (`fetch_dispatcher.py:662`). If golive routes an extraction through a path lacking that wrap,
+  add an equivalent outer bound (security-lens; golive sign-off checklist note).
+
 ## 18. Next
 
 Ratify §14 (esp. forks 1 + 2) → `writing-plans` for PR2b-prep (small) → focused plan-review →
