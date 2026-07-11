@@ -22,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
+from tests._docker_probe import docker_available, docker_unavailable_reason
 from tests.support.discord_mocks import DiscordMockFactory
+
+# Enable the built-in ``pytester`` plugin (inert unless the ``pytester`` fixture
+# is requested) so the docker auto-skip hook can be exercised end-to-end. Must
+# live in the top-most conftest — there is no repo-root conftest.py.
+pytest_plugins = ["pytester"]
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
@@ -31,6 +37,32 @@ _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 # rather than stall the whole job. ``subprocess.run`` kills the child on
 # timeout and re-raises ``TimeoutExpired``, surfacing as a test error.
 _LAUNCHER_TIMEOUT_S = 30.0
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Skip ``docker``-marked tests when no Docker daemon is reachable.
+
+    The Docker-backed unit modules (the Testcontainers web_fetch files, each
+    module-marked ``pytest.mark.docker``) would ERROR at fixture setup on a
+    daemon-less runner. On the macOS / Windows CI legs — which have no Docker
+    daemon — this hook turns that error into a clean SKIP, which is what lets
+    ``tests/unit`` run there. On Linux CI and dev boxes with Docker the probe
+    returns ``True`` and this is a no-op.
+
+    The skip reason carries the specific probe reason (PATH-absent / hung /
+    OSError / nonzero-exit) so the integration fixture's flaky-vs-absent
+    diagnostic (PR #217) is preserved uniformly across all docker skips.
+    """
+    docker_items = [item for item in items if item.get_closest_marker("docker") is not None]
+    if not docker_items:
+        return  # no docker-marked items collected — don't pay the probe at all
+    if docker_available():
+        return
+    skip_docker = pytest.mark.skip(
+        reason=f"docker daemon unavailable: {docker_unavailable_reason()}"
+    )
+    for item in docker_items:
+        item.add_marker(skip_docker)
 
 
 @dataclass(frozen=True)
