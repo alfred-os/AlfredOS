@@ -82,6 +82,34 @@ def test_from_settings_default_passes_none_http_client(monkeypatch: pytest.Monke
     assert captured["http_client"] is None
 
 
+def test_from_settings_forwards_max_retries_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR2b-prep P1a/P1e (#340): the quarantine child (golive) passes max_retries=0 +
+    a short read timeout on its brokered one-shot socket."""
+    import alfred.providers.anthropic_native as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: captured.update(kw) or object())
+    short = httpx.Timeout(connect=10.0, read=8.0, write=10.0, pool=5.0)
+    mod.AnthropicProvider.from_settings(
+        api_key="k", model="claude-haiku-4-5", max_retries=0, timeout=short
+    )
+    assert captured["max_retries"] == 0
+    assert captured["timeout"] is short
+
+
+def test_from_settings_defaults_preserve_privileged_posture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behaviour-neutral: default max_retries=2 + the module _HTTP_TIMEOUT (live #338 path)."""
+    import alfred.providers.anthropic_native as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: captured.update(kw) or object())
+    mod.AnthropicProvider.from_settings(api_key="k", model="claude-sonnet-4-6")
+    assert captured["max_retries"] == 2
+    assert captured["timeout"] is mod._HTTP_TIMEOUT
+
+
 def _anthropic_text_response(text: str = "ok") -> MagicMock:
     r = MagicMock()
     r.content = [MagicMock(type="text", text=text)]

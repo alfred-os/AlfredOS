@@ -267,16 +267,24 @@ class DeepSeekProvider:
         model: str,
         *,
         http_client: httpx.AsyncClient | None = None,
+        max_retries: int = 2,
+        timeout: httpx.Timeout | None = None,
     ) -> DeepSeekProvider:
         # http_client is the G7-1 egress seam (Spec C, #333); see
         # AnthropicProvider.from_settings. None => the SDK builds its own (un-proxied)
         # client — a general provider contract, but post-G7-3 (ADR-0042) build_router
         # ALWAYS injects the proxied client and that path is dead-by-kernel on the
-        # connectivity-free core. timeout stays on the SDK ctor (rider 4); max_retries
-        # is left at the SDK default (2), the same effective posture as Anthropic's.
+        # connectivity-free core. timeout + max_retries STAY on the SDK ctor (rider 4).
+        # They are PARAMS (PR2b-prep, #340) whose DEFAULTS preserve today's posture
+        # (max_retries=2 — previously the un-passed SDK default — + _HTTP_TIMEOUT); the
+        # quarantine child (PR2b-golive) passes max_retries=0 + a short read timeout.
         return cls(
             client=AsyncOpenAI(
-                api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT, http_client=http_client
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout if timeout is not None else _HTTP_TIMEOUT,
+                max_retries=max_retries,
+                http_client=http_client,
             ),
             model=model,
         )

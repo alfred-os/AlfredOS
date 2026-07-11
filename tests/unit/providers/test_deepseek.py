@@ -97,6 +97,40 @@ def test_from_settings_default_passes_none_http_client(monkeypatch: pytest.Monke
     assert captured["http_client"] is None
 
 
+def test_from_settings_forwards_max_retries_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR2b-prep P1a/P1e (#340): the quarantine child (golive) passes max_retries=0 +
+    a short read timeout. deepseek previously left max_retries at the SDK default (un-passed)."""
+    import alfred.providers.deepseek as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    short = httpx.Timeout(connect=10.0, read=8.0, write=10.0, pool=5.0)
+    mod.DeepSeekProvider.from_settings(
+        api_key="k",
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+        max_retries=0,
+        timeout=short,
+    )
+    assert captured["max_retries"] == 0
+    assert captured["timeout"] is short
+
+
+def test_from_settings_defaults_preserve_privileged_posture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behaviour-neutral: default max_retries=2 + the module _HTTP_TIMEOUT."""
+    import alfred.providers.deepseek as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    mod.DeepSeekProvider.from_settings(
+        api_key="k", base_url="https://api.deepseek.com/v1", model="deepseek-chat"
+    )
+    assert captured["max_retries"] == 2
+    assert captured["timeout"] is mod._HTTP_TIMEOUT
+
+
 def _openai_ok_response(content: str = "ok") -> MagicMock:
     r = MagicMock()
     r.choices = [
