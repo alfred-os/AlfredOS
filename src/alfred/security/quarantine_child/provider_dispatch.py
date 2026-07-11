@@ -96,7 +96,11 @@ _EXTRACT_TOOL_NAME = "extract_structured_data"
 # per-extraction budget stays byte-identical to the provider seam's default
 # (no drift with base.py). Used when dispatch_extraction is called without a
 # max_tokens (P1b, #340) — golive threads the routing.yaml budget instead.
-_COMPLETION_DEFAULT_MAX_TOKENS: int = CompletionRequest.model_fields["max_tokens"].default
+# ``.default`` is typed ``Any``; the ``int(...)`` VERIFIES it (rather than merely
+# asserting the annotation) so a future base.py switch to a ``default_factory``
+# (whose ``.default`` is the ``PydanticUndefined`` sentinel) fails loud HERE at
+# import, not deep inside an extraction (fleet review: reviewer/provider/security/devex).
+_COMPLETION_DEFAULT_MAX_TOKENS: int = int(CompletionRequest.model_fields["max_tokens"].default)
 
 # Maximum retries on validation / JSON-decode failure (spec §6.3). Total
 # attempts is ``_MAX_RETRIES + 1`` — one initial call plus this many

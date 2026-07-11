@@ -243,6 +243,17 @@ class AnthropicProvider:
         max_retries: int = 2,
         timeout: httpx.Timeout | None = None,
     ) -> AnthropicProvider:
+        """Construct the provider, injecting the egress seam + retry/timeout.
+
+        Args:
+            api_key: provider key (resolved via the secret broker upstream).
+            model: model id.
+            http_client: the G7-1 proxied client (Spec C); ``None`` lets the SDK build
+                its own (dead-by-kernel on the connectivity-free core).
+            max_retries: SDK-level retry count. Default ``2`` preserves the live posture;
+                the quarantine child (PR2b-golive, #340) passes ``0``.
+            timeout: per-request httpx timeout; ``None`` → the module ``_HTTP_TIMEOUT``.
+        """
         # http_client is the G7-1 egress seam (Spec C, #333): a proxied client when
         # the gateway proxy is configured. The SDK builds its own (un-proxied) client
         # on None — kept as a general provider contract (tests inject None/mocks), but

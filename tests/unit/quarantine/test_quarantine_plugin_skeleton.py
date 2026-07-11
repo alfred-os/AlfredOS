@@ -207,12 +207,15 @@ async def test_handle_extract_delegates_to_dispatch_extraction(
         schema_json='{"type":"object"}',
         schema_version=1,
         provider=fake_provider,
+        max_tokens=8192,
     )
     # The cached bytes flowed through to the dispatcher.
     assert captured["content"] == b'{"title": "hi"}'
     assert captured["schema_json"] == '{"type":"object"}'
     assert captured["schema_version"] == 1
     assert captured["provider"] is fake_provider
+    # max_tokens is forwarded verbatim (P1b, #340) — golive feeds it from the spawn env.
+    assert captured["max_tokens"] == 8192
     assert result["extraction_mode"] == "native_constrained"
 
 

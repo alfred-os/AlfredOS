@@ -658,3 +658,24 @@ async def test_dispatch_threads_max_tokens_into_completion_request() -> None:
     )
     # default preserved when max_tokens is None (CompletionRequest.max_tokens=1024)
     assert provider_default.complete.call_args.args[0].max_tokens == 1024
+
+
+@pytest.mark.asyncio
+async def test_dispatch_threads_max_tokens_on_prompt_embedded_fallback() -> None:
+    """P1b (#340): max_tokens also reaches CompletionRequest on the fallback branch
+    (no NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback). CodeRabbit CR-1."""
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
+
+    provider = _fake_provider_with_capabilities(
+        frozenset(),  # no native constrained generation → prompt_embedded_fallback
+        _text_response('{"text": "ok", "intent": "greeting"}'),  # schema-valid content
+    )
+    result = await dispatch_extraction(
+        content=b"hi",
+        schema_json=_SCHEMA_JSON,
+        schema_version=1,
+        provider=provider,
+        max_tokens=4096,
+    )
+    assert result["kind"] == "extracted"
+    assert provider.complete.call_args.args[0].max_tokens == 4096
