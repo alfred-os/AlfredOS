@@ -107,10 +107,16 @@ _MAX_RETRIES = 2
 
 # Per-extraction wall-clock budget (perf-1 fix). The retry loop was firing
 # back-to-back attempts with no back-off and no upper bound — a thrashing
-# provider could pin a quarantine subprocess for the full
-# orchestrator-side deadline. 30 seconds keeps the loop bounded well
-# under the orchestrator's 30s action_deadline_seconds (config/policies.yaml).
-_MAX_TOTAL_WALL_CLOCK_SECONDS: float = 30.0
+# provider could pin a quarantine subprocess for the full orchestrator-side
+# deadline. This budget sits UNDER the host read-frame timeout (25s,
+# quarantine_child_io._READ_FRAME_TIMEOUT_S) UNDER the orchestrator
+# action_deadline (30s) — monotone per P1e (#340); the prior 30s was EQUAL to
+# action_deadline (the "well under" claim was wrong, surviving only because the
+# echo child replies instantly). NB the check is loop-top only, so it is not a
+# hard ceiling by itself — PR2b-golive wraps each provider.complete() in
+# asyncio.wait_for(remaining_budget) to make it one, and injects a child SDK read
+# timeout <= this budget.
+_MAX_TOTAL_WALL_CLOCK_SECONDS: float = 20.0
 
 # Exponential back-off base. Sleep between attempt N and N+1 is
 # ``_BACKOFF_BASE_SECONDS * (2 ** attempt)`` — 0.5s after attempt 0,
