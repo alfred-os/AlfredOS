@@ -625,3 +625,36 @@ def test_dispatch_retry_path_does_not_carry_prior_response_text() -> None:
         )
         assert poisoned not in prompt
         assert "IGNORE" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_dispatch_threads_max_tokens_into_completion_request() -> None:
+    """P1b (#340): max_tokens reaches CompletionRequest.max_tokens; None keeps the 1024 default."""
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
+
+    provider = _fake_provider_with_capabilities(
+        frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
+        _tool_use_response({"text": "ok", "intent": "greeting"}),  # schema-valid for _SCHEMA_JSON
+    )
+    result = await dispatch_extraction(
+        content=b"hi",
+        schema_json=_SCHEMA_JSON,
+        schema_version=1,
+        provider=provider,
+        max_tokens=8192,
+    )
+    assert result["kind"] == "extracted"
+    assert provider.complete.call_args.args[0].max_tokens == 8192
+
+    provider_default = _fake_provider_with_capabilities(
+        frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
+        _tool_use_response({"text": "ok", "intent": "greeting"}),
+    )
+    await dispatch_extraction(
+        content=b"hi",
+        schema_json=_SCHEMA_JSON,
+        schema_version=1,
+        provider=provider_default,
+    )
+    # default preserved when max_tokens is None (CompletionRequest.max_tokens=1024)
+    assert provider_default.complete.call_args.args[0].max_tokens == 1024

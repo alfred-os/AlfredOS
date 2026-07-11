@@ -163,6 +163,7 @@ async def handle_extract(
     schema_json: str,
     schema_version: int,
     provider: Any,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Dispatch a structured extraction against the cached T3 content.
 
@@ -183,6 +184,11 @@ async def handle_extract(
     version` so a bad version refuses BEFORE we pay subprocess-launch
     cost. Re-checking inside the subprocess is defence in depth and
     lands in a later slice.
+
+    ``max_tokens`` is accepted-and-passed-through to
+    :func:`provider_dispatch.dispatch_extraction` (P1b, #340); ``None``
+    leaves the provider seam's own default in place. PR2b-golive supplies
+    the routing.yaml ``max_tokens_per_extraction`` here via the spawn env.
 
     Imports :mod:`provider_dispatch` inside the function so the child
     module's import-time surface stays minimal — the dispatcher pulls
@@ -210,6 +216,7 @@ async def handle_extract(
         schema_json=schema_json,
         schema_version=schema_version,
         provider=provider,
+        max_tokens=max_tokens,
     )
 
 
