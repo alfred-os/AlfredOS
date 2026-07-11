@@ -1,8 +1,20 @@
 # Cross-platform unit-test CI coverage — macOS + Windows, phased (design)
 
-**Status:** DRAFT — awaiting ratification. Branch `ci-macos-unit-crossplatform` off main `c15cc3a7`.
-Scope ratified by the requester as **truly cross-platform (macOS + Windows)**; executed in two phases
-(§7) because the two OSes are asymmetric in risk. Ratify §7 before `writing-plans`.
+> **⚠️ SUPERSEDED (2026-07-11).** This is the original design record. The
+> **authoritative Phase A contract is the implementation plan**
+> ([`../plans/2026-07-11-crossos-unit-ci-phase-a.md`](../plans/2026-07-11-crossos-unit-ci-phase-a.md)),
+> whose "PLAN-TIME CORRECTION" overrides this spec on two points a reader must NOT
+> take from here: (1) the Docker-backed set is **4 files** (`tests/unit/plugins/web_fetch/`),
+> not the "~12" in §6 — the rest only mention testcontainers in prose; (2) the
+> Windows leg runs the suite **informationally** and is expected to surface
+> POSIX-only errors under `continue-on-error` (§7 Phase A), not merely skip them.
+> The mechanism (`docker` marker + auto-skip hook + anti-rot guard) shipped as
+> designed. §5.1/§6/§7/§8 are retained unedited below as the design rationale.
+
+**Status:** SUPERSEDED by the Phase A plan (was: ratified — macOS + Windows, phased).
+Branch `ci-macos-unit-crossplatform` off main `c15cc3a7`. Scope ratified by the requester as
+**truly cross-platform (macOS + Windows)**; executed in two phases (§7) because the two OSes are
+asymmetric in risk.
 
 ## 1. Goal
 

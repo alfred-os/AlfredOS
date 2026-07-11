@@ -21,7 +21,10 @@ import re
 from pathlib import Path
 
 _UNIT_ROOT = Path(__file__).resolve().parents[1]  # tests/unit
-_META_DIR = Path(__file__).resolve().parent  # tests/unit/meta (holds pattern literals — excluded)
+# Exclude ONLY this guard file (its synthetic-test string literals contain the
+# detection patterns) — NOT the whole meta/ dir, so a real Docker-backed test
+# added anywhere under tests/unit (incl. meta/) is still validated (CR #417).
+_GUARD_FILE = Path(__file__).resolve()
 _REPO_ROOT = _UNIT_ROOT.parents[1]  # repo root, for readable failure paths
 
 # Real Testcontainers usage: an import of the package, or instantiation of a
@@ -53,13 +56,20 @@ def _is_docker_marked(src: str) -> bool:
     return bool(_MARK_RE.search(src))
 
 
-def find_unmarked_docker_files(unit_root: Path, *, exclude: Path) -> list[Path]:
-    """Return TEST MODULES that use Testcontainers but lack the ``docker`` marker."""
+def find_unmarked_docker_files(unit_root: Path, *, exclude_files: frozenset[Path]) -> list[Path]:
+    """Return TEST MODULES that use Testcontainers but lack the ``docker`` marker.
+
+    ``exclude_files`` skips specific files (only this guard module, whose
+    synthetic-test strings hold the detection patterns) rather than a whole
+    directory — so a real Docker-backed test anywhere under ``unit_root`` is
+    still checked (CR #417).
+    """
+    excluded = {path.resolve() for path in exclude_files}
     offenders: list[Path] = []
     for path in sorted(unit_root.rglob("*.py")):
         if path.name == "conftest.py":
             continue  # conftests are handled by find_testcontainers_conftests
-        if path.parent == exclude or exclude in path.parents:
+        if path.resolve() in excluded:
             continue
         src = path.read_text(encoding="utf-8")
         if _uses_testcontainers(src) and not _is_docker_marked(src):
@@ -77,7 +87,7 @@ def find_testcontainers_conftests(unit_root: Path) -> list[Path]:
 
 
 def test_all_testcontainers_unit_files_are_docker_marked() -> None:
-    offenders = find_unmarked_docker_files(_UNIT_ROOT, exclude=_META_DIR)
+    offenders = find_unmarked_docker_files(_UNIT_ROOT, exclude_files=frozenset({_GUARD_FILE}))
     assert offenders == [], (
         "These unit files use Testcontainers but are not `docker`-marked, so they "
         "would ERROR (not skip) on the daemon-less macOS/Windows CI legs. Add a "
@@ -104,7 +114,7 @@ def test_guard_flags_unmarked_synthetic_file(tmp_path: Path) -> None:
         "def test_x() -> None:\n    RedisContainer('redis:8')\n",
         encoding="utf-8",
     )
-    offenders = find_unmarked_docker_files(tmp_path, exclude=tmp_path / "nonexistent")
+    offenders = find_unmarked_docker_files(tmp_path, exclude_files=frozenset())
     assert [p.name for p in offenders] == ["test_bad.py"]
 
 
@@ -115,7 +125,7 @@ def test_guard_passes_marked_synthetic_file(tmp_path: Path) -> None:
         "def test_x() -> None:\n    RedisContainer('redis:8')\n",
         encoding="utf-8",
     )
-    offenders = find_unmarked_docker_files(tmp_path, exclude=tmp_path / "nonexistent")
+    offenders = find_unmarked_docker_files(tmp_path, exclude_files=frozenset())
     assert offenders == []
 
 
@@ -125,7 +135,7 @@ def test_guard_ignores_prose_mention(tmp_path: Path) -> None:
         "def test_x() -> None:\n    assert True\n",
         encoding="utf-8",
     )
-    offenders = find_unmarked_docker_files(tmp_path, exclude=tmp_path / "nonexistent")
+    offenders = find_unmarked_docker_files(tmp_path, exclude_files=frozenset())
     assert offenders == []
 
 
@@ -154,7 +164,7 @@ def test_guard_flags_file_that_only_mentions_the_mark(tmp_path: Path) -> None:
         "def test_x() -> None:\n    RedisContainer('redis:8')\n",
         encoding="utf-8",
     )
-    offenders = find_unmarked_docker_files(tmp_path, exclude=tmp_path / "nonexistent")
+    offenders = find_unmarked_docker_files(tmp_path, exclude_files=frozenset())
     assert [p.name for p in offenders] == ["test_mention_only.py"]
 
 
@@ -166,5 +176,19 @@ def test_guard_marks_list_assignment_with_docker(tmp_path: Path) -> None:
         "def test_x() -> None:\n    RedisContainer('redis:8')\n",
         encoding="utf-8",
     )
-    offenders = find_unmarked_docker_files(tmp_path, exclude=tmp_path / "nonexistent")
+    offenders = find_unmarked_docker_files(tmp_path, exclude_files=frozenset())
     assert offenders == []
+
+
+def test_guard_catches_docker_file_in_subdirectory(tmp_path: Path) -> None:
+    """CR #417: a Docker-backed test in ANY subdir (incl. a meta-like dir) is
+    caught, not bypassed — the exclusion skips only the guard file, not a dir."""
+    sub = tmp_path / "meta"
+    sub.mkdir()
+    (sub / "test_nested.py").write_text(
+        "from testcontainers.redis import RedisContainer\n\n"
+        "def test_x() -> None:\n    RedisContainer('redis:8')\n",
+        encoding="utf-8",
+    )
+    offenders = find_unmarked_docker_files(tmp_path, exclude_files=frozenset())
+    assert [p.name for p in offenders] == ["test_nested.py"]
