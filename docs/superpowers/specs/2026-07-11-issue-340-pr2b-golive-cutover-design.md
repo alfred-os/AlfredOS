@@ -1,11 +1,11 @@
 # #340 PR2b — real-LLM quarantine child go-live cutover (design)
 
-**Status:** DRAFT rev.2 — awaiting ratification. Committed on branch `340-pr2b-golive-design`
-off main `42377a52`. rev.2 folds a focused 4-lens design review (architect / security / core /
-provider — all AGREE/SOUND-WITH-CHANGES, 0 design-killers; §19 is the fold log, which **overrides
-section bodies where they conflict**). Do **not** proceed to `writing-plans` until the forks in §14
-are ratified. The go-live PR additionally carries a **HUMAN SIGN-OFF** at merge (§13) — design +
-ratify here; the sign-off gates the *merge*, not this spec.
+**Status:** RATIFIED rev.2 (2026-07-11) — §14 forks 1–5 ratified by the requester; proceeding to
+`writing-plans` for PR2b-prep. Committed on branch `340-pr2b-golive-design` off main `42377a52`.
+rev.2 folds a focused 4-lens design review (architect / security / core / provider — all
+AGREE/SOUND-WITH-CHANGES, 0 design-killers; §19 is the fold log, which **overrides section bodies
+where they conflict**). The go-live PR still carries a **HUMAN SIGN-OFF** at merge (§13) — that gate
+is separate from this ratification; PR2b-prep is behavior-neutral and needs no sign-off.
 
 Parent design: `docs/superpowers/specs/2026-07-09-issue-340-real-quarantine-child-design.md`
 (the 2-PR machinery→go-live decomposition; PR2b = go-live). fd-broker spike findings +
