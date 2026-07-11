@@ -281,6 +281,11 @@ ignore = ["S101"]
 # reaches a subprocess (the only interpolated value is a uuid-suffixed network/
 # container name built from fixed literals).
 "tests/integration/egress/test_core_network_isolation_kernel.py" = ["S603", "S607"]
+# The shared docker-availability probe (consumed by the smoke + integration
+# fixtures above and the root-conftest auto-skip hook) runs `docker version` by
+# name (partial path) with fixed-literal argv — same trusted-CLI rationale as
+# the smokes above. No untrusted input reaches the subprocess.
+"tests/_docker_probe.py" = ["S603", "S607"]
 "src/alfred/memory/migrations/**/*.py" = ["N999"]
 # FBT001/FBT002/FBT003 (boolean-trap rules) are valid for general API design
 # but conflict with Typer's declarative CLI surface — Typer flags are by

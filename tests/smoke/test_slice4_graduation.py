@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import time
 import uuid
@@ -43,6 +42,8 @@ import warnings
 from collections.abc import Iterator
 
 import pytest
+
+from tests._docker_probe import docker_available
 
 pytestmark = pytest.mark.smoke
 
@@ -63,33 +64,12 @@ _PROPOSAL_PATH = f"policies/breaker-resets/{_PROPOSAL_ID}.json"
 _STATE_GIT_IN_CONTAINER = "/var/lib/alfred/state.git"
 
 
-def _docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    # Bound the probe: a misconfigured docker context can make ``docker info``
-    # hang indefinitely, which would bypass the perf-007 budget and stall the
-    # whole smoke suite. Treat a timed-out probe as "docker unavailable" so the
-    # test skips cleanly rather than hanging. (PR-S4-10 review #3.)
-    try:
-        return (
-            subprocess.run(
-                ["docker", "info"],
-                capture_output=True,
-                check=False,
-                timeout=10,
-            ).returncode
-            == 0
-        )
-    except subprocess.TimeoutExpired:
-        return False
-
-
 @pytest.fixture(scope="module")
 def compose_stack() -> Iterator[None]:
     """Bring up docker compose for the module; tear it down (volumes) after."""
     if os.environ.get(_OPT_IN_ENV) != "1":
         pytest.skip(f"{_OPT_IN_ENV} != 1 — graduation smoke is opt-in (builds images)")
-    if not _docker_available():
+    if not docker_available():
         pytest.skip("docker unavailable — graduation smoke skipped cleanly")
 
     up = subprocess.run(
