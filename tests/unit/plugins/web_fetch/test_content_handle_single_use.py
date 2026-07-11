@@ -32,6 +32,8 @@ from alfred.plugins.web_fetch.content_store import (
     ContentStore,
 )
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:

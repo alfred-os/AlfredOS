@@ -22,6 +22,8 @@ from testcontainers.redis import RedisContainer
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
 from alfred.plugins.web_fetch.rate_limit import RateLimitConfig, RateLimiter
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:

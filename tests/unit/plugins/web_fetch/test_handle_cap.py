@@ -29,6 +29,8 @@ from testcontainers.redis import RedisContainer
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
 from alfred.plugins.web_fetch.handle_cap import HandleCap, HandleCapConfig
 
+pytestmark = pytest.mark.docker
+
 
 def test_default_config_matches_spec() -> None:
     """HandleCapConfig() defaults to per_user=5 (spec §7)."""
