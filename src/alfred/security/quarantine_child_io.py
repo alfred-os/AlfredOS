@@ -146,8 +146,12 @@ _ALLOWED_CHILD_MODULES: frozenset[str] = frozenset({_CHILD_MODULE, _BROKERED_PRO
 _LENGTH_HEADER_BYTES = 4
 
 # Bounded ``read_frame`` deadline (seconds): a wedged child must fail loud rather
-# than hang the inbound turn forever. Mirrors the #240 inbound-turn 15s bound.
-_READ_FRAME_TIMEOUT_S = 15.0
+# than hang the inbound turn forever. MUST be >= the child's wall-clock budget
+# (``provider_dispatch._MAX_TOTAL_WALL_CLOCK_SECONDS``) so a real extraction is not torn
+# host-side, and < the orchestrator action_deadline (P1e, #340 — see
+# test_quarantine_timeout_hierarchy). Raised from the original #240 15s (which sat BELOW
+# the child budget) to give a real extraction framing headroom.
+_READ_FRAME_TIMEOUT_S = 25.0
 
 # Bounded best-effort drain of the quarantined child's stderr (#251). The child is
 # spawned with ``stderr=PIPE``; on a failed/torn ``read_frame`` or on ``aclose`` the
