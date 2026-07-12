@@ -52,7 +52,10 @@ def _hard_ro_bind_sources(flags: list[str]) -> list[str]:
 def test_lib64_is_a_soft_bind_so_the_child_spawns_on_arm64() -> None:
     """``/lib64`` translates to ``--ro-bind-try``, never a hard ``--ro-bind`` (#269)."""
     policy = read_policy_toml(_linux_policy_text())
-    assert ("/lib64", "/lib64") in policy.ro_binds_try
+    # Pin EXACTLY, not membership — a soft bind silently skips a missing source, so
+    # it is a quieter hiding place than a hard one, and `in` would let a future
+    # `["/etc", "/etc"]` soft bind slip past unnoticed.
+    assert list(policy.ro_binds_try) == [("/lib64", "/lib64")]
     assert ("/lib64", "/lib64") not in policy.ro_binds
 
     flags = policy_to_bwrap_flags(policy)
@@ -74,6 +77,25 @@ def test_interpreter_trees_stay_hard_binds() -> None:
     hard = _hard_ro_bind_sources(policy_to_bwrap_flags(policy))
     assert "/usr" in hard
     assert "/lib" in hard
+
+
+def test_no_shipped_linux_policy_hard_binds_lib64() -> None:
+    """STRUCTURAL guard: NO shipped Linux policy may hard-bind ``/lib64`` (#269).
+
+    The per-policy tests above are enumerated by hand, so a THIRD
+    ``config/sandbox/*.linux.bwrap.policy`` could ship a hard ``--ro-bind /lib64``
+    and reintroduce the arm64 launch failure with zero coverage. This globs the
+    shipped set instead, so the guard grows automatically with the policies.
+    """
+    policies = sorted((_repo_root() / "config" / "sandbox").glob("*.linux.bwrap.policy"))
+    assert policies, "no shipped Linux bwrap policies found — the glob is wrong"
+    for path in policies:
+        policy = read_policy_toml(path.read_text(encoding="utf-8"))
+        hard = _hard_ro_bind_sources(policy_to_bwrap_flags(policy))
+        assert "/lib64" not in hard, (
+            f"{path.name} hard-binds /lib64 — this kills the bwrap launch on arm64 "
+            f"('Can't find source path /lib64'). Declare it in ro_binds_try instead."
+        )
 
 
 def test_containment_posture_unchanged_by_the_soft_bind() -> None:

@@ -46,6 +46,24 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 # ``keep_fds`` for every policy (arch-2).
 _REQUIRED_FD: Final[int] = 3
 
+# The CLOSED allow-list of paths that may be SOFT-bound (``ro_binds_try``, #269).
+#
+# ``ro_binds_try`` is the schema's ONLY silently-skipping field: bwrap binds the
+# source iff it exists and says NOTHING when it does not. That is exactly right
+# for a genuinely arch-variable path (``/lib64`` exists on x86-64, never on
+# arm64) and exactly WRONG for anything else — an unconstrained field would let a
+# typo (``/lib46``) or a load-bearing bind (``/etc/ssl/certs``, an egress socket
+# dir) degrade the sandbox in silence instead of refusing at launch. That silent
+# degradation is the failure mode ``ro_binds`` is HARD precisely to avoid
+# (CLAUDE.md hard rule #7: no silent failures in security paths).
+#
+# So the field is constrained exactly as ``unshare`` is — by a closed vocabulary
+# the type refuses to leave (see the ``unshare`` Literal below: "silently
+# dropping an unknown unshare kind would weaken isolation without telling
+# anyone"). To soft-bind a NEW path, add it HERE, with the arch that lacks it and
+# why its absence is expected. That one-line edit IS the security review.
+_SOFT_BINDABLE_PATHS: Final[frozenset[str]] = frozenset({"/lib64"})
+
 
 class SandboxPolicyInvalid(Exception):  # noqa: N818 -- name pinned by spec §7.2 + audit reason vocab
     """A sandbox policy file failed schema validation.
@@ -122,6 +140,28 @@ class SandboxPolicy(BaseModel):
                 reason="kind_full_requires_keep_fd_3",
                 detail=f"keep_fds={list(self.keep_fds)!r} omits fd {_REQUIRED_FD}",
             )
+        return self
+
+    @model_validator(mode="after")
+    def _restrict_soft_binds(self) -> SandboxPolicy:
+        # #269: a soft bind SILENTLY skips a missing source, so the set of paths
+        # allowed to be soft is closed (:data:`_SOFT_BINDABLE_PATHS`). A policy
+        # soft-binding anything else — a typo'd ``/lib46``, or a load-bearing
+        # ``/etc/ssl/certs`` — would degrade the sandbox without a word instead of
+        # refusing at launch. Refuse it at PARSE time, loudly, with a
+        # closed-vocabulary reason the ``supervisor.plugin.sandbox_refused`` audit
+        # row can carry.
+        for src, dst in self.ro_binds_try:
+            if src not in _SOFT_BINDABLE_PATHS or dst not in _SOFT_BINDABLE_PATHS:
+                raise SandboxPolicyInvalid(
+                    reason="soft_bind_forbidden_path",
+                    detail=(
+                        f"ro_binds_try may only carry arch-variable paths "
+                        f"{sorted(_SOFT_BINDABLE_PATHS)}; got {src!r} -> {dst!r}. "
+                        f"A path that must always exist belongs in ro_binds, where a "
+                        f"missing source fails loud instead of silently skipping."
+                    ),
+                )
         return self
 
 

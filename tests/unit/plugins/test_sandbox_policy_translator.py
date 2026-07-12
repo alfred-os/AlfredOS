@@ -134,6 +134,38 @@ def test_ro_binds_try_round_trips_through_toml() -> None:
     assert "--ro-bind-try" in policy_to_bwrap_flags(policy)
 
 
+def test_soft_bind_of_a_non_arch_variable_path_is_refused() -> None:
+    """``ro_binds_try`` is a CLOSED vocabulary — a load-bearing path is refused (#269).
+
+    A soft bind SILENTLY skips a missing source. That is right for ``/lib64``
+    (genuinely absent on arm64) and wrong for anything else: soft-binding
+    ``/etc/ssl/certs`` would let a missing CA bundle degrade the sandbox without
+    a word instead of refusing at launch — the exact silent-failure mode
+    ``ro_binds`` is HARD to avoid (hard rule #7). Refuse at parse time.
+    """
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(ro_binds_try=[("/etc/ssl/certs", "/etc/ssl/certs")], keep_fds=[3])
+    assert exc_info.value.reason == "soft_bind_forbidden_path"
+
+
+def test_soft_bind_typo_is_refused_not_silently_skipped() -> None:
+    # The nastiest case the closed vocabulary buys us: a typo'd source would
+    # otherwise parse clean, bind nothing, and hand the child a quietly broken
+    # sandbox. `/lib46` is not in the allow-list, so it refuses LOUDLY.
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(ro_binds_try=[("/lib46", "/lib64")], keep_fds=[3])
+    assert exc_info.value.reason == "soft_bind_forbidden_path"
+
+
+def test_soft_bind_forbidden_path_refused_via_toml() -> None:
+    # The refusal holds at the POLICY-FILE boundary too (read_policy_toml
+    # re-raises SandboxPolicyInvalid un-wrapped so the reason survives to the
+    # supervisor.plugin.sandbox_refused audit row).
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        read_policy_toml('keep_fds = [3]\nro_binds_try = [["/etc", "/etc"]]\n')
+    assert exc_info.value.reason == "soft_bind_forbidden_path"
+
+
 def test_rw_binds_translate() -> None:
     policy = SandboxPolicy(rw_binds=[("/var/run/x", "/var/run/x")], keep_fds=[3])
     flags = policy_to_bwrap_flags(policy)
