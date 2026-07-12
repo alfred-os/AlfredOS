@@ -73,12 +73,17 @@ def _real_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
     policy = read_policy_toml(_QUARANTINED_LINUX_POLICY.read_text())
     flags = policy_to_bwrap_flags(policy)
     # Prune (a) the --tmpfs <scratch> pair — irrelevant to containment, avoids a
-    # mountpoint dependency in the test root — and (b) any --ro-bind whose SOURCE
-    # does not exist on this host. The production policy targets x86-64 Debian
-    # Bookworm where /lib64 is a real dir; on aarch64 /lib64 is absent and
-    # --ro-bind /lib64 would fail "Can't find source path". The /usr + /lib binds
-    # carry the loader on every arch via the usrmerge symlink, so the escape
-    # assertions stay meaningful. (bwrap --ro-bind-try is a #230 schema item.)
+    # mountpoint dependency in the test root — and (b) any HARD --ro-bind whose
+    # SOURCE does not exist on this host (a defensive prune; the shipped hard binds
+    # /usr and /lib exist on every arch).
+    #
+    # `--ro-bind-try` pairs are deliberately NOT pruned: since #269 the policy
+    # soft-binds /lib64 (a real dir on x86-64 holding ld-linux-x86-64.so.2; absent
+    # on aarch64, where the loader arrives via the already-bound /lib), and bwrap
+    # itself skips a soft bind whose source is missing. Passing them through
+    # verbatim is what keeps this corpus running against the PRODUCTION flag list
+    # on both arches — pruning them would silently diverge the payloads from the
+    # policy they exist to prove.
     pruned: list[str] = []
     i = 0
     while i < len(flags):

@@ -65,11 +65,14 @@ def _discord_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
 
     Mirrors the quarantine-test helper but for the Discord policy:
 
-    * ``ro_binds`` whose SOURCE does not exist on this host are dropped — the
-      production policy targets x86-64 Debian Bookworm; on aarch64 ``/lib64`` is
-      absent and ``/etc/ssl/certs`` may live elsewhere. The /usr + /lib binds
-      carry the loader via the usrmerge symlink on every arch, so the
-      containment assertions stay meaningful.
+    * ``ro_binds`` (HARD) pass through verbatim — ``/usr``, ``/lib`` and
+      ``/etc/ssl/certs`` exist on every supported arch, and a missing one must
+      fail loud exactly as it would in production.
+    * ``ro_binds_try`` (SOFT, #269) pass through as ``--ro-bind-try`` — ``/lib64``
+      is a real dir on x86-64 (holding ``ld-linux-x86-64.so.2``, load-bearing for
+      exec) and absent on aarch64, where the loader arrives via the bound
+      ``/lib``. bwrap skips a soft bind whose source is missing, so the SAME
+      reconstruction is faithful on both arches.
     * ``rw_binds`` (the gateway egress socket dir
       ``/home/alfred/.egress/discord``) are dropped when the SOURCE does not
       exist — no live gateway socket is present in the integration runner; the
@@ -86,10 +89,10 @@ def _discord_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
     """
     shipped = tomllib.loads(_DISCORD_LINUX_POLICY.read_text())
 
-    # ro_binds: filter to paths that exist on this host.
-    ro_binds: list[tuple[str, str]] = [
-        (src, dst) for src, dst in shipped.get("ro_binds", []) if Path(src).exists()
-    ]
+    # HARD binds pass through VERBATIM — no existence filter. /usr, /lib and
+    # /etc/ssl/certs always exist, and a missing one must fail loud here exactly as
+    # it would in production rather than be quietly dropped into a weaker sandbox.
+    ro_binds: list[tuple[str, str]] = [(src, dst) for src, dst in shipped.get("ro_binds", [])]
 
     # Append venv interpreter + plugin_dir roots — NOT under /etc or /bin.
     interp_roots = interpreter_sandbox_roots() | {str(plugin_dir)}
@@ -108,6 +111,17 @@ def _discord_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
     flags: list[str] = []
     for src, dst in ro_binds:
         flags += ["--ro-bind", src, dst]
+    # SOFT binds (#269) pass through as SOFT binds, so this reconstruction mirrors
+    # production on EVERY arch: bwrap binds `/lib64` where it exists (x86-64, where
+    # it holds ld-linux-x86-64.so.2 — the ELF interpreter of every dynamically
+    # linked binary, so it is LOAD-BEARING for exec) and skips it where it does not
+    # (arm64, where the loader arrives via the already-bound /lib). Rebuilding from
+    # `ro_binds` alone would DROP /lib64 once it moved to `ro_binds_try`: on x86-64
+    # the sandboxed interpreter would fail to exec and every containment assertion
+    # below would hold VACUOUSLY (a child that never runs reaches nothing) — the
+    # #245 paper-gate shape.
+    for src, dst in shipped.get("ro_binds_try", []):
+        flags += ["--ro-bind-try", src, dst]
     # rw_binds: include only if the source path exists — the egress socket dir
     # is absent in the test runner (no live gateway), so this list is normally
     # empty during kernel-proof runs.
