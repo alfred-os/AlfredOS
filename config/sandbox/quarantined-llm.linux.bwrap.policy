@@ -18,8 +18,9 @@
 # Filesystem confinement
 # ----------------------------------------------------------------------------
 # Read-only binds for the interpreter + its shared libraries ONLY. We bind the
-# usrmerged system trees (/usr, /lib, /lib64) read-only so CPython can exec and
-# dynamically link, and NOTHING else:
+# usrmerged system trees (/usr, /lib — plus /lib64 SOFTLY, see the arch note on
+# `ro_binds_try` below) read-only so CPython can exec and dynamically link, and
+# NOTHING else:
 #
 #   * NO /etc bind — /etc/passwd, /etc/shadow, resolv.conf, ssh configs, the
 #     host's secrets-in-config all stay invisible. (DNS is moot for the shipped
@@ -40,6 +41,23 @@
 ro_binds = [
   ["/usr", "/usr"],
   ["/lib", "/lib"],
+]
+
+# SOFT read-only bind (#269) — bound iff the source EXISTS, else skipped
+# (`--ro-bind-try`). `/lib64` holds the dynamic linker on x86-64
+# (`ld-linux-x86-64.so.2`) but does NOT exist on arm64, where the loader is
+# `/lib/ld-linux-aarch64.so.1` — already covered by the `/lib` bind above. A
+# HARD `--ro-bind /lib64` therefore kills the sandbox launch on aarch64
+# (`bwrap: Can't find source path /lib64`): the quarantined child never starts,
+# never emits a frame, and the host surfaces a truncated `read_frame_failed`.
+# Soft-binding it makes these SAME policy bytes portable across both arches.
+#
+# This does NOT weaken containment: the mount stays read-only where it exists,
+# and a path that does not exist was never reachable from inside the sandbox.
+# Only genuinely ARCH-VARIABLE paths belong here — `/usr` and `/lib` stay HARD
+# above, because a missing one is a real error that must fail loud rather than
+# silently degrade into a broken sandbox.
+ro_binds_try = [
   ["/lib64", "/lib64"],
 ]
 
