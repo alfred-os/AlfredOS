@@ -23,8 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 from alfred.plugins.sandbox_policy import (
+    _SOFT_BINDABLE_PATHS,
     SandboxPolicy,
     SandboxPolicyInvalid,
     policy_to_bwrap_flags,
@@ -157,32 +160,59 @@ def test_soft_bind_typo_is_refused_not_silently_skipped() -> None:
     assert exc_info.value.reason == "soft_bind_forbidden_path"
 
 
-def test_a_path_bound_both_hard_and_soft_is_refused() -> None:
-    """A dst in BOTH ``ro_binds`` and ``ro_binds_try`` reintroduces #269 — refuse it.
+def test_hard_binding_an_arch_variable_path_is_refused() -> None:
+    """The LITERAL #269 bug: just move /lib64 back to ro_binds. Nothing else needed.
 
-    The allow-list alone does not catch this: ``/lib64`` is legal in
-    ``ro_binds_try``, so a policy listing it in BOTH lists validates clean — and
-    then the translator emits the HARD ``--ro-bind /lib64`` FIRST, which is exactly
-    the bwrap launch failure #269 removed ("Can't find source path /lib64" on
-    arm64). The soft entry that follows is dead. So the policy would sail past a
-    validator that says it is fine and resurrect the original bug.
+    The first version of this guard compared destinations, so this policy — the
+    original bug, verbatim — validated CLEAN. Keying on the source closes it.
+    """
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(ro_binds=[("/usr", "/usr"), ("/lib64", "/lib64")], keep_fds=[3])
+    assert exc_info.value.reason == "arch_variable_path_hard_bound"
 
-    A path is either always-present (hard) or arch-variable (soft). Never both.
+
+def test_hard_binding_an_arch_variable_path_under_a_different_dst_is_refused() -> None:
+    # dst asymmetry: the fatal SOURCE is still /lib64, so bwrap still aborts.
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(
+            ro_binds=[("/lib64", "/lib64-compat")],
+            ro_binds_try=[("/lib64", "/lib64")],
+            keep_fds=[3],
+        )
+    assert exc_info.value.reason == "arch_variable_path_hard_bound"
+
+
+def test_rw_binding_an_arch_variable_path_is_refused() -> None:
+    # rw_binds emits --bind (not --ro-bind) and dies identically on a missing
+    # source. The dst-keyed guard scanned --ro-bind only and missed this entirely.
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(rw_binds=[("/lib64", "/lib64")], keep_fds=[3])
+    assert exc_info.value.reason == "arch_variable_path_hard_bound"
+
+
+def test_same_dst_bound_hard_and_soft_is_refused() -> None:
+    """The dst-OVERMOUNT case: different sources, same destination.
+
+    The source-keyed guard above catches every policy that hard-binds an
+    arch-variable path. This one catches what survives it: a hard bind of a
+    NON-arch-variable source (``/usr``) onto a destination that a soft bind also
+    claims. The hard bind is emitted first, so the soft bind is dead — and the
+    policy is making two contradictory claims about that mount point.
     """
     with pytest.raises(SandboxPolicyInvalid) as exc_info:
         SandboxPolicy(
-            ro_binds=[("/usr", "/usr"), ("/lib64", "/lib64")],
+            ro_binds=[("/usr", "/lib64")],
             ro_binds_try=[("/lib64", "/lib64")],
             keep_fds=[3],
         )
     assert exc_info.value.reason == "soft_bind_conflicts_with_hard_bind"
 
 
-def test_hard_and_soft_collision_refused_via_toml() -> None:
+def test_same_dst_hard_and_soft_refused_via_toml() -> None:
     with pytest.raises(SandboxPolicyInvalid) as exc_info:
         read_policy_toml(
             "keep_fds = [3]\n"
-            'ro_binds = [["/lib64", "/lib64"]]\n'
+            'ro_binds = [["/usr", "/lib64"]]\n'
             'ro_binds_try = [["/lib64", "/lib64"]]\n'
         )
     assert exc_info.value.reason == "soft_bind_conflicts_with_hard_bind"
@@ -195,6 +225,97 @@ def test_soft_bind_forbidden_path_refused_via_toml() -> None:
     with pytest.raises(SandboxPolicyInvalid) as exc_info:
         read_policy_toml('keep_fds = [3]\nro_binds_try = [["/etc", "/etc"]]\n')
     assert exc_info.value.reason == "soft_bind_forbidden_path"
+
+
+# ---------------------------------------------------------------------------
+# The PROPERTY (#269). Two point-patches — the `_SOFT_BINDABLE_PATHS` allow-list
+# and the hard/soft collision check — were each written after a *specific* policy
+# was found that validated clean and still produced a flag list that kills the
+# bwrap launch on arm64. Patching instances does not close a class, and each
+# instance was found by a human reading a diff.
+#
+# This states the invariant ONCE, and lets hypothesis hunt the counterexamples:
+#
+#   For ANY policy that validates, the emitted flag list must never HARD-bind
+#   (--ro-bind / --bind) a path declared arch-variable.
+#
+# Both the original #269 bug and its first follow-up are counterexamples to this
+# property — it fails on the code that shipped them. It also holds the line as
+# `_SOFT_BINDABLE_PATHS` grows, which the module comment explicitly invites.
+# ---------------------------------------------------------------------------
+
+# A path pool mixing arch-variable paths, always-present trees, and near-misses
+# (a `/lib64`-prefixed decoy that must NOT be treated as arch-variable).
+_PATH_POOL = st.sampled_from(
+    ["/usr", "/lib", "/lib64", "/lib64-compat", "/etc/ssl/certs", "/run/alfred/x", "/x"]
+)
+_BINDS = st.lists(st.tuples(_PATH_POOL, _PATH_POOL), max_size=4)
+
+
+def _policy_or_none(
+    ro: list[tuple[str, str]],
+    ro_try: list[tuple[str, str]],
+    rw: list[tuple[str, str]],
+) -> SandboxPolicy | None:
+    """Construct the policy, or ``None`` if the schema REFUSES it.
+
+    A refused policy is out of scope for the properties below: they constrain what
+    a policy the schema *accepts* is allowed to emit.
+    """
+    try:
+        return SandboxPolicy(ro_binds=ro, ro_binds_try=ro_try, rw_binds=rw, keep_fds=[3])
+    except SandboxPolicyInvalid:
+        return None
+
+
+@given(ro=_BINDS, ro_try=_BINDS, rw=_BINDS)
+def test_no_validating_policy_can_hard_bind_an_arch_variable_path(
+    ro: list[tuple[str, str]],
+    ro_try: list[tuple[str, str]],
+    rw: list[tuple[str, str]],
+) -> None:
+    """PROPERTY: a policy that VALIDATES can never emit a hard bind of a soft-bindable path.
+
+    bwrap aborts the whole launch on a missing hard-bind SOURCE. A path in
+    ``_SOFT_BINDABLE_PATHS`` is declared to be legitimately absent on some arch.
+    So a validating policy that hard-binds one is a launch failure waiting for the
+    other architecture — which is precisely what #269 was, and what its first
+    dst-keyed follow-up still allowed.
+    """
+    policy = _policy_or_none(ro, ro_try, rw)
+    assume(policy is not None)
+    assert policy is not None  # narrow for the type-checker; assume() already bailed
+
+    flags = policy_to_bwrap_flags(policy)
+    hard_sources = {flags[i + 1] for i, flag in enumerate(flags) if flag in ("--ro-bind", "--bind")}
+    offenders = hard_sources & _SOFT_BINDABLE_PATHS
+    assert not offenders, (
+        f"policy validated but HARD-binds arch-variable path(s) {sorted(offenders)} — "
+        f"this aborts the bwrap launch on any arch where the source is absent (#269). "
+        f"flags={flags}"
+    )
+
+
+@given(ro=_BINDS, ro_try=_BINDS, rw=_BINDS)
+def test_no_validating_policy_binds_the_same_dst_hard_and_soft(
+    ro: list[tuple[str, str]],
+    ro_try: list[tuple[str, str]],
+    rw: list[tuple[str, str]],
+) -> None:
+    """PROPERTY: a validating policy never overmounts the same dst hard AND soft.
+
+    The hard bind is emitted first, so the soft one is dead — and the policy's own
+    claim about that path ("must exist" vs "may be absent") is self-contradictory.
+    """
+    policy = _policy_or_none(ro, ro_try, rw)
+    assume(policy is not None)
+    assert policy is not None  # narrow for the type-checker; assume() already bailed
+
+    hard_dsts = {dst for _src, dst in (*policy.ro_binds, *policy.rw_binds)}
+    soft_dsts = {dst for _src, dst in policy.ro_binds_try}
+    assert not (hard_dsts & soft_dsts), (
+        f"policy validated but binds {sorted(hard_dsts & soft_dsts)} both hard and soft"
+    )
 
 
 def test_rw_binds_translate() -> None:
