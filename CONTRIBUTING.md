@@ -108,6 +108,16 @@ The **`Adversarial corpus` check is release-blocking on every PR** (it runs unfi
 
 See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 
+### Cross-platform unit tests (macOS + Windows are blocking)
+
+`pytest tests/unit` runs on **three** CI legs — Linux (with coverage gates), macOS, and Windows — and **all three block merge**. AlfredOS is a Linux-only runtime (bwrap / `runuser` / `AF_UNIX` sockets / POSIX fds); the supported Windows dev path is WSL2. So a unit test that touches a POSIX-only facility (`os.getuid`/`geteuid`, `socket.AF_UNIX`, `os.O_NOFOLLOW`, `os.writev`, the bash/`runuser` launcher, POSIX file modes) passes on Linux/macOS but fails the **blocking Windows leg**. Guard it — don't leave a red required check:
+
+- **Runtime failure, the module still imports on Windows** → add `@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: <name the facility>")` to the specific test (or its class). Write an accurate reason; it's what a Windows contributor sees in `pytest -rs`.
+- **Import-time crash** (a module-level POSIX import/attr, or every test in the file is POSIX-only) → add the file, path-relative to `tests/`, to `POSIX_ONLY_TEST_FILES` in [`tests/_posix_only_tests.py`](./tests/_posix_only_tests.py) (a module-level `skipif` can't help — the crash is before pytest applies it).
+- **First fix the real bug** if the failure is a genuine portability defect (e.g. a `Path.read_text()` missing `encoding="utf-8"`, or an assertion hardcoding `/` separators) rather than a POSIX-only dependency — make the test portable instead of skipping it.
+
+The guards are `win32`-only, so the Linux and macOS legs keep running every test — no coverage is lost on the runtime target. The Windows leg also enforces an **assert-RAN floor** (it fails if fewer than 3000 unit tests pass), so you can't quietly grow the skip/ignore list until the gate is hollow.
+
 ### Running performance benches locally
 
 `make test-perf` runs the release-blocking hook-dispatch perf gate (the same
