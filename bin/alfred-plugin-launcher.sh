@@ -318,8 +318,9 @@ EOF
                 # opt in via ALFRED_SANDBOX_BIND_INTERP_PREFIX=1 — only the
                 # quarantine-child spawn (`_child_env` in quarantine_child_io.py)
                 # sets it, because only it execs a bound interpreter that may live
-                # OUTSIDE the policy's static /usr,/lib,/lib64 binds (a proto/uv
-                # self-contained python-build-standalone under ~/.proto: interpreter
+                # OUTSIDE the policy's static binds (/usr and /lib hard, /lib64
+                # softly via --ro-bind-try — #269) — a proto/uv self-contained
+                # python-build-standalone under ~/.proto: interpreter
                 # + stdlib + site-packages share one prefix — ADR-0030). Generic
                 # kind:full plugins run under a /usr interpreter the policy already
                 # binds, so they DON'T opt in and the namespace is never widened for

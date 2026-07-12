@@ -45,10 +45,19 @@ namespace built (both diagnosed during the same investigation):
 3. The production `sys.executable` was a `uv`-venv **symlink** outside any
    bwrap-bound prefix → `bwrap: execvp <python>: No such file or directory`.
 4. A stock python.org/slim CPython resolves `libpython3.14.so.1.0` via
-   `/etc/ld.so.cache`, which the tight `kind=full` policy (binds only `/usr`,
-   `/lib`, `/lib64`) omits → the child died with
+   `/etc/ld.so.cache`, which the tight `kind=full` policy (binds `/usr` and
+   `/lib` hard, plus `/lib64` softly — see the [ADR-0030](0030-first-party-kind-full-plugin-ships-in-wheel-under-bound-prefix.md)
+   `ro_binds_try` amendment, #269) omits → the child died with
    `libpython3.14.so.1.0: cannot open shared object file` after the namespace was
    built.
+
+   > **Still live, and worth knowing (#269).** This exact failure resurfaced while
+   > diagnosing the arm64 spawn bug and was briefly mistaken for a *second* arm64
+   > root cause. It is not: it is the expected consequence of using a **non-PBS**
+   > interpreter (a Debian/`/usr/local` CPython that needs `/etc/ld.so.cache`,
+   > which this policy deliberately omits). Under the bound python-build-standalone
+   > interpreter this ADR mandates, it does not occur. **If you see it, you are
+   > reproducing under an unsupported interpreter — fix the repro, not the sandbox.**
 
 The quarantined LLM is the load-bearing T3 trust boundary (PRD DEC-007: the
 dual-LLM split is non-negotiable). A `kind=full` child that cannot spawn at all
