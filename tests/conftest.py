@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,12 +24,19 @@ from pathlib import Path
 import pytest
 
 from tests._docker_probe import docker_available, docker_unavailable_reason
+from tests._posix_only_tests import collect_ignore_for
 from tests.support.discord_mocks import DiscordMockFactory
 
 # Enable the built-in ``pytester`` plugin (inert unless the ``pytester`` fixture
 # is requested) so the docker auto-skip hook can be exercised end-to-end. Must
 # live in the top-most conftest — there is no repo-root conftest.py.
 pytest_plugins = ["pytester"]
+
+# Modules pytest must NOT collect on Windows: they import POSIX-only facilities
+# (`resource`, `os.uname`, `os.getuid`) at import time, before any module-level
+# skipif can fire. Empty off Windows → a no-op on the Linux/macOS legs. The list
+# is a testable pure function (tests/_posix_only_tests.py). #246 Phase B.
+collect_ignore_glob = collect_ignore_for(sys.platform, Path(__file__).resolve().parent)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
