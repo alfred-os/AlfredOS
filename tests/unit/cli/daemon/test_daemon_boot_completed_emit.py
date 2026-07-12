@@ -16,7 +16,7 @@ from .conftest import FakeAuditWriter, FakeSupervisor
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking",
 )
 def test_boot_completed_emits_row_and_writes_pidfile(
     monkeypatch: pytest.MonkeyPatch,
@@ -52,7 +52,7 @@ def test_boot_completed_emits_row_and_writes_pidfile(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking",
 )
 def test_boot_completed_exits_3_when_completion_audit_unwritable(
     monkeypatch: pytest.MonkeyPatch,

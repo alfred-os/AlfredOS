@@ -206,7 +206,7 @@ async def test_broadcast_going_down_reraises_cancelled_error() -> None:
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: os.O_NOFOLLOW (not defined in the os module on Windows; "
-    "the real boot path's write_pidfile() call is unmocked here) (#246 review)",
+    "the real boot path's write_pidfile() call is unmocked here)",
 )
 def test_going_down_broadcast_happens_before_supervisor_stop(
     monkeypatch: pytest.MonkeyPatch,

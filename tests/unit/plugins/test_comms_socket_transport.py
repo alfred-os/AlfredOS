@@ -66,10 +66,9 @@ def runtime_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: test fixture patches $HOME via monkeypatch.setenv, which "
+    reason="Windows-incompatible: test fixture patches $HOME via monkeypatch.setenv, which "
     "Windows' Path.home()/expanduser ignores in favor of %USERPROFILE% — the "
-    "resolved default_comms_socket_path() diverges from the fixture's runtime_dir "
-    "(#246 review)",
+    "resolved default_comms_socket_path() diverges from the fixture's runtime_dir",
 )
 async def test_default_socket_path_is_adapter_keyed_under_runtime_dir(runtime_dir: Path) -> None:
     path = default_comms_socket_path(_ADAPTER_ID)
@@ -232,7 +231,7 @@ async def test_listener_binds_socket_0600_owner_only(runtime_dir: Path) -> None:
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: file mode/permissions (chmod bits do not carry the same "
-    "meaning under Windows ACLs) (#246 review)",
+    "meaning under Windows ACLs)",
 )
 async def test_listener_tightens_preexisting_loose_runtime_dir_to_0700(
     runtime_dir: Path,

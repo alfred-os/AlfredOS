@@ -72,7 +72,7 @@ def test_full_kind_child_env_scrubs_operator_secrets(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: hardcoded POSIX manifest/import-root paths (#246 review)",
+    reason="Windows path-rendering: hardcoded POSIX manifest/import-root paths",
 )
 def test_full_kind_child_env_preserves_spec_and_launcher_controls(
     monkeypatch: pytest.MonkeyPatch,
@@ -94,7 +94,7 @@ def test_full_kind_child_env_preserves_spec_and_launcher_controls(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: hardcoded POSIX manifest/import-root paths (#246 review)",
+    reason="Windows path-rendering: hardcoded POSIX manifest/import-root paths",
 )
 def test_none_kind_child_env_passes_operator_env_through(
     monkeypatch: pytest.MonkeyPatch,

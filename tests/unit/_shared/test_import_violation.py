@@ -18,8 +18,8 @@ from tests.unit._shared.import_violation import ImportViolation, _remediation_me
 class TestRemediationMessage:
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="POSIX-only: WindowsPath str() renders '/'-literal fixture paths with "
-        "backslashes (#246 review)",
+        reason="Windows path-rendering: WindowsPath str() renders '/'-literal fixture paths with "
+        "backslashes",
     )
     def test_env_read_category_includes_adr_pointer(self) -> None:
         v = ImportViolation(
@@ -36,8 +36,8 @@ class TestRemediationMessage:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="POSIX-only: WindowsPath str() renders '/'-literal fixture paths with "
-        "backslashes (#246 review)",
+        reason="Windows path-rendering: WindowsPath str() renders '/'-literal fixture paths with "
+        "backslashes",
     )
     def test_adapter_import_category_includes_adr_pointer(self) -> None:
         v = ImportViolation(

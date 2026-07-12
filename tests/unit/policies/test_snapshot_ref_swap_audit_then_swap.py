@@ -27,8 +27,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: hardcoded Linux policy path; WindowsPath str() renders "
-    "it with backslashes (#246 review)",
+    reason="Linux-only: hardcoded Linux policy path; WindowsPath str() renders it with backslashes",
 )
 async def test_swap_emits_config_reload_audit_before_assignment() -> None:
     initial = make_snapshot()
@@ -58,8 +57,7 @@ async def test_swap_emits_config_reload_audit_before_assignment() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: hardcoded Linux policy path; WindowsPath str() renders "
-    "it with backslashes (#246 review)",
+    reason="Linux-only: hardcoded Linux policy path; WindowsPath str() renders it with backslashes",
 )
 async def test_swap_uses_new_file_path_not_mtime() -> None:
     """Regression for the removed placeholder ``file_path=str(new.file_mtime)``."""

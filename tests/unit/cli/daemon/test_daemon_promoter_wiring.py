@@ -106,7 +106,7 @@ def test_factory_fails_loud_on_unregistered_kind() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking",
 )
 def test_enabled_empty_set_adapter_wires_none_promoter(
     monkeypatch: pytest.MonkeyPatch,
@@ -149,7 +149,7 @@ def test_enabled_empty_set_adapter_wires_none_promoter(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking",
 )
 def test_boot_reaps_content_store_on_normal_shutdown(
     monkeypatch: pytest.MonkeyPatch,

@@ -78,7 +78,7 @@ def test_idempotency_db_path_honours_runtime_dir_override(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: file mode/permissions (#246 review)",
+    reason="POSIX-only: file mode/permissions",
 )
 def test_idempotency_db_path_falls_back_to_private_0700_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

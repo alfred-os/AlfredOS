@@ -299,7 +299,7 @@ def test_start_programming_bug_still_surfaces_loud(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.getuid family (#246 review)",
+    reason="POSIX-only: os.getuid family",
 )
 def test_status_socket_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runtime_dir = tmp_path / ".run" / "alfred"

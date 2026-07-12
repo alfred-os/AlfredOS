@@ -175,10 +175,7 @@ def test_alfred_cli_main_does_not_import_chat_graph_at_module_load() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason=(
-        "POSIX-only: rich/typer --help console-detection under CliRunner's "
-        "captured stream (#246 review)"
-    ),
+    reason=("POSIX-only: rich/typer --help console-detection under CliRunner's captured stream"),
 )
 def test_alfred_cli_main_lazy_load_keeps_help_surface_intact() -> None:
     """The lazy-load refactor must not break the ``alfred --help`` surface.

@@ -318,7 +318,7 @@ async def test_cancel_mid_relay_still_reaps_listener(runtime_dir: Path) -> None:
     sys.platform == "win32",
     reason="POSIX-only: socket.AF_UNIX (the runtime_dir/_dial_gateway_with_retry "
     "fixtures depend on AF_UNIX, which is not exposed by CPython on Windows — "
-    "the dial retry loop exhausts and raises 'never became dialable') (#246 review)",
+    "the dial retry loop exhausts and raises 'never became dialable')",
 )
 async def test_client_handshake_failure_raises_and_reaps(runtime_dir: Path) -> None:
     """A not-ok client handshake raises ``GatewayHandshakeError`` (fail-closed) and the

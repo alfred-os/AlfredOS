@@ -383,10 +383,10 @@ async def test_spawn_invokes_launcher_argv_with_scrubbed_env(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: the assertion hardcodes a forward-slash suffix "
+    reason="Windows path-separator: the assertion hardcodes a forward-slash suffix "
     "('bin/alfred-plugin-launcher.sh'), which a Windows-native path never "
     "matches; the launcher itself is a POSIX shell script irrelevant to a "
-    "Windows runtime (#246 review)",
+    "Windows runtime",
 )
 async def test_default_launcher_path_resolves_to_repo_bin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the env override, the launcher path points at the repo's bin/ script."""

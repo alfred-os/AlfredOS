@@ -61,8 +61,7 @@ def quarantine_registry() -> Iterator[HookRegistry]:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based "
-    "peer auth (#246 review)",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
 )
 def test_boot_registers_authorized_t3_nonce(
     monkeypatch: pytest.MonkeyPatch,
@@ -97,8 +96,7 @@ def test_boot_registers_authorized_t3_nonce(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based "
-    "peer auth (#246 review)",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
 )
 def test_boot_threads_same_nonce_into_comms_graph(
     monkeypatch: pytest.MonkeyPatch,
@@ -167,8 +165,7 @@ def test_boot_threads_same_nonce_into_comms_graph(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based "
-    "peer auth (#246 review)",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
 )
 def test_boot_does_not_double_call_factory(
     monkeypatch: pytest.MonkeyPatch,

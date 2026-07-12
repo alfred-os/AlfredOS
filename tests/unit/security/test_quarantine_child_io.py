@@ -224,8 +224,8 @@ async def test_spawn_dups_read_end_onto_fd3_and_passes_it(_spawn_capture: dict[s
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: manifest-path forward-slash endswith check breaks under "
-    "Windows backslash paths (#246 review)",
+    reason="Windows path-separator: manifest-path forward-slash endswith check breaks under "
+    "Windows backslash paths",
 )
 async def test_spawn_env_is_scrubbed_and_carries_no_repo_roots(
     _spawn_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -389,8 +389,7 @@ async def test_spawn_oserror_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: fd-3 dance (os.dup/dup2 literal-fd passing) is Unix "
-    "subprocess mechanics (#246 review)",
+    reason="POSIX-only: fd-3 dance (os.dup/dup2 literal-fd passing) is Unix subprocess mechanics",
 )
 async def test_spawn_without_prior_fd3_closes_installed_fd(
     monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]

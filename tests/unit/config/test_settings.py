@@ -16,8 +16,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_loads_with_defaults_when_env_missing(self) -> None:
@@ -36,8 +35,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_database_url_defaults_to_localhost_postgres(self) -> None:
@@ -57,8 +55,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_redis_url_defaults_to_localhost(self) -> None:
@@ -73,8 +70,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_redis_url_reads_alfred_redis_url_env(self) -> None:
@@ -95,8 +91,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_anthropic_api_key_is_optional(self) -> None:
@@ -110,8 +105,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_proposal_dispatch_interval_s_defaults_to_30(self) -> None:
@@ -126,8 +120,7 @@ class TestSettings:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_proposal_dispatch_interval_s_reads_env_override(self) -> None:
@@ -175,8 +168,7 @@ class TestPlaceholderApiKeyValidator:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_rejects_literal_placeholder(self) -> None:
@@ -197,8 +189,7 @@ class TestPlaceholderApiKeyValidator:
         sys.platform == "win32",
         reason=(
             "POSIX-only: Path.home() has no non-env fallback on Windows "
-            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
-            "(#246 review)"
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db)"
         ),
     )
     def test_accepts_real_looking_key(self) -> None:

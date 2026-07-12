@@ -61,8 +61,8 @@ def test_max_local_socket_line_bytes_re_exports_the_shared_bound() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: HOME-based runtime_dir resolution diverges from Windows "
-    "Path.home()/USERPROFILE (#246 review)",
+    reason="Windows-incompatible: HOME-based runtime_dir resolution diverges from Windows "
+    "Path.home()/USERPROFILE",
 )
 def test_runtime_dir_resolves_home_at_call_time(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -74,7 +74,7 @@ def test_delivery_uses_single_writev() -> None:
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: os.writev (masked as DID NOT RAISE by the finally-block "
-    "cleanup after patch() raises AttributeError) (#246 review)",
+    "cleanup after patch() raises AttributeError)",
 )
 def test_partial_write_refuses() -> None:
     read_fd, write_fd = os.pipe()
@@ -94,7 +94,7 @@ def test_partial_write_refuses() -> None:
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: os.writev (masked as DID NOT RAISE by the finally-block "
-    "cleanup after patch() raises AttributeError) (#246 review)",
+    "cleanup after patch() raises AttributeError)",
 )
 def test_eagain_refuses() -> None:
     read_fd, write_fd = os.pipe()
