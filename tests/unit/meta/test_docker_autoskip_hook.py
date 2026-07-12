@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from tests import conftest as root_conftest
@@ -22,6 +24,9 @@ class _FakeItem:
 
 
 def test_docker_items_skipped_when_daemon_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force non-Windows so this exercises the daemon-absent branch, not the
+    # unconditional win32 skip (#246 Phase B) — which has its own test below.
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(root_conftest, "docker_available", lambda: False)
     monkeypatch.setattr(root_conftest, "docker_unavailable_reason", lambda: "no daemon")
     docker_item = _FakeItem(marked=True)
@@ -33,10 +38,33 @@ def test_docker_items_skipped_when_daemon_absent(monkeypatch: pytest.MonkeyPatch
 
 
 def test_nothing_skipped_when_daemon_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Daemon-present → no skip is a NON-Windows path; on win32 docker items skip
+    # unconditionally (see the win32 test below), so pin the platform here.
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(root_conftest, "docker_available", lambda: True)
     docker_item = _FakeItem(marked=True)
     root_conftest.pytest_collection_modifyitems(items=[docker_item])
     assert docker_item.added == []
+
+
+def test_docker_items_skipped_on_win32_even_with_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On native Windows, docker-marked items skip regardless of the daemon.
+
+    Docker Desktop reports the CLI available on the Windows runner, but the
+    Linux-container Testcontainers cannot run there (the /var/run/docker.sock
+    bind is invalid), so the hook skips them unconditionally rather than letting
+    them ERROR (#246 Phase B). ``docker_available`` must NOT even be consulted.
+    """
+
+    def _must_not_probe() -> bool:
+        raise AssertionError("docker_available must not be probed on win32")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(root_conftest, "docker_available", _must_not_probe)
+    docker_item = _FakeItem(marked=True)
+    root_conftest.pytest_collection_modifyitems(items=[docker_item])
+    assert len(docker_item.added) == 1
+    assert docker_item.added[0].name == "skip"
 
 
 def test_no_probe_when_no_docker_items(monkeypatch: pytest.MonkeyPatch) -> None:
