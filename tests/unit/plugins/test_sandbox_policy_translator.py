@@ -157,6 +157,37 @@ def test_soft_bind_typo_is_refused_not_silently_skipped() -> None:
     assert exc_info.value.reason == "soft_bind_forbidden_path"
 
 
+def test_a_path_bound_both_hard_and_soft_is_refused() -> None:
+    """A dst in BOTH ``ro_binds`` and ``ro_binds_try`` reintroduces #269 — refuse it.
+
+    The allow-list alone does not catch this: ``/lib64`` is legal in
+    ``ro_binds_try``, so a policy listing it in BOTH lists validates clean — and
+    then the translator emits the HARD ``--ro-bind /lib64`` FIRST, which is exactly
+    the bwrap launch failure #269 removed ("Can't find source path /lib64" on
+    arm64). The soft entry that follows is dead. So the policy would sail past a
+    validator that says it is fine and resurrect the original bug.
+
+    A path is either always-present (hard) or arch-variable (soft). Never both.
+    """
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(
+            ro_binds=[("/usr", "/usr"), ("/lib64", "/lib64")],
+            ro_binds_try=[("/lib64", "/lib64")],
+            keep_fds=[3],
+        )
+    assert exc_info.value.reason == "soft_bind_conflicts_with_hard_bind"
+
+
+def test_hard_and_soft_collision_refused_via_toml() -> None:
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        read_policy_toml(
+            "keep_fds = [3]\n"
+            'ro_binds = [["/lib64", "/lib64"]]\n'
+            'ro_binds_try = [["/lib64", "/lib64"]]\n'
+        )
+    assert exc_info.value.reason == "soft_bind_conflicts_with_hard_bind"
+
+
 def test_soft_bind_forbidden_path_refused_via_toml() -> None:
     # The refusal holds at the POLICY-FILE boundary too (read_policy_toml
     # re-raises SandboxPolicyInvalid un-wrapped so the reason survives to the
