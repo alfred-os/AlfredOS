@@ -263,8 +263,18 @@ async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
         with contextlib.suppress(ProcessLookupError, OSError):
             process.terminate()
     loop = asyncio.get_running_loop()
-    with contextlib.suppress(Exception):
+    try:
         await loop.run_in_executor(None, process.wait)
+    except Exception as exc:
+        # Best-effort teardown (never raises), but LOUD not silent (#414, hard
+        # rule #7): a reap gone wrong surfaces its error class instead of
+        # vanishing. Mirrors the security-child sibling
+        # (``security.quarantine_child.reap_failed``) + ``gateway.adapter.spawn_failed``.
+        # ``except Exception`` (not ``BaseException``) so cooperative cancellation
+        # still propagates; the emit is ``suppress``-wrapped so a structlog-emit
+        # failure during teardown cannot escape either.
+        with contextlib.suppress(Exception):
+            log.warning("gateway.adapter.reap_failed", error_class=type(exc).__name__)
 
 
 class _GatewayAdapterChild:
