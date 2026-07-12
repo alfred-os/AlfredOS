@@ -68,6 +68,28 @@ def test_linux_policy_parses_and_isolates_filesystem() -> None:
     assert "--die-with-parent" in joined
 
 
+def test_linux_policy_binds_lib64_softly_for_arm64_portability() -> None:
+    """``/lib64`` is a SOFT bind (``--ro-bind-try``) — the #269 arm64 fix.
+
+    Same failure the quarantined-LLM policy had: ``/lib64`` holds the dynamic
+    linker on x86-64 but does NOT exist on arm64 (the aarch64 loader lives under
+    the already-bound ``/lib``), so a HARD ``--ro-bind /lib64`` dies at launch
+    with "Can't find source path /lib64". ``/etc/ssl/certs`` stays a HARD bind —
+    it is not arch-variable, and a Discord adapter that silently lost its CA
+    bundle would fail TLS at runtime instead of failing loud at launch.
+    """
+    policy = read_policy_toml(_linux_policy_text())
+    flags = policy_to_bwrap_flags(policy)
+    hard_sources = [flags[i + 1] for i, flag in enumerate(flags) if flag == "--ro-bind"]
+
+    assert ("/lib64", "/lib64") in policy.ro_binds_try
+    assert "--ro-bind-try /lib64 /lib64" in " ".join(flags)
+    assert "/lib64" not in hard_sources
+    # The non-arch-variable trees stay HARD (fail loud if absent).
+    assert "/usr" in hard_sources
+    assert "/etc/ssl/certs" in hard_sources
+
+
 def test_linux_policy_binds_tls_certs_unlike_quarantined_llm() -> None:
     # The Discord plugin opens a WSS connection to the gateway and needs the
     # system CA bundle to verify the TLS chain — the quarantined LLM does not.

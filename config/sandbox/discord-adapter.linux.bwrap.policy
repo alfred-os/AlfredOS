@@ -27,9 +27,9 @@
 # Filesystem confinement
 # ----------------------------------------------------------------------------
 # Read-only binds for the interpreter + its shared libraries ONLY, plus the
-# system CA bundle. We bind the usrmerged system trees (/usr, /lib, /lib64)
-# read-only so CPython + discord.py can exec and dynamically link, and NOTHING
-# else:
+# system CA bundle. We bind the usrmerged system trees (/usr, /lib — plus /lib64
+# SOFTLY, see the arch note on `ro_binds_try` below) read-only so CPython +
+# discord.py can exec and dynamically link, and NOTHING else:
 #
 #   * NO /etc bind (other than the explicit /etc/ssl/certs read below) —
 #     /etc/passwd, /etc/shadow, ssh configs, the host's secrets-in-config all
@@ -49,8 +49,23 @@
 ro_binds = [
   ["/usr", "/usr"],
   ["/lib", "/lib"],
-  ["/lib64", "/lib64"],
   ["/etc/ssl/certs", "/etc/ssl/certs"],
+]
+
+# SOFT read-only bind (#269) — bound iff the source EXISTS, else skipped
+# (`--ro-bind-try`). `/lib64` holds the dynamic linker on x86-64
+# (`ld-linux-x86-64.so.2`) but does NOT exist on arm64, where the loader is
+# `/lib/ld-linux-aarch64.so.1` — already covered by the `/lib` bind above. A
+# HARD `--ro-bind /lib64` kills the sandbox launch on aarch64 (`bwrap: Can't
+# find source path /lib64`), so the adapter child never starts. Soft-binding it
+# makes these SAME policy bytes portable across both arches.
+#
+# `/etc/ssl/certs` deliberately stays a HARD bind above: it is NOT arch-variable,
+# and an adapter that silently lost its CA bundle would fail TLS to the Discord
+# gateway at runtime instead of failing loud at launch. Only genuinely
+# arch-variable paths belong here.
+ro_binds_try = [
+  ["/lib64", "/lib64"],
 ]
 
 # A single writable scratch directory, backed by an ephemeral tmpfs that dies
