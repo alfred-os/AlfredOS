@@ -65,26 +65,36 @@ pytestmark = pytest.mark.skipif(
 def _real_policy_body_with_test_binds(plugin_dir: Path) -> str:
     """The REAL quarantined-LLM Linux policy body + the test-interpreter binds.
 
-    We parse the shipped policy's ``ro_binds`` (so the /usr, /lib, /lib64
-    confinement is the production set verbatim), APPEND the venv-interpreter +
-    plugin_dir binds the pytest interpreter needs, and re-emit a TOML policy
-    body. We KEEP the policy's ``unshare`` / ``die_with_parent`` / ``keep_fds``
-    untouched and DROP only the production tmpfs scratch (``/run/alfred/...``)
-    — irrelevant to the containment assertions and avoids a mountpoint-exists
-    dependency in the test root. We deliberately do NOT add /etc or /bin, so the
-    escape assertions stay meaningful.
+    We parse the shipped policy's ``ro_binds`` AND ``ro_binds_try`` (so the
+    /usr, /lib, /lib64 confinement is the production set verbatim), APPEND the
+    venv-interpreter + plugin_dir binds the pytest interpreter needs, and re-emit
+    a TOML policy body. We KEEP the policy's ``unshare`` / ``die_with_parent`` /
+    ``keep_fds`` untouched and DROP only the production tmpfs scratch
+    (``/run/alfred/...``) — irrelevant to the containment assertions and avoids a
+    mountpoint-exists dependency in the test root. We deliberately do NOT add
+    /etc or /bin, so the escape assertions stay meaningful.
     """
     shipped = tomllib.loads(_REAL_POLICY.read_text())
-    # Drop any shipped bind whose SOURCE does not exist on this host. The
-    # production policy targets x86-64 Debian Bookworm, where ``/lib64`` is a
-    # real directory holding ld-linux-x86-64.so.2; on aarch64 (and other arches)
-    # ``/lib64`` does not exist and ``--ro-bind /lib64`` would fail with "Can't
-    # find source path". bwrap has no tolerant ``--ro-bind`` in the schema this
-    # PR ships (``--ro-bind-try`` is a #230 schema item), so the TEST filters to
-    # existing sources — the /usr + /lib binds carry the loader via the usrmerge
-    # symlink on every arch, so containment stays meaningful.
-    ro_binds: list[tuple[str, str]] = [
-        (src, dst) for src, dst in shipped.get("ro_binds", []) if Path(src).exists()
+    # HARD binds pass through VERBATIM — no existence filter. /usr and /lib always
+    # exist, and a missing one must fail loud here exactly as it would in
+    # production rather than be quietly dropped into a weaker test sandbox.
+    ro_binds: list[tuple[str, str]] = [(src, dst) for src, dst in shipped.get("ro_binds", [])]
+
+    # SOFT binds (#269) pass through as SOFT binds, so this reconstruction mirrors
+    # production on EVERY arch: bwrap binds `/lib64` where it exists (x86-64, where
+    # it holds ld-linux-x86-64.so.2 — the ELF interpreter of every dynamically
+    # linked binary, so it is LOAD-BEARING for exec) and skips it where it does not
+    # (arm64, where the loader arrives via the already-bound /lib).
+    #
+    # Rebuilding from `ro_binds` ALONE — as this helper used to, back when /lib64
+    # was a hard bind the test had to existence-filter itself — would now DROP
+    # /lib64 entirely once it moved to `ro_binds_try`. On x86-64 the sandboxed
+    # interpreter would then fail to exec, and every "the plugin cannot read
+    # /etc/passwd" assertion below would hold VACUOUSLY (a child that never runs
+    # reads nothing). That is the #245 paper-gate shape — a containment proof that
+    # proves containment of nothing — so the soft binds are carried explicitly.
+    ro_binds_try: list[tuple[str, str]] = [
+        (src, dst) for src, dst in shipped.get("ro_binds_try", [])
     ]
 
     # The pytest interpreter is ``sys.executable`` (venv python); its script
@@ -112,9 +122,11 @@ def _real_policy_body_with_test_binds(plugin_dir: Path) -> str:
         ro_binds.append((root, root))
 
     binds_toml = ",\n  ".join(f'["{src}", "{dst}"]' for src, dst in ro_binds)
+    soft_binds_toml = ",\n  ".join(f'["{src}", "{dst}"]' for src, dst in ro_binds_try)
     unshare_toml = ", ".join(f'"{ns}"' for ns in shipped.get("unshare", []))
     lines = [
         "ro_binds = [\n  " + binds_toml + "\n]",
+        "ro_binds_try = [\n  " + soft_binds_toml + "\n]",
         f"unshare = [{unshare_toml}]",
         f"dev = {str(shipped.get('dev', True)).lower()}",
         f"die_with_parent = {str(shipped.get('die_with_parent', True)).lower()}",
