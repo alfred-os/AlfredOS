@@ -1133,8 +1133,8 @@ jobs:
           for attempt in 1 2 3; do
             sudo apt-get update && break
             echo "::warning::apt-get update failed (attempt ${attempt}/3); retrying"
-            sleep $((attempt * 5))
             [ "${attempt}" -eq 3 ] && { echo "::error::apt-get update failed 3x — package-mirror flake on a merge-blocking lane, not a code failure."; exit 1; }
+            sleep $((attempt * 5))
           done
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
@@ -1221,8 +1221,8 @@ jobs:
           for attempt in 1 2 3; do
             sudo apt-get update && break
             echo "::warning::apt-get update failed (attempt ${attempt}/3); retrying"
-            sleep $((attempt * 5))
             [ "${attempt}" -eq 3 ] && { echo "::error::apt-get update failed 3x — package-mirror flake on a merge-blocking lane, not a code failure."; exit 1; }
+            sleep $((attempt * 5))
           done
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
@@ -1233,15 +1233,18 @@ jobs:
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv sync --frozen --dev
-      - name: Cache the proto-managed py3.14 toolchain
-        if: steps.check.outputs.has_spawn == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.proto
-          key: proto-${{ runner.os }}-${{ runner.arch }}-v0.58.2-py3.14
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
+        # DELIBERATELY NOT CACHED. `PROTO_HOME=$HOME/.proto`, and this step runs
+        # `uv pip install --python "${PROTO_PY}" .` — so alfred AND ALL ITS DEPS land in
+        # ~/.proto/tools/python/3.14.x/lib/python3.14/site-packages, INSIDE any cache of
+        # ~/.proto. Caching that tree means: on a cache hit `uv pip install .` finds the
+        # deps already satisfied and SKIPS them, so this lane would provision the
+        # sandboxed T3 child against a STALE, cross-commit dependency tree instead of the
+        # PR's. That is a soundness hole in the one lane whose entire job is to prove the
+        # child execs the RIGHT code — traded for an unmeasured speedup. The network flake
+        # a cache would have mitigated is handled by the retries below instead.
         env:
           # Keep in lockstep with the arm64 twin's pin.
           PROTO_INSTALL_VERSION: "0.58.2"
@@ -1287,8 +1290,8 @@ jobs:
               break
             fi
             echo "::warning::proto installer fetch failed (attempt ${attempt}/3); retrying"
-            sleep $((attempt * 5))
             [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the proto installer after 3 attempts (moonrepo.dev unreachable) — this is a network flake on a merge-blocking lane, not a code failure."; exit 1; }
+            sleep $((attempt * 5))
           done
           bash /tmp/proto-install.sh "${PROTO_INSTALL_VERSION}" --yes
           export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
@@ -1558,10 +1561,17 @@ jobs:
           # report green while gating NOTHING. `tee` + `set -o pipefail` keep a FAILED
           # run failing; the skip-parse then fails a green-but-vacuous run.
           sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
-            tests/adversarial/sandbox_escape -q \
+            tests/adversarial/sandbox_escape -q -rs \
             -p no:cacheprovider --cov-fail-under=0 | tee /tmp/sbx_corpus.out
-          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/sbx_corpus.out; then
-            echo "::error::bwrap-gated sandbox-escape payloads SKIPPED on the privileged lane — this job is their only required gate, so the containment corpus would be paper-only (#245 / #248)."
+          # Fail ONLY on the BWRAP gate's skip reason — not on any skip. The corpus
+          # contains DELIBERATE, environment-conditional skips the author chose on
+          # purpose (a netns/RTM_NEWADDR guard that "skips loudly rather than fail", and
+          # two jq-absent skipifs). A blanket "N skipped => exit 1" would turn a runner
+          # image change into a REPO-WIDE merge block on a required lane. The only skip
+          # that makes THIS gate vacuous is the bwrap one — so that is the only one we
+          # fail on. (`-rs` prints skip reasons, which is what this greps.)
+          if grep -q "bwrap required for the kernel-observable" /tmp/sbx_corpus.out; then
+            echo "::error::the bwrap-gated sandbox-escape payloads SKIPPED on the privileged lane — this job is their only required gate, so the containment corpus would be paper-only (#245 / #248). bwrap provisioning regressed."
             exit 1
           fi
           grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/sbx_corpus.out \
@@ -1711,8 +1721,8 @@ jobs:
           for attempt in 1 2 3; do
             sudo apt-get update && break
             echo "::warning::apt-get update failed (attempt ${attempt}/3); retrying"
-            sleep $((attempt * 5))
             [ "${attempt}" -eq 3 ] && { echo "::error::apt-get update failed 3x — package-mirror flake on a merge-blocking lane, not a code failure."; exit 1; }
+            sleep $((attempt * 5))
           done
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
@@ -1723,15 +1733,18 @@ jobs:
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv sync --frozen --dev
-      - name: Cache the proto-managed py3.14 toolchain
-        if: steps.check.outputs.has_spawn == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.proto
-          key: proto-${{ runner.os }}-${{ runner.arch }}-v0.58.2-py3.14
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
+        # DELIBERATELY NOT CACHED. `PROTO_HOME=$HOME/.proto`, and this step runs
+        # `uv pip install --python "${PROTO_PY}" .` — so alfred AND ALL ITS DEPS land in
+        # ~/.proto/tools/python/3.14.x/lib/python3.14/site-packages, INSIDE any cache of
+        # ~/.proto. Caching that tree means: on a cache hit `uv pip install .` finds the
+        # deps already satisfied and SKIPS them, so this lane would provision the
+        # sandboxed T3 child against a STALE, cross-commit dependency tree instead of the
+        # PR's. That is a soundness hole in the one lane whose entire job is to prove the
+        # child execs the RIGHT code — traded for an unmeasured speedup. The network flake
+        # a cache would have mitigated is handled by the retries below instead.
         # Identical to the amd64 sibling — proto ships an aarch64
         # python-build-standalone, so the same glob + prefix-bind contract holds.
         env:
@@ -1755,8 +1768,8 @@ jobs:
               break
             fi
             echo "::warning::proto installer fetch failed (attempt ${attempt}/3); retrying"
-            sleep $((attempt * 5))
             [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the proto installer after 3 attempts (moonrepo.dev unreachable) — this is a network flake on a merge-blocking lane, not a code failure."; exit 1; }
+            sleep $((attempt * 5))
           done
           bash /tmp/proto-install.sh "${PROTO_INSTALL_VERSION}" --yes
           export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
@@ -1906,14 +1919,17 @@ jobs:
           # report green while gating NOTHING. `tee` + `set -o pipefail` keep a FAILED
           # run failing; the skip-parse then fails a green-but-vacuous run.
           sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
-            tests/adversarial/sandbox_escape -q \
+            tests/adversarial/sandbox_escape -q -rs \
             -p no:cacheprovider --cov-fail-under=0 | tee /tmp/sbx_corpus_arm64.out
-          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/sbx_corpus_arm64.out; then
-            echo "::error::bwrap-gated sandbox-escape payloads SKIPPED on the ARM64 privileged lane — the only aarch64 gate for these payloads — this job is their only required gate, so the containment corpus would be paper-only (#245 / #248)."
+          # Fail ONLY on the BWRAP gate's skip reason (see the amd64 twin): the corpus
+          # has deliberate netns/jq-conditional skips, and failing on those would let a
+          # runner-image change block every merge in the repo.
+          if grep -q "bwrap required for the kernel-observable" /tmp/sbx_corpus_arm64.out; then
+            echo "::error::the bwrap-gated sandbox-escape payloads SKIPPED on the ARM64 privileged lane — the ONLY aarch64 gate for these payloads. The containment corpus would be paper-only on arm64 (#245 / #248)."
             exit 1
           fi
           grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/sbx_corpus_arm64.out \
-            || { echo "::error::sandbox-escape corpus did not report a passing run."; exit 1; }
+            || { echo "::error::sandbox-escape corpus did not report a passing run on arm64."; exit 1; }
       - name: Assert the Discord kernel proof RUNS (not skipped) — FIX-7 paper-gate guard (#245)
         if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/egress/test_discord_policy_kernel_enforced.py') != ''
         run: |
