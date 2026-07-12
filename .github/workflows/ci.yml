@@ -1049,12 +1049,12 @@ jobs:
     # what makes `test_alfred_core_image_bwrap.py` green here — amd64's
     # `/lib64` ld-linux-x86-64 path does not exist on arm64.
     #
-    # NOTE — no `integration-privileged-arm64` twin (yet): its first arm64 run
-    # caught a REAL arm64 bug (the dual-LLM real-bwrap-spawn child produces a
-    # truncated frame on aarch64 -> `read_frame_failed` -> a `ck_audit_log_result`
-    # CHECK violation), tracked in #269 (overlapping #252). Rather than land a red
-    # leg on `main`, that privileged arm64 leg is added with the #269 fix (after
-    # #251 un-swallows the child stderr to diagnose it). See ADR-0034 Decision 1.
+    # The `integration-privileged-arm64` twin now EXISTS (see the job below):
+    # deferred while its first arm64 run's REAL bug was open (#269 — the hard
+    # `--ro-bind /lib64`, absent on aarch64, killed the dual-LLM bwrap child at
+    # launch; #252's `ck_audit_log_result` CHECK gap was its downstream mask and
+    # is closed). Both are fixed, so the privileged arm64 leg is re-added and
+    # gates merge. See ADR-0034 Decision 1.
     #
     # ADD, do NOT RENAME (ADR-0034): a SEPARATE job emitting the SEPARATE check
     # context `Integration (arm64)` alongside the unchanged amd64 `integration`
@@ -1550,6 +1550,265 @@ jobs:
           fi
           grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/discord_kernel_proof.out \
             || { echo "::error::Discord policy kernel proof did not report a passing run."; exit 1; }
+      - name: Assert the dual-LLM quarantine-child real-spawn leg RAN (not skipped) — #245 / #269
+        # #269 closed a gap here: the gateway, brokered-fd and Discord legs each had
+        # an assert-RAN guard, but `test_quarantine_child_real_spawn.py` — the REAL
+        # dual-LLM bwrap child round-trip, the single most arch-sensitive leg in the
+        # repo — had none. It `skipif`s on (not bwrap) / (sysname != Linux) /
+        # (geteuid != 0) / (not ALFRED_QUARANTINE_CHILD_PYTHON), so a provisioning
+        # regression would silently downgrade it to a skip and this required lane
+        # would still go green while gating nothing (the exact #245 failure mode).
+        # It is ALSO the leg that proves the #269 `/lib64` soft-bind on the arm64
+        # twin below, so an un-asserted skip there would make the whole arm64 gate
+        # vacuous. Run it in isolation and fail on skip / non-pass.
+        #
+        # NOTE: the test path appears TWICE (the `if: hashFiles(...)` guard AND the
+        # `pytest` arg). Keep them in sync — a rename that updates only one silently
+        # disarms this gate.
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/test_quarantine_child_real_spawn.py') != ''
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          # `tee` keeps pytest's summary on disk for the skip-parse; `set -o pipefail`
+          # still propagates a FAILED run's non-zero exit. Do not "simplify" it away.
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/test_quarantine_child_real_spawn.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/quarantine_child_spawn.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/quarantine_child_spawn.out; then
+            echo "::error::dual-LLM quarantine-child real-spawn leg SKIPPED on the privileged lane — paper-gate hazard (#245); ALFRED_QUARANTINE_CHILD_PYTHON / bwrap / euid-0 provisioning regressed."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/quarantine_child_spawn.out \
+            || { echo "::error::dual-LLM quarantine-child real-spawn leg did not report a passing run."; exit 1; }
+
+  integration-privileged-arm64:
+    # Axis 2 x Axis 3 — the arm64 twin of `integration-privileged`, re-added by
+    # #269. THE most arch-sensitive lane in the repo: it runs the REAL bwrap
+    # dual-LLM quarantine-child spawn, the gateway adapter child spawn, and the
+    # kernel-observable sandbox-escape corpus on native aarch64.
+    #
+    # WHY IT WAS DEFERRED, AND WHAT FIXED IT. Its first arm64 run caught a REAL
+    # arm64 bug: the shipped bwrap policies hard-bound `/lib64` (`--ro-bind`),
+    # which holds the dynamic linker on x86-64 but does NOT exist on arm64 (the
+    # aarch64 loader is `/lib/ld-linux-aarch64.so.1`, under the already-bound
+    # `/lib`). bwrap died at launch with "Can't find source path /lib64", the
+    # quarantined child never emitted a frame, and the host surfaced a truncated
+    # `read_frame_failed`. Rather than land a red leg on `main`, the leg was
+    # deferred to #269. The fix — binding `/lib64` via `ro_binds_try`
+    # (`--ro-bind-try`: bind iff present, else skip) in both shipped Linux
+    # policies — makes the same policy bytes portable across arches, so this leg
+    # is now green and re-added. It is the merge-blocking proof of that fix.
+    #
+    # ADD, do NOT RENAME (ADR-0034): a SEPARATE job emitting the SEPARATE check
+    # context `Integration (privileged Linux, real spawn) (arm64)` alongside the
+    # unchanged amd64 `integration-privileged`. Folding the two into a matrix
+    # would RENAME the required amd64 context and break branch protection on
+    # `main` for every open PR.
+    #
+    # The provisioning recipe is arch-neutral and mirrors the amd64 sibling
+    # VERBATIM (sudo for euid 0 while keeping the root-accessible Docker socket
+    # reachable for testcontainers; apt bubblewrap + jq; apparmor userns relax;
+    # a hermetic proto-managed python-build-standalone 3.14 — proto publishes
+    # arm64 PBS — bound into the sandbox per ADR-0030). See `integration-privileged`
+    # above for the full rationale behind each step; the comments are not
+    # duplicated here.
+    name: Integration (privileged Linux, real spawn) (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check for privileged-spawn corpus
+        id: check
+        run: |
+          set -euo pipefail
+          if find tests/integration tests/smoke -type f -name '*.py' \
+              -print -quit 2>/dev/null | grep -q .; then
+            echo "has_spawn=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_spawn=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no integration/smoke corpus — skipping privileged-spawn arm64 job."
+          fi
+      - name: Install bubblewrap + jq and relax unprivileged-userns
+        if: steps.check.outputs.has_spawn == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap jq
+          bwrap --version
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        if: steps.check.outputs.has_spawn == 'true'
+      - if: steps.check.outputs.has_spawn == 'true'
+        run: uv python install 3.14
+      - if: steps.check.outputs.has_spawn == 'true'
+        run: uv sync --frozen --dev
+      - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
+        id: bound_py
+        if: steps.check.outputs.has_spawn == 'true'
+        # Identical to the amd64 sibling — proto ships an aarch64
+        # python-build-standalone, so the same glob + prefix-bind contract holds.
+        run: |
+          set -euo pipefail
+          export PROTO_HOME="${HOME}/.proto"
+          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes
+          export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
+          proto install python 3.14
+          PROTO_PY="$(ls -d "${PROTO_HOME}"/tools/python/3.14.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+          if [ -z "${PROTO_PY}" ] || [ ! -x "${PROTO_PY}" ]; then
+            echo "no proto-managed python3 under ${PROTO_HOME}/tools/python" >&2
+            ls -la "${PROTO_HOME}/tools/python" 2>&1 >&2 || true
+            exit 1
+          fi
+          "${PROTO_PY}" -V
+          chmod -R a+rX "${PROTO_HOME}"
+          sudo ln -sf "${PROTO_PY}" /usr/local/bin/python3
+          python3 -V
+          uv pip install --python "${PROTO_PY}" .
+          CHILD_FILE="$("${PROTO_PY}" -c 'import alfred.security.quarantine_child as m; print(m.__file__)')"
+          echo "quarantine_child resolves at: ${CHILD_FILE}"
+          test -n "${CHILD_FILE}"
+          echo "bound_py=${PROTO_PY}" >> "$GITHUB_OUTPUT"
+          echo "Hermetic proto py3.14 (aarch64) provisioned; launcher binds its prefix."
+      - name: Assert the spawn-enabling preconditions hold (euid 0 + bwrap + bound py)
+        if: steps.check.outputs.has_spawn == 'true'
+        env:
+          BOUND_PY: ${{ steps.bound_py.outputs.bound_py }}
+          ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          EUID_UNDER_SUDO=$(sudo python3 -c 'import os; print(os.geteuid())')
+          echo "euid under sudo: ${EUID_UNDER_SUDO}"
+          if [ "${EUID_UNDER_SUDO}" != "0" ]; then
+            echo "::error::sudo did not yield euid 0 (got ${EUID_UNDER_SUDO}); the root-gated spawn legs would SKIP and this arm64 gate would be paper-only (see #245)."
+            exit 1
+          fi
+          if ! sudo bash -c 'command -v bwrap' >/dev/null 2>&1; then
+            echo "::error::bwrap not on root PATH; the bwrap-gated real-spawn legs would SKIP and this arm64 gate would be paper-only (see #245)."
+            exit 1
+          fi
+          if [ -z "${BOUND_PY}" ] || [ ! -x "${BOUND_PY}" ]; then
+            echo "::error::bound py3.14 (ALFRED_QUARANTINE_CHILD_PYTHON) missing or not executable ('${BOUND_PY}'); the real-spawn quarantine-child leg would SKIP and gate nothing (see #248)."
+            exit 1
+          fi
+          if [ -z "${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" ] || [ ! -x "${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" ]; then
+            echo "::error::bound py3.14 (ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON) missing or not executable; the gateway real-spawn leg would SKIP and gate nothing (devops-006 / #245)."
+            exit 1
+          fi
+          echo "Preconditions hold on aarch64: euid 0 + bwrap + bound py3.14 (${BOUND_PY}) — the root-gated legs will EXECUTE, not skip."
+      - name: Run real-spawn integration + smoke legs as root (arm64)
+        if: steps.check.outputs.has_spawn == 'true'
+        # Same `sudo env` PATH/child-python threading as the amd64 sibling (sudo
+        # strips the environment even with -E, so uv's dir and both child-python
+        # vars are carried explicitly). `--cov-fail-under=0`: this lane is about
+        # EXECUTION of the arch-sensitive spawn legs, not coverage thresholds
+        # (arch-invariant — amd64 stays the single coverage source, ADR-0034).
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+          ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"
+          UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env \
+            "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest tests/integration tests/smoke -q \
+            -p no:cacheprovider --cov-fail-under=0 -m "not real_llm"
+      - name: Assert the dual-LLM quarantine-child real-spawn leg RAN (not skipped) — #269 proof
+        # THE gate this whole job exists for: the real bwrap dual-LLM child
+        # round-trip on aarch64. It is what the #269 `/lib64` soft-bind fixes, and
+        # it `skipif`s on (not bwrap) / (sysname != Linux) / (geteuid != 0) /
+        # (not ALFRED_QUARANTINE_CHILD_PYTHON) — so without this runtime assert a
+        # provisioning regression would silently skip it and this lane would go
+        # green while proving NOTHING about arm64 (the #245 paper-gate failure
+        # mode, one level deeper). Keep the test path in the `if:` guard and the
+        # `pytest` arg in sync.
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/test_quarantine_child_real_spawn.py') != ''
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/test_quarantine_child_real_spawn.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/quarantine_child_spawn_arm64.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/quarantine_child_spawn_arm64.out; then
+            echo "::error::dual-LLM quarantine-child real-spawn leg SKIPPED on the arm64 privileged lane — this lane's raison d'être; the #269 /lib64 proof would be vacuous (paper-gate hazard, #245)."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/quarantine_child_spawn_arm64.out \
+            || { echo "::error::dual-LLM quarantine-child real-spawn leg did not report a passing run on arm64."; exit 1; }
+      - name: Assert the gateway real-spawn test RUNS (not skipped) — #245 paper-gate guard
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py') != ''
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+          ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/gw_probe_spawn_arm64.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/gw_probe_spawn_arm64.out; then
+            echo "::error::gateway real-spawn test SKIPPED on the arm64 privileged lane — paper-gate hazard (#245)."
+            exit 1
+          fi
+          grep -q "1 passed" /tmp/gw_probe_spawn_arm64.out || { echo "::error::gateway real-spawn test did not report '1 passed' on arm64."; exit 1; }
+      - name: Assert the brokered-fd real-spawn leg RAN (not skipped) — #245 paper-gate guard
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/test_quarantine_fd_broker_real_spawn.py') != ''
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/test_quarantine_fd_broker_real_spawn.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/broker_fd_spawn_arm64.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/broker_fd_spawn_arm64.out; then
+            echo "::error::brokered-fd real-spawn leg SKIPPED on the arm64 privileged lane — paper-gate hazard (#245)."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])1 passed([^0-9]|$)" /tmp/broker_fd_spawn_arm64.out || { echo "::error::brokered-fd real-spawn leg did not report exactly '1 passed' on arm64."; exit 1; }
+      - name: Run the bwrap-gated sandbox-escape adversarial corpus (arm64, #248)
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/adversarial/sandbox_escape/**/*.py') != ''
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"
+          UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
+            tests/adversarial/sandbox_escape -q \
+            -p no:cacheprovider --cov-fail-under=0
+      - name: Assert the Discord kernel proof RUNS (not skipped) — FIX-7 paper-gate guard (#245)
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/egress/test_discord_policy_kernel_enforced.py') != ''
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/egress/test_discord_policy_kernel_enforced.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/discord_kernel_proof_arm64.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/discord_kernel_proof_arm64.out; then
+            echo "::error::Discord policy kernel proof SKIPPED on the arm64 privileged lane — paper-gate hazard (#245 / FIX-7)."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/discord_kernel_proof_arm64.out \
+            || { echo "::error::Discord policy kernel proof did not report a passing run on arm64."; exit 1; }
 
 
   coverage-gates:
