@@ -143,6 +143,46 @@ class SandboxPolicy(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _refuse_hard_bind_of_arch_variable_path(self) -> SandboxPolicy:
+        """THE class-closing invariant: an arch-variable path is never HARD-bound (#269).
+
+        A path in :data:`_SOFT_BINDABLE_PATHS` is *declared* arch-variable — it
+        legitimately does not exist on some supported architecture. bwrap aborts
+        the entire launch on a missing HARD bind **source**, so hard-binding such
+        a path is, by the schema's own declaration, a launch failure waiting for
+        the other architecture. That is #269, exactly.
+
+        **Keying on the SOURCE is what closes the class rather than an instance.**
+        The first attempt at this guard compared destinations and only caught the
+        case where the same path appeared in *both* lists. It accepted all of the
+        following — each of which still emits a hard bind of ``/lib64`` and still
+        dies on arm64:
+
+        * ``ro_binds=[("/lib64", "/lib64")]`` with NO soft entry — i.e. someone
+          simply moves the path back. **The literal #269 bug, reintroduced.**
+        * ``ro_binds=[("/lib64", "/lib64-compat")]`` + soft ``/lib64`` — same
+          fatal source, different destination.
+        * ``rw_binds=[("/lib64", "/lib64")]`` — emits ``--bind``, not ``--ro-bind``,
+          and dies identically.
+
+        bwrap cares about the source. So does this validator.
+        """
+        for field, binds in (("ro_binds", self.ro_binds), ("rw_binds", self.rw_binds)):
+            for src, dst in binds:
+                if src in _SOFT_BINDABLE_PATHS:
+                    raise SandboxPolicyInvalid(
+                        reason="arch_variable_path_hard_bound",
+                        detail=(
+                            f"{src!r} is declared arch-variable (it may not exist on every "
+                            f"supported architecture) but is HARD-bound in {field} as "
+                            f"{src!r} -> {dst!r}. A hard bind of a missing source aborts the "
+                            f"whole bwrap launch. Declare it in ro_binds_try instead, where a "
+                            f"missing source is skipped."
+                        ),
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _refuse_hard_and_soft_bind_of_same_path(self) -> SandboxPolicy:
         # #269 follow-up: the allow-list alone does NOT catch this. `/lib64` is
         # legal in `ro_binds_try`, so a policy listing it in BOTH lists validates
