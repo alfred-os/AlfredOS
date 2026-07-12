@@ -1014,7 +1014,7 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: hardcoded Linux runtime path assumed (#246 review)",
+    reason="Linux-only: hardcoded Linux runtime path assumed",
 )
 def test_queue_proposal_or_exit_denial_path_handles_client_without_repo_attribute(
     tmp_path: Path,

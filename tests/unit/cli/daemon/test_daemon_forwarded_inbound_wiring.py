@@ -212,7 +212,7 @@ class _ImmediateAcceptListener:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows) (#246 review)",
+    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows)",
 )
 def test_gateway_leg_runner_built_with_forwarded_receiver(
     monkeypatch: pytest.MonkeyPatch,
@@ -297,7 +297,7 @@ def test_gateway_leg_runner_built_with_forwarded_receiver(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows) (#246 review)",
+    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows)",
 )
 def test_arm_time_preview_warning_emitted_once(
     monkeypatch: pytest.MonkeyPatch,

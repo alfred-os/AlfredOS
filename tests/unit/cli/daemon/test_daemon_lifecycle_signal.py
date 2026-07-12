@@ -155,7 +155,7 @@ def quarantine_registry() -> Any:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_ready_row_emitted_after_boot_completed(
     monkeypatch: pytest.MonkeyPatch,
@@ -182,7 +182,7 @@ def test_ready_row_emitted_after_boot_completed(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_ready_epoch_matches_going_down_epoch(
     monkeypatch: pytest.MonkeyPatch,
@@ -206,7 +206,7 @@ def test_ready_epoch_matches_going_down_epoch(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_going_down_row_emitted_at_drain(
     monkeypatch: pytest.MonkeyPatch,
@@ -251,7 +251,7 @@ def test_going_down_not_emitted_when_boot_refuses(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_default_empty_adapters_emits_audit_rows_without_wire(
     monkeypatch: pytest.MonkeyPatch,
@@ -272,7 +272,7 @@ def test_default_empty_adapters_emits_audit_rows_without_wire(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_boot_path_registers_runner_send_notification_with_broadcaster(
     monkeypatch: pytest.MonkeyPatch,
@@ -355,7 +355,7 @@ def test_boot_path_never_constructs_lifecycle_frame_models() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_going_down_emit_failure_still_runs_the_reap_chain(
     monkeypatch: pytest.MonkeyPatch,
@@ -425,7 +425,7 @@ def test_going_down_emit_failure_still_runs_the_reap_chain(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid",
 )
 def test_ready_emit_failure_skips_going_down(
     monkeypatch: pytest.MonkeyPatch,

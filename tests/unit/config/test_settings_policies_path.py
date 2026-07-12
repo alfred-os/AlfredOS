@@ -18,9 +18,9 @@ from alfred.config.settings import Settings
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: hardcoded /etc/alfred runtime-config root "
+    reason="Linux-only: hardcoded /etc/alfred runtime-config root "
     "(AlfredOS is a Linux-only runtime; the default anchors at a POSIX "
-    "absolute path) (#246 review)",
+    "absolute path)",
 )
 def test_policies_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default anchors at /etc/alfred/policies.yaml — never CWD-relative."""

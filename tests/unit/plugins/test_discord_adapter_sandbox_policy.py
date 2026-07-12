@@ -94,9 +94,9 @@ def test_linux_policy_keep_fd_3_for_broker_channel() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: DISCORD_EGRESS_SOCKET_PATH.parent is a hardcoded Linux "
+    reason="Linux-only: DISCORD_EGRESS_SOCKET_PATH.parent is a hardcoded Linux "
     "path; WindowsPath str() renders it with backslashes, mismatching the "
-    "bwrap policy's forward-slash literal (#246 review)",
+    "bwrap policy's forward-slash literal",
 )
 def test_linux_policy_rw_binds_egress_socket_dir() -> None:
     # FIX-5 / G7-4: the egress socket dir must be rw-bound (--bind), NOT

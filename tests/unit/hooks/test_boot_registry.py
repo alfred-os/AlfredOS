@@ -146,7 +146,7 @@ def test_boot_registry_with_deny_gate_refuses_dlp_subscriber(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason=("POSIX-only: hardcoded forward-slash path-string literals in the guard (#246 review)"),
+    reason=("Windows path-separator: hardcoded forward-slash path-string literals in the guard"),
 )
 def test_boot_declares_every_in_tree_declare_hookpoints_publisher() -> None:
     """Completeness guard: every ``def declare_hookpoints`` in ``src/alfred``

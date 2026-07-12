@@ -61,7 +61,7 @@ def _spec() -> PluginLaunchSpec:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec (#246 review)",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
 )
 async def test_alive_past_probe_without_blocking_returns_handed_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -83,7 +83,7 @@ async def test_alive_past_probe_without_blocking_returns_handed_off(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec (#246 review)",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
 )
 async def test_handed_off_terminates_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -111,7 +111,7 @@ async def test_handed_off_terminates_the_child(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec (#246 review)",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
 )
 async def test_blocking_caller_waits_for_clean_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

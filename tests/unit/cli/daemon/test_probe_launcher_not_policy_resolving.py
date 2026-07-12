@@ -28,7 +28,7 @@ from alfred.cli.daemon._failures import LauncherNotPolicyResolvingFailure
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec "
-    "(no POSIX shebang interpreter on Windows; falls back to the stub signature) (#246 review)",
+    "(no POSIX shebang interpreter on Windows; falls back to the stub signature)",
 )
 async def test_real_launcher_self_test_returns_policy_resolving() -> None:
     """PR-S4-6: the real launcher --self-test returns the resolving signature."""
@@ -46,7 +46,7 @@ async def test_probe_passes_in_development() -> None:
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec "
-    "(no POSIX shebang interpreter on Windows; falls back to the stub signature) (#246 review)",
+    "(no POSIX shebang interpreter on Windows; falls back to the stub signature)",
 )
 async def test_probe_passes_in_production_with_real_launcher() -> None:
     """PR-S4-6 flip: the real policy-resolving launcher boots in production.

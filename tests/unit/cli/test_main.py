@@ -36,7 +36,7 @@ def test_alfred_status_exits_zero(monkeypatch: MonkeyPatch) -> None:
     sys.platform == "win32",
     reason="POSIX-only: os.getuid family (_validate_secrets_file_security calls "
     "os.getuid() before the is-directory check, so the AttributeError on Windows "
-    "surfaces as an uncaught exit-1, not the expected Exit(2)) (#246 review)",
+    "surfaces as an uncaught exit-1, not the expected Exit(2))",
 )
 def test_alfred_status_secrets_config_error_exits_cleanly(
     monkeypatch: MonkeyPatch, tmp_path: Path
@@ -64,7 +64,7 @@ def test_alfred_status_secrets_config_error_exits_cleanly(
     sys.platform == "win32",
     reason="POSIX-only: os.getuid family (_validate_secrets_file_security calls "
     "os.getuid(), which does not exist on Windows, so the real secrets file "
-    "construction raises AttributeError instead of succeeding) (#246 review)",
+    "construction raises AttributeError instead of succeeding)",
 )
 def test_alfred_status_shows_resolved_secrets_path(
     monkeypatch: MonkeyPatch, tmp_path: Path

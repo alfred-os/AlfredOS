@@ -113,9 +113,7 @@ def test_operator_attributed_constants_nonempty() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason=(
-        "POSIX-only: Path.read_text() default locale encoding is not UTF-8 on Windows (#246 review)"
-    ),
+    reason=("POSIX-only: Path.read_text() default locale encoding is not UTF-8 on Windows"),
 )
 def test_every_operator_attributed_cli_module_consumes_resolver() -> None:
     constants = _operator_attributed_constants()

@@ -163,8 +163,8 @@ class TestConfigErrorHierarchy:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="POSIX-only: hardcoded '/'-literal path; WindowsPath repr() "
-        "renders it with backslashes (#246 review)",
+        reason="Windows path-rendering: hardcoded '/'-literal path; WindowsPath repr() "
+        "renders it with backslashes",
     )
     def test_permissions_error_repr_includes_octal_mode(self) -> None:
         err = SecretBrokerPermissionsError("perms", path=Path("/x"), mode=0o644, parent=Path("/"))
@@ -174,8 +174,8 @@ class TestConfigErrorHierarchy:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="POSIX-only: hardcoded '/'-literal path; WindowsPath repr() "
-        "renders it with backslashes (#246 review)",
+        reason="Windows path-rendering: hardcoded '/'-literal path; WindowsPath repr() "
+        "renders it with backslashes",
     )
     def test_config_error_repr_includes_path(self) -> None:
         err = SecretBrokerConfigError("oops", path=Path("/x/y"))
