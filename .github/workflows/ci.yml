@@ -781,7 +781,10 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # 30 (not 20): the now-blocking Windows unit step runs ~17 min; +uncached
+    # uv sync + type-checks leaves thin headroom under 20 on a slow runner, and
+    # a job TIMEOUT is not rescued by the unit step's rollback lever (#246 CR).
+    timeout-minutes: 30
     # Both matrix legs' STATIC layer (lint/format/type) is BLOCKING — the
     # `continue-on-error` that kept windows informational-until-green was
     # removed 2026-06-24 (#321 Phase 3) after 6+ green cycles (#312–#319). The
@@ -871,7 +874,23 @@ jobs:
         # drops the static lint/format/type gate.
         if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
         shell: bash
-        run: uv run pytest tests/unit -q
+        # assert-RAN floor (#246 Phase B / #245 discipline): the blocking leg
+        # must RUN a substantial suite, not merely be FAILED/ERROR-free — else a
+        # future PR growing the win32 collect-ignore/skipif guard list could
+        # hollow the gate green. 3000 is a fixed floor far below today's counts
+        # (macOS ~6018, Windows ~5459) and the suite only grows, so it never
+        # needs re-tuning; it trips only on a runaway guard list.
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          set -eo pipefail
+          uv run pytest tests/unit -q | tee pytest-unit-summary.txt
+          passed="$(grep -oE '[0-9]+ passed' pytest-unit-summary.txt | tail -n1 | grep -oE '^[0-9]+' || echo 0)"
+          echo "assert-RAN: ${passed} unit tests passed on ${MATRIX_OS}"
+          if [ "${passed}" -lt 3000 ]; then
+            echo "::error::assert-RAN floor tripped: only ${passed} unit tests passed (<3000) on ${MATRIX_OS} — the win32 collect-ignore/skipif guard list may have hollowed this blocking gate; investigate (#246 Phase B, #245 discipline)."
+            exit 1
+          fi
 
   integration:
     name: Integration
