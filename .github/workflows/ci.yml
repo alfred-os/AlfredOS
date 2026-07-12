@@ -1222,6 +1222,9 @@ jobs:
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
+        env:
+          # Keep in lockstep with the arm64 twin's pin.
+          PROTO_INSTALL_VERSION: "0.58.2"
         # ADR-0030 bound-interpreter contract — make the REAL bwrap quarantine-child
         # spawn RUNNABLE here instead of paper-only. `test_quarantine_child_real_spawn.py`
         # gates on `ALFRED_QUARANTINE_CHILD_PYTHON` being set (`_PROVISIONED`); without
@@ -1249,7 +1252,12 @@ jobs:
           # bound prefix). Validated on true x86_64 ubuntu-noble + bwrap 0.9.0 via
           # qemu: real round-trip PROOF OK.
           export PROTO_HOME="${HOME}/.proto"
-          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes
+          # PINNED installer version (CR: supply-chain). The installer takes the
+          # proto version as a positional arg (it defaults to `latest`); an unpinned
+          # `curl | bash` would silently pull whatever proto ships that morning into
+          # a lane that provisions the interpreter the SANDBOXED child execs. Bump
+          # deliberately, not implicitly.
+          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- "${PROTO_INSTALL_VERSION}" --yes
           export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
           proto install python 3.14
           # Resolve the interpreter from the tree `proto install` just populated —
@@ -1562,21 +1570,30 @@ jobs:
         # twin below, so an un-asserted skip there would make the whole arm64 gate
         # vacuous. Run it in isolation and fail on skip / non-pass.
         #
-        # NOTE: the test path appears TWICE (the `if: hashFiles(...)` guard AND the
-        # `pytest` arg). Keep them in sync — a rename that updates only one silently
-        # disarms this gate.
-        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/test_quarantine_child_real_spawn.py') != ''
+        # NO `hashFiles()` GUARD — deliberately. Every other assert-RAN step here is
+        # gated on `if: hashFiles('<path>') != ''`, which means a RENAME of the test
+        # makes the whole step EVAPORATE: the required check then goes green while
+        # gating nothing. That is the #245 paper-gate failure mode one level up — the
+        # guard disarms itself exactly when the thing it guards moves. This leg's file
+        # is on `main` and must exist, so the existence check lives INSIDE the step and
+        # FAILS LOUD instead of silently skipping.
+        if: steps.check.outputs.has_spawn == 'true'
         env:
           ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+          SPAWN_TEST: tests/integration/test_quarantine_child_real_spawn.py
         run: |
           set -euo pipefail
+          if [ ! -f "${SPAWN_TEST}" ]; then
+            echo "::error::${SPAWN_TEST} is missing — the dual-LLM real-spawn gate cannot run. If it was RENAMED, update SPAWN_TEST here; do not let this gate disappear silently (#245)."
+            exit 1
+          fi
           UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
           # `tee` keeps pytest's summary on disk for the skip-parse; `set -o pipefail`
           # still propagates a FAILED run's non-zero exit. Do not "simplify" it away.
           sudo env "PATH=${UV_DIR}:${PATH}" \
             "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
             "${UV_BIN}" run pytest \
-            tests/integration/test_quarantine_child_real_spawn.py \
+            "${SPAWN_TEST}" \
             -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/quarantine_child_spawn.out
           if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/quarantine_child_spawn.out; then
             echo "::error::dual-LLM quarantine-child real-spawn leg SKIPPED on the privileged lane — paper-gate hazard (#245); ALFRED_QUARANTINE_CHILD_PYTHON / bwrap / euid-0 provisioning regressed."
@@ -1618,7 +1635,12 @@ jobs:
     # duplicated here.
     name: Integration (privileged Linux, real spawn) (arm64)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    # 45, not the amd64 sibling's 30: arm64 runners measure ~1.7x slower on this
+    # repo's integration lanes (recent `main`: Integration 11m amd64 vs 19m arm64),
+    # and this lane additionally downloads an aarch64 PBS interpreter and runs a
+    # sixth isolated assert-RAN re-run. A merge-blocking lane must not flake on a
+    # timeout that was sized for the faster arch.
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -1655,10 +1677,18 @@ jobs:
         if: steps.check.outputs.has_spawn == 'true'
         # Identical to the amd64 sibling — proto ships an aarch64
         # python-build-standalone, so the same glob + prefix-bind contract holds.
+        env:
+          # Keep in lockstep with the amd64 sibling's pin.
+          PROTO_INSTALL_VERSION: "0.58.2"
         run: |
           set -euo pipefail
           export PROTO_HOME="${HOME}/.proto"
-          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes
+          # PINNED installer version (CR: supply-chain). The installer takes the
+          # proto version as a positional arg (it defaults to `latest`); an unpinned
+          # `curl | bash` would silently pull whatever proto ships that morning into
+          # a lane that provisions the interpreter the SANDBOXED child execs. Bump
+          # deliberately, not implicitly.
+          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- "${PROTO_INSTALL_VERSION}" --yes
           export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
           proto install python 3.14
           PROTO_PY="$(ls -d "${PROTO_HOME}"/tools/python/3.14.*/bin/python3 2>/dev/null | sort -V | tail -1)"
@@ -1730,18 +1760,27 @@ jobs:
         # (not ALFRED_QUARANTINE_CHILD_PYTHON) — so without this runtime assert a
         # provisioning regression would silently skip it and this lane would go
         # green while proving NOTHING about arm64 (the #245 paper-gate failure
-        # mode, one level deeper). Keep the test path in the `if:` guard and the
-        # `pytest` arg in sync.
-        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/test_quarantine_child_real_spawn.py') != ''
+        # mode, one level deeper).
+        #
+        # NO `hashFiles()` GUARD — deliberately (see the amd64 twin): gating the step
+        # on the file's existence means a RENAME makes the step evaporate and the
+        # required check goes green gating nothing. The existence check lives INSIDE
+        # the step and fails LOUD.
+        if: steps.check.outputs.has_spawn == 'true'
         env:
           ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+          SPAWN_TEST: tests/integration/test_quarantine_child_real_spawn.py
         run: |
           set -euo pipefail
+          if [ ! -f "${SPAWN_TEST}" ]; then
+            echo "::error::${SPAWN_TEST} is missing — this lane's raison d'être (the #269 /lib64 arm64 proof) cannot run. If it was RENAMED, update SPAWN_TEST here; do not let this gate disappear silently (#245)."
+            exit 1
+          fi
           UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
           sudo env "PATH=${UV_DIR}:${PATH}" \
             "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
             "${UV_BIN}" run pytest \
-            tests/integration/test_quarantine_child_real_spawn.py \
+            "${SPAWN_TEST}" \
             -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/quarantine_child_spawn_arm64.out
           if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/quarantine_child_spawn_arm64.out; then
             echo "::error::dual-LLM quarantine-child real-spawn leg SKIPPED on the arm64 privileged lane — this lane's raison d'être; the #269 /lib64 proof would be vacuous (paper-gate hazard, #245)."

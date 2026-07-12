@@ -22,6 +22,24 @@ The shipped Linux policy (`config/sandbox/quarantined-llm.linux.bwrap.policy`) b
 repo bind) so a compromised child has no host filesystem, host shell, or host env (proven by
 `sbx-2026-003/004/006`).
 
+> **AMENDED 2026-07-12 ([#269](https://github.com/alfred-os/AlfredOS/issues/269)) — `/lib64` is now
+> a SOFT bind; the reachable set is unchanged.** The bind-set above is still the invariant, but
+> `/lib64` is declared in a new `ro_binds_try` policy field and emitted as `--ro-bind-try` (bind iff
+> the source exists, else skip) rather than a hard `--ro-bind`. Reason: `/lib64` holds the dynamic
+> linker on x86-64 but **does not exist on arm64**, where the loader is `/lib/ld-linux-aarch64.so.1`
+> under the already-bound `/lib`. A hard bind therefore killed the sandbox launch on aarch64
+> (`bwrap: Can't find source path /lib64`), so the child never spawned — the same class of
+> "the child cannot start at all" blocker this ADR exists to record (cf. [ADR-0037](0037-production-quarantine-sandbox-boundary.md)).
+>
+> **This does not widen the sandbox**: the mount stays read-only where it exists, and a path that
+> does not exist was never reachable from inside. **Authoring rule:** `ro_binds_try` is a CLOSED
+> vocabulary (`_SOFT_BINDABLE_PATHS` in `alfred.plugins.sandbox_policy`, today `{"/lib64"}`) — a
+> soft bind SILENTLY skips a missing source, so only genuinely **arch-variable** paths may go there.
+> Anything that must always exist (`/usr`, `/lib`, Discord's `/etc/ssl/certs`) stays a HARD
+> `ro_binds` entry, where a missing source fails loud instead of degrading the sandbox in silence
+> (CLAUDE.md hard rule #7). A policy soft-binding anything outside the allow-list is refused at
+> parse time with `SandboxPolicyInvalid(reason="soft_bind_forbidden_path")`.
+
 When PR-S4-11c-2b drove the FIRST real `kind=full` spawn end-to-end (the docker real-spawn proof on
 `debian:bookworm`, bubblewrap 0.8.0), two structural blockers surfaced that no mac/unit leg could
 catch — only a real bwrap spawn under root exercises them:
