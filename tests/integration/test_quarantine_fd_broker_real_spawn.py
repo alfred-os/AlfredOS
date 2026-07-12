@@ -36,9 +36,12 @@ WHY DOCKER-ONLY: ``kind="full"`` resolves to bwrap on Linux; the spawn needs ``b
 interpreter (``ALFRED_QUARANTINE_CHILD_PYTHON`` set, ``alfred`` installed into it — the
 wheel-co-located probe resolves off THAT interpreter's site-packages, which the
 policy's ``/usr`` ro-bind covers). It SKIPS on macOS / non-root / unprovisioned boxes;
-it RUNS + gates merge on the privileged-Linux CI leg (``integration-privileged``).
-Reproduce locally via ``docker run --rm --privileged --platform linux/amd64
-debian:bookworm`` (see procedural_local_docker_for_ci_only_failures in project memory).
+it RUNS + gates merge on the privileged-Linux CI legs (``integration-privileged``;
+aarch64 twin ``integration-privileged-arm64``, #269). Reproduce locally via
+``docker run --rm --privileged --platform linux/<arch> debian:bookworm`` — use
+``linux/arm64`` on an Apple-Silicon host (amd64 emulation fails there with
+``exec format error`` without qemu binfmt), ``linux/amd64`` on x86-64 (see
+procedural_local_docker_for_ci_only_failures in project memory).
 """
 
 from __future__ import annotations
@@ -70,9 +73,13 @@ _DOCKER_ONLY = pytest.mark.skipif(
     reason=(
         "brokered-fd real-spawn: needs bwrap + Linux + root + the ADR-0030 "
         "bound-interpreter provisioning (ALFRED_QUARANTINE_CHILD_PYTHON set, alfred "
-        "installed into that interpreter). RUNS + gates merge in the privileged-Linux "
-        "CI leg (`integration-privileged`); skipped on macOS / non-root / unprovisioned "
-        "local boxes — reproduce via `docker run --rm --privileged --platform linux/amd64`."
+        "installed into that interpreter). RUNS + gates merge on the privileged-Linux "
+        "CI legs (`integration-privileged` on amd64, `integration-privileged-arm64` on "
+        "aarch64 — #269); skipped on macOS / non-root / unprovisioned local "
+        "boxes — reproduce via `docker run --rm --privileged --platform "
+        "linux/<arch>`: use `linux/arm64` on an Apple-Silicon host (amd64 emulation "
+        "fails there with `exec format error` without qemu binfmt), `linux/amd64` on "
+        "x86-64."
     ),
 )
 

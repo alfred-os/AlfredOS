@@ -30,11 +30,14 @@ WHY DOCKER-ONLY: ``sandbox.kind="full"`` resolves to bwrap on Linux; the spawn
 needs ``bwrap`` present, a Linux kernel, AND root, PLUS the ADR-0030 bound-
 interpreter provisioning (``ALFRED_QUARANTINE_CHILD_PYTHON`` set to a real
 interpreter binary with ``alfred`` installed into it). It SKIPS on macOS / non-root
-/ unprovisioned CI. #248 wired it into the ``integration-privileged`` CI leg (a
-hermetic ``~/.proto`` python whose prefix the launcher binds into the sandbox), so
-it RUNS + gates merge there. Reproduce locally via ``docker run --rm --privileged
---platform linux/amd64 debian:bookworm`` with ``ALFRED_QUARANTINE_CHILD_PYTHON=
-/usr/bin/python3`` + ``alfred`` pip-installed into that interpreter — see
+/ unprovisioned CI. #248 wired it into the ``integration-privileged`` CI leg, and
+#269 added its aarch64 twin ``integration-privileged-arm64`` (a hermetic
+``~/.proto`` python whose prefix the launcher binds into the sandbox), so it RUNS +
+gates merge on both. Reproduce locally via ``docker run --rm --privileged
+--platform linux/<arch> debian:bookworm`` — ``linux/arm64`` on an Apple-Silicon
+host (amd64 emulation fails there with ``exec format error`` without qemu binfmt),
+``linux/amd64`` on x86-64 — with ``ALFRED_QUARANTINE_CHILD_PYTHON=/usr/bin/python3``
++ ``alfred`` pip-installed into that interpreter — see
 ``tests/integration/test_quarantine_child_real_spawn.py`` (the precursor 2b0 proof
 this mirrors at the daemon layer) and procedural_local_docker_for_ci_only_failures
 in project memory.
@@ -117,9 +120,12 @@ _DOCKER_ONLY = pytest.mark.skipif(
         "daemon go-live flip real bwrap spawn: needs bwrap + Linux + root + the "
         "ADR-0030 bound-interpreter provisioning (ALFRED_QUARANTINE_CHILD_PYTHON set, "
         "alfred installed into that interpreter). RUNS + gates merge in the "
-        "privileged-Linux CI leg (`integration-privileged`); skipped on macOS / "
+        "privileged-Linux CI legs (`integration-privileged` on amd64 and "
+        "`integration-privileged-arm64` on aarch64 — #269); skipped on macOS / "
         "non-root / unprovisioned local boxes — reproduce via `docker run --rm "
-        "--privileged --platform linux/amd64`."
+        "--privileged --platform linux/<arch>`: use `linux/arm64` on an "
+        "Apple-Silicon host (amd64 emulation fails there with `exec format error` "
+        "without qemu binfmt), `linux/amd64` on x86-64."
     ),
 )
 

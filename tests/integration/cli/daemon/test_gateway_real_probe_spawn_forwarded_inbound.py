@@ -70,8 +70,9 @@ The gateway adapter child resolves ``sandbox.kind="full"`` -> bwrap on Linux; th
 spawn needs ``bwrap`` present, a Linux kernel, AND root, PLUS the ADR-0030 bound-
 interpreter provisioning (``ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON`` set to a real
 interpreter binary with ``alfred`` installed into it). It SKIPS on macOS / non-root
-/ unprovisioned CI and RUNS + gates merge in the privileged-Linux CI leg
-(``integration-privileged``). The quarantine-child provisioning
+/ unprovisioned CI and RUNS + gates merge on the privileged-Linux CI legs
+(``integration-privileged``; aarch64 twin ``integration-privileged-arm64``, #269).
+The quarantine-child provisioning
 (``ALFRED_QUARANTINE_CHILD_PYTHON``) is deliberately OUT of the gate — the
 quarantine child stays the in-proc echo double, so it is never spawned here.
 Reproduce locally via the docker-privileged reproduction recipe in
@@ -202,9 +203,13 @@ _DOCKER_ONLY = pytest.mark.skipif(
     reason=(
         "gateway real-spawn: needs bwrap + Linux + root + the ADR-0030 bound-interpreter "
         "provisioning (ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON set, alfred installed into that "
-        "interpreter). RUNS + gates merge in the privileged-Linux CI leg "
-        "(`integration-privileged`); skipped on macOS / non-root / unprovisioned local "
-        "boxes — reproduce via `docker run --rm --privileged --platform linux/amd64`."
+        "interpreter). RUNS + gates merge on the privileged-Linux CI legs "
+        "(`integration-privileged` on amd64, `integration-privileged-arm64` on "
+        "aarch64 — #269); skipped on macOS / non-root / unprovisioned local "
+        "boxes — reproduce via `docker run --rm --privileged --platform "
+        "linux/<arch>`: use `linux/arm64` on an Apple-Silicon host (amd64 emulation "
+        "fails there with `exec format error` without qemu binfmt), `linux/amd64` on "
+        "x86-64."
     ),
 )
 
