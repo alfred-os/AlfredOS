@@ -75,7 +75,8 @@ The Linux policy is TOML validated by `alfred.plugins.sandbox_policy.SandboxPoli
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `ro_binds` | `[[src, dst], …]` | Read-only bind mounts (interpreter + libs). |
+| `ro_binds` | `[[src, dst], …]` | Read-only bind mounts (interpreter + libs). A missing source is a **loud launch failure** — use this for paths that must always exist. |
+| `ro_binds_try` | `[[src, dst], …]` | Read-only bind mounts applied **only when the source exists** (`--ro-bind-try`); a missing source is skipped, not a launch failure. Reserve for genuinely **arch-variable** paths — today just `/lib64` (see the arch note below). |
 | `rw_binds` | `[[src, dst], …]` | Writable bind mounts (avoid for the quarantined LLM). |
 | `tmpfs` | `["/path", …]` | Ephemeral tmpfs scratch dirs, discarded on exit. |
 | `dev` | bool (default `true`) | Synthesise a minimal `/dev` (no host device passthrough). Required for CPython startup. |
@@ -83,15 +84,32 @@ The Linux policy is TOML validated by `alfred.plugins.sandbox_policy.SandboxPoli
 | `die_with_parent` | bool (default `true`) | Reap the sandbox subtree when the Supervisor exits. |
 | `keep_fds` | `[int, …]` (must contain `3`) | Declares fd 3 (the provider-key channel) survives. Omitting `3` is refused (`kind_full_requires_keep_fd_3`). |
 
-The shipped quarantined-LLM Linux policy binds only `/usr`, `/lib`, `/lib64`
-read-only (the interpreter + its loader/libs), a tmpfs scratch dir, synthesises
-`/dev`, unshares `pid/uts/cgroup/ipc/net` (Spec C G7-1 — the echo child runs in an
-empty network namespace), dies with its parent, and keeps fd 3. It
-binds **no** `/etc` and **no** `/bin` — so host secrets are unreadable and
-`/bin/sh` / `/bin/*` are not exec targets. (Note: on x86-64 Debian `/lib64`
-exists and holds `ld-linux-x86-64.so.2`; on arches without a top-level `/lib64`,
-the `/usr` + `/lib` binds carry the loader via the usrmerge symlink — the
-production target is x86-64 Debian Bookworm, the CI + container image arch.)
+The shipped quarantined-LLM Linux policy binds only `/usr` and `/lib` read-only
+(hard) plus `/lib64` **softly** (the interpreter + its loader/libs), a tmpfs
+scratch dir, synthesises `/dev`, unshares `pid/uts/cgroup/ipc/net` (Spec C G7-1 —
+the echo child runs in an empty network namespace), dies with its parent, and
+keeps fd 3. It binds **no** `/etc` and **no** `/bin` — so host secrets are
+unreadable and `/bin/sh` / `/bin/*` are not exec targets.
+
+### Why `/lib64` is a soft bind (arch portability — [#269](https://github.com/alfred-os/AlfredOS/issues/269))
+
+`/lib64` is the one **arch-variable** path in the shipped policies:
+
+- On **x86-64** Debian it exists and holds the dynamic linker `ld-linux-x86-64.so.2`, so it is bound (read-only) exactly as before.
+- On **arm64** it does **not exist** — the aarch64 loader is `/lib/ld-linux-aarch64.so.1`, already covered by the `/lib` bind.
+
+A hard `--ro-bind /lib64` therefore killed the sandbox launch on aarch64 with
+`bwrap: Can't find source path /lib64` — the quarantined child never started,
+never emitted a frame, and the host surfaced it as a truncated
+`read_frame_failed`. Binding it via `ro_binds_try` (`--ro-bind-try`: bind iff
+present, else skip) makes the **same policy bytes** portable across both arches,
+which is what unblocks arm64 self-hosting and the `Integration (privileged
+Linux, real spawn) (arm64)` CI leg.
+
+This does **not** weaken containment: the mount stays read-only where it exists,
+and a path that does not exist was never reachable from inside the sandbox. Keep
+non-arch-variable trees (`/usr`, `/lib`, `/etc/ssl/certs`) in `ro_binds` so a
+missing one fails **loud** at launch rather than silently degrading the sandbox.
 
 > **Known-permissive (tracked in #230): the broad `/usr` bind leaves
 > `/usr/bin/*` exec-reachable.** Binding all of `/usr` read-only puts
