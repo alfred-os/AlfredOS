@@ -87,6 +87,53 @@ def test_unshare_net_translates_to_unshare_net_flag() -> None:
     assert "--unshare-net" in policy_to_bwrap_flags(policy)
 
 
+def test_ro_binds_try_translates_to_soft_bind_flag() -> None:
+    """``ro_binds_try`` → ``--ro-bind-try`` (bind iff the source exists) — #269.
+
+    bwrap binds a ``--ro-bind-try`` source only when it EXISTS and silently
+    skips it otherwise. This is the arch-portability primitive for ``/lib64``:
+    it holds the dynamic linker on x86-64 (bound) but does NOT exist on arm64
+    (skipped — the aarch64 loader lives under the already-bound ``/lib``). A
+    HARD ``--ro-bind /lib64`` dies with "Can't find source path /lib64" on
+    arm64, tearing the dual-LLM real-spawn child.
+    """
+    policy = SandboxPolicy(
+        ro_binds=[("/usr", "/usr"), ("/lib", "/lib")],
+        ro_binds_try=[("/lib64", "/lib64")],
+        keep_fds=[3],
+    )
+    flags = policy_to_bwrap_flags(policy)
+    # Hard binds first, then soft binds — a stable, auditable exec line.
+    assert flags[:9] == [
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+    ]
+
+
+def test_ro_binds_try_empty_by_default_emits_nothing() -> None:
+    # The field is opt-in: a policy that declares no soft binds emits no
+    # --ro-bind-try flag at all (every existing policy stays byte-identical).
+    policy = SandboxPolicy(ro_binds=[("/usr", "/usr")], keep_fds=[3])
+    assert "--ro-bind-try" not in policy_to_bwrap_flags(policy)
+
+
+def test_ro_binds_try_round_trips_through_toml() -> None:
+    # The soft-bind list is a first-class policy-file field, not a code-only
+    # construct — a shipped .policy declares it as TOML.
+    policy = read_policy_toml(
+        'keep_fds = [3]\nro_binds = [["/usr", "/usr"]]\nro_binds_try = [["/lib64", "/lib64"]]\n'
+    )
+    assert list(policy.ro_binds_try) == [("/lib64", "/lib64")]
+    assert "--ro-bind-try" in policy_to_bwrap_flags(policy)
+
+
 def test_rw_binds_translate() -> None:
     policy = SandboxPolicy(rw_binds=[("/var/run/x", "/var/run/x")], keep_fds=[3])
     flags = policy_to_bwrap_flags(policy)

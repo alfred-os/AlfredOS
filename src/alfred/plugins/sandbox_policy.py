@@ -80,6 +80,19 @@ class SandboxPolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ro_binds: Sequence[tuple[str, str]] = ()
+    # SOFT read-only binds (``--ro-bind-try``): bwrap binds the source only if
+    # it EXISTS and silently skips it otherwise. This is the arch-portability
+    # primitive (#269): ``/lib64`` holds the dynamic linker on x86-64 (bound)
+    # but does NOT exist on arm64 (skipped — the aarch64 loader lives under the
+    # already-bound ``/lib``). A HARD ``--ro-bind /lib64`` dies with "Can't find
+    # source path /lib64" on arm64, tearing the dual-LLM real-spawn child before
+    # it can emit a frame. A soft bind never WIDENS the sandbox — the mount stays
+    # read-only, and an absent source was unreachable anyway; it only tolerates a
+    # source that legitimately does not exist on this architecture. Reserve it
+    # for genuinely arch-variable paths: a path that MUST exist (``/usr``,
+    # ``/lib``) belongs in ``ro_binds``, where a missing source is a loud
+    # launch failure rather than a silently degraded sandbox.
+    ro_binds_try: Sequence[tuple[str, str]] = ()
     rw_binds: Sequence[tuple[str, str]] = ()
     tmpfs: Sequence[str] = ()
     # A minimal ``/dev`` (``/dev/null``, ``/dev/zero``, ``/dev/urandom``, …)
@@ -115,14 +128,18 @@ class SandboxPolicy(BaseModel):
 def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
     """Translate a :class:`SandboxPolicy` into the bwrap CLI flag list.
 
-    The flag order is stable (binds → tmpfs → dev → unshare → die-with-parent)
-    so the launcher's exec line is reproducible and auditable across Python
-    dict-ordering changes. ``keep_fds`` emits NO flag: bwrap inherits fd 3 by
-    default (see the module docstring).
+    The flag order is stable (ro-binds → soft ro-binds → rw-binds → tmpfs → dev
+    → unshare → die-with-parent) so the launcher's exec line is reproducible and
+    auditable across Python dict-ordering changes. ``keep_fds`` emits NO flag:
+    bwrap inherits fd 3 by default (see the module docstring).
     """
     flags: list[str] = []
     for src, dst in policy.ro_binds:
         flags += ["--ro-bind", src, dst]
+    for src, dst in policy.ro_binds_try:
+        # --ro-bind-try: bind iff the source exists, else skip (never a launch
+        # failure). /lib64 is present on x86-64, absent on arm64 (#269).
+        flags += ["--ro-bind-try", src, dst]
     for src, dst in policy.rw_binds:
         flags += ["--bind", src, dst]
     for path in policy.tmpfs:
