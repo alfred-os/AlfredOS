@@ -1128,7 +1128,14 @@ jobs:
         if: steps.check.outputs.has_integration == 'true'
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # Retry apt-get update: Azure-mirror flake is a perennial GHA failure and this
+          # is now a merge-blocking lane (a transient mirror 5xx would block all merges).
+          for attempt in 1 2 3; do
+            sudo apt-get update && break
+            echo "::warning::apt-get update failed (attempt ${attempt}/3); retrying"
+            sleep $((attempt * 5))
+            [ "${attempt}" -eq 3 ] && { echo "::error::apt-get update failed 3x — package-mirror flake on a merge-blocking lane, not a code failure."; exit 1; }
+          done
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -1209,7 +1216,14 @@ jobs:
         # restriction to lift there). Same machinery as the `integration` job.
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # Retry apt-get update: Azure-mirror flake is a perennial GHA failure and this
+          # is now a merge-blocking lane (a transient mirror 5xx would block all merges).
+          for attempt in 1 2 3; do
+            sudo apt-get update && break
+            echo "::warning::apt-get update failed (attempt ${attempt}/3); retrying"
+            sleep $((attempt * 5))
+            [ "${attempt}" -eq 3 ] && { echo "::error::apt-get update failed 3x — package-mirror flake on a merge-blocking lane, not a code failure."; exit 1; }
+          done
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -1219,6 +1233,12 @@ jobs:
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv sync --frozen --dev
+      - name: Cache the proto-managed py3.14 toolchain
+        if: steps.check.outputs.has_spawn == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.proto
+          key: proto-${{ runner.os }}-${{ runner.arch }}-v0.58.2-py3.14
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
@@ -1257,7 +1277,20 @@ jobs:
           # `curl | bash` would silently pull whatever proto ships that morning into
           # a lane that provisions the interpreter the SANDBOXED child execs. Bump
           # deliberately, not implicitly.
-          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- "${PROTO_INSTALL_VERSION}" --yes
+          # RETRY (3x, backoff): this fetch is on the critical path of a merge-blocking
+          # lane, unretried and uncached. One 5xx from moonrepo.dev would block every
+          # merge in the repo. `--retry-all-errors` covers the non-transient-looking
+          # failures curl otherwise gives up on immediately.
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+                 https://moonrepo.dev/install/proto.sh -o /tmp/proto-install.sh; then
+              break
+            fi
+            echo "::warning::proto installer fetch failed (attempt ${attempt}/3); retrying"
+            sleep $((attempt * 5))
+            [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the proto installer after 3 attempts (moonrepo.dev unreachable) — this is a network flake on a merge-blocking lane, not a code failure."; exit 1; }
+          done
+          bash /tmp/proto-install.sh "${PROTO_INSTALL_VERSION}" --yes
           export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
           proto install python 3.14
           # Resolve the interpreter from the tree `proto install` just populated —
@@ -1519,9 +1552,20 @@ jobs:
           set -euo pipefail
           UV_BIN="$(command -v uv)"
           UV_DIR="$(dirname "${UV_BIN}")"
+          # ASSERT-RAN (#245 / ops-003): these payloads `@_bwrap_required`-skip wherever
+          # bwrap is absent, and this job is their ONLY required gate (the dedicated
+          # `adversarial` workflow does not install bwrap). A silent skip here would
+          # report green while gating NOTHING. `tee` + `set -o pipefail` keep a FAILED
+          # run failing; the skip-parse then fails a green-but-vacuous run.
           sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
             tests/adversarial/sandbox_escape -q \
-            -p no:cacheprovider --cov-fail-under=0
+            -p no:cacheprovider --cov-fail-under=0 | tee /tmp/sbx_corpus.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/sbx_corpus.out; then
+            echo "::error::bwrap-gated sandbox-escape payloads SKIPPED on the privileged lane — this job is their only required gate, so the containment corpus would be paper-only (#245 / #248)."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/sbx_corpus.out \
+            || { echo "::error::sandbox-escape corpus did not report a passing run."; exit 1; }
       - name: Assert the Discord kernel proof RUNS (not skipped) — FIX-7 paper-gate guard (#245)
         # FIX-7: the Discord policy kernel-enforcement proof
         # (tests/integration/egress/test_discord_policy_kernel_enforced.py) SKIPS
@@ -1662,7 +1706,14 @@ jobs:
         if: steps.check.outputs.has_spawn == 'true'
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # Retry apt-get update: Azure-mirror flake is a perennial GHA failure and this
+          # is now a merge-blocking lane (a transient mirror 5xx would block all merges).
+          for attempt in 1 2 3; do
+            sudo apt-get update && break
+            echo "::warning::apt-get update failed (attempt ${attempt}/3); retrying"
+            sleep $((attempt * 5))
+            [ "${attempt}" -eq 3 ] && { echo "::error::apt-get update failed 3x — package-mirror flake on a merge-blocking lane, not a code failure."; exit 1; }
+          done
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -1672,6 +1723,12 @@ jobs:
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv sync --frozen --dev
+      - name: Cache the proto-managed py3.14 toolchain
+        if: steps.check.outputs.has_spawn == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.proto
+          key: proto-${{ runner.os }}-${{ runner.arch }}-v0.58.2-py3.14
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
@@ -1688,7 +1745,20 @@ jobs:
           # `curl | bash` would silently pull whatever proto ships that morning into
           # a lane that provisions the interpreter the SANDBOXED child execs. Bump
           # deliberately, not implicitly.
-          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- "${PROTO_INSTALL_VERSION}" --yes
+          # RETRY (3x, backoff): this fetch is on the critical path of a merge-blocking
+          # lane, unretried and uncached. One 5xx from moonrepo.dev would block every
+          # merge in the repo. `--retry-all-errors` covers the non-transient-looking
+          # failures curl otherwise gives up on immediately.
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+                 https://moonrepo.dev/install/proto.sh -o /tmp/proto-install.sh; then
+              break
+            fi
+            echo "::warning::proto installer fetch failed (attempt ${attempt}/3); retrying"
+            sleep $((attempt * 5))
+            [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the proto installer after 3 attempts (moonrepo.dev unreachable) — this is a network flake on a merge-blocking lane, not a code failure."; exit 1; }
+          done
+          bash /tmp/proto-install.sh "${PROTO_INSTALL_VERSION}" --yes
           export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
           proto install python 3.14
           PROTO_PY="$(ls -d "${PROTO_HOME}"/tools/python/3.14.*/bin/python3 2>/dev/null | sort -V | tail -1)"
@@ -1830,9 +1900,20 @@ jobs:
           set -euo pipefail
           UV_BIN="$(command -v uv)"
           UV_DIR="$(dirname "${UV_BIN}")"
+          # ASSERT-RAN (#245 / ops-003): these payloads `@_bwrap_required`-skip wherever
+          # bwrap is absent, and this job is their ONLY required gate (the dedicated
+          # `adversarial` workflow does not install bwrap). A silent skip here would
+          # report green while gating NOTHING. `tee` + `set -o pipefail` keep a FAILED
+          # run failing; the skip-parse then fails a green-but-vacuous run.
           sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
             tests/adversarial/sandbox_escape -q \
-            -p no:cacheprovider --cov-fail-under=0
+            -p no:cacheprovider --cov-fail-under=0 | tee /tmp/sbx_corpus_arm64.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/sbx_corpus_arm64.out; then
+            echo "::error::bwrap-gated sandbox-escape payloads SKIPPED on the ARM64 privileged lane — the only aarch64 gate for these payloads — this job is their only required gate, so the containment corpus would be paper-only (#245 / #248)."
+            exit 1
+          fi
+          grep -qE "(^|[^0-9])[1-9][0-9]* passed" /tmp/sbx_corpus_arm64.out \
+            || { echo "::error::sandbox-escape corpus did not report a passing run."; exit 1; }
       - name: Assert the Discord kernel proof RUNS (not skipped) — FIX-7 paper-gate guard (#245)
         if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/egress/test_discord_policy_kernel_enforced.py') != ''
         run: |
