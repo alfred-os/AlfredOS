@@ -106,7 +106,10 @@ def test_start_constructs_and_runs_gateway_process(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+    reason=(
+        "POSIX-only: asyncio.unix_events._UnixSelectorEventLoop and "
+        "Unix signal-handler APIs are unavailable on Windows"
+    ),
 )
 def test_start_signal_handler_unavailable_logs_and_continues(
     monkeypatch: pytest.MonkeyPatch,

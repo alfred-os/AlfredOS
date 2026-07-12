@@ -172,7 +172,7 @@ def test_parse_expires_in_out_of_range_raises(raw: str) -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: file mode/permissions (#246 review)",
+    reason="POSIX-only: file mode/permissions",
 )
 async def test_login_happy_path(tmp_path: Path) -> None:
     db = _DB(users_by_slug={"alice": _user()}, users_by_id={7: _user()})
