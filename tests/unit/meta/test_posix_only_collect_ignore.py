@@ -9,10 +9,12 @@ or the Linux CI legs, so these tests pin it directly: the platform gating (win32
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
+from tests import conftest as root_conftest
 from tests._posix_only_tests import POSIX_ONLY_TEST_FILES, collect_ignore_for
 
 _TESTS_ROOT = Path(__file__).resolve().parents[2]  # tests/
@@ -82,4 +84,11 @@ def test_no_intermediate_conftest_shadows_the_guard() -> None:
     assert offenders == [], (
         f"collect_ignore[_glob] is not merged across conftests; the win32 guard "
         f"lives only in the top-most tests/conftest.py. Offenders: {offenders}"
+    )
+
+
+def test_conftest_wiring_is_pinned() -> None:
+    """The REAL conftest attribute is wired to the helper on every platform."""
+    assert root_conftest.collect_ignore_glob == collect_ignore_for(
+        sys.platform, Path(root_conftest.__file__).resolve().parent
     )
