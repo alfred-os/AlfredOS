@@ -581,8 +581,17 @@ async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
             process.terminate()
     # ``Popen.wait`` blocks — reap in an executor so the loop is not blocked.
     loop = asyncio.get_running_loop()
-    with contextlib.suppress(Exception):
+    try:
         await loop.run_in_executor(None, process.wait)
+    except Exception as exc:
+        # Best-effort teardown (never raises), but LOUD not silent (#414, hard
+        # rule #7): a reap gone wrong surfaces its error class instead of
+        # vanishing. ``except Exception`` (not ``BaseException``) so cooperative
+        # cancellation still propagates; the emit is ``suppress``-wrapped so a
+        # structlog-emit failure during teardown cannot escape either. Mirrors
+        # the ``stderr_drain_failed`` / ``read_frame_failed`` idiom.
+        with contextlib.suppress(Exception):
+            _log.warning("security.quarantine_child.reap_failed", error_class=type(exc).__name__)
 
 
 def _lift_above_targets(

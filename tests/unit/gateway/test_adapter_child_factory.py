@@ -784,3 +784,60 @@ def _fd_open(fd: int) -> bool:
     except OSError:
         return False
     return True
+
+
+async def test_terminate_and_reap_logs_loudly_when_reap_raises() -> None:
+    """A reap (``process.wait``) that raises is logged LOUDLY, not silently swallowed.
+
+    #414 twin: this gateway ``_terminate_and_reap`` was byte-identical to the
+    security-child sibling's previously-silent reap. The fix surfaces
+    ``gateway.adapter.reap_failed`` with the error class (mirroring
+    ``gateway.adapter.spawn_failed``); teardown stays non-raising.
+    """
+    import structlog.testing
+
+    import alfred.gateway.adapter_child_factory as acf_mod
+
+    class _ReapBoom:
+        returncode = None
+
+        def poll(self) -> int:
+            return 0  # already exited -> skip terminate(); exercise the reap arm
+
+        def wait(self) -> int:
+            raise OSError("reap boom")
+
+    with structlog.testing.capture_logs() as logs:
+        await acf_mod._terminate_and_reap(_ReapBoom())  # type: ignore[arg-type]  # must NOT raise
+
+    failed = [e for e in logs if e["event"] == "gateway.adapter.reap_failed"]
+    assert len(failed) == 1  # loud, not silent
+    assert failed[0]["error_class"] == "OSError"
+
+
+async def test_terminate_and_reap_cancelled_reap_propagates() -> None:
+    """A ``CancelledError`` from the reap PROPAGATES — never demoted to a warning.
+
+    ``except Exception`` (not ``BaseException``) so cooperative cancellation is
+    honoured (#414 twin).
+    """
+    import structlog.testing
+
+    import alfred.gateway.adapter_child_factory as acf_mod
+
+    class _ReapCancel:
+        returncode = None
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self) -> int:
+            raise asyncio.CancelledError
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await acf_mod._terminate_and_reap(_ReapCancel())  # type: ignore[arg-type]
+
+    assert not [e for e in logs if e["event"] == "gateway.adapter.reap_failed"]

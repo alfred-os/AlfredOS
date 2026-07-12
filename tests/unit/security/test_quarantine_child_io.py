@@ -654,6 +654,61 @@ async def test_read_frame_failure_drain_error_does_not_preempt_spawn_error(
         await cio.aclose()
 
 
+async def test_terminate_and_reap_logs_loudly_when_reap_raises() -> None:
+    """A reap (``process.wait``) that raises is logged LOUDLY, not silently swallowed.
+
+    #414 / hard rule #7: this trust-boundary teardown previously wrapped the reap
+    in a bare ``contextlib.suppress(Exception)`` with no logging — a genuine silent
+    swallow. The fix surfaces ``security.quarantine_child.reap_failed`` with the
+    error class (mirroring ``read_frame_failed`` / ``stderr_drain_failed``) while
+    keeping teardown non-raising (best-effort).
+    """
+    import structlog.testing
+
+    class _ReapBoom:
+        returncode = None
+
+        def poll(self) -> int:
+            return 0  # already exited -> skip terminate(); exercise the reap arm
+
+        def wait(self) -> int:
+            raise OSError("reap boom")
+
+    with structlog.testing.capture_logs() as logs:
+        await child_io_mod._terminate_and_reap(_ReapBoom())  # type: ignore[arg-type]  # must NOT raise
+
+    failed = [e for e in logs if e["event"] == "security.quarantine_child.reap_failed"]
+    assert len(failed) == 1  # loud, not silent
+    assert failed[0]["error_class"] == "OSError"
+
+
+async def test_terminate_and_reap_cancelled_reap_propagates() -> None:
+    """A ``CancelledError`` from the reap PROPAGATES — never demoted to a warning.
+
+    The best-effort guard is ``except Exception`` (not ``BaseException``), so
+    cooperative cancellation is honoured. Mirrors
+    ``test_log_child_stderr_propagates_cancelled_error`` for the reap arm (#414).
+    """
+    import structlog.testing
+
+    class _ReapCancel:
+        returncode = None
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self) -> int:
+            raise asyncio.CancelledError
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await child_io_mod._terminate_and_reap(_ReapCancel())  # type: ignore[arg-type]
+
+    assert not [e for e in logs if e["event"] == "security.quarantine_child.reap_failed"]
+
+
 async def test_log_child_stderr_propagates_cancelled_error(
     monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
 ) -> None:
