@@ -82,7 +82,12 @@ def test_linux_policy_binds_lib64_softly_for_arm64_portability() -> None:
     flags = policy_to_bwrap_flags(policy)
     hard_sources = [flags[i + 1] for i, flag in enumerate(flags) if flag == "--ro-bind"]
 
-    assert ("/lib64", "/lib64") in policy.ro_binds_try
+    # Pin EXACTLY, not membership: a soft bind silently skips a missing source, so
+    # it is a quieter hiding place than a hard one. `in` would let a future
+    # `["/etc", "/etc"]` soft bind slip in unnoticed. (The schema also refuses that
+    # at parse time — `_SOFT_BINDABLE_PATHS` — but the shipped bytes are pinned here
+    # too, so the policy and the allow-list can never drift apart silently.)
+    assert list(policy.ro_binds_try) == [("/lib64", "/lib64")]
     assert "--ro-bind-try /lib64 /lib64" in " ".join(flags)
     assert "/lib64" not in hard_sources
     # The non-arch-variable trees stay HARD (fail loud if absent).
