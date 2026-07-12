@@ -8,6 +8,7 @@ runtime-config root) rather than a fragile CWD-relative
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,12 @@ import pytest
 from alfred.config.settings import Settings
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded /etc/alfred runtime-config root "
+    "(AlfredOS is a Linux-only runtime; the default anchors at a POSIX "
+    "absolute path) (#246 review)",
+)
 def test_policies_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default anchors at /etc/alfred/policies.yaml — never CWD-relative."""
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")

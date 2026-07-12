@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,9 @@ from alfred.cli.daemon._daemon_pidfile import (
 )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW (symlink-safe pidfile open)"
+)
 def test_stale_pid_detected(tmp_path: Path) -> None:
     pf = tmp_path / "daemon.pid"
     dead_pid = 999_999
@@ -46,6 +50,9 @@ def test_delete_pidfile_missing_is_noop(tmp_path: Path) -> None:
     delete_pidfile(tmp_path / "absent.pid")  # no raise
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW (symlink-safe pidfile open)"
+)
 def test_delete_pidfile_removes(tmp_path: Path) -> None:
     pf = tmp_path / "daemon.pid"
     write_pidfile(path=pf, pid=1, boot_id="x", started_at="now")

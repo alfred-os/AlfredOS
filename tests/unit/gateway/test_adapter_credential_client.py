@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 
 import pytest
 import structlog.testing
@@ -81,6 +82,10 @@ def _read_fd3_frame(read_fd: int) -> str:
 # --- Happy path: deliver to fd-3 ----------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev (not defined on Windows)",
+)
 async def test_acquire_and_deliver_writes_credential_to_fd3() -> None:
     link = _FakeLink()
     client = _client(link)
@@ -99,6 +104,10 @@ async def test_acquire_and_deliver_writes_credential_to_fd3() -> None:
     assert link.requests[0].host_restart_seq == 0
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev (not defined on Windows)",
+)
 async def test_client_holds_no_credential_attribute_after_call() -> None:
     link = _FakeLink()
     client = _client(link)
@@ -328,6 +337,10 @@ async def test_cancelled_during_roundtrip_propagates_and_closes_fd() -> None:
 # --- The credential never appears in a log (sentinel sweep) -------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev (not defined on Windows)",
+)
 async def test_credential_never_logged_on_happy_path() -> None:
     link = _FakeLink()
     client = _client(link)

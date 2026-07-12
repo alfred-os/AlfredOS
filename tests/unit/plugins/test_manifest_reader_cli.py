@@ -65,6 +65,10 @@ def _run(*args: str, env: dict[str, str] | None = None, stdin: str | None = None
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_emits_json(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.toml"
     manifest.write_text(_FULL_MANIFEST)
@@ -75,6 +79,10 @@ def test_read_sandbox_emits_json(tmp_path: Path) -> None:
     assert payload["policy_refs"]["linux"].endswith(".bwrap.policy")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_missing_block_refuses(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.toml"
     manifest.write_text(_NO_SANDBOX_MANIFEST)
@@ -83,6 +91,10 @@ def test_read_sandbox_missing_block_refuses(tmp_path: Path) -> None:
     assert "plugin.manifest_sandbox_block_missing" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_malformed_toml_refuses(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.toml"
     manifest.write_text("this is = = not toml [[[")
@@ -91,6 +103,10 @@ def test_read_sandbox_malformed_toml_refuses(tmp_path: Path) -> None:
     assert "plugin.manifest_invalid" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_nonexistent_path_refuses(tmp_path: Path) -> None:
     result = _run("--read-sandbox", "--manifest-path", str(tmp_path / "nope.toml"))
     assert result.returncode != 0
@@ -99,6 +115,10 @@ def test_read_sandbox_nonexistent_path_refuses(tmp_path: Path) -> None:
     assert "plugin.manifest_unreadable" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_by_plugin_id_resolves_dir(tmp_path: Path) -> None:
     # plugin-id maps to plugins/<id_with_dots_and_hyphens_as_underscores>/.
     plugin_dir = tmp_path / "alfred_example"
@@ -114,6 +134,10 @@ def test_read_sandbox_by_plugin_id_resolves_dir(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["kind"] == "full"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_unsafe_plugin_id_refused() -> None:
     # Charset gate: a plugin-id with path-traversal characters is refused
     # before any filesystem lookup, with the exact bare key (CR #229 R2 f-8).
@@ -127,12 +151,20 @@ def test_read_sandbox_unsafe_plugin_id_refused() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_environment_emits_value() -> None:
     result = _run("--read-environment", env={"ALFRED_ENVIRONMENT": "development"})
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "development"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_environment_file_source(tmp_path: Path) -> None:
     env_file = tmp_path / "environment"
     env_file.write_text("production\n")
@@ -144,6 +176,10 @@ def test_read_environment_file_source(tmp_path: Path) -> None:
     assert result.stdout.strip() == "production"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_environment_unset_refuses(tmp_path: Path) -> None:
     result = _run(
         "--read-environment",
@@ -153,6 +189,10 @@ def test_read_environment_unset_refuses(tmp_path: Path) -> None:
     assert "daemon.boot.environment_not_set" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_environment_unrecognised_refuses(tmp_path: Path) -> None:
     result = _run(
         "--read-environment",
@@ -170,6 +210,10 @@ def test_read_environment_unrecognised_refuses(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_policy_to_bwrap_flags_one_per_line() -> None:
     policy = 'keep_fds = [3]\ntmpfs = ["/tmp"]\n'
     result = _run("--policy-to-bwrap-flags", stdin=policy)
@@ -181,6 +225,10 @@ def test_policy_to_bwrap_flags_one_per_line() -> None:
     assert "--tmpfs" in lines
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_policy_to_bwrap_flags_malformed_refuses() -> None:
     result = _run("--policy-to-bwrap-flags", stdin="keep_fds = []\n")
     assert result.returncode != 0
@@ -192,6 +240,10 @@ def test_policy_to_bwrap_flags_bad_toml_refuses() -> None:
     assert result.returncode != 0
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_policy_ref_escapes_root_refuses_with_exact_key(tmp_path: Path) -> None:
     # A confined --policy-ref pointing outside the root is refused with the
     # stable bare key (closed-vocab; not a rendered sentence).
@@ -280,6 +332,10 @@ def _run_inline(*args: str, stdin: str | None = None):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_policy_to_bwrap_flags_stdout_pure_when_locale_absent() -> None:
     """With the catalog absent, stdout is PURE bwrap flags — no warning leaks to fd 1.
 
@@ -298,6 +354,10 @@ def test_policy_to_bwrap_flags_stdout_pure_when_locale_absent() -> None:
     assert "translations disabled" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
 def test_read_sandbox_requires_a_source() -> None:
     # Neither --manifest-path nor --plugin-id → refuse with the exact bare key.
     result = _run("--read-sandbox")

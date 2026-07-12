@@ -19,6 +19,7 @@ regression guard: a future change that broadens the passthrough beyond
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -124,6 +125,10 @@ def _make_transport(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded /bin/sh executable (not present on Windows)",
+)
 async def test_spawn_propagates_alfred_env_development(
     monkeypatch: pytest.MonkeyPatch,
     fake_audit_writer: MagicMock,
@@ -149,6 +154,10 @@ async def test_spawn_propagates_alfred_env_development(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded /bin/sh executable (not present on Windows)",
+)
 async def test_spawn_defaults_alfred_env_to_production_when_parent_unset(
     monkeypatch: pytest.MonkeyPatch,
     fake_audit_writer: MagicMock,
@@ -175,6 +184,10 @@ async def test_spawn_defaults_alfred_env_to_production_when_parent_unset(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded /bin/sh executable (not present on Windows)",
+)
 async def test_spawn_does_not_leak_other_parent_env_keys(
     monkeypatch: pytest.MonkeyPatch,
     fake_audit_writer: MagicMock,

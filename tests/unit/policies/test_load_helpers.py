@@ -9,6 +9,7 @@ is enforced against the fstat result (authoritative for the fd we read).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,12 +41,20 @@ def _valid_yaml_text() -> str:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_reads_file(tmp_path: Path) -> None:
     f = tmp_path / "policies.yaml"
     f.write_text("schema_version: 1\n")
     assert b"schema_version: 1" in load_yaml_bytes(f, max_size=MAX_POLICIES_BYTES)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_refuses_oversize(tmp_path: Path) -> None:
     f = tmp_path / "huge.yaml"
     f.write_bytes(b"# pad\n" * (MAX_POLICIES_BYTES // 4))
@@ -53,6 +62,10 @@ def test_load_yaml_bytes_refuses_oversize(tmp_path: Path) -> None:
         load_yaml_bytes(f, max_size=MAX_POLICIES_BYTES)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_refuses_symlink(tmp_path: Path) -> None:
     """O_NOFOLLOW refuses to open the path if it is a symlink (sec-1)."""
     target = tmp_path / "attacker.yaml"
@@ -63,6 +76,10 @@ def test_load_yaml_bytes_refuses_symlink(tmp_path: Path) -> None:
         load_yaml_bytes(link, max_size=MAX_POLICIES_BYTES)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_missing_file_raises_filenotfound(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_yaml_bytes(tmp_path / "nope.yaml", max_size=MAX_POLICIES_BYTES)
@@ -100,6 +117,10 @@ def test_compute_sha256_differs_on_content_change() -> None:
     assert compute_sha256(b"key: 1\n") != compute_sha256(b"key: 2\n")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_reads_exactly_fstat_size(tmp_path: Path) -> None:
     """The read length is bounded by the fstat result, not an unbounded read."""
     f = tmp_path / "policies.yaml"
@@ -110,6 +131,10 @@ def test_load_yaml_bytes_reads_exactly_fstat_size(tmp_path: Path) -> None:
     assert len(raw) == f.stat().st_size
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_assembles_short_reads(tmp_path: Path, monkeypatch) -> None:
     """sec-1: a SHORT ``os.read`` is looped until ``st_size`` bytes accumulate.
 
@@ -132,6 +157,10 @@ def test_load_yaml_bytes_assembles_short_reads(tmp_path: Path, monkeypatch) -> N
     assert load_yaml_bytes(f, max_size=MAX_POLICIES_BYTES) == payload
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (symlink-refusing flag not on Windows)",
+)
 def test_load_yaml_bytes_refuses_concurrent_truncation(tmp_path: Path, monkeypatch) -> None:
     """sec-1: early EOF (read < st_size) is a concurrent truncate -> refuse."""
     import alfred.policies.load as load_mod

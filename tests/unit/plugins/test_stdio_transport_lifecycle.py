@@ -54,6 +54,10 @@ def _make_transport(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: /bin/sh executable path (not present on Windows)",
+)
 async def test_spawn_scrubs_environment(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
@@ -92,6 +96,10 @@ async def test_spawn_scrubs_environment(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess pass_fds (not supported on Windows)",
+)
 async def test_spawn_closes_fd3_pipe_even_when_executable_missing(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
@@ -132,6 +140,10 @@ async def test_spawn_closes_fd3_pipe_even_when_executable_missing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess pass_fds (not supported on Windows)",
+)
 async def test_spawn_delivers_provider_key_via_inherited_fd(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
@@ -173,6 +185,10 @@ async def test_spawn_delivers_provider_key_via_inherited_fd(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess pass_fds (not supported on Windows)",
+)
 async def test_spawn_announces_provider_key_fd_via_env(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
@@ -201,6 +217,10 @@ async def test_spawn_announces_provider_key_fd_via_env(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: /bin/sh executable path (not present on Windows)",
+)
 async def test_kill_returns_true_on_live_subprocess(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:

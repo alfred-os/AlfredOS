@@ -26,7 +26,10 @@ These tests pin:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from alfred.egress.adapter_egress_addr import DISCORD_EGRESS_SOCKET_PATH
 from alfred.plugins.manifest import parse_manifest
@@ -89,6 +92,12 @@ def test_linux_policy_keep_fd_3_for_broker_channel() -> None:
     assert 3 in policy.keep_fds
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: DISCORD_EGRESS_SOCKET_PATH.parent is a hardcoded Linux "
+    "path; WindowsPath str() renders it with backslashes, mismatching the "
+    "bwrap policy's forward-slash literal (#246 review)",
+)
 def test_linux_policy_rw_binds_egress_socket_dir() -> None:
     # FIX-5 / G7-4: the egress socket dir must be rw-bound (--bind), NOT
     # ro-bound (--ro-bind). connect(2) on a UNIX-domain socket path requires

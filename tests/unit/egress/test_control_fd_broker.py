@@ -12,6 +12,7 @@ from __future__ import annotations
 import array
 import os
 import socket
+import sys
 import threading
 
 import pytest
@@ -32,6 +33,10 @@ class _Cfg:
         self.egress_proxy_url = url
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_make_control_socketpair_child_end_is_inheritable() -> None:
     parent, child = make_control_socketpair()
     try:
@@ -43,6 +48,10 @@ def test_make_control_socketpair_child_end_is_inheritable() -> None:
         child.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_recv_passed_fd_returns_frame_and_one_fd() -> None:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     donor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -66,6 +75,10 @@ def test_recv_passed_fd_returns_frame_and_one_fd() -> None:
         donor.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_recv_passed_fd_no_fd_is_loud() -> None:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -78,6 +91,10 @@ def test_recv_passed_fd_no_fd_is_loud() -> None:
         child.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_recv_passed_fd_ancillary_truncation_closes_received_fds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -112,6 +129,10 @@ def test_recv_passed_fd_ancillary_truncation_closes_received_fds(
         keeper.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_recv_passed_fd_multi_fd_without_ctrunc_closes_and_refuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -150,6 +171,10 @@ def test_recv_passed_fd_multi_fd_without_ctrunc_closes_and_refuses(
         keeper_b.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_recv_passed_fd_non_scm_rights_cmsg_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ``level == SOL_SOCKET and typ == SCM_RIGHTS`` inner-if False branch.
 
@@ -202,6 +227,10 @@ def _accept_once(listener: socket.socket) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_broker_connected_socket_passes_a_live_fd() -> None:
     """A live, connected socket crosses via SCM_RIGHTS with exactly the ``\\x01`` framing byte.
 
@@ -246,6 +275,10 @@ async def test_broker_connected_socket_passes_a_live_fd() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_broker_connected_socket_unreachable_is_loud() -> None:
     """A refused connection (closed port, immediate ECONNREFUSED) raises ``gateway_unreachable``.
 
@@ -270,6 +303,10 @@ async def test_broker_connected_socket_unreachable_is_loud() -> None:
         child.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fold-log H item 1 (coverage-gate MANDATORY): a ``sendmsg`` returning fewer bytes than the
     1-byte frame (e.g. 0, a short write) must raise ``short_data_send`` loud, not silently report
@@ -303,6 +340,10 @@ def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -
         listener.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_connect_and_send_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fold-log H item 1 (coverage-gate MANDATORY): a raw ``OSError`` from ``sendmsg`` (e.g.
     ``EPIPE``) must raise ``sendmsg_failed`` loud, not propagate the raw ``OSError`` past this

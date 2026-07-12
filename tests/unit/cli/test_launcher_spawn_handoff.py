@@ -21,6 +21,7 @@ probe returns promptly instead of hanging.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,10 @@ def _spec() -> PluginLaunchSpec:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec (#246 review)",
+)
 async def test_alive_past_probe_without_blocking_returns_handed_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -76,6 +81,10 @@ async def test_alive_past_probe_without_blocking_returns_handed_off(
     assert outcome.result is LaunchResult.HANDED_OFF
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec (#246 review)",
+)
 async def test_handed_off_terminates_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -100,6 +109,10 @@ async def test_handed_off_terminates_the_child(
     assert proc.returncode is not None  # type: ignore[attr-defined]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec (#246 review)",
+)
 async def test_blocking_caller_waits_for_clean_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

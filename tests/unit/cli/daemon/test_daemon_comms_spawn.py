@@ -19,6 +19,7 @@ Three invariants:
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
@@ -151,6 +152,13 @@ def _patch_comms_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _FakeRunner)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_default_empty_adapters_boot_unchanged(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -172,6 +180,13 @@ def test_default_empty_adapters_boot_unchanged(
     assert _FakeCommsTransport.instances == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_enabled_adapter_spawns_and_registers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -312,6 +327,13 @@ def test_enabled_adapter_spawns_and_registers(
     ]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_boot_refuses_on_adapter_handshake_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -514,6 +536,13 @@ def test_boot_refuses_on_multiple_enabled_adapters(
     assert "comms_multi_adapter_unsupported" in reasons
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_boot_refuses_on_adapter_manifest_resolution_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -549,6 +578,13 @@ def test_boot_refuses_on_adapter_manifest_resolution_failure(
     assert boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_boot_refuses_on_unregistered_adapter_kind(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

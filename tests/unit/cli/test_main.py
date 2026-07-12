@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,12 @@ def test_alfred_status_exits_zero(monkeypatch: MonkeyPatch) -> None:
     assert "deepseek" in result.stdout.lower()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family (_validate_secrets_file_security calls "
+    "os.getuid() before the is-directory check, so the AttributeError on Windows "
+    "surfaces as an uncaught exit-1, not the expected Exit(2)) (#246 review)",
+)
 def test_alfred_status_secrets_config_error_exits_cleanly(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -53,6 +60,12 @@ def test_alfred_status_secrets_config_error_exits_cleanly(
     assert str(bad) in result.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family (_validate_secrets_file_security calls "
+    "os.getuid(), which does not exist on Windows, so the real secrets file "
+    "construction raises AttributeError instead of succeeding) (#246 review)",
+)
 def test_alfred_status_shows_resolved_secrets_path(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:

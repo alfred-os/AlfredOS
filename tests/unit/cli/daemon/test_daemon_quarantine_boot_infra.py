@@ -16,6 +16,7 @@ without Postgres, plus the refusal arm through the CLI command path.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -236,6 +237,13 @@ def test_boot_refuses_when_first_party_grant_missing(
     assert _reason(boot_success_env) == "quarantine_grant_missing"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_boot_proceeds_when_first_party_grant_live(
     monkeypatch: pytest.MonkeyPatch, boot_success_env: FakeAuditWriter
 ) -> None:

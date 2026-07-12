@@ -25,6 +25,7 @@ Invariants under proof (hermetic — NO real Redis / subprocess / socket):
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -209,6 +210,10 @@ class _ImmediateAcceptListener:
         self.aclose_calls += 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows) (#246 review)",
+)
 def test_gateway_leg_runner_built_with_forwarded_receiver(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -290,6 +295,10 @@ def test_gateway_leg_runner_built_with_forwarded_receiver(
     assert receiver_trackers[0] is handler_trackers[0]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows) (#246 review)",
+)
 def test_arm_time_preview_warning_emitted_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

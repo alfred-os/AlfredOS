@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -70,6 +71,10 @@ def test_listener_uses_gateway_adapter_id() -> None:
     assert _GATEWAY_ADAPTER_ID == "gateway"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_bind_creates_gateway_keyed_socket(runtime_dir: Path) -> None:
     listener = GatewayClientListener()
     await listener.bind()
@@ -81,6 +86,10 @@ async def test_bind_creates_gateway_keyed_socket(runtime_dir: Path) -> None:
     assert not listener.path.exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_send_control_writes_idless_reconnecting_frame(
     _connected: tuple[GatewayClientListener, asyncio.StreamReader, asyncio.StreamWriter],
 ) -> None:
@@ -102,6 +111,10 @@ async def test_send_control_writes_idless_reconnecting_frame(
         (LinkUnavailableNotification, "link.unavailable"),
     ],
 )
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_send_control_routes_each_method(
     _connected: tuple[GatewayClientListener, asyncio.StreamReader, asyncio.StreamWriter],
     model: type[LinkReconnectingNotification],
@@ -113,6 +126,10 @@ async def test_send_control_routes_each_method(
     assert json.loads(line)["method"] == method
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_send_control_before_accept_is_loud(runtime_dir: Path) -> None:
     listener = GatewayClientListener()
     await listener.bind()
@@ -123,6 +140,10 @@ async def test_send_control_before_accept_is_loud(runtime_dir: Path) -> None:
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_send_control_to_dead_client_is_loud(
     _connected: tuple[GatewayClientListener, asyncio.StreamReader, asyncio.StreamWriter],
 ) -> None:
@@ -145,6 +166,10 @@ async def test_structlog_only_peer_rejected_is_a_noop_callback() -> None:
     await _structlog_only_peer_rejected(None)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 async def test_injected_on_peer_rejected_routes_a_mismatch(
     runtime_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -189,6 +214,10 @@ async def test_default_on_peer_rejected_is_the_structlog_stub() -> None:
     assert listener._listener._on_peer_rejected is _structlog_only_peer_rejected
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_transport_getter_is_none_before_accept_then_set(
     _connected: tuple[GatewayClientListener, asyncio.StreamReader, asyncio.StreamWriter],
 ) -> None:
@@ -201,6 +230,10 @@ async def test_transport_getter_is_none_before_accept_then_set(
     assert listener.transport is listener._transport
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_aclose_is_idempotent(runtime_dir: Path) -> None:
     listener = GatewayClientListener()
     await listener.bind()
@@ -213,6 +246,10 @@ async def test_aclose_is_idempotent(runtime_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_machine_to_wire_emits_section9_sequence(
     _connected: tuple[GatewayClientListener, asyncio.StreamReader, asyncio.StreamWriter],
 ) -> None:

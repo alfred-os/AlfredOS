@@ -22,6 +22,7 @@ import os
 import socket
 import stat
 import struct
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,6 +59,11 @@ def test_max_local_socket_line_bytes_re_exports_the_shared_bound() -> None:
     assert MAX_LOCAL_SOCKET_LINE_BYTES == _MAX_COMMS_LINE_BYTES
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: HOME-based runtime_dir resolution diverges from Windows "
+    "Path.home()/USERPROFILE (#246 review)",
+)
 def test_runtime_dir_resolves_home_at_call_time(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -65,12 +71,17 @@ def test_runtime_dir_resolves_home_at_call_time(
     assert runtime_dir() == tmp_path / ".run" / "alfred"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
 def test_peer_uid_authorized_rules() -> None:
     assert peer_uid_authorized(reported_uid=None) is True  # unknowable -> FS-perms-of-record
     assert peer_uid_authorized(reported_uid=os.getuid()) is True
     assert peer_uid_authorized(reported_uid=os.getuid() + 1) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_bind_creates_0600_socket_under_0700_dir(short_runtime: Path) -> None:
     path = short_runtime / "control.sock"
     sock = bind_owner_only_unix_socket(path)
@@ -81,6 +92,10 @@ def test_bind_creates_0600_socket_under_0700_dir(short_runtime: Path) -> None:
         sock.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_bind_tightens_a_preexisting_0755_parent_to_0700(short_runtime: Path) -> None:
     # sec-MEDIUM-1 (c): a pre-existing looser dir is tightened EVERY bind, not only
     # on creation (mkdir(mode=) is umask-masked + creation-only).
@@ -94,6 +109,10 @@ def test_bind_tightens_a_preexisting_0755_parent_to_0700(short_runtime: Path) ->
         sock.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_bind_unlinks_a_stale_socket(short_runtime: Path) -> None:
     path = short_runtime / "control.sock"
     bind_owner_only_unix_socket(path).close()  # leaves a stale inode
@@ -101,6 +120,10 @@ def test_bind_unlinks_a_stale_socket(short_runtime: Path) -> None:
     sock.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_bind_cleanup_unlinks_partial_inode_on_post_open_failure(
     short_runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,6 +149,7 @@ def test_bind_cleanup_unlinks_partial_inode_on_post_open_failure(
     assert not path.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
 def test_assert_path_owned_refuses_non_socket(short_runtime: Path) -> None:
     short_runtime.mkdir(parents=True)
     f = short_runtime / "notasock"
@@ -134,6 +158,10 @@ def test_assert_path_owned_refuses_non_socket(short_runtime: Path) -> None:
         assert_path_owned(f, log_prefix="daemon.control")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_assert_path_owned_refuses_symlink_via_lstat(short_runtime: Path) -> None:
     # sec-MEDIUM-1 (a): a symlink (even to a socket we own) is refused on the LINK
     # inode — ``lstat`` never follows it.
@@ -157,6 +185,10 @@ def test_assert_path_owned_raises_filenotfound_bare_on_missing(short_runtime: Pa
         assert_path_owned(short_runtime / "absent.sock", log_prefix="daemon.control")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_assert_path_owned_accepts_owned_socket(short_runtime: Path) -> None:
     path = short_runtime / "ours.sock"
     sock = bind_owner_only_unix_socket(path)
@@ -166,6 +198,7 @@ def test_assert_path_owned_accepts_owned_socket(short_runtime: Path) -> None:
         sock.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
 def test_unlink_stale_socket_refuses_a_fifo(short_runtime: Path) -> None:
     # sec-MEDIUM-1 (e): a FIFO at our runtime path is anomalous — refuse rather than
     # blindly unlink something we do not recognise as ours; the FIFO survives.

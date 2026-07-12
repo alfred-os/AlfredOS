@@ -10,6 +10,7 @@ policy-resolving signature, so a prod deploy on it now boots.
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,11 @@ from alfred.cli.daemon._failures import LauncherNotPolicyResolvingFailure
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec "
+    "(no POSIX shebang interpreter on Windows; falls back to the stub signature) (#246 review)",
+)
 async def test_real_launcher_self_test_returns_policy_resolving() -> None:
     """PR-S4-6: the real launcher --self-test returns the resolving signature."""
     assert await _launcher_self_test_impl() == _POLICY_RESOLVING_SIGNATURE
@@ -37,6 +43,11 @@ async def test_probe_passes_in_development() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec "
+    "(no POSIX shebang interpreter on Windows; falls back to the stub signature) (#246 review)",
+)
 async def test_probe_passes_in_production_with_real_launcher() -> None:
     """PR-S4-6 flip: the real policy-resolving launcher boots in production.
 
@@ -188,6 +199,10 @@ async def test_self_test_hang_does_not_orphan_subprocess(
     assert not marker.exists(), "self-test child survived the timeout — it was not killed"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.killpg (process groups)",
+)
 def test_kill_process_group_falls_back_to_pid_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     """If ``os.killpg`` raises (group lookup races a just-exited leader), the
     per-pid ``proc.kill()`` fallback fires so the process is still reaped."""

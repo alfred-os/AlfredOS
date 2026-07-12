@@ -19,7 +19,10 @@ A negative fixture proves the guard catches a non-consuming module.
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
+
+import pytest
 
 from alfred.audit import audit_row_schemas
 
@@ -108,6 +111,12 @@ def test_operator_attributed_constants_nonempty() -> None:
     assert _operator_attributed_constants()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: Path.read_text() default locale encoding is not UTF-8 on Windows (#246 review)"
+    ),
+)
 def test_every_operator_attributed_cli_module_consumes_resolver() -> None:
     constants = _operator_attributed_constants()
     offenders: list[str] = []

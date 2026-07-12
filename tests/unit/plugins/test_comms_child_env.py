@@ -15,6 +15,7 @@ exported ``DISCORD_BOT_TOKEN`` / ``ANTHROPIC_API_KEY`` must never cross into it.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,10 @@ def test_scrubbed_even_for_kind_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "DISCORD_BOT_TOKEN" not in env
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded Linux container path (#246 review)",
+)
 def test_pythonpath_is_import_roots_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
     """PYTHONPATH is the spec's import roots, in order.
 
@@ -102,6 +107,10 @@ def test_pythonpath_is_import_roots_in_order(monkeypatch: pytest.MonkeyPatch) ->
     assert "/pre-existing-host-path" not in env["PYTHONPATH"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded Linux container path (#246 review)",
+)
 def test_manifest_and_adapter_keys_set(monkeypatch: pytest.MonkeyPatch) -> None:
     """The spec-derived manifest path + adapter id land on the child env."""
     env = comms_child_env(_spec())

@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -180,6 +181,10 @@ def test_exact_match_equivalence_wrong_port_denied() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_serve_unix_path_bind_and_connect() -> None:
     """AF_UNIX serve branch: the proxy binds a unix socket and handles CONNECT correctly.
 

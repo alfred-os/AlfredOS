@@ -10,6 +10,7 @@ failure, and the load-leg error arms) so coverage is total.
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,6 +62,7 @@ async def test_history_writer_adds_and_flushes_row() -> None:
     session.flush.assert_awaited_once()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 def test_build_initial_snapshot(tmp_path: Path) -> None:
     cfg = tmp_path / "policies.yaml"
     model = make_policies()
@@ -74,6 +76,7 @@ def test_build_initial_snapshot(tmp_path: Path) -> None:
     assert snap.file_mtime == cfg.stat().st_mtime
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 def test_build_initial_snapshot_uses_fstat_not_path_restat(tmp_path: Path, monkeypatch) -> None:
     """CR round-3 (TOCTOU): the bootstrap snapshot does NOT re-``stat`` the path.
 
@@ -162,6 +165,7 @@ async def test_default_invoke_dispatches_against_registry() -> None:
         set_registry(prior)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_run_loop_ticks_then_cancels(tmp_path: Path) -> None:
     watcher, _ref, _audit, _invoker = build_watcher(tmp_path, poll_interval=0.01)
     ticks = 0
@@ -184,6 +188,7 @@ async def test_run_loop_ticks_then_cancels(tmp_path: Path) -> None:
     assert watcher._effective_interval() == pytest.approx(watcher._interval * 10)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_history_write_failure_is_swallowed_loudly(tmp_path: Path) -> None:
     """A history-write failure logs but does NOT unwind the committed swap."""
     import time
@@ -207,6 +212,7 @@ async def test_history_write_failure_is_swallowed_loudly(tmp_path: Path) -> None
     assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 120
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_load_and_parse_file_vanished(tmp_path: Path) -> None:
     watcher, _ref, _audit, _invoker = build_watcher(tmp_path)
     watcher._path.unlink()
@@ -214,6 +220,7 @@ async def test_load_and_parse_file_vanished(tmp_path: Path) -> None:
     assert outcome.reject_reason == "file_vanished"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_load_and_parse_oversize_is_parse_failure(tmp_path: Path) -> None:
     from alfred.policies.load import MAX_POLICIES_BYTES
 

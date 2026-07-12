@@ -20,6 +20,7 @@ and assert the delta — never the absolute value.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -251,6 +252,10 @@ async def test_spawn_missing_executable_observes_spawn_failed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded /bin/sh executable path (not present on Windows)",
+)
 async def test_spawn_success_observes_ok(make_transport: Any) -> None:
     """``_spawn`` of a real executable observes ``ok`` and the spawn duration is recorded."""
     transport = StdioTransport(

@@ -2,6 +2,7 @@
 
 import asyncio
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -47,6 +48,10 @@ async def test_shim_closes_connection_on_upstream_unavailable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_shim_splices_bytes_verbatim_to_unix(monkeypatch: pytest.MonkeyPatch) -> None:
     # macOS AF_UNIX pathname limit is 104 bytes; pytest's tmp_path can exceed it,
     # so we use a short-prefixed mkdtemp to stay well within the limit.

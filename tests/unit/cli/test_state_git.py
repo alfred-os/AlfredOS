@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1011,6 +1012,10 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded Linux runtime path assumed (#246 review)",
+)
 def test_queue_proposal_or_exit_denial_path_handles_client_without_repo_attribute(
     tmp_path: Path,
 ) -> None:

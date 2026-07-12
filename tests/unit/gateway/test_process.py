@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -111,6 +112,10 @@ async def _accept_core_host(listener: CommsSocketListener, *, epoch: str) -> Com
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_run_binds_accepts_handshakes_and_relays(runtime_dir: Path) -> None:
     """``run()`` binds the client socket, accepts a loopback client, runs the client
     handshake, then relays a real turn byte-for-byte in BOTH directions through the core.
@@ -180,6 +185,10 @@ async def _dial_gateway_with_retry() -> CommsSocketTransport:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_shutdown_before_client_connects_returns_clean(runtime_dir: Path) -> None:
     """A shutdown set BEFORE any client connects ends ``run()`` cleanly: no core dial,
     and the listener socket file is unlinked.
@@ -211,6 +220,10 @@ async def test_shutdown_before_client_connects_returns_clean(runtime_dir: Path) 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_shutdown_mid_relay_returns_and_reaps(runtime_dir: Path) -> None:
     """A shutdown set DURING the relay ends ``run()`` promptly; the socket is unlinked."""
     epoch = uuid4().hex
@@ -252,6 +265,10 @@ async def test_shutdown_mid_relay_returns_and_reaps(runtime_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_cancel_mid_relay_still_reaps_listener(runtime_dir: Path) -> None:
     """A CANCEL of ``run()`` mid-relay still runs the ``finally: listener.aclose()`` —
     the socket file is unlinked even on a cancel unwind (the security-M2 reap).
@@ -297,6 +314,12 @@ async def test_cancel_mid_relay_still_reaps_listener(runtime_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (the runtime_dir/_dial_gateway_with_retry "
+    "fixtures depend on AF_UNIX, which is not exposed by CPython on Windows — "
+    "the dial retry loop exhausts and raises 'never became dialable') (#246 review)",
+)
 async def test_client_handshake_failure_raises_and_reaps(runtime_dir: Path) -> None:
     """A not-ok client handshake raises ``GatewayHandshakeError`` (fail-closed) and the
     listener is STILL reaped — the socket file is unlinked even on the raise.
@@ -409,6 +432,10 @@ async def test_accept_error_with_shutdown_set_propagates(runtime_dir: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 async def test_mismatched_uid_client_increments_metric_and_logs(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -461,6 +488,10 @@ async def test_mismatched_uid_client_increments_metric_and_logs(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_run_relays_control_frame_on_core_going_down(runtime_dir: Path) -> None:
     """A ``daemon.lifecycle.going_down`` on the core leg drives a ``reconnecting`` control
     frame down to the client through the supervised relay — proving the full stack wires.
@@ -533,6 +564,10 @@ def _capture_core_link(
     return built
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_default_process_activates_resume_buffer(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -573,6 +608,10 @@ async def test_default_process_activates_resume_buffer(
     assert not _gateway_socket_path().exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_injected_seams_thread_through_to_core_link(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
