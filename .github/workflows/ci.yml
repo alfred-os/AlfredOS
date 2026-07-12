@@ -761,15 +761,15 @@ jobs:
     #     No coverage gate — the per-subsystem 100% gates stay on the Linux job.
     #
     #   * windows-latest — runs lint + format + mypy + pyright, and the unit
-    #     suite INFORMATIONALLY (`continue-on-error`, #246 Phase A). The Docker
-    #     files auto-skip (no daemon), but many tests still invoke POSIX-only
-    #     surface (`/bin/sh`, `os.uname()`, `os.geteuid()`, `signal.SIGKILL`,
-    #     `subprocess(..., pass_fds=...)`) with no `sys.platform == "win32"`
-    #     guard, so they ERROR rather than skip. Guarding them is a discover-
-    #     then-guard change against real CI data (#246 Phase B) — until then the
-    #     unit step is non-blocking so its failures are visible but do not fail
-    #     the required `Python cross-OS (windows-latest)` check. The static
-    #     layer (lint/format/type) stays REQUIRED (#321 Phase 3).
+    #     suite BLOCKING (#246 Phase B, 2026-07-12). The Docker files auto-skip
+    #     on win32 (Docker Desktop reports available but the Linux-container
+    #     Testcontainers can't run); the wholly-POSIX unit files are collect-
+    #     ignored on win32 (tests/_posix_only_tests.py); and the POSIX-only
+    #     tests in otherwise-portable files carry `sys.platform == "win32"`
+    #     skipif. So the portable subset (~5.4k tests) runs green and blocks
+    #     merge — the Windows portability-hygiene signal for a Linux-only
+    #     runtime whose Windows dev path is WSL2. The static layer
+    #     (lint/format/type) is also REQUIRED (#321 Phase 3).
     #
     # Cost discipline: the heavy Integration/Smoke (Testcontainers, needs the
     # Docker daemon) stay Linux-only; this matrix only adds the cheap
@@ -785,9 +785,9 @@ jobs:
     # Both matrix legs' STATIC layer (lint/format/type) is BLOCKING — the
     # `continue-on-error` that kept windows informational-until-green was
     # removed 2026-06-24 (#321 Phase 3) after 6+ green cycles (#312–#319). The
-    # UNIT step is BLOCKING on macos-latest (proven green) and INFORMATIONAL on
-    # windows-latest (its own step-level `continue-on-error`, #246 Phase A) —
-    # Phase B removes that once win32 skip-guards make Windows green (#246).
+    # UNIT step is now BLOCKING on BOTH legs: macos-latest (proven green) and
+    # windows-latest (green after the #246 Phase B win32 guards; its step-level
+    # `continue-on-error` was dropped 2026-07-12).
     # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()` in
     # job-level `if:` at workflow-parse time. The first-step `check` probes for
     # pyproject.toml and every downstream step short-circuits on
@@ -856,20 +856,20 @@ jobs:
       # stay on the Linux `python` job (they need the combined unit+integration
       # corpus). These are pass/fail portability runs.
       - name: Unit tests (no coverage gate)
-        # ONE step for both legs; `continue-on-error` is the only difference, so
-        # a matrix expression keeps them from drifting (Phase B edits one place).
-        # BLOCKING on macos-latest (proven green — tests/unit is all-pass on
-        # Darwin with the Docker files skipping): the highest-value divergence
+        # ONE step, BLOCKING on both legs (#246 Phase B dropped the windows
+        # step-level `continue-on-error` on 2026-07-12, once the win32 guards
+        # made Windows green). macos-latest is the highest-value divergence
         # signal — POSIX syscalls (recvmsg/MSG_CTRUNC, os.geteuid, SIGKILL,
         # pass_fds) run on Darwin, catching the class of bug the #340 PR2a split
-        # hit. INFORMATIONAL on windows-latest (the expression → true): the win32
-        # failure surface is unknown + not locally validatable (POSIX-only tests
-        # need `sys.platform == "win32"` skip-guards), so the leg RUNS and
-        # surfaces it without blocking merge — the same de-risking the windows
-        # static layer used (#312–#319 → #321). #246 Phase B lands the win32
-        # guards and drops the continue-on-error.
+        # hit. windows-latest runs the portable subset: Docker files auto-skip
+        # on win32, wholly-POSIX files are collect-ignored
+        # (tests/_posix_only_tests.py), and POSIX-only tests in mixed files
+        # carry `skipif(sys.platform == "win32")`.
+        # ROLLBACK (see docs/ci/required-checks.md): on a Windows-unit flake,
+        # re-add the step-level windows-only continue-on-error matrix expression
+        # here. Do NOT de-require `Python cross-OS (windows-latest)` — that also
+        # drops the static lint/format/type gate.
         if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
-        continue-on-error: ${{ matrix.os == 'windows-latest' }}
         shell: bash
         run: uv run pytest tests/unit -q
 
