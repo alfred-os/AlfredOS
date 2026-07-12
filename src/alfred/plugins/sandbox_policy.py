@@ -36,6 +36,7 @@ Two load-bearing invariants:
 
 from __future__ import annotations
 
+import posixpath
 import tomllib
 from collections.abc import Sequence
 from typing import Final, Literal
@@ -63,6 +64,52 @@ _REQUIRED_FD: Final[int] = 3
 # anyone"). To soft-bind a NEW path, add it HERE, with the arch that lacks it and
 # why its absence is expected. That one-line edit IS the security review.
 _SOFT_BINDABLE_PATHS: Final[frozenset[str]] = frozenset({"/lib64"})
+
+
+def _is_arch_variable(path: str) -> bool:
+    """True if ``path`` IS an arch-variable path, or lives UNDER one.
+
+    Membership is not enough. ``/lib64`` does not exist on arm64 — and therefore
+    neither does ``/lib64/ld-linux-x86-64.so.2``. A guard keyed on
+    ``src in _SOFT_BINDABLE_PATHS`` refuses the directory and waves through every
+    file inside it, each of which still hard-binds a source that is absent on arm64
+    and still aborts the launch (#269, fourth variant).
+
+    This is not hypothetical: #230 ("tighten the interpreter bind to the exact
+    CPython prefix, dropping the broad /usr") produces exactly this shape — a
+    narrow bind of a specific file under a bound directory. The next recurrence of
+    this bug is already scheduled in our own comments, so the rule is containment.
+    """
+    normalized = _canonical(path)
+    return any(
+        normalized == arch_variable or normalized.startswith(arch_variable + "/")
+        for arch_variable in _SOFT_BINDABLE_PATHS
+    )
+
+
+def _canonical(path: str) -> str:
+    """Lexically canonical form of a policy path (no filesystem access).
+
+    Every guard below compares paths. Comparing them as RAW STRINGS is a hole:
+    ``/lib64``, ``/lib64/``, ``//lib64``, ``/lib64/.`` and ``/usr/../lib64`` are
+    the SAME path to bwrap and five different strings to Python. A guard keyed on
+    ``src in _SOFT_BINDABLE_PATHS`` therefore refuses the first and waves through
+    the other four — each of which still emits a hard bind that aborts the launch
+    on an arch where the source is absent (#269, third variant).
+
+    Lexical only — deliberately NO ``realpath``/``resolve``: this translator is
+    host-independent and unit-testable precisely because it never touches the
+    filesystem, and resolving symlinks HERE would make a policy's meaning depend
+    on the machine that parsed it.
+
+    ``posixpath.normpath`` collapses ``.``, ``..``, and duplicate/trailing
+    slashes, but POSIX permits a leading ``//`` to be implementation-defined and
+    ``normpath`` preserves it — so that one case is collapsed explicitly.
+    """
+    normalized = posixpath.normpath(path)
+    while normalized.startswith("//"):
+        normalized = normalized[1:]
+    return normalized
 
 
 class SandboxPolicyInvalid(Exception):  # noqa: N818 -- name pinned by spec §7.2 + audit reason vocab
@@ -143,6 +190,40 @@ class SandboxPolicy(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _require_canonical_paths(self) -> SandboxPolicy:
+        """Every policy path must be in canonical form — one spelling, one meaning.
+
+        This is what makes every guard below sound. They all compare paths, and
+        comparing raw strings is evadable by respelling: ``/lib64/``, ``//lib64``,
+        ``/lib64/.`` and ``/usr/../lib64`` are ONE path to bwrap and four
+        different strings to Python. Canonicalising *inside* each guard would work
+        too, but it leaves the door open for the next guard someone adds to forget.
+
+        So the ambiguity is refused at the boundary instead: a policy path that is
+        not already canonical is a policy bug, and the exec line bwrap receives is
+        then unambiguous and auditable. The shipped policies are all canonical, so
+        this refuses nothing that works today.
+        """
+        for field, paths in (
+            ("ro_binds", [p for pair in self.ro_binds for p in pair]),
+            ("ro_binds_try", [p for pair in self.ro_binds_try for p in pair]),
+            ("rw_binds", [p for pair in self.rw_binds for p in pair]),
+            ("tmpfs", list(self.tmpfs)),
+        ):
+            for path in paths:
+                if path != _canonical(path):
+                    raise SandboxPolicyInvalid(
+                        reason="policy_path_not_canonical",
+                        detail=(
+                            f"{field} contains a non-canonical path {path!r} "
+                            f"(canonical form: {_canonical(path)!r}). Respelling a path "
+                            f"would let it slip past the arch-variable and collision "
+                            f"guards, which compare paths. Declare the canonical form."
+                        ),
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _refuse_hard_bind_of_arch_variable_path(self) -> SandboxPolicy:
         """THE class-closing invariant: an arch-variable path is never HARD-bound (#269).
 
@@ -169,7 +250,7 @@ class SandboxPolicy(BaseModel):
         """
         for field, binds in (("ro_binds", self.ro_binds), ("rw_binds", self.rw_binds)):
             for src, dst in binds:
-                if src in _SOFT_BINDABLE_PATHS:
+                if _is_arch_variable(src):
                     raise SandboxPolicyInvalid(
                         reason="arch_variable_path_hard_bound",
                         detail=(
@@ -195,9 +276,9 @@ class SandboxPolicy(BaseModel):
         # A path is EITHER always-present (hard) OR arch-variable (soft). Never
         # both — that is a contradiction in the policy's own claim about the path,
         # so refuse it at parse time rather than let the hard bind quietly win.
-        hard_dsts = {dst for _src, dst in self.ro_binds}
+        hard_dsts = {_canonical(dst) for _src, dst in (*self.ro_binds, *self.rw_binds)}
         for _src, dst in self.ro_binds_try:
-            if dst in hard_dsts:
+            if _canonical(dst) in hard_dsts:
                 raise SandboxPolicyInvalid(
                     reason="soft_bind_conflicts_with_hard_bind",
                     detail=(
@@ -219,7 +300,10 @@ class SandboxPolicy(BaseModel):
         # closed-vocabulary reason the ``supervisor.plugin.sandbox_refused`` audit
         # row can carry.
         for src, dst in self.ro_binds_try:
-            if src not in _SOFT_BINDABLE_PATHS or dst not in _SOFT_BINDABLE_PATHS:
+            if (
+                _canonical(src) not in _SOFT_BINDABLE_PATHS
+                or _canonical(dst) not in _SOFT_BINDABLE_PATHS
+            ):
                 raise SandboxPolicyInvalid(
                     reason="soft_bind_forbidden_path",
                     detail=(
