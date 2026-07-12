@@ -2,9 +2,9 @@
 
 The win32 branch of ``collect_ignore_for`` never runs on the macOS/Linux dev box
 or the Linux CI legs, so these tests pin it directly: the platform gating (win32
-→ the 3 modules, else empty), that the produced paths resolve to existing files
-(anti-orphan), and — via ``pytester`` — that pytest actually honours a
-``collect_ignore_glob`` built from the helper.
+→ the listed modules, else empty), structural invariants on the list, that the
+produced paths resolve to existing files (anti-orphan), and — via ``pytester`` —
+that pytest actually honours a ``collect_ignore_glob`` built from the helper.
 """
 
 from __future__ import annotations
@@ -25,18 +25,18 @@ def test_non_win32_ignores_nothing() -> None:
     assert collect_ignore_for("darwin", _TESTS_ROOT) == []
 
 
-def test_win32_ignores_the_known_posix_only_modules() -> None:
+def test_win32_ignores_the_listed_posix_only_modules() -> None:
     ignored = collect_ignore_for("win32", _TESTS_ROOT)
+    # Formula pin: absolute paths under tests_root for every listed module.
     assert ignored == [str(_TESTS_ROOT / rel) for rel in POSIX_ONLY_TEST_FILES]
-    # Content-pinning canary: the exact known basenames — so a SAME-COUNT swap
-    # of which modules are ignored also trips this reviewed gate, not just an
-    # add/remove. Bump this set (a reviewed diff) when the list legitimately
-    # changes (Task 4 rule a).
-    assert {Path(rel).name for rel in POSIX_ONLY_TEST_FILES} == {
-        "test_process_posture.py",
-        "test_plugin_launcher_stub.py",
-        "test_operator_session_file_load.py",
-    }
+    # Structural invariants. The list grew from 3 to ~20+ during the #246 Phase B
+    # grind, so an exact-basename literal set is no longer maintainable; the
+    # reviewed DIFF of POSIX_ONLY_TEST_FILES is what makes each entry a reviewed
+    # decision. Enforce that every entry is a distinct, well-formed tests/unit
+    # path so a typo/dup/absolute-path slip trips locally.
+    assert len(set(POSIX_ONLY_TEST_FILES)) == len(POSIX_ONLY_TEST_FILES), "duplicate entry"
+    for rel in POSIX_ONLY_TEST_FILES:
+        assert rel.startswith("unit/") and rel.endswith(".py") and not rel.startswith("/"), rel
 
 
 def test_every_listed_module_exists() -> None:

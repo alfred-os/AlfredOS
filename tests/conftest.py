@@ -52,10 +52,17 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
     The Docker-backed unit modules (the Testcontainers web_fetch files, each
     module-marked ``pytest.mark.docker``) would ERROR at fixture setup on a
-    daemon-less runner. On the macOS / Windows CI legs — which have no Docker
-    daemon — this hook turns that error into a clean SKIP, which is what lets
-    ``tests/unit`` run there. On Linux CI and dev boxes with Docker the probe
-    returns ``True`` and this is a no-op.
+    daemon-less runner. On the macOS / Windows CI legs — which have no usable
+    Docker daemon — this hook turns that error into a clean SKIP, which is what
+    lets ``tests/unit`` run there. On Linux CI and dev boxes with Docker the
+    probe returns ``True`` and this is a no-op.
+
+    On native **Windows** the probe reports the CLI as available (Docker Desktop
+    ships on the runner), but the Linux-container Testcontainers cannot run
+    there — the ``/var/run/docker.sock`` bind is invalid on Windows and the
+    ryuk/Redis containers 500 at ``create`` (#246 Phase B). So win32 skips the
+    docker-marked items unconditionally, like a daemon-less host, rather than
+    letting them ERROR. (The real Docker coverage stays on the Linux legs.)
 
     The skip reason carries the specific probe reason (PATH-absent / hung /
     OSError / nonzero-exit) so the integration fixture's flaky-vs-absent
@@ -64,11 +71,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     docker_items = [item for item in items if item.get_closest_marker("docker") is not None]
     if not docker_items:
         return  # no docker-marked items collected — don't pay the probe at all
-    if docker_available():
+    if sys.platform == "win32":
+        reason = "docker-backed Testcontainers unavailable on native Windows (use WSL2/Linux)"
+    elif docker_available():
         return
-    skip_docker = pytest.mark.skip(
-        reason=f"docker daemon unavailable: {docker_unavailable_reason()}"
-    )
+    else:
+        reason = f"docker daemon unavailable: {docker_unavailable_reason()}"
+    skip_docker = pytest.mark.skip(reason=reason)
     for item in docker_items:
         item.add_marker(skip_docker)
 
