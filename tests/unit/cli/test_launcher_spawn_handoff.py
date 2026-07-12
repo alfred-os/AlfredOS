@@ -33,6 +33,14 @@ from alfred.cli._launcher_spawn import (
     spawn_plugin_via_launcher,
 )
 
+# Every test here execs a real bash-shebang stand-in launcher + chmod 0o755 —
+# POSIX-only (Windows has no bash/shebang-exec and chmod is a mode no-op). One
+# shared marker keeps the reason in sync across the tests it guards (#246 CR).
+_POSIX_ONLY_LAUNCHER = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
+)
+
 
 def _sleep_launcher(tmp_path: Path, seconds: float) -> Path:
     """A launcher stand-in that stays alive ``seconds`` then exits 0.
@@ -59,10 +67,7 @@ def _spec() -> PluginLaunchSpec:
     )
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
-)
+@_POSIX_ONLY_LAUNCHER
 async def test_alive_past_probe_without_blocking_returns_handed_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -81,10 +86,7 @@ async def test_alive_past_probe_without_blocking_returns_handed_off(
     assert outcome.result is LaunchResult.HANDED_OFF
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
-)
+@_POSIX_ONLY_LAUNCHER
 async def test_handed_off_terminates_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -109,10 +111,7 @@ async def test_handed_off_terminates_the_child(
     assert proc.returncode is not None  # type: ignore[attr-defined]
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="POSIX-only: bash-shebang launcher stand-in + chmod 0o755 exec",
-)
+@_POSIX_ONLY_LAUNCHER
 async def test_blocking_caller_waits_for_clean_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
