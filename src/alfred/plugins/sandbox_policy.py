@@ -143,6 +143,33 @@ class SandboxPolicy(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _refuse_hard_and_soft_bind_of_same_path(self) -> SandboxPolicy:
+        # #269 follow-up: the allow-list alone does NOT catch this. `/lib64` is
+        # legal in `ro_binds_try`, so a policy listing it in BOTH lists validates
+        # clean — and then `policy_to_bwrap_flags` emits the HARD `--ro-bind
+        # /lib64` FIRST, which is precisely the launch failure #269 removed
+        # ("bwrap: Can't find source path /lib64" on arm64). The soft entry that
+        # follows is dead code. The policy would sail past a validator that says
+        # it is fine and resurrect the original bug.
+        #
+        # A path is EITHER always-present (hard) OR arch-variable (soft). Never
+        # both — that is a contradiction in the policy's own claim about the path,
+        # so refuse it at parse time rather than let the hard bind quietly win.
+        hard_dsts = {dst for _src, dst in self.ro_binds}
+        for _src, dst in self.ro_binds_try:
+            if dst in hard_dsts:
+                raise SandboxPolicyInvalid(
+                    reason="soft_bind_conflicts_with_hard_bind",
+                    detail=(
+                        f"{dst!r} is bound BOTH hard (ro_binds) and soft (ro_binds_try). "
+                        f"The hard bind is emitted first and fails the whole launch where "
+                        f"the source is absent, so the soft bind is dead — declare the path "
+                        f"in exactly one list."
+                    ),
+                )
+        return self
+
+    @model_validator(mode="after")
     def _restrict_soft_binds(self) -> SandboxPolicy:
         # #269: a soft bind SILENTLY skips a missing source, so the set of paths
         # allowed to be soft is closed (:data:`_SOFT_BINDABLE_PATHS`). A policy
