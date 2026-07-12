@@ -98,10 +98,13 @@ _DOCKER_ONLY = pytest.mark.skipif(
     reason=(
         "real bwrap quarantine-child spawn: needs bwrap + Linux + root + the "
         "ADR-0030 bound-interpreter provisioning (ALFRED_QUARANTINE_CHILD_PYTHON set, "
-        "alfred installed into that interpreter). RUNS + gates merge in the "
-        "privileged-Linux CI leg (`integration-privileged`); skipped on macOS / "
-        "non-root / unprovisioned local boxes — reproduce via `docker run --rm "
-        "--privileged --platform linux/amd64`."
+        "alfred installed into that interpreter). RUNS + gates merge on BOTH "
+        "privileged-Linux CI legs (`integration-privileged` on amd64 and "
+        "`integration-privileged-arm64` on aarch64 — #269); skipped on macOS / "
+        "non-root / unprovisioned local boxes. Reproduce in `docker run --rm "
+        "--privileged --platform linux/<arch>` with a bound py3.14 — use "
+        "`linux/arm64` on an Apple-Silicon host (amd64 emulation fails there with "
+        "`exec format error` without qemu binfmt), `linux/amd64` on an x86-64 host."
     ),
 )
 
