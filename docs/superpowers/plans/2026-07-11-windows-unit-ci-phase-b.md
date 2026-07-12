@@ -18,6 +18,9 @@
 - **#246 stays OPEN** after this PR — Part 2 (macOS-native `sandbox-exec`) remains, blocked on PR-S4-7. PR body says `Part of #246 (Phase B / Part 1)` with **no** closing keyword.
 - **Commits:** conventional-commit format with a literal `#246` **after the colon** in every subject; end every commit body with the `MrReasonable <4990954+MrReasonable@users.noreply.github.com>` trailer; never `--no-verify`; stage named paths only (never `git add -A`); never `--admin` merge.
 - **`make check` (or the relevant `uv run` gates) before every push.**
+- **Assert-RAN floor.** Before promoting, the Windows unit leg must run a substantial passed count (`>= 3000`, floor far below today's ~5900), not merely be FAILED/ERROR-free — a hollow-gate guard (#245 discipline).
+- **Rollback = revert one line, not de-require.** On a Windows-unit flake post-merge, re-add the step-level `continue-on-error`; never de-require `Python cross-OS (windows-latest)` (that would also drop the static lint/type gate).
+- **Local markdownlint is pinned** to the CI version (`markdownlint-cli2@0.22.1`) so local matches CI.
 
 ---
 
@@ -53,10 +56,12 @@ or the Linux CI legs, so these tests pin it directly: the platform gating (win32
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
+from tests import conftest as root_conftest
 from tests._posix_only_tests import POSIX_ONLY_TEST_FILES, collect_ignore_for
 
 _TESTS_ROOT = Path(__file__).resolve().parents[2]  # tests/
@@ -67,12 +72,18 @@ def test_non_win32_ignores_nothing() -> None:
     assert collect_ignore_for("darwin", _TESTS_ROOT) == []
 
 
-def test_win32_ignores_the_three_posix_only_modules() -> None:
+def test_win32_ignores_the_known_posix_only_modules() -> None:
     ignored = collect_ignore_for("win32", _TESTS_ROOT)
     assert ignored == [str(_TESTS_ROOT / rel) for rel in POSIX_ONLY_TEST_FILES]
-    # Canary: exactly the three known modules — a change to the list is a
-    # reviewed decision, not a silent drift.
-    assert len(ignored) == 3
+    # Content-pinning canary: the exact known basenames — so a SAME-COUNT swap
+    # of which modules are ignored also trips this reviewed gate, not just an
+    # add/remove. Bump this set (a reviewed diff) when the list legitimately
+    # changes (Task 4 rule a).
+    assert {Path(rel).name for rel in POSIX_ONLY_TEST_FILES} == {
+        "test_process_posture.py",
+        "test_plugin_launcher_stub.py",
+        "test_operator_session_file_load.py",
+    }
 
 
 def test_every_listed_module_exists() -> None:
@@ -103,6 +114,40 @@ def test_pytest_honours_collect_ignore_from_helper(pytester: pytest.Pytester) ->
 
     result = pytester.runpytest("-q")
     result.assert_outcomes(passed=1)  # POSIX-only file ignored; only portable ran
+
+
+def test_conftest_wiring_is_pinned() -> None:
+    """The REAL conftest attribute is wired to the helper on every platform.
+
+    On Darwin/Linux this is `== []`, but it still proves the attribute EXISTS,
+    is spelled correctly (not `collect_ignore_globs`), and is derived from the
+    helper with the right resolved tests_root — catching a typo/wrong-base
+    locally instead of only on a re-crashed real Windows CI run. Mirrors the
+    docker meta test's `from tests import conftest` pattern.
+    """
+    assert root_conftest.collect_ignore_glob == collect_ignore_for(
+        sys.platform, Path(root_conftest.__file__).resolve().parent
+    )
+
+
+def test_no_intermediate_conftest_shadows_the_guard() -> None:
+    """No conftest under tests/unit may define collect_ignore[_glob].
+
+    pytest does NOT merge collect_ignore/collect_ignore_glob across the conftest
+    chain — the DEEPEST definer wins. An intermediate conftest assigning either
+    name would silently shadow the top-most win32 guard for its subtree and
+    re-break Windows collection. This static guard forbids that (mirrors the
+    docker-conftest anti-rot guard).
+    """
+    offenders = [
+        cf
+        for cf in (_TESTS_ROOT / "unit").rglob("conftest.py")
+        if "collect_ignore" in cf.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], (
+        f"collect_ignore[_glob] is not merged across conftests; the win32 guard "
+        f"lives only in the top-most tests/conftest.py. Offenders: {offenders}"
+    )
 ```
 
 - [ ] **Step 2: Run the meta test to verify it fails**
@@ -142,7 +187,9 @@ POSIX_ONLY_TEST_FILES: Final[tuple[str, ...]] = (
     # `resource` is POSIX-only → ModuleNotFoundError at import on Windows.
     "unit/supervisor/test_process_posture.py",
     # `os.uname().sysname` in a module-level constant → AttributeError on
-    # Windows; the tests also exec the bash launcher / runuser / `/bin/echo`.
+    # Windows. Mixed file: most tests exec the bash launcher/runuser/`/bin/echo`
+    # (POSIX); its ~6 portable read_text()+grep tests are lost on Windows too, an
+    # accepted no-op (they read tracked bytes → identical on every OS; spec §2).
     "unit/plugins/test_plugin_launcher_stub.py",
     # `os.getuid()` inside two skipif decorators evaluated at import →
     # AttributeError on Windows; POSIX file mode/owner semantics (the module is
@@ -167,7 +214,7 @@ def collect_ignore_for(platform: str, tests_root: Path) -> list[str]:
 - [ ] **Step 4: Run the meta test to verify it passes**
 
 Run: `uv run pytest tests/unit/meta/test_posix_only_collect_ignore.py -q`
-Expected: PASS (4 passed).
+Expected: PASS (6 passed).
 
 - [ ] **Step 5: Lint/format/type the two new files**
 
@@ -226,10 +273,10 @@ Immediately after the `pytest_plugins = ["pytester"]` line and the `_REPO_ROOT =
 # (`resource`, `os.uname`, `os.getuid`) at import time, before any module-level
 # skipif can fire. Empty off Windows → a no-op on the Linux/macOS legs. The list
 # is a testable pure function (tests/_posix_only_tests.py). #246 Phase B.
-collect_ignore_glob = collect_ignore_for(sys.platform, Path(__file__).parent)
+collect_ignore_glob = collect_ignore_for(sys.platform, Path(__file__).resolve().parent)
 ```
 
-`Path(__file__).parent` is the `tests/` directory (conftest lives at `tests/conftest.py`), matching the `tests_root` the meta test uses.
+`Path(__file__).resolve().parent` is the `tests/` directory (conftest lives at `tests/conftest.py`). Use `.resolve()` for parity with the meta test's resolved root, consistency with the existing `_REPO_ROOT = Path(__file__).resolve().parents[1]` convention, and to honour spec §4's absolute-path guarantee under a symlinked tree (pytest compares against resolved collection-node paths).
 
 - [ ] **Step 3: Verify the suite is unchanged on Darwin (no-op branch)**
 
@@ -266,7 +313,7 @@ The collection guard is now complete and locally verified. This task takes it to
 - [ ] **Step 1: Full local quality gates**
 
 Run: `make check`
-Expected: green. (If `make check|tail` is used, check `$?` — a tail masks the exit code.) Also run markdownlint on the committed spec + this plan: `npx --yes markdownlint-cli2 "docs/superpowers/specs/2026-07-11-windows-unit-ci-phase-b-design.md" "docs/superpowers/plans/2026-07-11-windows-unit-ci-phase-b.md"` → `0 error(s)`.
+Expected: green. (If `make check|tail` is used, check `$?` — a tail masks the exit code.) Also run markdownlint on the committed spec + this plan, **pinned to the CI version** (`@0.22.1` per required-checks.md, so local matches CI): `npx --yes markdownlint-cli2@0.22.1 "docs/superpowers/specs/2026-07-11-windows-unit-ci-phase-b-design.md" "docs/superpowers/plans/2026-07-11-windows-unit-ci-phase-b.md"` → `0 error(s)`.
 
 - [ ] **Step 2: Optional pre-push review (per CLAUDE.md cadence)**
 
@@ -284,15 +331,17 @@ No closing keyword — #246 stays open for Part 2.
 
 - [ ] **Step 4: Confirm Windows collection is now clean**
 
-Wait for the `Python cross-OS (windows-latest)` job, then read the Unit-tests step's real result (its step `conclusion` shows "success" because `continue-on-error` masks it — read the LOG for the pytest summary, not the conclusion):
+Read the Unit-tests step's real result from the step **LOG** — the step `conclusion` shows "success" because `continue-on-error` masks it, and the true `outcome` is NOT surfaced by `gh run view` (only the masked `conclusion` is), so this log-read supersedes spec §5's `outcome` phrasing. **Gate on job completion first** (do not `2>/dev/null` the log read — an in-progress `gh run view --log` errors, and swallowing that would misread empty output as a clean collection):
 
 ```bash
 RUN=$(gh run list --branch 246-windows-unit-blocking --workflow ci.yml --limit 1 --json databaseId -q '.[0].databaseId')
+STATUS=$(gh run view "$RUN" --json jobs -q '.jobs[] | select(.name|test("windows-latest")) | .status')
+[ "$STATUS" = "completed" ] || { echo "windows job still $STATUS — wait"; exit 0; }
 WINJOB=$(gh run view "$RUN" --json jobs -q '.jobs[] | select(.name|test("windows-latest")) | .databaseId')
-gh run view --job "$WINJOB" --log 2>/dev/null | grep -iE "error during collection|errors during collection|passed|failed|== .* ==" | tail -20
+gh run view --job "$WINJOB" --log | grep -iE "error during collection|errors during collection| passed| failed|== .* ==" | tail -20
 ```
 
-Expected: **no "errors during collection"** — the guard worked. The summary line will now report `passed`/`failed`/`skipped` counts (the suite RAN). If any collection errors remain, they are a NEW import-crash file → go to Task 4 rule (a).
+Expected: **no "errors during collection"** — the guard worked — and a non-empty summary line reporting `passed`/`failed`/`skipped` counts (the suite RAN; empty output means the read was premature, not clean). If a NOT-already-listed file errors at collection → Task 4 rule (a). If the SAME 3 listed files still error → it is a glob-matching/mechanism failure, not a new file (Task 4 decision rule, third bullet).
 
 ---
 
@@ -304,25 +353,28 @@ With collection clean, the suite runs on Windows and will likely surface **runti
 
 **Decision rule (from spec §5):**
 
-- **Import-time crash** (a collection error) → **rule (a)**: add the file to `POSIX_ONLY_TEST_FILES`. You cannot skip what will not import.
+- **A NEW import-time crash** (collection error in a file NOT already listed) → **rule (a)**: add the file to `POSIX_ONLY_TEST_FILES`. You cannot skip what will not import. **Precondition (fix-don't-dismiss):** first confirm the crash is a genuinely POSIX-only facility (in the test, or a legitimately-POSIX production module) — NOT an unguarded `os.getuid()`/`os.uname()`/POSIX syscall newly added to `src/alfred/` that should instead be made Windows-import-safe. Any rule-(a) addition of a `src/alfred/security/`- or `supervisor`-adjacent test goes through **security review** (see the review's sec-001).
+- **The SAME already-listed files still error at collection** → this is a **collect-ignore mechanism failure** (the win32 glob did not match — a path-separator / resolution mismatch the Darwin pytester test cannot exercise), NOT a new rule-(a) file. Re-adding a listed file is a no-op; instead inspect the Windows collection-node paths vs the resolved ignore entries.
 - **Runtime failure, import succeeds** → **rule (b)**: in-place `@pytest.mark.skipif(sys.platform == "win32", reason=…)` on the specific test or module (or make the test portable). Once import works, `skipif` is the correct, most-local tool.
 
 - [ ] **Step 1: Read the current Windows failures**
 
 ```bash
 RUN=$(gh run list --branch 246-windows-unit-blocking --workflow ci.yml --limit 1 --json databaseId -q '.[0].databaseId')
+STATUS=$(gh run view "$RUN" --json jobs -q '.jobs[] | select(.name|test("windows-latest")) | .status')
+[ "$STATUS" = "completed" ] || { echo "windows job still $STATUS — wait"; exit 0; }
 WINJOB=$(gh run view "$RUN" --json jobs -q '.jobs[] | select(.name|test("windows-latest")) | .databaseId')
-gh run view --job "$WINJOB" --log 2>/dev/null | grep -iE "FAILED|ERROR|error during collection|== .* ==" | tail -40
+gh run view --job "$WINJOB" --log | grep -iE "FAILED|ERROR|error during collection|== .* ==" | tail -40
 ```
 
-If the summary is all-passed (e.g. `N passed, M skipped`), skip to Task 5. Otherwise, classify each failure with the decision rule and apply the matching template below.
+If the summary is all-passed (e.g. `N passed, M skipped`), go to Step 6 (the assert-RAN floor) then Task 5. Otherwise, classify each failure with the decision rule and apply the matching template below. (Gate on `status == completed` and do not `2>/dev/null` the log read — empty output from a premature read is not the same as a clean run.)
 
 - [ ] **Step 2 (rule a): a new import-time crash → extend the ignore list**
 
-Add the offending tests/-relative path to `POSIX_ONLY_TEST_FILES` in `tests/_posix_only_tests.py`, with a one-line rationale comment naming the POSIX facility. Then update the meta test's canary count (`assert len(ignored) == 3` → the new count). Verify locally:
+Add the offending tests/-relative path to `POSIX_ONLY_TEST_FILES` in `tests/_posix_only_tests.py`, with a one-line rationale comment naming the POSIX facility (after satisfying the rule-(a) precondition above). Then update the meta test's **content-pinning canary** — add the new basename to the expected set in `test_win32_ignores_the_known_posix_only_modules`. Verify locally:
 
 Run: `uv run pytest tests/unit/meta/test_posix_only_collect_ignore.py -q`
-Expected: PASS (the anti-orphan check confirms the new path exists).
+Expected: PASS (the anti-orphan check confirms the new path exists; the content-pinning canary confirms the new set is exactly the reviewed list).
 
 - [ ] **Step 3 (rule b): a runtime failure → in-place skipif**
 
@@ -359,8 +411,12 @@ Expected: clean + Darwin suite still green (skipif is a no-op on Darwin; a rule-
 
 ```bash
 git add <changed files>
-git commit -m "test(ci): #246 guard <file> for win32 (<rule a: import / rule b: runtime>)"
+git commit -m "test(ci): #246 guard <file> for win32 (<rule a: import / rule b: runtime>)
+
+$(printf '<one-line what+why>\n\nMrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 ```
+
+(The trailer is mandatory on every commit including these loop iterations — Global Constraints.)
 
 - [ ] **Step 5: Push and re-read Windows CI; repeat until green**
 
@@ -368,7 +424,19 @@ git commit -m "test(ci): #246 guard <file> for win32 (<rule a: import / rule b: 
 git push
 ```
 
-Re-run Step 1. Loop Steps 1-5 until the Windows Unit-tests step log shows an all-passed summary (`N passed[, M skipped]`, no FAILED/ERROR). **Contingency (spec §8):** if the runtime surface proves unexpectedly deep and green is not reachable in reasonable iterations, do **not** ship a red blocking leg — stop, leave Windows informational, and split promotion (Task 5) into a follow-up; escalate to the user. Per the ratified scope, the target is green + blocking in this PR.
+Re-run Step 1. Loop Steps 1-5 until the Windows Unit-tests step log shows an all-passed summary (`N passed[, M skipped]`, no FAILED/ERROR), then apply the Step 6 floor. **Contingency (spec §8):** if the runtime surface proves unexpectedly deep and green (or the Step 6 floor) is not reachable in reasonable iterations, do **not** ship a red or hollow blocking leg — stop, leave Windows informational, and split promotion (Task 5) into a follow-up; escalate to the user. **If the contingency fires, also reword the PR title/body to describe only the collection guard, and do NOT post the Task 6 Step 4 "#246 Part 1 complete" comment (Part 1 stays open).** Per the ratified scope, the target is green + blocking in this PR.
+
+- [ ] **Step 6: Assert-RAN floor (hollow-gate guard) before promoting**
+
+Confirm the Windows leg is not merely FAILED/ERROR-free but actually RAN a substantial suite — otherwise accumulated ignore-list entries + `skipif`s could hollow the gate (the repo's #245 "green while gating nothing" shape). From the summary line captured in Step 1:
+
+```bash
+# PASSED must be well above the floor (today the suite is ~5900; the floor is far
+# below and only trips on a runaway ignore list — the suite only grows).
+# e.g. summary "5873 passed, 128 skipped in 240s" → PASSED=5873, SKIPPED=128.
+```
+
+Expected: `PASSED >= 3000` and `SKIPPED` a small fraction of `PASSED`. If the floor is not met, treat it as the contingency (Step 5) — do not promote a hollow gate.
 
 ---
 
@@ -401,15 +469,19 @@ In the `python-cross-os` job, change the comments that describe the Windows unit
 - Windows required-check row (~53): replace "Runs the unit suite INFORMATIONALLY (step-level `continue-on-error`; #246 Phase A) — Docker files auto-skip, POSIX-only tests still error; win32 skip-guards promote it to blocking in #246 Phase B." with a blocking description: the unit suite runs **blocking** (#246 Phase B); the 3 POSIX-only modules are collect-ignored on win32 and remaining POSIX-only tests carry `skipif(win32)`.
 - Reality table (~97): the `Unit suite` × `windows-latest` cell `informational (`continue-on-error`; #246)` → `✓ blocking (Docker + POSIX-only tests skip; #246)`.
 - Windows prose bullet (~114) and surrounding prose (~101-108): reword "informational until #246 Phase B" to blocking.
+- **#321 Phase 3 rollup bullet (~64):** that line reads "`Python cross-OS (windows-latest)` — continue-on-error removed …; the leg now blocks" but refers to the job-level STATIC-layer removal. Qualify it (or add a one-clause note) so a reader does not read "the leg now blocks" as having always covered the unit step too — the unit step became blocking in #246 Phase B.
+- **Rollback lever** — add to the Windows required-check row (~53): on a Windows-unit flake, restore `continue-on-error: ${{ matrix.os == 'windows-latest' }}` on the unit step (a one-line code revert). Do **NOT** de-require the whole `Python cross-OS (windows-latest)` check — that would also drop enforcement of the already-required static lint/format/type layer on the same job. This is a code-revert rollback, not a `gh api .../contexts` branch-protection rollback (unlike the other flake-prone required checks).
 - Deferred item 2 (~121): mark **DONE (#246 Phase B)** mirroring item 1's "DONE (#246 Phase A)" style, one line summarising the mechanism (collect-ignore for import-time crashes + `skipif(win32)` for runtime).
+
+Branch-protection contexts are **unchanged**: `Python cross-OS (windows-latest)` is already a required check, so dropping the step-level `continue-on-error` only tightens that already-required job's internal step — no new context is emitted and **no `gh api .../contexts` call is needed** (only the required-checks.md rationale text is updated).
 
 - [ ] **Step 4: Validate the workflow + docs locally**
 
-Run: `uv run python -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')" && npx --yes markdownlint-cli2 "docs/ci/required-checks.md"`
-Expected: `yaml ok` + `0 error(s)`. Also grep-assert the flip landed:
+Run: `uv run python -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')" && npx --yes markdownlint-cli2@0.22.1 "docs/ci/required-checks.md"`
+Expected: `yaml ok` + `0 error(s)`. Also grep-assert the flip landed — **use `grep -F` (fixed string), NOT plain `grep`**: the `$` in `${{` is a regex end-anchor, so a plain `grep -c` returns `0` whether or not the line was deleted (a vacuous, false-confidence check — verified against the live tree):
 
-Run: `grep -c "continue-on-error: \${{ matrix.os == 'windows-latest' }}" .github/workflows/ci.yml`
-Expected: `0` (the informational line is gone; no other step used that exact expression).
+Run: `grep -cF "continue-on-error: \${{ matrix.os == 'windows-latest' }}" .github/workflows/ci.yml`
+Expected: `0` AFTER deletion (confirm it returns `1` BEFORE deleting, so you know the assert is live). The expression is unique to the one step, so a `1→0` transition proves the flip.
 
 - [ ] **Step 5: Commit and push**
 
@@ -471,13 +543,13 @@ gh issue comment 246 --body "Part 1 (Windows unit leg → blocking) complete —
 **Spec coverage** (against `docs/superpowers/specs/2026-07-11-windows-unit-ci-phase-b-design.md`):
 
 - §3/§4 centralized win32 `collect_ignore_glob` + testable helper → Tasks 1-2. ✓
-- §4 absolute paths, zero test-file edits, no production change → Task 1 helper + Task 2 Steps 3-4 + Global Constraints. ✓
-- §5 iteration decision rule (import-crash → list; runtime → skipif) → Task 4 rule + templates. ✓
-- §6 meta test (gating + anti-orphan) + pytester end-to-end → Task 1 Step 1 (all four tests). ✓
-- §7 promotion (drop `continue-on-error` + ci.yml comments + required-checks.md rows + close Part 1) → Task 5 + Task 6 Step 4. ✓
-- §8 contingency (deep runtime surface → keep informational, split) → Task 4 Step 5. ✓
-- §9 acceptance criteria 1-6 → Tasks 1-2 (crit 1), Task 3-4 (crit 2), Task 5 (crit 3-4), Task 6 (crit 5), Task 5 Step 6 (crit 6). ✓
+- §4 resolved absolute paths (`.resolve().parent`), exact-not-glob note, no-shadow note, zero test-file edits, no production change → Task 1 helper + Task 2 Step 2 (resolved) + Steps 3-4 + Global Constraints. ✓
+- §5 iteration decision rule (new-import-crash → list, with fix-don't-dismiss precondition; same-files-error → mechanism failure; runtime → skipif) → Task 4 decision rule (3 bullets) + templates. ✓
+- §6 meta test (gating + content-pinning canary + anti-orphan + real-wiring + no-shadow) + pytester end-to-end + assert-RAN floor → Task 1 Step 1 (6 tests) + Task 4 Step 6. ✓
+- §7 promotion (drop `continue-on-error` + ci.yml comments + required-checks.md rows + #321 bullet + rollback + branch-protection-unchanged + close Part 1) → Task 5 + Task 6 Step 4. ✓
+- §8 contingency (deep runtime surface OR hollow floor → keep informational, split; reword PR + skip Part-1 comment) → Task 4 Step 5. ✓
+- §9 acceptance criteria 1-6 → Tasks 1-2 (crit 1), Task 3-4 + Task 4 Step 6 floor (crit 2), Task 5 (crit 3-4), Task 6 (crit 5), Task 5 Step 6 (crit 6). ✓
 
-**Placeholder scan:** the only non-verbatim content is Task 4's CI-discovered edits — deliberately templated (rule a / rule b) with complete code, because the exact runtime failures are unknown until real Windows CI (fabricating them would be dishonest). All local (Task 1-2, 5) steps carry exact code/paths/commands.
+**Placeholder scan:** the only non-verbatim content is Task 4's CI-discovered edits (deliberately templated rule a/b with complete code — the exact runtime failures are unknown until real Windows CI) and the Task 5 Step 2 ci.yml-comment reflow (described, since exact line positions shift as edits land; the required-checks.md prose is given verbatim). All local (Task 1-2, 5) steps carry exact code/paths/commands.
 
-**Type consistency:** `POSIX_ONLY_TEST_FILES: Final[tuple[str, ...]]` and `collect_ignore_for(platform: str, tests_root: Path) -> list[str]` are used identically in the helper (Task 1 Step 3), the meta test (Task 1 Step 1), and the conftest wiring (Task 2 Step 2). `_TESTS_ROOT`/`tests_root` both resolve to the `tests/` directory (`parents[2]` from `tests/unit/meta/`, `Path(__file__).parent` from `tests/conftest.py`). Consistent.
+**Type consistency:** `POSIX_ONLY_TEST_FILES: Final[tuple[str, ...]]` and `collect_ignore_for(platform: str, tests_root: Path) -> list[str]` are used identically in the helper (Task 1 Step 3), the meta test (Task 1 Step 1), and the conftest wiring (Task 2 Step 2). The renamed canary `test_win32_ignores_the_known_posix_only_modules` (count-neutral) is referenced consistently in Task 4 Step 2. Both the conftest wiring and the meta test's real-wiring assertion derive `tests_root` as `Path(__file__).resolve().parent` / `Path(root_conftest.__file__).resolve().parent` (the `tests/` dir), and `_TESTS_ROOT = Path(__file__).resolve().parents[2]` — all resolved, all the same directory. Consistent.

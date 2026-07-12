@@ -40,8 +40,15 @@ current collection-error set**. The 3 offending modules and their import-time ca
    Windows inside the **production** import.
 2. `tests/unit/plugins/test_plugin_launcher_stub.py` — `AttributeError: module 'os' has no attribute
    'uname'`. A module-level constant evaluates `os.uname().sysname` at import
-   (`_LAUNCHER_REQUIRES_ROOT`, line 58). The module's own imports are otherwise Windows-safe, but its
-   tests `exec` the bash launcher, `runuser`, and `/bin/echo` — POSIX-runtime regardless.
+   (`_LAUNCHER_REQUIRES_ROOT`, line 58). This module is **mixed**, not purely POSIX-runtime: roughly
+   half its tests `exec` the bash launcher / `runuser` / `/bin/echo` (POSIX-runtime), but ~6 are
+   **portable** static-contract tests that only `_LAUNCHER.read_text()` the launcher script and grep
+   its bytes (e.g. `test_launcher_invokes_runuser_for_uid_drop`). Whole-file collection-ignore drops
+   those portable tests on Windows too. That loss is **accepted** (see §4): they read tracked repo
+   bytes, so they produce byte-identical results on every OS — the Linux and macOS legs already run
+   them, and Windows adds **zero unique signal**. The alternative (reclassify as a runtime-failure file
+   by fixing the one-line `os.uname()` const to `platform.system()` and per-test `skipif`-ing only the
+   exec tests) was weighed and declined in favour of the uniform mechanism.
 3. `tests/unit/identity/test_operator_session_file_load.py` — `AttributeError: module 'os' has no
    attribute 'getuid'`. Two `@pytest.mark.skipif(os.getuid() == 0, …)` decorators (lines 203, 218)
    evaluate `os.getuid()` at **decoration** (import) time. The module is **already** whole-module
@@ -59,10 +66,11 @@ the crash is in the **production** module's `import resource`, triggered by the 
 
 ## 3. Design decision — centralized collection-ignore (Approach A)
 
-All three modules are **genuinely POSIX-runtime** (POSIX `resource`/`RLIMIT_CORE`; a bash/`runuser`
-launcher; POSIX file mode/owner semantics). None can run meaningfully on Windows. The chosen mechanism
-is a **win32-gated `collect_ignore_glob`** in the top-most `tests/conftest.py` — pytest reads this
-**before importing** the listed modules, so the crash never happens.
+All three modules are **POSIX-runtime** on the whole (POSIX `resource`/`RLIMIT_CORE`; a bash/`runuser`
+launcher; POSIX file mode/owner semantics), and none can run its *substantive* tests on Windows —
+File 2 additionally carries some portable static-grep tests whose Windows loss is accepted (§2 item 2,
+§4). The chosen mechanism is a **win32-gated `collect_ignore_glob`** in the top-most `tests/conftest.py`
+— pytest reads this **before importing** the listed modules, so the crash never happens.
 
 Rejected alternatives:
 
@@ -116,13 +124,26 @@ def collect_ignore_for(platform: str, tests_root: Path) -> list[str]:
 import sys
 from tests._posix_only_tests import collect_ignore_for
 
-collect_ignore_glob = collect_ignore_for(sys.platform, Path(__file__).parent)
+collect_ignore_glob = collect_ignore_for(sys.platform, Path(__file__).resolve().parent)
 ```
 
 Design notes:
 
-- **Absolute paths**, built from `Path(__file__).parent`, so matching is independent of pytest's
-  invocation cwd.
+- **Resolved absolute paths**, built from `Path(__file__).resolve().parent` (matching the repo's
+  existing `_REPO_ROOT = Path(__file__).resolve().parents[1]` convention and the meta test's resolved
+  root), so matching is independent of pytest's invocation cwd **and** canonicalises symlinks — pytest
+  compares against resolved collection-node paths, so an unresolved entry could fail to match under a
+  symlinked `tests/` tree.
+- **Exact paths, not globs.** The helper emits exact absolute paths with no fnmatch metacharacters
+  (`* ? [ ]`); `collect_ignore_glob` is used for parity with the sibling docker mechanism and is
+  proven by the pytester test, but entries must stay literal — do not add wildcard entries expecting
+  glob semantics. (`collect_ignore` — exact-path equality — is the semantically-precise alternative;
+  kept as `collect_ignore_glob` per this design, and the metacharacter-free repo path makes the two
+  equivalent in practice.)
+- **`collect_ignore_glob` is NOT merged across conftests.** pytest takes the value from the *deepest*
+  conftest that defines the name. There are intermediate conftests under `tests/unit` (none define it
+  today); a future one that assigns `collect_ignore`/`collect_ignore_glob` would silently shadow this
+  win32 guard for its subtree. §6 adds a static meta assertion forbidding that.
 - **Zero edits to the 3 test files.** Collection-ignore prevents the import entirely — the correct
   and minimal change. We deliberately do **not** also "fix" the eager `os.getuid()`/`os.uname()`
   evaluations as defence-in-depth: YAGNI, and touching unrelated security-test files widens the blast
@@ -138,14 +159,27 @@ surface a fresh layer of **runtime** failures (path separators, text encoding, s
 (the dev box is macOS), so Phase B is **discover-then-guard against real Windows CI**, iterating with
 this rule:
 
-- **Import-time crash** (a new collection error) → add the file to `POSIX_ONLY_TEST_FILES`. You cannot
-  skip what will not import.
+- **A NEW import-time crash** (a collection error in a file not already listed) → add the file to
+  `POSIX_ONLY_TEST_FILES`. You cannot skip what will not import. **Precondition (fix-don't-dismiss):**
+  first confirm the crash comes from a genuinely POSIX-only facility (in the test, or a legitimately
+  POSIX production module) — **not** an unguarded `os.getuid()`/`os.uname()`/POSIX syscall newly
+  introduced into `src/alfred/` that should instead be made Windows-import-safe. Any rule-(a) addition
+  of a `src/alfred/security/`- or `supervisor`-adjacent test goes through **security review** (the
+  helper only ignores on win32, so Linux coverage is structurally intact regardless — but the review
+  guards against suppressing a symptom instead of fixing a regression).
+- **The SAME already-listed modules still error at collection** → this is a **collect-ignore mechanism
+  failure** (the win32 glob did not match — e.g. a path-separator / resolution mismatch that the
+  Darwin pytester test cannot exercise), **not** a new rule-(a) file. Re-adding an already-listed file
+  is a no-op; instead inspect the Windows collection-node paths vs the resolved ignore entries.
 - **Runtime failure, import succeeds** → in-place `@pytest.mark.skipif(sys.platform == "win32",
   reason=…)` on the specific test or module (or make the test portable). Once import works, `skipif`
   is the correct, most-local tool.
 
-Each iteration: push → read the Windows unit step's `outcome` (readable even while the step is still
-`continue-on-error`) → apply the rule → repeat until the step is green.
+Each iteration: push → read the Windows unit step's result **from the step LOG** (the pytest summary
+line) — the step `conclusion` shows "success" while `continue-on-error` is on, and the true `outcome`
+is not surfaced by `gh run view`, only the masked `conclusion` is → apply the rule → repeat until the
+step is green **and runs a substantial passed count** (§6's assert-RAN floor), not merely free of
+FAILED/ERROR.
 
 ## 6. Testing
 
@@ -153,14 +187,33 @@ Each iteration: push → read the Windows unit step's `outcome` (readable even w
   - `collect_ignore_for("win32", base)` returns the 3 absolute paths; `collect_ignore_for("linux",
     base)` returns `[]` — pins the list and verifies the win32 gating branch locally (the branch real
     Windows exercises, otherwise untested on Darwin).
+  - **Content-pinning canary:** assert the ignored set is exactly the three known basenames (not just a
+    `len == 3` count) so a *same-count swap* of which modules are ignored also trips the review gate.
   - **Anti-orphan assertion:** every path in `POSIX_ONLY_TEST_FILES` resolves to an existing file, so a
     rename/deletion that orphans an entry fails loudly rather than silently no-op'ing the glob.
-- **pytester end-to-end** (optional; uses the already-enabled `pytest_plugins=["pytester"]`): a
-  sub-`pytest` run with `collect_ignore_glob` set to the target paths asserts those items are not
-  collected — proves pytest honours the mechanism, on Darwin.
-- **No "forgot to add a file" anti-rot guard is needed.** Once Windows is blocking, a new POSIX-only
-  file that crashes collection fails CI loudly — the blocking leg *is* that guard. The only silent
-  failure mode is an orphaned entry, covered by the anti-orphan assertion above.
+- **Real-wiring assertion** (mirrors Phase A's `test_docker_autoskip_hook.py` importing the real
+  conftest): `from tests import conftest; assert conftest.collect_ignore_glob ==
+  collect_ignore_for(sys.platform, Path(conftest.__file__).resolve().parent)`. On Darwin/Linux this is
+  `== []` but it still proves the conftest attribute **exists, is spelled correctly, and is wired to
+  the helper with the right resolved `tests_root`** — catching a `collect_ignore_globs` typo or a wrong
+  base locally, instead of only on a re-crashed real Windows CI run.
+- **No-shadow static guard:** assert no `conftest.py` under `tests/unit` defines
+  `collect_ignore`/`collect_ignore_glob` (they are not merged across conftests; the deepest definer
+  wins, which would silently shadow the top-most win32 guard). Mirrors the existing docker-conftest
+  anti-rot guard.
+- **pytester end-to-end** (uses the already-enabled `pytest_plugins=["pytester"]`): a sub-`pytest` run
+  whose `collect_ignore_glob` is built by `collect_ignore_for("win32", …)` asserts the target file is
+  not collected — proves pytest honours the helper-built list, on Darwin.
+- **Assert-RAN floor (hollow-gate guard).** The blocking Windows leg must **run a substantial passed
+  count**, not merely be free of FAILED/ERROR — otherwise progressive accumulation of ignore-list
+  entries + `skipif`s could hollow the gate into the repo's #245 "green while gating nothing" shape.
+  The Task-4 exit criterion parses `N passed` from the Windows summary and asserts `N >= 3000` (a floor
+  far below today's ~5900 that only trips on a runaway ignore list; the suite only grows) with
+  `skipped` a small fraction of `passed`.
+- **No "forgot to add a file" anti-rot guard is needed** for *additions*: once Windows is blocking, a
+  new POSIX-only file that crashes collection fails CI loudly — the blocking leg *is* that guard. The
+  silent failure modes (orphaned entry, same-count swap, an intermediate conftest shadowing the guard,
+  a runaway ignore list) are covered by the assertions above.
 
 ## 7. Promotion (once the Windows unit step is green on real CI)
 
@@ -183,20 +236,30 @@ Each iteration: push → read the Windows unit step's `outcome` (readable even w
 
 - **Unknown runtime-failure depth.** We cannot pre-validate on Darwin. Per the requester's decision,
   the plan drives to green + blocking in this one PR, iterating (§5) against real Windows CI.
-  **Contingency (documented, not expected):** if the runtime surface proves unexpectedly deep, we do
-  **not** ship a red blocking leg — we keep Windows informational and split promotion to a follow-up.
-  This spec's §4 collection guard has standalone value (clean collection) regardless.
-- **Glob matching.** Absolute paths from `Path(__file__).parent` remove cwd ambiguity; the pytester
-  test confirms pytest honours them.
+  **Contingency (documented, not expected):** if the runtime surface proves unexpectedly deep (or the
+  assert-RAN floor cannot be met without a hollow gate), we do **not** ship a red or hollow blocking
+  leg — we keep Windows informational and split promotion to a follow-up. If that fires, the PR
+  title/body must be reworded to describe only the collection guard, and the "#246 Part 1 complete"
+  close-out comment is **not** posted (Part 1 stays open). This spec's §4 collection guard has
+  standalone value (clean collection) regardless.
+- **Glob matching.** Resolved absolute paths from `Path(__file__).resolve().parent` remove cwd +
+  symlink ambiguity; the pytester test confirms pytest honours the helper-built list.
 - **Orphaned ignore entry** (a listed file renamed/deleted): caught by the §6 anti-orphan assertion.
+- **Hollow gate via accumulated skips:** caught by the §6 assert-RAN floor + the security-review
+  invariant on security-adjacent ignore additions.
 
 ## 9. Acceptance criteria
 
 1. `tests/conftest.py` collection-ignores the 3 POSIX-only modules on win32 only, via a testable pure
-   function; the meta test (gating + anti-orphan) passes on Darwin.
-2. On the PR's own CI, the `Python cross-OS (windows-latest)` **Unit tests** step reports
-   `outcome: success` (green) — collection clean and every executed test passing.
-3. `continue-on-error` is removed from the unit step; the Windows unit leg **blocks** merge.
+   function; the meta test (gating + content-pinning canary + anti-orphan + real-wiring + no-shadow)
+   passes on Darwin.
+2. On the PR's own CI, the `Python cross-OS (windows-latest)` **Unit tests** step's LOG shows a clean
+   pytest summary — collection clean, every executed test passing, and a substantial passed count
+   (assert-RAN floor `N >= 3000`), read from the log (not a `gh … outcome` field, which does not
+   exist).
+3. `continue-on-error` is removed from the unit step; the Windows unit leg **blocks** merge. A rollback
+   lever is documented: on a Windows-unit flake, re-add the one `continue-on-error` line — do **not**
+   de-require the check (that would also drop the static lint/type gate).
 4. `docs/ci/required-checks.md` reflects the Windows unit leg as blocking (row, reality table, prose,
    Deferred item 2 marked done).
 5. #246 Part 1 closed; Part 2 (macOS-native `sandbox-exec`) remains open.
