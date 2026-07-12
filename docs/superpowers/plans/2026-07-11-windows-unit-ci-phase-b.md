@@ -56,12 +56,10 @@ or the Linux CI legs, so these tests pin it directly: the platform gating (win32
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-from tests import conftest as root_conftest
 from tests._posix_only_tests import POSIX_ONLY_TEST_FILES, collect_ignore_for
 
 _TESTS_ROOT = Path(__file__).resolve().parents[2]  # tests/
@@ -114,20 +112,6 @@ def test_pytest_honours_collect_ignore_from_helper(pytester: pytest.Pytester) ->
 
     result = pytester.runpytest("-q")
     result.assert_outcomes(passed=1)  # POSIX-only file ignored; only portable ran
-
-
-def test_conftest_wiring_is_pinned() -> None:
-    """The REAL conftest attribute is wired to the helper on every platform.
-
-    On Darwin/Linux this is `== []`, but it still proves the attribute EXISTS,
-    is spelled correctly (not `collect_ignore_globs`), and is derived from the
-    helper with the right resolved tests_root — catching a typo/wrong-base
-    locally instead of only on a re-crashed real Windows CI run. Mirrors the
-    docker meta test's `from tests import conftest` pattern.
-    """
-    assert root_conftest.collect_ignore_glob == collect_ignore_for(
-        sys.platform, Path(root_conftest.__file__).resolve().parent
-    )
 
 
 def test_no_intermediate_conftest_shadows_the_guard() -> None:
@@ -214,7 +198,7 @@ def collect_ignore_for(platform: str, tests_root: Path) -> list[str]:
 - [ ] **Step 4: Run the meta test to verify it passes**
 
 Run: `uv run pytest tests/unit/meta/test_posix_only_collect_ignore.py -q`
-Expected: PASS (6 passed).
+Expected: PASS (5 passed). (The 6th test — `test_conftest_wiring_is_pinned` — is added in Task 2, since it asserts the `collect_ignore_glob` attribute that Task 2 wires into conftest.)
 
 - [ ] **Step 5: Lint/format/type the two new files**
 
@@ -239,6 +223,7 @@ Feed the helper into pytest's `collect_ignore_glob`. On non-Windows this is a no
 **Files:**
 
 - Modify: `tests/conftest.py` (imports block ~15-26; add the assignment near `_REPO_ROOT` ~33)
+- Modify: `tests/unit/meta/test_posix_only_collect_ignore.py` (add the real-wiring test — Step 5)
 
 **Interfaces:**
 
@@ -288,18 +273,30 @@ Expected: the same pass/skip totals as before this branch (collection unaffected
 Run: `uv run pytest tests/unit/supervisor/test_process_posture.py tests/unit/plugins/test_plugin_launcher_stub.py tests/unit/identity/test_operator_session_file_load.py -q 2>&1 | tail -5`
 Expected: they collect and run/skip normally on Darwin (the ignore list is empty off Windows — we did not accidentally hide them everywhere).
 
-- [ ] **Step 5: Run the meta test + ruff on conftest**
+- [ ] **Step 5: Add the real-wiring meta test (now that conftest defines the attribute)**
 
-Run: `uv run pytest tests/unit/meta/test_posix_only_collect_ignore.py -q && uv run ruff check tests/conftest.py && uv run ruff format --check tests/conftest.py`
-Expected: PASS + clean. (If ruff reports I001, `uv run ruff check --fix tests/conftest.py` and re-verify.)
+Add `import sys` (stdlib group) and `from tests import conftest as root_conftest` (first-party group, before the `_posix_only_tests` import) to `tests/unit/meta/test_posix_only_collect_ignore.py`, then append this test — it pins Task 2's wiring on every platform (on Darwin/Linux it asserts `== []`, but still proves the attribute EXISTS, is spelled correctly, and is derived from the helper with the right resolved `tests_root` — catching a typo like `collect_ignore_globs` locally instead of only on a re-crashed Windows CI run; mirrors the docker meta test's `from tests import conftest` pattern):
 
-- [ ] **Step 6: Commit**
+```python
+def test_conftest_wiring_is_pinned() -> None:
+    """The REAL conftest attribute is wired to the helper on every platform."""
+    assert root_conftest.collect_ignore_glob == collect_ignore_for(
+        sys.platform, Path(root_conftest.__file__).resolve().parent
+    )
+```
+
+- [ ] **Step 6: Run the meta test + ruff on both files**
+
+Run: `uv run pytest tests/unit/meta/test_posix_only_collect_ignore.py -q && uv run ruff check tests/conftest.py tests/unit/meta/test_posix_only_collect_ignore.py && uv run ruff format --check tests/conftest.py tests/unit/meta/test_posix_only_collect_ignore.py`
+Expected: PASS (6 passed) + clean. (If ruff reports I001, `uv run ruff check --fix <files>` and re-verify.)
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add tests/conftest.py
+git add tests/conftest.py tests/unit/meta/test_posix_only_collect_ignore.py
 git commit -m "test(ci): #246 wire win32 collect-ignore into the top-most conftest
 
-$(printf 'collect_ignore_glob = collect_ignore_for(sys.platform, tests/) — a no-op\noff Windows; on Windows it stops pytest importing the 3 POSIX-only modules\nthat crash at collection. Suite unchanged on Darwin (empty-list branch).\n\nMrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
+$(printf 'collect_ignore_glob = collect_ignore_for(sys.platform, tests/) — a no-op\noff Windows; on Windows it stops pytest importing the 3 POSIX-only modules\nthat crash at collection. Meta test pins the wiring on every platform. Suite\nunchanged on Darwin (empty-list branch).\n\nMrReasonable <4990954+MrReasonable@users.noreply.github.com>')"
 ```
 
 ---
@@ -545,7 +542,7 @@ gh issue comment 246 --body "Part 1 (Windows unit leg → blocking) complete —
 - §3/§4 centralized win32 `collect_ignore_glob` + testable helper → Tasks 1-2. ✓
 - §4 resolved absolute paths (`.resolve().parent`), exact-not-glob note, no-shadow note, zero test-file edits, no production change → Task 1 helper + Task 2 Step 2 (resolved) + Steps 3-4 + Global Constraints. ✓
 - §5 iteration decision rule (new-import-crash → list, with fix-don't-dismiss precondition; same-files-error → mechanism failure; runtime → skipif) → Task 4 decision rule (3 bullets) + templates. ✓
-- §6 meta test (gating + content-pinning canary + anti-orphan + real-wiring + no-shadow) + pytester end-to-end + assert-RAN floor → Task 1 Step 1 (6 tests) + Task 4 Step 6. ✓
+- §6 meta test (gating + content-pinning canary + anti-orphan + no-shadow + pytester in Task 1; real-wiring added in Task 2 where the attribute exists) + assert-RAN floor → Task 1 Step 1 (5 tests) + Task 2 Step 5 (6th) + Task 4 Step 6. ✓
 - §7 promotion (drop `continue-on-error` + ci.yml comments + required-checks.md rows + #321 bullet + rollback + branch-protection-unchanged + close Part 1) → Task 5 + Task 6 Step 4. ✓
 - §8 contingency (deep runtime surface OR hollow floor → keep informational, split; reword PR + skip Part-1 comment) → Task 4 Step 5. ✓
 - §9 acceptance criteria 1-6 → Tasks 1-2 (crit 1), Task 3-4 + Task 4 Step 6 floor (crit 2), Task 5 (crit 3-4), Task 6 (crit 5), Task 5 Step 6 (crit 6). ✓
