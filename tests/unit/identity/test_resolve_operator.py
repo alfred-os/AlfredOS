@@ -10,6 +10,7 @@ on this file (test-3 closure).
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -245,6 +246,7 @@ def _token_hash() -> str:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_happy_path_returns_canonical_user_id(tmp_path: Path) -> None:
     path = _write_session(tmp_path, user_id=7)
     session = _FakeSession(rows=[_Row(token_hash=_token_hash(), user_id=7)])
@@ -252,6 +254,7 @@ async def test_happy_path_returns_canonical_user_id(tmp_path: Path) -> None:
     assert await resolver.resolve() == "7"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_expired_refuses_and_audits(tmp_path: Path) -> None:
     path = _write_session(tmp_path, expires_delta=timedelta(hours=-1))
     audit = _FakeAudit()
@@ -265,6 +268,7 @@ async def test_expired_refuses_and_audits(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_host_mismatch_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path, host="other-host")
     audit = _FakeAudit()
@@ -278,6 +282,7 @@ async def test_host_mismatch_refuses(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_machine_mismatch_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path, machine_hash="f" * 64)
     audit = _FakeAudit()
@@ -291,6 +296,7 @@ async def test_machine_mismatch_refuses(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_token_unknown_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     audit = _FakeAudit()
@@ -304,6 +310,7 @@ async def test_token_unknown_refuses(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_token_hash_mismatch_is_token_unknown(tmp_path: Path) -> None:
     """A seeded row whose token_hash differs from the queried hash is invisible.
 
@@ -324,6 +331,7 @@ async def test_token_hash_mismatch_is_token_unknown(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_token_user_mismatch_refuses(tmp_path: Path) -> None:
     """Valid token, but file user_id != DB row user_id -> token authoritative."""
     path = _write_session(tmp_path, user_id=7)
@@ -340,6 +348,7 @@ async def test_token_user_mismatch_refuses(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_user_revoked_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path, user_id=7)
     session = _FakeSession(
@@ -356,6 +365,7 @@ async def test_user_revoked_refuses(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_timeout_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path, user_id=7)
     session = _FakeSession(rows=[_Row(token_hash=_token_hash(), user_id=7)], sleep_s=5.0)
@@ -366,6 +376,7 @@ async def test_timeout_refuses(tmp_path: Path) -> None:
         await resolver.resolve()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_missing_file_emits_fileless_session_missing(tmp_path: Path) -> None:
     """No file -> file-less ``session_missing`` row (attempted_user_id None).
 
@@ -392,6 +403,7 @@ async def test_missing_file_emits_fileless_session_missing(tmp_path: Path) -> No
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_malformed_file_emits_fileless_planted_file_invalid(tmp_path: Path) -> None:
     parent = tmp_path / ".config" / "alfred"
     parent.mkdir(parents=True)
@@ -410,6 +422,7 @@ async def test_malformed_file_emits_fileless_planted_file_invalid(tmp_path: Path
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_non_hex_machine_id_hash_refused_as_planted_file_invalid(tmp_path: Path) -> None:
     """A planted file with a non-hex ``machine_id_hash`` is refused at PARSE.
 
@@ -454,6 +467,7 @@ async def test_non_hex_machine_id_hash_refused_as_planted_file_invalid(tmp_path:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_bad_file_mode_emits_fileless_bad_file_mode(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     path.chmod(0o644)  # broaden beyond 0600 -> BadFileMode on load
@@ -468,6 +482,7 @@ async def test_bad_file_mode_emits_fileless_bad_file_mode(tmp_path: Path) -> Non
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_parent_dir_insecure_emits_fileless_row(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     path.parent.chmod(0o755)  # group/other-accessible parent -> ParentDirInsecure
@@ -482,6 +497,7 @@ async def test_parent_dir_insecure_emits_fileless_row(tmp_path: Path) -> None:
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_no_machine_id_emits_fileless_machine_id_unavailable(tmp_path: Path) -> None:
     """A machine-id source read failure lands a ``machine_id_unavailable`` row.
 
@@ -509,6 +525,7 @@ async def test_no_machine_id_emits_fileless_machine_id_unavailable(tmp_path: Pat
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_short_pepper_refused_as_pepper_misconfigured(tmp_path: Path) -> None:
     """A short/misconfigured pepper is a TYPED refusal, not a raw ValueError.
 
@@ -540,6 +557,7 @@ async def test_short_pepper_refused_as_pepper_misconfigured(tmp_path: Path) -> N
     assert len(_refused_hooks(hooks)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_happy_path_fires_no_refused_hook(tmp_path: Path) -> None:
     path = _write_session(tmp_path, user_id=7)
     session = _FakeSession(rows=[_Row(token_hash=_token_hash(), user_id=7)])
@@ -549,6 +567,7 @@ async def test_happy_path_fires_no_refused_hook(tmp_path: Path) -> None:
     assert not [c for c in hooks.calls if c.name == "operator.session.refused"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: file mode/permissions")
 async def test_refusal_fires_refused_hook(tmp_path: Path) -> None:
     path = _write_session(tmp_path, expires_delta=timedelta(hours=-1))
     hooks = _FakeHooks()

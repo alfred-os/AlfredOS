@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,10 @@ def test_start_constructs_and_runs_gateway_process(monkeypatch: pytest.MonkeyPat
     assert isinstance(captured.get("shutdown_event"), asyncio.Event)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_start_signal_handler_unavailable_logs_and_continues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -289,6 +294,10 @@ def test_start_programming_bug_still_surfaces_loud(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family (#246 review)",
+)
 def test_status_socket_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runtime_dir = tmp_path / ".run" / "alfred"
     runtime_dir.mkdir(mode=0o700, parents=True)
@@ -369,6 +378,10 @@ def test_status_runtime_dir_vanishes_between_checks_is_friendly(
     assert t("gateway.status.socket_absent", path=str(sock)) in result.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_status_never_dials_the_socket(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Status is a ``Path.exists`` + stat probe only — it MUST NOT open a connection."""
     runtime_dir = tmp_path / ".run" / "alfred"

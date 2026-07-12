@@ -23,6 +23,7 @@ control-reject row), never a coverage-only smoke.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -340,6 +341,7 @@ async def test_build_wiring_refuses_on_unregistered_adapter_kind(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
 async def test_control_reject_auditor_writes_loud_refused_row(
     fake_audit_writer: FakeAuditWriter,
 ) -> None:

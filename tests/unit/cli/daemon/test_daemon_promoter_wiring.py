@@ -29,6 +29,7 @@ covered by ``test_sub_payload_promotion.py`` / ``test_inbound_handler_promoter.p
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,10 @@ def test_factory_fails_loud_on_unregistered_kind() -> None:
     assert "bogus_unregistered" in str(excinfo.value)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+)
 def test_enabled_empty_set_adapter_wires_none_promoter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -142,6 +147,10 @@ def test_enabled_empty_set_adapter_wires_none_promoter(
     assert len(sup.registered_tasks) == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+)
 def test_boot_reaps_content_store_on_normal_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

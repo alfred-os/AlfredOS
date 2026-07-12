@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,10 @@ def test_build_boot_audit_writer_falls_back_to_default(
 # --- _daemon_pidfile malformed-shape arm -----------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows)",
+)
 def test_load_pidfile_refuses_missing_json_field(tmp_path: Path) -> None:
     """A JSON object missing a required field → DaemonPidFileError."""
     pf = tmp_path / "daemon.pid"
@@ -69,6 +74,10 @@ def test_load_pidfile_refuses_missing_json_field(tmp_path: Path) -> None:
         load_pidfile(pf)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (not exposed by CPython on Windows)",
+)
 def test_load_pidfile_refuses_non_int_pid(tmp_path: Path) -> None:
     pf = tmp_path / "daemon.pid"
     pf.write_text(

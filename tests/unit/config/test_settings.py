@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,14 @@ from alfred.config.settings import Settings, SettingsError
 
 
 class TestSettings:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_loads_with_defaults_when_env_missing(self) -> None:
         with patch.dict(
             os.environ,
@@ -23,6 +32,14 @@ class TestSettings:
             assert s.primary_provider == "deepseek"  # default
             assert s.fallback_provider == "anthropic"  # default
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_database_url_defaults_to_localhost_postgres(self) -> None:
         with patch.dict(
             os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True
@@ -36,6 +53,14 @@ class TestSettings:
                 == "postgresql+asyncpg://alfred:alfred@localhost:5432/alfred"
             )
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_redis_url_defaults_to_localhost(self) -> None:
         """PR-S4-235-1: the daemon-owned ContentStore reads its Redis URL from here."""
         with patch.dict(
@@ -44,6 +69,14 @@ class TestSettings:
             s = Settings()
             assert s.redis_url == "redis://localhost:6379/0"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_redis_url_reads_alfred_redis_url_env(self) -> None:
         """The docker-compose stack sets ALFRED_REDIS_URL to the internal service URL."""
         with patch.dict(
@@ -58,6 +91,14 @@ class TestSettings:
             s = Settings()
             assert s.redis_url == "redis://alfred-redis:6379/0"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_anthropic_api_key_is_optional(self) -> None:
         with patch.dict(
             os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True
@@ -65,6 +106,14 @@ class TestSettings:
             s = Settings()
             assert s.anthropic_api_key is None
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_proposal_dispatch_interval_s_defaults_to_30(self) -> None:
         """ADR-0021 #171 — supervisor's dispatch cycle cadence defaults to 30s."""
         with patch.dict(
@@ -73,6 +122,14 @@ class TestSettings:
             s = Settings()
             assert s.proposal_dispatch_interval_s == 30
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_proposal_dispatch_interval_s_reads_env_override(self) -> None:
         """Operators can lower the cadence via ALFRED_PROPOSAL_DISPATCH_INTERVAL_S."""
         with patch.dict(
@@ -114,6 +171,14 @@ class TestPlaceholderApiKeyValidator:
     bootstrap that forgot to override the env, hand-edited compose file).
     """
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_rejects_literal_placeholder(self) -> None:
         # Sentinel string is `sk-...` exactly, matching .env.example line 5.
         with patch.dict(
@@ -128,6 +193,14 @@ class TestPlaceholderApiKeyValidator:
             # branch on it without parsing the full pydantic error blob.
             assert "placeholder_api_key" in str(excinfo.value)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only: Path.home() has no non-env fallback on Windows "
+            "(clear=True strips USERPROFILE; POSIX falls back via the pwd db) "
+            "(#246 review)"
+        ),
+    )
     def test_accepts_real_looking_key(self) -> None:
         # Any string other than the literal placeholder is accepted at this
         # layer — the provider call validates further (auth failure surfaces

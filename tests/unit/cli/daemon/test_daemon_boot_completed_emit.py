@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,10 @@ from alfred.cli.daemon import daemon_app
 from .conftest import FakeAuditWriter, FakeSupervisor
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+)
 def test_boot_completed_emits_row_and_writes_pidfile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -45,6 +50,10 @@ def test_boot_completed_emits_row_and_writes_pidfile(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking (#246 review)",
+)
 def test_boot_completed_exits_3_when_completion_audit_unwritable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

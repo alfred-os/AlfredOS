@@ -13,6 +13,7 @@ assert the audit rows AND the wire-send-via-seam contract (broadcast through
 from __future__ import annotations
 
 import inspect
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -152,6 +153,10 @@ def quarantine_registry() -> Any:
         set_registry(prior)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_ready_row_emitted_after_boot_completed(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -175,6 +180,10 @@ def test_ready_row_emitted_after_boot_completed(
     assert ready[0]["result"] == "success"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_ready_epoch_matches_going_down_epoch(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -195,6 +204,10 @@ def test_ready_epoch_matches_going_down_epoch(
     assert shared_epoch == minted
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_going_down_row_emitted_at_drain(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -236,6 +249,10 @@ def test_going_down_not_emitted_when_boot_refuses(
     assert not [r for r in lifecycle if r["subject"]["phase"] == "going_down"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_default_empty_adapters_emits_audit_rows_without_wire(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -253,6 +270,10 @@ def test_default_empty_adapters_emits_audit_rows_without_wire(
     assert all(r["subject"]["epoch"] for r in lifecycle)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_boot_path_registers_runner_send_notification_with_broadcaster(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -332,6 +353,10 @@ def test_boot_path_never_constructs_lifecycle_frame_models() -> None:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_going_down_emit_failure_still_runs_the_reap_chain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -398,6 +423,10 @@ def test_going_down_emit_failure_still_runs_the_reap_chain(
     assert patch_quarantine_child_spawn[0].aclose_calls >= 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot pidfile os.O_NOFOLLOW/os.getuid (#246 review)",
+)
 def test_ready_emit_failure_skips_going_down(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,

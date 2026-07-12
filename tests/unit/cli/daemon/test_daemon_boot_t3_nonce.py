@@ -19,6 +19,7 @@ the wider suite.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -58,6 +59,11 @@ def quarantine_registry() -> Iterator[HookRegistry]:
         set_registry(prior)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based "
+    "peer auth (#246 review)",
+)
 def test_boot_registers_authorized_t3_nonce(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -89,6 +95,11 @@ def test_boot_registers_authorized_t3_nonce(
         tag_t3_with_nonce("y", caller_token=CapabilityGateNonce())
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based "
+    "peer auth (#246 review)",
+)
 def test_boot_threads_same_nonce_into_comms_graph(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -154,6 +165,11 @@ def test_boot_threads_same_nonce_into_comms_graph(
     assert built_graphs[0].t3_nonce is booted  # type: ignore[attr-defined]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based "
+    "peer auth (#246 review)",
+)
 def test_boot_does_not_double_call_factory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

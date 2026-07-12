@@ -45,6 +45,7 @@ Covers, per the PR2a plan's mandatory coverage list:
 from __future__ import annotations
 
 import socket
+import sys
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -135,6 +136,10 @@ async def test_default_spawn_passes_no_control_fd(_spawn_capture: dict[str, Any]
         await io.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_control_fd_spawn_passes_fd_3_and_4(
     _spawn_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -244,6 +249,10 @@ async def test_aliasing_loop_lifts_source_fd_off_a_literal_target(
         await io.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_unsaved_target_closes_installed_fd_for_both_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -288,6 +297,10 @@ async def test_unsaved_target_closes_installed_fd_for_both_targets(
         await io.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_provider_key_delivery_failure_closes_control_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -326,6 +339,10 @@ async def test_provider_key_delivery_failure_closes_control_parent(
         captured["control_parent"].getsockname()  # closed
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_popen_oserror_closes_control_parent(monkeypatch: pytest.MonkeyPatch) -> None:
     """An OS spawn failure on a ``control_fd=True`` spawn ALSO closes the parent control-end.
 
@@ -371,6 +388,10 @@ async def test_broker_socket_unconfigured_raises() -> None:
         await io.broker_socket()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_aclose_closes_the_parent_control_end() -> None:
     """``aclose`` closes the owned parent control-end (no fd leak on teardown)."""
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)

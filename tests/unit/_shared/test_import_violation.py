@@ -7,12 +7,20 @@ own failure paths; these tests pin the rendering itself.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from tests.unit._shared.import_violation import ImportViolation, _remediation_message
 
 
 class TestRemediationMessage:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only: WindowsPath str() renders '/'-literal fixture paths with "
+        "backslashes (#246 review)",
+    )
     def test_env_read_category_includes_adr_pointer(self) -> None:
         v = ImportViolation(
             file=Path("src/alfred/foo.py"),
@@ -26,6 +34,11 @@ class TestRemediationMessage:
         assert "ADR-0012" in msg
         assert "broker.get" in msg
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only: WindowsPath str() renders '/'-literal fixture paths with "
+        "backslashes (#246 review)",
+    )
     def test_adapter_import_category_includes_adr_pointer(self) -> None:
         v = ImportViolation(
             file=Path("src/alfred/comms/discord.py"),

@@ -1,5 +1,8 @@
 # tests/unit/security/test_broker_discord_token_precedence.py
+import sys
 from pathlib import Path
+
+import pytest
 
 from alfred.security.secrets import SecretBroker
 
@@ -14,6 +17,7 @@ def test_discord_token_resolves_from_env_when_no_file(tmp_path: Path) -> None:
     assert broker.get("discord_bot_token") == "tok-env"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
 def test_file_shadows_env_for_discord_token(tmp_path: Path) -> None:
     """_PREFER_FILE precedence: a secrets.toml value SHADOWS the env var. Pinned so the
     migration's 'set it in .env' guidance is honest about file-shadowing (#309)."""

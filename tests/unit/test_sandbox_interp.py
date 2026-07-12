@@ -25,6 +25,10 @@ def test_includes_prefix_base_prefix_and_realpath_root() -> None:
     assert all(isinstance(r, str) for r in roots)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: symlink semantics for the bwrap sandbox root walk (#246 review)",
+)
 def test_walks_the_uv_minor_alias_symlink_hop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

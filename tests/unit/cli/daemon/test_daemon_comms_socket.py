@@ -19,6 +19,7 @@ Invariants under proof:
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
@@ -136,6 +137,13 @@ def _patch_socket_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("alfred.cli.daemon._comms_boot.CommsPluginRunner", _FakeRunner)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_tui_adapter_binds_listener_and_schedules_accept_task(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -178,6 +186,10 @@ def test_tui_adapter_binds_listener_and_schedules_accept_task(
     assert t("daemon.comms.adapter_listening", adapter_id=_TUI_ADAPTER) in result.output
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family (peer-uid audit callback)",
+)
 def test_tui_adapter_peer_reject_callback_writes_audit_row(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -215,6 +227,10 @@ def test_tui_adapter_peer_reject_callback_writes_audit_row(
     assert rows[0]["result"] == "refused"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family (peer-uid audit callback)",
+)
 def test_tui_adapter_peer_reject_callback_handles_unknown_uid(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -239,6 +255,13 @@ def test_tui_adapter_peer_reject_callback_handles_unknown_uid(
     assert rows[0]["subject"]["peer_uid"] == ""
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_tui_adapter_listener_reaped_on_clean_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -260,6 +283,13 @@ def test_tui_adapter_listener_reaped_on_clean_shutdown(
     assert _FakeSocketListener.instances[0].aclose_calls >= 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_tui_adapter_listener_reaped_when_later_boot_step_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -287,6 +317,13 @@ def test_tui_adapter_listener_reaped_when_later_boot_step_fails(
     assert _FakeSocketListener.instances[0].aclose_calls >= 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_tui_adapter_listener_reaped_even_when_supervisor_stop_raises(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -319,6 +356,13 @@ def test_tui_adapter_listener_reaped_even_when_supervisor_stop_raises(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_no_enabled_adapters_binds_no_socket_listener(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -343,6 +387,13 @@ def test_no_enabled_adapters_binds_no_socket_listener(
     assert _FakeSocketListener.instances == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_tui_adapter_bind_failure_refuses_boot_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -455,6 +506,13 @@ class _CapturingSupervisor(FakeSupervisor):
         return coro
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_accept_and_pump_returns_promptly_on_shutdown_with_no_peer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -550,6 +608,13 @@ class _SameTickAcceptListener:
         self.aclose_calls += 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only: real daemon-boot pipeline touches os.O_NOFOLLOW "
+        "(pidfile write) not exposed on Windows"
+    ),
+)
 def test_accept_and_pump_prefers_shutdown_on_same_tick_race(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

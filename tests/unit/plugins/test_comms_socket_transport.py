@@ -27,6 +27,7 @@ import os
 import socket
 import stat
 import struct
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -63,6 +64,13 @@ def runtime_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         yield Path(home) / ".run" / "alfred"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: test fixture patches $HOME via monkeypatch.setenv, which "
+    "Windows' Path.home()/expanduser ignores in favor of %USERPROFILE% — the "
+    "resolved default_comms_socket_path() diverges from the fixture's runtime_dir "
+    "(#246 review)",
+)
 async def test_default_socket_path_is_adapter_keyed_under_runtime_dir(runtime_dir: Path) -> None:
     path = default_comms_socket_path(_ADAPTER_ID)
     assert path == runtime_dir / f"comms-{_ADAPTER_ID}.sock"
@@ -201,6 +209,10 @@ async def test_close_is_idempotent() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_binds_socket_0600_owner_only(runtime_dir: Path) -> None:
     listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
     try:
@@ -217,6 +229,11 @@ async def test_listener_binds_socket_0600_owner_only(runtime_dir: Path) -> None:
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions (chmod bits do not carry the same "
+    "meaning under Windows ACLs) (#246 review)",
+)
 async def test_listener_tightens_preexisting_loose_runtime_dir_to_0700(
     runtime_dir: Path,
 ) -> None:
@@ -240,6 +257,10 @@ async def test_listener_tightens_preexisting_loose_runtime_dir_to_0700(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_unlinks_stale_socket_before_bind(runtime_dir: Path) -> None:
     """A crashed prior boot leaves a socket inode; bind unlinks-then-binds."""
     runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -255,6 +276,10 @@ async def test_listener_unlinks_stale_socket_before_bind(runtime_dir: Path) -> N
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_accept_yields_a_working_transport(runtime_dir: Path) -> None:
     """Accept one connection; the returned transport carries a full round-trip."""
     listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
@@ -283,6 +308,10 @@ async def test_listener_accept_yields_a_working_transport(runtime_dir: Path) -> 
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_bounds_accepted_reader_to_max_line_bytes(runtime_dir: Path) -> None:
     """The listener's ``max_line_bytes`` actually bounds the ACCEPTED reader.
 
@@ -313,6 +342,10 @@ async def test_listener_bounds_accepted_reader_to_max_line_bytes(runtime_dir: Pa
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_aclose_reaps_socket_file(runtime_dir: Path) -> None:
     listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
     await listener.bind()
@@ -346,6 +379,10 @@ async def test_close_skips_close_when_writer_already_closing() -> None:
     assert writer.close_calls == 0
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_bind_twice_raises(runtime_dir: Path) -> None:
     listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
     await listener.bind()
@@ -361,6 +398,10 @@ async def test_listener_path_property(runtime_dir: Path) -> None:
     assert listener.path == default_comms_socket_path(_ADAPTER_ID)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.mkfifo",
+)
 async def test_listener_refuses_anomalous_path_type(runtime_dir: Path) -> None:
     """A FIFO (not socket/regular) at the runtime path is refused, never unlinked."""
     runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -377,6 +418,10 @@ async def test_listener_refuses_anomalous_path_type(runtime_dir: Path) -> None:
         sock_path.unlink(missing_ok=True)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_bind_failure_cleans_up(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -411,6 +456,10 @@ async def test_listener_accept_before_bind_raises(runtime_dir: Path) -> None:
         await listener.accept()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_second_connection_is_closed(runtime_dir: Path) -> None:
     """The single-connection cut closes a second dial-in rather than racing the first.
 
@@ -444,6 +493,10 @@ async def test_listener_second_connection_is_closed(runtime_dir: Path) -> None:
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 async def test_listener_rejects_mismatched_uid_peer_then_serves_same_uid(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -480,6 +533,10 @@ async def test_listener_rejects_mismatched_uid_peer_then_serves_same_uid(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 async def test_listener_fires_on_peer_rejected_callback_with_uid(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -529,6 +586,10 @@ async def test_listener_fires_on_peer_rejected_callback_with_uid(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_reject_callback_audit_failure_escalates_to_accept(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -589,6 +650,10 @@ def test_resolve_peer_uid_no_so_peercred_logs_breadcrumb(
     assert any(e == "comms.socket.peer_cred_unsupported" for e, _ in events)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_listener_second_accept_call_raises(runtime_dir: Path) -> None:
     """A SECOND ``accept()`` *call* raises — one-shot lifecycle (ADR-0031 Decision 4).
 
@@ -627,6 +692,10 @@ async def test_listener_second_accept_call_raises(runtime_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_dial_round_trips_both_directions_against_a_real_listener(
     runtime_dir: Path,
 ) -> None:
@@ -676,6 +745,10 @@ async def test_dial_with_no_listener_raises_loud(runtime_dir: Path) -> None:
         await dial_comms_socket(_ADAPTER_ID)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_dial_bounds_the_reader_to_max_line_bytes(runtime_dir: Path) -> None:
     """An over-bound line from the host trips the DIALED reader's limit.
 
@@ -712,6 +785,10 @@ async def test_dial_bounds_the_reader_to_max_line_bytes(runtime_dir: Path) -> No
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 def test_peer_uid_same_uid_accepted() -> None:
     from alfred.plugins.comms_socket_transport import _peer_uid_authorized
 
@@ -719,6 +796,10 @@ def test_peer_uid_same_uid_accepted() -> None:
     assert _peer_uid_authorized(reported_uid=os.getuid()) is True
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 def test_peer_uid_different_uid_rejected() -> None:
     from alfred.plugins.comms_socket_transport import _peer_uid_authorized
 
@@ -847,6 +928,10 @@ def _has_peer(sock: socket.socket) -> bool:
     return True
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_dial_peer_auth_succeeds_same_uid_loopback(runtime_dir: Path) -> None:
     """A same-uid loopback dial passes both the pre-dial lstat + post-connect check.
 
@@ -866,6 +951,10 @@ async def test_dial_peer_auth_succeeds_same_uid_loopback(runtime_dir: Path) -> N
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_dial_peer_auth_rejects_mismatched_uid_and_closes_writer(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -913,6 +1002,10 @@ async def test_dial_peer_auth_rejects_mismatched_uid_and_closes_writer(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_dial_peer_auth_reads_creds_off_connected_socket_not_listener(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -972,6 +1065,10 @@ async def test_dial_peer_auth_reads_creds_off_connected_socket_not_listener(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_dial_peer_auth_pre_dial_lstat_refuses_non_socket(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1000,6 +1097,10 @@ async def test_dial_peer_auth_pre_dial_lstat_refuses_non_socket(
     assert connect_called is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 def test_dial_path_owned_helper_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """SEC-2: the FS-guard helper refuses a socket owned by a DIFFERENT uid.
 
@@ -1022,6 +1123,10 @@ def test_dial_path_owned_helper_rejects_foreign_owner(monkeypatch: pytest.Monkey
         cst._assert_dial_path_owned(path)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_dial_path_owned_helper_accepts_owned_socket(runtime_dir: Path) -> None:
     """SEC-2: the FS-guard helper accepts a same-uid socket inode (no raise).
 
@@ -1259,6 +1364,10 @@ async def test_concurrent_sends_do_not_interleave() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_read_payload_unit_plain_leg_returns_unsequenced_frame(
     runtime_dir: Path,
 ) -> None:
@@ -1287,6 +1396,10 @@ async def test_read_payload_unit_plain_leg_returns_unsequenced_frame(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_send_read_payload_unit_seq_enabled_round_trips_non_json(
     runtime_dir: Path,
 ) -> None:
@@ -1323,6 +1436,10 @@ async def test_send_read_payload_unit_seq_enabled_round_trips_non_json(
         await listener.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_read_payload_unit_seq_enabled_reads_plain_line_as_unsequenced(
     runtime_dir: Path,
 ) -> None:

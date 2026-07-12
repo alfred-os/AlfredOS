@@ -7,6 +7,7 @@ Postgres, no real ``HOME``. Output and exit codes are asserted directly.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -169,6 +170,10 @@ def test_parse_expires_in_out_of_range_raises(raw: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions (#246 review)",
+)
 async def test_login_happy_path(tmp_path: Path) -> None:
     db = _DB(users_by_slug={"alice": _user()}, users_by_id={7: _user()})
     audit = _Audit()
@@ -211,6 +216,10 @@ async def test_login_refresh_no_session(tmp_path: Path) -> None:
     assert exc.value.exit_code == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_login_refresh_rotates(tmp_path: Path) -> None:
     deps = _deps(tmp_path)
     await _seed_session_file(deps)
@@ -278,6 +287,10 @@ async def test_login_bare_multi_user_tty_picker_out_of_range(
     assert exc.value.exit_code == 2
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_login_refresh_user_gone(tmp_path: Path) -> None:
     """Refresh when the session's user was removed -> user_not_found."""
     deps = _deps(tmp_path)
@@ -288,6 +301,10 @@ async def test_login_refresh_user_gone(tmp_path: Path) -> None:
     assert exc.value.exit_code == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_login_overwrite_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     deps = _deps(tmp_path)
     await _seed_session_file(deps, user_id=7)
@@ -304,6 +321,10 @@ async def test_login_overwrite_declined(tmp_path: Path, monkeypatch: pytest.Monk
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_logout_happy_path(tmp_path: Path) -> None:
     deps = _deps(tmp_path)
     await _seed_session_file(deps)
@@ -326,6 +347,10 @@ async def test_logout_no_session(tmp_path: Path) -> None:
     assert exc.value.exit_code == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_logout_bad_file_cleanup(tmp_path: Path) -> None:
     """A session file present but unloadable (bad mode) is audited + removed.
 
@@ -348,6 +373,10 @@ async def test_logout_bad_file_cleanup(tmp_path: Path) -> None:
     assert refused["result"] == "refused"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_logout_confirmed_resolves_display_name(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -361,6 +390,10 @@ async def test_logout_confirmed_resolves_display_name(
     assert "User 7" in out
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_logout_confirmed_numeric_fallback_when_user_gone(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -387,6 +420,10 @@ def test_session_file_path_under_home(monkeypatch: pytest.MonkeyPatch, tmp_path:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_whoami_happy_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     deps = _deps(tmp_path)
     await _seed_session_file(deps)
@@ -466,6 +503,10 @@ async def _seed_expired_session(deps: OperatorSessionDeps, *, user_id: int = 7) 
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_whoami_expired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     deps = _deps(tmp_path)
     await _seed_expired_session(deps)
@@ -481,6 +522,10 @@ async def test_whoami_expired(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     assert past.isoformat() not in err
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_whoami_expired_numeric_fallback_when_user_gone(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -493,6 +538,10 @@ async def test_whoami_expired_numeric_fallback_when_user_gone(
     assert "7" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions",
+)
 async def test_whoami_unloadable_no_traceback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

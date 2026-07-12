@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -50,6 +51,10 @@ async def test_missing_socket_raises_unavailable(short_runtime: Path) -> None:
         await query_daemon_control(STATUS_QUERY_METHOD, path=short_runtime / "absent.sock")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_stale_inode_no_listener_raises_unavailable(short_runtime: Path) -> None:
     # A socket WE own but with NO accepting server -> connect raises
     # ConnectionRefusedError -> mapped to Unavailable (distinct from the missing arm).
@@ -60,6 +65,10 @@ async def test_stale_inode_no_listener_raises_unavailable(short_runtime: Path) -
         await query_daemon_control(STATUS_QUERY_METHOD, path=path)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_connect_time_oserror_maps_to_unavailable(
     short_runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -80,6 +89,10 @@ async def test_connect_time_oserror_maps_to_unavailable(
         await query_daemon_control(STATUS_QUERY_METHOD, path=path)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 async def test_unowned_path_raises_auth_error(short_runtime: Path) -> None:
     short_runtime.mkdir(parents=True)
     f = short_runtime / "notasock"
@@ -88,6 +101,10 @@ async def test_unowned_path_raises_auth_error(short_runtime: Path) -> None:
         await query_daemon_control(STATUS_QUERY_METHOD, path=f)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_post_connect_peer_uid_mismatch_raises_auth_error(
     short_runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -122,6 +139,10 @@ async def _stub_server(path: Path, response: bytes) -> asyncio.AbstractServer:
     return await asyncio.start_unix_server(_accept, sock=sock)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_empty_response_raises_protocol_error(short_runtime: Path) -> None:
     # test-M4 (arm 1): an EOF / empty response is its own protocol error.
     path = short_runtime / "ctl.sock"
@@ -135,6 +156,10 @@ async def test_empty_response_raises_protocol_error(short_runtime: Path) -> None
             await server.wait_closed()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_over_bound_response_raises_protocol_error(short_runtime: Path) -> None:
     # test-M4 (arm 2): an over-bound response line is its own protocol error (the ``or``
     # short-circuits, so this needs an independent test from the empty-read arm).
@@ -151,6 +176,10 @@ async def test_over_bound_response_raises_protocol_error(short_runtime: Path) ->
             await server.wait_closed()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_malformed_response_raises_protocol_error(short_runtime: Path) -> None:
     # test-M4 (arm 3): a bounded but non-JSON response line.
     path = short_runtime / "ctl.sock"
@@ -189,6 +218,10 @@ async def test_read_response_belt_and_braces_over_bound_guard() -> None:
         await _read_response(reader)  # type: ignore[arg-type]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_server_drop_mid_exchange_maps_to_daemon_control_error(short_runtime: Path) -> None:
     # The portable server-drop case: a real server accepts then immediately closes WITHOUT
     # sending a frame. On Linux the close-with-unread-data delivers an RST so the client's
@@ -232,6 +265,10 @@ async def test_read_response_connection_reset_maps_to_unavailable() -> None:
         await _read_response(_ResettingReader())  # type: ignore[arg-type]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_drain_connection_reset_maps_to_unavailable(
     short_runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

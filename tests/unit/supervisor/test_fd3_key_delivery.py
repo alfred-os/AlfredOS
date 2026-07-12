@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import os
 import struct
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +29,10 @@ from alfred.supervisor.fd3_key_delivery import (
 )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev",
+)
 def test_delivery_writes_length_prefix_then_bytes() -> None:
     read_fd, write_fd = os.pipe()
     key = "sk-test-12345"
@@ -47,6 +52,10 @@ def test_delivery_writes_length_prefix_then_bytes() -> None:
         os.close(read_fd)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev",
+)
 def test_delivery_uses_single_writev() -> None:
     # sec-3: the prefix + key go in ONE atomic writev, not two writes.
     read_fd, write_fd = os.pipe()
@@ -62,6 +71,11 @@ def test_delivery_uses_single_writev() -> None:
         os.close(read_fd)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev (masked as DID NOT RAISE by the finally-block "
+    "cleanup after patch() raises AttributeError) (#246 review)",
+)
 def test_partial_write_refuses() -> None:
     read_fd, write_fd = os.pipe()
     total = struct.calcsize(">I") + len("sk-abc")
@@ -77,6 +91,11 @@ def test_partial_write_refuses() -> None:
             os.close(write_fd)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev (masked as DID NOT RAISE by the finally-block "
+    "cleanup after patch() raises AttributeError) (#246 review)",
+)
 def test_eagain_refuses() -> None:
     read_fd, write_fd = os.pipe()
     try:
@@ -93,6 +112,10 @@ def test_eagain_refuses() -> None:
             os.close(write_fd)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev",
+)
 def test_key_buffer_zeroed_before_gc_collect() -> None:
     # sec-3: the mutable key bytearray is zeroed BEFORE gc.collect(). The
     # implementation routes both through patchable module attributes; assert
@@ -131,6 +154,10 @@ def test_zero_buffer_actually_zeroes() -> None:
     assert bytes(buf) == b"\x00" * len(b"secret-bytes")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.writev",
+)
 def test_delivery_does_not_retain_key_in_module_state() -> None:
     import alfred.supervisor.fd3_key_delivery as mod
 

@@ -18,6 +18,7 @@ the wire frame is best-effort (spec §6).
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Mapping
 
 import pytest
@@ -202,6 +203,11 @@ async def test_broadcast_going_down_reraises_cancelled_error() -> None:
         await broadcaster.broadcast_going_down("shutdown")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW (not defined in the os module on Windows; "
+    "the real boot path's write_pidfile() call is unmocked here) (#246 review)",
+)
 def test_going_down_broadcast_happens_before_supervisor_stop(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,

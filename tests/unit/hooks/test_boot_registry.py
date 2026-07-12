@@ -24,6 +24,7 @@ Pinned invariants:
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 
 import pytest
@@ -143,6 +144,10 @@ def test_boot_registry_with_deny_gate_refuses_dlp_subscriber(
         register_extract_dlp_subscriber(registry=reg, outbound_dlp=_make_dlp())
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=("POSIX-only: hardcoded forward-slash path-string literals in the guard (#246 review)"),
+)
 def test_boot_declares_every_in_tree_declare_hookpoints_publisher() -> None:
     """Completeness guard: every ``def declare_hookpoints`` in ``src/alfred``
     (except ``hooks/boot.py`` itself, which is the AGGREGATOR) MUST be wired

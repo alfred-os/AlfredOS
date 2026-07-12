@@ -10,6 +10,7 @@ works against a trivial double, not just a full ``Settings``.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,10 @@ def test_plain_stub_satisfies_secret_broker_config() -> None:
     assert cfg.secrets_file == Path("/nonexistent/secrets.toml")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.getuid family",
+)
 def test_from_settings_threads_the_stub_secrets_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

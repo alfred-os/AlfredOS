@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess as _subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -160,12 +161,22 @@ class TestConfigErrorHierarchy:
         assert err.path == path
         assert "boom" in str(err)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only: hardcoded '/'-literal path; WindowsPath repr() "
+        "renders it with backslashes (#246 review)",
+    )
     def test_permissions_error_repr_includes_octal_mode(self) -> None:
         err = SecretBrokerPermissionsError("perms", path=Path("/x"), mode=0o644, parent=Path("/"))
         assert "0o644" in repr(err)
         assert "/x" in repr(err)
         assert err.parent == Path("/")
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only: hardcoded '/'-literal path; WindowsPath repr() "
+        "renders it with backslashes (#246 review)",
+    )
     def test_config_error_repr_includes_path(self) -> None:
         err = SecretBrokerConfigError("oops", path=Path("/x/y"))
         assert "/x/y" in repr(err)
@@ -285,6 +296,7 @@ class TestLoadBoundaryTypedErrors:
     handlers catch them uniformly instead of surfacing a raw traceback.
     """
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_malformed_toml_raises_typed_malformed_error(self, tmp_path: Path) -> None:
         """A valid-perms secrets file with broken TOML → SecretBrokerMalformedError.
 
@@ -305,6 +317,7 @@ class TestLoadBoundaryTypedErrors:
         assert isinstance(exc_info.value, SecretBrokerConfigError)
         assert exc_info.value.path == path
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_unreadable_file_raises_typed_unreadable_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -337,6 +350,7 @@ class TestLoadBoundaryTypedErrors:
         assert isinstance(exc_info.value, SecretBrokerConfigError)
         assert exc_info.value.path == path
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_invalid_utf8_file_raises_typed_malformed_error(self, tmp_path: Path) -> None:
         """A valid-perms secrets file with invalid UTF-8 → SecretBrokerMalformedError.
 
@@ -402,6 +416,7 @@ class TestSecretsFilePathAccessor:
         """No file layer set → None (env-only backend)."""
         assert SecretBroker(env={}).secrets_file_path is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_returns_resolved_path_for_present_file(self, tmp_path: Path) -> None:
         """A present, valid file layer → its resolved path."""
         parent = tmp_path / "alfred"
@@ -565,6 +580,7 @@ class TestGitWalkNarrowing:
         secret.chmod(0o600)
         return secret
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_layer3_gitignored_boots_with_warning(self, tmp_path: Path) -> None:
         """A layer-3 secret that IS gitignored boots AND emits the warn event."""
         secret = self._repo_with_secret(tmp_path, gitignored=True)
@@ -620,6 +636,7 @@ class TestGitFileWorktreeNarrowing:
     caught by the walk and gets the #366 layer-3 gitignore-aware treatment —
     proving the .git-FILE detection composes with the check-ignore narrowing."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_layer3_gitignored_worktree_secret_boots(self, tmp_path: Path) -> None:
         """A gitignored secret in a worktree boots — `git check-ignore` resolves
         the worktree natively, so the layer-3 narrowing applies here too."""
@@ -680,6 +697,7 @@ class TestPermissionsCheck:
             SecretBroker(env={}, secrets_file=link, allow_inside_git_worktree=True)
         assert exc_info.value.path == link
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_rejects_world_readable_file(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
         parent.mkdir(mode=0o700)
@@ -690,6 +708,7 @@ class TestPermissionsCheck:
             SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
         assert exc_info.value.mode & 0o077 != 0
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_rejects_group_writable_parent(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
         parent.mkdir()
@@ -701,6 +720,7 @@ class TestPermissionsCheck:
             SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
         assert exc_info.value.parent == parent
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_rejects_wrong_owner(self, secure_secrets_file: Path) -> None:
         # Patch os.getuid() to return a uid that doesn't match the file's
         # st_uid — we can't easily chown to a different user in tmp_path
@@ -716,6 +736,7 @@ class TestPermissionsCheck:
                 allow_inside_git_worktree=True,
             )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_rejects_directory_at_path(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
         parent.mkdir(mode=0o700)
@@ -774,6 +795,7 @@ class TestGitWalk:
         # regression rendering the wrong .git-marker message is caught.
         assert ".gitignore" not in message
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_allow_inside_git_worktree_bypasses(self, tmp_path: Path) -> None:
         worktree = tmp_path / "repo"
         worktree.mkdir()
@@ -833,6 +855,7 @@ class TestGitWalk:
 
 
 class TestGetPrecedence:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_env_wins_for_slice_1_keys(self, secure_secrets_file: Path) -> None:
         # File defines discord_bot_token; we add deepseek_api_key to the file
         # to assert env still wins for slice-1 keys.
@@ -846,6 +869,7 @@ class TestGetPrecedence:
         )
         assert broker.get("deepseek_api_key") == "ds-from-env"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_file_wins_for_prefer_file_keys(self, secure_secrets_file: Path) -> None:
         broker = SecretBroker(
             env={"ALFRED_DISCORD_BOT_TOKEN": "from-env"},
@@ -854,6 +878,7 @@ class TestGetPrecedence:
         )
         assert broker.get("discord_bot_token") == "from-file"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_file_wins_for_quarantine_provider_api_key(self, tmp_path: Path) -> None:
         # PR-S4-11c-2b precedence lock: the file value wins over
         # ALFRED_QUARANTINE_PROVIDER_API_KEY (file-preferred, like discord_bot_token).
@@ -869,6 +894,7 @@ class TestGetPrecedence:
         )
         assert broker.get("quarantine_provider_api_key") == "from-file"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_file_falls_back_to_env_when_file_lacks_key(self, secure_secrets_file: Path) -> None:
         # File has discord_bot_token only; deepseek_api_key only in env.
         broker = SecretBroker(
@@ -878,6 +904,7 @@ class TestGetPrecedence:
         )
         assert broker.get("deepseek_api_key") == "env-only"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_prefer_file_falls_back_to_env_when_file_lacks_key(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
         parent.mkdir(mode=0o700)
@@ -916,6 +943,7 @@ class TestGetPrecedence:
         with pytest.raises(UnknownSecretError):
             broker.get("discord_bot_token")
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_get_via_env_var_for_secrets_file_path(
         self, secure_secrets_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -924,6 +952,7 @@ class TestGetPrecedence:
         broker = SecretBroker(env=dict(os.environ), allow_inside_git_worktree=True)
         assert broker.get("discord_bot_token") == "from-file"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_load_toml_drops_non_string_values(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
         parent.mkdir(mode=0o700)
@@ -934,6 +963,7 @@ class TestGetPrecedence:
         assert broker.get("discord_bot_token") == "ok"
         # `junk` (int) and `[nested]` (table) dropped by the flat-mapping policy.
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_has_returns_true_when_file_supplies_value(self, secure_secrets_file: Path) -> None:
         broker = SecretBroker(
             env={},
@@ -942,6 +972,7 @@ class TestGetPrecedence:
         )
         assert broker.has("discord_bot_token") is True
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_known_includes_file_backed_secrets(self, secure_secrets_file: Path) -> None:
         broker = SecretBroker(
             env={},
@@ -952,6 +983,7 @@ class TestGetPrecedence:
 
 
 class TestFromSettings:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
     def test_uses_settings_secrets_file_when_present(
         self,
         secure_secrets_file: Path,
@@ -981,6 +1013,12 @@ class TestFromSettings:
 
 
 class TestReload:
+    # Every test in this class constructs a file-backed SecretBroker, whose
+    # ownership check calls os.getuid() — absent on Windows. ALL methods of
+    # this class are POSIX-only, so a class-level marker is the tightest
+    # scope that still covers exactly the listed tests.
+    pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.getuid family")
+
     def test_reload_picks_up_new_value(self, tmp_path: Path) -> None:
         parent = tmp_path / "alfred"
         parent.mkdir(mode=0o700)

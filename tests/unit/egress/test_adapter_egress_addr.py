@@ -1,3 +1,7 @@
+import sys
+
+import pytest
+
 from alfred.egress.adapter_egress_addr import (
     DISCORD_EGRESS_SHIM_PORT,
     DISCORD_EGRESS_SOCKET_PATH,
@@ -5,6 +9,11 @@ from alfred.egress.adapter_egress_addr import (
 )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: DISCORD_EGRESS_SOCKET_PATH is a hardcoded Linux-container "
+    "path; WindowsPath str() renders it with backslashes (#246 review)",
+)
 def test_socket_path_is_gateway_only_not_runtime_dir():
     # devops-001: the egress socket must NOT live under ~/.run/alfred (the alfred_run
     # volume, which is mounted into BOTH core and gateway).

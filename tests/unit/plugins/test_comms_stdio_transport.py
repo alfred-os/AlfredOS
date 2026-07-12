@@ -381,6 +381,13 @@ async def test_spawn_invokes_launcher_argv_with_scrubbed_env(
     assert captured["kwargs"]["limit"] == _MAX_COMMS_LINE_BYTES
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: the assertion hardcodes a forward-slash suffix "
+    "('bin/alfred-plugin-launcher.sh'), which a Windows-native path never "
+    "matches; the launcher itself is a POSIX shell script irrelevant to a "
+    "Windows runtime (#246 review)",
+)
 async def test_default_launcher_path_resolves_to_repo_bin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the env override, the launcher path points at the repo's bin/ script."""
     from alfred.plugins import comms_stdio_transport as mod

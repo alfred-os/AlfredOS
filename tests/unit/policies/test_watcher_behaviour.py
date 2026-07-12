@@ -8,6 +8,7 @@ the audit-write-failed fallback, and the degraded/recovered state machine.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def _bump_mtime(path: Path) -> None:
     os.utime(path, (future, future))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_allowlisted_change_swaps_and_emits_applied(tmp_path: Path) -> None:
     """An *allowlisted* key change hot-reloads (the applied path still works).
 
@@ -55,6 +57,7 @@ async def test_allowlisted_change_swaps_and_emits_applied(tmp_path: Path) -> Non
     assert invoker.count("supervisor.config_reload") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_rate_limit_change_refused_by_default(tmp_path: Path) -> None:
     """KEYSTONE (ADR-0023 §5 / arch-003): a rate-limit edit REFUSES hot-reload.
 
@@ -78,6 +81,7 @@ async def test_rate_limit_change_refused_by_default(tmp_path: Path) -> None:
     assert invoker.count("supervisor.config_reload") == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_handle_cap_change_refused_by_default(tmp_path: Path) -> None:
     """A ``handle_caps.*`` edit is high-blast and refuses hot-reload (arch-003)."""
     watcher, ref, audit, _ = build_watcher(tmp_path)
@@ -92,6 +96,7 @@ async def test_handle_cap_change_refused_by_default(tmp_path: Path) -> None:
     assert ref.current() is active
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_burst_limiter_nested_change_refused_by_default(tmp_path: Path) -> None:
     """A nested ``quarantined_extract_per_user_persona.*`` edit refuses (arch-003).
 
@@ -115,6 +120,7 @@ async def test_burst_limiter_nested_change_refused_by_default(tmp_path: Path) ->
     assert ref.current() is active
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_mtime_gate_skips_reread_when_unchanged(tmp_path: Path, monkeypatch) -> None:
     watcher, _ref, _audit, _ = build_watcher(tmp_path)
     # First tick caches (mtime, size).
@@ -134,6 +140,7 @@ async def test_mtime_gate_skips_reread_when_unchanged(tmp_path: Path, monkeypatc
     assert calls == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_mtime_gate_uses_nanosecond_resolution(tmp_path: Path, monkeypatch) -> None:
     """CR round-3: the gate keys on ``st_mtime_ns`` so a same-SECOND edit re-reads.
 
@@ -174,6 +181,7 @@ async def test_mtime_gate_uses_nanosecond_resolution(tmp_path: Path, monkeypatch
     assert len(calls) == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_sha_short_circuit_no_swap_when_content_unchanged(tmp_path: Path) -> None:
     watcher, ref, audit, invoker = build_watcher(tmp_path)
     active = ref.current()
@@ -211,6 +219,7 @@ async def test_stat_failed_emits_rejected(tmp_path: Path, monkeypatch) -> None:
     assert subjects[-1]["offending_key"] == "<filesystem>"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_parse_failure_on_malformed_yaml(tmp_path: Path) -> None:
     watcher, ref, audit, _ = build_watcher(tmp_path)
     active = ref.current()
@@ -222,6 +231,7 @@ async def test_parse_failure_on_malformed_yaml(tmp_path: Path) -> None:
     assert ref.current() is active
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_validation_failure_on_negative_rate(tmp_path: Path) -> None:
     watcher, ref, audit, _ = build_watcher(tmp_path)
     active = ref.current()
@@ -244,6 +254,7 @@ async def test_validation_failure_on_negative_rate(tmp_path: Path) -> None:
     assert ref.current() is active
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_oversize_file_refused_as_parse_failure(tmp_path: Path) -> None:
     watcher, _ref, audit, _ = build_watcher(tmp_path)
     from alfred.policies.load import MAX_POLICIES_BYTES
@@ -255,6 +266,7 @@ async def test_oversize_file_refused_as_parse_failure(tmp_path: Path) -> None:
     assert subjects and subjects[-1]["reason"] == "parse_failure"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_high_blast_change_refused(tmp_path: Path) -> None:
     watcher, ref, audit, invoker = build_watcher(tmp_path)
     active = ref.current()
@@ -272,6 +284,7 @@ async def test_high_blast_change_refused(tmp_path: Path) -> None:
     assert invoker.count("supervisor.config_reload_rejected") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_swap_audit_failure_emits_rejected_keeps_active(tmp_path: Path) -> None:
     """err-011: Phase-1 swap audit failure -> rejected row, active unchanged."""
     watcher, ref, audit, invoker = build_watcher(tmp_path)
@@ -290,6 +303,7 @@ async def test_swap_audit_failure_emits_rejected_keeps_active(tmp_path: Path) ->
     assert invoker.count("supervisor.config_reload_rejected") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_rejected_write_failure_falls_back_to_jsonl_and_degrades(tmp_path: Path) -> None:
     """sec-4: when the REJECTED audit write itself fails, fall back loudly."""
     watcher, ref, audit, invoker = build_watcher(tmp_path)
@@ -311,6 +325,7 @@ async def test_rejected_write_failure_falls_back_to_jsonl_and_degrades(tmp_path:
     assert invoker.count("policies.watcher.degraded") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_swap_programmer_error_propagates_not_reclassified(tmp_path: Path) -> None:
     """err-S4-4-4: a wrong-shape append_schema (ValueError) propagates loudly.
 
@@ -332,6 +347,7 @@ async def test_swap_programmer_error_propagates_not_reclassified(tmp_path: Path)
     assert ref.current() is active
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_fallback_write_oserror_does_not_kill_watcher(tmp_path: Path, monkeypatch) -> None:
     """err-S4-4-3: a read-only / full state dir must NOT crash the watcher.
 
@@ -433,6 +449,7 @@ async def test_degraded_after_three_stat_failures(tmp_path: Path, monkeypatch) -
     assert watcher._effective_interval() == pytest.approx(watcher._interval * 10)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_recovered_after_three_successes(tmp_path: Path, monkeypatch) -> None:
     watcher, _ref, _audit, invoker = build_watcher(tmp_path)
     import alfred.policies.watcher as watcher_mod
@@ -452,6 +469,7 @@ async def test_recovered_after_three_successes(tmp_path: Path, monkeypatch) -> N
     assert invoker.count("supervisor.config_watcher.recovered") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_rejection_re_emits_every_tick_until_fixed(tmp_path: Path) -> None:
     """sec-2: cache is NOT updated on reject -> sustained rejection signal."""
     watcher, _ref, audit, _ = build_watcher(tmp_path)
@@ -463,6 +481,7 @@ async def test_rejection_re_emits_every_tick_until_fixed(tmp_path: Path) -> None
     assert len(rejects) == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_mtime_skew_far_future_still_loads(tmp_path: Path) -> None:
     """csb-2026-004: mtime is a change-gate, not a trust signal."""
     watcher, ref, audit, _ = build_watcher(tmp_path)
@@ -475,6 +494,7 @@ async def test_mtime_skew_far_future_still_loads(tmp_path: Path) -> None:
     assert audit.subjects_for(_APPLIED)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_first_tick_caches_then_idempotent(tmp_path: Path) -> None:
     watcher, ref, audit, _ = build_watcher(tmp_path)
     active = ref.current()
@@ -483,6 +503,7 @@ async def test_first_tick_caches_then_idempotent(tmp_path: Path) -> None:
     assert audit.calls == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.O_NOFOLLOW")
 async def test_swap_writes_history_row_when_writer_present(tmp_path: Path) -> None:
     watcher, ref, _audit, _ = build_watcher(tmp_path)
 

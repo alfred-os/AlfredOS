@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,10 @@ def test_full_kind_child_env_scrubs_operator_secrets(monkeypatch: pytest.MonkeyP
     assert "super-secret-value" not in env.values()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded POSIX manifest/import-root paths (#246 review)",
+)
 def test_full_kind_child_env_preserves_spec_and_launcher_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -87,6 +92,10 @@ def test_full_kind_child_env_preserves_spec_and_launcher_controls(
     assert "ANTHROPIC_API_KEY" not in env
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded POSIX manifest/import-root paths (#246 review)",
+)
 def test_none_kind_child_env_passes_operator_env_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

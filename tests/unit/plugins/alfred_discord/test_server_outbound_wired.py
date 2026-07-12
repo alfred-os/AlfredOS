@@ -9,6 +9,7 @@ the ``OutboundMessageResult`` discriminated-union dict.
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 from uuid import uuid4
@@ -75,6 +76,10 @@ def test_idempotency_db_path_honours_runtime_dir_override(
     assert idempotency_db_path() == tmp_path / "idempotency.db"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: file mode/permissions (#246 review)",
+)
 def test_idempotency_db_path_falls_back_to_private_0700_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

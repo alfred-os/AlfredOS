@@ -11,6 +11,7 @@ mtime float.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,11 @@ from ._factories import make_policies, make_snapshot
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded Linux policy path; WindowsPath str() renders "
+    "it with backslashes (#246 review)",
+)
 async def test_swap_emits_config_reload_audit_before_assignment() -> None:
     initial = make_snapshot()
     new = make_snapshot(
@@ -50,6 +56,11 @@ async def test_swap_emits_config_reload_audit_before_assignment() -> None:
     assert values["new"] == 120
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: hardcoded Linux policy path; WindowsPath str() renders "
+    "it with backslashes (#246 review)",
+)
 async def test_swap_uses_new_file_path_not_mtime() -> None:
     """Regression for the removed placeholder ``file_path=str(new.file_mtime)``."""
     initial = make_snapshot()
