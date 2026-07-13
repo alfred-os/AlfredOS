@@ -30,7 +30,11 @@ from alfred.plugins.errors import (
 )
 from alfred.plugins.manifest import parse_manifest
 from alfred.plugins.manifest_reader import PolicyRefEscapesRoot, resolve_policy_ref
-from alfred.plugins.sandbox_policy import policy_to_bwrap_flags, read_policy_toml
+from alfred.plugins.sandbox_policy import (
+    SandboxPolicyInvalid,
+    policy_to_bwrap_flags,
+    read_policy_toml,
+)
 from alfred.plugins.session import AlfredPluginSession
 from alfred.supervisor.fd3_key_delivery import (
     ProviderKeyDeliveryError,
@@ -350,6 +354,21 @@ kind = "none"
     assert audit.calls[-1]["event"] == "plugin.lifecycle.quarantined"
 
 
+def test_sbx_2026_016_over_broad_bind_source_refused() -> None:
+    """sbx-2026-016: an over-broad bind source is refused at policy-parse time."""
+    payload = _load("sbx-2026-016")
+    assert payload.expected_outcome == "refused"
+    for variant in (
+        'ro_binds = [["/", "/"]]\nkeep_fds = [3]\n',
+        'ro_binds = [["/etc", "/etc"]]\nkeep_fds = [3]\n',
+        'ro_binds_try = [["/lib64/..", "/"]]\nkeep_fds = [3]\n',
+        'ro_binds = [["/proc/self/root", "/x"]]\nkeep_fds = [3]\n',
+    ):
+        with pytest.raises(SandboxPolicyInvalid) as exc:
+            read_policy_toml(variant)
+        assert exc.value.reason == "bind_source_too_broad"
+
+
 def test_all_pr_s4_6_payloads_load() -> None:
     # Every PR-S4-6 sbx payload schema-validates + carries the sbx prefix.
     ids = [
@@ -359,6 +378,7 @@ def test_all_pr_s4_6_payloads_load() -> None:
         "sbx-2026-008",
         "sbx-2026-009",
         "sbx-2026-010",
+        "sbx-2026-016",
     ]
     for pid in ids:
         payload = _load(pid)

@@ -20,6 +20,8 @@ used, it consumes fd 3; verified bubblewrap 0.8.0/0.9.0, #218).
 - fd-3 partial-write / pipe-buffer-leak attempts on the provider-key channel.
 - Sandbox-info handshake mismatch (plugin reports kind:full while actually kind:none).
 - bwrap version drift (CVE-window or bwrap absent / below the version floor).
+- Over-broad bind source: host root, non-allowlisted top-level tree, soft-field
+  traversal to root, or procfs magic-link (`bind_source_too_broad`, #428).
 
 **Prefix.** `sbx-`
 
@@ -62,6 +64,7 @@ drift is a release-blocker.
 | fd-3 partial-write / pipe-buffer-leak on provider-key channel | PR-S4-6 (`sbx-2026-008`) |
 | Sandbox-info handshake mismatch (`kind:none` posing as `kind:full`) | PR-S4-6 (`sbx-2026-009`) |
 | bwrap version drift (bwrap absent / below the version floor) | PR-S4-1 boot probe (#228) — TBD, no dedicated payload yet |
+| Over-broad bind source (`/`, top-level root, `/lib64/..`, `/proc/self/root`) | #428 (`sbx-2026-016`) — `bind_source_too_broad` parse-time refusal (not kernel-observable) |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
