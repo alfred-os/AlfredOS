@@ -289,6 +289,28 @@ def test_policy_ref_unreadable_after_resolution_refuses(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# --check-bind-source (#428)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/usr", "/lib", "/etc/ssl/certs", "/home/alfred/.egress/discord"])
+def test_check_bind_source_accepts_legitimate_path(path: str) -> None:
+    result = _run("--check-bind-source", "--bind-source", path)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("path", ["/", "/etc", "/home", "/proc/self/root", "/sys/x"])
+def test_check_bind_source_refuses_over_broad_path(path: str) -> None:
+    result = _run("--check-bind-source", "--bind-source", path)
+    assert result.returncode != 0
+
+
+def test_check_bind_source_refuses_empty() -> None:
+    result = _run("--check-bind-source", "--bind-source", "")
+    assert result.returncode != 0
+
+
+# --------------------------------------------------------------------------
 # argument handling
 # --------------------------------------------------------------------------
 
