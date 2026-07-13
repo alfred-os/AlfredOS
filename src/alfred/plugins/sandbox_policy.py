@@ -88,7 +88,20 @@ def _is_arch_variable(path: str) -> bool:
 
 
 def _canonical(path: str) -> str:
-    """Lexically canonical form of a policy path (no filesystem access).
+    """Lexically canonical form of a policy path, FOR COMPARISON ONLY.
+
+    NOTE — we deliberately do NOT *refuse* non-canonical policy paths, and we do
+    NOT rewrite the emitted flag. An earlier revision did refuse them (one spelling,
+    one meaning — an appealing invariant) and it was WRONG: real policy paths are
+    often derived from the filesystem and legitimately contain ``..`` — e.g. a
+    Homebrew interpreter root, ``/opt/homebrew/opt/python@3.14/bin/../Frameworks/…``.
+    Those ``..`` segments CROSS SYMLINKS, so normalising them *lexically* yields a
+    different, wrong path (the classic ``normpath`` vs ``realpath`` trap), and
+    refusing them breaks legitimate callers. Only ``realpath`` could canonicalise
+    them safely, and this module must not touch the filesystem.
+
+    So the canonical form is used ONLY to COMPARE paths inside the guards below,
+    which is what actually closes the hole; bwrap resolves the declared path itself.
 
     Every guard below compares paths. Comparing them as RAW STRINGS is a hole:
     ``/lib64``, ``/lib64/``, ``//lib64``, ``/lib64/.`` and ``/usr/../lib64`` are
@@ -187,40 +200,6 @@ class SandboxPolicy(BaseModel):
                 reason="kind_full_requires_keep_fd_3",
                 detail=f"keep_fds={list(self.keep_fds)!r} omits fd {_REQUIRED_FD}",
             )
-        return self
-
-    @model_validator(mode="after")
-    def _require_canonical_paths(self) -> SandboxPolicy:
-        """Every policy path must be in canonical form — one spelling, one meaning.
-
-        This is what makes every guard below sound. They all compare paths, and
-        comparing raw strings is evadable by respelling: ``/lib64/``, ``//lib64``,
-        ``/lib64/.`` and ``/usr/../lib64`` are ONE path to bwrap and four
-        different strings to Python. Canonicalising *inside* each guard would work
-        too, but it leaves the door open for the next guard someone adds to forget.
-
-        So the ambiguity is refused at the boundary instead: a policy path that is
-        not already canonical is a policy bug, and the exec line bwrap receives is
-        then unambiguous and auditable. The shipped policies are all canonical, so
-        this refuses nothing that works today.
-        """
-        for field, paths in (
-            ("ro_binds", [p for pair in self.ro_binds for p in pair]),
-            ("ro_binds_try", [p for pair in self.ro_binds_try for p in pair]),
-            ("rw_binds", [p for pair in self.rw_binds for p in pair]),
-            ("tmpfs", list(self.tmpfs)),
-        ):
-            for path in paths:
-                if path != _canonical(path):
-                    raise SandboxPolicyInvalid(
-                        reason="policy_path_not_canonical",
-                        detail=(
-                            f"{field} contains a non-canonical path {path!r} "
-                            f"(canonical form: {_canonical(path)!r}). Respelling a path "
-                            f"would let it slip past the arch-variable and collision "
-                            f"guards, which compare paths. Declare the canonical form."
-                        ),
-                    )
         return self
 
     @model_validator(mode="after")

@@ -49,14 +49,23 @@ pytestmark = pytest.mark.skipif(
 # carries the provider key. The real quarantined-LLM policy bytes ship in
 # PR-S4-7; this fixture is the resolver-integration analogue.
 def _adequate_policy_body(plugin_dir: Path, *, unshare_net: bool = False) -> str:
-    # /lib64 carries the ELF dynamic loader the interpreter needs. /bin is
-    # DELIBERATELY NOT bound: on usrmerged Linux it's a symlink to /usr/bin, so
-    # binding it would make ``/bin/sh`` available inside the sandbox and break
-    # test_plugin_cannot_exec_host_bin_sh's containment assertion. The venv
-    # interpreter is bound by absolute path below, so it needs no /bin.
+    # /lib64 carries the ELF dynamic loader on x86-64 — and does NOT exist on
+    # arm64, where the loader lives under the already-bound /lib. It is therefore a
+    # SOFT bind (#269), exactly as in the shipped policies: bwrap binds it where it
+    # exists and skips it where it does not.
+    #
+    # This previously hard-bound /lib64 behind an `if Path("/lib64").exists()` HOST
+    # check, which made the fixture's meaning depend on the machine that ran it —
+    # and the schema now refuses a hard bind of an arch-variable path outright
+    # (`arch_variable_path_hard_bound`), because that is the #269 launch failure.
+    # Declaring it soft is both the fix and the point: one policy, portable.
+    #
+    # /bin is DELIBERATELY NOT bound: on usrmerged Linux it's a symlink to
+    # /usr/bin, so binding it would make ``/bin/sh`` available inside the sandbox
+    # and break test_plugin_cannot_exec_host_bin_sh's containment assertion. The
+    # venv interpreter is bound by absolute path below, so it needs no /bin.
     binds = ['["/usr", "/usr"]', '["/lib", "/lib"]']
-    if Path("/lib64").exists():
-        binds.append('["/lib64", "/lib64"]')
+    soft_binds = ['["/lib64", "/lib64"]']
     binds.append(f'["{_REPO_ROOT / "src"}", "{_REPO_ROOT / "src"}"]')
     # The plugin entrypoint passed by the test is ``sys.executable`` (the venv
     # python), and its script lives under ``plugin_dir`` (pytest's tmp_path).
@@ -99,6 +108,7 @@ def _adequate_policy_body(plugin_dir: Path, *, unshare_net: bool = False) -> str
     unshare_toml = ", ".join(f'"{ns}"' for ns in unshare)
     return (
         "ro_binds = [\n  " + ",\n  ".join(binds) + "\n]\n"
+        "ro_binds_try = [\n  " + ",\n  ".join(soft_binds) + "\n]\n"
         f"unshare = [{unshare_toml}]\n"
         "die_with_parent = true\n"
         "keep_fds = [3]\n"
