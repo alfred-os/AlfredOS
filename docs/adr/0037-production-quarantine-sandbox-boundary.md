@@ -221,4 +221,7 @@ the filesystem). The `/usr` residual it permits — `/usr/bin/*` stays exec-reac
 — is tracked in #430, the live successor to the closed #230. The same change routes
 the launcher's interpreter-prefix bind through the identical predicate
 (`is_over_broad_bind_source`) and corrects a pre-existing audit-reason
-misattribution (all five schema refusals were logged as `policy_ref_unreadable`).
+misattribution (all six schema refusals — `kind_full_requires_keep_fd_3`,
+`policy_path_not_absolute`, `arch_variable_path_hard_bound`,
+`mount_shadows_earlier_mount`, `soft_bind_forbidden_path`, and `bind_source_too_broad`
+— were logged as `policy_ref_unreadable`).

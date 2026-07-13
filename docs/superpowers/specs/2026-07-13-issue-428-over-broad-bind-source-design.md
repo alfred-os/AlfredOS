@@ -227,11 +227,11 @@ bash. The mode gets its own exit-code unit tests in `tests/unit/plugins/test_man
   loadable by then — no bootstrap-ordering risk). Folding it into the existing
   `--policy-to-bwrap-flags` call is a possible DRY/latency optimisation but is **out of scope**
   here; accept the extra subprocess.
-- **Audit-reason misattribution fix (owns all five reasons).** `bin/alfred-plugin-launcher.sh:303`
+- **Audit-reason misattribution fix (owns all six reasons).** `bin/alfred-plugin-launcher.sh:303`
   hardcodes `"reason":"policy_ref_unreadable"` into the audit JSON for *any* failure of the
-  flags call. Every schema refusal — `soft_bind_forbidden_path`, `mount_shadows_earlier_mount`,
-  `arch_variable_path_hard_bound`, `policy_path_not_absolute`, and the new
-  `bind_source_too_broad` — is therefore audited under a reason that is not its own. The
+  flags call. Every schema refusal — `kind_full_requires_keep_fd_3`, `soft_bind_forbidden_path`,
+  `mount_shadows_earlier_mount`, `arch_variable_path_hard_bound`, `policy_path_not_absolute`, and
+  the new `bind_source_too_broad` — is therefore audited under a reason that is not its own. The
   launcher captures the helper's stderr already (`BWRAP_FLAGS_RAW`, via `2>&1`). **[rev — it
   must `tail -n 1` that capture before matching, because the alfred cold-import can emit a
   stderr warning *ahead* of the bare reason (this is why the BUG-1 pin exists at L162); a
@@ -239,7 +239,7 @@ bash. The mode gets its own exit-code unit tests in `tests/unit/plugins/test_man
   line against the closed reason vocabulary and echoes it into the audit row's `reason` field
   when it matches, falling back to `policy_ref_unreadable` when it does not. The reading side
   is safe: the JSON `reason` is never catalog-rendered, and `SANDBOX_REFUSED_FIELDS` validates
-  field *names*, so a new reason value breaks nothing. This fix re-attributes all five reasons,
+  field *names*, so a new reason value breaks nothing. This fix re-attributes all six reasons,
   so its tests cover at least one pre-existing reason (e.g. `soft_bind_forbidden_path`) in
   addition to `bind_source_too_broad`.
 
