@@ -24,6 +24,13 @@ CLI subcommands (mutually exclusive):
       Read a TOML policy from stdin; print the bwrap CLI flags one per line.
       Used by the launcher's ``kind: full`` branch on Linux.
 
+  --check-bind-source --bind-source <path>
+      Exit 0 iff ``<path>`` is an acceptable HARD bind source (not the host
+      root, a non-allowlisted top-level root, or a ``/proc``/``/sys`` source
+      — see ``is_over_broad_bind_source``, #428). Exit non-zero otherwise
+      (including an empty path). Output is not consumed by callers; only the
+      exit code matters.
+
 Each subcommand does the smallest thing so invocations are independent —
 failure of one cannot corrupt a subsequent one. Refusals print a bare i18n
 KEY (not a rendered sentence) on stderr per the launcher's bare-key
@@ -65,6 +72,7 @@ from alfred.plugins.errors import (  # noqa: E402 - after stderr-logging pin (BU
 from alfred.plugins.manifest import parse_manifest  # noqa: E402 - after stderr-logging pin (BUG-1)
 from alfred.plugins.sandbox_policy import (  # noqa: E402 - after stderr-logging pin (BUG-1)
     SandboxPolicyInvalid,
+    is_over_broad_bind_source,
     policy_to_bwrap_flags,
     read_policy_toml,
 )
@@ -279,6 +287,19 @@ def _cmd_policy_to_bwrap_flags(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check_bind_source(args: argparse.Namespace) -> int:
+    """Exit 0 iff ``--bind-source`` is an acceptable (not over-broad) bind source.
+
+    The launcher (bin/alfred-plugin-launcher.sh) calls this for the interpreter
+    prefix and maps a non-zero exit to its own ``interpreter_prefix_too_broad``
+    refusal. The bare reason is machine-only; no operator-facing rendering here.
+    """
+    path = args.bind_source if args.bind_source is not None else ""
+    if is_over_broad_bind_source(path):
+        return _fail("bind_source_too_broad")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alfred.plugins.manifest_reader",
@@ -288,12 +309,15 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--read-sandbox", action="store_true")
     mode.add_argument("--read-environment", action="store_true")
     mode.add_argument("--policy-to-bwrap-flags", action="store_true")
+    mode.add_argument("--check-bind-source", action="store_true")
     parser.add_argument("--manifest-path", default=None)
     parser.add_argument("--plugin-id", default=None)
     # --policy-to-bwrap-flags options: a confined --policy-ref (sec-2) +
     # the install root it is relative to. Absent → read policy TOML from stdin.
     parser.add_argument("--policy-ref", default=None)
     parser.add_argument("--install-root", default=None)
+    # --check-bind-source value (#428): a candidate bind source path to test.
+    parser.add_argument("--bind-source", default=None)
     return parser
 
 
@@ -304,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_read_sandbox(args)
     if args.read_environment:
         return _cmd_read_environment()
+    if args.check_bind_source:
+        return _cmd_check_bind_source(args)
     # The mutually-exclusive required group guarantees exactly one mode; the
     # remaining branch is --policy-to-bwrap-flags.
     return _cmd_policy_to_bwrap_flags(args)

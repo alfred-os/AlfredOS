@@ -264,6 +264,40 @@ def test_policy_to_bwrap_flags_ref_default_install_root(tmp_path, monkeypatch, c
 
 
 # --------------------------------------------------------------------------
+# --check-bind-source (#428)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/usr", "/lib", "/etc/ssl/certs", "/home/alfred/.egress/discord"])
+def test_check_bind_source_accepts_legitimate_path(path: str, capsys) -> None:
+    rc = manifest_reader.main(["--check-bind-source", "--bind-source", path])
+    assert rc == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("path", ["/", "/etc", "/home", "/proc/self/root", "/sys/x"])
+def test_check_bind_source_refuses_over_broad_path(path: str, capsys) -> None:
+    rc = manifest_reader.main(["--check-bind-source", "--bind-source", path])
+    assert rc == 1
+    assert "bind_source_too_broad" in capsys.readouterr().err
+
+
+def test_check_bind_source_refuses_empty(capsys) -> None:
+    rc = manifest_reader.main(["--check-bind-source", "--bind-source", ""])
+    assert rc == 1
+    assert "bind_source_too_broad" in capsys.readouterr().err
+
+
+def test_check_bind_source_missing_arg_defaults_to_empty(capsys) -> None:
+    # --bind-source omitted entirely: args.bind_source stays argparse's
+    # default None, exercising the ternary's `is None` branch (distinct
+    # from passing an explicit empty string, which is `is not None`).
+    rc = manifest_reader.main(["--check-bind-source"])
+    assert rc == 1
+    assert "bind_source_too_broad" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # argument handling
 # --------------------------------------------------------------------------
 
