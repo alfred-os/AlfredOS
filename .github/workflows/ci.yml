@@ -97,7 +97,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -704,7 +704,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python arm64 job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -816,7 +816,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python cross-OS job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -942,7 +942,7 @@ jobs:
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/integration/**/*.py missing — skipping Integration job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
         run: uv sync --frozen --dev
@@ -1128,7 +1128,7 @@ jobs:
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/integration/**/*.py missing — skipping Integration arm64 job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
         run: uv sync --frozen --dev
@@ -1252,7 +1252,7 @@ jobs:
           done
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_spawn == 'true'
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv python install 3.14
@@ -1779,7 +1779,7 @@ jobs:
           done
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_spawn == 'true'
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv python install 3.14
@@ -2051,7 +2051,7 @@ jobs:
             echo "has_coverage_corpus=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/unit or tests/integration missing — skipping coverage-gates job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_coverage_corpus == 'true'
       - if: steps.check.outputs.has_coverage_corpus == 'true'
         run: uv python install 3.14
@@ -2507,7 +2507,7 @@ jobs:
             echo "has_smoke=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/smoke/**/*.py missing — skipping Smoke job."
           fi
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         if: steps.check.outputs.has_smoke == 'true'
       - if: steps.check.outputs.has_smoke == 'true'
         run: uv python install 3.14
