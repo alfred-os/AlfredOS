@@ -27,11 +27,13 @@
 The core of the change. Adds the exported predicate, the validator, the audit-vocab comment, and repairs the two existing in-file tests the new rule breaks.
 
 **Files:**
+
 - Modify: `src/alfred/plugins/sandbox_policy.py` (imports ~37–45; add constants near `_ARCH_VARIABLE_PATHS` ~61; add validator after `_restrict_soft_binds` ~418; extend `__all__` ~484)
 - Modify: `src/alfred/audit/audit_row_schemas.py:1186-1194` (reason-vocab comment)
 - Test: `tests/unit/plugins/test_sandbox_policy_translator.py` (new tests; repair `test_a_genuine_near_miss_path_is_not_treated_as_arch_variable:250`; deepen property pools `_HARD_SRCS:404` and `_LEGAL_HARD_SRCS:427`)
 
 **Interfaces:**
+
 - Produces: `is_over_broad_bind_source(path: str) -> bool` (exported; the hard-field rule, tiers 1+2+3 — Task 2 and the launcher call this). `_resolves_to_host_root_or_pseudofs(path: str) -> bool` (module-internal; tiers 1+2). Validator `_refuse_over_broad_bind_source`. New reason string `"bind_source_too_broad"`.
 - Consumes: existing `_canonical(path: str) -> str`, `SandboxPolicyInvalid(reason, detail)`.
 
