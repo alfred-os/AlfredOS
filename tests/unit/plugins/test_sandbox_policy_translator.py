@@ -206,6 +206,33 @@ def test_respelling_an_arch_variable_path_cannot_evade_the_guard(respelling: str
     assert exc_info.value.reason == "arch_variable_path_hard_bound"
 
 
+@pytest.mark.parametrize("traversing", ["/lib64/..", "/lib64/../lib64", "/lib64/../../x"])
+def test_a_path_that_traverses_an_arch_variable_dir_is_refused(traversing: str) -> None:
+    """#269, variant FIVE: lexical `..`-collapsing hides a real launch failure.
+
+    ``/lib64/..`` collapses to ``/`` under ``normpath``, so a guard built only on
+    the canonical form waves it through. But the KERNEL resolves a path component
+    by component — it must ENTER ``/lib64`` before it can go back up. On arm64 that
+    is ENOENT and bwrap aborts, exactly as #269 did.
+
+    This is the normpath-vs-real-resolution divergence, and it is why the guard
+    walks the RAW components as well as comparing the canonical form.
+    """
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(ro_binds=[(traversing, "/x")], keep_fds=[3])
+    assert exc_info.value.reason == "arch_variable_path_hard_bound"
+
+
+@pytest.mark.parametrize("bad", ["lib64", "", ".", "./lib64", "usr/lib"])
+def test_a_non_absolute_policy_path_is_refused(bad: str) -> None:
+    # A relative bind would resolve against whatever cwd the launcher happened to
+    # have, so the sandbox's SHAPE would depend on where it was invoked from — and
+    # it slips past the arch-variable guards, which reason about absolute paths.
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(ro_binds=[(bad, "/x")], keep_fds=[3])
+    assert exc_info.value.reason == "policy_path_not_absolute"
+
+
 def test_a_genuine_near_miss_path_is_not_treated_as_arch_variable() -> None:
     # Guard against over-correction: /lib64-compat is a DIFFERENT path, not a
     # respelling of /lib64, and must remain hard-bindable.
@@ -332,7 +359,17 @@ def _under(path: str, ancestor: str) -> bool:
 # one (the #230 "bind the exact interpreter file" shape) — both must be refused —
 # plus a near-miss (`/lib64-compat`) that must NOT be.
 _HARD_SRC_POOL = st.sampled_from(
-    ["/usr", "/lib", "/etc/ssl/certs", "/x", "/lib64-compat", "/lib64", "/lib64/ld.so"]
+    [
+        "/usr",
+        "/lib",
+        "/etc/ssl/certs",
+        "/x",
+        "/lib64-compat",  # near-miss: must stay ALLOWED
+        "/lib64",  # the arch-variable path itself
+        "/lib64/ld.so",  # UNDER it (the #230 exact-interpreter-bind shape)
+        "/lib64/..",  # TRAVERSES it, then lexically escapes (variant five)
+        "/usr/../lib64",  # respelling
+    ]
 )
 # Destinations. `/lib64` is present so the dst-overmount property can actually be
 # reached (it previously fired on 0.14% of examples).

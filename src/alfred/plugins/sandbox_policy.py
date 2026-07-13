@@ -67,7 +67,21 @@ _SOFT_BINDABLE_PATHS: Final[frozenset[str]] = frozenset({"/lib64"})
 
 
 def _is_arch_variable(path: str) -> bool:
-    """True if ``path`` IS an arch-variable path, or lives UNDER one.
+    """True if binding ``path`` requires an arch-variable path to EXIST.
+
+    There are TWO ways that happens, and the second is easy to miss:
+
+    1. The path IS an arch-variable path, or lives UNDER one — ``/lib64``,
+       ``/lib64/ld-linux-x86-64.so.2``.
+    2. The path TRAVERSES one, even if it lexically escapes it again.
+       ``/lib64/..`` collapses to ``/`` under ``normpath`` — but the KERNEL
+       resolves a path component by component, so it must still enter ``/lib64``
+       first. On arm64 that is ENOENT and bwrap aborts. Collapsing ``..``
+       lexically HIDES this: it is precisely the normpath-vs-real-resolution
+       divergence, and a comparison built only on the canonical form waves
+       ``/lib64/..`` straight through.
+
+    So we check the canonical form (case 1) AND walk the raw components (case 2).
 
     Membership is not enough. ``/lib64`` does not exist on arm64 — and therefore
     neither does ``/lib64/ld-linux-x86-64.so.2``. A guard keyed on
@@ -81,10 +95,25 @@ def _is_arch_variable(path: str) -> bool:
     this bug is already scheduled in our own comments, so the rule is containment.
     """
     normalized = _canonical(path)
-    return any(
+    if any(
         normalized == arch_variable or normalized.startswith(arch_variable + "/")
         for arch_variable in _SOFT_BINDABLE_PATHS
-    )
+    ):
+        return True
+
+    # Case 2 — traversal. Every component the kernel walks must exist, INCLUDING
+    # the ones a later ``..`` removes.
+    walked = "/"
+    for part in path.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            walked = posixpath.dirname(walked)
+            continue
+        walked = posixpath.join(walked, part)
+        if walked in _SOFT_BINDABLE_PATHS:
+            return True
+    return False
 
 
 def _canonical(path: str) -> str:
@@ -200,6 +229,34 @@ class SandboxPolicy(BaseModel):
                 reason="kind_full_requires_keep_fd_3",
                 detail=f"keep_fds={list(self.keep_fds)!r} omits fd {_REQUIRED_FD}",
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_absolute_paths(self) -> SandboxPolicy:
+        """Every policy path must be ABSOLUTE.
+
+        A relative (or empty, or ``.``) bind source is meaningless in a sandbox
+        policy: bwrap would resolve it against whatever cwd the launcher happened
+        to have, so the sandbox's shape would depend on where it was invoked from.
+        It also slips past the arch-variable guards, which reason about absolute
+        paths. Refuse it rather than let it mean something accidental.
+        """
+        for field, paths in (
+            ("ro_binds", [p for pair in self.ro_binds for p in pair]),
+            ("ro_binds_try", [p for pair in self.ro_binds_try for p in pair]),
+            ("rw_binds", [p for pair in self.rw_binds for p in pair]),
+            ("tmpfs", list(self.tmpfs)),
+        ):
+            for path in paths:
+                if not path.startswith("/"):
+                    raise SandboxPolicyInvalid(
+                        reason="policy_path_not_absolute",
+                        detail=(
+                            f"{field} contains a non-absolute path {path!r}. A relative "
+                            f"bind would resolve against the launcher's cwd, making the "
+                            f"sandbox's shape depend on where it was invoked from."
+                        ),
+                    )
         return self
 
     @model_validator(mode="after")
