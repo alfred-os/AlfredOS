@@ -193,12 +193,17 @@ def test_respelling_an_arch_variable_path_cannot_evade_the_guard(respelling: str
     refused the canonical spelling and waved through every respelling, each of
     which still emits a hard bind that aborts the launch on arm64.
 
-    The schema now refuses non-canonical paths outright (one spelling, one
-    meaning), so no guard that compares paths can be evaded by respelling one.
+    The guards now COMPARE canonical forms, so every respelling collapses onto
+    ``/lib64`` and is refused as the arch-variable hard bind it is.
+
+    We deliberately do NOT *refuse* non-canonical paths outright — an earlier
+    revision did, and CI proved it wrong: real policy paths are often derived from
+    the filesystem and legitimately contain ``..`` (a Homebrew interpreter root),
+    whose ``..`` segments cross symlinks and cannot be normalised lexically.
     """
     with pytest.raises(SandboxPolicyInvalid) as exc_info:
         SandboxPolicy(ro_binds=[(respelling, "/lib64")], keep_fds=[3])
-    assert exc_info.value.reason == "policy_path_not_canonical"
+    assert exc_info.value.reason == "arch_variable_path_hard_bound"
 
 
 def test_a_genuine_near_miss_path_is_not_treated_as_arch_variable() -> None:
@@ -206,6 +211,24 @@ def test_a_genuine_near_miss_path_is_not_treated_as_arch_variable() -> None:
     # respelling of /lib64, and must remain hard-bindable.
     policy = SandboxPolicy(ro_binds=[("/lib64-compat", "/lib64-compat")], keep_fds=[3])
     assert "--ro-bind" in policy_to_bwrap_flags(policy)
+
+
+def test_a_filesystem_derived_path_with_dotdot_is_accepted() -> None:
+    """Over-correction guard, learned from CI (#269).
+
+    An earlier revision REFUSED any non-canonical path ("one spelling, one
+    meaning"). It was elegant and it was wrong: real policy paths come from the
+    filesystem and legitimately contain ``..`` — e.g. a Homebrew interpreter root
+    ``/opt/homebrew/opt/python@3.14/bin/../Frameworks/…``, which the launcher's own
+    interpreter-root walk produces. Those ``..`` segments cross SYMLINKS, so
+    normalising them lexically yields a different, wrong path, and refusing them
+    broke the launcher-resolver integration legs outright.
+
+    Canonicalisation is for COMPARISON only. This pins that.
+    """
+    homebrew_root = "/opt/homebrew/opt/python@3.14/bin/../Frameworks/Python.framework"
+    policy = SandboxPolicy(ro_binds=[(homebrew_root, homebrew_root)], keep_fds=[3])
+    assert homebrew_root in policy_to_bwrap_flags(policy)
 
 
 def test_rw_binding_an_arch_variable_path_is_refused() -> None:
