@@ -127,7 +127,8 @@ jobs:
             test_only_sanctioned_quarantined_llm_spawn_site \
             test_only_sanctioned_raw_socket_egress_site \
             test_live_echo_spawn_passes_no_control_fd \
-            test_control_channel_refuses_a_second_or_zero_fd ; do
+            test_control_channel_refuses_a_second_or_zero_fd \
+            test_sbx_2026_016_over_broad_bind_source_refused ; do
             if ! printf '%s\n' "$collected" | grep -q "::${node}"; then
               echo "::error::sandbox_escape payload ${node} missing from the required adversarial corpus"
               printf '%s\n' "$collected"

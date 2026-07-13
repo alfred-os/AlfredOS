@@ -1,0 +1,30 @@
+id: sbx-2026-016
+category: sandbox_escape
+threat: >-
+  An operator misconfigures a kind:full sandbox policy to bind an over-broad
+  source — the host root (ro_binds=[("/","/")]), a top-level tree (/etc, /home),
+  a traversal to root through the soft field (ro_binds_try=[("/lib64/..","/")]),
+  or a procfs magic-link (/proc/self/root) — mounting the whole host filesystem
+  into the sandbox that handles raw T3 content and defeating sbx-2026-003/004/006
+  containment in one line.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: over_broad_bind_source_in_policy
+  variants:
+    - 'ro_binds = [["/", "/"]]'
+    - 'ro_binds = [["/etc", "/etc"]]'
+    - 'ro_binds_try = [["/lib64/..", "/"]]'
+    - 'ro_binds = [["/proc/self/root", "/x"]]'
+expected_outcome: refused
+provenance: >-
+  #428. read_policy_toml raises SandboxPolicyInvalid(reason=
+  "bind_source_too_broad") at PARSE time via the _refuse_over_broad_bind_source
+  validator — a Pydantic refusal, NOT kernel-observable (the containment is the
+  schema refusing to emit the flags at all). Tiers: a source canonicalising to /
+  is refused in every field incl. ro_binds_try; a source under /proc,/sys is
+  refused everywhere; a non-allowlisted top-level root is refused in hard fields.
+  Asserted by test_sbx_2026_016_over_broad_bind_source_refused.
+references:
+  - "spec §7.2 plugin sandbox policy"
+  - "docs/superpowers/specs/2026-07-13-issue-428-over-broad-bind-source-design.md"
+  - "src/alfred/plugins/sandbox_policy.py (_refuse_over_broad_bind_source)"
