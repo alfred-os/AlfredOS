@@ -27,8 +27,11 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from alfred.plugins.sandbox_policy import (
+    _PERMITTED_TOP_LEVEL_BIND_ROOTS,
     SandboxPolicy,
     SandboxPolicyInvalid,
+    _canonical,
+    is_over_broad_bind_source,
     policy_to_bwrap_flags,
     read_policy_toml,
 )
@@ -248,9 +251,10 @@ def test_a_respelled_target_is_recognised_as_the_same_mount_point() -> None:
 
 
 def test_a_genuine_near_miss_path_is_not_treated_as_arch_variable() -> None:
-    # Guard against over-correction: /lib64-compat is a DIFFERENT path, not a
-    # respelling of /lib64, and must remain hard-bindable.
-    policy = SandboxPolicy(ro_binds=[("/lib64-compat", "/lib64-compat")], keep_fds=[3])
+    # Guard against over-correction: /opt/lib64-compat is a DIFFERENT path, not a
+    # respelling of /lib64, and must remain hard-bindable. (Deepened from
+    # /lib64-compat, a depth-1 root the #428 over-broad-source guard now refuses.)
+    policy = SandboxPolicy(ro_binds=[("/opt/lib64-compat", "/opt/lib64-compat")], keep_fds=[3])
     assert "--ro-bind" in policy_to_bwrap_flags(policy)
 
 
@@ -405,8 +409,8 @@ _HARD_SRCS = [
     "/usr",
     "/lib",
     "/etc/ssl/certs",
-    "/x",
-    "/lib64-compat",  # near-miss: must stay ALLOWED
+    "/x/y",
+    "/opt/lib64-compat",  # near-miss: must stay ALLOWED (deepened, #428)
     "/lib64",  # arch-variable
     "/lib64/ld.so",  # UNDER it (the #230 exact-interpreter-bind shape)
     "/lib64/..",  # TRAVERSES it, then lexically escapes
@@ -424,7 +428,7 @@ _TMPFS = ["/run/alfred/x", "/lib64", "/usr"]
 # is a vacuous property wearing a green tick. Weighting keeps accepted policies
 # common while leaving every adversarial spelling reachable. The anti-vacuity guard
 # below asserts the resulting rates, so this balance cannot silently rot.
-_LEGAL_HARD_SRCS = ["/usr", "/lib", "/etc/ssl/certs", "/x", "/lib64-compat"]
+_LEGAL_HARD_SRCS = ["/usr", "/lib", "/etc/ssl/certs", "/x/y", "/opt/lib64-compat"]
 _HARD_SRC_POOL = st.sampled_from(_LEGAL_HARD_SRCS * 2 + _HARD_SRCS)
 _DST_POOL = st.sampled_from(["/usr", "/x"] * 2 + _DSTS)
 _TMPFS_POOL = st.sampled_from(["/run/alfred/x"] * 3 + _TMPFS)
@@ -761,3 +765,141 @@ def test_fixture_policy_file_translates() -> None:
     # fd 3 is inherited by default — no fd flag is emitted.
     assert "--sync-fd" not in flags
     assert "--keep-fd" not in flags
+
+
+# ---------------------------------------------------------------------------
+# #428: the over-broad-bind-source guard. A bind SOURCE that canonicalises to
+# the host root, or to a broad top-level tree, must never be accepted in any
+# bind field — including the soft ro_binds_try, where a source that resolves
+# to "/" degrades the sandbox exactly as a hard bind would.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "/",  # tier 1: literal host root
+        "/lib64/..",  # tier 1: traversal to root (soft field — see below)
+        "/usr/..",  # tier 1: traversal to root
+        "/etc",  # tier 3: non-allowlisted top-level root
+        "/home",  # tier 3
+        "/var",  # tier 3
+        "/proc/self/root",  # tier 2: procfs magic-link (depth-4, defeats depth rule)
+        "/proc/1/root",  # tier 2
+        "/sys/kernel",  # tier 2
+        "/proc",  # tier 2 (also tier 3)
+    ],
+)
+def test_over_broad_hard_bind_source_is_refused(src: str) -> None:
+    # /lib64/.. reaches the arch-variable guard first in a HARD field, so use a
+    # soft field only for that one; the rest are refused in ro_binds.
+    field = "ro_binds_try" if src == "/lib64/.." else "ro_binds"
+    with pytest.raises(SandboxPolicyInvalid) as exc:
+        if field == "ro_binds_try":
+            SandboxPolicy(ro_binds_try=[(src, "/")], keep_fds=[3])
+        else:
+            SandboxPolicy(ro_binds=[(src, "/x")], keep_fds=[3])
+    assert exc.value.reason == "bind_source_too_broad"
+
+
+def test_over_broad_rw_bind_source_is_refused() -> None:
+    with pytest.raises(SandboxPolicyInvalid) as exc:
+        SandboxPolicy(rw_binds=[("/etc", "/etc")], keep_fds=[3])
+    assert exc.value.reason == "bind_source_too_broad"
+
+
+def test_soft_bind_resolving_to_root_is_refused() -> None:
+    # sec-001: /lib64/.. is arch-variable (matches /lib64 on the raw walk) so
+    # _restrict_soft_binds passes it, but it canonicalises to / — tier 1 refuses it.
+    with pytest.raises(SandboxPolicyInvalid) as exc:
+        SandboxPolicy(ro_binds_try=[("/lib64/..", "/")], keep_fds=[3])
+    assert exc.value.reason == "bind_source_too_broad"
+
+
+@pytest.mark.parametrize(
+    "src",
+    ["/usr", "/lib", "/etc/ssl/certs", "/home/alfred/.egress/discord", "/usr/lib"],
+)
+def test_legitimate_bind_source_is_accepted(src: str) -> None:
+    policy = SandboxPolicy(ro_binds=[(src, src)], keep_fds=[3])
+    assert (src, src) in policy.ro_binds
+
+
+def test_lib64_soft_bind_still_accepted() -> None:
+    # tier 3 (the depth-1 breadth floor) must NOT apply to ro_binds_try: /lib64 is
+    # a legitimate depth-1 arch-variable soft bind (#269).
+    policy = SandboxPolicy(ro_binds_try=[("/lib64", "/lib64")], keep_fds=[3])
+    assert ("/lib64", "/lib64") in policy.ro_binds_try
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/", True),
+        ("/etc", True),
+        ("/proc/self/root", True),
+        ("/sys/x", True),
+        ("", True),  # relative/empty → refused (defensive; launcher relies on this)
+        ("/usr", False),
+        ("/lib", False),
+        ("/etc/ssl/certs", False),
+        ("/home/alfred/.egress/discord", False),
+        ("/opt/lib64-compat", False),
+    ],
+)
+def test_is_over_broad_bind_source_predicate(path: str, expected: bool) -> None:  # noqa: FBT001 — parametrized expected value
+    assert is_over_broad_bind_source(path) is expected
+
+
+# Hand-verified respelling table (spec §Tests): each verdict written by hand, so
+# it cannot share an algorithm bug with the validator. Every entry is a
+# NON-arch-variable root: this table tests ro_binds (a hard field), and an
+# arch-variable source there hits _refuse_hard_bind_of_arch_variable_path first
+# (reason arch_variable_path_hard_bound) — see test_soft_bind_resolving_to_root_is_refused
+# and test_over_broad_hard_bind_source_is_refused for the /lib64/.. case, which
+# is arch-variable and must be tested via the soft field instead.
+_RESPELLING_VERDICTS = [
+    ("/home/..", True),  # → /
+    ("/usr/..", True),  # → /
+    ("/lib/../..", True),  # → /
+    ("/etc/", True),  # → /etc
+    ("//etc", True),  # → /etc
+    ("/etc/.", True),  # → /etc
+    ("/usr/../etc", True),  # → /etc
+    ("/etc/ssl/certs/../..", True),  # → /etc
+    ("/usr/./lib", False),  # → /usr/lib (depth-3, fine)
+    ("/etc/ssl/certs", False),
+]
+
+
+@pytest.mark.parametrize(("path", "over_broad"), _RESPELLING_VERDICTS)
+def test_respelling_verdict_table(path: str, over_broad: bool) -> None:  # noqa: FBT001 — parametrized expected value
+    # /usr/../etc etc. are non-arch-variable, so they reach the new guard.
+    if over_broad:
+        with pytest.raises(SandboxPolicyInvalid) as exc:
+            SandboxPolicy(ro_binds=[(path, "/x")], keep_fds=[3])
+        assert exc.value.reason == "bind_source_too_broad"
+    else:
+        SandboxPolicy(ro_binds=[(path, "/x")], keep_fds=[3])
+
+
+def test_permitted_roots_match_shipped_policies() -> None:
+    """The allowlist must equal EXACTLY the depth-1 hard-bind sources the shipped
+    policies declare — read from ro_binds + rw_binds ONLY (never ro_binds_try, which
+    legitimately carries the depth-1 arch-variable /lib64). Widening the allowlist
+    without a shipped policy that needs it fails here (the #269 class-closing test).
+    """
+    policy_dir = Path(__file__).resolve().parents[3] / "config" / "sandbox"
+    # non-recursive glob: skips _fixtures/ and *.windows.stub.policy
+    files = sorted(policy_dir.glob("*.linux.bwrap.policy"))
+    assert len(files) >= 2, f"expected >=2 shipped Linux policies, found {[f.name for f in files]}"
+    depth1_sources: set[str] = set()
+    for f in files:
+        policy = read_policy_toml(f.read_text())
+        for src, _dst in (*policy.ro_binds, *policy.rw_binds):
+            if len(PurePosixPath(_canonical(src)).parts) <= 2:
+                depth1_sources.add(_canonical(src))
+    assert depth1_sources == set(_PERMITTED_TOP_LEVEL_BIND_ROOTS), (
+        f"shipped depth-1 hard-bind sources {sorted(depth1_sources)} != allowlist "
+        f"{sorted(_PERMITTED_TOP_LEVEL_BIND_ROOTS)} — update the allowlist (and #430) in lockstep"
+    )

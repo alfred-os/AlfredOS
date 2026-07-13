@@ -40,6 +40,7 @@ import posixpath
 import re
 import tomllib
 from collections.abc import Sequence
+from pathlib import PurePosixPath
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -81,6 +82,54 @@ _ARCH_VARIABLE_PATHS: Final[frozenset[str]] = frozenset(
 _ARCH_TRIPLET_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*-linux-[A-Za-z0-9_]+$"
 )
+
+# The two top-level roots the shipped policies legitimately hard-bind. Kept in
+# lockstep with the policies by test_permitted_roots_match_shipped_policies.
+# ``/usr`` is broad (it leaves /usr/bin/* exec-reachable) and that residual is
+# tracked in #430 — NOT closed here; this PR permits it so as not to pre-empt #430.
+_PERMITTED_TOP_LEVEL_BIND_ROOTS: Final[frozenset[str]] = frozenset({"/usr", "/lib"})
+
+# Pseudo-filesystems whose magic symlinks resolve to the host root (/proc/self/root,
+# /proc/<pid>/root, /proc/<pid>/cwd). A depth-based breadth rule cannot catch these
+# — they are deep paths that resolve to /. No policy ever legitimately binds a
+# source under them. This is a deliberate, NAMED two-entry exception to the
+# "allowlist not denylist" stance (see is_over_broad_bind_source).
+_PSEUDO_FS_TOP_LEVEL: Final[frozenset[str]] = frozenset({"proc", "sys"})
+
+
+def _resolves_to_host_root_or_pseudofs(path: str) -> bool:
+    """Tiers 1+2: a source that canonicalises to ``/`` or lives under a
+    root-resolving pseudo-filesystem. Over-broad in ANY bind field — a soft bind
+    of such a source degrades the sandbox exactly as a hard one does.
+    """
+    canonical = _canonical(path)
+    if canonical == "/":
+        return True
+    parts = PurePosixPath(canonical).parts
+    return len(parts) >= 2 and parts[1] in _PSEUDO_FS_TOP_LEVEL
+
+
+def is_over_broad_bind_source(path: str) -> bool:
+    """Is ``path`` too broad to be a HARD bind source (tiers 1+2+3)?
+
+    Exported: the launcher calls this (via ``manifest_reader --check-bind-source``)
+    for the interpreter prefix, which is a hard ``--ro-bind``. The soft field
+    ``ro_binds_try`` uses only tiers 1+2 (``_resolves_to_host_root_or_pseudofs``),
+    because it legitimately carries the depth-1 arch-variable root ``/lib64``.
+
+    **This guard CANNOT decide a filesystem fact, and does not try to (#269).** It
+    cannot see that a depth-2 path like ``/home/alfred`` is still the operator's
+    whole home (depth is a proxy for breadth, not breadth). It is lexical, so an
+    on-disk symlink pointing at ``/`` defeats it — this module must never touch the
+    filesystem. Tier 2 names only ``/proc``/``/sys``; a future root-resolving
+    pseudo-fs is not caught. Assume variant N+1 exists.
+    """
+    if _resolves_to_host_root_or_pseudofs(path):
+        return True
+    canonical = _canonical(path)
+    if canonical in _PERMITTED_TOP_LEVEL_BIND_ROOTS:
+        return False
+    return len(PurePosixPath(canonical).parts) <= 2
 
 
 def _is_arch_variable(path: str) -> bool:
@@ -417,6 +466,48 @@ class SandboxPolicy(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _refuse_over_broad_bind_source(self) -> SandboxPolicy:
+        """No bind SOURCE may expose the host root or a broad top-level tree (#428).
+
+        Three tiers, applied by field kind:
+
+        * tiers 1+2 (source resolves to ``/``, or lives under ``/proc``/``/sys``)
+          apply to EVERY bind field including the soft ``ro_binds_try`` — a source
+          that resolves to the host root is over-broad however it is bound.
+        * tier 3 (a single-component top-level root not in
+          ``_PERMITTED_TOP_LEVEL_BIND_ROOTS``) applies to the HARD fields only,
+          because ``ro_binds_try`` legitimately carries the depth-1 arch-variable
+          root ``/lib64`` that a breadth floor would wrongly refuse.
+
+        Keys on the SOURCE, like ``_refuse_hard_bind_of_arch_variable_path``: bwrap
+        cares about the source. This is a lexical floor, not a filesystem oracle —
+        see ``is_over_broad_bind_source`` for what it cannot decide.
+        """
+        for field, binds in (("ro_binds", self.ro_binds), ("rw_binds", self.rw_binds)):
+            for src, dst in binds:
+                if is_over_broad_bind_source(src):
+                    raise SandboxPolicyInvalid(
+                        reason="bind_source_too_broad",
+                        detail=(
+                            f"{field} binds source {src!r} -> {dst!r}, which exposes the "
+                            f"host root or a broad top-level tree into the T3 sandbox. Only "
+                            f"{sorted(_PERMITTED_TOP_LEVEL_BIND_ROOTS)} are permitted as "
+                            f"top-level bind roots; bind a specific subdirectory instead."
+                        ),
+                    )
+        for src, dst in self.ro_binds_try:
+            if _resolves_to_host_root_or_pseudofs(src):
+                raise SandboxPolicyInvalid(
+                    reason="bind_source_too_broad",
+                    detail=(
+                        f"ro_binds_try binds source {src!r} -> {dst!r}, which resolves to "
+                        f"the host root or a pseudo-filesystem. A soft bind of such a source "
+                        f"degrades the sandbox as badly as a hard one."
+                    ),
+                )
+        return self
+
 
 def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
     """Translate a :class:`SandboxPolicy` into the bwrap CLI flag list.
@@ -484,6 +575,7 @@ def read_policy_toml(raw: str) -> SandboxPolicy:
 __all__ = [
     "SandboxPolicy",
     "SandboxPolicyInvalid",
+    "is_over_broad_bind_source",
     "policy_to_bwrap_flags",
     "read_policy_toml",
 ]
