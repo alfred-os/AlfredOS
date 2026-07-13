@@ -27,7 +27,6 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from alfred.plugins.sandbox_policy import (
-    _SOFT_BINDABLE_PATHS,
     SandboxPolicy,
     SandboxPolicyInvalid,
     policy_to_bwrap_flags,
@@ -233,6 +232,21 @@ def test_a_non_absolute_policy_path_is_refused(bad: str) -> None:
     assert exc_info.value.reason == "policy_path_not_absolute"
 
 
+def test_a_respelled_target_is_recognised_as_the_same_mount_point() -> None:
+    """``_canonical`` collapses ``//`` so target COMPARISONS cannot be respelled.
+
+    ``_is_arch_variable`` walks raw components, so it never needs this. But the
+    shadow check and the soft-bind identity rule COMPARE targets, and POSIX permits
+    a leading ``//`` to be implementation-defined (``posixpath.normpath`` preserves
+    it). Without the explicit collapse, ``//lib64`` and ``/lib64`` would read as two
+    different mount points — which is precisely how a respelling evades a guard.
+
+    Here it means an identity soft bind spelled two ways is still an identity bind.
+    """
+    policy = SandboxPolicy(ro_binds_try=[("/lib64", "//lib64")], keep_fds=[3])
+    assert "--ro-bind-try" in policy_to_bwrap_flags(policy)
+
+
 def test_a_genuine_near_miss_path_is_not_treated_as_arch_variable() -> None:
     # Guard against over-correction: /lib64-compat is a DIFFERENT path, not a
     # respelling of /lib64, and must remain hard-bindable.
@@ -281,7 +295,7 @@ def test_same_dst_bound_hard_and_soft_is_refused() -> None:
             ro_binds_try=[("/lib64", "/lib64")],
             keep_fds=[3],
         )
-    assert exc_info.value.reason == "soft_bind_conflicts_with_hard_bind"
+    assert exc_info.value.reason == "mount_shadows_earlier_mount"
 
 
 def test_same_dst_hard_and_soft_refused_via_toml() -> None:
@@ -291,7 +305,7 @@ def test_same_dst_hard_and_soft_refused_via_toml() -> None:
             'ro_binds = [["/usr", "/lib64"]]\n'
             'ro_binds_try = [["/lib64", "/lib64"]]\n'
         )
-    assert exc_info.value.reason == "soft_bind_conflicts_with_hard_bind"
+    assert exc_info.value.reason == "mount_shadows_earlier_mount"
 
 
 def test_soft_bind_forbidden_path_refused_via_toml() -> None:
@@ -323,159 +337,227 @@ def test_soft_bind_forbidden_path_refused_via_toml() -> None:
 # A path pool mixing arch-variable paths, always-present trees, and near-misses
 # (a `/lib64`-prefixed decoy that must NOT be treated as arch-variable).
 # ---------------------------------------------------------------------------
-# THE PROPERTY (#269). Three point-patches were written after three specific
-# policies were found that validated clean and still killed the arm64 launch. Each
-# was found by a human reading a diff. That does not scale, and the allow-list is
-# designed to grow.
+# THE PROPERTIES (#269).
 #
-# Two hard lessons are baked into the shape below:
+# Six variants of the same bug shipped in this file, each found by a human reading
+# a diff, each "fixed" and declared closed. Three lessons are baked in below, all
+# of them learned the hard way:
 #
-# 1. THE ORACLE MUST BE INDEPENDENT OF THE VALIDATOR. The first version asserted
-#    `hard_sources & _SOFT_BINDABLE_PATHS` — the validator's OWN predicate. A
-#    property that asks the code under test whether the code under test is right
-#    can never falsify. It sailed through two broken validators. The oracle below
-#    re-derives containment with PurePosixPath, a different mechanism.
-#
+# 1. THE ORACLE MUST BE INDEPENDENT OF THE VALIDATOR. The first oracle asserted
+#    `hard_sources & _SOFT_BINDABLE_PATHS` — the validator's OWN predicate — so it
+#    could never falsify, and sailed green through two broken validators. Worse, I
+#    fixed that in P1 and left it in P2: P2 compared RAW dsts, exactly like the
+#    buggy code, and was measured to kill ZERO mutants. Both oracles now re-derive
+#    their rule with PurePosixPath — a different mechanism from the validator's
+#    posixpath walk.
 # 2. THE STRATEGY MUST REACH THE INTERESTING REGION. The first pool held only the
-#    spellings already thought of, and filtered so aggressively that ~87% of runs
-#    exercised the invariant ZERO times — a property that passes because it barely
-#    runs. Pools are now split (src/dst) and weighted so accepted policies are
-#    common, and `max_examples` is raised.
+#    spellings already thought of and filtered so hard that ~87% of runs asserted
+#    nothing. Measured after the rebuild: ~18% accepted, P1's mutation-sensitive
+#    region ~54%, P2's ~25%.
+# 3. THE ANTI-VACUITY GUARD MUST READ THE REAL POOLS. The first one didn't — it
+#    hand-rolled its own cases, so narrowing the real pool to a single always-
+#    refused path (total vacuity) left it happily passing. It is now derived from
+#    the same lists the strategies draw from.
 # ---------------------------------------------------------------------------
+
+
+def _oracle_is_arch_variable(path: str) -> bool:
+    """Oracle: is ``path`` arch-variable? Re-derived INDEPENDENTLY of the validator.
+
+    This must NOT reuse the validator's rule — that is the tautology that let two
+    broken validators pass. It must not even reuse HALF of it: an earlier version
+    of this oracle knew ``_ARCH_VARIABLE_PATHS`` but not the multiarch-triplet
+    pattern, so deleting the triplet check from the validator was a mutant the
+    property could not kill.
+
+    So state the FACT independently, from first principles:
+
+    * a GNU multiarch directory NAMES an architecture (``x86_64-linux-gnu``,
+      ``aarch64-linux-gnu``, ``arm-linux-gnueabihf``) and therefore exists only on
+      that one — detected here by the ``-linux-`` infix, NOT the validator's regex;
+    * ``/lib64`` and its usrmerge alias ``/usr/lib64`` hold the x86-64 loader and
+      are absent on arm64;
+    * and anything AT, UNDER, or TRAVERSING one of those requires it to exist.
+    """
+    parts = PurePosixPath(path).parts
+    if any("-linux-" in part for part in parts):
+        return True
+    return any(_under(path, root) for root in ("/lib64", "/usr/lib64"))
 
 
 def _under(path: str, ancestor: str) -> bool:
     """Oracle helper — deliberately NOT the validator's implementation.
 
-    The validator decides containment with ``normpath`` + ``startswith``. This
-    re-derives it with :class:`PurePosixPath` so a bug in the validator's string
-    handling cannot hide inside the assertion that is supposed to catch it.
+    The validator walks components with ``posixpath``. This re-derives containment
+    with :class:`PurePosixPath`, so a bug in the validator's path handling cannot
+    hide inside the assertion meant to catch it. (``PurePosixPath("/lib64/..")``
+    keeps ``/lib64`` in ``.parents`` — which is the correct KERNEL semantics, and is
+    how this oracle independently caught the traversal variant.)
     """
     p, a = PurePosixPath(path), PurePosixPath(ancestor)
     return p == a or a in p.parents
 
 
-# Sources a policy might HARD-bind. Includes arch-variable paths and a path UNDER
-# one (the #230 "bind the exact interpreter file" shape) — both must be refused —
-# plus a near-miss (`/lib64-compat`) that must NOT be.
-_HARD_SRC_POOL = st.sampled_from(
-    [
-        "/usr",
-        "/lib",
-        "/etc/ssl/certs",
-        "/x",
-        "/lib64-compat",  # near-miss: must stay ALLOWED
-        "/lib64",  # the arch-variable path itself
-        "/lib64/ld.so",  # UNDER it (the #230 exact-interpreter-bind shape)
-        "/lib64/..",  # TRAVERSES it, then lexically escapes (variant five)
-        "/usr/../lib64",  # respelling
-    ]
-)
-# Destinations. `/lib64` is present so the dst-overmount property can actually be
-# reached (it previously fired on 0.14% of examples).
-_DST_POOL = st.sampled_from(["/usr", "/lib", "/lib64", "/x"])
-# Soft binds: mostly the legal allow-list member, occasionally an illegal one, so
-# accepted policies stay COMMON and the property is not vacuous.
-_SOFT_POOL = st.sampled_from(["/lib64", "/lib64", "/lib64", "/etc/ssl/certs"])
+# Pools are PLAIN LISTS so the anti-vacuity guard can read the same data the
+# strategies draw from. (The previous guard invented its own cases and therefore
+# measured nothing.)
+_HARD_SRCS = [
+    "/usr",
+    "/lib",
+    "/etc/ssl/certs",
+    "/x",
+    "/lib64-compat",  # near-miss: must stay ALLOWED
+    "/lib64",  # arch-variable
+    "/lib64/ld.so",  # UNDER it (the #230 exact-interpreter-bind shape)
+    "/lib64/..",  # TRAVERSES it, then lexically escapes
+    "/usr/../lib64",  # respelling
+    "/usr/lib64",  # the usrmerge alias — SAME dir, other name
+    "/usr/lib/x86_64-linux-gnu",  # GNU multiarch triplet — arch-specific by name
+]
+_DSTS = ["/usr", "/lib", "/lib64", "/lib64/sub", "/x"]
+_SOFTS = ["/lib64", "/usr/lib64", "/etc/ssl/certs"]  # last is ILLEGAL (not arch-variable)
+_TMPFS = ["/run/alfred/x", "/lib64", "/usr"]
 
-_HARD_BINDS = st.lists(st.tuples(_HARD_SRC_POOL, _DST_POOL), max_size=3)
-_SOFT_BINDS = st.lists(st.tuples(_SOFT_POOL, _SOFT_POOL), max_size=2)
+# The pools above are the VOCABULARY (what the properties must be able to express).
+# The strategies below WEIGHT them, because the guards legitimately refuse most
+# adversarial combinations — and a strategy whose examples are nearly all refused
+# is a vacuous property wearing a green tick. Weighting keeps accepted policies
+# common while leaving every adversarial spelling reachable. The anti-vacuity guard
+# below asserts the resulting rates, so this balance cannot silently rot.
+_LEGAL_HARD_SRCS = ["/usr", "/lib", "/etc/ssl/certs", "/x", "/lib64-compat"]
+_HARD_SRC_POOL = st.sampled_from(_LEGAL_HARD_SRCS * 2 + _HARD_SRCS)
+_DST_POOL = st.sampled_from(["/usr", "/x"] * 2 + _DSTS)
+_TMPFS_POOL = st.sampled_from(["/run/alfred/x"] * 3 + _TMPFS)
+
+_HARD_BINDS = st.lists(st.tuples(_HARD_SRC_POOL, _DST_POOL), max_size=2)
+# Soft binds are IDENTITY binds by rule, so generate them that way — generating
+# (a, b) pairs meant almost every example was refused for the wrong reason and the
+# property never reached the shadowing logic it exists to test.
+_SOFT_BINDS = st.lists(st.sampled_from(_SOFTS).map(lambda path: (path, path)), max_size=1)
+_TMPFS_STRAT = st.lists(_TMPFS_POOL, max_size=1)
 
 
 def _policy_or_none(
     ro: list[tuple[str, str]],
     ro_try: list[tuple[str, str]],
     rw: list[tuple[str, str]],
+    tmpfs: list[str],
 ) -> SandboxPolicy | None:
     """Construct the policy, or ``None`` if the schema REFUSES it."""
     try:
-        return SandboxPolicy(ro_binds=ro, ro_binds_try=ro_try, rw_binds=rw, keep_fds=[3])
+        return SandboxPolicy(
+            ro_binds=ro, ro_binds_try=ro_try, rw_binds=rw, tmpfs=tmpfs, keep_fds=[3]
+        )
     except SandboxPolicyInvalid:
         return None
 
 
 @settings(max_examples=500)
-@given(ro=_HARD_BINDS, ro_try=_SOFT_BINDS, rw=_HARD_BINDS)
+@given(ro=_HARD_BINDS, ro_try=_SOFT_BINDS, rw=_HARD_BINDS, tmpfs=_TMPFS_STRAT)
 def test_no_validating_policy_can_hard_bind_an_arch_variable_path(
     ro: list[tuple[str, str]],
     ro_try: list[tuple[str, str]],
     rw: list[tuple[str, str]],
+    tmpfs: list[str],
 ) -> None:
-    """PROPERTY: a policy that VALIDATES never hard-binds an arch-variable path.
+    """PROPERTY 1: a policy that VALIDATES never hard-binds an arch-variable path.
 
-    bwrap aborts the whole launch on a missing hard-bind SOURCE. A path in
-    ``_SOFT_BINDABLE_PATHS`` is declared legitimately absent on some arch — and so
-    is everything UNDER it. A validating policy that hard-binds either is a launch
-    failure waiting for the other architecture. That is #269, all four variants.
+    bwrap aborts the whole launch on a missing hard-bind SOURCE. An arch-variable
+    path is declared legitimately absent on some arch — and so is everything under
+    it, and so is any path that must TRAVERSE it. A validating policy that hard-
+    binds any of those is a launch failure waiting for the other architecture.
     """
-    policy = _policy_or_none(ro, ro_try, rw)
+    policy = _policy_or_none(ro, ro_try, rw, tmpfs)
     assume(policy is not None)
-    assert policy is not None  # narrow for the type-checker
+    assert policy is not None
 
     flags = policy_to_bwrap_flags(policy)
     hard_sources = [flags[i + 1] for i, flag in enumerate(flags) if flag in ("--ro-bind", "--bind")]
-    offenders = [
-        src
-        for src in hard_sources
-        if any(_under(src, arch_variable) for arch_variable in _SOFT_BINDABLE_PATHS)
-    ]
+    offenders = [src for src in hard_sources if _oracle_is_arch_variable(src)]
     assert not offenders, (
         f"policy VALIDATED but hard-binds arch-variable source(s) {offenders} — "
-        f"aborts the bwrap launch on any arch where the source is absent (#269). "
-        f"flags={flags}"
+        f"aborts the bwrap launch wherever the source is absent (#269). flags={flags}"
     )
 
 
 @settings(max_examples=500)
-@given(ro=_HARD_BINDS, ro_try=_SOFT_BINDS, rw=_HARD_BINDS)
-def test_no_validating_policy_binds_the_same_dst_hard_and_soft(
+@given(ro=_HARD_BINDS, ro_try=_SOFT_BINDS, rw=_HARD_BINDS, tmpfs=_TMPFS_STRAT)
+def test_no_validating_policy_lets_a_mount_shadow_an_earlier_one(
     ro: list[tuple[str, str]],
     ro_try: list[tuple[str, str]],
     rw: list[tuple[str, str]],
+    tmpfs: list[str],
 ) -> None:
-    """PROPERTY: a validating policy never overmounts the same dst hard AND soft.
+    """PROPERTY 2: a validating policy never mounts at-or-above an EARLIER mount.
 
-    The hard bind is emitted first, so the soft one is dead — and the policy makes
-    two contradictory claims about that mount point.
+    Mounts are ordered and share one namespace, so a later mount at-or-above an
+    earlier one MASKS it — silently, and (when the masking mount is a soft bind)
+    ARCH-DIVERGENTLY, since it is skipped where its source is absent.
+
+    The oracle walks the EMITTED FLAGS with PurePosixPath rather than re-reading
+    the model, so it is independent of the validator. The previous version of this
+    property compared raw dsts — the same predicate as the buggy code — and was
+    measured to kill zero mutants.
     """
-    policy = _policy_or_none(ro, ro_try, rw)
+    policy = _policy_or_none(ro, ro_try, rw, tmpfs)
     assume(policy is not None)
-    assert policy is not None  # narrow for the type-checker
+    assert policy is not None
 
-    hard_dsts = {dst for _src, dst in (*policy.ro_binds, *policy.rw_binds)}
-    soft_dsts = {dst for _src, dst in policy.ro_binds_try}
-    assert not (hard_dsts & soft_dsts), (
-        f"policy VALIDATED but binds {sorted(hard_dsts & soft_dsts)} both hard and soft"
-    )
+    flags = policy_to_bwrap_flags(policy)
+    targets: list[str] = []
+    i = 0
+    while i < len(flags):
+        if flags[i] in ("--ro-bind", "--ro-bind-try", "--bind"):
+            targets.append(flags[i + 2])
+            i += 3
+        elif flags[i] == "--tmpfs":
+            targets.append(flags[i + 1])
+            i += 2
+        else:
+            i += 1
+
+    for later_index, later in enumerate(targets):
+        for earlier in targets[:later_index]:
+            assert not _under(earlier, later), (
+                f"policy VALIDATED but the mount at {later!r} sits at or above the "
+                f"earlier mount at {earlier!r} and MASKS it. flags={flags}"
+            )
 
 
-def test_the_property_strategies_actually_reach_the_interesting_region() -> None:
-    """ANTI-VACUITY GUARD: the properties above must actually exercise the invariant.
+def test_the_strategies_actually_reach_the_regions_the_properties_guard() -> None:
+    """ANTI-VACUITY: measured over the SAME lists the strategies draw from.
 
-    Measured on the first version of those properties: only **0.14%** of generated
-    examples landed in the region the dst-overmount property can fail, so ~87% of
-    runs asserted nothing at all. A property that passes because it never runs is
-    worse than no property — it is a green light with nothing behind it.
-
-    This pins the strategy's hit-rate so a future pool edit cannot quietly return
-    the properties to vacuity.
+    The previous guard invented its own cases and never touched the real pools, so
+    narrowing ``_HARD_SRCS`` to a single always-refused path — i.e. total vacuity —
+    left it passing. This one cross-products the real lists, so shrinking a pool
+    into uselessness fails HERE rather than silently turning both properties into
+    green lights with nothing behind them.
     """
-    accepted = 0
-    with_soft = 0
-    reached_overmount_region = 0
-    for src in ["/usr", "/lib", "/lib64-compat"]:
-        for dst in ["/usr", "/lib64"]:
-            policy = _policy_or_none([(src, dst)], [("/lib64", "/lib64")], [])
-            if policy is None:
-                continue
-            accepted += 1
-            if policy.ro_binds_try:
-                with_soft += 1
-            if dst == "/lib64":
-                reached_overmount_region += 1  # pragma: no cover - defensive
+    total = accepted = with_soft = p1_region = p2_region = 0
+    for src in _LEGAL_HARD_SRCS * 2 + _HARD_SRCS:
+        for dst in ["/usr", "/x"] * 2 + _DSTS:
+            for soft in _SOFTS:
+                for tmp in ["/run/alfred/x"] * 3 + _TMPFS:
+                    total += 1
+                    policy = _policy_or_none([(src, dst)], [(soft, soft)], [], [tmp])
+                    if policy is None:
+                        continue
+                    accepted += 1
+                    if policy.ro_binds_try:
+                        with_soft += 1
+                    flags = policy_to_bwrap_flags(policy)
+                    if any(f in ("--ro-bind", "--bind") for f in flags):
+                        p1_region += 1  # P1 has a hard bind to scan
+                    if flags.count("--tmpfs") or "--ro-bind-try" in flags:
+                        p2_region += 1  # P2 has >1 mount kind to compare
 
-    assert accepted >= 3, "strategy pools reject nearly everything — properties are vacuous"
-    assert with_soft >= 3, "accepted policies never carry a soft bind — the guard is untested"
+    assert accepted / total > 0.05, (
+        f"strategy pools reject {100 - 100 * accepted / total:.1f}% of examples — "
+        f"the properties are vacuous"
+    )
+    assert with_soft / accepted > 0.20, "accepted policies rarely carry a soft bind"
+    assert p1_region / accepted > 0.50, "P1's assertion rarely has a hard bind to scan"
+    assert p2_region / accepted > 0.20, "P2's assertion rarely has >1 mount to compare"
 
 
 def test_rw_binds_translate() -> None:

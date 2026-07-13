@@ -37,6 +37,7 @@ Two load-bearing invariants:
 from __future__ import annotations
 
 import posixpath
+import re
 import tomllib
 from collections.abc import Sequence
 from typing import Final, Literal
@@ -47,62 +48,81 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 # ``keep_fds`` for every policy (arch-2).
 _REQUIRED_FD: Final[int] = 3
 
-# The CLOSED allow-list of paths that may be SOFT-bound (``ro_binds_try``, #269).
+# Directory roots that may legitimately be ABSENT on some supported architecture.
 #
-# ``ro_binds_try`` is the schema's ONLY silently-skipping field: bwrap binds the
-# source iff it exists and says NOTHING when it does not. That is exactly right
-# for a genuinely arch-variable path (``/lib64`` exists on x86-64, never on
-# arm64) and exactly WRONG for anything else — an unconstrained field would let a
-# typo (``/lib46``) or a load-bearing bind (``/etc/ssl/certs``, an egress socket
-# dir) degrade the sandbox in silence instead of refusing at launch. That silent
-# degradation is the failure mode ``ro_binds`` is HARD precisely to avoid
-# (CLAUDE.md hard rule #7: no silent failures in security paths).
+# ``ro_binds_try`` is the schema's only silently-skipping field: bwrap binds the
+# source iff it exists and says NOTHING when it does not. That is right for a
+# genuinely arch-variable path and WRONG for anything else — soft-binding
+# ``/etc/ssl/certs`` would let a missing CA bundle degrade the sandbox in silence
+# instead of refusing at launch (hard rule #7). Hence the vocabulary.
 #
-# So the field is constrained exactly as ``unshare`` is — by a closed vocabulary
-# the type refuses to leave (see the ``unshare`` Literal below: "silently
-# dropping an unknown unshare kind would weaken isolation without telling
-# anyone"). To soft-bind a NEW path, add it HERE, with the arch that lacks it and
-# why its absence is expected. That one-line edit IS the security review.
-_SOFT_BINDABLE_PATHS: Final[frozenset[str]] = frozenset({"/lib64"})
+# READ THE ``_is_arch_variable`` DOCSTRING BEFORE TRUSTING THIS LIST. It is not,
+# and cannot be, complete.
+_ARCH_VARIABLE_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        # The x86-64 dynamic-linker directory. Absent on arm64, where the loader
+        # is /lib/ld-linux-aarch64.so.1 under the already-bound /lib. This is #269.
+        "/lib64",
+        # THE SAME DIRECTORY, spelled differently: on usrmerged Debian ``/lib64``
+        # is a symlink to ``usr/lib64``. A guard that knows only the first spelling
+        # is blind to the second.
+        "/usr/lib64",
+    }
+)
+
+# GNU multiarch triplet directories — ``/usr/lib/x86_64-linux-gnu``,
+# ``/lib/aarch64-linux-gnu``, ``/usr/lib/arm-linux-gnueabihf``, …
+#
+# These NAME an architecture, so by construction they exist only on that one. They
+# matter because #230 ("tighten the interpreter bind to the exact CPython prefix,
+# dropping the broad /usr") lands precisely here: CPython's shared libraries on
+# amd64 ARE ``/usr/lib/x86_64-linux-gnu``. A pattern, not a list, because the set
+# of triplets is open.
+_ARCH_TRIPLET_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*-linux-[A-Za-z0-9_]+$"
+)
 
 
 def _is_arch_variable(path: str) -> bool:
-    """True if binding ``path`` requires an arch-variable path to EXIST.
+    """Best-effort: does binding ``path`` require an arch-variable path to EXIST?
 
-    There are TWO ways that happens, and the second is easy to miss:
+    **THIS IS NOT A CLOSED CLASS, AND CANNOT BE. Read this before adding a bind.**
 
-    1. The path IS an arch-variable path, or lives UNDER one — ``/lib64``,
-       ``/lib64/ld-linux-x86-64.so.2``.
-    2. The path TRAVERSES one, even if it lexically escapes it again.
-       ``/lib64/..`` collapses to ``/`` under ``normpath`` — but the KERNEL
-       resolves a path component by component, so it must still enter ``/lib64``
-       first. On arm64 that is ENOENT and bwrap aborts. Collapsing ``..``
-       lexically HIDES this: it is precisely the normpath-vs-real-resolution
-       divergence, and a comparison built only on the canonical form waves
-       ``/lib64/..`` straight through.
+    Arch-variance is a property of the FILESYSTEM. This function decides it
+    LEXICALLY, from a vocabulary of spellings we happen to have thought of. Those
+    are not the same thing, and the gap between them has produced six distinct bugs
+    in this file already — each one a path that was arch-variable in fact and
+    invisible to the rule in force at the time:
 
-    So we check the canonical form (case 1) AND walk the raw components (case 2).
+    * ``/lib64`` in ``ro_binds`` (the original #269).
+    * ``/lib64`` in ``rw_binds`` — a different field, same missing source.
+    * ``/lib64/ld-linux-x86-64.so.2`` — UNDER it, so membership missed it.
+    * ``/lib64/`` , ``//lib64``, ``/usr/../lib64`` — respellings, so string
+      equality missed them.
+    * ``/lib64/..`` — TRAVERSES it and then lexically escapes, so the canonical
+      form (``/``) missed it, even though the kernel must still enter ``/lib64``.
+    * ``/usr/lib64`` and ``/usr/lib/x86_64-linux-gnu`` — the SAME directories under
+      other names, so a one-spelling list missed them.
 
-    Membership is not enough. ``/lib64`` does not exist on arm64 — and therefore
-    neither does ``/lib64/ld-linux-x86-64.so.2``. A guard keyed on
-    ``src in _SOFT_BINDABLE_PATHS`` refuses the directory and waves through every
-    file inside it, each of which still hard-binds a source that is absent on arm64
-    and still aborts the launch (#269, fourth variant).
+    Each fix was declared "the class-closing invariant". Each was wrong. **A
+    lexical rule cannot decide a filesystem fact, so assume variant seven exists.**
 
-    This is not hypothetical: #230 ("tighten the interpreter bind to the exact
-    CPython prefix, dropping the broad /usr") produces exactly this shape — a
-    narrow bind of a specific file under a bound directory. The next recurrence of
-    this bug is already scheduled in our own comments, so the rule is containment.
+    What this function is FOR: catching the known spellings cheaply, at parse time,
+    with an auditable refusal — defence in depth, and a fast signal for the
+    misconfiguration we can foresee.
+
+    What actually CLOSES the class: the ``Integration (privileged Linux, real
+    spawn) (arm64)`` CI lane (a required check), which launches REAL bwrap against
+    the SHIPPED policies on aarch64. A path that is arch-variable in fact but
+    invisible to this rule still fails there, loudly, before it can merge. That
+    lane — not this function — is the guarantee. Do not weaken it, and do not let
+    a green parse here persuade you that a new bind is safe.
+
+    Mechanically: walk the RAW components, because the kernel resolves a path one
+    component at a time and every component it walks must exist — including ones a
+    later ``..`` removes. That single rule subsumes membership, containment and
+    canonicalisation (verified: it catches all six variants above on its own).
     """
-    normalized = _canonical(path)
-    if any(
-        normalized == arch_variable or normalized.startswith(arch_variable + "/")
-        for arch_variable in _SOFT_BINDABLE_PATHS
-    ):
-        return True
-
-    # Case 2 — traversal. Every component the kernel walks must exist, INCLUDING
-    # the ones a later ``..`` removes.
     walked = "/"
     for part in path.split("/"):
         if part in ("", "."):
@@ -111,9 +131,24 @@ def _is_arch_variable(path: str) -> bool:
             walked = posixpath.dirname(walked)
             continue
         walked = posixpath.join(walked, part)
-        if walked in _SOFT_BINDABLE_PATHS:
+        if walked in _ARCH_VARIABLE_PATHS or _ARCH_TRIPLET_RE.match(part):
             return True
     return False
+
+
+def _mount_targets_in_emission_order(policy: SandboxPolicy) -> list[tuple[str, str]]:
+    """Every mount target bwrap will create, in the order ``policy_to_bwrap_flags`` emits them.
+
+    Mounts are ordered, and a later mount at-or-above an earlier one MASKS it. The
+    kinds are not interchangeable but they share one namespace, so they must be
+    checked together — a ``tmpfs`` masks a bind exactly as a bind masks a bind.
+    """
+    return [
+        *(("ro_binds", dst) for _src, dst in policy.ro_binds),
+        *(("ro_binds_try", dst) for _src, dst in policy.ro_binds_try),
+        *(("rw_binds", dst) for _src, dst in policy.rw_binds),
+        *(("tmpfs", path) for path in policy.tmpfs),
+    ]
 
 
 def _canonical(path: str) -> str:
@@ -135,7 +170,7 @@ def _canonical(path: str) -> str:
     Every guard below compares paths. Comparing them as RAW STRINGS is a hole:
     ``/lib64``, ``/lib64/``, ``//lib64``, ``/lib64/.`` and ``/usr/../lib64`` are
     the SAME path to bwrap and five different strings to Python. A guard keyed on
-    ``src in _SOFT_BINDABLE_PATHS`` therefore refuses the first and waves through
+    a guard keyed on raw-string equality therefore refuses the first and waves through
     the other four — each of which still emits a hard bind that aborts the launch
     on an arch where the source is absent (#269, third variant).
 
@@ -263,7 +298,7 @@ class SandboxPolicy(BaseModel):
     def _refuse_hard_bind_of_arch_variable_path(self) -> SandboxPolicy:
         """THE class-closing invariant: an arch-variable path is never HARD-bound (#269).
 
-        A path in :data:`_SOFT_BINDABLE_PATHS` is *declared* arch-variable — it
+        A path :func:`_is_arch_variable` recognises is *declared* arch-variable — it
         legitimately does not exist on some supported architecture. bwrap aborts
         the entire launch on a missing HARD bind **source**, so hard-binding such
         a path is, by the schema's own declaration, a launch failure waiting for
@@ -300,53 +335,68 @@ class SandboxPolicy(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _refuse_hard_and_soft_bind_of_same_path(self) -> SandboxPolicy:
-        # #269 follow-up: the allow-list alone does NOT catch this. `/lib64` is
-        # legal in `ro_binds_try`, so a policy listing it in BOTH lists validates
-        # clean — and then `policy_to_bwrap_flags` emits the HARD `--ro-bind
-        # /lib64` FIRST, which is precisely the launch failure #269 removed
-        # ("bwrap: Can't find source path /lib64" on arm64). The soft entry that
-        # follows is dead code. The policy would sail past a validator that says
-        # it is fine and resurrect the original bug.
-        #
-        # A path is EITHER always-present (hard) OR arch-variable (soft). Never
-        # both — that is a contradiction in the policy's own claim about the path,
-        # so refuse it at parse time rather than let the hard bind quietly win.
-        hard_dsts = {_canonical(dst) for _src, dst in (*self.ro_binds, *self.rw_binds)}
-        for _src, dst in self.ro_binds_try:
-            if _canonical(dst) in hard_dsts:
-                raise SandboxPolicyInvalid(
-                    reason="soft_bind_conflicts_with_hard_bind",
-                    detail=(
-                        f"{dst!r} is bound BOTH hard (ro_binds) and soft (ro_binds_try). "
-                        f"The hard bind is emitted first and fails the whole launch where "
-                        f"the source is absent, so the soft bind is dead — declare the path "
-                        f"in exactly one list."
-                    ),
+    def _refuse_a_mount_that_shadows_an_earlier_one(self) -> SandboxPolicy:
+        """No mount may sit at-or-above an EARLIER mount's target, masking it.
+
+        Mounts are ordered and share one namespace, so a later one at-or-above an
+        earlier one hides it. Three real bugs collapse into this single rule, which
+        is why it replaces the dst-equality check that caught only the first:
+
+        * ``ro_binds=[(X, "/lib64")]`` + ``ro_binds_try=[("/lib64", "/lib64")]`` —
+          same target; the soft bind is emitted second and the hard bind is dead.
+        * a hard bind at ``/lib64/sub`` + a soft bind at ``/lib64`` — the soft bind
+          is emitted second and mounts OVER it. Worse, it is ARCH-DIVERGENT: on
+          arm64 the soft bind is skipped, so the hard bind survives and the sandbox
+          has different contents than on x86-64. Silently.
+        * ``tmpfs=["/lib64"]`` + a bind at ``/lib64`` — ``tmpfs`` is emitted after
+          the binds, so an empty tmpfs masks the dynamic linker on x86-64 and the
+          policy validates clean while producing a dead sandbox.
+
+        Nesting the other way is FINE and common: a bind at ``/usr`` followed by one
+        at ``/usr/local/x`` is a sub-mount, not a mask.
+        """
+        seen: list[tuple[str, str]] = []
+        for field, target in _mount_targets_in_emission_order(self):
+            canonical_target = _canonical(target)
+            for earlier_field, earlier_target in seen:
+                earlier_canonical = _canonical(earlier_target)
+                shadows = canonical_target == earlier_canonical or earlier_canonical.startswith(
+                    canonical_target.rstrip("/") + "/"
                 )
+                if shadows:
+                    raise SandboxPolicyInvalid(
+                        reason="mount_shadows_earlier_mount",
+                        detail=(
+                            f"{field} mounts at {target!r}, which sits at or above the "
+                            f"earlier {earlier_field} mount at {earlier_target!r} and "
+                            f"would MASK it (mounts are emitted in order). Where the "
+                            f"masking mount is a soft bind, the result is also "
+                            f"arch-divergent: it is skipped on an arch where its source "
+                            f"is absent, so the sandbox differs by architecture, silently."
+                        ),
+                    )
+            seen.append((field, target))
         return self
 
     @model_validator(mode="after")
     def _restrict_soft_binds(self) -> SandboxPolicy:
         # #269: a soft bind SILENTLY skips a missing source, so the set of paths
-        # allowed to be soft is closed (:data:`_SOFT_BINDABLE_PATHS`). A policy
+        # allowed to be soft is constrained (:func:`_is_arch_variable`). A policy
         # soft-binding anything else — a typo'd ``/lib46``, or a load-bearing
         # ``/etc/ssl/certs`` — would degrade the sandbox without a word instead of
         # refusing at launch. Refuse it at PARSE time, loudly, with a
         # closed-vocabulary reason the ``supervisor.plugin.sandbox_refused`` audit
         # row can carry.
         for src, dst in self.ro_binds_try:
-            if (
-                _canonical(src) not in _SOFT_BINDABLE_PATHS
-                or _canonical(dst) not in _SOFT_BINDABLE_PATHS
-            ):
+            if not _is_arch_variable(src) or _canonical(src) != _canonical(dst):
                 raise SandboxPolicyInvalid(
                     reason="soft_bind_forbidden_path",
                     detail=(
-                        f"ro_binds_try may only carry arch-variable paths "
-                        f"{sorted(_SOFT_BINDABLE_PATHS)}; got {src!r} -> {dst!r}. "
-                        f"A path that must always exist belongs in ro_binds, where a "
-                        f"missing source fails loud instead of silently skipping."
+                        f"ro_binds_try may only carry an IDENTITY bind of an "
+                        f"arch-variable path; got {src!r} -> {dst!r}. A path that must "
+                        f"always exist belongs in ro_binds, where a missing source fails "
+                        f"loud instead of silently skipping. (Arch-variable roots: "
+                        f"{sorted(_ARCH_VARIABLE_PATHS)}, plus GNU multiarch triplet dirs.)"
                     ),
                 )
         return self

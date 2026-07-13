@@ -89,7 +89,20 @@ def _adequate_policy_body(plugin_dir: Path, *, unshare_net: bool = False) -> str
     assert not any(
         os.path.realpath(root).startswith(("/etc", "/bin")) for root in appended_roots
     ), f"test bind resolves under /etc or /bin — would widen the sandbox: {appended_roots}"
+    # Dedupe by REALPATH. `interpreter_sandbox_roots()` walks the interpreter's
+    # symlink chain and can yield two SPELLINGS of the same directory (a Homebrew
+    # root arrives both as `.../bin/../Frameworks/...` and `.../Frameworks/...`).
+    # Binding both is pointless — and the schema now (correctly) refuses it, since a
+    # second mount at the same target masks the first. Dedupe on realpath rather
+    # than lexically: these `..` segments cross symlinks, so only the filesystem can
+    # say whether two spellings are the same directory. A test may ask it; the
+    # translator may not.
+    seen_real: set[str] = set()
     for root in appended_roots:
+        real = os.path.realpath(root)
+        if real in seen_real:
+            continue
+        seen_real.add(real)
         binds.append(f'["{root}", "{root}"]')
     # NOTE: deliberately NO ``tmpfs = ["/tmp"]`` — pytest's tmp_path (where the
     # stub lives) is typically UNDER /tmp, so a fresh tmpfs there would shadow

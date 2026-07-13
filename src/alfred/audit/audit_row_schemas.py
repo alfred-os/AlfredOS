@@ -1190,7 +1190,7 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # sandbox_info_handshake_mismatch | sandbox_block_missing |
 # unsandboxed_env_set_in_production | windows_stub_in_production |
 # environment_not_set | provider_key_delivery_failed |
-# soft_bind_forbidden_path | soft_bind_conflicts_with_hard_bind |
+# soft_bind_forbidden_path | mount_shadows_earlier_mount |
 # arch_variable_path_hard_bound | policy_path_not_absolute
 # (per PR-S4-6/7 round-2 closures; ``policy_ref_escapes_root`` covers the
 # path-traversal case the sandbox_escape adversarial README documents and
