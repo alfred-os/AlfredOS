@@ -186,9 +186,9 @@ def _canonical(path: str) -> str:
     Every guard below compares paths. Comparing them as RAW STRINGS is a hole:
     ``/lib64``, ``/lib64/``, ``//lib64``, ``/lib64/.`` and ``/usr/../lib64`` are
     the SAME path to bwrap and five different strings to Python. A guard keyed on
-    a guard keyed on raw-string equality therefore refuses the first and waves through
-    the other four — each of which still emits a hard bind that aborts the launch
-    on an arch where the source is absent (#269, third variant).
+    raw-string equality therefore refuses the first and waves through the other
+    four — each of which still emits a hard bind that aborts the launch on an arch
+    where the source is absent (#269, third variant).
 
     Lexical only — deliberately NO ``realpath``/``resolve``: this translator is
     host-independent and unit-testable precisely because it never touches the
