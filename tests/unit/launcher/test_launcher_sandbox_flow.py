@@ -320,6 +320,34 @@ def test_kind_full_policy_ref_missing_for_host_os(run_launcher, tmp_path) -> Non
     assert "policy_ref_missing" in result.stderr
 
 
+@_requires_jq
+def test_policy_schema_refusal_audit_row_carries_the_real_reason(run_launcher, tmp_path) -> None:
+    """#428: a policy-translate failure is audited under the schema's OWN reason,
+    not the hardcoded policy_ref_unreadable that mislabels all five schema refusals.
+    """
+    (tmp_path / "bad.linux.bwrap.policy").write_text(
+        'ro_binds_try = [["/etc/ssl/certs", "/etc/ssl/certs"]]\nkeep_fds = [3]\n'
+    )
+    manifest_body = _FULL_MANIFEST.replace(
+        'linux = "config/sandbox/_fixtures/policy_resolver_test.linux.bwrap.policy"',
+        'linux = "bad.linux.bwrap.policy"',
+    )
+    manifest = _write_manifest(tmp_path, manifest_body)
+    result = run_launcher(
+        "alfred.example",
+        "/usr/bin/python3",
+        env={
+            "ALFRED_ENVIRONMENT": "test",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "ALFRED_SANDBOX_POLICY_DIR": str(tmp_path),
+            "FAKE_UNAME": "Linux",
+        },
+    )
+    assert result.returncode != 0
+    assert '"reason":"soft_bind_forbidden_path"' in result.stderr
+    assert '"reason":"policy_ref_unreadable"' not in result.stderr
+
+
 # --------------------------------------------------------------------------
 # kind:stub
 # --------------------------------------------------------------------------

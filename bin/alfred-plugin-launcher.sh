@@ -300,7 +300,21 @@ case "${SANDBOX_KIND}" in
                 # flag per line into a bash array.
                 if ! BWRAP_FLAGS_RAW="$(python3 -m alfred.plugins.manifest_reader --policy-to-bwrap-flags --policy-ref "${POLICY_REF}" 2>&1)"; then
                     printf 'supervisor.sandbox.refused.policy_translate_failed plugin_id=%s detail=%s\n' "${PLUGIN_ID}" "${BWRAP_FLAGS_RAW}" >&2
-                    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"policy_ref_unreadable","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+                    # #428: the helper printed the SCHEMA reason (bare, or a
+                    # supervisor.sandbox.refused.* key) as its last stderr line; a
+                    # cold-import warning may precede it, so read the LAST line. Echo
+                    # the real reason into the audit row instead of the historic
+                    # hardcoded policy_ref_unreadable, which mislabelled every schema
+                    # refusal. Closed vocab source of truth: audit_row_schemas.py:1188.
+                    _CAPTURED_REASON="$(printf '%s\n' "${BWRAP_FLAGS_RAW}" | tail -n 1)"
+                    _CAPTURED_REASON="${_CAPTURED_REASON#supervisor.sandbox.refused.}"
+                    case "${_CAPTURED_REASON}" in
+                        kind_full_requires_keep_fd_3|policy_path_not_absolute|arch_variable_path_hard_bound|mount_shadows_earlier_mount|soft_bind_forbidden_path|bind_source_too_broad|policy_translate_failed|policy_ref_escapes_root|policy_ref_unreadable)
+                            _AUDIT_REASON="${_CAPTURED_REASON}" ;;
+                        *)
+                            _AUDIT_REASON="policy_ref_unreadable" ;;
+                    esac
+                    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"%s","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${_AUDIT_REASON}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
                     exit 1
                 fi
                 BWRAP_FLAGS=()
@@ -331,12 +345,12 @@ EOF
                 if _truthy "${ALFRED_SANDBOX_BIND_INTERP_PREFIX:-}"; then
                     _INTERP_REAL="$(readlink -f "${EXECUTABLE}")"
                     _INTERP_PREFIX="$(dirname "$(dirname "${_INTERP_REAL}")")"
-                    # Fail loud (hard rule #7) rather than open: a root-level
-                    # interpreter (realpath one dir below /, e.g. /python or
-                    # /x/python) yields an empty-or-/ prefix that would ro-bind the
-                    # ENTIRE host root into the sandbox, re-exposing /etc, /proc
-                    # mounts etc. the policy omits. Operator-misconfiguration guard.
-                    if [ -z "${_INTERP_PREFIX}" ] || [ "${_INTERP_PREFIX}" = "/" ]; then
+                    # #428: the over-broad-prefix decision lives in ONE place —
+                    # is_over_broad_bind_source, reached via --check-bind-source — so
+                    # the schema and the launcher cannot drift. Refuses "" (empty
+                    # prefix), "/", any non-allowlisted top-level root, and pseudo-fs
+                    # sources. Output is discarded; the exit code is the verdict.
+                    if ! python3 -m alfred.plugins.manifest_reader --check-bind-source --bind-source "${_INTERP_PREFIX}" >/dev/null 2>&1; then
                         printf 'supervisor.sandbox.refused.interpreter_prefix_too_broad plugin_id=%s interpreter=%s\n' "${PLUGIN_ID}" "${_INTERP_REAL}" >&2
                         printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"interpreter_prefix_too_broad","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
                         exit 1
