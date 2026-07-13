@@ -200,3 +200,25 @@ reason, so the profile (not a lax host) is provably what does the work.
   — wheel-co-located child code + bound real interpreter (sub-causes 3 + 4).
 - `docs/subsystems/quarantine.md` — the dual-LLM subsystem deep-doc.
 - `.github/workflows/bwrap-userns-validation.yml` — the decisive end-to-end gate.
+
+## Amendment (2026-07-13, #428) — policy bind sources are governed by a closed allowlist
+
+`SandboxPolicy` now refuses an over-broad bind **source** at parse time
+(`reason="bind_source_too_broad"`), adding a structural invariant to the sandbox
+boundary this ADR governs:
+
+- A source canonicalising to `/` is refused in **every** bind field, including the
+  soft `ro_binds_try`.
+- A source under a root-resolving pseudo-filesystem (`/proc`, `/sys`) is refused in
+  every field.
+- A single-component top-level root not in the allowlist `{/usr, /lib}` is refused
+  in the hard fields (`ro_binds`, `rw_binds`). `ro_binds_try` is exempt from this
+  tier because it legitimately carries the depth-1 arch-variable root `/lib64`.
+
+This is a lexical floor, not a filesystem oracle: it cannot see that a depth-2 path
+is still broad, and an on-disk symlink to `/` defeats it (the module never touches
+the filesystem). The `/usr` residual it permits — `/usr/bin/*` stays exec-reachable
+— is tracked in #430, the live successor to the closed #230. The same change routes
+the launcher's interpreter-prefix bind through the identical predicate
+(`is_over_broad_bind_source`) and corrects a pre-existing audit-reason
+misattribution (all five schema refusals were logged as `policy_ref_unreadable`).
