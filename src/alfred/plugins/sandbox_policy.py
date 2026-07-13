@@ -137,18 +137,34 @@ def _is_arch_variable(path: str) -> bool:
 
 
 def _mount_targets_in_emission_order(policy: SandboxPolicy) -> list[tuple[str, str]]:
-    """Every mount target bwrap will create, in the order ``policy_to_bwrap_flags`` emits them.
+    """EVERY mount target bwrap will create, in the order ``policy_to_bwrap_flags`` emits them.
 
     Mounts are ordered, and a later mount at-or-above an earlier one MASKS it. The
     kinds are not interchangeable but they share one namespace, so they must be
     checked together — a ``tmpfs`` masks a bind exactly as a bind masks a bind.
+
+    **``--dev`` IS A MOUNT, and it is emitted LAST.** Forgetting it here is how the
+    first version of this helper lied: ``tmpfs=["/dev"]`` with ``dev=True`` (the
+    default) validated clean and emitted ``--tmpfs /dev --dev /dev`` — so the
+    author's intended EMPTY ``/dev`` was silently repopulated with device nodes by
+    the ``--dev`` that ran after it. The sandbox came out **wider than the policy
+    text said**, which is the worst direction for this failure to go, and no
+    real-spawn CI lane can catch it: the child boots and behaves identically on
+    every architecture, so there is no symptom to observe. Only this check sees it.
+
+    THIS LIST MUST STAY IN SYNC WITH :func:`policy_to_bwrap_flags`. A new mount kind
+    added there and forgotten here silently stops being checked —
+    ``test_mount_target_helper_is_in_sync_with_the_translator`` fails if they drift.
     """
-    return [
+    targets: list[tuple[str, str]] = [
         *(("ro_binds", dst) for _src, dst in policy.ro_binds),
         *(("ro_binds_try", dst) for _src, dst in policy.ro_binds_try),
         *(("rw_binds", dst) for _src, dst in policy.rw_binds),
         *(("tmpfs", path) for path in policy.tmpfs),
     ]
+    if policy.dev:
+        targets.append(("dev", "/dev"))
+    return targets
 
 
 def _canonical(path: str) -> str:

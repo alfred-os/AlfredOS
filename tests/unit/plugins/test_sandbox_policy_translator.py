@@ -560,6 +560,110 @@ def test_the_strategies_actually_reach_the_regions_the_properties_guard() -> Non
     assert p2_region / accepted > 0.20, "P2's assertion rarely has >1 mount to compare"
 
 
+# Flags that CREATE A MOUNT, and the offset of their target argument. Anything the
+# translator emits that is not here and not a known non-mount flag is, by
+# definition, an unaudited mount — see the sync test below.
+_MOUNT_FLAG_TARGET_OFFSET = {
+    "--ro-bind": 2,
+    "--ro-bind-try": 2,
+    "--bind": 2,
+    "--tmpfs": 1,
+    "--dev": 1,
+}
+_NON_MOUNT_FLAGS = {
+    "--unshare-pid",
+    "--unshare-uts",
+    "--unshare-cgroup",
+    "--unshare-ipc",
+    "--unshare-user",
+    "--unshare-net",
+    "--die-with-parent",
+}
+
+
+def test_mount_target_helper_is_in_sync_with_the_translator() -> None:
+    """The shadow guard is only as complete as its list of mounts. Pin the two together.
+
+    ``_refuse_a_mount_that_shadows_an_earlier_one`` checks the targets that
+    ``_mount_targets_in_emission_order`` reports. If the TRANSLATOR grows a mount
+    the HELPER does not know about, that mount silently stops being checked — and
+    the guard keeps passing, which is the worst possible failure for a guard.
+
+    This is not hypothetical. The first version of the helper omitted ``--dev``,
+    which the translator emits LAST. So ``tmpfs=["/dev"]`` with ``dev=True``
+    validated clean and emitted ``--tmpfs /dev --dev /dev``: the author's intended
+    EMPTY /dev was repopulated with device nodes by the ``--dev`` that ran after it.
+    The sandbox came out **wider than the policy text**, and — because the child
+    boots identically on every architecture — no real-spawn CI lane could ever have
+    caught it. Only a check like this one sees that class at all.
+
+    So: every mount the translator emits must appear in the helper, in the same
+    order, and any NEW flag that is neither a known mount nor a known non-mount
+    fails here until someone classifies it.
+    """
+    policy = SandboxPolicy(
+        ro_binds=[("/usr", "/usr")],
+        ro_binds_try=[("/lib64", "/lib64")],
+        rw_binds=[("/host/state", "/state")],
+        tmpfs=["/run/alfred/scratch"],
+        dev=True,
+        unshare=["pid", "net"],
+        die_with_parent=True,
+        keep_fds=[3],
+    )
+    flags = policy_to_bwrap_flags(policy)
+
+    emitted: list[str] = []
+    i = 0
+    while i < len(flags):
+        flag = flags[i]
+        if flag in _MOUNT_FLAG_TARGET_OFFSET:
+            offset = _MOUNT_FLAG_TARGET_OFFSET[flag]
+            emitted.append(flags[i + offset])
+            i += offset + 1
+        elif flag in _NON_MOUNT_FLAGS:
+            i += 1
+        else:
+            pytest.fail(
+                f"policy_to_bwrap_flags emits {flag!r}, which is classified neither as a "
+                f"mount nor as a non-mount flag. If it CREATES A MOUNT it must be added to "
+                f"_mount_targets_in_emission_order, or the shadow guard will silently stop "
+                f"checking it (that is exactly how --dev was missed)."
+            )
+
+    from alfred.plugins.sandbox_policy import _mount_targets_in_emission_order
+
+    assert emitted == [target for _field, target in _mount_targets_in_emission_order(policy)], (
+        "the mount-target helper has drifted from the translator — a mount is being "
+        "emitted that the shadow guard does not check"
+    )
+
+
+def test_a_tmpfs_over_dev_is_refused_because_dev_repopulates_it() -> None:
+    """Variant seven: ``--dev`` is emitted LAST and silently WIDENS the sandbox.
+
+    The author asks for an empty ``/dev`` via tmpfs; ``--dev`` runs afterwards and
+    puts the device nodes back. The policy validates, and the sandbox is wider than
+    it says. Refuse it — and note that ``dev = false`` remains the honest way to
+    express "I want no device nodes".
+    """
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(tmpfs=["/dev"], keep_fds=[3])
+    assert exc_info.value.reason == "mount_shadows_earlier_mount"
+
+    # dev=False honours the intent, so it must still be accepted.
+    assert "--dev" not in policy_to_bwrap_flags(
+        SandboxPolicy(tmpfs=["/dev"], dev=False, keep_fds=[3])
+    )
+
+
+def test_a_bind_under_dev_is_refused_because_dev_masks_it() -> None:
+    # --dev mounts a fresh devtmpfs at /dev, masking anything bound beneath it.
+    with pytest.raises(SandboxPolicyInvalid) as exc_info:
+        SandboxPolicy(rw_binds=[("/host/shm", "/dev/shm")], keep_fds=[3])  # noqa: S108 -- a bwrap mount TARGET inside the sandbox, not a host temp path
+    assert exc_info.value.reason == "mount_shadows_earlier_mount"
+
+
 def test_rw_binds_translate() -> None:
     policy = SandboxPolicy(rw_binds=[("/var/run/x", "/var/run/x")], keep_fds=[3])
     flags = policy_to_bwrap_flags(policy)
