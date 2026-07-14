@@ -303,11 +303,15 @@ def test_check_bind_source_accepts_legitimate_path(path: str) -> None:
 def test_check_bind_source_refuses_over_broad_path(path: str) -> None:
     result = _run("--check-bind-source", "--bind-source", path)
     assert result.returncode != 0
+    # Assert the SPECIFIC reason, not just a non-zero exit: an argparse error or
+    # crash would also be non-zero and would mask a real regression (CR cloud).
+    assert "bind_source_too_broad" in result.stderr
 
 
 def test_check_bind_source_refuses_empty() -> None:
     result = _run("--check-bind-source", "--bind-source", "")
     assert result.returncode != 0
+    assert "bind_source_too_broad" in result.stderr
 
 
 # --------------------------------------------------------------------------
