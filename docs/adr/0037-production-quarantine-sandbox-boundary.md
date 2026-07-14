@@ -212,8 +212,25 @@ boundary this ADR governs:
 - A source under a root-resolving pseudo-filesystem (`/proc`, `/sys`) is refused in
   every field.
 - A single-component top-level root not in the allowlist `{/usr, /lib}` is refused
-  in the hard fields (`ro_binds`, `rw_binds`). `ro_binds_try` is exempt from this
-  tier because it legitimately carries the depth-1 arch-variable root `/lib64`.
+  in every field, including `ro_binds_try` — checked against the CANONICAL source
+  there, and exempting a genuine arch-variable root (e.g. `/lib64`), which the soft
+  field legitimately carries.
+- **Precedence in a HARD field:** a source that traverses an arch-variable
+  directory (e.g. `/lib64/..`) is caught EARLIER, by
+  `_refuse_hard_bind_of_arch_variable_path` (`reason="arch_variable_path_hard_bound"`),
+  because that validator runs first. `bind_source_too_broad` is the reason seen in
+  the soft field, and for non-arch-variable hard-field traversals (e.g. `/usr/..`).
+
+**sec-001 (2026-07-13):** the soft-field check above closes a traversal bypass —
+`ro_binds_try=[("/lib64/../etc", "/etc")]` was ACCEPTED (binding host `/etc` into
+the sandbox) because the pre-fix soft check applied only tiers 1+2 to the RAW
+source, and `/lib64/../etc` canonicalises past those two tiers while its
+arch-variable match (`/lib64`, matched on the raw walk before the `..` backs out)
+let it slip past `_restrict_soft_binds` too. The fix applies the full three-tier
+rule to the CANONICAL source and checks arch-variance on that SAME canonical
+form: `/lib64/../etc` canonicalises to `/etc` (over-broad, not arch-variable) and
+is refused, while `/lib64` canonicalises to itself (arch-variable) and stays
+allowed.
 
 This is a lexical floor, not a filesystem oracle: it cannot see that a depth-2 path
 is still broad, and an on-disk symlink to `/` defeats it (the module never touches
@@ -221,7 +238,9 @@ the filesystem). The `/usr` residual it permits — `/usr/bin/*` stays exec-reac
 — is tracked in #430, the live successor to the closed #230. The same change routes
 the launcher's interpreter-prefix bind through the identical predicate
 (`is_over_broad_bind_source`) and corrects a pre-existing audit-reason
-misattribution (all six schema refusals — `kind_full_requires_keep_fd_3`,
-`policy_path_not_absolute`, `arch_variable_path_hard_bound`,
-`mount_shadows_earlier_mount`, `soft_bind_forbidden_path`, and `bind_source_too_broad`
-— were logged as `policy_ref_unreadable`).
+misattribution: the five schema refusals that predate this PR
+(`kind_full_requires_keep_fd_3`, `policy_path_not_absolute`,
+`arch_variable_path_hard_bound`, `mount_shadows_earlier_mount`,
+`soft_bind_forbidden_path`) were all logged as `policy_ref_unreadable`; the launcher
+now stamps each with its own reason, and the new `bind_source_too_broad` is
+attributed correctly from the start.

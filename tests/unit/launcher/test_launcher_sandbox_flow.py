@@ -323,7 +323,8 @@ def test_kind_full_policy_ref_missing_for_host_os(run_launcher, tmp_path) -> Non
 @_requires_jq
 def test_policy_schema_refusal_audit_row_carries_the_real_reason(run_launcher, tmp_path) -> None:
     """#428: a policy-translate failure is audited under the schema's OWN reason,
-    not the hardcoded policy_ref_unreadable that mislabels all five schema refusals.
+    not the hardcoded policy_ref_unreadable, which mislabels all five PRE-EXISTING
+    schema refusals (this PR adds a sixth, bind_source_too_broad).
     """
     (tmp_path / "bad.linux.bwrap.policy").write_text(
         'ro_binds_try = [["/etc/ssl/certs", "/etc/ssl/certs"]]\nkeep_fds = [3]\n'

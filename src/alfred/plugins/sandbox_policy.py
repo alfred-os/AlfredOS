@@ -114,8 +114,9 @@ def is_over_broad_bind_source(path: str) -> bool:
 
     Exported: the launcher calls this (via ``manifest_reader --check-bind-source``)
     for the interpreter prefix, which is a hard ``--ro-bind``. The soft field
-    ``ro_binds_try`` uses only tiers 1+2 (``_resolves_to_host_root_or_pseudofs``),
-    because it legitimately carries the depth-1 arch-variable root ``/lib64``.
+    ``ro_binds_try`` also applies all three tiers (see ``_refuse_over_broad_bind_source``)
+    — but to the CANONICAL source, with a genuine arch-variable root (e.g. ``/lib64``)
+    exempted, because ``ro_binds_try`` legitimately carries that depth-1 root.
 
     **This guard CANNOT decide a filesystem fact, and does not try to (#269).** It
     cannot see that a depth-2 path like ``/home/alfred`` is still the operator's
@@ -472,17 +473,27 @@ class SandboxPolicy(BaseModel):
 
         Three tiers, applied by field kind:
 
-        * tiers 1+2 (source resolves to ``/``, or lives under ``/proc``/``/sys``)
-          apply to EVERY bind field including the soft ``ro_binds_try`` — a source
-          that resolves to the host root is over-broad however it is bound.
-        * tier 3 (a single-component top-level root not in
-          ``_PERMITTED_TOP_LEVEL_BIND_ROOTS``) applies to the HARD fields only,
-          because ``ro_binds_try`` legitimately carries the depth-1 arch-variable
-          root ``/lib64`` that a breadth floor would wrongly refuse.
+        * The HARD fields (``ro_binds``, ``rw_binds``) get all three tiers via
+          ``is_over_broad_bind_source`` applied to the raw source directly — there
+          is no arch-variable exemption here; ``_refuse_hard_bind_of_arch_variable_path``
+          already refuses a hard bind of an arch-variable root separately.
+        * The soft field (``ro_binds_try``) gets the SAME three-tier rule
+          (``is_over_broad_bind_source``), but applied to the CANONICAL source, and
+          exempting a genuine arch-variable root (``_is_arch_variable`` on that same
+          canonical form) — ``ro_binds_try`` legitimately carries the depth-1
+          arch-variable root ``/lib64`` that tier 3 would otherwise wrongly refuse.
+          Canonicalising before the arch-variable check is what closes sec-001: a
+          traversal like ``/lib64/../etc`` is arch-variable on the RAW walk (it
+          enters ``/lib64`` before backing out) but its EFFECTIVE path is ``/etc``,
+          which is over-broad and not itself arch-variable — so it is refused,
+          while ``/lib64`` (canonicalises to itself) stays allowed.
 
         Keys on the SOURCE, like ``_refuse_hard_bind_of_arch_variable_path``: bwrap
         cares about the source. This is a lexical floor, not a filesystem oracle —
-        see ``is_over_broad_bind_source`` for what it cannot decide.
+        see ``is_over_broad_bind_source`` for what it cannot decide. Do NOT read this
+        as class-closing: it closes the ``/lib64/..``-style traversal bypass, not the
+        general "a lexical rule cannot decide a filesystem fact" problem documented
+        on ``_is_arch_variable``.
         """
         for field, binds in (("ro_binds", self.ro_binds), ("rw_binds", self.rw_binds)):
             for src, dst in binds:
@@ -497,13 +508,25 @@ class SandboxPolicy(BaseModel):
                         ),
                     )
         for src, dst in self.ro_binds_try:
-            if _resolves_to_host_root_or_pseudofs(src):
+            # The soft field gets the FULL over-broad rule (tiers 1+2+3) applied to
+            # the CANONICAL source, EXCEPT a genuine arch-variable root (/lib64,
+            # /usr/lib64, GNU triplet dirs) that ro_binds_try exists to carry.
+            # Checking _is_arch_variable on the CANONICAL form is load-bearing: on the
+            # RAW source _is_arch_variable("/lib64/../etc") is True (it enters /lib64
+            # before the ..), which is exactly why _restrict_soft_binds admits it —
+            # but the EFFECTIVE bound path is /etc. So /lib64/../etc canonicalises to
+            # /etc (over-broad, NOT arch-variable) and is refused, while /lib64
+            # canonicalises to itself (arch-variable) and is allowed. Closes the
+            # sec-001 traversal bypass; a soft bind can no longer re-open tier 3.
+            if is_over_broad_bind_source(src) and not _is_arch_variable(_canonical(src)):
                 raise SandboxPolicyInvalid(
                     reason="bind_source_too_broad",
                     detail=(
-                        f"ro_binds_try binds source {src!r} -> {dst!r}, which resolves to "
-                        f"the host root or a pseudo-filesystem. A soft bind of such a source "
-                        f"degrades the sandbox as badly as a hard one."
+                        f"ro_binds_try binds source {src!r} -> {dst!r}, whose effective "
+                        f"(canonical) path {_canonical(src)!r} exposes the host root or a "
+                        f"broad top-level tree into the T3 sandbox. ro_binds_try may only "
+                        f"carry a genuine arch-variable root (e.g. /lib64); bind a specific "
+                        f"subdirectory instead."
                     ),
                 )
         return self
