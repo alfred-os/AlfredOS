@@ -1184,20 +1184,68 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # supervisor.plugin.sandbox family (#152 §5, ADR-0015)
 # ---------------------------------------------------------------------------
 
-# ``reason`` closed-vocab: policy_ref_missing | policy_ref_os_mismatch |
-# policy_ref_unreadable | policy_ref_escapes_root | bwrap_unavailable |
-# bwrap_mode_userns_unavailable | kind_full_requires_keep_fd_3 |
-# sandbox_info_handshake_mismatch | sandbox_block_missing |
-# unsandboxed_env_set_in_production | windows_stub_in_production |
-# environment_not_set | provider_key_delivery_failed |
-# soft_bind_forbidden_path | mount_shadows_earlier_mount |
-# arch_variable_path_hard_bound | policy_path_not_absolute |
-# bind_source_too_broad
-# (per PR-S4-6/7 round-2 closures; ``policy_ref_escapes_root`` covers the
-# path-traversal case the sandbox_escape adversarial README documents and
-# is distinct from ``policy_ref_unreadable``; ``provider_key_delivery_failed``
-# is the fd-3 partial-write / EAGAIN refusal from
-# ``alfred.supervisor.fd3_key_delivery`` — sec-3).
+# The CLOSED ``reason`` vocabulary for ``supervisor.plugin.sandbox_refused``.
+#
+# ``bin/alfred-plugin-launcher.sh`` is the sole producer of this row and is bound to this set by
+# ``tests/unit/plugins/test_sandbox_reason_vocab_sync.py`` (#432) — adding a reason to either
+# side without the other fails the build. Before #432 this was a prose comment bound to nothing,
+# and seven reasons the launcher could actually write were missing from it.
+#
+# NOTE (#433): this row is not yet persisted. The launcher ``printf``s it to stderr, which is
+# drained into a ``child_stderr`` log field; no ``src/alfred`` code parses it into an
+# ``append_schema`` write, and the registered ``fail_closed`` T0 hookpoint is never dispatched.
+# This set governs what the launcher WRITES (plus the reserved reasons named below); wiring
+# it to a real audit write is #433.
+#
+# Twenty reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
+# deliberately (the binding requires the set to equal the union of emittable and reserved):
+#   * ``policy_ref_os_mismatch``, ``bwrap_unavailable``, ``bwrap_mode_userns_unavailable`` —
+#     documented, no code path emits them;
+#   * ``provider_key_delivery_failed`` — the fd-3 partial-write / EAGAIN refusal from
+#     ``alfred.supervisor.fd3_key_delivery`` (sec-3); defined there as a sandbox-refusal reason
+#     but NOT emitted by the launcher, and (per #433) not yet written by any code;
+#   * ``sandbox_info_handshake_mismatch`` — ``plugins/session.py`` handshake; likewise a defined
+#     sandbox-refusal reason the launcher never emits (unwired — #433).
+# ``policy_ref_escapes_root`` covers the path-traversal case the sandbox_escape adversarial
+# README documents and is distinct from ``policy_ref_unreadable``; ``policy_translate_failed`` is
+# both a real malformed-TOML reason AND the launcher's honest fallback for an unclassifiable
+# helper stderr line (the alarm/real conflation is tracked in #434).
+SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        # Pre-flight: environment + host-OS resolution (launcher).
+        "environment_not_set",
+        "environment_unrecognised",
+        "fake_uname_in_production",
+        "unknown_host_os",
+        "uid_separation_unavailable",
+        # Sandbox block / kind gating (launcher).
+        "sandbox_block_missing",
+        "unsandboxed_env_set_in_production",
+        "stub_kind_in_production",
+        "windows_stub_in_production",
+        # policy_ref resolution (launcher + manifest_reader).
+        "policy_ref_missing",
+        "policy_ref_unreadable",
+        "policy_ref_escapes_root",
+        # Policy schema refusals (sandbox_policy.SandboxPolicyInvalid).
+        "kind_full_requires_keep_fd_3",
+        "policy_path_not_absolute",
+        "arch_variable_path_hard_bound",
+        "mount_shadows_earlier_mount",
+        "soft_bind_forbidden_path",
+        "bind_source_too_broad",
+        "policy_translate_failed",
+        # Post-translation: bind widening (launcher).
+        "interpreter_prefix_too_broad",
+        # Reserved — no launcher emitter (see comment above).
+        "policy_ref_os_mismatch",
+        "bwrap_unavailable",
+        "bwrap_mode_userns_unavailable",
+        "provider_key_delivery_failed",
+        "sandbox_info_handshake_mismatch",
+    }
+)
+
 SANDBOX_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "plugin_id",
