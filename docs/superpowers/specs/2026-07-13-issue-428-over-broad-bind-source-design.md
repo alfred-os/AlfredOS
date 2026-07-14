@@ -73,9 +73,15 @@ A bind **source** is refused when any of the following holds, checked against it
 
 | Tier | Refuses | Applies to |
 | --- | --- | --- |
-| 1 — resolves to host root | `_canonical(src) == "/"` (covers `/`, `/lib64/..`, `/usr/..`, `/lib/../..`) | **all** bind fields incl. `ro_binds_try` |
+| 1 — resolves to host root | `_canonical(src) == "/"` (covers `/`, `/usr/..`, `/lib/../..` in a hard field; `/lib64/..` in a SOFT field — in a HARD field `/lib64/..` is caught earlier, see the precedence note below) | **all** bind fields incl. `ro_binds_try` |
 | 2 — pseudo-filesystem source | canonical first component ∈ {`proc`, `sys`} (covers `/proc`, `/proc/self/root`, `/sys/…`) | **all** bind fields incl. `ro_binds_try` |
-| 3 — over-broad top-level root | a single-component root not in the allowlist | `ro_binds` + `rw_binds` only |
+| 3 — over-broad top-level root | a single-component root not in the allowlist | `ro_binds` + `rw_binds` unconditionally; `ro_binds_try` too **[rev — sec-001]**, checked against the CANONICAL source, except a genuine arch-variable root (e.g. `/lib64`) |
+
+**Precedence note [rev — sec-001/H]:** in a HARD field, a source that traverses an
+arch-variable directory (e.g. `/lib64/..`) is refused EARLIER, by
+`_refuse_hard_bind_of_arch_variable_path` (`reason="arch_variable_path_hard_bound"`),
+because that validator runs first. `bind_source_too_broad` (tier 1) is the reason
+seen in the SOFT field, and for non-arch-variable hard-field traversals (`/usr/..`).
 
 ```python
 _PERMITTED_TOP_LEVEL_BIND_ROOTS: Final[frozenset[str]] = frozenset({"/usr", "/lib"})
@@ -95,13 +101,24 @@ def is_over_broad_bind_source(path: str) -> bool:
     return len(parts) <= 2                           # tier 3 refuse
 ```
 
-**Why tier 3 is hard-fields-only, and why it cannot merge with tiers 1+2.** `ro_binds_try`
-legitimately carries `/lib64` — a *single-component* (depth-1) arch-variable root. The tier-3
-breadth floor would refuse it. So the soft field gets tiers 1+2 only (a source that
-resolves to `/`, or lives under a pseudo-fs, is over-broad in *any* field), and keeps its
-existing `_restrict_soft_binds` governance (identity bind of an arch-variable path) for
-everything else. The soft-field check therefore uses a narrower internal predicate, not the
-exported `is_over_broad_bind_source`.
+**Why tier 3 needs an arch-variable exemption for the soft field [rev — sec-001, supersedes
+the original "hard-fields-only" design below].** `ro_binds_try` legitimately carries
+`/lib64` — a *single-component* (depth-1) arch-variable root. An unconditional tier-3
+breadth floor would refuse it, so the ORIGINAL design (below) skipped tier 3 for the soft
+field entirely. That was the sec-001 hole: `ro_binds_try=[("/lib64/../etc", "/etc")]`
+matches `_is_arch_variable` on the RAW walk (it enters `/lib64` before the `..` backs out),
+so it was accepted as a would-be arch-variable identity bind — but its EFFECTIVE path is
+`/etc`, a broad root tier 3 exists to refuse. The fix applies tier 3 (and, for uniformity,
+tiers 1+2 too) to the soft field via the same exported `is_over_broad_bind_source`, but
+checks BOTH the over-broad predicate and the arch-variable exemption against the source's
+`_canonical` form: `/lib64/../etc` canonicalises to `/etc` (over-broad, not arch-variable,
+refused); `/lib64` canonicalises to itself (arch-variable, allowed).
+
+*Original design rationale (superseded above, kept for context):* the soft field would get
+tiers 1+2 only (a source that resolves to `/`, or lives under a pseudo-fs, is over-broad in
+*any* field), keeping `_restrict_soft_binds` governance (identity bind of an arch-variable
+path) for everything else, via a narrower internal predicate rather than the exported
+`is_over_broad_bind_source`.
 
 **Why `_canonical` matters, stated correctly this time [rev — the first draft's claim that
 all six respellings collapse to `/` was false].** `_canonical` collapses respellings so a
@@ -227,21 +244,25 @@ bash. The mode gets its own exit-code unit tests in `tests/unit/plugins/test_man
   loadable by then — no bootstrap-ordering risk). Folding it into the existing
   `--policy-to-bwrap-flags` call is a possible DRY/latency optimisation but is **out of scope**
   here; accept the extra subprocess.
-- **Audit-reason misattribution fix (owns all six reasons).** `bin/alfred-plugin-launcher.sh:303`
-  hardcodes `"reason":"policy_ref_unreadable"` into the audit JSON for *any* failure of the
-  flags call. Every schema refusal — `kind_full_requires_keep_fd_3`, `soft_bind_forbidden_path`,
-  `mount_shadows_earlier_mount`, `arch_variable_path_hard_bound`, `policy_path_not_absolute`, and
-  the new `bind_source_too_broad` — is therefore audited under a reason that is not its own. The
-  launcher captures the helper's stderr already (`BWRAP_FLAGS_RAW`, via `2>&1`). **[rev — it
+- **Audit-reason misattribution fix (handles the six reasons the path can raise) [rev — G].**
+  `bin/alfred-plugin-launcher.sh:303` hardcodes `"reason":"policy_ref_unreadable"` into the
+  audit JSON for *any* failure of the flags call. The FIVE schema refusals that predate this
+  PR — `kind_full_requires_keep_fd_3`, `soft_bind_forbidden_path`, `mount_shadows_earlier_mount`,
+  `arch_variable_path_hard_bound`, `policy_path_not_absolute` — were therefore all historically
+  audited under a reason that is not their own; only these five carry the misattribution, since
+  the SIXTH (the new `bind_source_too_broad`) never shipped under the old code. The launcher
+  captures the helper's stderr already (`BWRAP_FLAGS_RAW`, via `2>&1`). **[rev — it
   must `tail -n 1` that capture before matching, because the alfred cold-import can emit a
   stderr warning *ahead* of the bare reason (this is why the BUG-1 pin exists at L162); a
   whole-blob match would non-deterministically fall back.]** It then exact-matches the last
   line against the closed reason vocabulary and echoes it into the audit row's `reason` field
-  when it matches, falling back to `policy_ref_unreadable` when it does not. The reading side
-  is safe: the JSON `reason` is never catalog-rendered, and `SANDBOX_REFUSED_FIELDS` validates
-  field *names*, so a new reason value breaks nothing. This fix re-attributes all six reasons,
-  so its tests cover at least one pre-existing reason (e.g. `soft_bind_forbidden_path`) in
-  addition to `bind_source_too_broad`.
+  when it matches, falling back to the generic `policy_translate_failed` **[rev — err-001: not
+  `policy_ref_unreadable`, which is specific-and-misleading for an unclassified failure]** when
+  it does not. The reading side is safe: the JSON `reason` is never catalog-rendered, and
+  `SANDBOX_REFUSED_FIELDS` validates field *names*, so a new reason value breaks nothing. This
+  fix correctly attributes all six reasons the path can raise going forward — the five
+  pre-existing ones plus the new `bind_source_too_broad` — so its tests cover at least one
+  pre-existing reason (e.g. `soft_bind_forbidden_path`) in addition to `bind_source_too_broad`.
 
 ### 5. Docs
 

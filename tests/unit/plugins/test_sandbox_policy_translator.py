@@ -802,9 +802,10 @@ def test_over_broad_hard_bind_source_is_refused(src: str) -> None:
     assert exc.value.reason == "bind_source_too_broad"
 
 
-def test_over_broad_rw_bind_source_is_refused() -> None:
+@pytest.mark.parametrize("src", ["/etc", "/", "/proc/self/root"])
+def test_over_broad_rw_bind_source_is_refused(src: str) -> None:
     with pytest.raises(SandboxPolicyInvalid) as exc:
-        SandboxPolicy(rw_binds=[("/etc", "/etc")], keep_fds=[3])
+        SandboxPolicy(rw_binds=[(src, "/x")], keep_fds=[3])
     assert exc.value.reason == "bind_source_too_broad"
 
 
@@ -814,6 +815,28 @@ def test_soft_bind_resolving_to_root_is_refused() -> None:
     with pytest.raises(SandboxPolicyInvalid) as exc:
         SandboxPolicy(ro_binds_try=[("/lib64/..", "/")], keep_fds=[3])
     assert exc.value.reason == "bind_source_too_broad"
+
+
+@pytest.mark.parametrize(
+    "src", ["/lib64/../etc", "/lib64/../home", "/lib64/../root", "/lib64/../var"]
+)
+def test_soft_bind_traversal_to_broad_root_is_refused(src: str) -> None:
+    # sec-001: /lib64/.. matches _is_arch_variable on the raw walk, so
+    # _restrict_soft_binds admits it, but the effective (canonical) path is a
+    # broad root. The soft-field over-broad check must apply to the CANONICAL
+    # source, not the raw one, or this traversal binds host /etc, /home, /root,
+    # /var into the T3 sandbox.
+    with pytest.raises(SandboxPolicyInvalid) as exc:
+        SandboxPolicy(ro_binds_try=[(src, _canonical(src))], keep_fds=[3])
+    assert exc.value.reason == "bind_source_too_broad"
+
+
+def test_usr_lib64_soft_bind_still_accepted() -> None:
+    # Branch coverage: the is_over_broad_bind_source(src) == False short-circuit
+    # in the soft loop — a legit depth-3 arch alias never reaches the
+    # _is_arch_variable check at all.
+    policy = SandboxPolicy(ro_binds_try=[("/usr/lib64", "/usr/lib64")], keep_fds=[3])
+    assert ("/usr/lib64", "/usr/lib64") in policy.ro_binds_try
 
 
 @pytest.mark.parametrize(

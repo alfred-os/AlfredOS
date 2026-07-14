@@ -312,7 +312,11 @@ case "${SANDBOX_KIND}" in
                         kind_full_requires_keep_fd_3|policy_path_not_absolute|arch_variable_path_hard_bound|mount_shadows_earlier_mount|soft_bind_forbidden_path|bind_source_too_broad|policy_translate_failed|policy_ref_escapes_root|policy_ref_unreadable)
                             _AUDIT_REASON="${_CAPTURED_REASON}" ;;
                         *)
-                            _AUDIT_REASON="policy_ref_unreadable" ;;
+                            # Generic translate-failure reason for an unclassified
+                            # last line — honest ("translation failed for an
+                            # unclassified reason") rather than the specific-and-
+                            # misleading "unreadable".
+                            _AUDIT_REASON="policy_translate_failed" ;;
                     esac
                     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"%s","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${_AUDIT_REASON}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
                     exit 1
@@ -351,7 +355,7 @@ EOF
                     # prefix), "/", any non-allowlisted top-level root, and pseudo-fs
                     # sources. Output is discarded; the exit code is the verdict.
                     if ! python3 -m alfred.plugins.manifest_reader --check-bind-source --bind-source "${_INTERP_PREFIX}" >/dev/null 2>&1; then
-                        printf 'supervisor.sandbox.refused.interpreter_prefix_too_broad plugin_id=%s interpreter=%s\n' "${PLUGIN_ID}" "${_INTERP_REAL}" >&2
+                        printf 'supervisor.sandbox.refused.interpreter_prefix_too_broad plugin_id=%s interpreter=%s prefix=%s\n' "${PLUGIN_ID}" "${_INTERP_REAL}" "${_INTERP_PREFIX}" >&2
                         printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"interpreter_prefix_too_broad","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
                         exit 1
                     fi

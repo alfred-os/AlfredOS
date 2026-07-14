@@ -355,18 +355,23 @@ kind = "none"
 
 
 def test_sbx_2026_016_over_broad_bind_source_refused() -> None:
-    """sbx-2026-016: an over-broad bind source is refused at policy-parse time."""
+    """sbx-2026-016: an over-broad bind source is refused at policy-parse time.
+
+    Iterates the YAML's own ``payload.variants`` list (rather than a second
+    hardcoded copy) so the corpus file is the single source of truth and the
+    two cannot drift — a variant added to the YAML (e.g. the sec-001
+    ``/lib64/../etc`` traversal) is covered here automatically.
+    """
     payload = _load("sbx-2026-016")
     assert payload.expected_outcome == "refused"
-    for variant in (
-        'ro_binds = [["/", "/"]]\nkeep_fds = [3]\n',
-        'ro_binds = [["/etc", "/etc"]]\nkeep_fds = [3]\n',
-        'ro_binds_try = [["/lib64/..", "/"]]\nkeep_fds = [3]\n',
-        'ro_binds = [["/proc/self/root", "/x"]]\nkeep_fds = [3]\n',
-    ):
+    assert isinstance(payload.payload, dict)
+    variants = payload.payload["variants"]
+    assert variants, "payload declares no variants"
+    for variant in variants:
+        toml = f"{variant}\nkeep_fds = [3]\n"
         with pytest.raises(SandboxPolicyInvalid) as exc:
-            read_policy_toml(variant)
-        assert exc.value.reason == "bind_source_too_broad"
+            read_policy_toml(toml)
+        assert exc.value.reason == "bind_source_too_broad", f"variant {variant!r}"
 
 
 def test_all_pr_s4_6_payloads_load() -> None:

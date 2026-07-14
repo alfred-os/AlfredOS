@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Base:** `main` @ `59bae79e`. Work on a branch `fix/428-over-broad-bind-source`.
+- **Base:** `main` @ `59bae79e` (the revised spec commit; supersedes the first-draft `7461df15`). Work on a branch `fix/428-over-broad-bind-source`.
 - **Spec:** `docs/superpowers/specs/2026-07-13-issue-428-over-broad-bind-source-design.md` — the source of truth for *what* and *why*. Read it before starting.
 - **Security boundary:** `src/alfred/plugins/sandbox_policy.py` — **100% line + branch coverage** required (CLAUDE.md security rule; adversarial suite is release-blocking).
 - **No completeness claims** in any docstring/comment (the #269 seven-variants lesson): name what the guard CANNOT do, in the guard.
@@ -543,7 +543,10 @@ In `bin/alfred-plugin-launcher.sh`, replace the policy-translate failure block (
                         kind_full_requires_keep_fd_3|policy_path_not_absolute|arch_variable_path_hard_bound|mount_shadows_earlier_mount|soft_bind_forbidden_path|bind_source_too_broad|policy_translate_failed|policy_ref_escapes_root|policy_ref_unreadable)
                             _AUDIT_REASON="${_CAPTURED_REASON}" ;;
                         *)
-                            _AUDIT_REASON="policy_ref_unreadable" ;;
+                            # [rev — err-001] generic translate-failure reason for an
+                            # unclassified last line — honest, not the specific-and-
+                            # misleading "unreadable".
+                            _AUDIT_REASON="policy_translate_failed" ;;
                     esac
                     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"%s","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${_AUDIT_REASON}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
                     exit 1
@@ -837,7 +840,7 @@ Run `/review-pr` (full fleet — security ALWAYS) **and** CodeRabbit CLI (`--bas
 - Pseudo-fs (sec-002) → Task 1 (`_PSEUDO_FS_TOP_LEVEL`) + tests.
 - "What the guard cannot do" in the docstring → Task 1 Step 3 (`is_over_broad_bind_source` docstring).
 - Exported predicate + launcher via one predicate → Task 2 + Task 3 Step 5.
-- Audit-reason fix owning all five reasons, `tail -n 1` → Task 3 Step 4.
+- Audit-reason fix: five pre-existing reasons plus the new `bind_source_too_broad` = six handled, `tail -n 1` → Task 3 Step 4.
 - In-file broken tests (near-miss, property pools) → Task 1 Step 6.
 - Independent oracle (refuse-net + example accepts + hand-verified table) → Task 1 Step 1 (`test_is_over_broad_bind_source_predicate` broad refuse pool + `_RESPELLING_VERDICTS` table + `test_legitimate_bind_source_is_accepted`).
 - Mutation testing → covered by the refuse-pool/table breadth; the reviewer runs the disable-guard/`<=2`→`<2`/strip-`_canonical`/drop-pseudo-fs/drop-soft-tier mutants against these at PR time and records kills in the PR body (Final Step 3).
@@ -858,9 +861,9 @@ Run `/review-pr` (full fleet — security ALWAYS) **and** CodeRabbit CLI (`--bas
 - [ ] Append to `tests/unit/plugins/test_sandbox_policy_translator.py`:
 
 ```python
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from alfred.plugins.sandbox_policy import _PERMITTED_TOP_LEVEL_BIND_ROOTS, read_policy_toml
+from alfred.plugins.sandbox_policy import _PERMITTED_TOP_LEVEL_BIND_ROOTS, _canonical, read_policy_toml
 
 
 def test_permitted_roots_match_shipped_policies() -> None:
