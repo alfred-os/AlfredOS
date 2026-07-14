@@ -305,7 +305,9 @@ case "${SANDBOX_KIND}" in
                     # cold-import warning may precede it, so read the LAST line. Echo
                     # the real reason into the audit row instead of the historic
                     # hardcoded policy_ref_unreadable, which mislabelled every schema
-                    # refusal. Closed vocab source of truth: audit_row_schemas.py:1188.
+                    # refusal. Closed vocab: audit_row_schemas.SANDBOX_REFUSED_REASONS;
+                    # both case lists + every emit path are bound to it by
+                    # test_sandbox_reason_vocab_sync.py (#432).
                     _CAPTURED_REASON="$(printf '%s\n' "${BWRAP_FLAGS_RAW}" | tail -n 1)"
                     _CAPTURED_REASON="${_CAPTURED_REASON#supervisor.sandbox.refused.}"
                     case "${_CAPTURED_REASON}" in
