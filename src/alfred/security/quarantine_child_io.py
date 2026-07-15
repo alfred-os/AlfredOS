@@ -92,7 +92,7 @@ import sys
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
 import structlog
 
@@ -105,6 +105,9 @@ from alfred.supervisor.fd3_key_delivery import (
     ProviderKeyDeliveryError,
     deliver_provider_key_via_fd3,
 )
+
+if TYPE_CHECKING:
+    from alfred.security.sandbox_refusal_audit import SandboxRefusalRecorder
 
 _log = structlog.get_logger(__name__)
 
@@ -379,6 +382,7 @@ class _SubprocessChildIO:
         *,
         control_parent: socket.socket | None = None,
         egress_config: EgressProxyConfig | None = None,
+        refusal_recorder: SandboxRefusalRecorder | None = None,
     ) -> None:
         self._process = process
         self._closed = False
@@ -391,6 +395,7 @@ class _SubprocessChildIO:
         self._stderr_reader_orphaned = False
         self._control_parent = control_parent
         self._egress_config = egress_config
+        self._refusal_recorder = refusal_recorder
 
     def write_frame(self, frame: bytes) -> None:
         """Ship one already-framed length-prefixed request onto child stdin."""
@@ -522,6 +527,7 @@ class _SubprocessChildIO:
             if sanitized is not None:
                 log = _log.error if failure else _log.warning
                 log("security.quarantine_child.child_stderr", child_stderr=sanitized)
+            await self._record_launcher_refusals(raw)
         except Exception as exc:
             # Best-effort diagnostic: NEVER preempt the caller's QuarantineChildSpawnError
             # (hard rule #7). Fail LOUD via an explicit ``error_class`` field — NOT
@@ -543,6 +549,30 @@ class _SubprocessChildIO:
                     "security.quarantine_child.stderr_drain_failed",
                     error_class=type(exc).__name__,
                 )
+
+    async def _record_launcher_refusals(self, raw: bytes) -> None:
+        """Parse launcher refusal rows from raw stderr + record them. Never raises.
+
+        Called from the stderr drain (a refused launcher exits pre-``exec`` so the
+        child produces no frame -> ``read_frame`` EOF -> this drain). Fully
+        self-guarding (CLAUDE.md hard rule #7): an ``append_schema`` / ``invoke``
+        failure is logged LOUD with an explicit ``error_class`` and swallowed, so
+        it neither preempts the ``read_frame_failed`` ``QuarantineChildSpawnError``
+        nor breaks ``_log_child_stderr``'s best-effort "never raises" contract.
+        """
+        if self._refusal_recorder is None:
+            return
+        try:
+            from alfred.audit.launcher_refusal import parse_launcher_refusal_rows
+
+            rows = parse_launcher_refusal_rows(raw)
+            if rows:
+                await self._refusal_recorder.record(rows)
+        except Exception as exc:
+            _log.error(
+                "security.quarantine_child.refusal_record_failed",
+                error_class=type(exc).__name__,
+            )
 
     async def aclose(self) -> None:
         """Terminate+reap the child; drain+log its stderr; close pipe/control-end.
@@ -637,6 +667,7 @@ async def spawn_quarantine_child_io(
     control_fd: bool = False,
     child_module: str = _CHILD_MODULE,
     egress_config: EgressProxyConfig | None = None,
+    refusal_recorder: SandboxRefusalRecorder | None = None,
 ) -> _SubprocessChildIO:
     """Spawn the bwrap-sandboxed quarantined-LLM child + deliver its key over fd 3.
 
@@ -812,7 +843,12 @@ async def spawn_quarantine_child_io(
             t("security.quarantine_child.provider_key_delivery_failed")
         ) from exc
 
-    return _SubprocessChildIO(process, control_parent=control_parent, egress_config=egress_config)
+    return _SubprocessChildIO(
+        process,
+        control_parent=control_parent,
+        egress_config=egress_config,
+        refusal_recorder=refusal_recorder,
+    )
 
 
 __all__ = [
