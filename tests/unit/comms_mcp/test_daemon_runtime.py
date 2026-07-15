@@ -408,7 +408,9 @@ async def test_build_extractor_drives_real_transport_over_spawned_child(
 
     spawned: list[_EchoingChildDouble] = []
 
-    async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+    async def _fake_spawn(
+        *, provider_key: str, refusal_recorder: object = None
+    ) -> _EchoingChildDouble:
         child = _EchoingChildDouble(provider_key=provider_key)
         spawned.append(child)
         return child
@@ -478,7 +480,9 @@ async def test_build_extractor_reaps_child_when_construction_fails(
 
     spawned: list[_EchoingChildDouble] = []
 
-    async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+    async def _fake_spawn(
+        *, provider_key: str, refusal_recorder: object = None
+    ) -> _EchoingChildDouble:
         child = _EchoingChildDouble(provider_key=provider_key)
         spawned.append(child)
         return child
@@ -528,7 +532,9 @@ async def test_build_extractor_reaps_child_when_transport_construction_fails(
 
     spawned: list[_EchoingChildDouble] = []
 
-    async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+    async def _fake_spawn(
+        *, provider_key: str, refusal_recorder: object = None
+    ) -> _EchoingChildDouble:
         child = _EchoingChildDouble(provider_key=provider_key)
         spawned.append(child)
         return child
@@ -554,6 +560,51 @@ async def test_build_extractor_reaps_child_when_transport_construction_fails(
     assert len(spawned) == 1
     # transport was never built, so the child itself was closed directly.
     assert spawned[0].aclose_calls == 1
+
+
+async def test_extractor_injects_refusal_auditor(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The builder constructs a real ``SandboxRefusalAuditor`` and passes it to the
+    spawn as ``refusal_recorder`` (#433) — this is what lets a real launcher refusal
+    be persisted at first extraction instead of only reaching child stderr.
+
+    Patched at the SOURCE module (``alfred.security.quarantine_child_io``), NOT on
+    ``daemon_runtime`` — the builder's ``spawn_quarantine_child_io`` import is a
+    lazy in-function import, so patching the re-export would silently no-op.
+    """
+    from alfred.security.dlp import OutboundDlp
+    from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+    audit_writer = MagicMock()
+
+    seen: dict[str, object] = {}
+
+    async def _fake_spawn(*, provider_key: str, refusal_recorder: object = None) -> Any:
+        seen["refusal_recorder"] = refusal_recorder
+        raise RuntimeError("stop after capturing kwargs")
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+
+    with pytest.raises(RuntimeError, match="stop after capturing kwargs"):
+        await _build_comms_inbound_extractor(
+            audit_writer=audit_writer,
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=QuarantineStagingMap(),
+        )
+
+    assert isinstance(seen["refusal_recorder"], SandboxRefusalAuditor)
 
 
 def test_resolve_provider_key_returns_broker_value_when_set() -> None:
