@@ -1,91 +1,86 @@
-# #433 Launcher-Refusal Audit Persistence Implementation Plan
+# #433 Launcher-Refusal Audit Persistence Implementation Plan (v2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Persist the `supervisor.plugin.sandbox_refused` audit row for the quarantine-child launcher path — parse the launcher's stderr JSON, write it via `append_schema`, and dispatch the registered `fail_closed` T0 hookpoint.
 
-**Architecture:** A pure parser (`plugins/launcher_refusal.py`) turns launcher stderr bytes into validated, canonicalized `SandboxRefusalRow`s. A reusable auditor (`security/sandbox_refusal_audit.py`) writes each row via `append_schema` and dispatches the hookpoint. `spawn_quarantine_child_io` gains a narrow one-method `SandboxRefusalRecorder` Protocol parameter (default `None` = unchanged); on the `ProviderKeyDeliveryError` arm it drains the reaped child's stderr, parses it, and records. `daemon_runtime` constructs the auditor from the `AuditWriter` it already holds and injects it.
+**Architecture:** A pure parser (`audit/launcher_refusal.py`) turns launcher stderr bytes into validated `SandboxRefusalRow`s. A reusable auditor (`security/sandbox_refusal_audit.py`) writes each via `append_schema` + dispatches the hookpoint. The refusal is intercepted at the **`read_frame`/`_log_child_stderr` drain** (a refused launcher exits pre-`exec`, so the child produces no frame → EOF → the drain already reads the stderr carrying the row). `_SubprocessChildIO` gains a narrow `SandboxRefusalRecorder` (default `None` = unchanged); `daemon_runtime` constructs the auditor from the `AuditWriter` it already holds and injects it.
 
-**Tech Stack:** Python 3.14+, asyncio, structlog, Pydantic-v2-era codebase (frozen `@dataclass(frozen=True, slots=True)` for value types), pytest, `mypy --strict` + `pyright`.
+**Tech Stack:** Python 3.14+, asyncio, structlog, frozen `@dataclass(frozen=True, slots=True)` value types, pytest, `mypy --strict` + `pyright`.
 
-**Design spec:** `docs/superpowers/specs/2026-07-15-433-launcher-refusal-audit-design.md`
+**Design spec:** `docs/superpowers/specs/2026-07-15-433-launcher-refusal-audit-design.md` (v2). This plan is **v2**, rewritten after the plan-review fleet found the v1 interception point (`ProviderKeyDeliveryError` arm) does not fire on a refusal — the fd-3 key `writev` buffers into the pipe and succeeds. See the spec's "Revision history".
 
 ## Global Constraints
 
-- **Depends on merged #432 + #437.** Do not add or rename any launcher reason;
-  the `test_sandbox_reason_vocab_sync` binding (#432) fails the build if the
-  launcher-emittable set drifts. This PR adds NO launcher reason.
-- **Security hard rules (CLAUDE.md).** No silent failures on security paths
-  (#7): `append_schema` / `invoke` / parse failures are loud (logged at error
-  with an explicit `error_class`, or raised), never swallowed. Do not stub the
-  capability/audit layer to "always allow" — use fixture doubles.
-- **Trust-boundary coverage.** `plugins/launcher_refusal.py` and
-  `security/sandbox_refusal_audit.py` and the new spawn arm require **100% line
-  and branch coverage**. The adversarial suite is release-blocking and MUST be
-  run locally because `src/alfred/security/` changes.
-- **Typing.** `from __future__ import annotations`; PEP 604 unions (`X | None`);
-  no `Any` without justification; frozen value types; `Mapping` over `dict` for
-  read-only inputs. `mypy --strict` + `pyright` clean.
-- **i18n.** No new operator-facing `t()` strings are expected (structlog event
-  keys are not `t()` scope; the audit event `supervisor.plugin.sandbox_refused`
-  is reused). Run `pybabel` drift check at the gate anyway.
-- **Precursor invariant.** The default-`None` recorder path must be behaviorally
-  identical to today — every existing `quarantine_child_io` spawn test stays
-  green untouched.
-- **Commits:** conventional-commit subjects with a literal `#433` after the
-  colon; end every commit body with the
-  `MrReasonable <4990954+MrReasonable@users.noreply.github.com>` trailer. No
-  `git add -A` — stage named paths only. Never `--no-verify`.
+- **Depends on merged #432 + #437.** Add or rename NO launcher reason; `test_sandbox_reason_vocab_sync` (#432) fails the build on drift. This PR adds none.
+- **Security hard rules (CLAUDE.md).** No silent failures (#7): `append_schema`/`invoke`/parse failures are loud, never swallowed silently. Do not stub the capability/audit layer — use fixture doubles.
+- **Trust-boundary coverage.** `audit/launcher_refusal.py`, `security/sandbox_refusal_audit.py`, and the new `_SubprocessChildIO` code require **100% line + branch**. The adversarial suite is release-blocking and MUST run locally (`src/alfred/security/` changes).
+- **Typing.** `from __future__ import annotations`; PEP 604 unions; no unjustified `Any`; frozen value types. `mypy --strict` + `pyright` clean.
+- **i18n.** No new `t()` strings expected (structlog event keys aren't `t()` scope; the audit event is reused). Run the pybabel drift check anyway.
+- **Precursor invariant.** The default-`None` recorder path is behaviorally identical to today — every existing `quarantine_child_io` spawn test stays green untouched.
+- **Interception is the `read_frame` drain, NOT the `ProviderKeyDeliveryError` arm and NOT a spawn-time probe** (spec §"The interception point"). Do not re-introduce v1's delivery-arm interception.
+- **Commits:** conventional-commit subjects with a literal `#433` after the colon; end every commit body with the `MrReasonable <4990954+MrReasonable@users.noreply.github.com>` trailer. No `git add -A`. Never `--no-verify`.
 
 ---
 
 ## File Structure
 
-- **Create** `src/alfred/plugins/launcher_refusal.py` — pure parser +
-  `SandboxRefusalRow` value type. One responsibility: launcher stderr bytes →
-  validated rows. No I/O, no audit/hook imports.
-- **Create** `src/alfred/security/sandbox_refusal_audit.py` — the
-  `SandboxRefusalRecorder` Protocol + `SandboxRefusalAuditor` (append_schema +
-  hookpoint dispatch). The reusable seam the other producers adopt later.
-- **Modify** `src/alfred/security/quarantine_child_io.py` — add the
-  `refusal_recorder` parameter + the drain-parse-record step in the
-  `ProviderKeyDeliveryError` arm + a bounded raw-stderr drain helper.
-- **Modify** `src/alfred/comms_mcp/daemon_runtime.py` — construct the auditor
-  from `audit_writer` and pass it to `spawn_quarantine_child_io`.
+- **Create** `src/alfred/audit/launcher_refusal.py` — pure parser + `SandboxRefusalRow`. Consumes `audit_row_schemas`; no I/O, no audit/hook/plugins imports.
+- **Create** `src/alfred/security/sandbox_refusal_audit.py` — `SandboxRefusalRecorder` Protocol + `SandboxRefusalAuditor` (append_schema + lazy-imported hookpoint dispatch).
+- **Modify** `src/alfred/security/quarantine_child_io.py` — `refusal_recorder` param on `spawn_quarantine_child_io` + `_SubprocessChildIO`; a `_record_launcher_refusals` method called from `_log_child_stderr`.
+- **Modify** `src/alfred/comms_mcp/daemon_runtime.py` — construct + inject the auditor.
 - **Create** `docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md`.
-- **Modify** prose: `src/alfred/security/fd3_key_delivery.py` (docstring),
-  `docs/subsystems/supervisor.md`, `src/alfred/audit/audit_row_schemas.py`
-  (`NOTE (#433)` block).
-- **Create** tests: `tests/unit/plugins/test_launcher_refusal.py`,
-  `tests/unit/security/test_sandbox_refusal_audit.py`,
-  `tests/unit/security/test_quarantine_child_io_refusal_audit.py`,
-  `tests/adversarial/.../test_sandbox_refusal_no_forged_event.py` (path pinned
-  in Task 6 against the corpus layout).
+- **Modify** prose: `src/alfred/supervisor/fd3_key_delivery.py`, `docs/subsystems/supervisor.md`, `src/alfred/audit/audit_row_schemas.py`.
+- **Create/extend** tests as each task specifies.
 
 ---
 
-## Task 1: Pure launcher-refusal parser
+## Task 0: Empirically confirm the interception point (spike — no production code)
+
+**Why:** v1 shipped a wrong interception point on a plausible-but-false timing assumption. Before writing any production code, PROVE that a real refusing launcher's refusal surfaces at `read_frame` (EOF) with the `sandbox_refused` row in the drained stderr — and that `deliver_provider_key_via_fd3` does NOT raise. If this is falsified, STOP and revise the spec.
+
+**Files:** none committed (throwaway proof) — record the result in the PR description / a scratch note.
+
+- [ ] **Step 1: Reproduce a refusal in a Linux+bwrap container (the real-spawn lane)**
+
+The macOS dev host cannot run the real bwrap spawn (memory: arm64 hits #269, amd64 emulation = `exec format error`). Use a privileged Linux container, mirroring the existing docker real-spawn harness. Run a refusing launcher and observe where the refusal surfaces:
+
+```bash
+# In a debian:bookworm --privileged container with the repo + deps installed:
+# Drive spawn_quarantine_child_io against a manifest that forces a pre-exec
+# refusal (e.g. a missing [sandbox] block -> sandbox_block_missing), and log
+# whether deliver_provider_key_via_fd3 raised vs read_frame raised.
+```
+
+Concretely: add a temporary assertion to the existing docker real-spawn test (the `Integration (privileged Linux, real spawn)` lane) that spawns with a refusing manifest and asserts: (a) `spawn_quarantine_child_io` returns WITHOUT raising (delivery buffered), (b) the first `read_frame` raises `QuarantineChildSpawnError`, (c) the child's stderr (drained) contains `"event":"supervisor.plugin.sandbox_refused"`.
+
+- [ ] **Step 2: Record the verdict**
+
+- If confirmed (delivery buffers; refusal at `read_frame`): proceed to Task 1.
+- If falsified (delivery raises deterministically on a real refusal): STOP. The spec's interception point is wrong; re-open the A-vs-B decision. Do not build Tasks 1-6 on a false premise.
+
+Note: the deterministic unit-level proof of the WIRING (below, Task 3) uses `_FakePopen` and does not need bwrap; Task 0 is specifically the REAL-launcher timing confirmation the review demanded.
+
+---
+
+## Task 1: Pure launcher-refusal parser (`audit/`)
 
 **Files:**
 
-- Create: `src/alfred/plugins/launcher_refusal.py`
-- Test: `tests/unit/plugins/test_launcher_refusal.py`
+- Create: `src/alfred/audit/launcher_refusal.py`
+- Test: `tests/unit/audit/test_launcher_refusal.py`
 
 **Interfaces:**
 
-- Consumes: `SANDBOX_REFUSED_FIELDS`, `SANDBOX_REFUSED_REASONS` from
-  `alfred.audit.audit_row_schemas`.
+- Consumes: `SANDBOX_REFUSED_FIELDS`, `SANDBOX_REFUSED_REASONS` from `alfred.audit.audit_row_schemas`.
 - Produces:
-  - `@dataclass(frozen=True, slots=True) class SandboxRefusalRow` with fields
-    `plugin_id: str`, `policy_ref: str`, `host_os: str`, `reason: str`,
-    `environment: str`, and `def as_subject(self) -> dict[str, str]` returning
-    exactly the five `SANDBOX_REFUSED_FIELDS` keys.
+  - `@dataclass(frozen=True, slots=True) class SandboxRefusalRow` — `plugin_id: str`, `policy_ref: str`, `host_os: str`, `reason: str`, `environment: str`; `def as_subject(self) -> dict[str, str]` (exactly the five `SANDBOX_REFUSED_FIELDS` keys).
   - `def parse_launcher_refusal_rows(stderr: bytes) -> tuple[SandboxRefusalRow, ...]`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/unit/plugins/test_launcher_refusal.py
+# tests/unit/audit/test_launcher_refusal.py
 """Unit tests for the pure launcher sandbox-refusal stderr parser (#433)."""
 
 from __future__ import annotations
@@ -95,10 +90,7 @@ import json
 import pytest
 
 from alfred.audit.audit_row_schemas import SANDBOX_REFUSED_FIELDS
-from alfred.plugins.launcher_refusal import (
-    SandboxRefusalRow,
-    parse_launcher_refusal_rows,
-)
+from alfred.audit.launcher_refusal import SandboxRefusalRow, parse_launcher_refusal_rows
 
 
 def _row_json(**overrides: str) -> bytes:
@@ -114,25 +106,21 @@ def _row_json(**overrides: str) -> bytes:
 
 
 def test_single_valid_row_parsed_and_canonicalized() -> None:
-    rows = parse_launcher_refusal_rows(_row_json())
-    assert len(rows) == 1
-    row = rows[0]
+    (row,) = parse_launcher_refusal_rows(_row_json())
     assert row.plugin_id == "alfred.quarantined-llm"
     assert row.reason == "sandbox_block_missing"
     assert row.host_os == "linux"
     assert row.environment == "development"
-    # absent policy_ref canonicalized to ""
-    assert row.policy_ref == ""
+    assert row.policy_ref == ""  # absent -> canonicalized
     assert set(row.as_subject().keys()) == SANDBOX_REFUSED_FIELDS
 
 
-def test_policy_ref_present_is_preserved() -> None:
-    raw = _row_json(policy_ref="policies/sandbox/full.toml", host_os="linux")
-    (row,) = parse_launcher_refusal_rows(raw)
+def test_policy_ref_present_preserved() -> None:
+    (row,) = parse_launcher_refusal_rows(_row_json(policy_ref="policies/sandbox/full.toml"))
     assert row.policy_ref == "policies/sandbox/full.toml"
 
 
-def test_interleaved_human_lines_are_ignored() -> None:
+def test_interleaved_human_lines_ignored() -> None:
     raw = (
         b"supervisor.sandbox.refused.sandbox_block_missing plugin_id=x\n"
         + _row_json()
@@ -141,80 +129,95 @@ def test_interleaved_human_lines_are_ignored() -> None:
     assert len(parse_launcher_refusal_rows(raw)) == 1
 
 
-def test_multiple_rows_parsed_in_order() -> None:
+def test_multiple_rows_in_order() -> None:
     raw = _row_json(reason="unknown_host_os") + _row_json(reason="policy_ref_missing")
-    rows = parse_launcher_refusal_rows(raw)
-    assert [r.reason for r in rows] == ["unknown_host_os", "policy_ref_missing"]
+    assert [r.reason for r in parse_launcher_refusal_rows(raw)] == [
+        "unknown_host_os",
+        "policy_ref_missing",
+    ]
 
 
-def test_malformed_json_line_dropped_loudly(caplog: pytest.LogCaptureFixture) -> None:
+def test_blank_lines_skipped() -> None:
+    raw = b"\n   \n" + _row_json() + b"\n\n"
+    assert len(parse_launcher_refusal_rows(raw)) == 1
+
+
+def test_malformed_json_line_dropped() -> None:
     raw = b'{"event":"supervisor.plugin.sandbox_refused", NOT JSON\n' + _row_json()
-    rows = parse_launcher_refusal_rows(raw)
-    assert len(rows) == 1  # only the valid row survives
+    assert len(parse_launcher_refusal_rows(raw)) == 1
 
 
 def test_unknown_event_ignored() -> None:
-    raw = (
-        json.dumps({"event": "supervisor.plugin.sandbox_stub_used", "plugin_id": "x"})
-        + "\n"
-    ).encode("utf-8")
+    raw = (json.dumps({"event": "supervisor.plugin.sandbox_stub_used", "plugin_id": "x"}) + "\n").encode()
     assert parse_launcher_refusal_rows(raw) == ()
 
 
-def test_out_of_vocab_reason_dropped(caplog: pytest.LogCaptureFixture) -> None:
-    raw = _row_json(reason="totally_made_up_reason")
+def test_out_of_vocab_reason_dropped() -> None:
+    assert parse_launcher_refusal_rows(_row_json(reason="totally_made_up")) == ()
+
+
+def test_missing_required_field_dropped() -> None:
+    # A row missing a NON-optional field (host_os) is dropped (branch coverage).
+    raw = (
+        json.dumps(
+            {
+                "event": "supervisor.plugin.sandbox_refused",
+                "plugin_id": "x",
+                "reason": "sandbox_block_missing",
+                "environment": "development",
+            }
+        )
+        + "\n"
+    ).encode()
     assert parse_launcher_refusal_rows(raw) == ()
 
 
 def test_extra_unknown_key_dropped() -> None:
-    raw = _row_json(smuggled="oops")
-    assert parse_launcher_refusal_rows(raw) == ()
+    assert parse_launcher_refusal_rows(_row_json(smuggled="oops")) == ()
 
 
-def test_non_dict_json_line_ignored() -> None:
-    raw = b'["supervisor.plugin.sandbox_refused"]\n' + b'42\n'
-    assert parse_launcher_refusal_rows(raw) == ()
+def test_non_dict_json_ignored() -> None:
+    assert parse_launcher_refusal_rows(b'["x"]\n42\n') == ()
 
 
 def test_non_utf8_bytes_do_not_raise() -> None:
-    raw = b"\xff\xfe not utf8\n" + _row_json()
-    assert len(parse_launcher_refusal_rows(raw)) == 1
+    assert len(parse_launcher_refusal_rows(b"\xff\xfe bad\n" + _row_json())) == 1
 
 
-def test_empty_stderr_returns_empty_tuple() -> None:
+def test_empty_returns_empty() -> None:
     assert parse_launcher_refusal_rows(b"") == ()
 
 
 def test_row_is_frozen() -> None:
     (row,) = parse_launcher_refusal_rows(_row_json())
     with pytest.raises((AttributeError, TypeError)):
-        row.reason = "mutated"  # type: ignore[misc]
+        row.reason = "x"  # type: ignore[misc]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run to verify fail**
 
-Run: `uv run pytest tests/unit/plugins/test_launcher_refusal.py -q`
-Expected: FAIL — `ModuleNotFoundError: alfred.plugins.launcher_refusal`.
+Run: `uv run pytest tests/unit/audit/test_launcher_refusal.py -q`
+Expected: FAIL — `ModuleNotFoundError: alfred.audit.launcher_refusal`.
 
 - [ ] **Step 3: Write the parser**
 
 ```python
-# src/alfred/plugins/launcher_refusal.py
+# src/alfred/audit/launcher_refusal.py
 """Pure parser: launcher sandbox-refusal stderr bytes -> validated rows (#433).
 
 ``bin/alfred-plugin-launcher.sh`` is the sole producer of
 ``supervisor.plugin.sandbox_refused``; it ``printf``s the row as one JSON line
 to stderr and ``exit 1``s. This module turns that stderr back into validated,
 canonicalized :class:`SandboxRefusalRow` values so the core can persist them
-(:mod:`alfred.security.sandbox_refusal_audit`). Pure — no I/O, no audit/hook
-imports — so it is trivially unit-testable to 100% line+branch.
+(:mod:`alfred.security.sandbox_refusal_audit`). It lives in ``audit/`` next to
+the schema it consumes (clean dependency direction; see ADR-0051). Pure — no
+I/O, no audit-writer/hook/plugins imports — so it is 100% line+branch testable.
 
 Trust posture: on a refusal the launcher exits BEFORE ``exec``ing the child, so
-this stderr is 100%-launcher-authored (T0). Validation here is defense in depth;
-#432 (closed reason vocabulary) and #437 (``policy_ref`` charset guard) already
+this stderr is launcher-authored (T0). Validation is defense in depth; #432
+(closed reason vocabulary) and #437 (``policy_ref`` charset guard) already
 constrain what the launcher writes. Any line that is not a well-formed,
-closed-vocab ``sandbox_refused`` row is dropped LOUDLY (never trusted, never
-silent).
+closed-vocab ``sandbox_refused`` row is dropped LOUDLY, never silently.
 """
 
 from __future__ import annotations
@@ -230,21 +233,15 @@ _log = structlog.get_logger(__name__)
 
 _REFUSED_EVENT = "supervisor.plugin.sandbox_refused"
 
-# The optional members of ``SANDBOX_REFUSED_FIELDS`` a launcher row may omit;
-# canonicalized to "" so the subject always carries the full symmetric key-set
-# ``AuditWriter.append_schema`` requires. ``policy_ref`` is absent from every
-# pre-``policy_ref``-resolution refusal (environment / host-OS / block-missing).
+# Optional members a launcher row may omit; canonicalized to "" so the subject
+# carries the full symmetric key-set ``AuditWriter.append_schema`` requires.
+# ``policy_ref`` is absent from every pre-``policy_ref``-resolution refusal.
 _OPTIONAL_FIELDS: frozenset[str] = frozenset({"policy_ref"})
 
 
 @dataclass(frozen=True, slots=True)
 class SandboxRefusalRow:
-    """One validated, canonicalized ``supervisor.plugin.sandbox_refused`` row.
-
-    Carries exactly the ``SANDBOX_REFUSED_FIELDS`` members. :meth:`as_subject`
-    returns the symmetric-keyed subject dict ``AuditWriter.append_schema``
-    validates against ``SANDBOX_REFUSED_FIELDS``.
-    """
+    """One validated, canonicalized ``supervisor.plugin.sandbox_refused`` row."""
 
     plugin_id: str
     policy_ref: str
@@ -265,23 +262,20 @@ class SandboxRefusalRow:
 def parse_launcher_refusal_rows(stderr: bytes) -> tuple[SandboxRefusalRow, ...]:
     """Extract validated ``sandbox_refused`` rows from raw launcher stderr.
 
-    Scans line by line; accepts only a JSON object whose ``event`` is
-    ``supervisor.plugin.sandbox_refused``, whose keys (minus ``event``) are a
-    subset of ``SANDBOX_REFUSED_FIELDS``, and whose ``reason`` is in
-    ``SANDBOX_REFUSED_REASONS``. Absent optional fields are canonicalized to "".
-    Every rejected line is logged at warning (never silently dropped). Never
-    raises — the caller is already mid-refusal.
+    Line-oriented ``json.loads``; accepts only an object whose ``event`` is
+    ``supervisor.plugin.sandbox_refused`` with keys ⊆ ``SANDBOX_REFUSED_FIELDS``
+    and ``reason`` ∈ ``SANDBOX_REFUSED_REASONS``. Absent optional fields ->  "".
+    Rejected lines are logged at warning. Never raises.
     """
     rows: list[SandboxRefusalRow] = []
-    text = stderr.decode("utf-8", errors="replace")
-    for line in text.splitlines():
+    for line in stderr.decode("utf-8", errors="replace").splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         try:
             candidate = json.loads(stripped)
         except ValueError:
-            continue  # a human log line, not JSON — expected, not an error
+            continue  # a human log line, not JSON — expected
         if not isinstance(candidate, dict) or candidate.get("event") != _REFUSED_EVENT:
             continue
         row = _validated_row(candidate)
@@ -291,21 +285,17 @@ def parse_launcher_refusal_rows(stderr: bytes) -> tuple[SandboxRefusalRow, ...]:
 
 
 def _validated_row(candidate: dict[str, object]) -> SandboxRefusalRow | None:
-    """Validate + canonicalize one candidate dict, or ``None`` (logged) if bad."""
     payload = {k: v for k, v in candidate.items() if k != "event"}
     unknown = payload.keys() - SANDBOX_REFUSED_FIELDS
     if unknown:
-        _log.warning("security.launcher_refusal.unknown_fields", unknown=sorted(unknown))
+        _log.warning("audit.launcher_refusal.unknown_fields", unknown=sorted(unknown))
         return None
-    reason = payload.get("reason")
-    if reason not in SANDBOX_REFUSED_REASONS:
-        _log.warning("security.launcher_refusal.unknown_reason", reason=reason)
+    if payload.get("reason") not in SANDBOX_REFUSED_REASONS:
+        _log.warning("audit.launcher_refusal.unknown_reason", reason=payload.get("reason"))
         return None
-    missing_required = (SANDBOX_REFUSED_FIELDS - _OPTIONAL_FIELDS) - payload.keys()
-    if missing_required:
-        _log.warning(
-            "security.launcher_refusal.missing_fields", missing=sorted(missing_required)
-        )
+    missing = (SANDBOX_REFUSED_FIELDS - _OPTIONAL_FIELDS) - payload.keys()
+    if missing:
+        _log.warning("audit.launcher_refusal.missing_fields", missing=sorted(missing))
         return None
     values = {field: str(payload.get(field, "")) for field in SANDBOX_REFUSED_FIELDS}
     return SandboxRefusalRow(**values)
@@ -314,21 +304,19 @@ def _validated_row(candidate: dict[str, object]) -> SandboxRefusalRow | None:
 __all__ = ["SandboxRefusalRow", "parse_launcher_refusal_rows"]
 ```
 
-- [ ] **Step 4: Run tests to verify they pass + branch coverage**
+- [ ] **Step 4: Run + 100% branch coverage**
 
-Run: `uv run pytest tests/unit/plugins/test_launcher_refusal.py -q`
-Expected: PASS (all).
+Run: `uv run pytest tests/unit/audit/test_launcher_refusal.py -q`
+Expected: PASS.
 
-Run: `uv run pytest tests/unit/plugins/test_launcher_refusal.py --cov=alfred.plugins.launcher_refusal --cov-branch --cov-report=term-missing -q`
-Expected: 100% line + branch for `launcher_refusal.py` (`Missing` empty). If a
-branch is uncovered, add the missing case (e.g. a candidate that is a JSON
-non-dict already covered by `test_non_dict_json_line_ignored`).
+Run: `uv run pytest tests/unit/audit/test_launcher_refusal.py --cov=alfred.audit.launcher_refusal --cov-branch --cov-report=term-missing -q`
+Expected: 100% line + branch (`Missing` empty).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/alfred/plugins/launcher_refusal.py tests/unit/plugins/test_launcher_refusal.py
-git commit -m "feat(sandbox): #433 pure launcher sandbox-refusal stderr parser
+git add src/alfred/audit/launcher_refusal.py tests/unit/audit/test_launcher_refusal.py
+git commit -m "feat(audit): #433 pure launcher sandbox-refusal stderr parser
 
 MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ```
@@ -344,14 +332,10 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 
 **Interfaces:**
 
-- Consumes: `SandboxRefusalRow` (Task 1); `SANDBOX_REFUSED_FIELDS`;
-  `AuditWriter.append_schema` shape; `alfred.hooks.invoke.invoke`,
-  `alfred.hooks.context.HookContext`, `alfred.hooks.SYSTEM_ONLY_TIERS`.
+- Consumes: `SandboxRefusalRow` (Task 1); `SANDBOX_REFUSED_FIELDS`; `AuditWriter.append_schema`; `alfred.hooks` (lazy).
 - Produces:
-  - `class SandboxRefusalRecorder(Protocol)` — `async def record(self, rows:
-    tuple[SandboxRefusalRow, ...]) -> None`.
-  - `class SandboxRefusalAuditor` — `__init__(self, *, audit_writer: AuditWriter)`;
-    `async def record(self, rows) -> None` (satisfies the Protocol).
+  - `class SandboxRefusalRecorder(Protocol)` — `async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None`.
+  - `class SandboxRefusalAuditor` — `__init__(self, *, audit_writer: AuditWriter)`; `async def record(self, rows) -> None`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -366,7 +350,7 @@ from typing import Any
 import pytest
 
 from alfred.audit.audit_row_schemas import SANDBOX_REFUSED_FIELDS
-from alfred.plugins.launcher_refusal import SandboxRefusalRow
+from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
 
 
@@ -388,18 +372,23 @@ def _row(reason: str = "sandbox_block_missing") -> SandboxRefusalRow:
     )
 
 
-@pytest.mark.asyncio
-async def test_record_writes_exact_schema_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def _fake_invoke(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     invoked: list[dict[str, Any]] = []
 
-    async def _fake_invoke(name: str, ctx: object, **kwargs: Any) -> object:
+    async def _invoke(name: str, ctx: object, **kwargs: Any) -> object:
         invoked.append({"name": name, **kwargs})
         return ctx
 
-    monkeypatch.setattr("alfred.security.sandbox_refusal_audit.invoke", _fake_invoke)
+    # invoke is lazily imported inside record(); patch it at its source module.
+    monkeypatch.setattr("alfred.hooks.invoke.invoke", _invoke)
+    return invoked
+
+
+@pytest.mark.asyncio
+async def test_record_writes_exact_schema_and_dispatches(_fake_invoke: list[dict[str, Any]]) -> None:
     audit = _FakeAudit()
     await SandboxRefusalAuditor(audit_writer=audit).record((_row(),))
-
     assert len(audit.calls) == 1
     call = audit.calls[0]
     assert call["event"] == "supervisor.plugin.sandbox_refused"
@@ -409,46 +398,29 @@ async def test_record_writes_exact_schema_subject(monkeypatch: pytest.MonkeyPatc
     assert call["result"] == "refused"
     assert call["actor_user_id"] is None
     assert call["cost_estimate_usd"] == 0.0
-
-    assert len(invoked) == 1
-    assert invoked[0]["name"] == "supervisor.plugin.sandbox_refused"
-    assert invoked[0]["fail_closed"] is True
+    assert len(_fake_invoke) == 1
+    assert _fake_invoke[0]["name"] == "supervisor.plugin.sandbox_refused"
+    assert _fake_invoke[0]["fail_closed"] is True
 
 
 @pytest.mark.asyncio
-async def test_record_writes_every_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop_invoke(name: str, ctx: object, **kwargs: Any) -> object:
-        return ctx
-
-    monkeypatch.setattr("alfred.security.sandbox_refusal_audit.invoke", _noop_invoke)
+async def test_record_writes_every_row(_fake_invoke: list[dict[str, Any]]) -> None:
     audit = _FakeAudit()
     await SandboxRefusalAuditor(audit_writer=audit).record(
         (_row("unknown_host_os"), _row("policy_ref_missing"))
     )
-    assert [c["subject"]["reason"] for c in audit.calls] == [
-        "unknown_host_os",
-        "policy_ref_missing",
-    ]
+    assert [c["subject"]["reason"] for c in audit.calls] == ["unknown_host_os", "policy_ref_missing"]
 
 
 @pytest.mark.asyncio
-async def test_empty_rows_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop_invoke(name: str, ctx: object, **kwargs: Any) -> object:
-        return ctx
-
-    monkeypatch.setattr("alfred.security.sandbox_refusal_audit.invoke", _noop_invoke)
+async def test_empty_rows_writes_nothing(_fake_invoke: list[dict[str, Any]]) -> None:
     audit = _FakeAudit()
     await SandboxRefusalAuditor(audit_writer=audit).record(())
     assert audit.calls == []
 
 
 @pytest.mark.asyncio
-async def test_append_schema_failure_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop_invoke(name: str, ctx: object, **kwargs: Any) -> object:
-        return ctx
-
-    monkeypatch.setattr("alfred.security.sandbox_refusal_audit.invoke", _noop_invoke)
-
+async def test_append_schema_failure_propagates(_fake_invoke: list[dict[str, Any]]) -> None:
     class _BoomAudit:
         async def append_schema(self, **kwargs: Any) -> None:
             raise RuntimeError("db down")
@@ -457,50 +429,49 @@ async def test_append_schema_failure_is_loud(monkeypatch: pytest.MonkeyPatch) ->
         await SandboxRefusalAuditor(audit_writer=_BoomAudit()).record((_row(),))
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run to verify fail**
 
 Run: `uv run pytest tests/unit/security/test_sandbox_refusal_audit.py -q`
-Expected: FAIL — `ModuleNotFoundError: alfred.security.sandbox_refusal_audit`.
+Expected: FAIL — `ModuleNotFoundError`.
 
-- [ ] **Step 3: Write the auditor**
+- [ ] **Step 3: Write the auditor (lazy hooks import)**
 
 ```python
 # src/alfred/security/sandbox_refusal_audit.py
 """Persist launcher sandbox-refusal rows + dispatch the fail-closed hookpoint (#433).
 
 The reusable half of the launcher->core audit path (ADR-0051). Given validated
-:class:`alfred.plugins.launcher_refusal.SandboxRefusalRow` values, writes each as
-a ``supervisor.plugin.sandbox_refused`` audit row (``AuditWriter.append_schema``,
-symmetric ``SANDBOX_REFUSED_FIELDS`` key-set) and dispatches the registered
-``fail_closed`` T0 hookpoint (:func:`alfred.hooks.invoke.invoke`), mirroring the
-daemon-boot hookpoint shape in ``cli/daemon/_boot_audit.py``.
+:class:`alfred.audit.launcher_refusal.SandboxRefusalRow` values, writes each as a
+``supervisor.plugin.sandbox_refused`` audit row (symmetric ``SANDBOX_REFUSED_FIELDS``
+key-set) and dispatches the registered ``fail_closed`` T0 hookpoint, mirroring
+``cli/daemon/_boot_audit.py:_invoke_boot_failed``.
 
-The quarantine-child spawn is the first adopter; the comms-adapter, gateway-
-adapter, and foreground-TUI launcher producers adopt this same auditor in the
-#433 follow-ups. A write or dispatch failure is LOUD (CLAUDE.md hard rule #7) —
-never swallowed.
+``alfred.hooks`` is imported lazily (function-local), mirroring ``_boot_audit.py``
+and respecting the known ``hooks -> security.tiers`` back-import.
+
+The quarantine-child spawn is the first adopter (dispatch happens at first
+extraction, post-``Supervisor``, so the hookpoint is registered — ADR-0051); the
+comms-adapter, gateway-adapter, and foreground-TUI producers adopt this same
+auditor in the #433 follow-ups. ``record`` raising is the caller's contract to
+handle (the quarantine drain guards it so it never masks the refusal).
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from alfred.audit.audit_row_schemas import SANDBOX_REFUSED_FIELDS
-from alfred.hooks import SYSTEM_ONLY_TIERS
-from alfred.hooks.context import HookContext
-from alfred.hooks.invoke import invoke
 
 if TYPE_CHECKING:
-    from typing import Protocol
-
+    from alfred.audit.launcher_refusal import SandboxRefusalRow
     from alfred.audit.log import AuditWriter
-    from alfred.plugins.launcher_refusal import SandboxRefusalRow
 
-    class SandboxRefusalRecorder(Protocol):
-        """Narrow seam a launcher-spawn site calls to persist its refusals."""
 
-        async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None: ...
+class SandboxRefusalRecorder(Protocol):
+    """Narrow seam a launcher-spawn site calls to persist its refusals."""
+
+    async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None: ...
 
 
 _REFUSED_EVENT = "supervisor.plugin.sandbox_refused"
@@ -513,6 +484,10 @@ class SandboxRefusalAuditor:
         self._audit = audit_writer
 
     async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
+        from alfred.hooks import SYSTEM_ONLY_TIERS
+        from alfred.hooks.context import HookContext
+        from alfred.hooks.invoke import invoke
+
         for row in rows:
             correlation_id = str(uuid.uuid4())
             await self._audit.append_schema(
@@ -544,18 +519,12 @@ class SandboxRefusalAuditor:
             )
 
 
-__all__ = ["SandboxRefusalAuditor"]
+__all__ = ["SandboxRefusalAuditor", "SandboxRefusalRecorder"]
 ```
 
-Note: `SandboxRefusalRecorder` is `TYPE_CHECKING`-only (a structural Protocol
-used solely for annotations); if the build session finds a runtime need for it
-(e.g. an `isinstance` check — there is none planned), promote it out of the
-`TYPE_CHECKING` block. Confirm `alfred.hooks.context.HookContext` accepts the
-kwargs shown (mirror `cli/daemon/_boot_audit.py:_invoke_boot_failed` verbatim);
-if the `HookContext` field names differ at build time, copy them from that
-function rather than guessing.
+Note: `Protocol` is at module scope (runtime, not `TYPE_CHECKING`) so it can be exported. The `HookContext(...)` field names + `invoke(...)` args MUST match `_boot_audit.py:_invoke_boot_failed` verbatim — copy them from there at build time; the core-engineer confirmed they match `hooks/context.py` + `hooks/invoke.py`.
 
-- [ ] **Step 4: Run tests + coverage**
+- [ ] **Step 4: Run + coverage**
 
 Run: `uv run pytest tests/unit/security/test_sandbox_refusal_audit.py -q`
 Expected: PASS.
@@ -574,44 +543,38 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 
 ---
 
-## Task 3: Wire the recorder into `spawn_quarantine_child_io`
+## Task 3: Record refusals at the `read_frame` drain
 
 **Files:**
 
-- Modify: `src/alfred/security/quarantine_child_io.py` (the
-  `spawn_quarantine_child_io` signature + the `ProviderKeyDeliveryError` arm at
-  `~803-813`; add a bounded raw-drain helper near `_read_stderr_bytes`)
+- Modify: `src/alfred/security/quarantine_child_io.py` (`_SubprocessChildIO.__init__`, `_log_child_stderr`, `spawn_quarantine_child_io` signature + the returned instance)
 - Test: `tests/unit/security/test_quarantine_child_io_refusal_audit.py`
 
 **Interfaces:**
 
-- Consumes: `SandboxRefusalRecorder` (Task 2), `parse_launcher_refusal_rows` +
-  `SandboxRefusalRow` (Task 1), existing `_read_stderr_bytes`,
-  `_STDERR_LOG_CAP_BYTES`, `_STDERR_DRAIN_TIMEOUT_S`, `_PLUGIN_ID`.
-- Produces: `spawn_quarantine_child_io(..., refusal_recorder:
-  SandboxRefusalRecorder | None = None)` — records parsed refusals (or a
-  synthesized `provider_key_delivery_failed` row when stderr carried none)
-  before raising `QuarantineChildSpawnError` on the delivery-failure arm.
+- Consumes: `SandboxRefusalRecorder` (Task 2, TYPE_CHECKING), `parse_launcher_refusal_rows` (Task 1, function-local import).
+- Produces: `spawn_quarantine_child_io(..., refusal_recorder: SandboxRefusalRecorder | None = None)`; `_SubprocessChildIO` records parsed refusals during its stderr drain.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/unit/security/test_quarantine_child_io_refusal_audit.py
-"""The spawn's delivery-failure arm records launcher refusals (#433)."""
+"""The read_frame drain records launcher refusals (#433)."""
 
 from __future__ import annotations
 
-import os
-import stat
-import textwrap
-from pathlib import Path
-
 import pytest
 
-from alfred.plugins.launcher_refusal import SandboxRefusalRow
+import alfred.security.quarantine_child_io as child_io_mod
+from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
-    spawn_quarantine_child_io,
+    _SubprocessChildIO,
+)
+
+_REFUSAL_ROW = (
+    b'{"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm",'
+    b'"reason":"sandbox_block_missing","environment":"development","host_os":"linux"}\n'
 )
 
 
@@ -623,121 +586,132 @@ class _CapturingRecorder:
         self.rows.extend(rows)
 
 
-def _fake_refusing_launcher(tmp_path: Path) -> str:
-    """A launcher stub that printfs a refusal row + exits 1 before exec."""
-    script = tmp_path / "refusing-launcher.sh"
-    script.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env bash
-            printf 'supervisor.sandbox.refused.sandbox_block_missing plugin_id=%s\\n' "$1" >&2
-            printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}\\n' "$1" >&2
-            exit 1
-            """
-        )
-    )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return str(script)
+def _exited_fake(stderr: bytes):
+    # Reuse the existing _FakePopen convention (test_quarantine_child_io.py:106):
+    # empty stdout_frames -> read_frame hits EOF; preset returncode so the drain's
+    # ``poll() is not None`` gate fires; stderr carries the refusal JSON.
+    from tests.unit.security.test_quarantine_child_io import _FakePopen
+
+    fake = _FakePopen(stdout_frames=[], stderr_bytes=stderr)
+    fake.returncode = 1  # launcher exited (refusal) — poll() returns non-None
+    return fake
 
 
 @pytest.mark.asyncio
-async def test_refusal_row_recorded_then_spawn_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", _fake_refusing_launcher(tmp_path))
+async def test_refusal_recorded_on_read_frame_eof() -> None:
     recorder = _CapturingRecorder()
+    io = _SubprocessChildIO(_exited_fake(_REFUSAL_ROW), refusal_recorder=recorder)
     with pytest.raises(QuarantineChildSpawnError):
-        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+        await io.read_frame()
     assert len(recorder.rows) == 1
     assert recorder.rows[0].reason == "sandbox_block_missing"
 
 
 @pytest.mark.asyncio
-async def test_delivery_failure_without_refusal_row_synthesizes_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A launcher that exits 1 with NO sandbox_refused row -> genuine delivery
-    # failure -> synthesized provider_key_delivery_failed row.
-    script = tmp_path / "silent-exit.sh"
-    script.write_text("#!/usr/bin/env bash\nexit 1\n")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", str(script))
-    recorder = _CapturingRecorder()
+async def test_default_none_records_nothing() -> None:
+    io = _SubprocessChildIO(_exited_fake(_REFUSAL_ROW))  # no recorder
     with pytest.raises(QuarantineChildSpawnError):
-        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
-    assert len(recorder.rows) == 1
-    assert recorder.rows[0].reason == "provider_key_delivery_failed"
-    assert recorder.rows[0].plugin_id == "alfred.quarantined-llm"
+        await io.read_frame()
+    # no crash, unchanged behavior
 
 
 @pytest.mark.asyncio
-async def test_default_none_recorder_records_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", _fake_refusing_launcher(tmp_path))
-    # No recorder passed -> unchanged behavior, still raises, no crash.
+async def test_record_failure_does_not_mask_refusal(caplog: pytest.LogCaptureFixture) -> None:
+    class _BoomRecorder:
+        async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
+            raise RuntimeError("audit down")
+
+    io = _SubprocessChildIO(_exited_fake(_REFUSAL_ROW), refusal_recorder=_BoomRecorder())
+    # The read_frame_failed QuarantineChildSpawnError STILL surfaces; the record
+    # failure is logged loud, not raised.
     with pytest.raises(QuarantineChildSpawnError):
-        await spawn_quarantine_child_io(provider_key="k")
+        await io.read_frame()
+
+
+@pytest.mark.asyncio
+async def test_clean_teardown_records_nothing() -> None:
+    # stderr with no sandbox_refused row (child ran) -> aclose drains -> no record.
+    recorder = _CapturingRecorder()
+    fake = _exited_fake(b"some benign child log line\n")
+    io = _SubprocessChildIO(fake, refusal_recorder=recorder)
+    await io.aclose()
+    assert recorder.rows == []
 ```
 
-Note: these tests assume the delivery-failure arm is reachable with a stub
-launcher on the CI host (the stub exits before any bwrap/interpreter dependency,
-so it runs cross-platform). If a preexisting spawn test in the suite uses a
-different stub convention (e.g. a fixture launcher path helper), reuse that
-helper instead of the inline `tmp_path` script — check
-`tests/unit/security/` for an existing `ALFRED_PLUGIN_LAUNCHER` fixture first
-and prefer it (DRY).
-
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run to verify fail**
 
 Run: `uv run pytest tests/unit/security/test_quarantine_child_io_refusal_audit.py -q`
-Expected: FAIL — `spawn_quarantine_child_io()` has no `refusal_recorder`
-parameter (`TypeError: unexpected keyword argument`).
+Expected: FAIL — `_SubprocessChildIO.__init__()` has no `refusal_recorder` param.
 
-- [ ] **Step 3: Add the drain helper**
+- [ ] **Step 3: Add the param to `_SubprocessChildIO.__init__`**
 
-Add near `_read_stderr_bytes` (after it, ~line 314):
+In `__init__` (after `egress_config`):
 
 ```python
-async def _drain_exited_child_stderr(process: subprocess.Popen[bytes], *, cap: int) -> bytes:
-    """Bounded off-loop read of an EXITED child's raw stderr (#433).
-
-    Caller guarantees the child has been reaped (``_terminate_and_reap``), so the
-    write-end is closed and the read cannot block; the deadline is defence in
-    depth. Returns RAW bytes (NOT sanitized) — the refusal parser needs intact
-    newlines to split JSON lines. Never raises: a drain failure must not preempt
-    the caller's contracted ``QuarantineChildSpawnError``.
-    """
-    loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _read_stderr_bytes, process, cap),
-            timeout=_STDERR_DRAIN_TIMEOUT_S,
-        )
-    except Exception as exc:  # noqa: BLE001 - best-effort; loud, never preempts
-        _log.warning(
-            "security.quarantine_child.refusal_drain_failed", error_class=type(exc).__name__
-        )
-        return b""
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        control_parent: socket.socket | None = None,
+        egress_config: EgressProxyConfig | None = None,
+        refusal_recorder: SandboxRefusalRecorder | None = None,
+    ) -> None:
+        ...
+        self._egress_config = egress_config
+        self._refusal_recorder = refusal_recorder
 ```
 
-- [ ] **Step 4: Add the parameter + import + record the refusals**
-
-Add module imports (top of file, with the other `from alfred...` imports):
+Add the TYPE_CHECKING import (in the existing type-only import area; add a `TYPE_CHECKING` block if none):
 
 ```python
-from alfred.plugins.launcher_refusal import SandboxRefusalRow, parse_launcher_refusal_rows
-```
+from typing import IO, TYPE_CHECKING
 
-Under `TYPE_CHECKING` (add a block if none exists — check the existing import
-layout; put it beside the other type-only imports):
-
-```python
 if TYPE_CHECKING:
     from alfred.security.sandbox_refusal_audit import SandboxRefusalRecorder
 ```
 
-Change the signature (at `~634`):
+- [ ] **Step 4: Add `_record_launcher_refusals` + call it from `_log_child_stderr`**
+
+Add the method (guarded, never raises):
+
+```python
+    async def _record_launcher_refusals(self, raw: bytes) -> None:
+        """Parse launcher refusal rows from raw stderr + record them. Never raises.
+
+        Called from the stderr drain (a refused launcher exits pre-``exec`` so the
+        child produces no frame -> ``read_frame`` EOF -> this drain). Fully
+        self-guarding (CLAUDE.md hard rule #7): an ``append_schema`` / ``invoke``
+        failure is logged LOUD with an explicit ``error_class`` and swallowed, so
+        it neither preempts the ``read_frame_failed`` ``QuarantineChildSpawnError``
+        nor breaks ``_log_child_stderr``'s best-effort "never raises" contract.
+        """
+        if self._refusal_recorder is None:
+            return
+        try:
+            from alfred.audit.launcher_refusal import parse_launcher_refusal_rows
+
+            rows = parse_launcher_refusal_rows(raw)
+            if rows:
+                await self._refusal_recorder.record(rows)
+        except Exception as exc:
+            _log.error(
+                "security.quarantine_child.refusal_record_failed",
+                error_class=type(exc).__name__,
+            )
+```
+
+In `_log_child_stderr`, after the existing sanitized-field log block (right after the `if sanitized is not None:` block, still inside the `try`):
+
+```python
+            if sanitized is not None:
+                log = _log.error if failure else _log.warning
+                log("security.quarantine_child.child_stderr", child_stderr=sanitized)
+            await self._record_launcher_refusals(raw)   # NEW (#433)
+```
+
+- [ ] **Step 5: Add the param to `spawn_quarantine_child_io` + thread it to the instance**
+
+Signature:
 
 ```python
 async def spawn_quarantine_child_io(
@@ -750,67 +724,35 @@ async def spawn_quarantine_child_io(
 ) -> _SubprocessChildIO:
 ```
 
-Replace the `ProviderKeyDeliveryError` arm (at `~803-813`):
+The final return:
 
 ```python
-    try:
-        deliver_provider_key_via_fd3(write_fd=write_fd, key=provider_key)
-    except ProviderKeyDeliveryError as exc:
-        _log.error("security.quarantine_child.provider_key_delivery_failed", reason=exc.reason)
-        await _terminate_and_reap(process)
-        if refusal_recorder is not None:
-            stderr = await _drain_exited_child_stderr(process, cap=_STDERR_LOG_CAP_BYTES)
-            rows = parse_launcher_refusal_rows(stderr)
-            if not rows:
-                # Genuine fd-3 delivery failure (no launcher refusal in stderr):
-                # synthesize the reserved provider_key_delivery_failed reason so
-                # the security-relevant refusal is still audited (ADR-0051).
-                rows = (
-                    SandboxRefusalRow(
-                        plugin_id=_PLUGIN_ID,
-                        policy_ref="",
-                        host_os="",
-                        reason="provider_key_delivery_failed",
-                        environment="",
-                    ),
-                )
-            await refusal_recorder.record(rows)
-        if control_parent is not None:
-            with contextlib.suppress(OSError):
-                control_parent.close()
-        raise QuarantineChildSpawnError(
-            t("security.quarantine_child.provider_key_delivery_failed")
-        ) from exc
+    return _SubprocessChildIO(
+        process,
+        control_parent=control_parent,
+        egress_config=egress_config,
+        refusal_recorder=refusal_recorder,
+    )
 ```
 
-Also add `TYPE_CHECKING` to the `from typing import` line if absent
-(`from typing import IO, TYPE_CHECKING`).
+Do NOT touch the `ProviderKeyDeliveryError` arm's logic (v1's interception is removed; the arm stays as-is — it handles genuine delivery failures, which are rare and out of #433 scope per the spec).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 6: Run tests + coverage + precursor invariant**
 
 Run: `uv run pytest tests/unit/security/test_quarantine_child_io_refusal_audit.py -q`
 Expected: PASS.
 
-Run the existing spawn suite to confirm the precursor invariant (default-None
-unchanged):
-Run: `uv run pytest tests/unit/security/ -k quarantine_child_io -q`
-Expected: PASS (all preexisting tests green).
+Run: `uv run pytest tests/unit/security/test_quarantine_child_io.py tests/unit/security/test_quarantine_child_io_control_fd.py -q`
+Expected: PASS (all existing spawn tests green — default-`None` unchanged).
 
-- [ ] **Step 6: Coverage of the new arm**
-
-Run: `uv run pytest tests/unit/security/ -k "quarantine_child_io" --cov=alfred.security.quarantine_child_io --cov-branch --cov-report=term-missing -q`
-Expected: the new lines (drain helper, record arm, synthesized-row branch) all
-covered. If the `if not rows` false-branch (a real refusal row present) or true-
-branch (synthesized) is uncovered, both are exercised by
-`test_refusal_row_recorded_then_spawn_raises` /
-`test_delivery_failure_without_refusal_row_synthesizes_reason` respectively —
-confirm both ran.
+Run: `uv run pytest tests/unit/security/ -k quarantine_child_io --cov=alfred.security.quarantine_child_io --cov-branch --cov-report=term-missing -q`
+Expected: the new `_record_launcher_refusals` lines (recorder-None early return, rows-present record, the `except` loud-log) all covered. The `except` branch is covered by `test_record_failure_does_not_mask_refusal`; the None early-return by `test_default_none_records_nothing`; the record-with-rows by `test_refusal_recorded_on_read_frame_eof`; the empty-rows-no-record by `test_clean_teardown_records_nothing`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/alfred/security/quarantine_child_io.py tests/unit/security/test_quarantine_child_io_refusal_audit.py
-git commit -m "feat(sandbox): #433 record launcher refusals on the quarantine spawn arm
+git commit -m "feat(sandbox): #433 record launcher refusals at the read_frame drain
 
 MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ```
@@ -821,75 +763,53 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 
 **Files:**
 
-- Modify: `src/alfred/comms_mcp/daemon_runtime.py`
-  (`_build_comms_inbound_extractor`, the `spawn_quarantine_child_io(...)` call
-  at `~334`)
-- Test: extend `tests/unit/` daemon-runtime wiring test (find the existing
-  `_build_comms_inbound_extractor` test; if none, add
-  `tests/unit/comms_mcp/test_daemon_runtime_refusal_wiring.py`)
+- Modify: `src/alfred/comms_mcp/daemon_runtime.py` (`_build_comms_inbound_extractor`)
+- Test: `tests/unit/comms_mcp/test_daemon_comms_spawn.py` (extend — this is where the existing `_fake_spawn(*, provider_key)` doubles live; the review pinned line ~393)
 
 **Interfaces:**
 
-- Consumes: `SandboxRefusalAuditor` (Task 2), the `audit_writer: AuditWriter`
-  already passed to `_build_comms_inbound_extractor`.
-- Produces: the live spawn is now called with a real recorder.
+- Consumes: `SandboxRefusalAuditor` (Task 2), the `audit_writer` already passed to `_build_comms_inbound_extractor`.
+- Produces: the live spawn is called with a real recorder.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test (reuse the existing doubles + patch the SOURCE module)**
+
+`spawn_quarantine_child_io` is a lazy import inside `_build_comms_inbound_extractor`, so it must be patched at its SOURCE module (`alfred.security.quarantine_child_io`), NOT on `daemon_runtime`, and WITHOUT `raising=False` (which would mask a wrong target). Reuse the existing `_fake_spawn(*, provider_key, ...)` fixture shape in `test_daemon_comms_spawn.py`.
 
 ```python
-# tests/unit/comms_mcp/test_daemon_runtime_refusal_wiring.py
-"""_build_comms_inbound_extractor injects a SandboxRefusalAuditor (#433)."""
-
-from __future__ import annotations
-
-from typing import Any
-
-import pytest
-
-
+# Add to tests/unit/comms_mcp/test_daemon_comms_spawn.py
 @pytest.mark.asyncio
-async def test_spawn_called_with_refusal_recorder(monkeypatch: pytest.MonkeyPatch) -> None:
-    from alfred.comms_mcp import daemon_runtime
+async def test_extractor_injects_refusal_auditor(monkeypatch: pytest.MonkeyPatch, <existing fixtures>) -> None:
     from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
 
-    seen: dict[str, Any] = {}
+    seen: dict[str, object] = {}
 
-    async def _fake_spawn(**kwargs: Any) -> Any:
-        seen.update(kwargs)
+    async def _fake_spawn(*, provider_key: str, refusal_recorder: object = None, **_k: object) -> object:
+        seen["refusal_recorder"] = refusal_recorder
         raise RuntimeError("stop after capturing kwargs")
 
-    monkeypatch.setattr(daemon_runtime, "spawn_quarantine_child_io", _fake_spawn, raising=False)
-    # Minimal doubles for the builder's other deps — reuse the existing
-    # daemon-runtime test fixtures if present (check the sibling test module).
-    ...  # build audit_writer/outbound_dlp/secret_broker/staging doubles
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
     with pytest.raises(RuntimeError, match="stop after capturing kwargs"):
-        await daemon_runtime._build_comms_inbound_extractor(
-            audit_writer=...,  # the fixture AuditWriter double
-            outbound_dlp=...,
-            secret_broker=...,
-            staging=...,
+        await _build_comms_inbound_extractor(
+            audit_writer=<fixture audit writer>,
+            outbound_dlp=<fixture>,
+            secret_broker=<fixture>,
+            staging=<fixture>,
         )
-    assert isinstance(seen.get("refusal_recorder"), SandboxRefusalAuditor)
+    assert isinstance(seen["refusal_recorder"], SandboxRefusalAuditor)
 ```
 
-Note: the `...` placeholders are the builder's existing dependency doubles —
-locate the current `_build_comms_inbound_extractor` test (grep
-`tests/ -rn "_build_comms_inbound_extractor"`) and reuse its fixtures verbatim
-rather than reconstructing them. If `spawn_quarantine_child_io` is imported
-lazily inside the function (it is — `from alfred.security.quarantine_child_io
-import spawn_quarantine_child_io` at `~328`), patch it at its source module
-(`alfred.security.quarantine_child_io.spawn_quarantine_child_io`) instead of on
-`daemon_runtime`.
+Locate the existing `_fake_spawn` / extractor-builder test in `test_daemon_comms_spawn.py` (the review pinned ~393) and reuse its fixtures verbatim rather than reconstructing them.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify fail**
 
-Run: `uv run pytest tests/unit/comms_mcp/test_daemon_runtime_refusal_wiring.py -q`
-Expected: FAIL — `refusal_recorder` not in the captured kwargs (currently the
-spawn is called without it).
+Run: `uv run pytest tests/unit/comms_mcp/test_daemon_comms_spawn.py -k refusal_auditor -q`
+Expected: FAIL — `refusal_recorder` is `None` (not yet wired).
 
 - [ ] **Step 3: Wire the auditor**
 
-In `_build_comms_inbound_extractor`, before the spawn call (`~328-334`):
+In `_build_comms_inbound_extractor`, before the spawn:
 
 ```python
     from alfred.security.quarantine_child_io import spawn_quarantine_child_io
@@ -899,21 +819,21 @@ In `_build_comms_inbound_extractor`, before the spawn call (`~328-334`):
     provider_key = _resolve_provider_key(secret_broker)
     refusal_recorder = SandboxRefusalAuditor(audit_writer=audit_writer)
     # SINGLE await — the spawn owns the process-wide fd-3 clobber window and must
-    # not race any other coroutine. Do not interleave awaits here.
+    # not race any other coroutine (auditor construction above is synchronous).
     child_io = await spawn_quarantine_child_io(
         provider_key=provider_key, refusal_recorder=refusal_recorder
     )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run to verify pass**
 
-Run: `uv run pytest tests/unit/comms_mcp/test_daemon_runtime_refusal_wiring.py -q`
+Run: `uv run pytest tests/unit/comms_mcp/test_daemon_comms_spawn.py -k refusal_auditor -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/alfred/comms_mcp/daemon_runtime.py tests/unit/comms_mcp/test_daemon_runtime_refusal_wiring.py
+git add src/alfred/comms_mcp/daemon_runtime.py tests/unit/comms_mcp/test_daemon_comms_spawn.py
 git commit -m "feat(sandbox): #433 inject the sandbox-refusal auditor at daemon boot
 
 MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
@@ -921,141 +841,107 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 
 ---
 
-## Task 5: ADR-0051 + prose corrections
+## Task 5: ADR-0051 + prose corrections + core-001 registry test
 
 **Files:**
 
 - Create: `docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md`
-- Modify: `src/alfred/security/fd3_key_delivery.py` (docstring `~23-24`)
-- Modify: `docs/subsystems/supervisor.md` (`~362-363`)
-- Modify: `src/alfred/audit/audit_row_schemas.py` (`NOTE (#433)` `~1194-1198`)
+- Modify: `src/alfred/supervisor/fd3_key_delivery.py` (docstring ~23-24)
+- Modify: `docs/subsystems/supervisor.md` (~362-363)
+- Modify: `src/alfred/audit/audit_row_schemas.py` (`NOTE (#433)` ~1194)
+- Test: add the core-001 registry assertion to `tests/unit/security/test_sandbox_refusal_audit.py`
 
-- [ ] **Step 1: Write ADR-0051**
-
-Create `docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md` following
-the repo ADR template (read `docs/adr/0050-*.md` for the exact heading
-structure). Content — Context / Decision / Consequences / Alternatives — drawn
-from the design spec's "ADR-0051 outline" section:
-
-- **Context:** the launcher is the sole `sandbox_refused` producer and can only
-  `printf` to stderr (a shell script, no DB/audit access); four spawn sites
-  drain that stderr; today none persists the row (hard-rule-#7 gap).
-- **Decision:** pure parser (`plugins/launcher_refusal`) + reusable auditor
-  (`security/sandbox_refusal_audit`) + narrow-`SandboxRefusalRecorder`-Protocol
-  injection into `spawn_quarantine_child_io`; quarantine-child producer first;
-  interception at the pre-`exec` fd-3-delivery-failure arm; the synthesized
-  `provider_key_delivery_failed` reason.
-- **Consequences:** the T3 refusal is finally persisted; the reserved reason
-  becomes real; three producers remain to adopt the seam (tracked follow-ups);
-  the IO module gains one narrow dependency.
-- **Alternatives:** B2 (attach rows to the exception); all-producers big-bang;
-  parse-inside-`_log_child_stderr` — each rejected (spec records why).
-
-- [ ] **Step 2: Correct `fd3_key_delivery.py` prose**
-
-At `~23-24`, change the aspirational claim to descriptive fact:
-
-Before:
-
-```text
-  truncated key. The caller maps this to a
-  ``SANDBOX_REFUSED_FIELDS(reason="provider_key_delivery_failed")`` audit row
-```
-
-After:
-
-```text
-  truncated key. ``spawn_quarantine_child_io`` records this as a
-  ``SANDBOX_REFUSED_FIELDS(reason="provider_key_delivery_failed")`` audit row
-  via the injected ``SandboxRefusalRecorder`` (ADR-0051, #433) — synthesized
-  when the launcher stderr carried no explicit refusal row.
-```
-
-- [ ] **Step 3: Correct `supervisor.md`**
-
-At `~362-363`, update the "On a partial write / EAGAIN the Supervisor REFUSES to
-spawn" sentence to note the audit row is now persisted:
-
-```text
-On a partial write / EAGAIN the Supervisor REFUSES to spawn
-(`reason="provider_key_delivery_failed"`) and records a
-`supervisor.plugin.sandbox_refused` audit row via the launcher->core refusal
-audit path (ADR-0051, #433).
-```
-
-- [ ] **Step 4: Update the `NOTE (#433)` block in `audit_row_schemas.py`**
-
-At `~1194-1198`, replace the "not yet persisted" NOTE with the shipped state:
+- [ ] **Step 1: core-001 registry test (prove the hookpoint is declared at dispatch)**
 
 ```python
-# NOTE (#433): the quarantine-child launcher path now persists this row — the
-# ProviderKeyDeliveryError arm of ``spawn_quarantine_child_io`` drains the
-# launcher stderr, ``alfred.plugins.launcher_refusal.parse_launcher_refusal_rows``
-# validates it, and ``alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor``
-# writes it + dispatches the fail_closed T0 hookpoint (ADR-0051). The three other
-# launcher producers (comms adapter, gateway adapter, foreground TUI) adopt the
-# same auditor in the #433 follow-ups. This set still governs what the launcher
-# WRITES (plus the reserved reasons below).
+@pytest.mark.asyncio
+async def test_hookpoint_declared_when_supervisor_constructed() -> None:
+    # Dispatch resolves the hookpoint against the real registry. It is registered
+    # by Supervisor.__init__; the auditor fires at first-extraction (post-Supervisor),
+    # so a constructed Supervisor means the hookpoint is declared. Assert the real
+    # registry knows the hookpoint after a Supervisor is built.
+    from alfred.hooks import get_registry
+    # ... construct a Supervisor with fixture deps (reuse an existing supervisor
+    # test fixture) ...
+    assert "supervisor.plugin.sandbox_refused" in get_registry()  # membership per the registry API
 ```
 
-Also update the `provider_key_delivery_failed` reserved-reason comment
-(`~1204-1206`): it is no longer "not yet written by any code" — it is
-synthesized by `spawn_quarantine_child_io` on a genuine delivery failure.
+Adapt the membership check to the real `HookRegistry` API (read `hooks/registry.py`); reuse an existing Supervisor-construction fixture. If the registry has no simple `__contains__`, assert via its declared-hookpoints accessor.
 
-- [ ] **Step 5: Lint docs + commit**
+- [ ] **Step 2: Write ADR-0051**
 
-Run: `markdownlint-cli2 "docs/adr/0051-*.md" "docs/subsystems/supervisor.md"`
-Expected: 0 errors (fix MD032/MD031/MD060/MD004 if any).
+Create `docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md` following the `docs/adr/0050-*.md` structure. Content from the spec's "ADR-0051 outline" — Context / Decision / Consequences / Alternatives — and MUST record: the v1-vs-v2 interception correction (delivery buffers; refusal at `read_frame`), the A-vs-B decision (B: `read_frame` drain, not a spawn-time probe), parser placement in `audit/`, and the guarded-`record()` posture.
+
+- [ ] **Step 3: Correct `fd3_key_delivery.py` prose (~23-24)**
+
+The reason stays reserved in this PR. Reword to descriptive-reserved:
+
+```text
+  truncated key. On a partial write / EAGAIN the spawn refuses; the
+  ``provider_key_delivery_failed`` reason is RESERVED for a future writer of the
+  ``SANDBOX_REFUSED_FIELDS`` row on the genuine-delivery-failure path (a #433
+  follow-up), and is not emitted today.
+```
+
+- [ ] **Step 4: Correct `supervisor.md` (~362-363)**
+
+Add that a launcher sandbox refusal is persisted at first-extraction via the
+`read_frame` drain (ADR-0051, #433); the `provider_key_delivery_failed` reason
+remains reserved.
+
+- [ ] **Step 5: Update the `NOTE (#433)` block in `audit_row_schemas.py` (~1194)**
+
+Replace the "not yet persisted" NOTE:
+
+```python
+# NOTE (#433): the quarantine-child launcher path now persists this row. A refused
+# launcher exits pre-exec, so the child produces no frame -> read_frame EOF ->
+# ``_SubprocessChildIO._log_child_stderr`` drains the stderr,
+# ``alfred.audit.launcher_refusal.parse_launcher_refusal_rows`` validates it, and
+# ``alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor`` writes it +
+# dispatches the fail_closed T0 hookpoint (ADR-0051). The three other launcher
+# producers (comms adapter, gateway adapter, foreground TUI) and the reserved
+# ``provider_key_delivery_failed`` writer adopt the same auditor in #433 follow-ups.
+```
+
+- [ ] **Step 6: Lint docs + run the registry test + commit**
+
+Run: `npx --yes markdownlint-cli2@0.22.1 "docs/adr/0051-*.md" "docs/subsystems/supervisor.md"`
+Expected: 0 errors (use dash-consistent bullets — MD004 defaults to `consistent`).
+
+Run: `uv run pytest tests/unit/security/test_sandbox_refusal_audit.py -q`
+Expected: PASS.
 
 ```bash
 git add docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md \
-        src/alfred/security/fd3_key_delivery.py \
-        docs/subsystems/supervisor.md \
-        src/alfred/audit/audit_row_schemas.py
-git commit -m "docs(sandbox): #433 ADR-0051 + correct the now-true refusal-audit prose
+        src/alfred/supervisor/fd3_key_delivery.py docs/subsystems/supervisor.md \
+        src/alfred/audit/audit_row_schemas.py tests/unit/security/test_sandbox_refusal_audit.py
+git commit -m "docs(sandbox): #433 ADR-0051 + correct the refusal-audit prose
 
 MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ```
 
 ---
 
-## Task 6: Adversarial coverage + full quality gates + follow-ups
+## Task 6: Adversarial corpus entry + full gates + follow-ups
 
 **Files:**
 
-- Create: an adversarial test under `tests/adversarial/` (pin the exact path
-  against the corpus layout — read `tests/adversarial/README` / an existing
-  sandbox adversarial test first; the #437 adversarial payload id was
-  `sbx-2026-017`, so use `sbx-2026-018`)
-- No src changes (verification + issue filing)
+- Create: a REAL adversarial corpus entry under `tests/adversarial/sandbox_escape/` (payload YAML + test), following the existing entries there. Read `tests/adversarial/sandbox_escape/` first; do NOT duplicate `sbx_2026_008_fd3_partial_write`. Use payload id `sbx-2026-018`.
 
-- [ ] **Step 1: Write the adversarial test**
+- [ ] **Step 1: Write the adversarial corpus entry**
 
-A refusal row whose field values carry injection bytes must not forge a second
-audit event or smuggle an out-of-vocab reason. (Upstream #437 charset-guards
-`policy_ref`; this asserts the parser+auditor layer is also non-forging.)
+Mirror the form of an existing `sandbox_escape` entry (YAML with category / threat / provenance + its test). The threat: a launcher refusal row whose field values contain injection bytes must not forge a second `sandbox_refused` audit event or smuggle an out-of-vocab reason. Assert via `parse_launcher_refusal_rows`:
 
 ```python
-# tests/adversarial/plugins/test_sandbox_refusal_no_forged_event.py
-"""sbx-2026-018: a launcher refusal row cannot forge a second audit event (#433)."""
-
-from __future__ import annotations
-
-from alfred.plugins.launcher_refusal import parse_launcher_refusal_rows
-
-
 def test_embedded_json_in_value_does_not_forge_a_second_row() -> None:
-    # A plugin_id value that itself contains a JSON object literal must not be
-    # re-parsed into a second sandbox_refused row: parsing is line-oriented and
-    # per-line json.loads yields ONE dict, so the nested text stays a value.
     raw = (
         b'{"event":"supervisor.plugin.sandbox_refused",'
         b'"plugin_id":"x\\", \\"event\\": \\"forged",'
         b'"reason":"sandbox_block_missing","environment":"development","host_os":"linux"}\n'
     )
     rows = parse_launcher_refusal_rows(raw)
-    assert len(rows) == 1
-    assert rows[0].reason == "sandbox_block_missing"
+    assert len(rows) == 1 and rows[0].reason == "sandbox_block_missing"
 
 
 def test_out_of_vocab_reason_cannot_slip_through() -> None:
@@ -1066,43 +952,48 @@ def test_out_of_vocab_reason_cannot_slip_through() -> None:
     assert parse_launcher_refusal_rows(raw) == ()
 ```
 
-- [ ] **Step 2: Run the adversarial suite (release-blocking — security/ touched)**
+- [ ] **Step 2: Run the adversarial suite (release-blocking)**
 
 Run: `uv run pytest tests/adversarial -q`
-Expected: PASS (including the new sbx-2026-018 test).
+Expected: PASS (incl. sbx-2026-018, registered + counted by the corpus harness).
 
-- [ ] **Step 3: Confirm the #432 vocab-sync binding still holds**
+- [ ] **Step 3: Vocab-sync + FULL unit suite (the #437 SLICE_4_KEYS lesson)**
 
 Run: `uv run pytest tests/unit/plugins/test_sandbox_reason_vocab_sync.py -q`
-Expected: PASS (this PR added NO launcher reason, so the binding is unchanged).
-
-- [ ] **Step 4: Full unit suite (the #437 SLICE_4_KEYS lesson — run the WHOLE suite, not just touched modules)**
+Expected: PASS (no launcher reason added).
 
 Run: `uv run pytest tests/unit -q`
-Expected: PASS, ≥ the assert-RAN floor. A new `supervisor.sandbox.`-prefixed
-audit/log key would trip `test_catalog_slice_4_keys` — this PR adds none (the
-audit event is reused; the parser's warnings use a `security.launcher_refusal.`
-prefix), but confirm the full suite is green, not just the touched tests.
+Expected: PASS, ≥ the assert-RAN floor. The new structlog keys use `audit.launcher_refusal.` / `security.quarantine_child.refusal_record_failed` (NOT a `supervisor.sandbox.` prefix), so `test_catalog_slice_4_keys` is unaffected — but confirm the full suite, not just touched modules.
 
-- [ ] **Step 5: i18n drift + all quality gates**
+- [ ] **Step 4: i18n drift + all quality gates**
 
-Run: `pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins && pybabel update -i /tmp/alfred.pot -d src/alfred/locale --no-fuzzy-matching`
-Expected: no new untranslated msgids (this PR adds no `t()` string). If drift
-appears, investigate — it should not.
+Run: `pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins && pybabel update -i /tmp/alfred.pot -o locale/... -D alfred` — first CONFIRM the real catalog layout: `ls locale/` (the review found the v1 command's `src/alfred/locale` path was wrong). Use the repo's actual catalog dir + domain. Expected: no new untranslated msgids (this PR adds no `t()` string).
 
 Run: `make check`
-Expected: lint + format + `mypy --strict` + `pyright` + tests all green. If
-`make ...|tail` is used, check `$?` (a tail masks the exit code).
+Expected: lint + format + `mypy --strict` + `pyright` + tests green. If piping to `tail`, check `$?`.
 
-- [ ] **Step 6: File the three producer follow-up issues**
+- [ ] **Step 5: Commit the adversarial entry**
+
+```bash
+git add tests/adversarial/sandbox_escape/  # the new entry's files (named paths only)
+git commit -m "test(sandbox): #433 adversarial sbx-2026-018 refusal-row no-forge
+
+MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
+```
+
+- [ ] **Step 6: File the follow-up issues**
 
 ```bash
 gh issue create --title "sandbox: persist sandbox_refused for the comms-adapter launcher producer" \
-  --body "Adopt alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor (ADR-0051, #433) in plugins/comms_stdio_transport.py so a comms-adapter launcher refusal is persisted. The stderr is already PIPE'd; wire the drain->parse->record on the adapter crash/exit arm."
+  --body "Adopt SandboxRefusalAuditor (ADR-0051, #433) in plugins/comms_stdio_transport.py."
 gh issue create --title "sandbox: persist sandbox_refused for the gateway-adapter launcher producer" \
   --body "Adopt the shared SandboxRefusalAuditor (ADR-0051, #433) in gateway/adapter_child_factory.py."
 gh issue create --title "sandbox: persist sandbox_refused for the foreground-TUI launcher producer" \
-  --body "cli/_launcher_spawn.py inherits stderr today (cannot capture the refusal row). Add a stderr-capture path + adopt the shared SandboxRefusalAuditor (ADR-0051, #433) so a foreground 'alfred chat'/discord launcher refusal is audited, not just printed to the operator terminal."
+  --body "cli/_launcher_spawn.py inherits stderr today; add capture + adopt the auditor (ADR-0051, #433)."
+gh issue create --title "sandbox: boot-time fail-closed quarantine health-check (option A)" \
+  --body "Detect a quarantine sandbox refusal at boot (probe barrier) and refuse boot, rather than at first extraction. Separate operability concern deferred from #433 (ADR-0051 A-vs-B)."
+gh issue create --title "sandbox: write the reserved provider_key_delivery_failed row on genuine fd-3 delivery failure" \
+  --body "On a real (rare) fd-3 delivery failure, synthesize the reserved provider_key_delivery_failed sandbox_refused row. Dispatch would be pre-Supervisor -> needs the declare_hookpoints() fix (ADR-0051)."
 ```
 
 - [ ] **Step 7: Open the PR**
@@ -1110,33 +1001,17 @@ gh issue create --title "sandbox: persist sandbox_refused for the foreground-TUI
 ```bash
 git push -u origin 433-launcher-refusal-audit
 gh pr create --title "feat(sandbox): #433 persist the sandbox_refused audit row (quarantine path)" \
-  --body "<summary + link to the design spec + ADR-0051 + the three follow-ups>"
+  --body "<summary + design spec + ADR-0051 + the five follow-ups; note the v1->v2 interception correction>"
 ```
 
-Then run the full `/review-pr` fleet (security ALWAYS) + CodeRabbit (both CLI
-and cloud) + alfred-uat, resolve every thread, and merge with a plain
-`gh pr merge --rebase` (NEVER `--admin`).
+Then the full `/review-pr` fleet (security ALWAYS) + CodeRabbit (CLI + cloud) + alfred-uat, resolve every thread, plain `gh pr merge --rebase` (NEVER `--admin`).
 
 ---
 
 ## Self-Review (completed by plan author)
 
-**Spec coverage:** every spec section maps to a task — pure parser → Task 1;
-reusable auditor → Task 2; spawn wiring + synthesized `provider_key_delivery_failed`
-→ Task 3; daemon_runtime injection → Task 4; ADR-0051 + the three prose
-corrections → Task 5; adversarial + vocab-sync + gates + the three producer
-follow-ups → Task 6. The "out of scope" items (#434/#435/#436, boot-detection
-timing) are explicitly not tasked. No gaps.
+**Spec coverage:** Task 0 = empirical interception gate; Task 1 = parser in `audit/`; Task 2 = auditor (lazy hooks import, propagating `record`); Task 3 = `read_frame`-drain interception + recorder on `_SubprocessChildIO` (guarded record, never masks the refusal); Task 4 = daemon injection (correct source-module patch, no `raising=False`); Task 5 = ADR-0051 + prose (fd3 `supervisor/` path) + core-001 registry test; Task 6 = real `sandbox_escape/` corpus entry (not a dup) + fixed pybabel + full gates + 5 follow-ups. Every review finding maps to a task; the v1 Critical is eliminated (no delivery-arm interception).
 
-**Placeholder scan:** the only `...` are in Tasks 3/4 test-fixture notes that
-explicitly instruct the implementer to reuse existing sibling-test fixtures
-(named grep given) rather than invent them — a deliberate DRY handoff, not a
-missing spec. Every code step shows complete code.
+**Placeholder scan:** the `<...>` in Tasks 4/5 tests are explicit "reuse the named existing fixture" handoffs (grep target given), not gaps. All production code is complete.
 
-**Type consistency:** `SandboxRefusalRow` (fields + `as_subject`) is defined in
-Task 1 and consumed identically in Tasks 2/3; `SandboxRefusalRecorder.record`
-signature matches between Task 2 (definition), Task 3 (parameter), Task 4
-(injection); `parse_launcher_refusal_rows` return type
-(`tuple[SandboxRefusalRow, ...]`) is consistent across Tasks 1/3/6;
-`SandboxRefusalAuditor(audit_writer=...)` construction matches between Task 2
-and Task 4. `append_schema` kwargs match the real `AuditWriter` signature.
+**Type consistency:** `SandboxRefusalRow`/`as_subject` (Task 1) used identically in Tasks 2/3/6; `SandboxRefusalRecorder.record(rows)` matches across Task 2 (def), Task 3 (`_refusal_recorder` field + `_record_launcher_refusals`), Task 4 (injection); `parse_launcher_refusal_rows` return type consistent; `SandboxRefusalAuditor(audit_writer=...)` matches Task 2 and Task 4. Import placement: parser in `audit/` (function-local in `quarantine_child_io`), hooks lazy in the auditor.
