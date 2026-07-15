@@ -34,9 +34,13 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+from alfred.plugins.manifest import _POLICY_REF_BAD_CHAR
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
@@ -534,3 +538,165 @@ def test_launcher_help_flag_prints_usage_and_exits_zero(flag: str) -> None:
     # Negative: the charset refusal key must NOT appear on stderr —
     # otherwise the help branch is downstream of the charset check.
     assert b"plugin.launcher_plugin_id_invalid" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# #437 — launcher POLICY_REF charset guard (defense-in-depth).
+#
+# manifest.py's own producer-side validator (`_POLICY_REF_BAD_CHAR`, Task 1
+# of #437) already refuses a charset-invalid `[sandbox.policy_refs]` entry at
+# manifest-PARSE time — it walks every declared OS key, not just the current
+# host's, so there is no legitimate manifest that lets a tainted value reach
+# this launcher branch (verified: driving the launcher through a real
+# ALFRED_PLUGIN_MANIFEST_PATH with a charset-invalid policy_ref refuses
+# upstream with `sandbox_block_missing`, via `_read_sandbox`, before
+# POLICY_REF is ever assigned).
+#
+# That is the point of a defense-in-depth guard: it must hold even if the
+# upstream Python check regresses, is bypassed, or a future manifest_reader
+# change loosens it. To exercise the launcher's OWN guard in isolation, these
+# tests shadow `python3` on PATH with a stub that hands back a raw,
+# unvalidated sandbox JSON — simulating exactly the "upstream check absent"
+# scenario the guard exists to defend against.
+# ---------------------------------------------------------------------------
+
+
+def _run_launcher_with_policy_ref(policy_ref: str) -> subprocess.CompletedProcess[bytes]:
+    """Drive the launcher's ``kind:full`` branch with an attacker-controlled
+    ``POLICY_REF``, bypassing manifest.py's own charset validation via a
+    PATH-shadowing ``python3`` stub (see module note above).
+
+    The stub answers ``--read-environment`` with a fixed ``development`` and
+    ``--read-sandbox`` with ``{"kind": "full", "policy_refs": {"linux":
+    <policy_ref>}}`` — anything else is an unexpected invocation and fails
+    loudly rather than silently returning nothing (so a future 3rd/4th
+    ``python3`` call this stub does not understand cannot pass silently).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_bin = Path(tmpdir) / "fake_bin"
+        fake_bin.mkdir()
+        # Build the sandbox JSON via json.dumps (correct escaping for ANY payload,
+        # including one containing a literal `"` or `\`) rather than hand-rolled
+        # string interpolation, then shell-single-quote the result (POSIX
+        # escaping: close, insert an escaped literal quote, reopen) so the
+        # generated stub script is well-formed regardless of the payload's
+        # content.
+        sandbox_json = json.dumps({"kind": "full", "policy_refs": {"linux": policy_ref}})
+        quoted_json = "'" + sandbox_json.replace("'", "'\\''") + "'"
+        fake_python3 = fake_bin / "python3"
+        fake_python3.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            "    *--read-environment*)\n"
+            "        printf 'development\\n'\n"
+            "        exit 0\n"
+            "        ;;\n"
+            "    *--read-sandbox*)\n"
+            f"        printf '%s\\n' {quoted_json}\n"
+            "        exit 0\n"
+            "        ;;\n"
+            "    *)\n"
+            "        printf 'unexpected fake-python3 invocation: %s\\n' \"$*\" >&2\n"
+            "        exit 1\n"
+            "        ;;\n"
+            "esac\n"
+        )
+        fake_python3.chmod(0o755)
+        env = {
+            **os.environ,
+            # FAKE_UNAME forces HOST_OS=linux (honoured only outside production —
+            # our stub's --read-environment always answers "development") so the
+            # stub's "linux" policy_refs key is the one the launcher resolves.
+            "FAKE_UNAME": "Linux",
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+        }
+        env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
+        env.pop("ALFRED_PLUGIN_MANIFEST_PATH", None)
+        return subprocess.run(  # noqa: S603 — literal repo-owned script path
+            [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "should-not-run"],
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX launcher subprocess; winsock hermetic-PATH breaks the child (see #428)",
+)
+@pytest.mark.skipif(
+    shutil.which("jq") is None,
+    reason="jq required: the launcher refuses jq_unavailable before the kind:full charset guard",
+)
+def test_launcher_refuses_policy_ref_with_injection_charset() -> None:
+    """A policy_ref carrying a JSON-injection payload is refused at the
+    launcher's own chokepoint with ``policy_ref_charset_invalid``, exit 1,
+    and — the security crux — the tainted value is NOT echoed anywhere in
+    the launcher's output.
+
+    See the module-level note above for why this drives the guard via a
+    PATH-shadowed ``python3`` stub rather than a real manifest file.
+    """
+    tainted = 'config/x","event":"forged'
+    result = _run_launcher_with_policy_ref(tainted)
+    assert result.returncode == 1
+    assert b"policy_ref_charset_invalid" in result.stderr
+    # ANTI-ECHO: neither the forged substring nor a bare quote-sequence from
+    # the payload appears anywhere in the launcher's output — the refusal
+    # row omits the policy_ref field entirely rather than interpolating the
+    # tainted value. Echoing it would BE the injection.
+    assert b"forged" not in result.stderr
+    assert b'","event":"' not in result.stderr
+    assert b"forged" not in result.stdout
+    # The plugin was never exec'd.
+    assert b"should-not-run" not in result.stdout
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX launcher subprocess; winsock hermetic-PATH breaks the child (see #428)",
+)
+@pytest.mark.skipif(
+    shutil.which("jq") is None,
+    reason="jq required: the launcher refuses jq_unavailable before the kind:full charset guard",
+)
+def test_launcher_accepts_well_formed_policy_ref() -> None:
+    """A charset-safe policy_ref (including its required ``/`` path
+    separators) is NOT refused by the new guard.
+
+    Pins the positive branch so a future tightening of the charset (which
+    would be backward-incompatible) shows up here. The launcher proceeds
+    past this guard to the next branch — the stub's fallback case for the
+    ``--policy-to-bwrap-flags`` call it does not understand — and refuses
+    downstream with the unrelated ``policy_translate_failed`` reason,
+    proving THIS guard specifically let the value through.
+    """
+    result = _run_launcher_with_policy_ref("config/sandbox/x.linux.bwrap.policy")
+    assert b"policy_ref_charset_invalid" not in result.stderr
+    assert b"policy_translate_failed" in result.stderr
+
+
+def test_launcher_charset_class_matches_the_python_producer() -> None:
+    """The launcher's negated POLICY_REF class is byte-identical to
+    manifest.py's ``_POLICY_REF_BAD_CHAR`` producer-side validator (Task 1 of
+    #437), so both layers refuse exactly the same values (the #432
+    cross-reference pattern — a sync assertion, not a hand-kept copy).
+
+    This in-process twin is also what actually exercises the SHARED
+    predicate's accept/reject branches for coverage: a subprocess launcher
+    run can never reach the reject branch for this exact payload (manifest.py
+    refuses it first — see the module note above), so the subprocess test
+    alone would leave the guard's own logic branch uncovered. Running here
+    covers it on every platform, including win32 where the subprocess test
+    is skipped.
+    """
+    launcher_source = _LAUNCHER.read_text()
+    assert "*[!A-Za-z0-9._/-]*" in launcher_source, (
+        "launcher POLICY_REF guard class drifted from manifest.py's _POLICY_REF_BAD_CHAR"
+    )
+    # Reject branch: the Python producer rejects the same injection payload
+    # the launcher guard defends against.
+    assert _POLICY_REF_BAD_CHAR.search('config/x","event":"forged')
+    # Accept branch: a legitimate path-safe policy_ref (including its
+    # required `/` path separators) is NOT rejected.
+    assert _POLICY_REF_BAD_CHAR.search("config/sandbox/x.linux.bwrap.policy") is None

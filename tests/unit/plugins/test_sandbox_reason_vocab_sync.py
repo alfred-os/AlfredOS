@@ -49,11 +49,11 @@ _RESERVED_UNEMITTED = frozenset(
 
 
 def test_sandbox_refused_reasons_constant_shape() -> None:
-    """The vocabulary is a real frozenset[str] of 25, and contains every reserved reason."""
+    """The vocabulary is a real frozenset[str] of 26, and contains every reserved reason."""
     reasons = audit_row_schemas.SANDBOX_REFUSED_REASONS
     assert isinstance(reasons, frozenset)
     assert all(isinstance(r, str) and r for r in reasons)
-    assert len(reasons) == 25, f"expected 25 reasons, got {len(reasons)}: {sorted(reasons)}"
+    assert len(reasons) == 26, f"expected 26 reasons, got {len(reasons)}: {sorted(reasons)}"
     missing_reserved = _RESERVED_UNEMITTED - reasons
     assert not missing_reserved, (
         f"reserved reasons dropped from the vocab: {sorted(missing_reserved)}"

@@ -25,6 +25,7 @@ import pytest
 import yaml
 
 from alfred.plugins.errors import (
+    ManifestError,
     ManifestSandboxMissingError,
     SandboxInfoHandshakeMismatch,
 )
@@ -374,6 +375,77 @@ def test_sbx_2026_016_over_broad_bind_source_refused() -> None:
         assert exc.value.reason == "bind_source_too_broad", f"variant {variant!r}"
 
 
+def _policy_ref_charset_injection_manifest_toml(policy_ref: str) -> str:
+    """A kind:full manifest embedding a raw attacker-controlled policy_ref.
+
+    TOML basic-string-escapes the value (backslash, double-quote, newline) so
+    it round-trips through ``tomllib`` back to the EXACT raw string the
+    sbx-2026-017 payload declares — including the newline variant, which a
+    TOML literal string cannot represent unescaped on a single line.
+    """
+    escaped = policy_ref.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return (
+        "[alfred]\n"
+        "manifest_version = 1\n"
+        "[plugin]\n"
+        'id = "attacker.example"\n'
+        'subscriber_tier = "user-plugin"\n'
+        'sandbox_profile = "user-plugin"\n'
+        "[sandbox]\n"
+        'kind = "full"\n'
+        "[sandbox.policy_refs]\n"
+        f'linux = "{escaped}"\n'
+    )
+
+
+def test_sbx_2026_017_policy_ref_charset_injection_refused(tmp_path: Path) -> None:
+    """sbx-2026-017: a policy_ref carrying JSON-injection characters is refused.
+
+    Iterates the YAML's own ``payload.variants`` list (the #428 lesson — the
+    YAML is the single source of truth, no second hardcoded copy).
+
+    Layer 1 (real flow, catches FIRST per the payload's provenance): the
+    manifest parser refuses at parse time, before ``SandboxBlock``
+    construction. Layer 2 (real end-to-end launcher subprocess): the tainted
+    manifest never reaches ``POLICY_REF`` assignment — ``manifest_reader``'s
+    ``--read-sandbox`` collapses the upstream ``ManifestError`` to
+    ``plugin.manifest_invalid``, which the launcher's ``_read_sandbox``
+    failure branch reports as ``sandbox_block_missing`` (the same collapse
+    ``test_sbx_2026_001_sandbox_block_missing`` asserts). The launcher's OWN
+    ``policy_ref_charset_invalid`` chokepoint guard is unreachable via any
+    real manifest — it is proximate-to-use defense-in-depth, exercised
+    directly (via a PATH-shadowed ``python3`` stub simulating an
+    upstream-bypassed producer) by
+    ``tests/unit/plugins/test_plugin_launcher_stub.py``.
+    """
+    payload = _load("sbx-2026-017")
+    assert payload.expected_outcome == "refused"
+    assert isinstance(payload.payload, dict)
+    variants = payload.payload["variants"]
+    assert variants, "payload declares no variants"
+    for variant in variants:
+        # match= pins the charset branch specifically (not just any ManifestError).
+        with pytest.raises(ManifestError, match=r"path-safe set"):
+            parse_manifest(_policy_ref_charset_injection_manifest_toml(variant))
+    # CR #229 R2 finding-5: an explicit skip when jq is absent — degrading to
+    # parser-only while still reporting green would silently weaken the
+    # executable-corpus guarantee (the launcher defence would go unexercised).
+    if not _HAS_JQ:
+        pytest.skip("jq required for sbx-2026-017 launcher refusal assertion")
+    for variant in variants:
+        rc, stderr = _run_launcher(
+            _policy_ref_charset_injection_manifest_toml(variant),
+            environment="production",
+            tmp_path=tmp_path,
+        )
+        assert rc != 0, f"variant {variant!r} was NOT refused by the launcher"
+        assert "sandbox_block_missing" in stderr, f"variant {variant!r}: {stderr!r}"
+        # ANTI-ECHO end-to-end: the tainted variant value must not appear in the
+        # launcher's output — the upstream refusal never interpolates it, and the
+        # launcher's own guard would omit it too. Echoing it would BE the injection.
+        assert variant not in stderr, f"variant {variant!r} leaked into stderr: {stderr!r}"
+
+
 def test_all_pr_s4_6_payloads_load() -> None:
     # Every PR-S4-6 sbx payload schema-validates + carries the sbx prefix.
     ids = [
@@ -384,6 +456,7 @@ def test_all_pr_s4_6_payloads_load() -> None:
         "sbx-2026-009",
         "sbx-2026-010",
         "sbx-2026-016",
+        "sbx-2026-017",
     ]
     for pid in ids:
         payload = _load(pid)
