@@ -48,6 +48,11 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     "supervisor.sandbox.refused.policy_ref_unreadable": t(
         "supervisor.sandbox.refused.policy_ref_unreadable"
     ),
+    # #437: launcher defense-in-depth charset guard on POLICY_REF (mirrors the
+    # manifest.py producer-side _POLICY_REF_BAD_CHAR validator).
+    "supervisor.sandbox.refused.policy_ref_charset_invalid": t(
+        "supervisor.sandbox.refused.policy_ref_charset_invalid"
+    ),
     "supervisor.sandbox.refused.unknown_host_os": t("supervisor.sandbox.refused.unknown_host_os"),
     "supervisor.sandbox.refused.jq_unavailable": t("supervisor.sandbox.refused.jq_unavailable"),
     "supervisor.sandbox.refused.macos_full_not_yet_shipped": t(

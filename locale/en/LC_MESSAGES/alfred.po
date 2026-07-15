@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-10 16:31+0100\n"
+"POT-Creation-Date: 2026-07-15 08:57+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2727,41 +2727,47 @@ msgstr ""
 "Plugin {plugin_id} policy_ref at {policy_ref} is unreadable. Refusing to "
 "launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:51
+#: src/alfred/plugins/_sandbox_i18n.py:54
+msgid "supervisor.sandbox.refused.policy_ref_charset_invalid"
+msgstr ""
+"Plugin {plugin_id} sandbox policy_ref contains characters outside the "
+"path-safe set [A-Za-z0-9._/-] and was refused."
+
+#: src/alfred/plugins/_sandbox_i18n.py:56
 msgid "supervisor.sandbox.refused.unknown_host_os"
 msgstr "Plugin {plugin_id} cannot be launched: unrecognised host OS."
 
-#: src/alfred/plugins/_sandbox_i18n.py:52
+#: src/alfred/plugins/_sandbox_i18n.py:57
 msgid "supervisor.sandbox.refused.jq_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: jq is not available on the "
 "launcher host."
 
-#: src/alfred/plugins/_sandbox_i18n.py:54
+#: src/alfred/plugins/_sandbox_i18n.py:59
 msgid "supervisor.sandbox.refused.macos_full_not_yet_shipped"
 msgstr ""
 "Plugin {plugin_id} requests a full macOS sandbox, which is not yet "
 "shipped (PR-S4-7)."
 
-#: src/alfred/plugins/_sandbox_i18n.py:57
+#: src/alfred/plugins/_sandbox_i18n.py:62
 msgid "supervisor.sandbox.refused.policy_translate_failed"
 msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags."
 
-#: src/alfred/plugins/_sandbox_i18n.py:63
+#: src/alfred/plugins/_sandbox_i18n.py:68
 msgid "supervisor.sandbox.refused.interpreter_prefix_too_broad"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: the configured interpreter "
 "({interpreter}) resolves to a root-level install prefix, which would bind"
 " the entire host filesystem into the sandbox."
 
-#: src/alfred/plugins/_sandbox_i18n.py:71
+#: src/alfred/plugins/_sandbox_i18n.py:76
 msgid "supervisor.sandbox.refused.fake_uname_in_production"
 msgstr ""
 "FAKE_UNAME is set in production for plugin {plugin_id}. FAKE_UNAME is a "
 "test-only host-OS override and is ignored in production; its presence "
 "here can only force a host-OS branch. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:74
+#: src/alfred/plugins/_sandbox_i18n.py:79
 msgid "supervisor.sandbox.refused.uid_separation_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched on this non-Linux production host "
@@ -2769,26 +2775,26 @@ msgstr ""
 "unsandboxed in production is refused. Run plugins on a Linux host or "
 "under bwrap."
 
-#: src/alfred/plugins/_sandbox_i18n.py:77
+#: src/alfred/plugins/_sandbox_i18n.py:82
 msgid "supervisor.sandbox.refused.stub_kind_in_production"
 msgstr ""
 "Plugin {plugin_id} declares a kind:stub sandbox, which provides no "
 "containment, and is refused in production on host {host_os}. Refusing to "
 "launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:81
+#: src/alfred/plugins/_sandbox_i18n.py:86
 msgid "supervisor.boot.mlock_unavailable"
 msgstr ""
 "mlockall is unavailable ({errno_string}); Supervisor pages may swap to "
 "disk. Boot proceeds."
 
-#: src/alfred/plugins/_sandbox_i18n.py:82
+#: src/alfred/plugins/_sandbox_i18n.py:87
 msgid "supervisor.boot.core_dumps_disabled"
 msgstr ""
 "Core dumps disabled (RLIMIT_CORE set to 0) to protect the in-memory "
 "provider key."
 
-#: src/alfred/plugins/_sandbox_i18n.py:83
+#: src/alfred/plugins/_sandbox_i18n.py:88
 msgid "daemon.boot.environment_source_conflict"
 msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "
@@ -2900,13 +2906,13 @@ msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
 
-#: src/alfred/plugins/manifest.py:94 src/alfred/plugins/manifest.py:321
+#: src/alfred/plugins/manifest.py:104 src/alfred/plugins/manifest.py:335
 msgid "plugin.manifest_sandbox_policy_refs_required"
 msgstr ""
 "Plugin manifest [sandbox] kind={kind} requires a non-empty policy_refs "
 "table."
 
-#: src/alfred/plugins/manifest.py:145 src/alfred/plugins/manifest.py:201
+#: src/alfred/plugins/manifest.py:155 src/alfred/plugins/manifest.py:211
 msgid "plugin.manifest_unknown_subscriber_tier"
 msgstr ""
 "Plugin manifest subscriber_tier {tier} is unknown; valid values: "
@@ -2915,51 +2921,57 @@ msgstr ""
 # Slice-3 retrospective fix DEVEX-002 — manifest parser raises that
 # previously bypassed t(). Each reason carries a distinct key so callers
 # can branch on the specific manifest defect (CLI rendering, audit row).
-#: src/alfred/plugins/manifest.py:169
+#: src/alfred/plugins/manifest.py:179
 msgid "plugin.manifest_invalid_toml"
 msgstr "Plugin manifest is not valid TOML: {detail}."
 
-#: src/alfred/plugins/manifest.py:183
+#: src/alfred/plugins/manifest.py:193
 msgid "plugin.manifest_missing_plugin_section"
 msgstr "Plugin manifest is missing the required [plugin] table."
 
-#: src/alfred/plugins/manifest.py:187
+#: src/alfred/plugins/manifest.py:197
 msgid "plugin.manifest_invalid_plugin_id"
 msgstr "Plugin manifest [plugin] id is missing or not a non-empty string."
 
-#: src/alfred/plugins/manifest.py:191
+#: src/alfred/plugins/manifest.py:201
 msgid "plugin.manifest_invalid_subscriber_tier_type"
 msgstr "Plugin manifest [plugin] subscriber_tier is missing or not a string."
 
-#: src/alfred/plugins/manifest.py:209
+#: src/alfred/plugins/manifest.py:219
 msgid "plugin.manifest_invalid_sandbox_profile_type"
 msgstr "Plugin manifest [plugin] sandbox_profile is not a string."
 
-#: src/alfred/plugins/manifest.py:213
+#: src/alfred/plugins/manifest.py:223
 msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
-#: src/alfred/plugins/manifest.py:248
+#: src/alfred/plugins/manifest.py:258
 msgid "plugin.manifest_comms_mcp_not_table"
 msgstr "Plugin manifest [comms_mcp] must be a table."
 
-#: src/alfred/plugins/manifest.py:291
+#: src/alfred/plugins/manifest.py:301
 msgid "plugin.manifest_sandbox_kind_invalid"
 msgstr "Plugin manifest [sandbox] kind {got} is invalid (valid: {valid})."
 
-#: src/alfred/plugins/manifest.py:299
+#: src/alfred/plugins/manifest.py:309
 msgid "plugin.manifest_sandbox_policy_refs_type"
 msgstr "Plugin manifest [sandbox] policy_refs must be a table."
 
-#: src/alfred/plugins/manifest.py:304
+#: src/alfred/plugins/manifest.py:314
 msgid "plugin.manifest_sandbox_policy_refs_unknown_os"
 msgstr ""
 "Plugin manifest [sandbox] policy_refs has unknown OS key {got} (valid: "
 "{valid})."
 
-#: src/alfred/plugins/manifest.py:314
+#: src/alfred/plugins/manifest.py:324
 msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
+
+#: src/alfred/plugins/manifest.py:327
+msgid "plugin.manifest_sandbox_policy_refs_value_charset"
+msgstr ""
+"Plugin manifest [sandbox] policy_refs[{os_key}] contains characters "
+"outside the path-safe set [A-Za-z0-9._/-]."
 
 #: src/alfred/plugins/stdio_transport.py:643
 #: src/alfred/plugins/web_fetch/errors.py:153
@@ -3019,9 +3031,9 @@ msgstr ""
 "src/alfred/orchestrator/builtin_tools.py) or an MCP plugin manifest — "
 "rename one so their provider-safe names differ."
 
-#: src/alfred/providers/anthropic_native.py:299
-#: src/alfred/providers/anthropic_native.py:308
-#: src/alfred/providers/deepseek.py:315 src/alfred/providers/deepseek.py:324
+#: src/alfred/providers/anthropic_native.py:321
+#: src/alfred/providers/anthropic_native.py:330
+#: src/alfred/providers/deepseek.py:336 src/alfred/providers/deepseek.py:345
 msgid "providers.provider_unavailable"
 msgstr "The {provider} provider ({model}) is currently unavailable."
 
@@ -3063,34 +3075,34 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:296
+#: src/alfred/security/quarantine_child_io.py:398
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:314
+#: src/alfred/security/quarantine_child_io.py:416
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:338
+#: src/alfred/security/quarantine_child_io.py:443
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:352
-#: src/alfred/security/quarantine_child_io.py:447
+#: src/alfred/security/quarantine_child_io.py:457
+#: src/alfred/security/quarantine_child_io.py:702
 msgid "security.quarantine_child.broker_unconfigured"
 msgstr "Quarantine child egress broker is not configured."
 
-#: src/alfred/security/quarantine_child_io.py:445
+#: src/alfred/security/quarantine_child_io.py:700
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:528
+#: src/alfred/security/quarantine_child_io.py:771
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:569
+#: src/alfred/security/quarantine_child_io.py:812
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "
