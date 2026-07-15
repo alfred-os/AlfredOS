@@ -10,6 +10,8 @@ per-OS ``policy_refs`` map shape.
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from alfred.plugins.errors import ManifestError, ManifestSandboxMissingError
 from alfred.plugins.manifest import SandboxBlock, parse_manifest
@@ -199,3 +201,65 @@ sandbox = "not-a-table"
     )
     with pytest.raises(ManifestSandboxMissingError):
         parse_manifest(raw)
+
+
+def test_sandbox_policy_refs_injection_charset_refuses() -> None:
+    # #437: a policy_ref carrying JSON-injection chars (a double-quote + comma
+    # forging an `event` field) must raise the TYPED ManifestError before
+    # SandboxBlock construction. Single-quoted TOML literal carries the quotes
+    # verbatim. The launcher interpolates POLICY_REF raw into audit-JSON printf
+    # rows; PLUGIN_ID is charset-validated for exactly this reason.
+    raw = (
+        _BASE
+        + """
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+linux = 'config/x","event":"forged'
+"""
+    )
+    # match= pins the SPECIFIC charset branch, not just any ManifestError — a
+    # different refusal (bad kind, missing block) would pass a bare raises().
+    with pytest.raises(ManifestError, match=r"policy_refs\[linux\].*path-safe set"):
+        parse_manifest(raw)
+
+
+# Chars guaranteed outside [A-Za-z0-9._/-] AND safe inside a single-quoted TOML
+# literal (no single-quote, no newline/control). Every generated value has >=1.
+_INJECTION_ALPHABET = '",;:{}[]<>= \t()|&$#@!*?~`^%+'
+
+
+@given(st.text(alphabet=_INJECTION_ALPHABET, min_size=1))
+def test_sandbox_policy_refs_charset_property_refuses(bad: str) -> None:
+    # Any value composed of out-of-set chars is refused. Single-quoted TOML
+    # literal carries them verbatim (the alphabet excludes ' and newlines).
+    raw = (
+        _BASE
+        + f"""
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+linux = '{bad}'
+"""
+    )
+    with pytest.raises(ManifestError, match=r"policy_refs\[linux\].*path-safe set"):
+        parse_manifest(raw)
+
+
+def test_sandbox_policy_refs_valid_path_still_parses() -> None:
+    # A legitimate path-safe policy_ref must still parse (guards against an
+    # over-strict allowlist). Mirrors the shape of every shipped policy_ref.
+    raw = (
+        _BASE
+        + """
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+linux = "config/sandbox/example.linux.bwrap.policy"
+"""
+    )
+    manifest = parse_manifest(raw)
+    assert manifest.sandbox.policy_refs["linux"] == "config/sandbox/example.linux.bwrap.policy"

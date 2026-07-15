@@ -1,0 +1,47 @@
+id: sbx-2026-017
+category: sandbox_escape
+threat: >-
+  A kind:full manifest sets a policy_ref containing JSON-injection characters —
+  a double-quote + comma that forges the `event` field, or a newline that injects
+  a whole fabricated row — that the launcher interpolates raw into its audit-JSON
+  printf rows (the sandbox_refused and sandbox_stub_used emitters) and passes to
+  the flags subprocess, latent today (manifests are human-gated and nothing yet
+  parses the launcher's stderr JSON — #433) but live the instant a json.loads
+  consumer of that row exists.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: policy_ref_charset_injection
+  variants:
+    - 'config/x","event":"forged'
+    - "config/x\n{\"event\":\"forged\"}"
+    - 'config/x";DROP'
+    - 'config/x{{brace}}'
+expected_outcome: refused
+provenance: >-
+  #437. Two layers refuse any policy_ref value containing a char outside the
+  path-safe set [A-Za-z0-9._/-] (negated class, identical on both sides). In the
+  real flow the manifest parser refuses FIRST: manifest.py's
+  _POLICY_REF_BAD_CHAR validator raises the typed ManifestError
+  (plugin.manifest_sandbox_policy_refs_value_charset) BEFORE SandboxBlock
+  construction, walking every declared OS key, not just the current host's.
+  bin/alfred-plugin-launcher.sh also carries its own guard at the POLICY_REF
+  chokepoint (reason=policy_ref_charset_invalid, emitting NO tainted value into
+  the audit row — the anti-echo rule), but that guard is belt-and-suspenders:
+  both `_read_sandbox` branches (manifest-path and plugin-id) route
+  SANDBOX_JSON through parse_manifest first, so no manifest reachable through
+  the real launcher — including one supplied via ALFRED_PLUGIN_MANIFEST_PATH,
+  which is likewise parsed by parse_manifest — can reach it today. It defends a
+  future _parse_sandbox_block narrowing or a SANDBOX_JSON source that bypasses
+  the Python producer. PLUGIN_ID has been charset-gated since PR-S4-6 for the
+  same reason; #437 closes the sibling POLICY_REF gap. Not kernel-observable —
+  the containment is the parser/launcher refusing to emit a row carrying the
+  payload. Asserted end-to-end by
+  test_sbx_2026_017_policy_ref_charset_injection_refused; the launcher's own
+  chokepoint guard is exercised directly (via a PATH-shadowed python3 stub that
+  simulates an upstream-bypassed producer) by
+  tests/unit/plugins/test_plugin_launcher_stub.py.
+references:
+  - "spec §7.1 manifest sandbox policy_refs"
+  - "src/alfred/plugins/manifest.py (_POLICY_REF_BAD_CHAR)"
+  - "bin/alfred-plugin-launcher.sh (POLICY_REF charset guard)"
+  - "docs/superpowers/specs/2026-07-15-issue-437-policy-ref-charset-guard-design.md"

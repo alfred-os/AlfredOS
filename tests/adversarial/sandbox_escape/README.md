@@ -22,6 +22,9 @@ used, it consumes fd 3; verified bubblewrap 0.8.0/0.9.0, #218).
 - bwrap version drift (CVE-window or bwrap absent / below the version floor).
 - Over-broad bind source: host root, non-allowlisted top-level tree, soft-field
   traversal to root, or procfs magic-link (`bind_source_too_broad`, #428).
+- `policy_ref` charset injection: JSON-injection characters (quote+comma,
+  newline) that would forge or inject a row into the launcher's audit-JSON
+  printf output (`policy_ref_charset_invalid`, #437).
 
 **Prefix.** `sbx-`
 
@@ -65,6 +68,7 @@ drift is a release-blocker.
 | Sandbox-info handshake mismatch (`kind:none` posing as `kind:full`) | PR-S4-6 (`sbx-2026-009`) |
 | bwrap version drift (bwrap absent / below the version floor) | PR-S4-1 boot probe (#228) — TBD, no dedicated payload yet |
 | Over-broad bind source (`/`, non-allowlisted top-level tree, `/lib64/..`, `/proc/self/root`) | #428 (`sbx-2026-016`) — `bind_source_too_broad` parse-time refusal (not kernel-observable) |
+| `policy_ref` charset injection (forged `event` field / injected row via out-of-charset chars) | #437 (`sbx-2026-017`) — `policy_ref_charset_invalid` refusal; caught by the manifest parser first, not kernel-observable |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
