@@ -327,11 +327,17 @@ async def _build_comms_inbound_extractor(
     """
     from alfred.security.quarantine_child_io import spawn_quarantine_child_io
     from alfred.security.quarantine_transport import QuarantineStdioTransport
+    from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
 
     provider_key = _resolve_provider_key(secret_broker)
+    # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await
+    # to the fd-3-clobber window; the single await below is still the only one.
+    refusal_recorder = SandboxRefusalAuditor(audit_writer=audit_writer)
     # SINGLE await — the spawn owns the process-wide fd-3 clobber window and must
     # not race any other coroutine. Do not interleave awaits here.
-    child_io = await spawn_quarantine_child_io(provider_key=provider_key)
+    child_io = await spawn_quarantine_child_io(
+        provider_key=provider_key, refusal_recorder=refusal_recorder
+    )
     # Reap the just-spawned child if the (synchronous) transport/extractor
     # construction raises: this builder hasn't returned the transport yet, so the
     # daemon's exit-path teardown can't see it — without this the bwrap child would

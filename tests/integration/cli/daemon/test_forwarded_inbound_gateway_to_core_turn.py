@@ -507,7 +507,9 @@ async def test_forwarded_discord_inbound_over_socket_reaches_core_dispatch(
                 nonce = CapabilityGateNonce()
                 _tiers._set_authorized_t3_nonce(nonce)
 
-            async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+            async def _fake_spawn(
+                *, provider_key: str, refusal_recorder: object = None
+            ) -> _EchoingChildDouble:
                 return _EchoingChildDouble(provider_key=provider_key)
 
             monkeypatch.setattr(

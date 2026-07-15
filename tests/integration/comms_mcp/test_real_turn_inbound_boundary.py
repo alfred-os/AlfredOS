@@ -494,7 +494,9 @@ async def _boot_stack(
                 nonce = CapabilityGateNonce()
                 _tiers._set_authorized_t3_nonce(nonce)
 
-            async def _fake_spawn(*, provider_key: str) -> _ExtractionAwareChildDouble:
+            async def _fake_spawn(
+                *, provider_key: str, refusal_recorder: object = None
+            ) -> _ExtractionAwareChildDouble:
                 return _ExtractionAwareChildDouble(provider_key=provider_key)
 
             monkeypatch.setattr(

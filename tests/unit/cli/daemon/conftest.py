@@ -428,7 +428,9 @@ def patch_quarantine_child_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeQ
     """
     spawned: list[_FakeQuarantineChildIO] = []
 
-    async def _fake_spawn(*, provider_key: str) -> _FakeQuarantineChildIO:
+    async def _fake_spawn(
+        *, provider_key: str, refusal_recorder: object = None
+    ) -> _FakeQuarantineChildIO:
         child = _FakeQuarantineChildIO(provider_key=provider_key)
         spawned.append(child)
         return child
