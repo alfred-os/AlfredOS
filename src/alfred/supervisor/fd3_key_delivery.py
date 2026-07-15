@@ -20,10 +20,12 @@ sec-3 (round-4) hardening:
   full frame, or raises ``BlockingIOError`` / ``OSError``, the Supervisor
   REFUSES to spawn the plugin (raises :class:`ProviderKeyDeliveryError` with
   ``reason="provider_key_delivery_failed"``) rather than handing the plugin a
-  truncated key. The caller maps this to a
-  ``SANDBOX_REFUSED_FIELDS(reason="provider_key_delivery_failed")`` audit row
-  + quarantine (CLAUDE.md hard rule #7 — no silent failure on a security
-  path).
+  truncated key. The ``provider_key_delivery_failed`` reason is RESERVED in
+  the ``SANDBOX_REFUSED_REASONS`` vocabulary for a future writer of the
+  ``SANDBOX_REFUSED_FIELDS`` audit row on this genuine-delivery-failure path
+  (a #433 follow-up, tracked in ADR-0051's Follow-ups); it is not emitted by
+  any code today (CLAUDE.md hard rule #7 — no silent failure on a security
+  path, hence reserved rather than dropped, but not yet a live audit write).
 
 * **Zeroize then collect.** The key is staged in a mutable ``bytearray`` and
   overwritten with NUL bytes the instant the writev returns — BEFORE

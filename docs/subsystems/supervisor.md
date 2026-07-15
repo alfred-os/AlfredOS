@@ -360,7 +360,13 @@ flag is used; bwrap inherits open, non-CLOEXEC fds into the sandboxed child.
 (`--sync-fd` is bwrap's internal sync fd and would CONSUME fd 3 — verified
 bubblewrap 0.8.0/0.9.0, #218; there is no `--keep-fd` either.) The launcher
 never reads fd 3 itself. On a partial write / EAGAIN the Supervisor REFUSES to spawn
-(`reason="provider_key_delivery_failed"`).
+(`reason="provider_key_delivery_failed"`). This reason stays **reserved** — a
+launcher sandbox refusal (a *different* failure mode, keyed on
+`sandbox_refused`-in-stderr) is now persisted at first-extraction via the
+`read_frame` drain (ADR-0051, #433); `provider_key_delivery_failed` has no
+writer yet because the genuine fd-3 delivery-failure path it covers is a
+separate, rarer condition (the read end actually closed) than a launcher
+refusal, and remains a tracked follow-up.
 
 **Honest residency-window limitation.** The provider key arrives at
 `deliver_provider_key_via_fd3` as a Python `str` (interned, non-zeroizable).

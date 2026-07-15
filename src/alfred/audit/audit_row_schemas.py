@@ -1191,11 +1191,15 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # side without the other fails the build. Before #432 this was a prose comment bound to nothing,
 # and seven reasons the launcher could actually write were missing from it.
 #
-# NOTE (#433): this row is not yet persisted. The launcher ``printf``s it to stderr, which is
-# drained into a ``child_stderr`` log field; no ``src/alfred`` code parses it into an
-# ``append_schema`` write, and the registered ``fail_closed`` T0 hookpoint is never dispatched.
-# This set governs what the launcher WRITES (plus the reserved reasons named below); wiring
-# it to a real audit write is #433.
+# NOTE (#433): the quarantine-child launcher path now persists this row. A refused
+# launcher exits pre-exec, so the child produces no frame -> read_frame EOF ->
+# ``_SubprocessChildIO._log_child_stderr`` drains the stderr,
+# ``alfred.audit.launcher_refusal.parse_launcher_refusal_rows`` validates it, and
+# ``alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor`` writes it +
+# dispatches the fail_closed T0 hookpoint (ADR-0051). The three other launcher
+# producers (comms adapter, gateway adapter, foreground TUI) and the reserved
+# ``provider_key_delivery_failed`` writer adopt the same auditor in #433 follow-ups.
+# This set governs what the launcher WRITES (plus the reserved reasons named below).
 #
 # Twenty-one reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
 # deliberately (the binding requires the set to equal the union of emittable and reserved):
