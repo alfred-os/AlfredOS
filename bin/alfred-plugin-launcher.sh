@@ -293,6 +293,21 @@ case "${SANDBOX_KIND}" in
             printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"policy_ref_missing","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
             exit 1
         fi
+
+        # #437: POLICY_REF is interpolated raw into the audit-JSON printf rows
+        # below (and passed to the flags subprocess). PLUGIN_ID is charset-gated
+        # at entry for exactly this reason; do the same for POLICY_REF here, at
+        # its single chokepoint, BEFORE any use. Refuse WITHOUT echoing the
+        # tainted value — emitting it into the JSON row would BE the injection.
+        # Same negated path-safe class as the Python producer (manifest.py).
+        case "${POLICY_REF}" in
+            *[!A-Za-z0-9._/-]*)
+                printf 'supervisor.sandbox.refused.policy_ref_charset_invalid plugin_id=%s\n' "${PLUGIN_ID}" >&2
+                printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"policy_ref_charset_invalid","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
+                exit 1
+                ;;
+        esac
+
         case "${HOST_OS}" in
             linux)
                 # Confine + translate the policy_ref into bwrap flags via the

@@ -1197,7 +1197,7 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # This set governs what the launcher WRITES (plus the reserved reasons named below); wiring
 # it to a real audit write is #433.
 #
-# Twenty reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
+# Twenty-one reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
 # deliberately (the binding requires the set to equal the union of emittable and reserved):
 #   * ``policy_ref_os_mismatch``, ``bwrap_unavailable``, ``bwrap_mode_userns_unavailable`` —
 #     documented, no code path emits them;
@@ -1225,6 +1225,7 @@ SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
         "windows_stub_in_production",
         # policy_ref resolution (launcher + manifest_reader).
         "policy_ref_missing",
+        "policy_ref_charset_invalid",
         "policy_ref_unreadable",
         "policy_ref_escapes_root",
         # Policy schema refusals (sandbox_policy.SandboxPolicyInvalid).

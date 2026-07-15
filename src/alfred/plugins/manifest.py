@@ -31,6 +31,7 @@ still gets refused).
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping
 from typing import Any, Final, Literal
@@ -68,6 +69,15 @@ _SANDBOX_KIND: Final[frozenset[str]] = frozenset({"full", "none", "stub"})
 # the manifest_reader validation, AND the launcher ``case`` branch in one
 # atomic PR (cross-PR contract — plan §5).
 _VALID_OS_KEYS: Final[frozenset[str]] = frozenset({"linux", "macos", "windows"})
+
+# #437: policy_ref values are interpolated raw into the launcher's audit-JSON
+# printf rows (bin/alfred-plugin-launcher.sh L338/L412). Reject any char outside
+# the path-safe set so a value cannot forge a JSON field / inject a row. Mirrors
+# the POLICY_REF launcher guard added in this same PR (Task 2) — NOT the
+# narrower PLUGIN_ID guard (`*[!A-Za-z0-9._-]*`, no `/`) — which uses the
+# identical `*[!A-Za-z0-9._/-]*` negated class; empty is tolerated here (the
+# kind:full-non-empty + launcher empty-checks own that case).
+_POLICY_REF_BAD_CHAR: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9._/-]")
 
 
 class SandboxBlock(BaseModel):
@@ -312,6 +322,10 @@ def _parse_sandbox_block(data: dict[str, Any], *, plugin_id: str) -> SandboxBloc
         # bare-key contract (CR #229 R2 finding-2/-9).
         if not isinstance(os_value, str):
             raise ManifestError(t("plugin.manifest_sandbox_policy_refs_value_type", os_key=os_key))
+        if _POLICY_REF_BAD_CHAR.search(os_value):
+            raise ManifestError(
+                t("plugin.manifest_sandbox_policy_refs_value_charset", os_key=os_key)
+            )
 
     # ``kind: full`` requires a non-empty policy_refs map. Checked HERE so a
     # public ``ManifestError`` surfaces to ``parse_manifest`` callers
