@@ -111,3 +111,72 @@ def test_row_is_frozen() -> None:
     (row,) = parse_launcher_refusal_rows(_row_json())
     with pytest.raises((AttributeError, TypeError)):
         row.reason = "x"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# sec-001/arch-001 (#433 follow-up): the parser is fed potentially
+# CHILD-authored stderr on the crash path (the drain gate in
+# quarantine_child_io.py is defense in depth, not the only line of defense).
+# These cases prove the parser itself never raises on adversarial JSON shapes
+# and never persists a value carrying control/format characters.
+# ---------------------------------------------------------------------------
+
+
+def _raw_object(payload: dict[str, object]) -> bytes:
+    return (json.dumps(payload) + "\n").encode("utf-8")
+
+
+def test_reason_as_list_dropped_no_raise() -> None:
+    """A non-hashable ``reason`` (a JSON array) must be dropped, never raise.
+
+    Before the type-validation step existed, ``payload.get("reason") not in
+    SANDBOX_REFUSED_REASONS`` raised ``TypeError: unhashable type: 'list'`` —
+    the CR-major-6/9 finding. This must return no rows and must not raise.
+    """
+    raw = _raw_object(
+        {
+            "event": "supervisor.plugin.sandbox_refused",
+            "plugin_id": "alfred.quarantined-llm",
+            "reason": ["not", "a", "string"],
+            "environment": "development",
+            "host_os": "linux",
+        }
+    )
+    assert parse_launcher_refusal_rows(raw) == ()
+
+
+@pytest.mark.parametrize("bad_value", [None, 42, {"nested": "object"}])
+def test_non_string_field_value_dropped(bad_value: object) -> None:
+    """Any present field value that isn't a ``str`` (null/number/dict) is dropped."""
+    raw = _raw_object(
+        {
+            "event": "supervisor.plugin.sandbox_refused",
+            "plugin_id": bad_value,
+            "reason": "sandbox_block_missing",
+            "environment": "development",
+            "host_os": "linux",
+        }
+    )
+    assert parse_launcher_refusal_rows(raw) == ()
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        "linux\ninjected line",  # LF — forged log line
+        "\x1b[31mred\x1b[0m",  # ANSI escape
+        "‮evil",  # RIGHT-TO-LEFT OVERRIDE (bidi display-spoof)
+    ],
+)
+def test_unsafe_field_value_dropped(unsafe_value: str) -> None:
+    """A present field value carrying a control/format char is dropped, not persisted."""
+    raw = _raw_object(
+        {
+            "event": "supervisor.plugin.sandbox_refused",
+            "plugin_id": "alfred.quarantined-llm",
+            "reason": "sandbox_block_missing",
+            "environment": "development",
+            "host_os": unsafe_value,
+        }
+    )
+    assert parse_launcher_refusal_rows(raw) == ()
