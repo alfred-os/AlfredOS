@@ -9,6 +9,7 @@ shim).
 
 from __future__ import annotations
 
+import json
 import shutil
 
 import pytest
@@ -66,6 +67,27 @@ id = "alfred.example"
 subscriber_tier = "user-plugin"
 sandbox_profile = "user-plugin"
 """
+
+_INVALID_TOML_MANIFEST = """[alfred]
+manifest_version = 1
+[plugin
+id = "alfred.example"
+"""
+
+
+def _refusal_row(stderr: str) -> dict[str, str]:
+    """The single parsed supervisor.plugin.sandbox_refused JSON row on stderr.
+
+    Asserts EXACTLY one — two rows for one refusal would double-count in the audit
+    stream, and zero is the #435 defect.
+    """
+    lines = [
+        line
+        for line in stderr.splitlines()
+        if '"event":"supervisor.plugin.sandbox_refused"' in line
+    ]
+    assert len(lines) == 1, f"expected exactly 1 sandbox_refused row, got {len(lines)}: {lines}"
+    return json.loads(lines[0])
 
 
 _HAS_JQ = shutil.which("jq") is not None
@@ -407,6 +429,64 @@ def test_missing_sandbox_block_refused(run_launcher, tmp_path) -> None:
     )
     assert result.returncode != 0
     assert "sandbox_block_missing" in result.stderr
+
+
+@_requires_jq
+def test_unreadable_manifest_refused_as_manifest_unreadable(run_launcher, tmp_path) -> None:
+    """#434A: an unreadable manifest is a TAMPER signal — it must NOT be recorded as the
+    benign sandbox_block_missing."""
+    missing = tmp_path / "definitely-absent.toml"
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(missing),
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "manifest_unreadable"
+    assert row["plugin_id"] == "alfred.example"
+
+
+@_requires_jq
+def test_invalid_manifest_refused_as_manifest_invalid(run_launcher, tmp_path) -> None:
+    """#434A: malformed TOML is a TAMPER signal, distinct from a missing [sandbox] block."""
+    manifest = _write_manifest(tmp_path, _INVALID_TOML_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "manifest_invalid"
+
+
+@_requires_jq
+def test_missing_sandbox_block_still_refused_as_sandbox_block_missing(
+    run_launcher, tmp_path
+) -> None:
+    """#434A must not REGRESS the one reason that was previously correct."""
+    manifest = _write_manifest(tmp_path, _NO_SANDBOX_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "sandbox_block_missing"
 
 
 # --------------------------------------------------------------------------

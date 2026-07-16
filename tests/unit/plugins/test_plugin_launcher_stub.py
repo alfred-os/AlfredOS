@@ -668,12 +668,14 @@ def test_launcher_accepts_well_formed_policy_ref() -> None:
     would be backward-incompatible) shows up here. The launcher proceeds
     past this guard to the next branch — the stub's fallback case for the
     ``--policy-to-bwrap-flags`` call it does not understand — and refuses
-    downstream with the unrelated ``policy_translate_failed`` reason,
+    downstream with the unrelated ``reason_unclassified`` reason (#434B: the
+    stub's own "unexpected invocation" message is unclassifiable by the
+    schema `case`, so it hits the `*)` alarm arm, not a real schema reason),
     proving THIS guard specifically let the value through.
     """
     result = _run_launcher_with_policy_ref("config/sandbox/x.linux.bwrap.policy")
     assert b"policy_ref_charset_invalid" not in result.stderr
-    assert b"policy_translate_failed" in result.stderr
+    assert b"reason_unclassified" in result.stderr
 
 
 def test_launcher_charset_class_matches_the_python_producer() -> None:

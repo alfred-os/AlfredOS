@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-15 08:57+0100\n"
+"POT-Creation-Date: 2026-07-16 13:21+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2753,21 +2753,64 @@ msgstr ""
 msgid "supervisor.sandbox.refused.policy_translate_failed"
 msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags."
 
-#: src/alfred/plugins/_sandbox_i18n.py:68
+#: src/alfred/plugins/_sandbox_i18n.py:70
+msgid "supervisor.sandbox.refused.kind_full_requires_keep_fd_3"
+msgstr ""
+"Plugin {plugin_id} sandbox policy omits fd 3 (the provider-key channel) "
+"from keep_fds. Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:73
+msgid "supervisor.sandbox.refused.policy_path_not_absolute"
+msgstr ""
+"Plugin {plugin_id} sandbox policy contains a non-absolute bind path. "
+"Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:76
+msgid "supervisor.sandbox.refused.arch_variable_path_hard_bound"
+msgstr ""
+"Plugin {plugin_id} sandbox policy hard-binds an architecture-variable "
+"path that may not exist on every supported architecture. Refusing to "
+"launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:79
+msgid "supervisor.sandbox.refused.mount_shadows_earlier_mount"
+msgstr ""
+"Plugin {plugin_id} sandbox policy has a mount that shadows an earlier "
+"mount, masking it. Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:82
+msgid "supervisor.sandbox.refused.soft_bind_forbidden_path"
+msgstr ""
+"Plugin {plugin_id} sandbox policy soft-binds a path outside the "
+"architecture-variable allow-list. Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:85
+msgid "supervisor.sandbox.refused.bind_source_too_broad"
+msgstr ""
+"Plugin {plugin_id} sandbox policy binds a source that exposes the host "
+"root or a broad top-level tree into the sandbox. Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:92
+msgid "supervisor.sandbox.refused.reason_unclassified"
+msgstr ""
+"Plugin {plugin_id} sandbox refusal could not be classified from the "
+"manifest reader's output. Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:98
 msgid "supervisor.sandbox.refused.interpreter_prefix_too_broad"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: the configured interpreter "
 "({interpreter}) resolves to a root-level install prefix, which would bind"
 " the entire host filesystem into the sandbox."
 
-#: src/alfred/plugins/_sandbox_i18n.py:76
+#: src/alfred/plugins/_sandbox_i18n.py:106
 msgid "supervisor.sandbox.refused.fake_uname_in_production"
 msgstr ""
 "FAKE_UNAME is set in production for plugin {plugin_id}. FAKE_UNAME is a "
 "test-only host-OS override and is ignored in production; its presence "
 "here can only force a host-OS branch. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:79
+#: src/alfred/plugins/_sandbox_i18n.py:109
 msgid "supervisor.sandbox.refused.uid_separation_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched on this non-Linux production host "
@@ -2775,26 +2818,26 @@ msgstr ""
 "unsandboxed in production is refused. Run plugins on a Linux host or "
 "under bwrap."
 
-#: src/alfred/plugins/_sandbox_i18n.py:82
+#: src/alfred/plugins/_sandbox_i18n.py:112
 msgid "supervisor.sandbox.refused.stub_kind_in_production"
 msgstr ""
 "Plugin {plugin_id} declares a kind:stub sandbox, which provides no "
 "containment, and is refused in production on host {host_os}. Refusing to "
 "launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:86
+#: src/alfred/plugins/_sandbox_i18n.py:116
 msgid "supervisor.boot.mlock_unavailable"
 msgstr ""
 "mlockall is unavailable ({errno_string}); Supervisor pages may swap to "
 "disk. Boot proceeds."
 
-#: src/alfred/plugins/_sandbox_i18n.py:87
+#: src/alfred/plugins/_sandbox_i18n.py:117
 msgid "supervisor.boot.core_dumps_disabled"
 msgstr ""
 "Core dumps disabled (RLIMIT_CORE set to 0) to protect the in-memory "
 "provider key."
 
-#: src/alfred/plugins/_sandbox_i18n.py:88
+#: src/alfred/plugins/_sandbox_i18n.py:118
 msgid "daemon.boot.environment_source_conflict"
 msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "
@@ -3075,34 +3118,34 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:403
+#: src/alfred/security/quarantine_child_io.py:429
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:421
+#: src/alfred/security/quarantine_child_io.py:447
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:448
+#: src/alfred/security/quarantine_child_io.py:490
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:462
-#: src/alfred/security/quarantine_child_io.py:733
+#: src/alfred/security/quarantine_child_io.py:504
+#: src/alfred/security/quarantine_child_io.py:810
 msgid "security.quarantine_child.broker_unconfigured"
 msgstr "Quarantine child egress broker is not configured."
 
-#: src/alfred/security/quarantine_child_io.py:731
+#: src/alfred/security/quarantine_child_io.py:808
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:802
+#: src/alfred/security/quarantine_child_io.py:879
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:843
+#: src/alfred/security/quarantine_child_io.py:920
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "

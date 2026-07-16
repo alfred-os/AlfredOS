@@ -186,6 +186,17 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.sandbox.refused.unknown_host_os",
     "supervisor.sandbox.refused.jq_unavailable",
     "supervisor.sandbox.refused.sandbox_info_handshake_mismatch",
+    "supervisor.sandbox.refused.reason_unclassified",  # #434A/#434B
+    # #434B: the schema `case` allow-list arm (SandboxPolicyInvalid reasons),
+    # now reachable from the launcher's operator stderr key since it
+    # interpolates ${_AUDIT_REASON} instead of hardcoding
+    # policy_translate_failed.
+    "supervisor.sandbox.refused.kind_full_requires_keep_fd_3",
+    "supervisor.sandbox.refused.policy_path_not_absolute",
+    "supervisor.sandbox.refused.arch_variable_path_hard_bound",
+    "supervisor.sandbox.refused.mount_shadows_earlier_mount",
+    "supervisor.sandbox.refused.soft_bind_forbidden_path",
+    "supervisor.sandbox.refused.bind_source_too_broad",
     # PR-S4-6 CR #229 finding-1 (sec-keystone) + low-1 host-accurate refusals.
     "supervisor.sandbox.refused.fake_uname_in_production",
     "supervisor.sandbox.refused.uid_separation_unavailable",

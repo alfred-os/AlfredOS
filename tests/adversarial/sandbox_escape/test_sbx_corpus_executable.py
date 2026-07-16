@@ -409,10 +409,12 @@ def test_sbx_2026_017_policy_ref_charset_injection_refused(tmp_path: Path) -> No
     manifest parser refuses at parse time, before ``SandboxBlock``
     construction. Layer 2 (real end-to-end launcher subprocess): the tainted
     manifest never reaches ``POLICY_REF`` assignment — ``manifest_reader``'s
-    ``--read-sandbox`` collapses the upstream ``ManifestError`` to
+    ``--read-sandbox`` reports the upstream ``ManifestError`` as
     ``plugin.manifest_invalid``, which the launcher's ``_read_sandbox``
-    failure branch reports as ``sandbox_block_missing`` (the same collapse
-    ``test_sbx_2026_001_sandbox_block_missing`` asserts). The launcher's OWN
+    failure branch (#434A) now maps to the DISTINCT ``manifest_invalid``
+    audit reason — no longer collapsed into the benign ``sandbox_block_missing``
+    that ``test_sbx_2026_001_sandbox_block_missing`` asserts for a genuinely
+    missing ``[sandbox]`` block. The launcher's OWN
     ``policy_ref_charset_invalid`` chokepoint guard is unreachable via any
     real manifest — it is proximate-to-use defense-in-depth, exercised
     directly (via a PATH-shadowed ``python3`` stub simulating an
@@ -440,7 +442,11 @@ def test_sbx_2026_017_policy_ref_charset_injection_refused(tmp_path: Path) -> No
             tmp_path=tmp_path,
         )
         assert rc != 0, f"variant {variant!r} was NOT refused by the launcher"
-        assert "sandbox_block_missing" in stderr, f"variant {variant!r}: {stderr!r}"
+        # #434A: a charset-injected policy_ref is a manifest-level ManifestError,
+        # reported as the distinct manifest_invalid TAMPER signal — not the benign
+        # sandbox_block_missing (which test_sbx_2026_001 covers for the genuinely
+        # missing-block case).
+        assert "manifest_invalid" in stderr, f"variant {variant!r}: {stderr!r}"
         # ANTI-ECHO end-to-end: the tainted variant value must not appear in the
         # launcher's output — the upstream refusal never interpolates it, and the
         # launcher's own guard would omit it too. Echoing it would BE the injection.

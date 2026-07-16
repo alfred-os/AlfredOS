@@ -270,11 +270,41 @@ _read_sandbox() {
     fi
 }
 
-if ! SANDBOX_JSON="$(_read_sandbox 2>/dev/null)"; then
-    printf 'supervisor.sandbox.refused.sandbox_block_missing plugin_id=%s\n' "${PLUGIN_ID}" >&2
-    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"sandbox_block_missing","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
+# #434A: capture the helper's stderr instead of discarding it. `_read_sandbox`
+# can fail with FIVE distinct bare i18n keys; `2>/dev/null` collapsed all five
+# into the benign `sandbox_block_missing`, so `manifest_unreadable` /
+# `manifest_invalid` — a planted-manifest TAMPER signal — were recorded as "you
+# forgot [sandbox]". Mirrors the environment path above (L155-171), which has
+# implemented this capture-and-map correctly since PR #229.
+_SANDBOX_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/alfred-launcher-sandbox-err.XXXXXX")"
+if ! SANDBOX_JSON="$(_read_sandbox 2>"${_SANDBOX_ERR_FILE}")"; then
+    _sandbox_err_key="$(tail -n 1 "${_SANDBOX_ERR_FILE}" 2>/dev/null || true)"
+    rm -f "${_SANDBOX_ERR_FILE}"
+    # Each arm assigns BOTH the audit reason and the operator key it re-prints.
+    # The operator key is echoed VERBATIM (never synthesised from the reason) so
+    # no new i18n key is needed — the `plugin.*` keys are already registered in
+    # _sandbox_i18n.py, and a `t(message_key=var)` indirection would make them
+    # pybabel-invisible. Closed vocab: audit_row_schemas.SANDBOX_REFUSED_REASONS;
+    # bound by test_sandbox_reason_vocab_sync.py (#432).
+    case "${_sandbox_err_key}" in
+        plugin.launcher_plugin_id_invalid) _SANDBOX_REASON="plugin_id_charset_invalid" ;;
+        plugin.manifest_reader_no_source) _SANDBOX_REASON="manifest_reader_no_source" ;;
+        plugin.manifest_unreadable) _SANDBOX_REASON="manifest_unreadable" ;;
+        plugin.manifest_sandbox_block_missing) _SANDBOX_REASON="sandbox_block_missing" ;;
+        plugin.manifest_invalid) _SANDBOX_REASON="manifest_invalid" ;;
+        *)
+            # An empty or unrecognised capture is a drift/crash ALARM, not a
+            # routine refusal — say so rather than guessing a specific reason
+            # (fail-closed: we still refuse).
+            _SANDBOX_REASON="reason_unclassified"
+            _sandbox_err_key="supervisor.sandbox.refused.reason_unclassified"
+            ;;
+    esac
+    printf '%s plugin_id=%s\n' "${_sandbox_err_key}" "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"%s","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${_SANDBOX_REASON}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
     exit 1
 fi
+rm -f "${_SANDBOX_ERR_FILE}"
 
 # jq parses the helper's JSON. Refuse loudly if missing — the resolver is
 # unimplementable without a JSON reader in bash (alfred-core apt-installs jq).
@@ -314,7 +344,6 @@ case "${SANDBOX_KIND}" in
                 # Python helper (sec-2 path-confinement lives in Python). One
                 # flag per line into a bash array.
                 if ! BWRAP_FLAGS_RAW="$(python3 -m alfred.plugins.manifest_reader --policy-to-bwrap-flags --policy-ref "${POLICY_REF}" 2>&1)"; then
-                    printf 'supervisor.sandbox.refused.policy_translate_failed plugin_id=%s detail=%s\n' "${PLUGIN_ID}" "${BWRAP_FLAGS_RAW}" >&2
                     # #428: the helper printed the SCHEMA reason (bare, or a
                     # supervisor.sandbox.refused.* key) as its last stderr line; a
                     # cold-import warning may precede it, so read the LAST line. Echo
@@ -329,12 +358,21 @@ case "${SANDBOX_KIND}" in
                         kind_full_requires_keep_fd_3|policy_path_not_absolute|arch_variable_path_hard_bound|mount_shadows_earlier_mount|soft_bind_forbidden_path|bind_source_too_broad|policy_translate_failed|policy_ref_escapes_root|policy_ref_unreadable)
                             _AUDIT_REASON="${_CAPTURED_REASON}" ;;
                         *)
-                            # Generic translate-failure reason for an unclassified
-                            # last line — honest ("translation failed for an
-                            # unclassified reason") rather than the specific-and-
-                            # misleading "unreadable".
-                            _AUDIT_REASON="policy_translate_failed" ;;
+                            # #434B: an unclassifiable last line is a drift/crash ALARM — a
+                            # traceback, an ImportError, or a schema reason added to Python
+                            # without touching this case. Record it as such. Reusing
+                            # `policy_translate_failed` (which is ALSO the real reason for
+                            # malformed TOML) made the alarm indistinguishable from a routine
+                            # policy-authoring error, so nobody ever looked at it.
+                            _AUDIT_REASON="reason_unclassified" ;;
                     esac
+                    # #434B: printed AFTER the case resolves _AUDIT_REASON so the operator
+                    # key matches the recorded reason, rather than unconditionally naming
+                    # policy_translate_failed even when the real (or unclassified) reason is
+                    # something else. Every value _AUDIT_REASON can take here has a
+                    # registered supervisor.sandbox.refused.* catalog key — bound by
+                    # test_every_schema_case_reason_has_a_registered_operator_key.
+                    printf 'supervisor.sandbox.refused.%s plugin_id=%s detail=%s\n' "${_AUDIT_REASON}" "${PLUGIN_ID}" "${BWRAP_FLAGS_RAW}" >&2
                     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"%s","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${_AUDIT_REASON}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
                     exit 1
                 fi
