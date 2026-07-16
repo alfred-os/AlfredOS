@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-16 14:39+0100\n"
+"POT-Creation-Date: 2026-07-16 19:36+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2705,15 +2705,25 @@ msgstr ""
 
 #: src/alfred/plugins/_sandbox_i18n.py:41
 msgid "plugin.manifest_unreadable"
-msgstr "Plugin manifest could not be read."
+msgstr ""
+"Plugin manifest could not be read (missing, permission-denied, or an "
+"unreadable symlink). This can also signal a corrupted or planted manifest"
+" file. Check plugins/<plugin_id>/manifest.toml exists and is readable by "
+"the launcher, then retry."
 
 #: src/alfred/plugins/_sandbox_i18n.py:42
 msgid "plugin.manifest_reader_no_source"
-msgstr "manifest_reader requires --manifest-path or --plugin-id."
+msgstr ""
+"manifest_reader requires --manifest-path or --plugin-id, and neither was "
+"supplied. This is an internal launcher-invocation defect, not a plugin-"
+"authoring error — report it with the alfred version you are running."
 
 #: src/alfred/plugins/_sandbox_i18n.py:43
 msgid "plugin.manifest_invalid"
-msgstr "Plugin manifest is invalid."
+msgstr ""
+"Plugin manifest is invalid (malformed TOML, or an unrecognised sandbox "
+"kind/policy_refs value). Fix plugins/<plugin_id>/manifest.toml against "
+"the manifest schema and retry."
 
 #: src/alfred/plugins/_sandbox_i18n.py:46
 msgid "supervisor.sandbox.refused.policy_ref_escapes_root"
@@ -2741,13 +2751,13 @@ msgstr "Plugin {plugin_id} cannot be launched: unrecognised host OS."
 msgid "supervisor.sandbox.refused.jq_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: jq is not available on the "
-"launcher host."
+"launcher host. Install jq and retry."
 
 #: src/alfred/plugins/_sandbox_i18n.py:60
 msgid "supervisor.sandbox.refused.bwrap_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: bwrap is not available on the "
-"launcher host."
+"launcher host. Install bubblewrap (provides bwrap) and retry."
 
 #: src/alfred/plugins/_sandbox_i18n.py:63
 msgid "supervisor.sandbox.refused.macos_full_not_yet_shipped"
@@ -2799,8 +2809,11 @@ msgstr ""
 #: src/alfred/plugins/_sandbox_i18n.py:96
 msgid "supervisor.sandbox.refused.reason_unclassified"
 msgstr ""
-"Plugin {plugin_id} sandbox refusal could not be classified from the "
-"manifest reader's output. Refusing to launch."
+"Plugin {plugin_id} sandbox refusal could not be classified from either "
+"the manifest-reader helper or the policy translator's output. This is an "
+"internal drift or crash signal in the launcher chain, not a routine "
+"policy refusal — refusing to launch. Check `alfred audit log --since 5m` "
+"and report it with the alfred version you are running."
 
 #: src/alfred/plugins/_sandbox_i18n.py:102
 msgid "supervisor.sandbox.refused.interpreter_prefix_too_broad"

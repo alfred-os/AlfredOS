@@ -1089,14 +1089,35 @@ class Supervisor:
             ("supervisor.plugin.sandbox_refused", SYSTEM_ONLY_TIERS, frozenset(), True, T0),
             # PR-S4-7: the dev/test-only stub-used row. The launcher emits this
             # (and execs unsandboxed) ONLY in development/test when no real OS
-            # sandbox is available (Windows kind:full, runuser-missing dev path).
-            # Registered here so a subscriber can observe — and an audit
-            # consumer can never miss — that a plugin ran without OS-level
-            # isolation. carrier_tier=T0 (carries only plugin_id/policy_ref/
-            # host_os/environment — no operator/untrusted content; spec index
+            # sandbox is available. Three producers, all in
+            # bin/alfred-plugin-launcher.sh: a non-Linux host with no UID-drop
+            # mechanism (uid_separation_unavailable), a Windows kind:full
+            # manifest (windows_stub), and a kind:stub manifest (stub_kind).
+            # The runuser-missing-on-Linux path is NOT one of these — it
+            # always refuses pre-exec (reason=runuser_unavailable, a
+            # sandbox_refused row, wired by #435) and never reaches this
+            # hookpoint.
+            #
+            # Registered + declared here, but UNPUBLISHED: no code path calls
+            # invoke() for this hookpoint (contrast sandbox_refused, dispatched
+            # by alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor).
+            # Persistence is deliberately NOT wired (#436 / ADR-0051): this row
+            # asserts "I am about to exec", so a live child shares the
+            # launcher's stderr fd with no delimiter between launcher-authored
+            # and child-authored bytes — the existing drain gate
+            # (quarantine_child_io._SubprocessChildIO's `refusal_candidate and
+            # not self._child_wrote_stdout`) is an INVERTED oracle for it: an
+            # honest child that execs writes stdout and closes the gate
+            # (discarding the true row), while a forging child that writes
+            # zero stdout before dying OPENS it. Persisting this row for real
+            # needs a success-path stderr drain with its own out-of-band
+            # provenance signal — tracked as #447.
+            #
+            # carrier_tier=T0 (carries only plugin_id/policy_ref/host_os/
+            # environment/reason — no operator/untrusted content; spec index
             # §3). fail_closed=True, mirroring its sandbox_refused sibling
-            # verbatim (#167 per-kind override deferred — all Slice-4 supervisor
-            # refusal/posture hookpoints are uniformly fail-closed).
+            # verbatim (#167 per-kind override deferred — all Slice-4
+            # supervisor refusal/posture hookpoints are uniformly fail-closed).
             ("supervisor.plugin.sandbox_stub_used", SYSTEM_ONLY_TIERS, frozenset(), True, T0),
             ("supervisor.boot.mlock_unavailable", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
             ("supervisor.boot.core_dumps_disabled", SYSTEM_ONLY_TIERS, frozenset(), False, T0),

@@ -21,10 +21,17 @@ Three defects in one row family, all on `bin/alfred-plugin-launcher.sh` + the co
    `SANDBOX_JSON="$(_read_sandbox 2>/dev/null)"` and unconditionally emits
    `reason="sandbox_block_missing"`. `manifest_reader._cmd_read_sandbox` can fail with **five**
    distinct keys (`plugin.launcher_plugin_id_invalid`, `plugin.manifest_reader_no_source`,
-   `plugin.manifest_unreadable`, `plugin.manifest_sandbox_block_missing`, `plugin.manifest_invalid`).
-   `2>/dev/null` discards all five unrecoverably — so `manifest_unreadable` and `manifest_invalid`
-   (a **planted-manifest tamper signal**) are recorded as the benign "you forgot `[sandbox]`".
-   The launcher's own environment path (`L155-171`) already implements the correct
+   `plugin.manifest_unreadable`, `plugin.manifest_sandbox_block_missing`, `plugin.manifest_invalid`);
+   the launcher's map covers all five because it binds to `manifest_reader`'s full CLI contract (the
+   #432 AST guard derives the map from that same contract). **Only three are reachable via the
+   launcher in practice**: `manifest_reader._plugin_id_is_safe` uses a charset byte-identical to the
+   launcher's own `PLUGIN_ID` gate (`L123-128`), and `_read_sandbox` always calls the helper with
+   either `--manifest-path` or the already-charset-validated `--plugin-id`, so `_cmd_read_sandbox`'s
+   `manifest_path is None` branch — the one that emits `plugin.launcher_plugin_id_invalid` or
+   `plugin.manifest_reader_no_source` — never runs from the launcher's own invocation. `2>/dev/null`
+   still discards all five unrecoverably wherever they occur — so `manifest_unreadable` and
+   `manifest_invalid` (a **planted-manifest tamper signal**) are recorded as the benign "you forgot
+   `[sandbox]`". The launcher's own environment path (`L155-171`) already implements the correct
    capture-and-map pattern; this is a self-inconsistency with a ready-made fix in the same file.
 
 2. **#434B — `policy_translate_failed` means three things.** It is simultaneously (a) a real
@@ -247,8 +254,9 @@ surfaces.
 | `plugin.manifest_invalid` | `manifest_invalid` *(new)* |
 | anything else | `reason_unclassified` *(new)* |
 
-The operator stderr line re-prints the captured key verbatim (D9), falling back to
-`plugin.manifest_sandbox_block_missing` when the capture is empty (fail-closed, mirroring `L166`).
+The operator stderr line re-prints the captured key verbatim (D9) when it matches one of the five
+recognised keys above; an empty or unrecognised capture instead falls back to the fixed
+`supervisor.sandbox.refused.reason_unclassified` key (fail-closed either way — we still refuse).
 
 **Part B.** The `*)` arm at `L336` sets `_AUDIT_REASON="reason_unclassified"` instead of
 `policy_translate_failed`, so a drift/crash alarm is forensically distinguishable from a real
@@ -275,7 +283,10 @@ uses `command -v "${BWRAP}"` so a `BWRAP=` absolute-path override is honoured.
 
 * Add `reason` to `SANDBOX_STUB_USED_FIELDS`.
 * Add `SANDBOX_STUB_USED_REASONS: Final[frozenset[str]] = frozenset({"uid_separation_unavailable",
-  "windows_stub", "stub_kind"})` per D7, exported in `__all__`.
+  "windows_stub", "stub_kind"})` per D7, declared as a module-level `Final` constant. The module has
+  no `__all__` — `AUDIT_FIELDSET_ROSTER`, its only name-tracking roster, is scoped to `*_FIELDS`
+  constants (the AST guard's bidirectional walk), not `*_REASONS` ones — so this constant is bound
+  only by the #432 reason-vocab drift guard, like its `SANDBOX_REFUSED_REASONS` sibling.
 * `L412` emits `reason="windows_stub"`; `L432` emits `reason="stub_kind"` — `reason` becomes mandatory
   on all three sites.
 * **Fix the false docstring** at `audit_row_schemas.py:1264` ("Emitted when a kind:stub plugin runs

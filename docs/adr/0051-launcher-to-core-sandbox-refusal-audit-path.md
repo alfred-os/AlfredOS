@@ -206,15 +206,18 @@ and `plugins/`.
   pre-`Supervisor` (needs a `declare_hookpoints()`-shaped fix first) and the
   underlying condition is rare.
 - #434 (the `2>/dev/null` five-key collapse + `policy_translate_failed`
-  alarm/real conflation), #435 (four launcher refusal paths that emit no
-  audit row at all), #436 (the undeclared `sandbox_stub_used` reason field)
-  — sibling refinements on the same row family, out of scope here.
+  alarm/real conflation), #435 (six launcher refusal paths that emit no
+  audit row at all — the issue as filed named four at stale line numbers),
+  #436 (the undeclared `sandbox_stub_used` reason field) — sibling
+  refinements on the same row family, out of scope here.
 - **#434, #435, #436 — closed 2026-07-16.** All three sibling refinements
   named above landed: `sandbox_refused` rows now carry their true reason
   (no more `2>/dev/null` collapse, no more alarm/real conflation on
-  `policy_translate_failed`), every launcher exit-1 path that previously left
-  no audit trail now emits one (including `bwrap_unavailable`), and
-  `sandbox_stub_used`'s `reason` field is declared under a closed vocabulary
+  `policy_translate_failed`), all six launcher exit-1 paths that previously
+  left no audit trail now emit one (charset gate, runuser missing, jq
+  missing, bwrap missing, macOS `kind:full`, and an unrecognised sandbox
+  kind — including `bwrap_unavailable`), and `sandbox_stub_used`'s `reason`
+  field is declared under a closed vocabulary
   (`SANDBOX_STUB_USED_REASONS`) bound by the #432 reason-vocab drift guard.
   That declaration is a schema fix only — the row itself remains
   **deliberately unpersisted**. `sandbox_stub_used` asserts "I am about to
