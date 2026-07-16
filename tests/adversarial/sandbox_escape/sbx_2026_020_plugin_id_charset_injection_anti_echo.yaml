@@ -1,0 +1,50 @@
+id: sbx-2026-020
+category: sandbox_escape
+threat: >-
+  A malformed, injection-shaped plugin_id passed as the launcher's first
+  positional argument must never appear in any emitted stderr line -- the
+  charset gate refuses before any JSON-emitting branch runs, so only the
+  launcher-authored `<invalid>` sentinel may ever stand in for it (D2).
+ingestion_path: launcher_refusal_stderr
+payload:
+  attack: plugin_id_charset_injection_anti_echo
+  variants: # each is passed as argv[1] (the plugin_id) to the REAL launcher
+    # subprocess. Every character outside [A-Za-z0-9._-] trips the charset gate
+    # at the top of the script, BEFORE any manifest read, jq invocation, or
+    # JSON-emitting printf branch.
+    - 'attacker.example", "event": "forged'
+    - 'attacker.example\'
+    - '<invalid>'
+    - '../../../etc/passwd'
+    - '$(id)'
+    - 'attacker.example;rm -rf /tmp'
+expected_outcome: refused
+provenance: >-
+  #435 (D2) + the launcher's own comment at the charset-gate exit path: "the
+  row carries the launcher-authored `<invalid>` sentinel, NEVER
+  ${PLUGIN_ID} -- interpolating the tainted bytes into this template is
+  exactly the injection the gate above exists to prevent (CR on PR #140)".
+  Before #435 this gate had NO audit row at all -- a malformed-id probe left
+  no trace; #435 added one, and D2 constrains what it may carry. Each
+  variant is fed as the launcher's literal argv[1] -- no shell re-parses
+  it, so a `$(id)` / `;rm -rf` payload is not exploitable as a shell
+  injection here, but is exactly the class of value the charset gate exists
+  to keep out of the JSON-emitting branches entirely, on the theory that
+  any string reaching a printf template is a potential forgery vector
+  regardless of shell context. Asserted three ways per variant, closing the
+  loop from raw argv bytes to the validated row the core would persist:
+  (1) the launcher process refuses (rc != 0) with `plugin_id_charset_invalid`
+  on stderr; (2) the tainted variant string appears in NEITHER stdout NOR
+  stderr -- the anti-echo guarantee #437's lesson generalizes ("echoing it
+  would BE the injection"); (3) parse_launcher_refusal_rows, run on the
+  real captured stderr, yields exactly one row whose plugin_id field is the
+  literal string "<invalid>", never the tainted bytes. The `<invalid>`
+  variant additionally proves there is no accidental collision special
+  case: an attacker whose real id happens to equal the sentinel string is
+  refused identically (the charset gate fires on `<`/`>` like any other
+  out-of-set byte), never silently "let through" because it looks safe.
+references:
+  - "bin/alfred-plugin-launcher.sh (PLUGIN_ID charset gate, top of script, before any JSON-emitting branch)"
+  - "src/alfred/audit/launcher_refusal.py (parse_launcher_refusal_rows)"
+  - "src/alfred/audit/audit_row_schemas.py (SANDBOX_REFUSED_REASONS: plugin_id_charset_invalid)"
+  - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md"
