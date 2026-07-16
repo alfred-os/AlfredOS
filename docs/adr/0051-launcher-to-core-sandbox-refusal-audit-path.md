@@ -217,17 +217,29 @@ mechanism beyond the original v2 design:
 
 - **sec-001/arch-001 — gate recording to the launcher-authored signal only.**
   `_record_launcher_refusals` is called from `_log_child_stderr` strictly
-  under `failure and not self._frame_read`: a `read_frame` EOF observed
-  *before* any frame has ever been successfully read from the child. That
-  condition holds only for a genuinely refused launcher (it exits
-  pre-`exec`, so the child never produces a frame). Once a frame has been
-  read, the child is live and exec'd — the most adversary-facing surface —
-  so a subsequent `read_frame` failure (a crash or wedge of that *running*
-  child) is child-authored and is never turned into an attributed audit
-  row; the same applies to the `aclose` teardown path, which never calls
-  the recorder at all. Without this gate, an exec'd T3 child could crash
-  itself on cue and have its own (attacker-influenced) stderr persisted as
-  a signed `supervisor.plugin.sandbox_refused` row.
+  under `refusal_candidate and not self._child_wrote_stdout`. `refusal_candidate`
+  is true only for a **zero-byte** `_TruncatedFrameError` — a `read_frame` EOF at
+  offset zero, which is exactly how a refused launcher presents (it exits
+  pre-`exec`, closing stdout immediately). A `TimeoutError` is **never** a
+  refusal candidate: a launcher refusal closes stdout at once rather than
+  stalling to the wall-clock deadline, and a timed-out read leaves the executor
+  read in flight with no byte-count evidence — so attributing it to the launcher
+  would let a child stall a partial header to the deadline, then exit, and forge
+  a row. `_child_wrote_stdout` is the second, lifetime discriminator: it is set
+  the instant **any** byte is read off the child's stdout — the moment the header
+  read returns, and (via `_TruncatedFrameError.bytes_read`) even when the header
+  read itself tears after a partial read. So once the child writes even one byte
+  it is live and exec'd — the most adversary-facing surface — and a subsequent
+  `read_frame` failure (a crash or wedge of that *running* child) is
+  child-authored and never turned into an attributed audit row; the same applies
+  to the `aclose` teardown path, which never calls the recorder at all. Keying on
+  a zero-byte EOF (not a full frame, and not a timeout) closes both forgery
+  bypasses CodeRabbit flagged: a malicious child that writes a valid 4-byte header
+  then fails the body read on frame one (excluded by `_child_wrote_stdout`), and
+  one that stalls a partial header to the read deadline then exits (excluded by
+  `refusal_candidate`). Without this gate, an exec'd T3 child could
+  crash itself on cue and have its own (attacker-influenced) stderr persisted
+  as a signed `supervisor.plugin.sandbox_refused` row.
 - **sec-001 (parser) — validate field values, not just field names.**
   `parse_launcher_refusal_rows` validates that every `SANDBOX_REFUSED_FIELDS`
   value is string-typed and free of `Cc` (control) / `Cf` (format) code
@@ -237,14 +249,17 @@ mechanism beyond the original v2 design:
   a forged newline, ANSI escape, or bidi-spoofing character into the signed
   audit log via a field value.
 
-The residual this ADR still carries: a child that crashes on its very first
-turn, before any frame has ever been read, is indistinguishable from a
-genuine launcher refusal at this call site — both present as `read_frame`
-EOF with `self._frame_read is False`. This is not a gap the launcher-authored
-gate can close by itself (the discriminator IS "no frame yet read"); it
-defers to the boot-time fail-closed health-check (option A, #443), which
-would observe the launcher's refusal (or lack thereof) directly at spawn
-time rather than inferring it from a later `read_frame` failure shape.
+The residual this ADR still carries (now far narrower): a child that execs,
+writes **zero** stdout bytes, and then dies while emitting a forged
+`sandbox_refused` row on stderr is indistinguishable from a genuine launcher
+refusal at this call site — both present as `read_frame` EOF with
+`self._child_wrote_stdout is False`. A child that writes *any* stdout (a full
+or even partial header) is already excluded. This last sliver is not a gap the
+launcher-authored gate can close by itself (the discriminator IS "no stdout
+byte ever seen"); it defers to the boot-time fail-closed health-check
+(option A, #443), which would observe the launcher's refusal (or lack thereof)
+directly at spawn time rather than inferring it from a later `read_frame`
+failure shape.
 
 ## References
 

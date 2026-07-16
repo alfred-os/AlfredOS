@@ -271,7 +271,18 @@ class _TruncatedFrameError(Exception):
     :class:`QuarantineChildSpawnError`. Never surfaces a silent empty body
     (CLAUDE.md hard rule #7). Peer to ``asyncio.IncompleteReadError`` on the old
     StreamReader path.
+
+    ``bytes_read`` carries how many bytes were consumed before EOF. It is
+    security-load-bearing (sec-001): ANY byte on stdout means the child exec'd and
+    wrote — so a mid-frame EOF with ``bytes_read > 0`` is a CHILD-authored torn
+    wire, NOT a pre-``exec`` launcher refusal (which produces zero stdout). The
+    ``read_frame`` drain gate uses this to refuse to attribute a child's stderr to
+    the T0 launcher (closes the first-turn header-then-fail forgery bypass).
     """
+
+    def __init__(self, bytes_read: int = 0) -> None:
+        super().__init__()
+        self.bytes_read = bytes_read
 
 
 def _blocking_read_exactly(stream: IO[bytes], count: int) -> bytes:
@@ -287,7 +298,10 @@ def _blocking_read_exactly(stream: IO[bytes], count: int) -> bytes:
     while remaining > 0:
         chunk = stream.read(remaining)
         if not chunk:
-            raise _TruncatedFrameError
+            # Report how many bytes DID arrive before EOF (sec-001): a non-zero
+            # partial read means the child wrote to stdout, so its stderr is
+            # child-authored, not a launcher refusal.
+            raise _TruncatedFrameError(bytes_read=count - remaining)
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -387,16 +401,18 @@ class _SubprocessChildIO:
         self._process = process
         self._closed = False
         self._stderr_drained = False
-        # Set the instant a frame is SUCCESSFULLY read (see ``read_frame``).
-        # sec-001/arch-001 (#433 follow-up): this is the launcher-authored/
-        # child-authored discriminator for ``_log_child_stderr`` -- a refused
-        # launcher exits pre-``exec`` and NEVER produces a frame, so a
-        # ``read_frame`` EOF with this flag still False is the genuine
-        # refusal signal. Once a frame HAS been read, the child is live and
-        # exec'd (the most adversary-facing surface) -- any subsequent
-        # ``read_frame`` failure is a crash/wedge of THAT child, and its
-        # stderr must never be turned into an attributed audit row.
-        self._frame_read = False
+        # Set the instant ANY byte is read off the child's stdout (see
+        # ``read_frame``). sec-001/arch-001 (#433 follow-up): this is the
+        # launcher-authored/child-authored discriminator for ``_log_child_stderr``
+        # -- a refused launcher exits pre-``exec`` and NEVER writes to stdout, so a
+        # ``read_frame`` EOF with this flag still False is the genuine refusal
+        # signal. The moment the child writes even a partial header the child is
+        # live and exec'd (the most adversary-facing surface), so any ``read_frame``
+        # failure from then on is a crash/wedge of THAT child and its stderr must
+        # never be turned into an attributed audit row. Keying on the FIRST stdout
+        # byte (not a full frame) closes the first-turn forgery bypass CR flagged:
+        # a child that writes a valid header then fails the body read on frame one.
+        self._child_wrote_stdout = False
         # Set iff a drain read TIMED OUT: the executor thread is still blocked in the
         # real ``stderr.read()`` (holding the BufferedReader lock), so ``aclose`` must
         # NOT close that pipe out from under it (the close would re-block). Only
@@ -436,6 +452,9 @@ class _SubprocessChildIO:
                 loop.run_in_executor(None, _blocking_read_exactly, stdout, _LENGTH_HEADER_BYTES),
                 timeout=_READ_FRAME_TIMEOUT_S,
             )
+            # The child wrote a full header -> it exec'd and produced stdout, so from
+            # here on its stderr is child-authored, never a launcher refusal (sec-001).
+            self._child_wrote_stdout = True
             length = struct.unpack(">I", header)[0]
             body = await asyncio.wait_for(
                 loop.run_in_executor(None, _blocking_read_exactly, stdout, length),
@@ -446,15 +465,27 @@ class _SubprocessChildIO:
             # header — the in-test `_EchoingChildDouble` returns header+body too, so
             # returning body-only here mis-aligned the real wire vs the double (the
             # decoder chopped the first 4 JSON bytes -> JSONDecodeError). #237.
-            self._frame_read = True
             return header + body
         except (TimeoutError, _TruncatedFrameError) as exc:
+            # A PARTIAL read (some stdout bytes arrived before EOF) also proves the
+            # child wrote to stdout -> child-authored (sec-001). Set BEFORE the drain
+            # below reads the flag, so a header-then-fail (or partial-header-then-EOF)
+            # first frame can never be attributed to the T0 launcher.
+            if isinstance(exc, _TruncatedFrameError) and exc.bytes_read > 0:
+                self._child_wrote_stdout = True
+            # Only a ZERO-byte EOF is a launcher-refusal candidate (CR follow-up). A
+            # TimeoutError is inherently a CHILD-side event -- a refused launcher exits
+            # pre-``exec`` and closes stdout immediately (EOF, never a wall-clock
+            # timeout), and on a timeout the executor read is still in flight so no
+            # ``bytes_read`` evidence exists; attributing it to the T0 launcher would let
+            # a child that stalls a partial header to the deadline then exits forge a row.
+            refusal_candidate = isinstance(exc, _TruncatedFrameError) and exc.bytes_read == 0
             _log.error(
                 "security.quarantine_child.read_frame_failed", error_class=type(exc).__name__
             )
             # failure=True -> the child_stderr diagnostic logs at ERROR, alongside the
             # read_frame_failed error it explains (visible to error-level alerting).
-            await self._log_child_stderr(failure=True)
+            await self._log_child_stderr(failure=True, refusal_candidate=refusal_candidate)
             raise QuarantineChildSpawnError(
                 t("security.quarantine_child.read_frame_failed")
             ) from exc
@@ -475,7 +506,9 @@ class _SubprocessChildIO:
             parent_end=self._control_parent, proxy_config=self._egress_config
         )
 
-    async def _log_child_stderr(self, *, failure: bool = False) -> None:
+    async def _log_child_stderr(
+        self, *, failure: bool = False, refusal_candidate: bool = False
+    ) -> None:
         """Drain (iff the child has exited) + structured-log its stderr, at most once.
 
         Exit-gated, idempotent, AND best-effort-never-raises (#251). Order matters:
@@ -536,13 +569,15 @@ class _SubprocessChildIO:
             # Record BEFORE the best-effort diagnostic log (CR-major-1: a structlog emit
             # failure below must not skip the audit persistence — the whole point of #433).
             # Gate to the LAUNCHER-authored signal (sec-001/arch-001): only a genuine
-            # pre-exec refusal surfaces as read_frame EOF (failure=True) with NO prior
-            # frame ever read. A crashed/wedged EXEC'd child (post-frame read_frame failure,
-            # or the aclose teardown path) is CHILD-authored — its stderr must NOT be turned
-            # into an attributed supervisor audit row. Residual: a child crashing on its very
-            # first turn before any frame is indistinguishable here and defers to the
-            # boot-time probe (ADR-0051 option A, #443).
-            if failure and not self._frame_read:
+            # pre-exec refusal surfaces as a read_frame ZERO-byte EOF (``refusal_candidate``)
+            # with the child having produced NO stdout across its life
+            # (``not self._child_wrote_stdout``). A TimeoutError (``refusal_candidate`` is
+            # False) or any stdout byte -- full/partial header, or the aclose teardown path
+            # -- is CHILD-authored: its stderr must NOT become an attributed supervisor
+            # audit row. Residual: a child that execs, writes zero stdout, then dies at a
+            # clean EOF emitting a forged row is indistinguishable here and defers to the
+            # boot-time probe (ADR-0051 option A, #443) -- far narrower than "any crash".
+            if refusal_candidate and not self._child_wrote_stdout:
                 await self._record_launcher_refusals(raw)
             truncated = len(raw) > _STDERR_LOG_CAP_BYTES
             sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES, truncated=truncated)
@@ -574,15 +609,20 @@ class _SubprocessChildIO:
     async def _record_launcher_refusals(self, raw: bytes) -> None:
         """Parse launcher refusal rows from raw stderr + record them. Never raises.
 
-        Called ONLY from the ``_log_child_stderr`` gate ``if failure and not
-        self._frame_read`` (sec-001/arch-001, #433 follow-up): a refused
-        launcher exits pre-``exec`` so the child produces no frame ->
-        ``read_frame`` EOF with no prior successful read -> this is the
-        launcher-authored (T0) signal. A crashed/wedged EXEC'd child (a frame
-        was already read, or this is the ``aclose`` teardown path) is
-        CHILD-authored — the caller does not reach this method on that path,
-        so a malicious child cannot forge a ``sandbox_refused`` line into an
-        attributed audit row. Fully self-guarding (CLAUDE.md hard rule #7): an
+        Called ONLY from the ``_log_child_stderr`` gate ``if refusal_candidate and
+        not self._child_wrote_stdout`` (sec-001/arch-001, #433 follow-up).
+        ``refusal_candidate`` is a ZERO-byte ``_TruncatedFrameError`` — a clean EOF
+        at offset zero — which is how a refused launcher presents: it exits
+        pre-``exec``, writing ZERO stdout bytes and closing the pipe at once. A
+        ``TimeoutError`` is never a candidate (a refusal does not stall to the
+        deadline, and a timed-out read carries no byte evidence). A crashed/wedged
+        EXEC'd child (it wrote any stdout — a full or even partial header — or this
+        is the ``aclose`` teardown path) is CHILD-authored — the caller does not
+        reach this method on those paths, so a malicious child cannot forge a
+        ``sandbox_refused`` line into an attributed audit row (closing both the
+        first-turn header-then-fail and the timeout-attribution bypasses).
+
+        Fully self-guarding (CLAUDE.md hard rule #7): an
         ``append_schema`` / ``invoke`` failure is logged LOUD with an explicit
         ``error_class`` and swallowed, so it neither preempts the
         ``read_frame_failed`` ``QuarantineChildSpawnError`` nor breaks
