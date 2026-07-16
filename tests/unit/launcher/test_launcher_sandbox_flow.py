@@ -506,6 +506,90 @@ def test_jq_unavailable_refuses_with_a_row(run_launcher, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------
+# mktemp capture failure (#452 review err-001/sec-002)
+#
+# A bare `_ERR_FILE="$(mktemp ...)"` assignment under `set -eu` let a failing
+# mktemp kill the whole script BEFORE the protective `if` around it ever ran
+# — zero audit row, just mktemp's raw diagnostic. `_capture_stderr_last_line`
+# fixed this at BOTH call sites; these two tests shadow a fake `mktemp` on
+# PATH (ahead of the real one) to prove each site fails CLOSED with a row.
+# --------------------------------------------------------------------------
+
+
+def test_environment_read_mktemp_failure_emits_a_row(run_launcher, tmp_path) -> None:
+    """The FIRST `_capture_stderr_last_line` caller (environment read, before host-OS
+    detection): `environment`/`host_os` are not resolved yet, so the row carries the same
+    unset/unknown markers as the other pre-resolution refusal rows.
+    """
+    fake_bin = tmp_path / "fake_mktemp_always_fails"
+    fake_bin.mkdir()
+    fake_mktemp = fake_bin / "mktemp"
+    fake_mktemp.write_text("#!/bin/sh\necho 'fake mktemp: simulated failure' >&2\nexit 1\n")
+    fake_mktemp.chmod(0o755)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "ALFRED_ENVIRONMENT": "development",
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "reason_unclassified"
+    assert row["environment"] == "unset"
+    assert row["host_os"] == "unknown"
+
+
+def test_sandbox_read_mktemp_failure_emits_a_row(run_launcher, tmp_path) -> None:
+    """Sibling of the test above for the #434A sandbox-read call site — the SECOND
+    `_capture_stderr_last_line` caller — proving BOTH call sites share the fix, not just the
+    first. A static TMPDIR can't fail only the second mktemp call, so this shadows a STATEFUL
+    fake `mktemp` that succeeds on call #1 (environment read, which must go through so this test
+    reaches the sandbox-read call at all) and fails on call #2 (sandbox read). Unlike the test
+    above, `environment`/`host_os` are already resolved by this point, so the row must carry the
+    REAL resolved values, not the unset/unknown markers.
+    """
+    real_mktemp = shutil.which("mktemp")
+    assert real_mktemp, "mktemp required on the real PATH to build the stateful fake"
+    fake_bin = tmp_path / "fake_mktemp_fails_second_call"
+    fake_bin.mkdir()
+    counter = tmp_path / "mktemp_calls"
+    fake_mktemp = fake_bin / "mktemp"
+    fake_mktemp.write_text(
+        "#!/bin/sh\n"
+        f'COUNTER="{counter}"\n'
+        "count=0\n"
+        '[ -f "$COUNTER" ] && count=$(cat "$COUNTER")\n'
+        "count=$((count + 1))\n"
+        'echo "$count" > "$COUNTER"\n'
+        'if [ "$count" -eq 2 ]; then\n'
+        "    echo 'fake mktemp: simulated failure on call #2' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        f'exec "{real_mktemp}" "$@"\n'
+    )
+    fake_mktemp.chmod(0o755)
+    manifest = _write_manifest(tmp_path, _NONE_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "reason_unclassified"
+    assert row["environment"] == "development"
+    assert row["host_os"] in {"linux", "macos", "windows"}
+
+
+# --------------------------------------------------------------------------
 # kind:stub
 # --------------------------------------------------------------------------
 
