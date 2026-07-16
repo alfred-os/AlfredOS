@@ -387,6 +387,16 @@ class _SubprocessChildIO:
         self._process = process
         self._closed = False
         self._stderr_drained = False
+        # Set the instant a frame is SUCCESSFULLY read (see ``read_frame``).
+        # sec-001/arch-001 (#433 follow-up): this is the launcher-authored/
+        # child-authored discriminator for ``_log_child_stderr`` -- a refused
+        # launcher exits pre-``exec`` and NEVER produces a frame, so a
+        # ``read_frame`` EOF with this flag still False is the genuine
+        # refusal signal. Once a frame HAS been read, the child is live and
+        # exec'd (the most adversary-facing surface) -- any subsequent
+        # ``read_frame`` failure is a crash/wedge of THAT child, and its
+        # stderr must never be turned into an attributed audit row.
+        self._frame_read = False
         # Set iff a drain read TIMED OUT: the executor thread is still blocked in the
         # real ``stderr.read()`` (holding the BufferedReader lock), so ``aclose`` must
         # NOT close that pipe out from under it (the close would re-block). Only
@@ -436,6 +446,7 @@ class _SubprocessChildIO:
             # header — the in-test `_EchoingChildDouble` returns header+body too, so
             # returning body-only here mis-aligned the real wire vs the double (the
             # decoder chopped the first 4 JSON bytes -> JSONDecodeError). #237.
+            self._frame_read = True
             return header + body
         except (TimeoutError, _TruncatedFrameError) as exc:
             _log.error(
@@ -522,12 +533,22 @@ class _SubprocessChildIO:
             )
             if not raw:
                 return
+            # Record BEFORE the best-effort diagnostic log (CR-major-1: a structlog emit
+            # failure below must not skip the audit persistence — the whole point of #433).
+            # Gate to the LAUNCHER-authored signal (sec-001/arch-001): only a genuine
+            # pre-exec refusal surfaces as read_frame EOF (failure=True) with NO prior
+            # frame ever read. A crashed/wedged EXEC'd child (post-frame read_frame failure,
+            # or the aclose teardown path) is CHILD-authored — its stderr must NOT be turned
+            # into an attributed supervisor audit row. Residual: a child crashing on its very
+            # first turn before any frame is indistinguishable here and defers to the
+            # boot-time probe (ADR-0051 option A, #443).
+            if failure and not self._frame_read:
+                await self._record_launcher_refusals(raw)
             truncated = len(raw) > _STDERR_LOG_CAP_BYTES
             sanitized = _sanitize_child_stderr(raw, cap=_STDERR_LOG_CAP_BYTES, truncated=truncated)
             if sanitized is not None:
                 log = _log.error if failure else _log.warning
                 log("security.quarantine_child.child_stderr", child_stderr=sanitized)
-            await self._record_launcher_refusals(raw)
         except Exception as exc:
             # Best-effort diagnostic: NEVER preempt the caller's QuarantineChildSpawnError
             # (hard rule #7). Fail LOUD via an explicit ``error_class`` field — NOT
@@ -553,12 +574,28 @@ class _SubprocessChildIO:
     async def _record_launcher_refusals(self, raw: bytes) -> None:
         """Parse launcher refusal rows from raw stderr + record them. Never raises.
 
-        Called from the stderr drain (a refused launcher exits pre-``exec`` so the
-        child produces no frame -> ``read_frame`` EOF -> this drain). Fully
-        self-guarding (CLAUDE.md hard rule #7): an ``append_schema`` / ``invoke``
-        failure is logged LOUD with an explicit ``error_class`` and swallowed, so
-        it neither preempts the ``read_frame_failed`` ``QuarantineChildSpawnError``
-        nor breaks ``_log_child_stderr``'s best-effort "never raises" contract.
+        Called ONLY from the ``_log_child_stderr`` gate ``if failure and not
+        self._frame_read`` (sec-001/arch-001, #433 follow-up): a refused
+        launcher exits pre-``exec`` so the child produces no frame ->
+        ``read_frame`` EOF with no prior successful read -> this is the
+        launcher-authored (T0) signal. A crashed/wedged EXEC'd child (a frame
+        was already read, or this is the ``aclose`` teardown path) is
+        CHILD-authored — the caller does not reach this method on that path,
+        so a malicious child cannot forge a ``sandbox_refused`` line into an
+        attributed audit row. Fully self-guarding (CLAUDE.md hard rule #7): an
+        ``append_schema`` / ``invoke`` failure is logged LOUD with an explicit
+        ``error_class`` and swallowed, so it neither preempts the
+        ``read_frame_failed`` ``QuarantineChildSpawnError`` nor breaks
+        ``_log_child_stderr``'s best-effort "never raises" contract.
+
+        CANARY FORWARD GATE (mirrors the sibling ``except`` in
+        ``_log_child_stderr`` at ~line 559-562): once a canary-raising log
+        processor is wired into the shared redactor
+        (``dlp.OutboundCanaryTripped``; canary=None today), a canary token
+        surfacing via ``parse_launcher_refusal_rows`` or the recorder's
+        ``append_schema``/``invoke`` call would raise HERE — the ``except``
+        below MUST then special-case + escalate it rather than demote it to
+        ``refusal_record_failed``.
         """
         if self._refusal_recorder is None:
             return
