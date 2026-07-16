@@ -83,6 +83,8 @@ IngestionPath = Literal[
     # platform BODY, pre-identity-resolution, gated by quarantined_extract);
     # this is resolved identity METADATA that skips that gate by design.
     "comms_inbound_display_name",
+    # #433: launcher sandbox_refused stderr → parse_launcher_refusal_rows
+    "launcher_refusal_stderr",
 ]
 
 ExpectedOutcome = Literal[
