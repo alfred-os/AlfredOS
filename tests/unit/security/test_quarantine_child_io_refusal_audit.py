@@ -98,3 +98,71 @@ async def test_clean_teardown_records_nothing() -> None:
     io = _SubprocessChildIO(fake, refusal_recorder=recorder)
     await io.aclose()
     assert recorder.rows == []
+
+
+# ---------------------------------------------------------------------------
+# sec-001/arch-001 (#433 follow-up): gate recording to the LAUNCHER-authored
+# signal. A genuine refusal is read_frame EOF with NO frame EVER read (the
+# launcher exited pre-exec, above). A crashed/wedged EXEC'D child is
+# CHILD-authored stderr — a malicious child could otherwise forge a
+# schema-valid sandbox_refused line and get an attributed audit row +
+# fail_closed hookpoint dispatch out of it. Both cases below carry the exact
+# same forged _REFUSAL_ROW in stderr but must record NOTHING.
+# ---------------------------------------------------------------------------
+
+
+def _exited_fake_with_frame(frame_body: bytes, stderr: bytes):
+    # A real frame is read successfully ONCE (simulating a live, exec'd
+    # quarantine child that produced at least one reply), then the buffer is
+    # drained -> the NEXT read_frame call hits EOF mid-header. returncode is
+    # preset so the drain's ``poll() is not None`` gate passes once we get
+    # there (mirrors ``_exited_fake``).
+    from tests.unit.security.test_quarantine_child_io import _FakePopen, _framed
+
+    fake = _FakePopen(stdout_frames=[_framed(frame_body)], stderr_bytes=stderr)
+    fake.returncode = 1
+    return fake
+
+
+async def test_post_frame_read_failure_not_recorded() -> None:
+    """A crash AFTER a frame was read is CHILD-authored -- never recorded."""
+    recorder = _CapturingRecorder()
+    fake = _exited_fake_with_frame(b'{"jsonrpc":"2.0","result":{"ok":1}}', _REFUSAL_ROW)
+    io = _SubprocessChildIO(fake, refusal_recorder=recorder)
+    await io.read_frame()  # first read succeeds -> sets _frame_read = True
+    with pytest.raises(QuarantineChildSpawnError):
+        await io.read_frame()  # buffer now empty -> EOF mid-frame (a crash)
+    assert recorder.rows == []
+
+
+async def test_launcher_authored_eof_with_no_refusal_row_records_nothing() -> None:
+    """The gate passes (failure=True, no prior frame) but stderr has NO refusal row.
+
+    Branch-coverage fill for ``_record_launcher_refusals``'s ``if rows:``: the
+    gate letting a genuine pre-exec EOF through does not itself guarantee the
+    stderr parses to a row -- benign launcher stderr with nothing recognisable
+    must still record nothing (distinct from the child-authored-suppression
+    tests above, which never even reach ``_record_launcher_refusals``).
+    """
+    recorder = _CapturingRecorder()
+    io = _SubprocessChildIO(
+        _exited_fake(b"some benign launcher log line\n"), refusal_recorder=recorder
+    )
+    with pytest.raises(QuarantineChildSpawnError):
+        await io.read_frame()
+    assert recorder.rows == []
+
+
+async def test_aclose_with_refusal_row_not_recorded() -> None:
+    """aclose (failure=False) never records -- not the launcher-refusal signal.
+
+    Even though stderr carries a schema-valid ``sandbox_refused`` row and no
+    frame was ever read, a clean teardown is not itself the ``read_frame``
+    EOF signal the gate keys on -- only the ``read_frame`` failure arm may
+    attribute a row (see the drain's ``_log_child_stderr`` docstring).
+    """
+    recorder = _CapturingRecorder()
+    fake = _exited_fake(_REFUSAL_ROW)
+    io = _SubprocessChildIO(fake, refusal_recorder=recorder)
+    await io.aclose()
+    assert recorder.rows == []
