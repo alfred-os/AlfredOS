@@ -236,7 +236,7 @@ and `plugins/`.
   `sandbox_stub_used` row it might have emitted), while a forging child that
   writes zero stdout before dying *opens* the gate — the gate would admit
   approximately only forgeries. Tracked as a new issue,
-  `<STUB-PERSIST-ISSUE>`, for the success-path drain + provenance-signal
+  [#447](https://github.com/alfred-os/AlfredOS/issues/447), for the success-path drain + provenance-signal
   design this needs, with its own ADR.
 
 ## Post-review hardening
