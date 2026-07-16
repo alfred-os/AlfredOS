@@ -189,22 +189,47 @@ Genuinely conditional: present only at `L412`, the one site that resolved a poli
 * **No stub_used `_OPTIONAL_FIELDS` constant** — that is more unwired scaffolding. Document optionality
   on the constant, matching the refused family's comment style.
 
-### D9 — operator stderr keys are re-printed verbatim, not synthesised
+### D9 — two operator-key strategies coexist: verbatim re-print, and deliberate synthesis
 
-The launcher's *operator stderr key* and the row's *audit `reason`* are **separate namespaces**. The
-environment path at `L168` already re-prints the captured helper key verbatim. Following that pattern
-(rather than synthesising `supervisor.sandbox.refused.${_AUDIT_REASON}`) means #434A adds **zero** new
-i18n keys — `plugin.manifest_unreadable`, `plugin.manifest_reader_no_source`, `plugin.manifest_invalid`
-are already registered in `_sandbox_i18n.py:41-43`; `plugin.launcher_plugin_id_invalid` and
-`plugin.launcher_uid_drop_unavailable` in `_launcher_i18n.py:39,42`. It also avoids the
-`t(message_key=var)` indirection that makes keys pybabel-invisible.
+The launcher's *operator stderr key* and the row's *audit `reason`* are **separate namespaces**, and
+two DIFFERENT strategies produce the operator key depending on what the failing helper handed back.
+(An earlier draft of this decision assumed only the first strategy and rejected the second outright
+— that assumption did not survive contact with the schema-case path, below.)
 
-`supervisor.sandbox.refused.jq_unavailable` and `…macos_full_not_yet_shipped` **already exist** in the
-catalog (`_sandbox_i18n.py:57-60`) — the operator keys were registered but the reasons and rows were
-never added. That asymmetry is the drift in miniature.
+* **#434A's `_read_sandbox` capture** (the manifest-key path) re-prints the captured helper key
+  VERBATIM — the environment path above already does this, and following the same pattern here means
+  the five real `manifest_reader --read-sandbox` refusals add **zero** new i18n keys:
+  `plugin.manifest_unreadable`, `plugin.manifest_reader_no_source`, `plugin.manifest_invalid` are
+  already registered in `_sandbox_i18n.py:41-43`; `plugin.launcher_plugin_id_invalid` and
+  `plugin.launcher_uid_drop_unavailable` in `_launcher_i18n.py:39,42`. It also avoids the
+  `t(message_key=var)` indirection that makes keys pybabel-invisible. This path's own `*)` fallback
+  reassigns the SAME variable to the fixed literal `supervisor.sandbox.refused.reason_unclassified`
+  precisely so a crashing helper's own (unconstrained) stderr text can never reach this verbatim
+  re-print — pinned by the anti-echo test added alongside this decision.
 
-**Exactly three new i18n keys** (each needs a `t()` anchor in `_sandbox_i18n.py`):
-`supervisor.sandbox.refused.reason_unclassified`, `…sandbox_kind_unrecognised`, `…bwrap_unavailable`.
+* **The schema-case path (`bin/alfred-plugin-launcher.sh:388`) SYNTHESISES** the operator key by
+  interpolating the resolved reason (`printf 'supervisor.sandbox.refused.%s ...' "${_AUDIT_REASON}"
+  ...`). This is deliberate, not a lapse: the value captured on this path (`_CAPTURED_REASON`) is a
+  BARE `SandboxPolicyInvalid` reason, never a full i18n key, so there is nothing to re-print verbatim.
+  Before this PR the operator key here was hardcoded to `policy_ref_unreadable` for every schema
+  refusal (#428's defect); interpolating fixes that — and, as a direct consequence, makes every one
+  of the schema case's nine literal reasons independently reachable as its own operator key. Six of
+  those nine had no catalog entry yet (`kind_full_requires_keep_fd_3`, `policy_path_not_absolute`,
+  `arch_variable_path_hard_bound`, `mount_shadows_earlier_mount`, `soft_bind_forbidden_path`,
+  `bind_source_too_broad`) — not new REASONS, but latent i18n gaps the old hardcoded key had been
+  masking. `test_every_schema_case_reason_has_a_registered_operator_key` binds all nine so that a
+  future maintainer who "corrects" `L388` back to a hardcoded key — reinstating the verbatim-only
+  rule this decision originally stated — would silently relabel six real refusals back to
+  `policy_ref_unreadable` and reopen #428, and the binding would catch it.
+
+`supervisor.sandbox.refused.jq_unavailable` and `…macos_full_not_yet_shipped` already existed in the
+catalog before this PR — the operator keys were registered but the reasons and rows were never added.
+That asymmetry is the drift in miniature.
+
+**Nine new i18n keys ship** (each needs a `t()` anchor in `_sandbox_i18n.py`): the three genuinely new
+operator keys — `supervisor.sandbox.refused.reason_unclassified`, `…bwrap_unavailable`,
+`…sandbox_kind_unrecognised` — plus the six schema-case literals the interpolation above newly
+surfaces.
 
 ## Design
 
@@ -300,7 +325,7 @@ its coverage is behavioural: one test per refusal path asserting the exact row.
   otherwise unchanged; assert that (no `_OPTIONAL_FIELDS` widening).
 * **`tests/unit/audit/test_slice_4_audit_row_fields.py`** — `SANDBOX_STUB_USED_FIELDS` includes `reason`.
 * **`tests/unit/plugins/test_sandbox_i18n_keys.py` / `tests/unit/test_catalog_slice_4_keys.py`** — the
-  three new keys are registered and present in the catalog. Run the full i18n gate
+  nine new keys are registered and present in the catalog. Run the full i18n gate
   (`pybabel extract` → `update --no-fuzzy-matching` → `compile`); a line-shifting edit re-stales the
   `#:` refs, and per-task runs skip that check.
 * **Adversarial** — extend `tests/adversarial/sandbox_escape/`: a forged `sandbox_stub_used` row on
@@ -350,5 +375,5 @@ its coverage is behavioural: one test per refusal path asserting the exact row.
 * **No new ADR, no ADR-0051 amendment.** Contract-only conformance to an existing decision — ADR-0051's
   Follow-ups already names #434/#435/#436 as one group, so landing this satisfies that line rather than
   contradicting it. The stub_used **persist** path is what would need an ADR; it is out of scope.
-* **No `t()` work beyond the three new keys.** The JSON row is a structured record, not operator prose,
+* **No `t()` work beyond the nine new keys.** The JSON row is a structured record, not operator prose,
   and the launcher is a bash child-subprocess stderr producer — neither is `t()` scope.

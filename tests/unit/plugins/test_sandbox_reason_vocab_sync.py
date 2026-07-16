@@ -337,8 +337,8 @@ def test_schema_case_classifies_exactly_the_flags_path_reasons() -> None:
     """The schema `case` allow-list == exactly the reasons the flags helper can emit (#432 ask).
 
     Equality (not superset) so it bites BOTH ways: a new SandboxPolicyInvalid reason missing from
-    bash (which would silently fall back to the generic policy_translate_failed), AND a dead bash
-    entry the helper can never print.
+    bash (which would degrade to reason_unclassified), AND a dead bash entry the helper can never
+    print.
     """
     first_arm, _ = _parse_case("${_CAPTURED_REASON}")
     expected = _flags_path_reasons()
@@ -378,9 +378,12 @@ def _launcher_emittable_reasons() -> frozenset[str]:
       * a literal -> {that literal};
       * `%s` fed by ${_AUDIT_REASON}    -> union of the schema case first arm and its `*)` arm;
       * `%s` fed by ${_env_err_key#...} -> union of the env case first arm and its `*)` arm
-        (prefix-stripped).
+        (prefix-stripped);
+      * `%s` fed by ${_SANDBOX_REASON}  -> the #434A mapping-case's resolved values (its `*)` arm
+        assigns the same variable, so its fallback is already folded into the mapping — no
+        separate union needed here).
     A `%s` fed by an unrecognised variable, or a line with no `reason` field, FAILS LOUD — so a
-    future 12th emit site (or a printf folded into a `%s` helper under #422 pressure) cannot be
+    future 19th emit site (or a printf folded into a `%s` helper under #422 pressure) cannot be
     silently skipped while a `>= N` floor still passes (#432 review ops-001 / err-003).
     """
     schema_first, schema_fallback = _parse_case("${_CAPTURED_REASON}")
@@ -398,7 +401,7 @@ def _launcher_emittable_reasons() -> frozenset[str]:
     # Independent denominator: every ``printf`` line that mentions the event, matched on the
     # event NAME rather than the exact JSON byte-string ``"event":"..."``. Keying the count on
     # the compact byte-string would let a FUTURE emit line that reformats the surrounding JSON
-    # (a space after a colon, a reordered field) slip the count entirely while ``>= 11`` still
+    # (a space after a colon, a reordered field) slip the count entirely while ``>= 18`` still
     # passed — the very silent-under-count class this guard exists to prevent (#432 review
     # err-438-01 / CodeRabbit). Every counted line must then resolve to a reason, or fail loud.
     emit_lines = [
@@ -555,7 +558,7 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     assert len(_read_environment_keys()) == 2, "env-key floor"
     assert len(_launcher_emittable_reasons()) >= 31, "launcher-emittable floor"
     assert len(_RESERVED_UNEMITTED) == 4, "reserved floor"
-    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 34, "vocab floor"
+    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 35, "vocab floor"
 
 
 # ---------------------------------------------------------------------------
