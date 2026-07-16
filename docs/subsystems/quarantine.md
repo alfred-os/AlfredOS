@@ -238,6 +238,17 @@ sanitized T3-derived stderr text into the operational-log plane — an accepted,
 bounded residual (the orchestrator still never reads it, and it is not audit-tier).
 See the #251 design spec §6 for the full residual + the canary forward-gate.
 
+On the **launcher-authored** refusal path — a `read_frame` EOF with no prior
+successful frame (a genuine pre-`exec` launcher refusal, T0) — the same drain
+additionally parses the launcher's `supervisor.plugin.sandbox_refused` stderr
+row (`alfred.audit.launcher_refusal.parse_launcher_refusal_rows`) and persists
+it via `alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor`
+(`append_schema` + dispatch of the `fail_closed` T0 hookpoint) — ADR-0051, #433.
+**Child-authored** stderr — a post-frame crash of the exec'd child, or the
+`aclose` teardown path — is never persisted this way, only logged as the
+transient `child_stderr` field above: an exec'd T3 child cannot forge a
+`sandbox_refused` audit row.
+
 ## Internal model
 
 ### Quarantined-LLM plugin shape

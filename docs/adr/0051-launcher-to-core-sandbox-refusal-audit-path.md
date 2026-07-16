@@ -194,20 +194,57 @@ and `plugins/`.
 
 ## Follow-ups
 
-- Persist `sandbox_refused` for the **comms-adapter**, **gateway-adapter**,
-  and **foreground-TUI** producers via the same `SandboxRefusalAuditor`.
-- **Boot-time fail-closed quarantine health-check** (option A above): detect
-  a refusal at spawn/boot and refuse boot, rather than at first extraction.
-  A separate operability concern from what this ADR ships.
-- **Synthesized `provider_key_delivery_failed` row**: on a genuine fd-3
-  delivery failure (the rare case where the read end is actually closed),
-  write the reserved reason. Deferred because its dispatch would be
+- Persist `sandbox_refused` for the **comms-adapter** (#440),
+  **gateway-adapter** (#441), and **foreground-TUI** (#442) producers via the
+  same `SandboxRefusalAuditor`.
+- **Boot-time fail-closed quarantine health-check** (#443 — option A above):
+  detect a refusal at spawn/boot and refuse boot, rather than at first
+  extraction. A separate operability concern from what this ADR ships.
+- **Synthesized `provider_key_delivery_failed` row** (#444): on a genuine
+  fd-3 delivery failure (the rare case where the read end is actually
+  closed), write the reserved reason. Deferred because its dispatch would be
   pre-`Supervisor` (needs a `declare_hookpoints()`-shaped fix first) and the
   underlying condition is rare.
 - #434 (the `2>/dev/null` five-key collapse + `policy_translate_failed`
   alarm/real conflation), #435 (four launcher refusal paths that emit no
   audit row at all), #436 (the undeclared `sandbox_stub_used` reason field)
   — sibling refinements on the same row family, out of scope here.
+
+## Post-review hardening
+
+The plan/PR review fleet raised two findings that shaped the shipped
+mechanism beyond the original v2 design:
+
+- **sec-001/arch-001 — gate recording to the launcher-authored signal only.**
+  `_record_launcher_refusals` is called from `_log_child_stderr` strictly
+  under `failure and not self._frame_read`: a `read_frame` EOF observed
+  *before* any frame has ever been successfully read from the child. That
+  condition holds only for a genuinely refused launcher (it exits
+  pre-`exec`, so the child never produces a frame). Once a frame has been
+  read, the child is live and exec'd — the most adversary-facing surface —
+  so a subsequent `read_frame` failure (a crash or wedge of that *running*
+  child) is child-authored and is never turned into an attributed audit
+  row; the same applies to the `aclose` teardown path, which never calls
+  the recorder at all. Without this gate, an exec'd T3 child could crash
+  itself on cue and have its own (attacker-influenced) stderr persisted as
+  a signed `supervisor.plugin.sandbox_refused` row.
+- **sec-001 (parser) — validate field values, not just field names.**
+  `parse_launcher_refusal_rows` validates that every `SANDBOX_REFUSED_FIELDS`
+  value is string-typed and free of `Cc` (control) / `Cf` (format) code
+  points before a row is accepted — the same category set the #251
+  `child_stderr` sanitizer strips. Without this, a child that could
+  influence the drained stderr bytes (see the residual below) could inject
+  a forged newline, ANSI escape, or bidi-spoofing character into the signed
+  audit log via a field value.
+
+The residual this ADR still carries: a child that crashes on its very first
+turn, before any frame has ever been read, is indistinguishable from a
+genuine launcher refusal at this call site — both present as `read_frame`
+EOF with `self._frame_read is False`. This is not a gap the launcher-authored
+gate can close by itself (the discriminator IS "no frame yet read"); it
+defers to the boot-time fail-closed health-check (option A, #443), which
+would observe the launcher's refusal (or lack thereof) directly at spawn
+time rather than inferring it from a later `read_frame` failure shape.
 
 ## References
 
