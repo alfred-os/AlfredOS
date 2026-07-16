@@ -29,11 +29,36 @@ used, it consumes fd 3; verified bubblewrap 0.8.0/0.9.0, #218).
   field value (forged `event`, embedded newline) that must not forge a second
   audit event or smuggle an out-of-vocab `reason` past the host-side stderr
   parser (`parse_launcher_refusal_rows`, #433).
+- Runtime-compromised quarantine child leaking its fd-3 provider key or the
+  raw T3 body back to a host-visible surface (stdout, stderr, the audit log) —
+  contained structurally by the fd-3 read-once child boundary and
+  `read_frame`'s single-result-frame lift, not a child-side promise.
+- Live-spawned quarantine child (real launcher + shipped bwrap policy, not a
+  direct bwrap invocation) attempting the same host-escape probes as
+  `sbx-2026-003/004/006` — the launcher-spawned graduation of those entries.
+- Discord adapter outbound network egress to an arbitrary attacker host —
+  contained by the adapter's `--unshare-net` policy; egress only via the
+  gateway L7 CONNECT proxy (Spec C G7-4, ADR-0043).
+- SCM_RIGHTS control-fd coax/forgery against the #340 PR2a reachability-broker
+  mechanism, which ships dormant (`control_fd` default `False`) and whose
+  control channel accepts only an exactly-one-fd frame (ADR-0050).
+- Forged `supervisor.plugin.sandbox_stub_used` row on inherited launcher
+  stderr from a live, exec'd child — must never be persisted; the host-side
+  parser recognizes only `sandbox_refused` and drops every stub_used line
+  unconditionally, even interleaved with a genuine refusal row (#436, D4/D7).
+- `plugin_id` charset injection: an out-of-charset first positional argument
+  (JSON-injection characters, path traversal, shell metacharacters) must never
+  be echoed into an emitted stderr row — only the launcher-authored
+  `<invalid>` sentinel may stand in for it (#435, D2).
 
 **Prefix.** `sbx-`
 
-**Owning PRs.** PR-S4-6 (launcher), PR-S4-7 (policies). PR-S4-7 ships the bulk of
-the entries; PR-S4-6 ships the launcher-side fd / handshake entries.
+**Owning PRs.** PR-S4-6 (launcher), PR-S4-7 (policies), plus later fast-follows:
+PR-S4-11c-2b0 (live quarantine-child spawn), #333 G7-4 (Discord egress
+containment), #340 PR2a (dormant reachability broker), #428 (bind-source
+guard), #437 (`policy_ref` charset), #433 (refusal-row injection), and #436
+(stub-row forgery + `plugin_id` anti-echo). PR-S4-7 ships the bulk of the
+original entries; PR-S4-6 ships the launcher-side fd / handshake entries.
 
 **Ingestion paths.** `sandbox_policy_load`, `stdio_fd3_key_delivery`,
 `launcher_refusal_stderr`.
@@ -42,12 +67,21 @@ the entries; PR-S4-6 ships the launcher-side fd / handshake entries.
 or `audit_row_emitted` anchored to `SANDBOX_REFUSED_FIELDS` /
 `SANDBOX_STUB_USED_FIELDS`.
 
-**Status at graduation.** 11 entries as of PR-S4-7 (density floor 10). The
-PR-S4-7 kernel-observable entries (`sbx-2026-003/004/006`) drive the REAL
-shipped `config/sandbox/quarantined-llm.linux.bwrap.policy` bytes under bwrap
-and assert a kernel-enforced refusal, NOT just a Pydantic refusal at the
+**Status at graduation.** 11 entries as of PR-S4-7 (density floor 10); 20 entries
+as of #436 (2026-07-16). The PR-S4-7 kernel-observable entries
+(`sbx-2026-003/004/006`) drive the REAL shipped
+`config/sandbox/quarantined-llm.linux.bwrap.policy` bytes under bwrap and
+assert a kernel-enforced refusal, NOT just a Pydantic refusal at the
 policy-parse step. `sbx-2026-005` is the honest `out_of_scope` egress gap
 (#230); `sbx-2026-011` exercises the realpath policy-root confinement.
+`sbx-2026-012/013` (PR-S4-11c-2b0) graduate the live quarantine-child spawn —
+013 re-runs the 003/004/006 host-escape probes through the real launcher
+instead of a direct bwrap invocation. `sbx-2026-014` (#333 G7-4) covers the
+Discord adapter's network-namespace containment. `sbx-2026-015` (#340 PR2a)
+pins the SCM_RIGHTS reachability-broker's dormancy invariant. `sbx-2026-019`
+(#436) pins that a forged `sandbox_stub_used` row is dropped unconditionally
+by the host-side parser's event gate — deliberately NOT persisted (D4);
+`sbx-2026-020` (#435 D2) pins the launcher's `plugin_id` anti-echo guarantee.
 
 ## Coverage matrix
 
@@ -75,6 +109,12 @@ drift is a release-blocker.
 | Over-broad bind source (`/`, non-allowlisted top-level tree, `/lib64/..`, `/proc/self/root`) | #428 (`sbx-2026-016`) — `bind_source_too_broad` parse-time refusal (not kernel-observable) |
 | `policy_ref` charset injection (forged `event` field / injected row via out-of-charset chars) | #437 (`sbx-2026-017`) — `policy_ref_charset_invalid` refusal; caught by the manifest parser first, not kernel-observable |
 | Launcher `sandbox_refused` refusal-row injection (forged 2nd event / out-of-vocab reason via escaped-JSON field values) | #433 (`sbx-2026-018`) — host-side `parse_launcher_refusal_rows` containment, not kernel-observable |
+| Runtime-compromised quarantine child leaks fd-3 key / raw T3 body to host-visible stdout, stderr, or audit log | PR-S4-11c-2b0 (`sbx-2026-012`) — structural containment via the fd-3 read-once child boundary + `read_frame`'s single-result-frame lift |
+| Live-spawned quarantine child host escape (real launcher + shipped bwrap policy, not direct bwrap) | PR-S4-11c-2b0 (`sbx-2026-013`) — kernel-observable graduation of `sbx-2026-003/004/006` onto the launcher-spawned path (Docker-only) |
+| Discord adapter outbound network egress to an arbitrary host | #333 G7-4 (`sbx-2026-014`) — `--unshare-net` kernel containment; egress only via the gateway L7 CONNECT proxy (ADR-0043) |
+| SCM_RIGHTS control-fd coax/forgery on the dormant reachability-broker mechanism | #340 PR2a (`sbx-2026-015`) — `control_fd` default-`False` dormancy invariant + `recv_passed_fd`'s exactly-one-fd envelope (ADR-0050) |
+| Forged `supervisor.plugin.sandbox_stub_used` row on inherited launcher stderr from a live, exec'd child | #436 (`sbx-2026-019`) — `parse_launcher_refusal_rows`'s event-only gate drops every stub_used line unconditionally; deliberately NOT persisted (D4), not kernel-observable |
+| `plugin_id` charset injection / anti-echo into an emitted launcher row | #435 D2 (`sbx-2026-020`) — charset gate fires before any JSON-emitting branch; tainted bytes never echoed, only the `<invalid>` sentinel, not kernel-observable |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
