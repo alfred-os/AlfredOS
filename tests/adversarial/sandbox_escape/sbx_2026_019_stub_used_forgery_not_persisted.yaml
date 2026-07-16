@@ -18,20 +18,22 @@ payload:
     # is the one entry in this list that is a member of BOTH
     # SANDBOX_REFUSED_REASONS and SANDBOX_STUB_USED_REASONS (D7 -- reason
     # names the cause, event names the disposition, and the two vocabularies
-    # are deliberately non-disjoint). Because it survives the reason-vocab
-    # membership check in _validated_row, it is the ONLY variant here that
-    # actually reaches -- and is dropped by -- the event gate in
-    # parse_launcher_refusal_rows (event == sandbox_refused only). It is what
-    # would catch a regression that widens that gate to also accept
-    # sandbox_stub_used.
+    # are deliberately non-disjoint). parse_launcher_refusal_rows applies its
+    # event gate (event == sandbox_refused only) BEFORE _validated_row's
+    # reason-vocab check ever runs, so TODAY all three variants below are
+    # dropped by the event gate and none of them reach reason validation.
+    # This variant is load-bearing precisely because it is the ONLY one that
+    # would SURVIVE the reason-vocab check if the event gate were ever
+    # widened to also accept sandbox_stub_used -- it is what would catch
+    # that specific regression.
     #
     # The other two variants below ("stub_kind", "windows_stub") are NOT
-    # members of SANDBOX_REFUSED_REASONS at all, so they are already dropped
-    # earlier by the reason-vocab check regardless of the event gate. They
-    # stay in the corpus as defense-in-depth against the reason check (and as
-    # realistic forgeries an attacker might actually send), but they cannot by
-    # themselves detect an event-gate regression -- do not mistake them for
-    # redundant copies of the load-bearing variant above.
+    # members of SANDBOX_REFUSED_REASONS at all, so even under a widened
+    # event gate they would still be dropped by the reason-vocab check. They
+    # stay in the corpus as defense-in-depth (and as realistic forgeries an
+    # attacker might actually send), but they cannot by themselves detect an
+    # event-gate regression -- do not mistake them for redundant copies of
+    # the load-bearing variant above.
     - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"production","reason":"stub_kind"}'
     - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"config/sandbox/windows-stub.bwrap.policy","host_os":"windows","environment":"development","reason":"windows_stub"}'
     - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"development","reason":"uid_separation_unavailable"}' # LOAD-BEARING -- see comment above

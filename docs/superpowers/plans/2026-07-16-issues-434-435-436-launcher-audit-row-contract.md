@@ -21,7 +21,7 @@
 - **The launcher is a security boundary** (`src/alfred/security/` contract). The full adversarial suite is mandatory: `uv run pytest tests/adversarial`.
 - **Bash 3.2 compatibility** — macOS ships Bash 3.2. No `${arr[@]}` on a declared-but-empty array without the `${arr[@]+"${arr[@]}"}` guard. No associative arrays.
 - **The parser (`src/alfred/audit/launcher_refusal.py`) is NOT modified by this PR.** D2 depends on it staying strict. Any task that touches it is wrong.
-- **i18n:** exactly three new catalog keys (D9). Never `--omit-header` on pybabel. msgstrs must be brace-free. A line-shifting edit re-stales `#:` refs — re-run the i18n gate at the end.
+- **i18n:** nine new catalog keys ship (D9) — three genuinely new operator keys (`reason_unclassified`, `bwrap_unavailable`, `sandbox_kind_unrecognised`) plus six schema-case literals that become independently reachable once the operator stderr line interpolates `${_AUDIT_REASON}` instead of a hardcoded key. The six are not new *reasons* — they are latent i18n gaps the old hardcoded key had been masking. Never `--omit-header` on pybabel. msgstrs must be brace-free. A line-shifting edit re-stales `#:` refs — re-run the i18n gate at the end.
 - **structlog does not land in `caplog`** — assert via `structlog.testing.capture_logs()` filtering `e["event"]`.
 - Comments explain **why**, never what. Match the launcher's existing comment density (it is heavily commented by design — it is a security boundary with non-obvious invariants).
 
@@ -497,11 +497,11 @@ If this FAILS, register the missing keys in `_sandbox_i18n.py` — do **not** we
 
 ```bash
 uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
-uv run pybabel update --no-fuzzy-matching -i /tmp/alfred.pot -d src/alfred/i18n/locale
-uv run pybabel compile -d src/alfred/i18n/locale
+uv run pybabel update --no-fuzzy-matching -i /tmp/alfred.pot -d locale -D alfred
+uv run pybabel compile -d locale -D alfred --statistics
 ```
 
-Expected: no errors; `git diff --stat src/alfred/i18n/locale` shows only the new key(s).
+Expected: no errors; `git diff --stat locale` shows only the new key(s).
 
 - [ ] **Step 8: Full local gates**
 
@@ -516,7 +516,7 @@ If the macOS integration lane throws mass testcontainers setup errors, that is t
 git add bin/alfred-plugin-launcher.sh \
         src/alfred/audit/audit_row_schemas.py \
         src/alfred/plugins/_sandbox_i18n.py \
-        src/alfred/i18n/locale \
+        locale \
         tests/unit/plugins/test_sandbox_reason_vocab_sync.py \
         tests/unit/plugins/test_sandbox_i18n_keys.py \
         tests/unit/launcher/test_launcher_sandbox_flow.py
@@ -954,7 +954,7 @@ Expected: all pass.
 git add bin/alfred-plugin-launcher.sh \
         src/alfred/audit/audit_row_schemas.py \
         src/alfred/plugins/_sandbox_i18n.py \
-        src/alfred/i18n/locale \
+        locale \
         tests/unit/plugins/test_sandbox_reason_vocab_sync.py \
         tests/unit/launcher/test_launcher_sandbox_flow.py \
         tests/unit/audit/test_launcher_refusal.py
