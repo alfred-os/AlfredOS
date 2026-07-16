@@ -37,6 +37,27 @@ def test_launcher_emitted_sandbox_refused_keys_are_registered() -> None:
     assert not missing, f"launcher emits unregistered sandbox keys: {sorted(missing)}"
 
 
+def test_every_schema_case_reason_has_a_registered_operator_key() -> None:
+    """#434B made the operator stderr key interpolate ${_AUDIT_REASON}. Every value it can
+    take must therefore have a registered `supervisor.sandbox.refused.*` catalog key, or the
+    supervisor renders a raw msgid at the operator. This binding is what makes the
+    interpolation safe.
+    """
+    from tests.unit.plugins.test_sandbox_reason_vocab_sync import _parse_case
+
+    first_arm, fallback = _parse_case("${_CAPTURED_REASON}")
+    reasons = set(first_arm) | {fallback}
+    missing = {
+        reason
+        for reason in reasons
+        if f"supervisor.sandbox.refused.{reason}" not in _SANDBOX_VISIBLE_KEYS
+    }
+    assert not missing, (
+        f"the launcher can print supervisor.sandbox.refused.{{{sorted(missing)}}} but those keys "
+        f"are not registered in _sandbox_i18n.py — the supervisor would render a raw msgid."
+    )
+
+
 def test_interpreter_prefix_too_broad_renders_with_emitter_kwargs() -> None:
     # The launcher emits this refusal (#250) with `plugin_id` + `interpreter`; the
     # catalog msgstr must substitute BOTH with no residual placeholder, else the

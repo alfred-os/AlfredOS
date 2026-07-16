@@ -1201,7 +1201,7 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # ``provider_key_delivery_failed`` writer adopt the same auditor in #433 follow-ups.
 # This set governs what the launcher WRITES (plus the reserved reasons named below).
 #
-# Twenty-one reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
+# Twenty-six reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
 # deliberately (the binding requires the set to equal the union of emittable and reserved):
 #   * ``policy_ref_os_mismatch``, ``bwrap_unavailable``, ``bwrap_mode_userns_unavailable`` —
 #     documented, no code path emits them;
@@ -1227,6 +1227,19 @@ SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
         "unsandboxed_env_set_in_production",
         "stub_kind_in_production",
         "windows_stub_in_production",
+        # Manifest read refusals — the five distinct keys `manifest_reader
+        # --read-sandbox` can emit (#434A). Before #434 a `2>/dev/null` discarded
+        # all five and recorded every one as `sandbox_block_missing`, so a planted
+        # or corrupt manifest read as "you forgot [sandbox]".
+        "plugin_id_charset_invalid",
+        "manifest_reader_no_source",
+        "manifest_unreadable",
+        "manifest_invalid",
+        # The honest fallback for an UNCLASSIFIABLE helper stderr line (#434B).
+        # Distinct from `policy_translate_failed`, which is a REAL malformed-TOML
+        # refusal — conflating the drift/crash alarm with a routine policy-authoring
+        # error hid the alarm.
+        "reason_unclassified",
         # policy_ref resolution (launcher + manifest_reader).
         "policy_ref_missing",
         "policy_ref_charset_invalid",

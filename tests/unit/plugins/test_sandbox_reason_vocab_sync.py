@@ -49,11 +49,11 @@ _RESERVED_UNEMITTED = frozenset(
 
 
 def test_sandbox_refused_reasons_constant_shape() -> None:
-    """The vocabulary is a real frozenset[str] of 26, and contains every reserved reason."""
+    """The vocabulary is a real frozenset[str] of 31, and contains every reserved reason."""
     reasons = audit_row_schemas.SANDBOX_REFUSED_REASONS
     assert isinstance(reasons, frozenset)
     assert all(isinstance(r, str) and r for r in reasons)
-    assert len(reasons) == 26, f"expected 26 reasons, got {len(reasons)}: {sorted(reasons)}"
+    assert len(reasons) == 31, f"expected 31 reasons, got {len(reasons)}: {sorted(reasons)}"
     missing_reserved = _RESERVED_UNEMITTED - reasons
     assert not missing_reserved, (
         f"reserved reasons dropped from the vocab: {sorted(missing_reserved)}"
@@ -193,13 +193,14 @@ def _read_environment_keys() -> frozenset[str]:
     return keys
 
 
-def _parse_case(subject: str) -> tuple[frozenset[str], str | None]:
-    """Parse the launcher ``case "<subject>" in`` — return (first-arm alternatives, ``*)`` literal).
+def _extract_case_body(subject: str) -> str:
+    """The body of the launcher's ``case "<subject>" in`` block, between the header and its
+    matching ``esac``.
 
-    Anchored on the case SUBJECT, never a line number (the shipped pointer comment already
-    drifted off-by-one, the class of bug this file prevents). The ``*)`` arm's assigned string
-    literal (the FALLBACK) is what the first-draft guard omitted — its value is a launcher-
-    emittable reason.
+    Shared by ``_parse_case`` (allow-list + ``*)``) and ``_parse_mapping_case`` (N arms, each
+    assigning a distinct literal). Anchored on the case SUBJECT, never a line number — the
+    shipped pointer comment already drifted off-by-one, which is the class of bug this file
+    prevents.
     """
     text = _launcher_text()
     header = f'case "{subject}" in'
@@ -208,7 +209,18 @@ def _parse_case(subject: str) -> tuple[frozenset[str], str | None]:
     body = text[idx + len(header) :]
     esac = body.find("esac")
     assert esac != -1, f"no matching esac for case {subject!r}"
-    body = body[:esac]
+    return body[:esac]
+
+
+def _parse_case(subject: str) -> tuple[frozenset[str], str | None]:
+    """Parse the launcher ``case "<subject>" in`` — return (first-arm alternatives, ``*)`` literal).
+
+    Anchored on the case SUBJECT, never a line number (the shipped pointer comment already
+    drifted off-by-one, the class of bug this file prevents). The ``*)`` arm's assigned string
+    literal (the FALLBACK) is what the first-draft guard omitted — its value is a launcher-
+    emittable reason.
+    """
+    body = _extract_case_body(subject)
 
     first_arm: frozenset[str] | None = None
     fallback: str | None = None
@@ -236,6 +248,90 @@ def _parse_case(subject: str) -> tuple[frozenset[str], str | None]:
     )
     assert first_arm, f"no allow-list arm parsed under case {subject!r}"
     return first_arm, fallback
+
+
+def _parse_mapping_case(subject: str, var: str) -> dict[str, str]:
+    """Parse a launcher ``case "<subject>" in`` whose arms each assign ``var="literal"``.
+
+    ``_parse_case`` above understands exactly two arms (an allow-list + ``*)``) and hard-fails
+    on a third. #434A's key->reason map is structurally different: N arms, each assigning a
+    DISTINCT literal. Returns {arm-pattern: assigned literal}, with the ``*)`` arm keyed ``"*"``.
+
+    Fails LOUD on an arm that does not assign ``var`` — an unassigned arm means the map has a
+    hole the launcher would fall through, and a silently-skipped arm makes the binding
+    UNDER-count (the #432 vacuity lesson).
+    """
+    body = _extract_case_body(subject)
+
+    mapping: dict[str, str] = {}
+    unassigned: list[str] = []
+    for arm in (a.strip() for a in body.split(";;") if a.strip()):
+        pattern, _, arm_body = arm.partition(")")
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        match = re.search(rf'{re.escape(var)}="([^"]*)"', arm_body)
+        if match is None:
+            unassigned.append(pattern)
+        else:
+            mapping[pattern] = match.group(1)
+    assert not unassigned, (
+        f"case {subject!r} has arm(s) that never assign {var}: {unassigned}. "
+        f"Each arm must assign a literal or the binding under-counts."
+    )
+    assert mapping, f"no arms parsed under case {subject!r}"
+    return mapping
+
+
+def _read_sandbox_keys() -> frozenset[str]:
+    """The full ``plugin.*`` i18n keys ``manifest_reader --read-sandbox`` can print."""
+    keys, passthrough = _fail_args_in("_cmd_read_sandbox")
+    assert not passthrough, "_cmd_read_sandbox() unexpectedly re-emits exc.reason"
+    return keys
+
+
+def test_sandbox_case_maps_exactly_the_read_sandbox_keys() -> None:
+    """The #434A key->reason map covers exactly the keys --read-sandbox can emit.
+
+    Equality, not superset, so it bites BOTH ways: a new manifest_reader refusal key missing
+    from bash (which would degrade to reason_unclassified — a real refusal reported as an
+    alarm), AND a dead bash arm the helper can never print.
+    """
+    mapping = _parse_mapping_case("${_sandbox_err_key}", "_SANDBOX_REASON")
+    arms = frozenset(mapping) - {"*"}
+    expected = _read_sandbox_keys()
+    assert len(expected) == 5, f"vacuity floor: derived {len(expected)} read-sandbox keys, want 5"
+    assert arms == expected, (
+        "the launcher's #434A sandbox `case` has drifted from the keys "
+        "`manifest_reader --read-sandbox` can emit.\n"
+        f"  missing from the bash case (would degrade to reason_unclassified): "
+        f"{sorted(expected - arms)}\n"
+        f"  dead entries in the bash case (unreachable): {sorted(arms - expected)}"
+    )
+
+
+def test_sandbox_case_maps_only_into_the_closed_vocab() -> None:
+    """Every reason the #434A map can assign is a vocabulary member."""
+    mapping = _parse_mapping_case("${_sandbox_err_key}", "_SANDBOX_REASON")
+    unknown = frozenset(mapping.values()) - audit_row_schemas.SANDBOX_REFUSED_REASONS
+    assert not unknown, (
+        f"the #434A sandbox case maps to {sorted(unknown)}, absent from SANDBOX_REFUSED_REASONS."
+    )
+
+
+def test_sandbox_case_distinguishes_the_tamper_signals() -> None:
+    """The named defect: manifest_unreadable / manifest_invalid are TAMPER signals and must NOT
+    collapse into the benign sandbox_block_missing (#434A). Mutation-resistant: asserts the
+    three map to three DISTINCT reasons, so re-pointing any one at another fails."""
+    mapping = _parse_mapping_case("${_sandbox_err_key}", "_SANDBOX_REASON")
+    tamper = {
+        mapping["plugin.manifest_unreadable"],
+        mapping["plugin.manifest_invalid"],
+        mapping["plugin.manifest_sandbox_block_missing"],
+    }
+    assert len(tamper) == 3, (
+        f"the tamper signals collapsed into {sorted(tamper)} — #434A's exact defect."
+    )
 
 
 def test_schema_case_classifies_exactly_the_flags_path_reasons() -> None:
@@ -290,6 +386,8 @@ def _launcher_emittable_reasons() -> frozenset[str]:
     """
     schema_first, schema_fallback = _parse_case("${_CAPTURED_REASON}")
     env_first, env_fallback = _parse_case("${_env_err_key}")
+    sandbox_map = _parse_mapping_case("${_sandbox_err_key}", "_SANDBOX_REASON")
+    sandbox_set = set(sandbox_map.values())
 
     schema_set = set(schema_first)
     if schema_fallback is not None:
@@ -324,6 +422,8 @@ def _launcher_emittable_reasons() -> frozenset[str]:
             emittable |= schema_set
         elif "_env_err_key" in line:
             emittable |= env_set
+        elif "_SANDBOX_REASON" in line:
+            emittable |= sandbox_set
         else:
             unresolved.append(f"unrecognised %s reason source: {line.strip()[:90]}")
     assert not unresolved, (
@@ -388,6 +488,23 @@ def test_case_fallback_literals_are_in_the_closed_vocab() -> None:
     )
 
 
+def test_schema_case_fallback_is_the_unclassified_alarm() -> None:
+    """#434B: the schema `*)` arm is the drift/crash ALARM (a traceback, an ImportError, a
+    new unbound reason). It must NOT reuse `policy_translate_failed`, which is ALSO a real
+    malformed-TOML refusal — that conflation made the alarm read as a routine
+    policy-authoring error and hid it.
+    """
+    _, schema_fallback = _parse_case("${_CAPTURED_REASON}")
+    assert schema_fallback == "reason_unclassified", (
+        f"the schema case `*)` fallback is {schema_fallback!r}; #434B requires the distinct "
+        f"`reason_unclassified` so the alarm is forensically separable from the real refusal."
+    )
+    assert "policy_translate_failed" in _parse_case("${_CAPTURED_REASON}")[0], (
+        "policy_translate_failed must REMAIN in the allow-list — it is a real "
+        "SandboxPolicyInvalid reason for malformed TOML, not only the old fallback."
+    )
+
+
 def test_derived_vocabularies_are_not_vacuous() -> None:
     """`set() == set()` / `set() <= X` are the canonical vacuous greens — floor every derived set.
 
@@ -399,4 +516,4 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     assert len(_read_environment_keys()) == 2, "env-key floor"
     assert len(_launcher_emittable_reasons()) >= 20, "launcher-emittable floor"
     assert len(_RESERVED_UNEMITTED) == 5, "reserved floor"
-    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 25, "vocab floor"
+    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 30, "vocab floor"

@@ -61,6 +61,36 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     "supervisor.sandbox.refused.policy_translate_failed": t(
         "supervisor.sandbox.refused.policy_translate_failed"
     ),
+    # #434B: the schema `case`'s allow-list arm (sandbox_policy.py
+    # SandboxPolicyInvalid reasons, re-emitted by the launcher's operator
+    # stderr key since the printf now interpolates ${_AUDIT_REASON} rather
+    # than hardcoding policy_translate_failed). Bound by
+    # test_every_schema_case_reason_has_a_registered_operator_key.
+    "supervisor.sandbox.refused.kind_full_requires_keep_fd_3": t(
+        "supervisor.sandbox.refused.kind_full_requires_keep_fd_3"
+    ),
+    "supervisor.sandbox.refused.policy_path_not_absolute": t(
+        "supervisor.sandbox.refused.policy_path_not_absolute"
+    ),
+    "supervisor.sandbox.refused.arch_variable_path_hard_bound": t(
+        "supervisor.sandbox.refused.arch_variable_path_hard_bound"
+    ),
+    "supervisor.sandbox.refused.mount_shadows_earlier_mount": t(
+        "supervisor.sandbox.refused.mount_shadows_earlier_mount"
+    ),
+    "supervisor.sandbox.refused.soft_bind_forbidden_path": t(
+        "supervisor.sandbox.refused.soft_bind_forbidden_path"
+    ),
+    "supervisor.sandbox.refused.bind_source_too_broad": t(
+        "supervisor.sandbox.refused.bind_source_too_broad"
+    ),
+    # #434B: the honest fallback when the helper's stderr line is unclassifiable
+    # (a traceback, an ImportError, a new unbound reason). Distinct from
+    # policy_translate_failed so a drift/crash ALARM is forensically separable
+    # from a routine malformed-TOML refusal.
+    "supervisor.sandbox.refused.reason_unclassified": t(
+        "supervisor.sandbox.refused.reason_unclassified"
+    ),
     # #250 / ADR-0030: the kind=full bwrap exec binds the configured interpreter's
     # install prefix into the sandbox; a root-level interpreter (prefix "/" or
     # empty) would ro-bind the entire host root, so the launcher refuses loudly.
