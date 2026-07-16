@@ -485,6 +485,113 @@ def test_sbx_2026_018_launcher_refusal_row_injection_contained() -> None:
         )
 
 
+def test_sbx_2026_019_stub_used_forgery_not_persisted() -> None:
+    """sbx-2026-019: a forged sandbox_stub_used row on inherited stderr is NEVER
+    persisted (ADR-0051 D4).
+
+    This is the design's most subtle decision, and the INVERSE of sbx-2026-018:
+    a sandbox_refused row is safe to persist because a refusing launcher exits
+    PRE-exec (no child exists, so drained stderr is provably launcher-authored).
+    A sandbox_stub_used row asserts "I am about to exec" -- a live child then
+    shares that SAME stderr fd with no delimiter, so "launcher-authored" is not
+    establishable in-band for this row at all. The #433/#446 drain gate
+    (``quarantine_child_io._SubprocessChildIO`` -- ``refusal_candidate and not
+    self._child_wrote_stdout``) is an INVERTED oracle for it: an honest child
+    writes stdout and closes the gate (discarding the true row it might have
+    emitted), while a FORGING child that writes zero stdout OPENS the gate --
+    it would admit approximately only forgeries. So the design declares the
+    stub schema (``SANDBOX_STUB_USED_FIELDS``) but wires NO persistence path at
+    all; this test pins that the parser itself -- the only thing standing
+    between a forged line and a persisted row today -- drops every
+    sandbox_stub_used line unconditionally, because it recognizes ONLY
+    ``event == "supervisor.plugin.sandbox_refused"``. Iterates the YAML's own
+    ``payload.forged_stub_variants`` list (the #428 lesson -- no second
+    hardcoded copy) and additionally exercises a mixed stream
+    (``payload.mixed_with_genuine_refusal``) carrying both a genuine
+    sandbox_refused line and a forged stub_used line, proving the forgery
+    does not disturb correct parsing of the real row riding the same stream.
+    """
+    payload = _load("sbx-2026-019")
+    assert payload.expected_outcome == "neutralized"
+    assert isinstance(payload.payload, dict)
+    forged = payload.payload["forged_stub_variants"]
+    assert forged, "payload declares no forged_stub_variants"
+    for variant in forged:
+        rows = parse_launcher_refusal_rows(variant.encode("utf-8"))
+        assert rows == (), f"forged stub_used variant was NOT dropped: {variant!r}"
+    mixed = payload.payload["mixed_with_genuine_refusal"]
+    rows = parse_launcher_refusal_rows(mixed.encode("utf-8"))
+    assert len(rows) == 1, f"mixed stream produced {len(rows)} rows, expected exactly 1: {mixed!r}"
+    assert rows[0].reason == "sandbox_block_missing", f"unexpected surviving row: {rows[0]!r}"
+
+
+def _run_launcher_with_raw_plugin_id(plugin_id: str, *, tmp_path: Path) -> tuple[int, str, str]:
+    """Run the real launcher with a caller-supplied (possibly malformed) plugin_id.
+
+    The charset gate (``bin/alfred-plugin-launcher.sh``, top of script) fires on
+    ``argv[1]`` BEFORE any manifest read, jq invocation, or environment
+    resolution, so this needs no manifest file, no ``ALFRED_ENVIRONMENT``, and
+    no jq -- exactly the ordering guarantee sbx-2026-020 exercises. The second
+    positional arg (the executable) is a real, harmless stub so a
+    (hypothetical) charset-gate regression that let the tainted id through
+    would still exec something inert rather than fail for an unrelated reason.
+    """
+    stub = tmp_path / "stub.sh"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    proc = subprocess.run(  # noqa: S603 — repo-owned launcher script path
+        [str(_LAUNCHER), plugin_id, str(stub)],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def test_sbx_2026_020_plugin_id_charset_injection_refused(tmp_path: Path) -> None:
+    """sbx-2026-020: an injection-shaped plugin_id never appears in any emitted row (D2).
+
+    Iterates the YAML's own ``payload.variants`` list (the #428 lesson -- the
+    YAML is the single source of truth, no second hardcoded copy). Drives the
+    REAL launcher subprocess (not just the parser) so this proves the
+    end-to-end guarantee: the charset gate at ``argv[1]`` refuses BEFORE any
+    JSON-emitting branch, so the tainted bytes never reach a printf template
+    in the first place -- the row the launcher DOES emit carries only the
+    constant ``<invalid>`` sentinel (#435's comment: "interpolating the
+    tainted bytes into this template is exactly the injection the gate above
+    exists to prevent"). Three checks per variant close the loop from raw
+    argv to the validated row the core would persist: the launcher refuses;
+    the tainted string never appears on stdout OR stderr (ANTI-ECHO,
+    generalizing #437's "echoing it would BE the injection" lesson); and
+    ``parse_launcher_refusal_rows`` on the real captured stderr yields
+    exactly one row whose ``plugin_id`` is the literal ``"<invalid>"``.
+    """
+    payload = _load("sbx-2026-020")
+    assert payload.expected_outcome == "refused"
+    assert isinstance(payload.payload, dict)
+    variants = payload.payload["variants"]
+    assert variants, "payload declares no variants"
+    for variant in variants:
+        rc, stdout, stderr = _run_launcher_with_raw_plugin_id(variant, tmp_path=tmp_path)
+        assert rc != 0, f"variant {variant!r} was NOT refused by the launcher"
+        assert "plugin_id_charset_invalid" in stderr, f"variant {variant!r}: {stderr!r}"
+        # ANTI-ECHO end-to-end: the tainted variant must not appear on ANY
+        # output stream — echoing it would BE the injection (#437's lesson).
+        # Skipped for the `<invalid>` variant itself: that string IS the
+        # launcher-authored sentinel, so it trivially (and correctly) appears
+        # in the sentinel row — the collision-safety property it proves is
+        # asserted below instead (the row's plugin_id is the sentinel, not a
+        # copy of the tainted argv smuggled through some special case).
+        if variant != "<invalid>":
+            assert variant not in stderr, f"variant {variant!r} leaked into stderr: {stderr!r}"
+            assert variant not in stdout, f"variant {variant!r} leaked into stdout: {stdout!r}"
+        rows = parse_launcher_refusal_rows(stderr.encode("utf-8"))
+        assert len(rows) == 1, f"variant {variant!r} produced {len(rows)} rows: {stderr!r}"
+        assert rows[0].plugin_id == "<invalid>", f"variant {variant!r}: {rows[0]!r}"
+        assert rows[0].reason == "plugin_id_charset_invalid", f"variant {variant!r}: {rows[0]!r}"
+
+
 def test_all_pr_s4_6_payloads_load() -> None:
     # Every PR-S4-6 sbx payload schema-validates + carries the sbx prefix.
     ids = [
@@ -497,6 +604,8 @@ def test_all_pr_s4_6_payloads_load() -> None:
         "sbx-2026-016",
         "sbx-2026-017",
         "sbx-2026-018",
+        "sbx-2026-019",
+        "sbx-2026-020",
     ]
     for pid in ids:
         payload = _load(pid)
