@@ -149,7 +149,11 @@ def _path_without_tool(tmp_path, missing_tool: str) -> str:
         assert found, f"{tool!r} not found on the real PATH — cannot build the shadow PATH"
         (shadow / tool).symlink_to(found)
     python_dir = str(Path(sys.executable).parent)
-    return f"{python_dir}{os.pathsep}{shadow}"
+    # Literal ':', never os.pathsep: this PATH is consumed by the bash launcher,
+    # which always splits on ':' regardless of host OS. os.pathsep would yield ';'
+    # under a native-Windows interpreter driving Git Bash/WSL and build a PATH
+    # bash cannot parse.
+    return f"{python_dir}:{shadow}"
 
 
 # --------------------------------------------------------------------------
