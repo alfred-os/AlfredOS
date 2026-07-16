@@ -1287,15 +1287,61 @@ SANDBOX_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Emitted when a kind:stub plugin runs unsandboxed in a development environment.
-# ``environment`` ∈ {"development", "test"} only — production refuses
-# (PR-S4-6 sec-2 closure).
+# Emitted immediately BEFORE an exec that runs a plugin WITHOUT OS-level
+# isolation. Three producers, all in bin/alfred-plugin-launcher.sh — the prior
+# comment named only the third and was therefore false for two of them, which
+# is how #436's field drift went unnoticed:
+#   * kind:none on a non-Linux host (no UID-drop mechanism) -> uid_separation_unavailable
+#   * kind:full on windows (resolves to a stub policy)      -> windows_stub
+#   * a kind:stub manifest                                  -> stub_kind
+# ``environment`` ∈ {"development", "test"} only — production refuses all three
+# branches with a ``sandbox_refused`` row instead (PR-S4-6 sec-2 closure).
+#
+# ``policy_ref`` is OPTIONAL: only the windows kind:full producer resolves one.
+# No parser exists for this row today (see NOT PERSISTED below) — but IF one is
+# ever built, an absent ``policy_ref`` should canonicalize to "" at the parse
+# boundary, as the ``sandbox_refused`` sibling already does
+# (``launcher_refusal._OPTIONAL_FIELDS``). This is a future instruction, not a
+# description of a parse boundary that exists today.
+#
+# NOT PERSISTED, DELIBERATELY (#436; contrast the ``sandbox_refused`` path
+# decided in ADR-0051). This row asserts "I am about to exec", so a live child
+# shares the launcher's stderr with no delimiter — unlike
+# ``sandbox_refused``, whose safety rests on the launcher exiting PRE-exec so no
+# child exists. The #433/#446 drain gate (``refusal_candidate and not
+# _child_wrote_stdout``) is an INVERTED oracle here: an honest child writes stdout
+# and closes the gate (dropping the true row), while a forging child writes zero
+# stdout and opens it — it would admit approximately only FORGERIES. Persisting
+# this row needs a success-path stderr drain with an out-of-band provenance
+# signal: a new interception point and its own ADR. Declaring the schema is NOT
+# an invitation to wire it to the existing path.
 SANDBOX_STUB_USED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "plugin_id",
         "policy_ref",
         "host_os",
         "environment",
+        "reason",
+    }
+)
+
+# Closed vocabulary for SANDBOX_STUB_USED_FIELDS['reason'] (#436). Each member is
+# the dev-side twin of the ``sandbox_refused`` reason on the SAME launcher branch,
+# stem-identical minus the ``_in_production`` suffix that no longer applies:
+#
+#   launcher branch            production -> sandbox_refused    dev/test -> stub_used
+#   non-Linux, no UID-drop     uid_separation_unavailable       uid_separation_unavailable
+#   windows kind:full          windows_stub_in_production       windows_stub
+#   kind:stub manifest         stub_kind_in_production          stub_kind
+#
+# ``uid_separation_unavailable`` is deliberately SHARED with SANDBOX_REFUSED_REASONS:
+# ``reason`` names the CAUSE, ``event`` names the disposition, ``environment`` names
+# why the disposition differs. The two vocabularies are NOT disjoint by design.
+SANDBOX_STUB_USED_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "uid_separation_unavailable",
+        "windows_stub",
+        "stub_kind",
     }
 )
 
