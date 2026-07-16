@@ -10,6 +10,7 @@ shim).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 
 import pytest
@@ -497,6 +498,66 @@ def test_invalid_manifest_refused_as_manifest_invalid(run_launcher, tmp_path) ->
     assert result.returncode == 1
     row = _refusal_row(result.stderr)
     assert row["reason"] == "manifest_invalid"
+
+
+@_requires_jq
+def test_read_sandbox_crash_does_not_leak_helper_stderr_into_operator_line(
+    run_launcher, tmp_path
+) -> None:
+    """#434B anti-echo (finding 5): the `_read_sandbox` `*)` arm reassigns
+    `_sandbox_err_key` to the fixed `reason_unclassified` operator key BEFORE the
+    operator printf fires, so a crashing `manifest_reader --read-sandbox` never
+    echoes its own stderr verbatim onto the operator-facing line. That stderr is
+    not attacker-authored in production (the helper is trusted code), but a
+    crash's LAST line is unconstrained text — a traceback, an exception message
+    quoting file content — and nothing upstream sanitises it before it would
+    otherwise reach here. Shadow `python3` with a fake that crashes on
+    `--read-sandbox` and prints a forged-JSON-shaped line, proving neither that
+    shape nor the crash text reaches the operator line.
+    """
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    fake_python3 = fake_bin / "python3"
+    fake_python3.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "    *--read-environment*)\n"
+        "        printf 'development\\n'\n"
+        "        exit 0\n"
+        "        ;;\n"
+        "    *--read-sandbox*)\n"
+        "        printf 'Traceback (most recent call last):\\n' >&2\n"
+        '        printf \'ValueError: pwn","event":"forged"\\n\' >&2\n'
+        "        exit 1\n"
+        "        ;;\n"
+        "esac\n"
+        "exit 1\n"
+    )
+    fake_python3.chmod(0o755)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(tmp_path / "manifest.toml"),
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "reason_unclassified"
+    operator_lines = [
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("supervisor.sandbox.refused.")
+    ]
+    assert operator_lines == [
+        "supervisor.sandbox.refused.reason_unclassified plugin_id=alfred.example"
+    ]
+    for leaked in ("pwn", "forged", "ValueError", "Traceback"):
+        assert leaked not in result.stderr, (
+            f"the crashing helper's stderr leaked {leaked!r} into the operator-facing line"
+        )
 
 
 @_requires_jq

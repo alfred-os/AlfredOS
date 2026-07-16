@@ -1212,8 +1212,9 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 #     sandbox-refusal reason the launcher never emits (unwired — #433).
 # ``policy_ref_escapes_root`` covers the path-traversal case the sandbox_escape adversarial
 # README documents and is distinct from ``policy_ref_unreadable``; ``policy_translate_failed`` is
-# both a real malformed-TOML reason AND the launcher's honest fallback for an unclassifiable
-# helper stderr line (the alarm/real conflation is tracked in #434).
+# a real malformed-TOML reason ONLY — the launcher's honest fallback for an unclassifiable helper
+# stderr line is the distinct ``reason_unclassified`` alarm below. #434 CLOSED the conflation of
+# the two (see the comment there for why collapsing them hid the alarm).
 SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
     {
         # Pre-flight: environment + host-OS resolution (launcher).
