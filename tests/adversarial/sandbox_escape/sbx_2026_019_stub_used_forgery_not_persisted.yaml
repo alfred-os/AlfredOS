@@ -13,12 +13,31 @@ payload:
   forged_stub_variants: # a live child sharing the launcher's stderr fd emits a
     # well-formed sandbox_stub_used line, mimicking the row a genuine dev/test
     # stub-kind launch would leave. Every variant must parse to ZERO rows.
+    #
+    # LOAD-BEARING variant (do NOT remove): "uid_separation_unavailable" below
+    # is the one entry in this list that is a member of BOTH
+    # SANDBOX_REFUSED_REASONS and SANDBOX_STUB_USED_REASONS (D7 -- reason
+    # names the cause, event names the disposition, and the two vocabularies
+    # are deliberately non-disjoint). Because it survives the reason-vocab
+    # membership check in _validated_row, it is the ONLY variant here that
+    # actually reaches -- and is dropped by -- the event gate in
+    # parse_launcher_refusal_rows (event == sandbox_refused only). It is what
+    # would catch a regression that widens that gate to also accept
+    # sandbox_stub_used.
+    #
+    # The other two variants below ("stub_kind", "windows_stub") are NOT
+    # members of SANDBOX_REFUSED_REASONS at all, so they are already dropped
+    # earlier by the reason-vocab check regardless of the event gate. They
+    # stay in the corpus as defense-in-depth against the reason check (and as
+    # realistic forgeries an attacker might actually send), but they cannot by
+    # themselves detect an event-gate regression -- do not mistake them for
+    # redundant copies of the load-bearing variant above.
     - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"production","reason":"stub_kind"}'
     - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"config/sandbox/windows-stub.bwrap.policy","host_os":"windows","environment":"development","reason":"windows_stub"}'
-    - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"development","reason":"uid_separation_unavailable"}'
+    - '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"development","reason":"uid_separation_unavailable"}' # LOAD-BEARING -- see comment above
   mixed_with_genuine_refusal: |-
     {"event":"supervisor.plugin.sandbox_refused","plugin_id":"attacker.example","policy_ref":"","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}
-    {"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"development","reason":"stub_kind"}
+    {"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"attacker.example","policy_ref":"","host_os":"linux","environment":"development","reason":"uid_separation_unavailable"}
 expected_outcome: neutralized
 provenance: >-
   ADR-0051 (D4) + the "NOT PERSISTED, DELIBERATELY" comment on

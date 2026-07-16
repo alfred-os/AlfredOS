@@ -510,6 +510,19 @@ def test_sbx_2026_019_stub_used_forgery_not_persisted() -> None:
     (``payload.mixed_with_genuine_refusal``) carrying both a genuine
     sandbox_refused line and a forged stub_used line, proving the forgery
     does not disturb correct parsing of the real row riding the same stream.
+
+    Only ONE of the three ``forged_stub_variants`` actually exercises the
+    event gate this test is named for: the ``uid_separation_unavailable``
+    variant, because that reason is the single member shared between
+    ``SANDBOX_REFUSED_REASONS`` and ``SANDBOX_STUB_USED_REASONS`` (D7), so it
+    is the only one that survives the earlier reason-vocab check in
+    ``_validated_row`` and reaches the event check at all. The other two
+    variants (``stub_kind``, ``windows_stub``) are already rejected by the
+    reason-vocab check regardless of the event gate -- they are
+    defense-in-depth against that check, not additional coverage of the event
+    gate. The mixed-stream variant is likewise built on the shared reason so
+    it, too, is load-bearing rather than redundant. See the YAML's own
+    comments next to ``forged_stub_variants`` for the full explanation.
     """
     payload = _load("sbx-2026-019")
     assert payload.expected_outcome == "neutralized"

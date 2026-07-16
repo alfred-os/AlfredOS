@@ -209,6 +209,35 @@ and `plugins/`.
   alarm/real conflation), #435 (four launcher refusal paths that emit no
   audit row at all), #436 (the undeclared `sandbox_stub_used` reason field)
   — sibling refinements on the same row family, out of scope here.
+- **#434, #435, #436 — closed 2026-07-16.** All three sibling refinements
+  named above landed: `sandbox_refused` rows now carry their true reason
+  (no more `2>/dev/null` collapse, no more alarm/real conflation on
+  `policy_translate_failed`), every launcher exit-1 path that previously left
+  no audit trail now emits one (including `bwrap_unavailable`), and
+  `sandbox_stub_used`'s `reason` field is declared under a closed vocabulary
+  (`SANDBOX_STUB_USED_REASONS`) bound by the #432 reason-vocab drift guard.
+  That declaration is a schema fix only — the row itself remains
+  **deliberately unpersisted**. `sandbox_stub_used` asserts "I am about to
+  exec," so a live child then shares the launcher's stderr fd with no
+  delimiter; this ADR's interception point is the `read_frame` EOF on a
+  refusal candidate that never wrote stdout (Decision B), which fires only
+  when the launcher exits *before* exec. A successful exec produces no such
+  EOF, so the failure-path drain this ADR built never runs for this row.
+  Persisting it for real needs a success-path stderr drain with its own
+  out-of-band provenance signal — a new interception point outside this
+  ADR's mechanism, and its own ADR.
+- **Critically: #440/#441/#442 do not extend to `sandbox_stub_used`.** Those
+  issues have the three other launcher-refusal producers (comms-adapter,
+  gateway-adapter, foreground-TUI) adopt `SandboxRefusalAuditor` for their
+  own `sandbox_refused` rows; adopting that auditor gives those producers
+  nothing toward persisting `sandbox_stub_used`, because the gate it wires
+  to is an **inverted oracle** for that row: an honest child that execs
+  writes stdout and immediately closes the gate (discarding the true
+  `sandbox_stub_used` row it might have emitted), while a forging child that
+  writes zero stdout before dying *opens* the gate — the gate would admit
+  approximately only forgeries. Tracked as a new issue,
+  `<STUB-PERSIST-ISSUE>`, for the success-path drain + provenance-signal
+  design this needs, with its own ADR.
 
 ## Post-review hardening
 
