@@ -34,13 +34,12 @@ _ENV_KEY_PREFIX = "daemon.boot."
 # SandboxPolicyInvalid reason is reachable from that command.
 _PASSTHROUGH = "exc.reason"
 
-# The five vocabulary reasons with no launcher emitter. Absence of an emitter is derivable; the
+# The four vocabulary reasons with no launcher emitter. Absence of an emitter is derivable; the
 # INTENT to reserve (vs an accidental orphan) is not — so it is named here, small, and pinned by
 # test_frozenset_is_exactly_emittable_plus_reserved.
 _RESERVED_UNEMITTED = frozenset(
     {
         "policy_ref_os_mismatch",  # documented; no code path emits it
-        "bwrap_unavailable",  # documented; no code path emits it
         "bwrap_mode_userns_unavailable",  # documented; no code path emits it
         "provider_key_delivery_failed",  # ProviderKeyDeliveryError default; not a refused row
         "sandbox_info_handshake_mismatch",  # session.py handshake; not a sandbox_refused row
@@ -49,11 +48,11 @@ _RESERVED_UNEMITTED = frozenset(
 
 
 def test_sandbox_refused_reasons_constant_shape() -> None:
-    """The vocabulary is a real frozenset[str] of 31, and contains every reserved reason."""
+    """The vocabulary is a real frozenset[str] of 35, and contains every reserved reason."""
     reasons = audit_row_schemas.SANDBOX_REFUSED_REASONS
     assert isinstance(reasons, frozenset)
     assert all(isinstance(r, str) and r for r in reasons)
-    assert len(reasons) == 31, f"expected 31 reasons, got {len(reasons)}: {sorted(reasons)}"
+    assert len(reasons) == 35, f"expected 35 reasons, got {len(reasons)}: {sorted(reasons)}"
     missing_reserved = _RESERVED_UNEMITTED - reasons
     assert not missing_reserved, (
         f"reserved reasons dropped from the vocab: {sorted(missing_reserved)}"
@@ -431,8 +430,8 @@ def _launcher_emittable_reasons() -> frozenset[str]:
         "a renamed feed variable. Extend the resolver; do NOT let it silently under-count:\n"
         + "\n".join(unresolved)
     )
-    assert len(emit_lines) >= 11, (
-        f"vacuity floor: only {len(emit_lines)} sandbox_refused emit lines found (expected >= 11)"
+    assert len(emit_lines) >= 18, (
+        f"vacuity floor: only {len(emit_lines)} sandbox_refused emit lines found (expected >= 18)"
     )
     return frozenset(emittable)
 
@@ -505,6 +504,46 @@ def test_schema_case_fallback_is_the_unclassified_alarm() -> None:
     )
 
 
+def _kind_case_fallback_arm() -> str:
+    """The body of the launcher's sandbox-kind ``*)`` arm.
+
+    NOT reusable via ``_parse_mapping_case``: that helper requires EVERY arm to assign the named
+    variable, and this case's ``full)`` / ``none)`` / ``stub)`` arms do the real launcher work
+    instead. Parse just the fallback arm.
+    """
+    text = _launcher_text()
+    header = 'case "${SANDBOX_KIND}" in'
+    idx = text.find(header)
+    assert idx != -1, f"bash case header not found in the launcher: {header!r}"
+    body = text[idx + len(header) :]
+    # The kind case is the launcher's LAST case and its arms nest further cases, so anchor the
+    # fallback on the `*)` arm marker rather than the first `esac`.
+    marker = "\n    *)"
+    arm_idx = body.find(marker)
+    assert arm_idx != -1, "the sandbox-kind case has no `*)` fallback arm — it must fail closed"
+    return body[arm_idx:]
+
+
+def test_sandbox_kind_fallback_is_not_mislabelled_as_block_missing() -> None:
+    """#435 / #434-class: the sandbox-kind `*)` arm recorded an unrecognised kind as
+    `sandbox_block_missing` — a different condition ("no [sandbox] block") with a different fix.
+
+    Text-bound rather than behavioural BY NECESSITY, and the limit is named here rather than left
+    implicit: manifest.py declares `kind: Literal["full","none","stub"]`, so parse_manifest
+    rejects anything else upstream and this arm is unreachable from a valid manifest. It is the
+    fail-closed default against helper/jq drift. This guard proves WHICH reason the arm writes;
+    it CANNOT prove the arm ever runs. No test can, short of stubbing the helper.
+    """
+    arm = _kind_case_fallback_arm()
+    assert '"reason":"sandbox_kind_unrecognised"' in arm, (
+        "the sandbox-kind `*)` fallback does not write sandbox_kind_unrecognised"
+    )
+    assert "sandbox_block_missing" not in arm, (
+        "the sandbox-kind `*)` fallback still mislabels an unrecognised kind as "
+        "sandbox_block_missing — #435's named defect."
+    )
+
+
 def test_derived_vocabularies_are_not_vacuous() -> None:
     """`set() == set()` / `set() <= X` are the canonical vacuous greens — floor every derived set.
 
@@ -514,6 +553,6 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     assert len(_sandbox_policy_invalid_reasons()) >= 7, "SandboxPolicyInvalid literal floor"
     assert len(_flags_path_reasons()) >= 9, "flags-path floor"
     assert len(_read_environment_keys()) == 2, "env-key floor"
-    assert len(_launcher_emittable_reasons()) >= 20, "launcher-emittable floor"
-    assert len(_RESERVED_UNEMITTED) == 5, "reserved floor"
-    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 30, "vocab floor"
+    assert len(_launcher_emittable_reasons()) >= 31, "launcher-emittable floor"
+    assert len(_RESERVED_UNEMITTED) == 4, "reserved floor"
+    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 34, "vocab floor"

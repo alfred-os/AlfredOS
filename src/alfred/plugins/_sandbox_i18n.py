@@ -55,6 +55,10 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     ),
     "supervisor.sandbox.refused.unknown_host_os": t("supervisor.sandbox.refused.unknown_host_os"),
     "supervisor.sandbox.refused.jq_unavailable": t("supervisor.sandbox.refused.jq_unavailable"),
+    # #435: a missing bwrap previously failed the exec at 127 with no row.
+    "supervisor.sandbox.refused.bwrap_unavailable": t(
+        "supervisor.sandbox.refused.bwrap_unavailable"
+    ),
     "supervisor.sandbox.refused.macos_full_not_yet_shipped": t(
         "supervisor.sandbox.refused.macos_full_not_yet_shipped"
     ),
@@ -110,6 +114,10 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     ),
     "supervisor.sandbox.refused.stub_kind_in_production": t(
         "supervisor.sandbox.refused.stub_kind_in_production"
+    ),
+    # #435: previously refused with no audit row at all.
+    "supervisor.sandbox.refused.sandbox_kind_unrecognised": t(
+        "supervisor.sandbox.refused.sandbox_kind_unrecognised"
     ),
     # Boot-posture observability (emitted at the PR-S4-1 daemon-boot caller
     # from the primitives PR-S4-6 ships).

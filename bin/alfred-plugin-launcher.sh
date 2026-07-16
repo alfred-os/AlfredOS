@@ -123,6 +123,14 @@ shift
 case "${PLUGIN_ID}" in
     *[!A-Za-z0-9._-]* | "")
         printf 'plugin.launcher_plugin_id_invalid\n' >&2
+        # #435: emit a row so a malformed-id PROBE leaves an audit trail (it left
+        # none before). D2: the row carries the launcher-authored `<invalid>`
+        # sentinel, NEVER ${PLUGIN_ID} — interpolating the tainted bytes into this
+        # template is exactly the injection the gate above exists to prevent (CR on
+        # PR #140), and `<`/`>` are outside the id charset so it cannot collide with
+        # a real id. environment/host_os are not resolved yet at this point, so they
+        # carry the same unset/unknown markers as the environment-failure row below.
+        printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"<invalid>","reason":"plugin_id_charset_invalid","environment":"unset","host_os":"unknown"}\n' >&2
         exit 1
         ;;
 esac
@@ -231,6 +239,10 @@ _do_exec() {
     if [ "${HOST_OS}" = "linux" ]; then
         if ! command -v runuser >/dev/null 2>&1; then
             printf 'plugin.launcher_uid_drop_unavailable plugin_id=%s\n' "${PLUGIN_ID}" >&2
+            # #435 / D6: a Linux host that SUPPORTS UID-drop but lacks util-linux —
+            # distinct from uid_separation_unavailable (an OS with no mechanism at
+            # all), because the remediation differs.
+            printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"runuser_unavailable","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
             exit 1
         fi
         exec runuser -u "${TARGET_UID}" -- "${EXECUTABLE}" "$@"
@@ -310,6 +322,7 @@ rm -f "${_SANDBOX_ERR_FILE}"
 # unimplementable without a JSON reader in bash (alfred-core apt-installs jq).
 if ! command -v jq >/dev/null 2>&1; then
     printf 'supervisor.sandbox.refused.jq_unavailable plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"jq_unavailable","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
     exit 1
 fi
 
@@ -428,15 +441,24 @@ EOF
                 # the array is non-empty. EXTRA_BINDS is empty unless the
                 # interp-prefix opt-in ran; BWRAP_FLAGS is empty only for a
                 # zero-flag policy. (Surfaced by the macOS unit CI leg, #246.)
+                # #435 / D5: refuse explicitly rather than letting `exec` fail at 127
+                # with no audit row. Mirrors the jq check above. `command -v` honours
+                # both a bare `bwrap` on PATH and a BWRAP= absolute-path override.
+                if ! command -v "${BWRAP}" >/dev/null 2>&1; then
+                    printf 'supervisor.sandbox.refused.bwrap_unavailable plugin_id=%s\n' "${PLUGIN_ID}" >&2
+                    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"bwrap_unavailable","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+                    exit 1
+                fi
                 exec "${BWRAP}" \
                     ${BWRAP_FLAGS[@]+"${BWRAP_FLAGS[@]}"} \
                     ${EXTRA_BINDS[@]+"${EXTRA_BINDS[@]}"} \
                     -- "${EXEC_TARGET}" "$@"
                 ;;
             macos)
-                # PR-S4-7 ships the sandbox-exec invocation; PR-S4-6 refuses
-                # so the resolver path is well-defined on macOS.
+                # PR-S4-7 ships the sandbox-exec invocation; until then refuse so
+                # the resolver path is well-defined on macOS.
                 printf 'supervisor.sandbox.refused.macos_full_not_yet_shipped plugin_id=%s\n' "${PLUGIN_ID}" >&2
+                printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"macos_full_not_yet_shipped","environment":"%s","host_os":"macos"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
                 exit 1
                 ;;
             windows)
@@ -471,7 +493,11 @@ EOF
         exec "${EXECUTABLE}" "$@"
         ;;
     *)
-        printf 'supervisor.sandbox.refused.sandbox_block_missing plugin_id=%s\n' "${PLUGIN_ID}" >&2
+        # #435: a kind outside {full,none,stub} — jq yielded null or an unknown
+        # value. Previously recorded under the "no [sandbox] block" reason, which
+        # is a different condition with a different fix. Fail-closed default.
+        printf 'supervisor.sandbox.refused.sandbox_kind_unrecognised plugin_id=%s\n' "${PLUGIN_ID}" >&2
+        printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"sandbox_kind_unrecognised","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
         exit 1
         ;;
 esac

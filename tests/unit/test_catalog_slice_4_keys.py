@@ -185,7 +185,11 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.sandbox.refused.macos_full_not_yet_shipped",
     "supervisor.sandbox.refused.unknown_host_os",
     "supervisor.sandbox.refused.jq_unavailable",
+    "supervisor.sandbox.refused.bwrap_unavailable",  # #435
     "supervisor.sandbox.refused.sandbox_info_handshake_mismatch",
+    # #435: the sandbox-kind `*)` fallback arm's own reason (previously
+    # mislabelled sandbox_block_missing).
+    "supervisor.sandbox.refused.sandbox_kind_unrecognised",
     "supervisor.sandbox.refused.reason_unclassified",  # #434A/#434B
     # #434B: the schema `case` allow-list arm (SandboxPolicyInvalid reasons),
     # now reachable from the launcher's operator stderr key since it

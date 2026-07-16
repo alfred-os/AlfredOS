@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-16 13:21+0100\n"
+"POT-Creation-Date: 2026-07-16 14:39+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2743,74 +2743,80 @@ msgstr ""
 "Plugin {plugin_id} cannot be launched: jq is not available on the "
 "launcher host."
 
-#: src/alfred/plugins/_sandbox_i18n.py:59
+#: src/alfred/plugins/_sandbox_i18n.py:60
+msgid "supervisor.sandbox.refused.bwrap_unavailable"
+msgstr ""
+"Plugin {plugin_id} cannot be launched: bwrap is not available on the "
+"launcher host."
+
+#: src/alfred/plugins/_sandbox_i18n.py:63
 msgid "supervisor.sandbox.refused.macos_full_not_yet_shipped"
 msgstr ""
 "Plugin {plugin_id} requests a full macOS sandbox, which is not yet "
 "shipped (PR-S4-7)."
 
-#: src/alfred/plugins/_sandbox_i18n.py:62
+#: src/alfred/plugins/_sandbox_i18n.py:66
 msgid "supervisor.sandbox.refused.policy_translate_failed"
 msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags."
 
-#: src/alfred/plugins/_sandbox_i18n.py:70
+#: src/alfred/plugins/_sandbox_i18n.py:74
 msgid "supervisor.sandbox.refused.kind_full_requires_keep_fd_3"
 msgstr ""
 "Plugin {plugin_id} sandbox policy omits fd 3 (the provider-key channel) "
 "from keep_fds. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:73
+#: src/alfred/plugins/_sandbox_i18n.py:77
 msgid "supervisor.sandbox.refused.policy_path_not_absolute"
 msgstr ""
 "Plugin {plugin_id} sandbox policy contains a non-absolute bind path. "
 "Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:76
+#: src/alfred/plugins/_sandbox_i18n.py:80
 msgid "supervisor.sandbox.refused.arch_variable_path_hard_bound"
 msgstr ""
 "Plugin {plugin_id} sandbox policy hard-binds an architecture-variable "
 "path that may not exist on every supported architecture. Refusing to "
 "launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:79
+#: src/alfred/plugins/_sandbox_i18n.py:83
 msgid "supervisor.sandbox.refused.mount_shadows_earlier_mount"
 msgstr ""
 "Plugin {plugin_id} sandbox policy has a mount that shadows an earlier "
 "mount, masking it. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:82
+#: src/alfred/plugins/_sandbox_i18n.py:86
 msgid "supervisor.sandbox.refused.soft_bind_forbidden_path"
 msgstr ""
 "Plugin {plugin_id} sandbox policy soft-binds a path outside the "
 "architecture-variable allow-list. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:85
+#: src/alfred/plugins/_sandbox_i18n.py:89
 msgid "supervisor.sandbox.refused.bind_source_too_broad"
 msgstr ""
 "Plugin {plugin_id} sandbox policy binds a source that exposes the host "
 "root or a broad top-level tree into the sandbox. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:92
+#: src/alfred/plugins/_sandbox_i18n.py:96
 msgid "supervisor.sandbox.refused.reason_unclassified"
 msgstr ""
 "Plugin {plugin_id} sandbox refusal could not be classified from the "
 "manifest reader's output. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:98
+#: src/alfred/plugins/_sandbox_i18n.py:102
 msgid "supervisor.sandbox.refused.interpreter_prefix_too_broad"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: the configured interpreter "
 "({interpreter}) resolves to a root-level install prefix, which would bind"
 " the entire host filesystem into the sandbox."
 
-#: src/alfred/plugins/_sandbox_i18n.py:106
+#: src/alfred/plugins/_sandbox_i18n.py:110
 msgid "supervisor.sandbox.refused.fake_uname_in_production"
 msgstr ""
 "FAKE_UNAME is set in production for plugin {plugin_id}. FAKE_UNAME is a "
 "test-only host-OS override and is ignored in production; its presence "
 "here can only force a host-OS branch. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:109
+#: src/alfred/plugins/_sandbox_i18n.py:113
 msgid "supervisor.sandbox.refused.uid_separation_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched on this non-Linux production host "
@@ -2818,26 +2824,32 @@ msgstr ""
 "unsandboxed in production is refused. Run plugins on a Linux host or "
 "under bwrap."
 
-#: src/alfred/plugins/_sandbox_i18n.py:112
+#: src/alfred/plugins/_sandbox_i18n.py:116
 msgid "supervisor.sandbox.refused.stub_kind_in_production"
 msgstr ""
 "Plugin {plugin_id} declares a kind:stub sandbox, which provides no "
 "containment, and is refused in production on host {host_os}. Refusing to "
 "launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:116
+#: src/alfred/plugins/_sandbox_i18n.py:120
+msgid "supervisor.sandbox.refused.sandbox_kind_unrecognised"
+msgstr ""
+"Plugin {plugin_id} sandbox manifest declares an unrecognised kind. "
+"Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:124
 msgid "supervisor.boot.mlock_unavailable"
 msgstr ""
 "mlockall is unavailable ({errno_string}); Supervisor pages may swap to "
 "disk. Boot proceeds."
 
-#: src/alfred/plugins/_sandbox_i18n.py:117
+#: src/alfred/plugins/_sandbox_i18n.py:125
 msgid "supervisor.boot.core_dumps_disabled"
 msgstr ""
 "Core dumps disabled (RLIMIT_CORE set to 0) to protect the in-memory "
 "provider key."
 
-#: src/alfred/plugins/_sandbox_i18n.py:118
+#: src/alfred/plugins/_sandbox_i18n.py:126
 msgid "daemon.boot.environment_source_conflict"
 msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "

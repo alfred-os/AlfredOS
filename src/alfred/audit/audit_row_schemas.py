@@ -1201,9 +1201,9 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # ``provider_key_delivery_failed`` writer adopt the same auditor in #433 follow-ups.
 # This set governs what the launcher WRITES (plus the reserved reasons named below).
 #
-# Twenty-six reasons are launcher-emittable. Five are RESERVED with no emitter and are retained
+# Thirty-one reasons are launcher-emittable. Four are RESERVED with no emitter and are retained
 # deliberately (the binding requires the set to equal the union of emittable and reserved):
-#   * ``policy_ref_os_mismatch``, ``bwrap_unavailable``, ``bwrap_mode_userns_unavailable`` —
+#   * ``policy_ref_os_mismatch``, ``bwrap_mode_userns_unavailable`` —
 #     documented, no code path emits them;
 #   * ``provider_key_delivery_failed`` — the fd-3 partial-write / EAGAIN refusal from
 #     ``alfred.supervisor.fd3_key_delivery`` (sec-3); defined there as a sandbox-refusal reason
@@ -1255,9 +1255,22 @@ SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
         "policy_translate_failed",
         # Post-translation: bind widening (launcher).
         "interpreter_prefix_too_broad",
+        # Host tooling missing (launcher). Distinct from `uid_separation_unavailable`,
+        # which means the HOST OS has no UID-drop mechanism at all: `runuser_unavailable`
+        # is a Linux host that supports UID-drop but lacks util-linux. Different
+        # remediation, so a different reason (#435 / D6).
+        "runuser_unavailable",
+        "jq_unavailable",
+        # Host tooling missing (launcher) — #435 wired this; it was reserved-with-no-emitter
+        # while a missing bwrap merely made the exec fail at 127 with no audit row at all.
+        "bwrap_unavailable",
+        # kind:full on macOS is not yet shipped (PR-S4-7 lands sandbox-exec).
+        "macos_full_not_yet_shipped",
+        # The sandbox-kind `*)` arm: a kind outside {full,none,stub}. Previously
+        # mislabelled `sandbox_block_missing` — a #434-class conflation (#435).
+        "sandbox_kind_unrecognised",
         # Reserved — no launcher emitter (see comment above).
         "policy_ref_os_mismatch",
-        "bwrap_unavailable",
         "bwrap_mode_userns_unavailable",
         "provider_key_delivery_failed",
         "sandbox_info_handshake_mismatch",
