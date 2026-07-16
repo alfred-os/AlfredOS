@@ -124,15 +124,116 @@ def _exited_fake_with_frame(frame_body: bytes, stderr: bytes):
     return fake
 
 
+def _exited_fake_stdout(stdout: bytes, stderr: bytes):
+    # A fake whose stdout carries exactly ``stdout`` raw bytes (a partial/torn
+    # frame the child wrote) then EOF; returncode preset so the drain proceeds.
+    from tests.unit.security.test_quarantine_child_io import _FakePopen
+
+    fake = _FakePopen(stdout_frames=[stdout], stderr_bytes=stderr)
+    fake.returncode = 1
+    return fake
+
+
 async def test_post_frame_read_failure_not_recorded() -> None:
     """A crash AFTER a frame was read is CHILD-authored -- never recorded."""
     recorder = _CapturingRecorder()
     fake = _exited_fake_with_frame(b'{"jsonrpc":"2.0","result":{"ok":1}}', _REFUSAL_ROW)
     io = _SubprocessChildIO(fake, refusal_recorder=recorder)
-    await io.read_frame()  # first read succeeds -> sets _frame_read = True
+    await io.read_frame()  # first read succeeds -> sets _child_wrote_stdout = True
     with pytest.raises(QuarantineChildSpawnError):
         await io.read_frame()  # buffer now empty -> EOF mid-frame (a crash)
     assert recorder.rows == []
+
+
+async def test_first_turn_full_header_then_body_eof_not_recorded() -> None:
+    """CR-Critical: a child that writes a valid 4-byte header then fails the BODY
+    read on frame ONE is CHILD-authored -- its forged stderr row must NOT record.
+
+    ``_child_wrote_stdout`` is set the instant the header is read (before the body),
+    so the drain gate ``refusal_candidate and not self._child_wrote_stdout`` is False
+    even though no full frame was ever returned. This is the exact first-turn forgery
+    bypass CodeRabbit flagged.
+    """
+    import struct
+
+    recorder = _CapturingRecorder()
+    header_only = struct.pack(">I", 80)  # claims an 80-byte body that never arrives
+    io = _SubprocessChildIO(
+        _exited_fake_stdout(header_only, _REFUSAL_ROW), refusal_recorder=recorder
+    )
+    with pytest.raises(QuarantineChildSpawnError):
+        await io.read_frame()
+    assert recorder.rows == []  # child wrote stdout -> forged row suppressed
+
+
+async def test_first_turn_partial_header_then_eof_not_recorded() -> None:
+    """A child that writes a PARTIAL header (1-3 bytes) then EOF also wrote to
+    stdout -- child-authored, forged stderr row not recorded.
+
+    Covers the ``_TruncatedFrameError.bytes_read > 0`` arm: the header read itself
+    tears mid-way, but the non-zero partial proves the child produced stdout.
+    """
+    recorder = _CapturingRecorder()
+    io = _SubprocessChildIO(
+        _exited_fake_stdout(b"\x00\x00", _REFUSAL_ROW), refusal_recorder=recorder
+    )
+    with pytest.raises(QuarantineChildSpawnError):
+        await io.read_frame()
+    assert recorder.rows == []
+
+
+async def test_read_frame_timeout_not_attributed_to_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read_frame TIMEOUT is a child-side event, NEVER a launcher refusal (CR follow-up).
+
+    A refused launcher exits pre-``exec`` and closes stdout immediately -> a ZERO-byte
+    EOF (``_TruncatedFrameError``), never a wall-clock timeout. So a ``TimeoutError``
+    must not set ``refusal_candidate``, even when the child has since exited (``poll()``
+    non-None) leaving a forged ``sandbox_refused`` row on stderr -- otherwise a child
+    that stalls a partial header to the deadline then exits could forge an attributed
+    T0 row. Here stdout blocks past a shortened deadline; stderr carries the forged row.
+    """
+    import threading
+
+    import alfred.security.quarantine_child_io as child_io_mod
+
+    release = threading.Event()
+
+    class _HangingStdout:
+        def read(self, n: int) -> bytes:
+            release.wait(timeout=30)
+            return b""  # pragma: no cover - the wait_for deadline fires first
+
+    class _StderrReader:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self, n: int) -> bytes:
+            chunk, self._data = self._data[:n], self._data[n:]
+            return chunk
+
+    class _TimingOutProc:
+        def __init__(self) -> None:
+            self.stdout = _HangingStdout()
+            self.stderr = _StderrReader(_REFUSAL_ROW)
+            self.returncode = 1  # child exited -> poll() non-None -> the drain proceeds
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            return self.returncode
+
+    monkeypatch.setattr(child_io_mod, "_READ_FRAME_TIMEOUT_S", 0.05)
+    recorder = _CapturingRecorder()
+    io = _SubprocessChildIO(_TimingOutProc(), refusal_recorder=recorder)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(QuarantineChildSpawnError):
+            await io.read_frame()
+        assert recorder.rows == []  # TimeoutError -> refusal_candidate False -> not recorded
+    finally:
+        release.set()
 
 
 async def test_launcher_authored_eof_with_no_refusal_row_records_nothing() -> None:

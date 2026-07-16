@@ -53,6 +53,6 @@ provenance: >-
   per the #428 lesson).
 references:
   - "src/alfred/audit/launcher_refusal.py"
-  - "src/alfred/security/quarantine_child_io.py (drain gate: failure and not _frame_read)"
+  - "src/alfred/security/quarantine_child_io.py (drain gate: refusal_candidate and not self._child_wrote_stdout)"
   - "src/alfred/audit/audit_row_schemas.py (SANDBOX_REFUSED_REASONS, SANDBOX_REFUSED_FIELDS)"
   - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md"
