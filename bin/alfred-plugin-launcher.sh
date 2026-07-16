@@ -149,6 +149,59 @@ _truthy() {
     esac
 }
 
+# #452 review (err-001/sec-002 + rev-001): shared "run a command, capture its
+# stdout, capture the LAST line of its stderr" helper. The #434A sandbox-read
+# capture (below) duplicated the environment-read capture (below it too, pre-
+# fix) almost verbatim — the second occurrence, which is this codebase's own
+# stated refactor trigger (rev-001). One helper, one fail-closed mktemp path,
+# two call sites.
+#
+# A bare `_ERR_FILE="$(mktemp ...)"` assignment is UNGUARDED under `set -eu`:
+# if mktemp itself fails (unwritable or full TMPDIR), `set -e` exits the
+# script BEFORE the protective `if` around the wrapped command ever runs —
+# zero audit row, just mktemp's raw diagnostic (empirically reproduced with
+# TMPDIR=/nonexistent). This helper checks mktemp's own exit status explicitly
+# (never a bare assignment) so that failure is caught HERE and turned into a
+# `sandbox_refused` row instead of an uncaught `set -e` exit with nothing on
+# the audit stream — err-001/sec-002.
+#
+# Args: $1 = the row's `environment` field on a mktemp failure ("unset" from
+#            the pre-environment-read caller, else the resolved value); $2 =
+#            likewise for `host_os` ("unknown" pre-detection, else resolved);
+#            $3.. = the command to run. The two call sites differ in what
+#            they've resolved by the time they call this, so the row's
+#            context is a parameter rather than assumed.
+#
+# On success: sets `_CAPTURE_STDOUT` to the command's stdout and returns 0.
+# On failure: additionally sets `_CAPTURE_ERR_LAST_LINE` to the last line of
+# the command's stderr (empty string if it wrote none) and returns 1 — each
+# caller's own `if ! ...; then` branching and reason-mapping is unchanged, it
+# just reads `_CAPTURE_ERR_LAST_LINE` instead of tailing its own tmp file.
+#
+# `reason_unclassified` on the mktemp-failure row, not a new reason: it is
+# ALREADY the vocabulary's bucket for "an alarm with no more specific
+# attributable cause" (the schema-case and env-case `*)` fallbacks below) — a
+# failed mktemp is exactly that, an infra fault rather than a manifest/policy
+# authoring error, so it belongs in the same bucket instead of growing the
+# vocabulary for a distinction the audit consumer doesn't need.
+_capture_stderr_last_line() {
+    _csl_env="$1"
+    _csl_host_os="$2"
+    shift 2
+    if ! _csl_err_file="$(mktemp "${TMPDIR:-/tmp}/alfred-launcher-capture-err.XXXXXX" 2>/dev/null)"; then
+        printf 'supervisor.sandbox.refused.reason_unclassified plugin_id=%s\n' "${PLUGIN_ID}" >&2
+        printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"reason_unclassified","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${_csl_env}" "${_csl_host_os}" >&2
+        exit 1
+    fi
+    if ! _CAPTURE_STDOUT="$("$@" 2>"${_csl_err_file}")"; then
+        _CAPTURE_ERR_LAST_LINE="$(tail -n 1 "${_csl_err_file}" 2>/dev/null || true)"
+        rm -f "${_csl_err_file}"
+        return 1
+    fi
+    rm -f "${_csl_err_file}"
+    return 0
+}
+
 # Read Settings.environment via the pre-launcher Python helper (dual-source:
 # ALFRED_ENVIRONMENT env var > /etc/alfred/environment). Neither set → refuse.
 # The helper prints the value on stdout and a bare i18n key on stderr.
@@ -160,15 +213,13 @@ _truthy() {
 # setting FAKE_UNAME=Darwin. The helper's stderr (the specific i18n key) is
 # captured (low-3) so the launcher surfaces the precise refusal reason —
 # environment_not_set vs environment_unrecognised — not a generic one.
-_ENV_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/alfred-launcher-env-err.XXXXXX")"
-if ! ALFRED_RESOLVED_ENVIRONMENT="$(python3 -m alfred.plugins.manifest_reader --read-environment 2>"${_ENV_ERR_FILE}")"; then
+if ! _capture_stderr_last_line "unset" "unknown" python3 -m alfred.plugins.manifest_reader --read-environment; then
     # The helper emits a closed-vocabulary bare key (daemon.boot.environment_-
     # not_set | daemon.boot.environment_unrecognised) on its LAST stderr line.
     # Surface it verbatim (low-3) instead of discarding it with 2>/dev/null and
     # refusing with a generic reason; fall back to the not_set key if the
     # capture was empty (fail-closed).
-    _env_err_key="$(tail -n 1 "${_ENV_ERR_FILE}" 2>/dev/null || true)"
-    rm -f "${_ENV_ERR_FILE}"
+    _env_err_key="${_CAPTURE_ERR_LAST_LINE}"
     case "${_env_err_key}" in
         daemon.boot.environment_unrecognised | daemon.boot.environment_not_set) : ;;
         *) _env_err_key="daemon.boot.environment_not_set" ;;
@@ -177,7 +228,7 @@ if ! ALFRED_RESOLVED_ENVIRONMENT="$(python3 -m alfred.plugins.manifest_reader --
     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"%s","environment":"unset","host_os":"unknown"}\n' "${PLUGIN_ID}" "${_env_err_key#daemon.boot.}" >&2
     exit 1
 fi
-rm -f "${_ENV_ERR_FILE}"
+ALFRED_RESOLVED_ENVIRONMENT="${_CAPTURE_STDOUT}"
 
 IS_PRODUCTION=false
 [ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ] && IS_PRODUCTION=true
@@ -286,18 +337,43 @@ _read_sandbox() {
 # can fail with FIVE distinct bare i18n keys; `2>/dev/null` collapsed all five
 # into the benign `sandbox_block_missing`, so `manifest_unreadable` /
 # `manifest_invalid` — a planted-manifest TAMPER signal — were recorded as "you
-# forgot [sandbox]". Mirrors the environment path above (L155-171), which has
-# implemented this capture-and-map correctly since PR #229.
-_SANDBOX_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/alfred-launcher-sandbox-err.XXXXXX")"
-if ! SANDBOX_JSON="$(_read_sandbox 2>"${_SANDBOX_ERR_FILE}")"; then
-    _sandbox_err_key="$(tail -n 1 "${_SANDBOX_ERR_FILE}" 2>/dev/null || true)"
-    rm -f "${_SANDBOX_ERR_FILE}"
+# forgot [sandbox]". Shares `_capture_stderr_last_line` with the environment
+# read above (#452 review fast-follow: the two capture scaffolds were nearly
+# byte-identical before this — rev-001).
+if ! _capture_stderr_last_line "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" _read_sandbox; then
+    _sandbox_err_key="${_CAPTURE_ERR_LAST_LINE}"
     # Each arm assigns BOTH the audit reason and the operator key it re-prints.
     # The operator key is echoed VERBATIM (never synthesised from the reason) so
-    # no new i18n key is needed — the `plugin.*` keys are already registered in
-    # _sandbox_i18n.py, and a `t(message_key=var)` indirection would make them
-    # pybabel-invisible. Closed vocab: audit_row_schemas.SANDBOX_REFUSED_REASONS;
+    # no new i18n key is needed — the `plugin.*` keys already resolve in the
+    # catalog, though NOT all from one registry: `manifest_unreadable` /
+    # `manifest_reader_no_source` / `manifest_invalid` are in _sandbox_i18n.py,
+    # `launcher_plugin_id_invalid` is in the pre-existing _launcher_i18n.py
+    # (Slice-3), and `manifest_sandbox_block_missing` has NO dedicated registry
+    # entry at all — its only pybabel anchor is the incidental `t()` call in
+    # errors.py (a real usage, not a deliberate pin; an errors.py refactor
+    # could silently drop it with nothing here to notice). test_sandbox_i18n_-
+    # keys.py binds all five, wherever each anchor lives, so that drift fails
+    # loud rather than silently orphaning a key. A `t(message_key=var)`
+    # indirection here would make the key pybabel-invisible, hence the
+    # verbatim echo. Closed vocab: audit_row_schemas.SANDBOX_REFUSED_REASONS;
     # bound by test_sandbox_reason_vocab_sync.py (#432).
+    #
+    # Reachability note (#452 review arch-001): of the five arms below, only
+    # THREE are live paths from this caller. `plugin_id_charset_invalid` and
+    # `manifest_reader_no_source` are drift defense: manifest_reader's
+    # `_cmd_read_sandbox` only reaches its `manifest_path is None` branch —
+    # the source of both keys — when called with an empty or unsafe
+    # --plugin-id and no --manifest-path. `_read_sandbox` above always
+    # supplies one or the other, and PLUGIN_ID is charset-gated by this
+    # launcher's OWN entry check — byte-identical to manifest_reader's
+    # `_SAFE_ID_CHARS` — before `_read_sandbox` is ever called. Both arms are
+    # kept, not deleted: this map's key set is derived from manifest_reader's
+    # `_fail` call sites, not hand-listed, and coupling to that CONTRACT is
+    # the point, not reachability today. A comment cannot be placed on the
+    # arms themselves, below — this file's own text-based drift-guard
+    # (`_parse_mapping_case` in test_sandbox_reason_vocab_sync.py) splits the
+    # case body on `;;` and would fuse a between-arms comment into the
+    # following arm's pattern text.
     case "${_sandbox_err_key}" in
         plugin.launcher_plugin_id_invalid) _SANDBOX_REASON="plugin_id_charset_invalid" ;;
         plugin.manifest_reader_no_source) _SANDBOX_REASON="manifest_reader_no_source" ;;
@@ -316,7 +392,7 @@ if ! SANDBOX_JSON="$(_read_sandbox 2>"${_SANDBOX_ERR_FILE}")"; then
     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"%s","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${_SANDBOX_REASON}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
     exit 1
 fi
-rm -f "${_SANDBOX_ERR_FILE}"
+SANDBOX_JSON="${_CAPTURE_STDOUT}"
 
 # jq parses the helper's JSON. Refuse loudly if missing — the resolver is
 # unimplementable without a JSON reader in bash (alfred-core apt-installs jq).

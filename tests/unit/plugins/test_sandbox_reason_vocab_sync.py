@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import re
 import types
 from pathlib import Path
+
+import pytest
 
 from alfred.audit import audit_row_schemas
 from alfred.plugins import manifest_reader, sandbox_policy
@@ -259,11 +262,19 @@ def _parse_mapping_case(subject: str, var: str) -> dict[str, str]:
     Fails LOUD on an arm that does not assign ``var`` — an unassigned arm means the map has a
     hole the launcher would fall through, and a silently-skipped arm makes the binding
     UNDER-count (the #432 vacuity lesson).
+
+    Also fails LOUD on a DUPLICATE arm pattern (#452 review CodeRabbit-major): a naive
+    ``mapping[pattern] = value`` keeps the LAST assignment, but bash's ``case`` matches the
+    FIRST matching arm. A dict build that silently overwrites would validate a mapping the
+    shell never actually executes — a hole in this drift-guard's own trust. An actual duplicate
+    in the launcher is itself a bug, so this refuses to silently pick either value; the launcher
+    must be fixed, not the parser.
     """
     body = _extract_case_body(subject)
 
     mapping: dict[str, str] = {}
     unassigned: list[str] = []
+    duplicates: list[str] = []
     for arm in (a.strip() for a in body.split(";;") if a.strip()):
         pattern, _, arm_body = arm.partition(")")
         pattern = pattern.strip()
@@ -272,14 +283,38 @@ def _parse_mapping_case(subject: str, var: str) -> dict[str, str]:
         match = re.search(rf'{re.escape(var)}="([^"]*)"', arm_body)
         if match is None:
             unassigned.append(pattern)
+        elif pattern in mapping:
+            duplicates.append(pattern)
         else:
             mapping[pattern] = match.group(1)
     assert not unassigned, (
         f"case {subject!r} has arm(s) that never assign {var}: {unassigned}. "
         f"Each arm must assign a literal or the binding under-counts."
     )
+    assert not duplicates, (
+        f"case {subject!r} has duplicate arm pattern(s) {duplicates}. bash's case matches the "
+        f"FIRST arm; a dict build that silently keeps the LAST would validate a mapping the "
+        f"shell never executes. Fix the launcher's case (remove or merge the duplicate)."
+    )
     assert mapping, f"no arms parsed under case {subject!r}"
     return mapping
+
+
+def test_parse_mapping_case_fails_loud_on_a_duplicate_arm_pattern(monkeypatch) -> None:
+    """Direct unit test of the parser's own contract (#452 review CodeRabbit-major).
+
+    The real launcher has no duplicate arm today, so this exercises a synthetic case body via
+    a monkeypatched ``_launcher_text`` rather than waiting for a real drift to prove the guard
+    works. Before the fix, ``mapping["a"] = "two"`` would win silently (bash would actually run
+    the FIRST arm, "one") and this parser would never notice.
+    """
+    fake_case = 'case "${_x}" in\n    a) _V="one" ;;\n    a) _V="two" ;;\nesac\n'
+    monkeypatch.setattr(
+        "tests.unit.plugins.test_sandbox_reason_vocab_sync._launcher_text",
+        lambda: fake_case,
+    )
+    with pytest.raises(AssertionError, match="duplicate arm pattern"):
+        _parse_mapping_case("${_x}", "_V")
 
 
 def _read_sandbox_keys() -> frozenset[str]:
@@ -531,11 +566,18 @@ def test_sandbox_kind_fallback_is_not_mislabelled_as_block_missing() -> None:
     """#435 / #434-class: the sandbox-kind `*)` arm recorded an unrecognised kind as
     `sandbox_block_missing` — a different condition ("no [sandbox] block") with a different fix.
 
-    Text-bound rather than behavioural BY NECESSITY, and the limit is named here rather than left
-    implicit: manifest.py declares `kind: Literal["full","none","stub"]`, so parse_manifest
-    rejects anything else upstream and this arm is unreachable from a valid manifest. It is the
-    fail-closed default against helper/jq drift. This guard proves WHICH reason the arm writes;
-    it CANNOT prove the arm ever runs. No test can, short of stubbing the helper.
+    Text-bound, and the limit is named here rather than left implicit: manifest.py declares
+    `kind: Literal["full","none","stub"]`, so parse_manifest rejects anything else upstream and
+    this arm is unreachable from a VALID manifest — it is the fail-closed default against
+    helper/jq drift (a compromised/stubbed `manifest_reader --read-sandbox`, or a `SANDBOX_KIND`
+    jq-extraction bug). This guard proves WHICH reason the arm writes; it does not drive the arm.
+
+    #452 review test-002: an earlier version of this docstring claimed "no test can [drive the
+    arm], short of stubbing the helper" — true as stated, but presented as if that made the arm
+    untestable, which is false: this PR already pays the PATH-shadowed-`python3` cost elsewhere
+    (see the anti-echo test in test_launcher_sandbox_flow.py). The behavioural companion,
+    `test_launcher_sandbox_flow.test_unrecognised_sandbox_kind_refused_via_stubbed_helper`,
+    stubs `python3` to return `{"kind":"bogus"}` and drives this exact arm end-to-end.
     """
     arm = _kind_case_fallback_arm()
     assert '"reason":"sandbox_kind_unrecognised"' in arm, (
@@ -559,6 +601,86 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     assert len(_launcher_emittable_reasons()) >= 31, "launcher-emittable floor"
     assert len(_RESERVED_UNEMITTED) == 4, "reserved floor"
     assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 35, "vocab floor"
+
+
+# ---------------------------------------------------------------------------
+# #452 review test-001 — every emit-line JSON TEMPLATE must itself be well-formed.
+#
+# Every guard above binds the launcher's *reasons* to the Python vocabulary. None of them
+# reads the printf FORMAT STRING as JSON — they match on substrings (`"reason":\s*"([^"]*)"`)
+# that survive even when the surrounding template is broken. Named mutant (from the PR #452
+# review): drop the closing brace from one row's printf template. The row becomes unparseable
+# and is silently discarded at ``launcher_refusal.py``'s ``except ValueError: continue`` — yet
+# a behavioural test asserting only ``"some_reason" in result.stderr`` stays green, because that
+# substring is present whether or not the JSON around it is well-formed (worse: it is ALSO
+# satisfied by an unrelated printf on the same stderr stream that happens to share the reason
+# word — the macOS test's original defect). This guard reads every template STATICALLY, so a
+# malformed one fails here regardless of which behavioural test happens to reach that line.
+# ---------------------------------------------------------------------------
+
+_TRAILING_LITERAL_NEWLINE = "\\n"  # the 2 literal characters \ and n, not an actual newline
+
+
+def _sandbox_event_printf_templates(event: str) -> list[str]:
+    """Every printf format-string literal (its first single-quoted argument) on a line
+    carrying ``event`` — parsed textually, since these are bash ``printf`` calls, not Python.
+
+    Keyed on the event NAME rather than the compact JSON byte-string, matching the sibling
+    emit-line walks above (#432 review err-438-01 / CodeRabbit): a future line that reformats
+    its JSON must not silently drop out of this guard's denominator.
+    """
+    templates: list[str] = []
+    for line in _launcher_text().splitlines():
+        if "printf" not in line or event not in line:
+            continue
+        match = re.search(r"printf\s+'([^']*)'", line)
+        assert match is not None, (
+            f"printf line carrying {event!r} has no single-quoted format-string literal this "
+            f"parser can extract: {line.strip()[:120]}"
+        )
+        template = match.group(1)
+        assert template.endswith(_TRAILING_LITERAL_NEWLINE), (
+            f"printf template for {event!r} does not end with the expected literal "
+            f"trailing \\n: {template!r}"
+        )
+        templates.append(template[: -len(_TRAILING_LITERAL_NEWLINE)])
+    return templates
+
+
+def _assert_templates_are_well_formed_json(event: str, templates: list[str]) -> None:
+    """Substitute a placeholder for every ``%s`` and feed the result through ``json.loads``.
+
+    A placeholder, not the real runtime values, because this guard runs at COLLECTION time
+    against the launcher's SOURCE TEXT — it proves the template's fixed structure (braces,
+    quoting, commas) is sound independent of what any caller ever substitutes in.
+    """
+    malformed: list[str] = []
+    for template in templates:
+        candidate = template.replace("%s", "PLACEHOLDER")
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            malformed.append(f"{template!r}: {exc}")
+    assert not malformed, (
+        f"the following {event!r} printf templates are not well-formed JSON once %s is "
+        f"substituted with a placeholder:\n" + "\n".join(malformed)
+    )
+
+
+def test_every_sandbox_refused_json_template_is_well_formed() -> None:
+    """The named #452 mutant: drop a closing brace from any ``sandbox_refused`` row's printf
+    template and this fails, independent of which behavioural test happens to exercise that
+    row — unlike a substring assertion, which the mutant survives."""
+    templates = _sandbox_event_printf_templates(_SANDBOX_REFUSED_EVENT)
+    assert len(templates) >= 18, f"vacuity floor: only {len(templates)} templates found"
+    _assert_templates_are_well_formed_json(_SANDBOX_REFUSED_EVENT, templates)
+
+
+def test_every_sandbox_stub_used_json_template_is_well_formed() -> None:
+    """Sibling of the guard above for the ``sandbox_stub_used`` event's three producers."""
+    templates = _sandbox_event_printf_templates(_SANDBOX_STUB_USED_EVENT)
+    assert len(templates) == 3, f"vacuity floor: expected 3 templates, got {len(templates)}"
+    _assert_templates_are_well_formed_json(_SANDBOX_STUB_USED_EVENT, templates)
 
 
 # ---------------------------------------------------------------------------
