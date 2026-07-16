@@ -50,9 +50,12 @@ _LENGTH_PREFIX = struct.Struct(">I")
 class ProviderKeyDeliveryError(Exception):
     """fd-3 provider-key delivery failed (partial write / EAGAIN / OSError).
 
-    ``reason`` is the closed-vocabulary audit string the caller attributes to
-    ``SANDBOX_REFUSED_FIELDS``. Deliberately rooted at :class:`Exception` (not
-    a transport error) so the spawn path can refuse loudly and uniformly.
+    ``reason`` is the closed-vocabulary refusal string RESERVED for a future
+    ``SANDBOX_REFUSED_FIELDS`` audit-row writer on this genuine-delivery-
+    failure path (a #433 follow-up, #444 — see ADR-0051's Follow-ups); no
+    code writes that row today. Deliberately rooted at :class:`Exception`
+    (not a transport error) so the spawn path can refuse loudly and
+    uniformly.
     """
 
     def __init__(self, reason: str = "provider_key_delivery_failed") -> None:

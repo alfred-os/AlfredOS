@@ -209,6 +209,25 @@ When the extraction result is a `TypedRefusal`, the `reason` field is one of:
 > and secret-redacted — so it may show sanitized T3-derived text; treat it as
 > operational-log-tier, not audit.
 
+> **Durable launcher-refusal audit row (#433, ADR-0051).** A launcher
+> **sandbox** refusal — `kind="full"` quarantine spawn refused pre-`exec` (e.g.
+> "Missing sandbox policy file" above) — now also persists a durable
+> `supervisor.plugin.sandbox_refused` audit row, queryable via:
+>
+> ```bash
+> alfred audit log --event supervisor.plugin.sandbox_refused --since 24h
+> ```
+>
+> The row carries the closed-vocabulary `reason` field explaining *why* the
+> launcher refused — e.g. `environment_not_set`, `sandbox_block_missing`,
+> `policy_ref_*`, `bind_source_too_broad`, `interpreter_prefix_too_broad`.
+> Previously operators had only the transient
+> `security.quarantine_child.child_stderr` structlog line to go on; that line
+> is still emitted, but for durable, queryable diagnosis of a launcher
+> sandbox refusal, check the audit row first. A crash of the already-exec'd
+> child (not a launcher refusal) does not produce this row — it remains
+> `child_stderr`-only, per the launcher-vs-child authorship split above.
+
 ## Cross-references
 
 - [PRD §7.1](../../PRD.md#71-security--prompt-injection-defense) — dual-LLM split design requirement.
