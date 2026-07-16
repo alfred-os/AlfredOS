@@ -202,6 +202,18 @@ def _write_none_manifest() -> str:
         return f.name
 
 
+def _write_stub_manifest() -> str:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(
+            "[alfred]\nmanifest_version = 1\n[plugin]\n"
+            'id = "alfred.test-plugin"\nsubscriber_tier = "user-plugin"\n'
+            'sandbox_profile = "user-plugin"\n[sandbox]\nkind = "stub"\n'
+        )
+        return f.name
+
+
 @pytest.mark.skipif(
     _LAUNCHER_REQUIRES_ROOT,
     reason="kind:none runuser branch requires root; this runner is non-root",
@@ -327,6 +339,95 @@ def test_launcher_non_linux_dev_execs_with_stub_used_row() -> None:
     assert parsed["plugin_id"] == "alfred.test-plugin"
     assert parsed["reason"] == "uid_separation_unavailable"
     assert parsed["host_os"] == "macos"
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq required for the kind:stub sandbox branch"
+)
+def test_kind_stub_dev_row_carries_the_stub_kind_reason() -> None:
+    """#436: at base this row carried NO `reason` key at all — a strict SUBSET of the
+    kind:none non-Linux row (which already emitted `reason:uid_separation_unavailable`),
+    not a byte-identical twin of it. An operator reading the kind:stub row had no way to
+    tell why the plugin ran unsandboxed at all, and the `reason` the kind:none row DID
+    emit was bound to no schema field (`SANDBOX_STUB_USED_FIELDS` declared none) — nothing
+    pinned it to exist, let alone to differ between the two producers.
+    """
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "development",
+        "ALFRED_PLUGIN_MANIFEST_PATH": _write_stub_manifest(),
+        "FAKE_UNAME": "Darwin",
+    }
+    env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
+        [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "stub-kind-marker"],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0
+    json_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if b'"event":"supervisor.plugin.sandbox_stub_used"' in line
+    )
+    parsed = json.loads(json_line)
+    assert parsed["reason"] == "stub_kind"
+    assert parsed["host_os"] == "macos"
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq required for the kind:none/kind:stub sandbox branches"
+)
+def test_kind_none_and_kind_stub_rows_are_distinguishable_on_macos() -> None:
+    """The crux of #436, asserted end-to-end: the two macOS-reachable stub_used producers must
+    each name their cause in a POSITIVE field value, rather than leaving it to be inferred from
+    which fields happen to be present. No parser exists for this row today (see the NOT PERSISTED
+    note on SANDBOX_STUB_USED_FIELDS), but field-presence would be the wrong discriminator to rely
+    on regardless: the sibling sandbox_refused parser canonicalizes an absent optional field to "",
+    so presence is exactly what a parse boundary erases first. Drive BOTH real launcher paths on
+    one host and prove each row names its own cause.
+    """
+    rows = {}
+    for label, manifest_writer in (
+        ("kind_none", _write_none_manifest),
+        ("kind_stub", _write_stub_manifest),
+    ):
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(_REPO_ROOT / "src"),
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": manifest_writer(),
+            "FAKE_UNAME": "Darwin",
+        }
+        env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
+        result = subprocess.run(  # noqa: S603 — literal repo-owned script path
+            [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", label],
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        assert result.returncode == 0, f"{label} did not exec: {result.stderr!r}"
+        json_line = next(
+            line
+            for line in result.stderr.splitlines()
+            if b'"event":"supervisor.plugin.sandbox_stub_used"' in line
+        )
+        rows[label] = json.loads(json_line)
+
+    # Both are macOS dev rows. Before #436 the kind:stub row carried no `reason`
+    # key at all — a strict SUBSET of the kind:none row (which already emitted
+    # `reason:uid_separation_unavailable`), not a byte-identical twin of it. An
+    # operator reading the kind:stub row had no way to tell why the plugin ran
+    # unsandboxed.
+    assert rows["kind_none"]["host_os"] == rows["kind_stub"]["host_os"] == "macos"
+    assert rows["kind_none"]["reason"] == "uid_separation_unavailable"
+    # Red at base: `rows["kind_stub"]` had no "reason" key before #436, so this
+    # line raised KeyError — the load-bearing oracle for this test. The two
+    # asserts above already pin the positive values that distinguish the two
+    # rows, so a further dict-level `!=` would be tautological given them.
+    assert rows["kind_stub"]["reason"] == "stub_kind"
 
 
 # ---------------------------------------------------------------------------

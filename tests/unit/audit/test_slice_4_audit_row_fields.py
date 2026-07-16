@@ -279,6 +279,14 @@ def test_daemon_boot_failed_has_failure_reason() -> None:
     assert "failure_reason" in audit_row_schemas.DAEMON_BOOT_FAILED_FIELDS
 
 
+def test_sandbox_stub_used_fields_declare_reason() -> None:
+    """#436: the launcher wrote `reason` into this row but the constant never declared it."""
+    assert "reason" in audit_row_schemas.SANDBOX_STUB_USED_FIELDS
+    assert audit_row_schemas.SANDBOX_STUB_USED_FIELDS == frozenset(  # noqa: SIM300
+        {"plugin_id", "policy_ref", "host_os", "environment", "reason"}
+    )
+
+
 def test_comms_inbound_poisoned_fields() -> None:
     """``COMMS_INBOUND_POISONED_FIELDS`` is the G6-7-5 dead-letter field-set.
 

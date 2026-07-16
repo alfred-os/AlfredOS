@@ -469,7 +469,7 @@ EOF
                     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"windows_stub_in_production","environment":"production","host_os":"windows"}\n' "${PLUGIN_ID}" >&2
                     exit 1
                 fi
-                printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","policy_ref":"%s","host_os":"windows","environment":"%s"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+                printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","policy_ref":"%s","host_os":"windows","environment":"%s","reason":"windows_stub"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
                 exec "${EXECUTABLE}" "$@"
                 ;;
         esac
@@ -489,7 +489,7 @@ EOF
             printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"stub_kind_in_production","environment":"production","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
             exit 1
         fi
-        printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","host_os":"%s","environment":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+        printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","host_os":"%s","environment":"%s","reason":"stub_kind"}\n' "${PLUGIN_ID}" "${HOST_OS}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
         exec "${EXECUTABLE}" "$@"
         ;;
     *)

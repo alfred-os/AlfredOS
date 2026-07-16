@@ -556,3 +556,84 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     assert len(_launcher_emittable_reasons()) >= 31, "launcher-emittable floor"
     assert len(_RESERVED_UNEMITTED) == 4, "reserved floor"
     assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 34, "vocab floor"
+
+
+# ---------------------------------------------------------------------------
+# #436 — bind the stub_used row's `reason` to a closed vocabulary of its own.
+#
+# `supervisor.plugin.sandbox_stub_used` is the sibling row for the disposition
+# where the launcher proceeds to exec WITHOUT OS-level isolation (dev/test
+# only). It has THREE producers, not one allow-list `case` — so this binding
+# is structurally simpler than the sandbox_refused guards above: it derives
+# the emitted reasons straight off the printf lines (no case-mapping to
+# resolve) and pins them against the new SANDBOX_STUB_USED_REASONS constant.
+# ---------------------------------------------------------------------------
+
+_SANDBOX_STUB_USED_EVENT = "supervisor.plugin.sandbox_stub_used"
+
+
+def _stub_used_emit_lines() -> list[str]:
+    """Every printf line carrying the stub_used event — keyed on the event NAME, not the
+    compact JSON byte-string, so a future line that reformats its JSON cannot slip the count
+    (#432's own silent-under-count lesson)."""
+    return [
+        line
+        for line in _launcher_text().splitlines()
+        if "printf" in line and _SANDBOX_STUB_USED_EVENT in line
+    ]
+
+
+def test_every_stub_used_reason_is_in_the_closed_vocab() -> None:
+    """#436: the stub row's `reason` was undeclared — live field-vocabulary drift of exactly
+    the class #432 closes for the sandbox_refused sibling. Bind it."""
+    lines = _stub_used_emit_lines()
+    assert len(lines) == 3, f"vacuity floor: expected 3 stub_used emit lines, got {len(lines)}"
+    reasons: set[str] = set()
+    missing_reason: list[str] = []
+    for line in lines:
+        match = re.search(r'"reason":\s*"([^"]*)"', line)
+        if match is None:
+            missing_reason.append(line.strip()[:90])
+        else:
+            reasons.add(match.group(1))
+    assert not missing_reason, (
+        "sandbox_stub_used printf line(s) with no `reason` field — #436 makes it MANDATORY on "
+        "all three sites. A row without one names no cause at all: it says a plugin ran "
+        "unsandboxed but not why, leaving an operator to infer the branch from which fields "
+        "happen to be present — and on macOS the kind:none and kind:stub branches are both "
+        "reachable, so that inference has nothing to work with:\n" + "\n".join(missing_reason)
+    )
+    unknown = reasons - audit_row_schemas.SANDBOX_STUB_USED_REASONS
+    assert not unknown, (
+        f"the launcher writes {sorted(unknown)} into a {_SANDBOX_STUB_USED_EVENT} row, absent "
+        f"from SANDBOX_STUB_USED_REASONS (a CLOSED vocabulary)."
+    )
+
+
+def test_stub_used_vocab_is_exactly_what_the_launcher_emits() -> None:
+    """Equality, so an ORPHAN (declared, emitted by nothing) is caught too — #432's arch-001."""
+    emitted = {
+        match.group(1)
+        for line in _stub_used_emit_lines()
+        if (match := re.search(r'"reason":\s*"([^"]*)"', line))
+    }
+    assert emitted == audit_row_schemas.SANDBOX_STUB_USED_REASONS, (
+        "SANDBOX_STUB_USED_REASONS is not exactly what the launcher emits.\n"
+        f"  orphan (declared, never emitted): "
+        f"{sorted(audit_row_schemas.SANDBOX_STUB_USED_REASONS - emitted)}\n"
+        f"  missing (emitted, not declared): "
+        f"{sorted(emitted - audit_row_schemas.SANDBOX_STUB_USED_REASONS)}"
+    )
+
+
+def test_stub_and_refused_vocabs_are_deliberately_not_disjoint() -> None:
+    """D7: `uid_separation_unavailable` is a member of BOTH vocabularies, and that is correct
+    — `reason` names the CAUSE, `event` names the disposition (refused vs proceeded anyway),
+    `environment` names why they differ. This test exists so a future reviewer cannot
+    'tidy' the overlap away without confronting the decision.
+    """
+    shared = audit_row_schemas.SANDBOX_STUB_USED_REASONS & audit_row_schemas.SANDBOX_REFUSED_REASONS
+    assert shared == {"uid_separation_unavailable"}, (
+        f"the vocab overlap changed to {sorted(shared)}. The two families share exactly one "
+        f"cause; see D7 in the design spec before altering this."
+    )
