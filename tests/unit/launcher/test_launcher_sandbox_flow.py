@@ -372,6 +372,36 @@ def test_policy_schema_refusal_audit_row_carries_the_real_reason(run_launcher, t
 
 
 # --------------------------------------------------------------------------
+# bwrap missing (#435)
+# --------------------------------------------------------------------------
+
+
+@_requires_jq
+def test_missing_bwrap_refuses_with_a_row(run_launcher, tmp_path) -> None:
+    """#435 / D5: a missing bwrap made exec fail at 127 with NO audit row. Refuse explicitly.
+
+    Drives it via BWRAP= pointing at a path that does not exist, which is the same condition
+    `command -v` reports for an uninstalled bwrap.
+    """
+    manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "BWRAP": str(tmp_path / "definitely-not-bwrap"),
+            "FAKE_UNAME": "Linux",
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "bwrap_unavailable"
+    assert row["host_os"] == "linux"
+
+
+# --------------------------------------------------------------------------
 # kind:stub
 # --------------------------------------------------------------------------
 
@@ -758,6 +788,27 @@ def test_invalid_plugin_id_refused(run_launcher, tmp_path) -> None:
     )
     assert result.returncode != 0
     assert "plugin.launcher_plugin_id_invalid" in result.stderr
+
+
+@_requires_jq
+def test_invalid_plugin_id_emits_a_row_without_echoing_the_id(run_launcher, tmp_path) -> None:
+    """#435 + D2: a malformed plugin_id must produce an audit row (today it produces NONE, so
+    a probe leaves no trail) — but the row must carry the `<invalid>` sentinel, never the
+    tainted bytes. Echoing them into the JSON template WOULD BE the injection (#437's lesson).
+    """
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        'evil","event":"forged',
+        str(stub),
+        env={"ALFRED_ENVIRONMENT": "development"},
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "plugin_id_charset_invalid"
+    assert row["plugin_id"] == "<invalid>"
+    assert row["environment"] == "unset"
+    assert row["host_os"] == "unknown"
+    assert "forged" not in result.stderr.replace("plugin.launcher_plugin_id_invalid", "")
 
 
 @pytest.mark.parametrize("flag", ["-h", "--help"])

@@ -180,3 +180,61 @@ def test_unsafe_field_value_dropped(unsafe_value: str) -> None:
         }
     )
     assert parse_launcher_refusal_rows(raw) == ()
+
+
+# ---------------------------------------------------------------------------
+# #435: every vocab reason must round-trip, and D2's <invalid> sentinel must
+# parse — the parser charset-checks nothing but Cc/Cf, so a strict prose
+# marker like "<invalid>" is accepted as a plain str.
+# ---------------------------------------------------------------------------
+
+
+def test_every_vocab_reason_round_trips() -> None:
+    """Every member of the closed vocab must survive the parser — a reason the launcher can
+    write but the parser drops is a silently-lost audit row.
+    """
+    from alfred.audit.audit_row_schemas import SANDBOX_REFUSED_REASONS
+
+    for reason in sorted(SANDBOX_REFUSED_REASONS):
+        line = json.dumps(
+            {
+                "event": "supervisor.plugin.sandbox_refused",
+                "plugin_id": "alfred.example",
+                "reason": reason,
+                "environment": "production",
+                "host_os": "linux",
+            }
+        )
+        rows = parse_launcher_refusal_rows(line.encode() + b"\n")
+        assert len(rows) == 1, f"the parser dropped the vocab reason {reason!r}"
+        assert rows[0].reason == reason
+
+
+def test_the_invalid_sentinel_row_parses() -> None:
+    """D2: the charset-refusal row carries the `<invalid>` sentinel. It must parse — the
+    parser charset-checks nothing, only Cc/Cf, so the sentinel is accepted as a plain str.
+    """
+    line = json.dumps(
+        {
+            "event": "supervisor.plugin.sandbox_refused",
+            "plugin_id": "<invalid>",
+            "reason": "plugin_id_charset_invalid",
+            "environment": "unset",
+            "host_os": "unknown",
+        }
+    )
+    rows = parse_launcher_refusal_rows(line.encode() + b"\n")
+    assert len(rows) == 1
+    assert rows[0].plugin_id == "<invalid>"
+
+
+def test_parser_optional_fields_not_widened() -> None:
+    """D2 depends on the parser staying strict: plugin_id must NOT become optional. A row
+    omitting it must still be dropped loudly, not canonicalized to "".
+    """
+    from alfred.audit.launcher_refusal import _OPTIONAL_FIELDS
+
+    assert frozenset({"policy_ref"}) == _OPTIONAL_FIELDS, (
+        "widening _OPTIONAL_FIELDS weakens every row on the most adversary-facing surface "
+        "in the system — D2 chose the <invalid> sentinel precisely to avoid this."
+    )
