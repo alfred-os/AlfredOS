@@ -449,25 +449,33 @@ def test_sbx_2026_017_policy_ref_charset_injection_refused(tmp_path: Path) -> No
 
 def test_sbx_2026_018_launcher_refusal_row_injection_contained() -> None:
     """sbx-2026-018: injection bytes in a launcher refusal row cannot forge a second
-    audit event nor smuggle an out-of-vocab reason (host-side parser containment, #433).
+    audit event, smuggle an out-of-vocab reason, nor ride control/format bytes into
+    the signed audit log (host-side parser containment, #433 + sec-001 hardening).
 
-    Iterates the YAML's own ``payload.forge_variants`` /
-    ``payload.out_of_vocab_reason_variants`` lists (the #428 lesson — the YAML
-    is the single source of truth, no second hardcoded copy of the variants).
+    Iterates the YAML's own ``payload.contained_variants`` /
+    ``payload.rejected_variants`` lists (the #428 lesson — the YAML is the single
+    source of truth, no second hardcoded copy of the variants).
+
+    ``contained_variants`` carry embedded escaped-JSON with NO control/format bytes:
+    line-oriented parsing keeps them a single string field, so each parses to
+    exactly one genuine row and no forged second row. ``rejected_variants`` carry a
+    control/format character (newline, ANSI ESC, bidi override), a non-string field
+    value, or an out-of-vocab reason: each is dropped loudly, admitting zero rows —
+    so injection bytes can never reach the signed audit log.
     """
     payload = _load("sbx-2026-018")
     assert payload.expected_outcome == "refused"
     assert isinstance(payload.payload, dict)
-    forge = payload.payload["forge_variants"]
-    oov = payload.payload["out_of_vocab_reason_variants"]
-    assert forge and oov, "payload declares no variants"
-    for variant in forge:
+    contained = payload.payload["contained_variants"]
+    rejected = payload.payload["rejected_variants"]
+    assert contained and rejected, "payload declares no variants"
+    for variant in contained:
         rows = parse_launcher_refusal_rows(variant.encode("utf-8"))
-        assert len(rows) == 1, f"forge variant produced {len(rows)} rows: {variant!r}"
+        assert len(rows) == 1, f"contained variant produced {len(rows)} rows: {variant!r}"
         assert rows[0].reason == "sandbox_block_missing", f"{variant!r}"
-    for variant in oov:
+    for variant in rejected:
         assert parse_launcher_refusal_rows(variant.encode("utf-8")) == (), (
-            f"oov variant not dropped: {variant!r}"
+            f"rejected variant not dropped: {variant!r}"
         )
 
 
