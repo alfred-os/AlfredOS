@@ -25,13 +25,18 @@ used, it consumes fd 3; verified bubblewrap 0.8.0/0.9.0, #218).
 - `policy_ref` charset injection: JSON-injection characters (quote+comma,
   newline) that would forge or inject a row into the launcher's audit-JSON
   printf output (`policy_ref_charset_invalid`, #437).
+- Launcher `sandbox_refused` refusal-row injection: escaped-JSON bytes in a
+  field value (forged `event`, embedded newline) that must not forge a second
+  audit event or smuggle an out-of-vocab `reason` past the host-side stderr
+  parser (`parse_launcher_refusal_rows`, #433).
 
 **Prefix.** `sbx-`
 
 **Owning PRs.** PR-S4-6 (launcher), PR-S4-7 (policies). PR-S4-7 ships the bulk of
 the entries; PR-S4-6 ships the launcher-side fd / handshake entries.
 
-**Ingestion paths.** `sandbox_policy_load`, `stdio_fd3_key_delivery`.
+**Ingestion paths.** `sandbox_policy_load`, `stdio_fd3_key_delivery`,
+`launcher_refusal_stderr`.
 
 **Expected outcomes.** Typically `refused` (bwrap or policy parser refuses)
 or `audit_row_emitted` anchored to `SANDBOX_REFUSED_FIELDS` /
@@ -69,6 +74,7 @@ drift is a release-blocker.
 | bwrap version drift (bwrap absent / below the version floor) | PR-S4-1 boot probe (#228) — TBD, no dedicated payload yet |
 | Over-broad bind source (`/`, non-allowlisted top-level tree, `/lib64/..`, `/proc/self/root`) | #428 (`sbx-2026-016`) — `bind_source_too_broad` parse-time refusal (not kernel-observable) |
 | `policy_ref` charset injection (forged `event` field / injected row via out-of-charset chars) | #437 (`sbx-2026-017`) — `policy_ref_charset_invalid` refusal; caught by the manifest parser first, not kernel-observable |
+| Launcher `sandbox_refused` refusal-row injection (forged 2nd event / out-of-vocab reason via escaped-JSON field values) | #433 (`sbx-2026-018`) — host-side `parse_launcher_refusal_rows` containment, not kernel-observable |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.

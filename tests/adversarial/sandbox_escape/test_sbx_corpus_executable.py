@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
+from alfred.audit.launcher_refusal import parse_launcher_refusal_rows
 from alfred.plugins.errors import (
     ManifestError,
     ManifestSandboxMissingError,
@@ -446,6 +447,30 @@ def test_sbx_2026_017_policy_ref_charset_injection_refused(tmp_path: Path) -> No
         assert variant not in stderr, f"variant {variant!r} leaked into stderr: {stderr!r}"
 
 
+def test_sbx_2026_018_launcher_refusal_row_injection_contained() -> None:
+    """sbx-2026-018: injection bytes in a launcher refusal row cannot forge a second
+    audit event nor smuggle an out-of-vocab reason (host-side parser containment, #433).
+
+    Iterates the YAML's own ``payload.forge_variants`` /
+    ``payload.out_of_vocab_reason_variants`` lists (the #428 lesson — the YAML
+    is the single source of truth, no second hardcoded copy of the variants).
+    """
+    payload = _load("sbx-2026-018")
+    assert payload.expected_outcome == "refused"
+    assert isinstance(payload.payload, dict)
+    forge = payload.payload["forge_variants"]
+    oov = payload.payload["out_of_vocab_reason_variants"]
+    assert forge and oov, "payload declares no variants"
+    for variant in forge:
+        rows = parse_launcher_refusal_rows(variant.encode("utf-8"))
+        assert len(rows) == 1, f"forge variant produced {len(rows)} rows: {variant!r}"
+        assert rows[0].reason == "sandbox_block_missing", f"{variant!r}"
+    for variant in oov:
+        assert parse_launcher_refusal_rows(variant.encode("utf-8")) == (), (
+            f"oov variant not dropped: {variant!r}"
+        )
+
+
 def test_all_pr_s4_6_payloads_load() -> None:
     # Every PR-S4-6 sbx payload schema-validates + carries the sbx prefix.
     ids = [
@@ -457,6 +482,7 @@ def test_all_pr_s4_6_payloads_load() -> None:
         "sbx-2026-010",
         "sbx-2026-016",
         "sbx-2026-017",
+        "sbx-2026-018",
     ]
     for pid in ids:
         payload = _load(pid)
