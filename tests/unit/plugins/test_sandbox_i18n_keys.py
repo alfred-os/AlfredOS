@@ -58,6 +58,31 @@ def test_every_schema_case_reason_has_a_registered_operator_key() -> None:
     )
 
 
+def test_434a_plugin_keys_all_resolve_wherever_their_anchor_lives() -> None:
+    """#452 review sec-001: derive the five ``plugin.*`` keys the #434A capture-and-map arm can
+    receive from the launcher itself (via the shared ``_parse_mapping_case`` helper, not a
+    hand-kept list) and assert each resolves to a live catalog entry — wherever its anchor
+    actually lives.
+
+    Three are anchored in ``_sandbox_i18n.py``, one (``launcher_plugin_id_invalid``) in the
+    pre-existing ``_launcher_i18n.py`` (Slice-3), and ``manifest_sandbox_block_missing`` has NO
+    dedicated registry entry at all: its only pybabel anchor is the incidental ``t()`` call in
+    ``errors.py`` (a real usage, not a deliberate pin) — an ``errors.py`` refactor could silently
+    drop it with nothing here to notice. Naming that dependency, mirroring the convention
+    ``_ENVIRONMENT_KEYS_RENDERED_ELSEWHERE`` already uses for the ``daemon.boot.*`` keys, is what
+    makes this binding honest rather than a restatement of "it happens to work today".
+    """
+    from tests.unit.plugins.test_sandbox_reason_vocab_sync import _parse_mapping_case
+
+    mapping = _parse_mapping_case("${_sandbox_err_key}", "_SANDBOX_REASON")
+    keys = frozenset(mapping) - {"*"}
+    assert len(keys) == 5, f"vacuity floor: derived {len(keys)} plugin.* keys, want 5"
+    bare = [key for key in keys if t(key) == key]
+    assert not bare, (
+        f"plugin.* keys the #434A case can receive but the catalog does not resolve: {bare}"
+    )
+
+
 def test_interpreter_prefix_too_broad_renders_with_emitter_kwargs() -> None:
     # The launcher emits this refusal (#250) with `plugin_id` + `interpreter`; the
     # catalog msgstr must substitute BOTH with no residual placeholder, else the

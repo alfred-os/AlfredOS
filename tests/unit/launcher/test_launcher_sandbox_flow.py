@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -106,6 +108,48 @@ def _stub_binary(tmp_path, exit_code: int = 0):
     stub.write_text(f"#!/bin/sh\nexit {exit_code}\n")
     stub.chmod(0o755)
     return stub
+
+
+# Every external tool the launcher's pre-sandbox-kind flow can invoke (env
+# read, sandbox read, host-OS detection, jq parsing, the mktemp-capture
+# helper), MINUS python3 (handled separately below). Used by
+# ``_path_without_tool`` to build a PATH with exactly one of them missing.
+_LAUNCHER_TOOLS = ("bash", "jq", "tr", "mktemp", "tail", "rm", "uname")
+
+
+def _path_without_tool(tmp_path, missing_tool: str) -> str:
+    """A PATH with every launcher-needed tool EXCEPT ``missing_tool``, built as an explicit
+    allow-list of symlinks to the REAL binaries (not "drop the directory that holds it").
+
+    Makes a specific tool's absence deterministic across hosts: macOS dev boxes never ship
+    ``runuser`` but Linux CI images almost always do (util-linux), so simply inheriting PATH
+    cannot exercise the ``runuser_unavailable`` branch reliably on both, and the reverse problem
+    (jq missing) can't be relied on either way. Symlinking each tool individually — rather than
+    removing whichever real PATH directory happens to contain the excluded one — keeps every
+    OTHER tool available exactly where the launcher expects to find it, regardless of how the
+    host lays out its PATH.
+
+    ``python3`` is deliberately NOT symlinked into the shadow dir: this repo's ``.venv/bin/-
+    python3`` is commonly itself a symlink to a base interpreter, and CPython's venv detection
+    walks up from the invoked path to find ``pyvenv.cfg`` — an extra symlink hop on top of that
+    breaks the walk, and the subprocess silently loses the venv's site-packages (hit while
+    writing this helper: a bare ``ModuleNotFoundError: prometheus_client``, not a clean refusal).
+    Prepending the REAL interpreter's own directory keeps python3 reachable without that hop;
+    ``missing_tool="python3"`` is refused outright rather than silently not excluding it.
+    """
+    assert missing_tool != "python3", (
+        "python3 is kept reachable via its own venv directory; this helper cannot exclude it"
+    )
+    shadow = tmp_path / f"path_no_{missing_tool}"
+    shadow.mkdir()
+    for tool in _LAUNCHER_TOOLS:
+        if tool == missing_tool:
+            continue
+        found = shutil.which(tool)
+        assert found, f"{tool!r} not found on the real PATH — cannot build the shadow PATH"
+        (shadow / tool).symlink_to(found)
+    python_dir = str(Path(sys.executable).parent)
+    return f"{python_dir}{os.pathsep}{shadow}"
 
 
 # --------------------------------------------------------------------------
@@ -403,6 +447,65 @@ def test_missing_bwrap_refuses_with_a_row(run_launcher, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------
+# runuser / jq missing (#452 review test-001)
+#
+# Neither reason had ANY test before this fix: `runuser_unavailable` had none
+# at all, and `jq_unavailable` appeared only inside `skipif` reason strings
+# (never as a behavioural assertion). `_path_without_tool` makes each tool's
+# absence deterministic on every host, unlike relying on the host's real
+# tooling (macOS dev boxes never ship runuser; Linux CI images almost always
+# do — the opposite problem for jq's absence).
+# --------------------------------------------------------------------------
+
+
+@_requires_jq
+def test_runuser_unavailable_refuses_with_a_row(run_launcher, tmp_path) -> None:
+    """`runuser_unavailable` — a Linux host that supports UID-drop but lacks util-linux — had
+    no test of any kind (#452 review test-001). FAKE_UNAME=Linux forces the Linux `_do_exec`
+    branch (honoured in development/test); the PATH is rebuilt with every tool this flow needs
+    EXCEPT runuser.
+    """
+    manifest = _write_manifest(tmp_path, _NONE_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "PATH": _path_without_tool(tmp_path, "runuser"),
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "FAKE_UNAME": "Linux",
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "runuser_unavailable"
+    assert row["host_os"] == "linux"
+
+
+def test_jq_unavailable_refuses_with_a_row(run_launcher, tmp_path) -> None:
+    """`jq_unavailable` appeared only in `skipif` reason strings before this fix — never
+    actually exercised (#452 review test-001). No `@_requires_jq` marker: the whole point is to
+    prove the launcher's OWN behaviour when jq is absent, independent of whether the test host
+    happens to have it.
+    """
+    manifest = _write_manifest(tmp_path, _NONE_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "PATH": _path_without_tool(tmp_path, "jq"),
+            "ALFRED_ENVIRONMENT": "development",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "jq_unavailable"
+
+
+# --------------------------------------------------------------------------
 # kind:stub
 # --------------------------------------------------------------------------
 
@@ -580,6 +683,48 @@ def test_missing_sandbox_block_still_refused_as_sandbox_block_missing(
     assert row["reason"] == "sandbox_block_missing"
 
 
+@_requires_jq
+def test_unrecognised_sandbox_kind_refused_via_stubbed_helper(run_launcher, tmp_path) -> None:
+    """#452 review test-002: an earlier docstring in test_sandbox_reason_vocab_sync.py claimed
+    the sandbox-kind `*)` fallback arm was untestable ("no test can, short of stubbing the
+    helper") and left it that way. The claim about REACHABILITY from a valid manifest is true —
+    manifest.py's ``kind: Literal["full","none","stub"]`` means ``parse_manifest`` rejects
+    anything else upstream — but "unreachable from a valid manifest" is not "untestable": this
+    PR already pays the PATH-shadowed-``python3`` cost elsewhere (see the anti-echo test above).
+    Stub ``python3 --read-sandbox`` to return a ``kind`` outside {full,none,stub} and drive the
+    arm end-to-end.
+    """
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    fake_python3 = fake_bin / "python3"
+    fake_python3.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "    *--read-environment*)\n"
+        "        printf 'development\\n'\n"
+        "        exit 0\n"
+        "        ;;\n"
+        "    *--read-sandbox*)\n"
+        '        printf \'{"kind":"bogus"}\\n\'\n'
+        "        exit 0\n"
+        "        ;;\n"
+        "esac\n"
+        "exit 1\n"
+    )
+    fake_python3.chmod(0o755)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        },
+    )
+    assert result.returncode == 1
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "sandbox_kind_unrecognised"
+
+
 # --------------------------------------------------------------------------
 # cross-OS matrix (devops-2) — FAKE_UNAME shim
 # --------------------------------------------------------------------------
@@ -587,6 +732,11 @@ def test_missing_sandbox_block_still_refused_as_sandbox_block_missing(
 
 @_requires_jq
 def test_macos_full_refuses_not_yet_shipped(run_launcher, tmp_path) -> None:
+    """#452 review test-001: a substring check here (``"macos_full_not_yet_shipped" in stderr``)
+    is ALSO satisfied by the unrelated operator-key printf line, so the JSON audit row could be
+    deleted outright and this assertion would still pass. Parse the row via ``_refusal_row``
+    (which requires exactly one, well-formed JSON row) instead.
+    """
     manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
     stub = _stub_binary(tmp_path)
     result = run_launcher(
@@ -599,7 +749,9 @@ def test_macos_full_refuses_not_yet_shipped(run_launcher, tmp_path) -> None:
         },
     )
     assert result.returncode != 0
-    assert "macos_full_not_yet_shipped" in result.stderr
+    row = _refusal_row(result.stderr)
+    assert row["reason"] == "macos_full_not_yet_shipped"
+    assert row["host_os"] == "macos"
 
 
 @_requires_jq
