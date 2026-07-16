@@ -106,6 +106,36 @@ async def test_append_schema_failure_propagates(_fake_invoke: list[dict[str, Any
         await SandboxRefusalAuditor(audit_writer=_BoomAudit()).record((_row(),))
 
 
+@pytest.mark.asyncio
+async def test_invoke_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CR-major-3: a hookpoint-dispatch failure must propagate, not be swallowed.
+
+    Mirrors ``test_append_schema_failure_propagates`` but on the OTHER call
+    ``record()`` makes per row: ``append_schema`` succeeds (the row IS
+    persisted) and the subsequent ``invoke(...)`` dispatch raises. ``record()``
+    has no try/except around either call, so this is a coverage-gap fill that
+    proves the "caller's contract to handle" docstring claim end-to-end rather
+    than asserting it only for the append_schema half.
+
+    Patched at its source module (``alfred.hooks.invoke``, not the string
+    form) -- see the ``_fake_invoke`` fixture's docstring above for why the
+    dotted-string resolver silently lands on the wrong object otherwise.
+    """
+
+    async def _boom_invoke(name: str, ctx: object, **kwargs: Any) -> object:
+        raise RuntimeError("hookpoint dispatch down")
+
+    invoke_module = importlib.import_module("alfred.hooks.invoke")
+    monkeypatch.setattr(invoke_module, "invoke", _boom_invoke)
+
+    audit = _FakeAudit()
+    with pytest.raises(RuntimeError, match="hookpoint dispatch down"):
+        await SandboxRefusalAuditor(audit_writer=audit).record((_row(),))
+    # The row WAS persisted before the dispatch failure -- proves the failure
+    # is downstream of append_schema, not a mask of it never having run.
+    assert len(audit.calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # core-001 — the declared-hookpoint / real-dispatch registry proof (#433,
 # ADR-0051).
