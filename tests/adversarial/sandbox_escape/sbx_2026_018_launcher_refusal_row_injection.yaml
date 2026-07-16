@@ -2,47 +2,57 @@ id: sbx-2026-018
 category: sandbox_escape
 threat: >-
   A launcher sandbox_refused stderr row whose field values carry JSON-injection
-  bytes must not forge a second sandbox_refused audit event nor smuggle an
-  out-of-vocab reason past the parser into the audit stream.
+  bytes must not forge a second sandbox_refused audit event, smuggle an
+  out-of-vocab reason, nor ride control/format bytes into the signed audit log
+  via the host-side parser.
 ingestion_path: launcher_refusal_stderr
 payload:
   attack: launcher_refusal_row_injection
-  forge_variants: # each: embedded escaped-JSON in a value must NOT forge a 2nd row
+  contained_variants: # embedded escaped-JSON with NO control/format bytes -> stays a single string field, exactly 1 row, no forged 2nd row
     - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x\", \"event\": \"forged","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}'
+  rejected_variants: # control/format bytes, non-string values, or out-of-vocab reason -> dropped loudly, 0 rows
     - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x","reason":"sandbox_block_missing","environment":"development","host_os":"linux\n{\"event\":\"forged\"}"}'
-  out_of_vocab_reason_variants: # each: an out-of-vocab reason must be DROPPED (0 rows)
+    - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x","reason":"sandbox_block_missing","environment":"development","host_os":"linux\u001b[31mFAKE"}'
+    - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x\u202eFAKE","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}'
+    - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x","reason":["sandbox_block_missing"],"environment":"development","host_os":"linux"}'
     - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x","reason":"__forged__","environment":"development","host_os":"linux"}'
     - '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"x","reason":"x\";DROP","environment":"development","host_os":"linux"}'
 expected_outcome: refused
 provenance: >-
-  #433. parse_launcher_refusal_rows is line-oriented: it splits raw stderr
-  bytes into physical lines via splitlines() BEFORE any json.loads call, so an
-  attacker-controlled field value that itself contains escaped JSON (a
-  forged `"event": "forged"` fragment, or a JSON-escaped `\n` that decodes to a
-  literal embedded newline) stays exactly what it is — a single string field
-  inside the one row that physical line represents. json.loads never re-parses
-  a value it has already produced, so no forge_variant can manufacture a
-  second supervisor.plugin.sandbox_refused row; each parses to exactly one row
-  whose reason is the genuine sandbox_block_missing the launcher emitted, and
-  the forged bytes ride inertly inside plugin_id/host_os. Separately, `reason`
-  is validated against the closed SANDBOX_REFUSED_REASONS vocabulary
-  (audit_row_schemas.py) and every key against the closed SANDBOX_REFUSED_FIELDS
-  set; a row with an out-of-vocab reason (an attacker-chosen sentinel, or a
-  charset-injection string) is dropped loudly (structlog warning), never
-  admitted. The canonicalization step also means an admitted row carries
-  exactly the 5 declared fields — no accreted extras. This is NOT
-  kernel-observable: the containment is the pure host-side parser (no I/O,
-  no bwrap involvement) refusing to construct a SandboxRefusalRow from a
-  malformed or out-of-vocab candidate. Distinct from sbx-2026-008 (fd-3
+  #433 (hardened by the sec-001/arch-001 review fix). parse_launcher_refusal_rows
+  is line-oriented: it splits raw stderr into physical lines via splitlines()
+  BEFORE any json.loads, so an attacker-controlled value that itself contains an
+  escaped `"event": "forged"` fragment stays a single string field inside the one
+  row that physical line represents — json.loads never re-parses a value it has
+  already produced, so no variant can manufacture a second
+  supervisor.plugin.sandbox_refused row (contained_variants each parse to exactly
+  one row whose reason is the genuine sandbox_block_missing, the forged bytes
+  riding inertly inside plugin_id). On top of that line-oriented containment the
+  parser now enforces THREE drops, each loud (structlog warning), never admitted:
+  (1) every present field value must be a string — a JSON list/dict/number/null is
+  dropped (invalid_field_types) and can no longer raise TypeError in the vocabulary
+  membership check; (2) no present field value may contain a control or format
+  character (Unicode Cc/Cf — newline, ANSI ESC, bidi override, zero-width), so an
+  attacker cannot smuggle newline/ANSI/bidi bytes into the SIGNED audit-log row or
+  an operator's `alfred audit log` render (the sibling child_stderr LOG field was
+  already de-fanged; this closes the same gap for the persisted ROW fields);
+  (3) reason must be in the closed SANDBOX_REFUSED_REASONS vocabulary and keys must
+  be a subset of SANDBOX_REFUSED_FIELDS. The rejected_variants exercise all three
+  (embedded newline, ANSI escape, bidi override, list-typed reason, and two
+  out-of-vocab reasons). Defense in depth pairs with the drain-side gate:
+  _record_launcher_refusals only runs on the launcher-authored signal (read_frame
+  EOF with no prior frame), so a crashed/wedged EXEC'd child's stderr is never
+  turned into an attributed audit row at all (verified by the quarantine_child_io
+  drain unit tests). This is NOT kernel-observable — the containment is the pure
+  host-side parser plus the drain gate. Distinct from sbx-2026-008 (fd-3
   partial-write framing) and sbx-2026-017 (policy_ref charset guard at the
-  manifest/launcher-producer layer, upstream of this parser) — this entry
-  covers the HOST-SIDE stderr-to-audit-row parser that Task 1-3 of #433
-  introduced. Asserted by
-  test_sbx_2026_018_launcher_refusal_row_injection_contained, which iterates
-  the YAML's own forge_variants/out_of_vocab_reason_variants lists (no second
-  hardcoded copy, per the #428 lesson).
+  manifest/launcher-producer layer, upstream of this parser) — this entry covers
+  the HOST-SIDE stderr-to-audit-row parser that #433 introduced. Asserted by
+  test_sbx_2026_018_launcher_refusal_row_injection_contained, which iterates the
+  YAML's own contained_variants/rejected_variants lists (no second hardcoded copy,
+  per the #428 lesson).
 references:
   - "src/alfred/audit/launcher_refusal.py"
+  - "src/alfred/security/quarantine_child_io.py (drain gate: failure and not _frame_read)"
   - "src/alfred/audit/audit_row_schemas.py (SANDBOX_REFUSED_REASONS, SANDBOX_REFUSED_FIELDS)"
   - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md"
-  - "docs/superpowers/specs/2026-07-15-433-launcher-refusal-audit-design.md"
