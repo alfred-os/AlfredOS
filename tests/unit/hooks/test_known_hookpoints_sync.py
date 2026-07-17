@@ -20,14 +20,15 @@ Two subsystems require explicit registration beyond a bare
   ``tool.web.fetch`` declaration lands in the registry for the
   drift check.
 
-* :mod:`alfred.supervisor.core` registers its six hookpoints inside
-  :meth:`Supervisor._register_hookpoints` rather than a module-level
-  ``declare_hookpoints()`` — plan-review decision core-010 rejected
-  import-time registration for that subsystem to keep test isolation
-  clean. The method body only consults ``self`` to dispatch to the
-  registry singleton (it reads no instance state), so calling it on
-  a bare ``object()`` produces the same registration side-effect a
-  real ``Supervisor.__init__`` would.
+* :mod:`alfred.supervisor.hookpoints` ships ``declare_hookpoints(registry)``
+  (#443 PR1) — called directly here, mirroring ``alfred.plugins.web_fetch``
+  above. It is NOT called at module-import time: plan-review decision
+  core-010 rejected import-time registration for the supervisor's
+  hookpoints to keep test isolation clean (pytest collects every test
+  module's imports before any fixture runs, so an import-time
+  registration would persist metadata across tests expecting a clean
+  registry). ``Supervisor._register_hookpoints`` delegates to this same
+  function for non-boot callers that construct a ``Supervisor`` directly.
 """
 
 from __future__ import annotations
@@ -52,19 +53,12 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
 
     alfred.plugins.web_fetch.register_hookpoints(get_registry())
 
-    # Supervisor's hookpoints are registered inside _register_hookpoints,
-    # which an instance calls from __init__. The body only dispatches to
-    # the registry singleton (no self-reads), so a stub instance suffices.
-    # Using a named stub class (rather than bare ``object()``) so a future
-    # refactor that adds ``self.*`` reads to the method produces a clear
-    # AttributeError pointing at THIS test, not a confusing traceback in
-    # supervisor/core.py.
-    from alfred.supervisor.core import Supervisor
+    # Supervisor's hookpoints are boot-declarable (#443 PR1) — see the
+    # module docstring above for why this calls declare_hookpoints()
+    # directly rather than constructing a Supervisor.
+    from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 
-    class _StubSupervisor:
-        """No-state stub — pinned by the docstring above."""
-
-    Supervisor._register_hookpoints(_StubSupervisor())  # type: ignore[arg-type]
+    declare_supervisor()
 
     # PR-S4-3 (ADR-0022): the carrier-substitution meta-hookpoints are
     # registered by declare_meta_hookpoints (not a per-subsystem

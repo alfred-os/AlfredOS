@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from alfred.hooks.boot import _declare_all_subsystem_hookpoints
 from alfred.hooks.registry import HookRegistry
+from alfred.security.tiers import T0
 from alfred.supervisor.hookpoints import declare_hookpoints
 from tests.helpers.gates import make_deny_all_gate
 
@@ -35,6 +36,7 @@ def test_sandbox_refused_is_declared_fail_closed_t0() -> None:
 
     meta = registry.hookpoint_meta("supervisor.plugin.sandbox_refused")
     assert meta is not None
+    assert meta.carrier_tier is T0
     assert meta.fail_closed is True
 
 

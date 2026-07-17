@@ -11,7 +11,7 @@ from alfred.audit.audit_row_schemas import SANDBOX_REFUSED_FIELDS
 from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.hooks import get_registry
 from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
-from alfred.supervisor.core import Supervisor
+from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 
 
 class _FakeAudit:
@@ -155,22 +155,21 @@ async def test_invoke_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> Non
 # other test in this file kept passing (they never exercise the real
 # registry).
 #
-# The pattern below is the confirmed-safe one from
-# ``tests/unit/hooks/test_sandbox_hookpoints_registered.py``:
-# ``Supervisor._register_hookpoints`` only reads ``get_registry()`` and
-# touches ``self`` to dispatch, so a bare stub instance is a safe receiver.
+# This premise is LATENT, not live, today: nothing dispatches
+# ``supervisor.plugin.sandbox_refused`` before a ``Supervisor`` exists (the
+# auditor's only driver is the ``read_frame`` extract-RPC drain in
+# ``quarantine_transport.py``, which always runs post-``Supervisor``). #443
+# PR2's in-spawn handshake is what makes the premise live: it dispatches
+# BEFORE ``Supervisor(...)`` is constructed, at which point the boot-time
+# declaration this PR (PR1) adds is the only thing standing between that
+# dispatch and an undeclared-hookpoint failure. See
+# :func:`alfred.supervisor.hookpoints.declare_hookpoints`.
+#
+# The tests below call ``declare_hookpoints()`` directly -- the same
+# function ``Supervisor._register_hookpoints`` delegates to -- rather than
+# constructing a ``Supervisor``, mirroring
+# ``tests/unit/hooks/test_sandbox_hookpoints_registered.py``.
 # ---------------------------------------------------------------------------
-
-
-class _StubSupervisor:
-    """Bare receiver for ``Supervisor._register_hookpoints`` (unbound call).
-
-    Mirrors ``tests/unit/hooks/test_sandbox_hookpoints_registered.py``'s
-    ``_fresh_registry_with_supervisor_hookpoints`` helper. The method only
-    reads the module-level ``get_registry()`` singleton and touches
-    ``self`` to dispatch -- it never reads or writes instance state -- so
-    a bare, unconstructed stub is a safe ``self`` for this unbound call.
-    """
 
 
 def test_sandbox_refused_hookpoint_declared_at_auditor_dispatch_phase() -> None:
@@ -183,7 +182,7 @@ def test_sandbox_refused_hookpoint_declared_at_auditor_dispatch_phase() -> None:
     proof; ``test_record_real_dispatch_against_declared_hookpoint`` below
     is the "and dispatch against it does not raise" half.
     """
-    Supervisor._register_hookpoints(_StubSupervisor())  # type: ignore[arg-type]
+    declare_supervisor()
     meta = get_registry().hookpoint_meta("supervisor.plugin.sandbox_refused")
     assert meta is not None
     assert meta.fail_closed is True
@@ -213,7 +212,7 @@ async def test_record_real_dispatch_against_declared_hookpoint() -> None:
     zero-subscriber no-op chain; that is sufficient to prove the
     "declared, not undeclared" contract this test targets.)
     """
-    Supervisor._register_hookpoints(_StubSupervisor())  # type: ignore[arg-type]
+    declare_supervisor()
     assert get_registry().hookpoint_meta("supervisor.plugin.sandbox_refused") is not None
 
     audit = _FakeAudit()
