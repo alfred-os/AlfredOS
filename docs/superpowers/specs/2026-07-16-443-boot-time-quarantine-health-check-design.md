@@ -517,10 +517,12 @@ deferred to #444.**
 ## 10. Decomposition and status
 
 **PR1 — declaration placement (no behaviour change). READY; needs no maintainer
-call.** Extract the four sandbox/boot tuples into a `declare_hookpoints(registry)`
-on the sandbox publisher; register it in `hooks/boot.py:_declare_all_subsystem_hookpoints`
-(discharging an obligation that docstring already imposes); re-key
-`KNOWN_HOOKPOINTS` (`_known_hookpoints.py:76-92`) off `alfred.supervisor.core`;
+call.** Move **all ten** supervisor hookpoints (the four sandbox/boot tuples plus
+the six breaker/lifecycle tuples — the four-vs-ten scope is resolved to ten below)
+into a `declare_hookpoints(registry)` publisher at `src/alfred/supervisor/hookpoints.py`;
+register it in `hooks/boot.py:_declare_all_subsystem_hookpoints` (discharging an
+obligation that docstring already imposes); re-key `KNOWN_HOOKPOINTS`
+(`_known_hookpoints.py`) off `alfred.supervisor.core` → `alfred.supervisor.hookpoints`;
 delegate from `_register_hookpoints`; drop the `_StubSupervisor` unbound-call dance
 (all **three** sites, not one), which exists only because these are not
 boot-declarable.
