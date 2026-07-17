@@ -917,8 +917,9 @@ def test_supervisor_breaker_tripped_registered_system_only() -> None:
     """``supervisor.breaker.tripped`` is system-tier-only.
 
     System-only emission of an internal state-machine transition — see
-    ``_register_hookpoints`` docstring. Operator and user-plugin tiers
-    are locked out.
+    the per-hookpoint trust-tier rationale comment in
+    ``alfred.supervisor.hookpoints.declare_hookpoints``. Operator and
+    user-plugin tiers are locked out.
     """
     from alfred.hooks import SYSTEM_ONLY_TIERS, get_registry
 

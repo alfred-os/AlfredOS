@@ -72,14 +72,13 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
     runtime_names = set(get_registry()._hookpoints.keys())
     manifest_names = set(all_known_hookpoints())
 
-    # Floor guard: a silently-shrunk runtime set (e.g. a refactor that
-    # let ``Supervisor._register_hookpoints`` early-return on a missing
-    # self-attribute, or a regression that skipped ``web_fetch``'s
-    # explicit ``register_hookpoints`` call) would still pass the
-    # ``missing_in_manifest`` check below because an empty set is a
-    # trivial subset of any manifest. The count floor refuses to let
+    # Floor guard: a silently-shrunk runtime set (e.g. a regression that
+    # skipped the ``declare_supervisor()`` call above, or skipped
+    # ``web_fetch``'s explicit ``register_hookpoints`` call) would still
+    # pass the ``missing_in_manifest`` check below because an empty set is
+    # a trivial subset of any manifest. The count floor refuses to let
     # that pass silently: if the runtime registers fewer than the
-    # current 30-hookpoint floor the bootstrap path is broken and the test
+    # current 32-hookpoint floor the bootstrap path is broken and the test
     # MUST fail loud. Bump this constant when the manifest grows; the
     # fixture-driven sync check below catches the matching shrink-the-
     # manifest direction.
@@ -89,10 +88,9 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
     assert len(runtime_names) >= expected_min_hookpoints, (
         f"sync test environment registered only {len(runtime_names)} "
         f"hookpoints; expected at least {expected_min_hookpoints}. Either "
-        f"Supervisor._register_hookpoints silently skipped (refactor that "
-        f"now needs real instance state?) or web_fetch's "
-        f"register_hookpoints bootstrap wasn't called. Investigate "
-        f"before relaxing this assertion."
+        f"alfred.supervisor.hookpoints.declare_hookpoints() was skipped "
+        f"above, or web_fetch's register_hookpoints bootstrap wasn't "
+        f"called. Investigate before relaxing this assertion."
     )
 
     # Missing from manifest (subsystem registered, manifest didn't list).
@@ -222,7 +220,7 @@ class _HookpointNameCollector(ast.NodeVisitor):
        references to module-level tuples, AND tuple-of-tuples shapes
        where the loop target unpacks ``(name, ...)`` and the iterable is
        a tuple of tuples whose 0-th element is a string constant — the
-       :meth:`Supervisor._register_hookpoints` shape.
+       :func:`alfred.supervisor.hookpoints.declare_hookpoints` shape.
     4. Anything else is skipped silently — the dynamic sync test still
        catches such names because the corresponding subsystem registers
        them at runtime when the test imports it.
@@ -338,7 +336,7 @@ class _HookpointNameCollector(ast.NodeVisitor):
 
         This is sufficient for the supervisor pattern (``hookpoints = (...)``
         immediately before the ``for`` loop in
-        :meth:`Supervisor._register_hookpoints`).
+        :func:`alfred.supervisor.hookpoints.declare_hookpoints`).
         """
         candidate: ast.expr | None = None
         for ancestor in self._enclosing_function_bodies(near):
