@@ -24,8 +24,11 @@ module-bottom call and the supervisor deliberately does not.
 
 **The tuple is function-local on purpose.** ``test_known_hookpoints_sync.py``'s AST
 drift resolver only resolves the inline ``hookpoints = (...)``-then-``for`` shape;
-hoisting it to a module constant makes the resolver silently skip this module and
-supervisor drift coverage drops to zero while staying green.
+hoisting it to a module constant makes the resolver silently skip this module, and
+the AST resolver's supervisor coverage drops to zero. (The dynamic sync test in the
+same file still calls ``declare_hookpoints()`` directly and diffs the runtime
+registry both ways, so it would still catch supervisor drift either hoisted or not —
+this loss is specific to the independent static check.)
 
 ``Supervisor._register_hookpoints`` delegates here — one definition, two callers.
 """

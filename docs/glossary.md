@@ -1188,9 +1188,12 @@ Fires when an orchestrator action exceeds its deadline (as enforced by
 [`DeadlineWrapper`](#deadlinewrapper)). `subscribable_tiers={"system"}`;
 `refusable_tiers=frozenset()` (the deadline has already fired; refusal has
 no effect on the timed-out action); `fail_closed=False` (a crashing
-subscriber is observability noise, not a security regression). Registered
-by `Supervisor.__init__` from the `_register_hookpoints()` method
-(`src/alfred/supervisor/core.py`) per core-010's rule against import-time
+subscriber is observability noise, not a security regression). Declared by
+`alfred.supervisor.hookpoints.declare_hookpoints()`
+(`src/alfred/supervisor/hookpoints.py`) — called from the boot seam
+(`hooks/boot.py:_declare_all_subsystem_hookpoints`) and from
+`Supervisor.__init__` via a delegating `_register_hookpoints()` method
+(`src/alfred/supervisor/core.py`) — per core-010's rule against import-time
 module-level hookpoint registration. The orchestrator emits this hookpoint
 via an autocommit audit writer, independent of the rolled-back turn session.
 
@@ -1199,8 +1202,10 @@ See [`Hookpoint`](glossary.md#hookpoint),
 
 ## supervisor.breaker.tripped / supervisor.breaker.reset hookpoints
 
-Two hookpoints that fire on circuit breaker state transitions
-(`src/alfred/supervisor/core.py`, `_register_hookpoints()`).
+Two hookpoints that fire on circuit breaker state transitions (declared in
+`src/alfred/supervisor/hookpoints.py`'s `declare_hookpoints()`;
+`Supervisor.__init__` triggers it via a delegating `_register_hookpoints()`
+in `src/alfred/supervisor/core.py`).
 
 - `supervisor.breaker.tripped` — fires after `CircuitBreaker._trip()`
   transitions the breaker to OPEN. `subscribable_tiers={"system"}`;
@@ -1225,8 +1230,9 @@ and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
 
 **Audit row, not a hookpoint.** Subscriber surface is the audit log itself —
 no `subscribable_tiers` exist because no hookpoint is registered for this
-event (the supervisor's spec §14 hookpoint table is the six entries
-declared by `Supervisor._register_hookpoints()`).
+event (the supervisor's spec §14 hookpoint table is declared by
+`alfred.supervisor.hookpoints.declare_hookpoints()`, not by this audit
+event's emission path).
 
 Emitted by `CapabilityGateMonitor._emit_transition()` via
 `AuditWriter.append_schema(event="supervisor.capability_gate_unavailable",

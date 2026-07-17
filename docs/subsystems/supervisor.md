@@ -35,8 +35,11 @@ rather than three independent shutdown sequences.
 
 - `Supervisor(session_scope, gate, audit, *, policies_ref, ...)` — constructor.
   Immediately creates a `PluginLifecycle` and a `CapabilityGateMonitor` bound to
-  the same gate + audit references. Registers the six supervisor hookpoints via
-  `_register_hookpoints()` (spec §14). `policies_ref` (PR-S4-4, ADR-0023) is a
+  the same gate + audit references. Registers the supervisor's hookpoints via
+  `_register_hookpoints()`, which delegates to
+  `alfred.supervisor.hookpoints.declare_hookpoints()` (spec §14; #443 PR1 — see
+  [Hookpoint registration discipline](#hookpoint-registration-discipline)
+  below). `policies_ref` (PR-S4-4, ADR-0023) is a
   **required** `PoliciesSnapshotRef` — production refuses to run the privileged
   orchestrator with no policy snapshot (rev-003 closure). `_proposal_dispatch_loop`
   derefs `policies_ref.current()` once per iteration (the stale-snapshot-for-one-
@@ -229,19 +232,35 @@ needed because the counter is only read from the single heartbeat task.
 
 ### Hookpoint registration discipline
 
-All six supervisor hookpoints are registered in `Supervisor.__init__()` via
-`_register_hookpoints()` (core-010). Import-time registration in
-`deadline.py` or `breaker.py` was explicitly rejected at plan review: pytest
-collects every test module's imports before any fixture runs, so
-module-level `register_hookpoint()` calls would persist across tests that
-expect a clean registry. Constructor registration makes cleanup
-straightforward — destroying the `Supervisor` instance removes the hookpoints.
+The supervisor's hookpoints are declared by
+`alfred.supervisor.hookpoints.declare_hookpoints()` (#443 PR1), extracted from
+`Supervisor._register_hookpoints()` so the supervisor can satisfy the boot
+seam's obligation that every in-tree publisher be declarable at boot. The boot
+seam (`alfred.hooks.boot._declare_all_subsystem_hookpoints`) calls
+`declare_hookpoints()` directly; `Supervisor.__init__()` also calls it, via a
+delegating `_register_hookpoints()` kept for callers (tests, non-boot code)
+that construct a `Supervisor` directly without going through boot.
+`register_hookpoint()` is idempotent on equal metadata, so the two call sites
+firing for the same process is a no-op, not a conflict.
 
-The six hookpoints use two tier constants (`SYSTEM_ONLY_TIERS`,
-`SYSTEM_OPERATOR_TIERS`) and `fail_closed=False` throughout. The rationale:
-supervisor hookpoints are observability surfaces. A crashing subscriber on
-`supervisor.breaker.tripped` is noise, not a security regression — the
-breaker transition is persisted to Postgres irrespective of the hook chain.
+core-010 still holds: `declare_hookpoints()` is a plain function with **no**
+module-bottom, import-time call. Import-time registration in `hookpoints.py`
+(or `deadline.py` / `breaker.py`) was explicitly rejected at plan review:
+pytest collects every test module's imports before any fixture runs, so a
+module-level `register_hookpoint()` call would persist metadata across tests
+that expect a clean registry. Explicit-call registration (from boot, or from
+`Supervisor.__init__()`) keeps cleanup straightforward — a test that never
+boots and never constructs a `Supervisor` sees no supervisor hookpoints at all.
+
+The original core-010 hookpoints (`supervisor.breaker.tripped`, `.reset`,
+`supervisor.action_timeout`, and the three `plugin.lifecycle.*` events) use
+two tier constants (`SYSTEM_ONLY_TIERS`, `SYSTEM_OPERATOR_TIERS`) and
+`fail_closed=False` throughout. The rationale: these are observability
+surfaces. A crashing subscriber on `supervisor.breaker.tripped` is noise, not
+a security regression — the breaker transition is persisted to Postgres
+irrespective of the hook chain. The PR-S4-6/PR-S4-7 sandbox-launcher additions
+are the exception to `fail_closed=False` — see the [Hookpoints](#hookpoints)
+table below for the full per-hookpoint disposition.
 
 ### No T3 in failure metadata
 
@@ -297,7 +316,9 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 
 ## Hookpoints
 
-Nine hookpoints registered by `Supervisor._register_hookpoints()`. All carry
+Hookpoints registered via `Supervisor._register_hookpoints()`, which delegates
+to `alfred.supervisor.hookpoints.declare_hookpoints()` (see [Hookpoint
+registration discipline](#hookpoint-registration-discipline) above). All carry
 `carrier_tier=T0` (system-internal observability). All `fail_closed=False`
 except `supervisor.plugin.sandbox_refused` (a subscriber timeout there must
 not let a refused spawn slip through).
