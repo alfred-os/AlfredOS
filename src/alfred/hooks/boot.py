@@ -93,6 +93,7 @@ def _declare_all_subsystem_hookpoints(registry: HookRegistry) -> None:
         declare_hookpoints as declare_proposals,
     )
     from alfred.security.quarantine import declare_hookpoints as declare_quarantine
+    from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 
     declare_episodic(registry)
     declare_operator_session(registry)
@@ -103,6 +104,7 @@ def _declare_all_subsystem_hookpoints(registry: HookRegistry) -> None:
     declare_watcher(registry)
     declare_comms(registry)
     declare_discord(registry)
+    declare_supervisor(registry)
 
 
 def build_boot_hook_registry(
