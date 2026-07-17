@@ -1,9 +1,9 @@
 # #443 — boot-time fail-closed quarantine health-check (design)
 
 - **Issue**: [#443](https://github.com/alfred-os/AlfredOS/issues/443)
-- **Status**: DESIGN COMPLETE — **BLOCKED on a maintainer decision** (see §9)
-- **Date**: 2026-07-16
-- **Amends**: ADR-0051 (three separate corrections — see §7)
+- **Status**: DESIGN COMPLETE — **PR1 ready to build; PR2 awaiting maintainer confirmation** (§10)
+- **Date**: 2026-07-16 (rev 2: 2026-07-17)
+- **Amends**: ADR-0051 (four corrections — §8)
 - **Pre-gates**: #340 PR2b (maintainer decision, 2026-07-16, recorded on #443)
 - **Predecessors**: #433 (PR #445), #446 (the fast-follow whose residual this closes)
 
@@ -28,11 +28,11 @@ prompt-injected child reaches it.
 
 ## 2. The finding that reframes the fix
 
-Verified by grep against main @ `967d8e2e` — not inferred from prose:
+Verified by grep against main @ `967d8e2e`:
 
-1. The quarantine child is spawned **exactly once, at boot**: `_commands.py:658`
-   → `_comms_boot.py:718` → `daemon_runtime.py:338`. One production call site,
-   gated on `if settings.comms_enabled_adapters:` (`_commands.py:648`).
+1. The quarantine **child** is spawned exactly once, at boot: `_commands.py:658`
+   → `_comms_boot.py:718` → `daemon_runtime.py:338`. One call site for that
+   module, gated on `if settings.comms_enabled_adapters:` (`_commands.py:648`).
 2. `spawn_quarantine_child_io` **never inspects the outcome** — no `read_frame`,
    `poll`, `wait`, or handshake in its body (`quarantine_child_io.py:741-928`).
 3. There is **no respawn path** for the quarantine child.
@@ -41,327 +41,491 @@ So a launcher refusal can only ever happen at boot. Today it is merely
 *discovered* late, at first extraction, when `read_frame` trips over a corpse
 that has been dead since boot.
 
-### The unified invariant
+> **The zero-stdout/EOF gate is a CORRECT oracle at a spawn attempt's first read,
+> and an INVERTED oracle after that attempt has proven exec.**
+>
+> **The gate was never the bug. Reading late was the bug.**
 
-> The zero-stdout/EOF gate is a **correct** oracle at the **first read of a spawn
-> attempt**, and an **inverted** oracle after that attempt has proven exec.
+### 2.1 CORRECTION (rev 2) — the spawn seam is SHARED; finding 1 does not generalise
 
-Today the quarantine child's first read happens at first-extraction — arbitrarily
-long after the spawn, by which time the launcher is long gone and only forgeries
-remain. **The gate was never the bug. Reading late was the bug.**
+`_ALLOWED_CHILD_MODULES` (`quarantine_child_io.py:146`) is a **closed set of two**:
+`_CHILD_MODULE` and `_BROKERED_PROBE_MODULE` (`:141`). Finding 1 above is true of
+the *quarantine child*; rev 1 silently applied it to *`spawn_quarantine_child_io`*,
+which is the shared spawn seam for **both**. See §6.1 — this is a blocker, and it
+is the same over-generalisation this epic keeps producing.
 
-## 3. Decision: positive handshake, inside the spawn — and the gate STAYS
+## 3. Decision: TWO FRAMES, inside the spawn — and the gate STAYS
 
 **Do NOT flip the runtime gate.** `_child_wrote_stdout` is set on the first
-stdout byte (`quarantine_child_io.py:457`, and `:474-475` on a partial read) and
-is **never reset** — not by `aclose` (`:654-681`), not anywhere. So once a boot
-handshake's `read_frame` succeeds, the gate at `:580`
+stdout byte (`quarantine_child_io.py:457`, `:474-475`) and **never reset** —
+exactly three assignments exist repo-wide (`:415` `False` in `__init__`, `:457`,
+`:475`), no `setattr`/`__dict__` vector, and `_SubprocessChildIO` has **one**
+production construction site (`:923`), so instance and `Popen` are born 1:1 and no
+instance can ever wrap an already-exec'd child. So once a boot handshake's
+`read_frame` succeeds, the gate at `:580` is **dead for that instance's life**.
+The runtime launcher-attribution becomes unreachable *by construction*, with zero
+edits to `_log_child_stderr`.
 
-```python
-if refusal_candidate and not self._child_wrote_stdout:
-```
+### 3.1 Why flipping is not merely unnecessary but UNSAFE (rev 2 — stronger than rev 1)
 
-is **dead for the remainder of that instance's life**. The runtime
-launcher-attribution becomes unreachable *by construction*, with zero edits to
-`_log_child_stderr` — while the gate stays live and correct on the boot
-handshake's own failure arm, where a launcher refusal genuinely is the cause.
+Rev 1 argued the second conjunct guards teardown and timeouts. The real reason is
+sharper: the `except` at `:469` wraps **both** reads, and `:457` sets the flag
+**between** them. So on the header-succeeds-then-body-EOF-at-offset-zero path,
+`:457` sets `True` **and** `:482` computes `refusal_candidate = True` —
+**both fire simultaneously, on a fresh instance, on its first read.** The second
+conjunct is the *only* thing suppressing that forged row.
+`tests/unit/security/test_quarantine_child_io_refusal_audit.py:148-171` pins it as
+"the exact first-turn forgery bypass CodeRabbit flagged."
 
-Placing the handshake **inside `spawn_quarantine_child_io`** makes the invariant
-**structural** ("no `_SubprocessChildIO` is ever returned without a proven
-exec") rather than **lexical** ("there is exactly one call site"). Every present
-and future call site inherits it.
+Under #443 the first read **is** the boot handshake. **Flipping the gate would
+reopen #446's bypass at the boot barrier itself.** The steelman is not weak; it is
+actively unsafe.
 
-### Why not a bounded wait (option A) — refuted
+**Corollary for §9's tests:** the invariant is load-bearing **per byte, not per
+read**. "First read" is a lossy approximation of it.
 
-(A) has **two** ambiguities, not one:
+### 3.2 Two frames, not one — the rev-1 design conflated two propositions
+
+A single hello was being asked to carry two assertions with **opposite optimal
+positions**:
+
+| proposition | wants to be | purpose |
+| --- | --- | --- |
+| "I am a real exec'd child" | as **early** as possible | provenance — close the forgery gate |
+| "I am initialized and serving" | as **late** as possible | liveness — the boot barrier |
+
+Separating them is the same lesson #446 taught, one level up. The decision table
+is complete and correctly attributed only with two frames:
+
+| event | flag at read | gate | row | boot |
+| --- | --- | --- | --- | --- |
+| launcher refuses (pre-exec, zero stdout) | `False` | **opens** | ✅ correct, launcher-authored | **refuse** |
+| child dies in `_build_provider` (hello, no ready) | `True` | **closed** | ✅ none — correctly child-authored | **refuse** |
+| healthy (hello + ready) | `True` | dead for life | none | proceed |
+| child dies pre-hello (fd-3 framing error) | `False` | opens on child stderr; parser yields nothing | none | refuse — **residual §11.5** |
+
+Row 2 is the one **neither single-frame design gets right**: hello-only refuses
+nothing; ready-only mis-attributes a `_build_provider` crash to the launcher —
+leaving *parser validation* as the only thing between a crash and a forged row,
+which is verbatim what CR's #446 Major says is insufficient.
+
+### 3.3 Why not a bounded wait (option A) — refuted
+
+(A) has **two** ambiguities:
 
 | branch | resolves to | safe? |
 | --- | --- | --- |
 | exited within window — refusal vs instant crash | refuse boot | ✅ symmetric |
 | **alive at window expiry — healthy child vs slow launcher** | **proceed** | ❌ **defaults open** |
 
-(A)'s success signal is the *absence* of an event. A healthy child never exits,
-so "did not exit" is the only success evidence available — the permissive default
-is **structural**, not a tuning choice. That is a timing rule deciding a runtime
-fact with the ambiguous branch defaulting to allow
+(A)'s success signal is the *absence* of an event. A healthy child never exits, so
+"did not exit" is the only success evidence — the permissive default is
+**structural**, not a tuning choice
 (`domain_guard_completeness_and_oracle_independence`).
 
 Empirically reachable: the launcher runs **two `python3 -m
 alfred.plugins.manifest_reader` cold-starts** (`alfred-plugin-launcher.sh:216`,
 `:326-334`) plus `jq` (`:400`) and `mktemp` (`:191`) before most refusal paths.
-`policy_ref_missing` (`:411`), `bwrap_unavailable` (`:524`) and
-`interpreter_prefix_too_broad` (`:502`) all land after two interpreter
-cold-starts. "Exits in ms" is false for the majority of refusal paths.
+"Exits in ms" is false for the majority of them.
 
 Under (A) the premise *"the launcher provably exec'd"* is never established — only
-*"it had not exited N seconds after fork."* So removing the gate under (A) would
-delete the only recorder for a real, reachable refusal: a hard-rule-#7
-regression, not a cleanup.
+*"it had not exited N seconds after fork."* A two-frame handshake's clock is a
+**liveness bound**, not a provenance oracle: its only failure direction is a
+spurious refusal (availability), never a silently-unbarriered boot (security).
 
-Under (B) the polarity inverts: the ambiguous branch defaults to **refuse boot**.
-(B)'s clock is a **liveness bound**, not a provenance oracle — its only failure
-direction is a spurious refusal (availability), never a silently-unbarriered boot
-(security).
+### 3.4 Why not a dedicated launcher fd (option C) — and rev 1 costed it wrongly
 
-### Why not a dedicated launcher fd (option C)
+Rev 1 said (C) "rewrites ~19 emit sites". **Wrong**: (C) needs ~5 edits, one per
+exec target (`alfred-plugin-launcher.sh:299`, `:312`, `:528`, `:549`, `:569`);
+refusal paths need nothing. The real objection is different and stronger:
 
-(C) buys provenance-by-construction but not the boot barrier — (B) would still be
-needed for the fail-closed-at-boot half, and (C) alone leaves the "boot proceeded
-with no child" hole. It rewrites ~19 emit sites across five `exec` targets and
-touches the fd dance PR2b touches (`keep_fds=[3,4]`). **Record (C) as the
-escalation path** if the §6 residual stops being acceptable — specifically if the
-child ever gains a boot-time external input.
+**(C) attests the wrong proposition.** A launcher marker says "the launcher
+reached `exec`" — but failure modes exist *between* that exec and the child's
+`main()`: bwrap sandbox-setup failure, interpreter crash, `ImportError`, the fd-3
+framing exits (`__main__.py:84-99`). Marker-present + bwrap-fails → gate closes →
+**boot proceeds on a corpse with no row**. A new fail-open hole.
 
-### Flipping the gate would weaken four things
+Record (C) as the escalation path only for §11.5's residual, which no
+child-authored frame can close.
 
-1. The **boot-path oracle** — under (B) the correct one, and the row's only writer.
-2. The **`aclose` teardown protection** — `aclose` (`:674`) passes
-   `refusal_candidate` defaulting to `False` (`:510`); that protection lives *in*
-   the gate.
-3. The **`TimeoutError` exclusion** (`:482`) — the #446 timeout-attribution fix.
-4. **#441's correctness** (§8).
+### 3.5 No protocol-free alternative exists (rev 2 — all five checked)
+
+- **fd-3 read receipt** — a pipe write returns on *buffering*, not on the peer's
+  read. That is ADR-0051:42-54's own premise. Dead end.
+- **Control socketpair (fd 4)** — not built at the live spawn
+  (`daemon_runtime.py:338` passes only `provider_key` + `refusal_recorder`;
+  `quarantine_child_io.py:776-778` "the live/echo spawn never sets it"). Using it
+  flips the ADR-0050 dormancy invariant *and* still needs the child to write.
+- **`/proc` / exec-vs-alive** — Linux-only; the pid held is the *launcher's*; it is
+  a poll (§3.3's timing ambiguity); `--unshare-pid` makes it policy-dependent.
+- **bwrap `--info-fd`/`--sync-fd`** — `sandbox_policy.py:26-30` and launcher
+  `:21-22` record that the translator deliberately emits **no** fd flag
+  ("`--sync-fd` would consume fd 3").
+- **Launcher stderr marker** — §3.4.
+
+**The only host-observable fact attesting "a real child reached its main loop" is a
+byte the child itself wrote.**
 
 ## 4. Why the boot-time drain is trustworthy
 
 At boot the child has consumed **zero inputs whose provenance is not the host's
-own**:
+own**: argv validated against the closed `_ALLOWED_CHILD_MODULES`
+(`quarantine_child_io.py:146`, enforced `:807-808`); env from `_child_env()`
+(`:235-263`), a scrubbed allowlist, never `dict(os.environ)`; fd 3, the
+broker-held provider key (`:912`). T3 arrives strictly at runtime — the loop
+writes stdout only on the extract branch (`__main__.py:414`).
 
-- **argv** — module-internal, validated against the closed `_ALLOWED_CHILD_MODULES`
-  (`quarantine_child_io.py:146`, enforced `:807-808`).
-- **env** — `_child_env()` (`:235-263`), a scrubbed allowlist, never
-  `dict(os.environ)`.
-- **fd 3** — the broker-held provider key (`:912`).
-- **Nothing else.** `main()` (`quarantine_child/__main__.py:337-352`) does
-  `configure_stderr_logging` → `_read_provider_key_from_fd3` → `_build_provider` →
-  connect pipes → `_run_mcp_server`. The loop (`:382-418`) writes stdout **only**
-  on the extract branch (`:414`), reached only after the host ships an extract
-  request. T3 arrives strictly at runtime.
+So a child forging a row at boot must do so from its own code image — the same
+`alfred` wheel the host runs, under the same interpreter (`_child_python()`,
+`:220-232`). An attacker who can alter it has already altered
+`SandboxRefusalAuditor`. **Not a defence gap but a restatement of the
+wheel-integrity trust root every other T0 primitive already assumes.**
 
-So a child forging a row at boot must do so **from its own code image** — and that
-image is the same `alfred` wheel the host runs, under the same interpreter
-(`_child_python()` → `sys.executable`, `:220-232`). An attacker who can alter it
-has already altered `SandboxRefusalAuditor` itself. **The boot-time residual is
-not a defence gap but a restatement of the wheel-integrity trust root every other
-T0 primitive already assumes.**
+### 4.1 CORRECTION (rev 2) — this residual is NARROWER than rev 1 implied, and §4 covers `_build_provider`
 
-### Forward gate — binding on #340 PR2b
+Rev 1 framed a binding "keep `_build_provider` network-free" forward gate on PR2b.
+Two verified facts shrink it:
 
-This argument rests on *"the child performs no external I/O before the boot
-handshake completes."* PR2b gives the child a real Anthropic client and a
-brokered-egress control fd. It holds **only while provider construction stays
-lazy and network-free**. Any boot-time network call — a health probe, a
-`models.list`, a token refresh, an SDK telemetry ping — makes a hostile provider
-response a **boot-time input** and **voids this argument**, widening the residual
-from "supply-chain" to "anyone who can answer the child's first socket." A test
-must pin this, not a comment (`sbx-2026-024`, §10).
+1. **The child is already in an empty network namespace.**
+   `config/sandbox/quarantined-llm.linux.bwrap.policy:90` —
+   `unshare = ["pid", "uts", "cgroup", "ipc", "net"]`, pinned by the probe's C1
+   control (`_brokered_probe.py:35-45`, `_EMPTY_NETNS_ERRNO = ENETUNREACH`,
+   asserted in the required CI lane). PR2b's egress arrives only via the
+   post-spawn SCM_RIGHTS fd. **`_build_provider` structurally cannot reach the
+   network at boot.**
+2. **The host imports `anthropic` too** (`providers/anthropic_native.py:16`;
+   `pyproject.toml:22`). A compromised SDK already owns the privileged
+   orchestrator — the §11.1 strictly-stronger attacker. So §4's argument genuinely
+   extends over `_build_provider`'s window.
+
+**Consequence:** the hello-before-`_build_provider` ordering is
+**defence-in-depth that retires a forward gate**, not a fix for a live hole. Say
+so plainly — overstating it would be another false claim in a spec about false
+claims. What it buys is that the PR2b contract becomes **positional** ("hello
+before `_build_provider`, ready after" — greppable, mechanically checkable)
+rather than **behavioural** ("stays lazy and network-free" — voidable by a
+transitive SDK change, and needing a test to pin).
 
 ## 5. Architecture
 
-Three changes, each single-responsibility.
+### 5.1 Child (`quarantine_child/__main__.py`)
 
-1. **Child** (`quarantine_child/__main__.py`) — emit one hello frame after
-   `_build_provider()` succeeds and before entering `_run_mcp_server`.
-   **This is a protocol change — see §9.**
-2. **Host** (`quarantine_child_io.py`, inside `spawn_quarantine_child_io`) — after
-   `deliver_provider_key_via_fd3`, `await read_frame()` for the hello. Success →
-   return `child_io` (with `_child_wrote_stdout` now `True`). EOF/timeout → the
-   existing drain + `_record_launcher_refusals` + raise
-   `QuarantineChildSpawnError`, which `_commands.py:686-693` **already** maps to
-   `_refuse_boot`.
-3. **core-001** (§6) — an explicit idempotent pre-spawn hookpoint declaration.
+Verified sequence today: `configure_stderr_logging()` `:337` →
+`_read_provider_key_from_fd3()` `:338` → `_build_provider(provider_key)` `:340`
+(inside a `try/finally` that scrubs the key) → asyncio reader/writer construction
+`:345-351` → `_run_mcp_server(...)` `:352`.
 
-No new failure-union member is needed: the spawn now genuinely *raises* on a
-refusal, so the existing `QuarantineChildSpawnFailedFailure` (`_failures.py:167`)
-becomes accurate rather than conflated.
+- **Hello** — a raw `sys.stdout.buffer.write(...)` + flush at **`:339`**, i.e.
+  after `_read_provider_key_from_fd3` and before `_build_provider`. It **must** be
+  a raw write: the asyncio `writer` does not exist until `:351`, after
+  `_build_provider`. It is safe because `configure_stderr_logging()` (`:337`)
+  already pins all logging to stderr.
+  **Not before `:338`** — `_emit_fd3_framing_error_and_exit` (`:84-98`) exits with
+  zero stdout, so an earlier hello would push fd-3 framing failures outside the
+  barrier for no gain.
+- **Ready** — one frame via the asyncio writer, after `:351`, before `:352`.
 
-## 6. core-001 is a real blocker
+Neither is a new **inbound** method: `:398-418` dispatches host→child `method`
+against the closed `_INGEST_METHOD`/`_EXTRACT_METHOD` set with `:418` refusing
+anything else. Both frames are **outbound**, written before the loop is entered.
+**Zero vocabulary expansion; `:418`'s refusal surface untouched.**
 
-ADR-0051:86-89 flagged it; it is verified, and it fails **silently, in the wrong
-direction**:
+### 5.2 Host (`quarantine_child_io.py`, inside `spawn_quarantine_child_io`)
 
-1. Spawn at `_commands.py:658`; `Supervisor(...)` at `_commands.py:783` — **125
-   lines later**.
-2. `supervisor.plugin.sandbox_refused` is declared **only** at
-   `supervisor/core.py:1089`, via `core.py:307` `_register_hookpoints()`.
-   (`_known_hookpoints.py:86` is a drift map, not a declarer.)
-3. `strict_declarations` defaults **True** (`hooks/registry.py:521`), pinned by
-   `tests/unit/security/test_default_strict_declarations_invariant.py`.
-4. `invoke()` on an undeclared hookpoint: `hooks/invoke.py:1410` → `:1413` →
-   **`:1439` `raise HookError`**.
+After `deliver_provider_key_via_fd3` (`:912`), construct `_SubprocessChildIO`
+(`:923`), then `await read_frame()` twice — hello, then ready — and return the
+instance only if both arrive. Either missing → the existing drain +
+`_record_launcher_refusals` + raise `QuarantineChildSpawnError`, which
+`_commands.py:686-693` **already** maps to `_refuse_boot`. No new failure-union
+member: the spawn now genuinely *raises* on a refusal, so
+`QuarantineChildSpawnFailedFailure` (`_failures.py:167`) becomes accurate rather
+than conflated.
 
-So `SandboxRefusalAuditor.record()` at the spawn writes the row
-(`sandbox_refusal_audit.py:53-65`) then **raises `HookError`** at the
-`fail_closed=True` dispatch — and `_record_launcher_refusals` catches it and logs
+Ordering is deadlock-free for `_CHILD_MODULE`: the parent `writev`s and closes the
+write end (`fd3_key_delivery.py:104,117`) **before** any handshake read; the child
+reads fd 3 (`:121`) then writes. Strict write→read→write→read. The ~100-byte key
+is far under the 64 KB pipe buffer, so the synchronous `writev` never blocks. The
+handshake `await`s sit after the dup2 window closes (`:844` opens, `:880-908`
+`finally` closes) — no clobbered-selector hazard.
+
+### 5.3 Transport — untouched
+
+`quarantine_transport.py:307` is the only quarantine-path `read_frame` caller: two
+`write_frame`s then exactly one read. `read_frame` drains header **plus** body and
+leaves the stream at the next frame boundary (`:458-468`), so frames consumed
+inside the spawn are invisible to it. **No read-count assumption breaks.**
+
+**A hello-only PR would be actively harmful**, not merely useless: `read_frame` is
+method-agnostic, so the first extraction would consume the hello *as its extract
+reply*. The child and host halves are one atomic change.
+
+## 6. Blockers
+
+### 6.1 The shared spawn seam deadlocks `_brokered_probe` (rev 2 — NEW)
+
+`_brokered_probe.main()` (`_brokered_probe.py:106-113`) is **parent-speaks-first**:
+it reconstructs fd 4 and immediately blocks in `_probe_once` → `recv_passed_fd`,
+writing its first stdout byte only *after* receiving a brokered fd. But
+`broker_socket()` is callable only on the **returned** instance
+(`tests/integration/test_quarantine_fd_broker_real_spawn.py:213-222` spawns, *then*
+brokers).
+
+An unconditional handshake inside the spawn therefore **deadlocks**: parent blocks
+in `read_frame`; child blocks in `recv_passed_fd`. Broken only by
+`_READ_FRAME_TIMEOUT_S = 25.0` (`:157`) → `TimeoutError` → spawn raises →
+**reds the `Integration (privileged Linux, real spawn) (arm64)` required check**
+(`test_quarantine_fd_broker_real_spawn.py:217`) plus four unit tests
+(`test_quarantine_child_io_control_fd.py:155,290,334,376`).
+
+**Fix: give `_brokered_probe.main()` a hello before its recv loop — and ONLY a
+hello, never a ready** (it has no provider to build). That asymmetry is itself an
+argument for separate frames.
+
+**Do NOT make the handshake conditional on `child_module`**: that returns a probe
+instance with `_child_wrote_stdout = False`, making the invariant false for that
+member and reopening #446 on the probe path. It is unexploitable today only
+because no probe test passes a `refusal_recorder` (`:640-641` returns early) — an
+accident, not a defence.
+
+### 6.2 core-001 — a live hard-rule-#7 defect, and rev 1's fix was WRONG
+
+The chain, verified: spawn at `_commands.py:658`; `Supervisor(...)` at `:783` —
+**125 lines later**; `supervisor.plugin.sandbox_refused` declared **only** at
+`supervisor/core.py:1089` via `core.py:307`; `strict_declarations` defaults
+**True** (`hooks/registry.py:521`, pinned by
+`test_default_strict_declarations_invariant.py`); `invoke()` on an undeclared
+hookpoint raises `HookError` (`hooks/invoke.py:1439`).
+
+So `SandboxRefusalAuditor.record()` writes the row (`sandbox_refusal_audit.py:53-65`)
+then **raises**, and `_record_launcher_refusals` catches it and logs
 `refusal_record_failed` (`quarantine_child_io.py:648-652`). **The fail-closed T0
-hookpoint never fires; the failure is demoted to a log line on the one path whose
-purpose is to trip quarantine.** Hard rule #7.
+hookpoint never fires on the one path whose purpose is to trip quarantine.**
 
-**Fix**: an explicit idempotent `declare_sandbox_hookpoints(registry)` called in
-`_start_async` **before** `:658`. `register_hookpoint` is idempotent on equal
-metadata and strict on drift (`hooks/registry.py:587`, `supervisor/core.py:1030-1038`),
-so `Supervisor._register_hookpoints()` re-registering later is a proven no-op —
-**provided both sites pass the same metadata**. Have `_register_hookpoints`
-delegate to the new function so one tuple has two callers and drift is
-structurally impossible; `test_known_hookpoints_sync.py` pins it.
+Two refinements rev 1 missed:
 
-**NOT import-time** — `supervisor/core.py:1023-1028` explicitly rejected that
-under core-010 (pytest collects imports before fixtures → publisher metadata
-persists across tests expecting a clean registry). core-010 rejects the
-*module-bottom call*; ADR-0051:204-207 asks for the *function*. Both hold.
+- **Rows 2..N are lost, not just demoted.** `record()` appends *then* invokes
+  **per row** inside the `for` at `:51`; the caller catches at the call level
+  (`:648`). Only the **first** row is ever written.
+- **`sandbox_refusal_audit.py:12-14` admits the dependency**: dispatch "happens at
+  first extraction, post-`Supervisor`, so the hookpoint is registered" — direct
+  evidence the current design *depends* on the late dispatch #443 removes.
 
-**This likely closes #444 too** — ADR-0051:205-207 defers the reserved
-`provider_key_delivery_failed` writer for the same pre-`Supervisor` reason, and
-§7.1 makes that path more reachable. One declaration fix closes both.
+**Rev 1's proposed fix — "an explicit `declare_sandbox_hookpoints(registry)` called
+in `_start_async` before `:658`" — is WRONG.** A declaration seam **already
+exists**: `_commands.py:485` → `_gate_boot.py:245-248` → `hooks/boot.py:144`
+`install_boot_hook_registry` → `:140 _declare_all_subsystem_hookpoints(registry)`,
+running **173 lines before the spawn**. Its docstring (`hooks/boot.py:76-79`) is
+explicit:
 
-## 7. ADR-0051 amendments (three corrections, all verified)
+> "The list is the COMPLETE set of in-tree `declare_hookpoints` publishers…; a new
+> subsystem publisher **MUST** be added here so its hookpoints are declarable at
+> boot."
 
-### 7.1 The writev-buffers premise is a RACE, not structural
+The supervisor is absent because `_register_hookpoints` is a **method on a class**,
+not a `declare_hookpoints(registry)` function — that is the whole cause of
+core-001. `supervisor.plugin.sandbox_refused` is the only `fail_closed=True`
+security hookpoint reachable *only by constructing an object*. Adding a tenth
+ad-hoc site would bypass the seam and make its "COMPLETE set" claim false in a new
+way.
 
-ADR-0051:42-54 states the fd-3 `writev` buffers and succeeds, so
-`ProviderKeyDeliveryError` "never fires on a refusal" — "empirically confirmed"
-on two platforms (:124-134).
+**Rev 1's "NOT import-time (core-010 forbids it)" is also withdrawn.**
+`install_boot_hook_registry` calls `set_registry` on a **fresh** registry
+(`hooks/boot.py:59-61`), so import-time declaration is irrelevant to it. core-010
+(`supervisor/core.py:1023-1028`) rejects a module-bottom *call* for the supervisor;
+`hooks/boot.py` is an explicit boot-time call seam — what core-010 wants. Rev 1
+over-generalised a supervisor-local rationale into a repo rule the repo does not
+follow (`cli/daemon/__init__.py`, `episodic.py`, `quarantine.py:1604`,
+`comms_mcp/hookpoints.py` all have module-bottom calls).
 
-**The parent closes every read-end copy at `quarantine_child_io.py:883-908`
-(`os.close(fd)` :889, `os.close(src)` :901, `os.close(original)` :907) BEFORE the
-writev at `:912`.** Only the child holds a read end. A launcher that exits
-*before* the writev ⟹ EPIPE ⟹ `OSError` (`fd3_key_delivery.py:104-105`) ⟹
-`ProviderKeyDeliveryError` ⟹ `QuarantineChildSpawnError` (`:913-921`) — boot
-already refuses, **nondeterministically**.
+Drift is pinned **by value**, not identity: `registry.py:734` compares
+`stored != new_meta` on a dataclass with eagerly-normalized frozensets
+(`core.py:1035-1038`'s "SAME frozenset objects" is stricter than the code demands).
 
-Task 0 only exercised **slow** refusal paths. The **fast** path —
-`plugin_id_charset_invalid` (`alfred-plugin-launcher.sh:123-136`), which fires
-before any `python3` — is the one plausibly fast enough to win the race and was
-never sampled. This changes no decision (both outcomes refuse boot under (B)) but
-a "proven on two platforms" claim that is actually load-dependent is exactly
-`domain_verify_mirrors_production_claims`.
+### 6.3 Rejected placement: a barrier at `_commands.py:793`
 
-### 7.2 ADR-0051 is wrong about three of the four producers
+Considered (post-`Supervisor`, so core-001 would be moot) and rejected on four
+counts:
 
-ADR-0051:21-24 says *"Four spawn sites drain that stderr today… the row was
-logged into a `child_stderr` field and nothing else."* **False.** Only the
-quarantine child drains (`quarantine_child_io.py:509`). The other live producers
-pipe stderr and **never read it**:
+1. **The handle is unreachable.** `_CommsBootGraph` exposes `quarantine_transport`
+   (`_comms_boot.py:535`), not `child_io`.
+2. **It needs new control flow anyway.** AST-verified: the try at `:782` has
+   **zero** `except` handlers (`finalbody=[935]`), so a barrier raising there
+   propagates **uncaught** → exit 1, no audit row — the #368 anti-pattern the file
+   names at `:724`.
+3. **The invariant stays lexical** — the spawn keeps returning unproven children.
+4. **It does not generalise.** #441 re-runs the launcher at runtime
+   (`adapter_supervisor.py:376`). And the house precedent already agrees with
+   in-spawn: `adapter_child_factory.py:25-33` documents
+   `await runner.start_and_handshake()` as **step 4 of its own spawn factory**, on
+   every spawn. `spawn_quarantine_child_io` is the *only* child factory that
+   returns without verifying.
 
-- `plugins/comms_stdio_transport.py:173` — `stderr=asyncio.subprocess.PIPE`, the
-  only occurrence of `stderr` in the file.
-- `gateway/adapter_child_factory.py:497` — same.
+**Reap (AST-verified):** the try at `:657` has 6 handlers and **no finally**; the
+try at `:782` has a `finally` at `:935` → `:963-966 comms_graph.aclose()`. A
+`_refuse_boot` in the **771-781** window would leak the live bwrap child.
+Handshaking **inside the spawn** is safest of all: the refusal precedes the
+instance ever being returned, so no window exists.
 
-So for #440/#441 the row is not "logged and dropped" — it is **never read**. That
-turns them from "swap a log line for an auditor" into "**build the drain, then
-attach the auditor**": materially larger than the ADR implies. (Aside, worth its
-own issue: an unread, 64 KB-bounded stderr pipe on a long-lived adapter is a
-wedge waiting to happen.)
-
-### 7.3 The A-vs-B reversal and the gating relationship
-
-Record the maintainer's 2026-07-16 decision: option A adopted, #443 is a hard
-pre-gate on #340 PR2b, and CodeRabbit's #446 Major stands vindicated.
-
-## 8. Scope: what transfers to #440/#441/#442
+## 7. Scope: what transfers to #440/#441/#442
 
 - **#441 (gateway-adapter) — re-runs the launcher at runtime.**
-  `GatewayAdapterSupervisor.supervise_one` (`gateway/adapter_supervisor.py:365`)
-  is a `while True:` loop (`:376`) → `_spawn_or_terminal` (`:394`) → launcher +
-  `Popen` (`adapter_child_factory.py:477-499`), with backoff and a per-adapter
-  breaker. A runtime refusal is genuinely reachable. **But it needs no
-  exception**: the factory already runs `await runner.start_and_handshake()` on
-  **every** spawn including restarts (`adapter_child_factory.py:29`) — the (B)
-  shape, per-spawn. The shared auditor is correct there under the same unified
-  invariant. No divergence, no per-producer special-casing.
+  `supervise_one` (`adapter_supervisor.py:365`) is a `while True:` loop (`:376`) →
+  `_spawn_or_terminal` (`:394`) → launcher + `Popen`
+  (`adapter_child_factory.py:477-499`), with backoff and a breaker. A runtime
+  refusal is genuinely reachable — **but it needs no exception**: the factory
+  already handshakes on **every** spawn (`adapter_child_factory.py:29`). The shared
+  auditor is correct there under the same unified invariant (§2). No divergence.
 - **#442 (foreground-TUI) — the producer does not exist.**
-  `spawn_plugin_via_launcher` (`cli/_launcher_spawn.py:188`) has **zero
-  production call sites**; `alfred chat` (`cli/main.py:273`) dials the gateway's
-  `comms-gateway.sock` (Spec A G5). **#442 should be rescoped to delete the dead
-  seam**, not wire an auditor into it.
-- **#440 (comms-adapter)** — per §7.2, needs the drain built first.
+  `spawn_plugin_via_launcher` (`cli/_launcher_spawn.py:188`) has **zero**
+  production call sites; `alfred chat` (`cli/main.py:273`) dials the gateway
+  socket (Spec A G5). **Rescope #442 to delete the dead seam.**
+- **#440 (comms-adapter)** — per §8.2, the drain must be built first.
 
-## 9. BLOCKED — the decision this needs
+## 8. ADR-0051 amendments
 
-**The chosen mechanism requires adding a hello frame to the quarantine child's
-protocol** (`quarantine_child/__main__.py`). Verified: there is no initialize and
-no unsolicited frame today — the loop writes stdout **only** on the extract branch
-(`:414`), and unknown methods are a loud refusal by design (`:418`).
+### 8.1 The writev-buffers premise is a RACE, not structural
 
-That protocol is exactly what **#340 PR2b** rewrites — its own comment says so
-(`:387-390`: *"PR-S4-11c-2c replaces this deterministic-echo body… Keep the loop,
-`handle_extract`, and the skeleton/loop tests in sync when that swap lands"*).
+ADR-0051:42-54 records that the fd-3 `writev` buffers and succeeds, so
+`ProviderKeyDeliveryError` "never fires on a refusal" — "empirically confirmed" on
+two platforms (:124-134). **The parent closes every read-end copy at
+`quarantine_child_io.py:883-908` BEFORE the writev at `:912`.** Only the child
+holds a read end. A launcher that exits first ⟹ EPIPE ⟹ `OSError`
+(`fd3_key_delivery.py:104-105`) ⟹ `ProviderKeyDeliveryError` ⟹
+`QuarantineChildSpawnError` (`:913-921`) — boot already refuses,
+**nondeterministically**. Task 0 sampled only **slow** refusal paths; the fast one
+(`plugin_id_charset_invalid`, `alfred-plugin-launcher.sh:123-136`, before any
+`python3`) was never in the sample. `domain_verify_mirrors_production_claims`,
+inside a recorded ADR.
 
-So #443's correct fix touches the surface of the human-sign-off-gated PR it is
-meant to pre-gate. Three things follow that only the maintainer can settle:
+### 8.2 ADR-0051 is wrong about three of the four producers
 
-1. **The approved scope was "probe + flip the runtime gate". The flip is wrong** —
-   §3 shows it weakens four things, and (B) inverts the gate for free. Confirm the
-   scope change.
-2. **Is a quarantine-child protocol change acceptable inside #443**, given #443
-   pre-gates PR2b and PR2b must then preserve the hello frame?
-3. **core-001's fix (§6) may fold #444 into #443.** Confirm, or split.
+ADR-0051:21-24 says *"Four spawn sites drain that stderr today… the row was logged
+into a `child_stderr` field and nothing else."* **False.** Only the quarantine
+child drains (`quarantine_child_io.py:509`). `comms_stdio_transport.py:173` and
+`adapter_child_factory.py:497` pipe stderr and **never read it**. So #440/#441 are
+"**build the drain, then attach the auditor**" — materially larger than the ADR
+implies. (Aside worth its own issue: an unread, 64 KB-bounded stderr pipe on a
+long-lived adapter is a wedge waiting to happen.)
 
-Everything up to this line is analysis and is durable. Implementation is
-deliberately not started.
+### 8.3 The A-vs-B reversal and the gating relationship
 
-## 10. Testing
+Record the maintainer's 2026-07-16 decision: option A adopted; #443 is a hard
+pre-gate on #340 PR2b; CodeRabbit's #446 Major stands vindicated.
+
+### 8.4 The fast-refusal hole is NOT #444's, and the barrier cannot close it
+
+On the EPIPE branch (§8.1) `:913-921` raises **before** `:923` — so **no
+`_SubprocessChildIO` is ever constructed**, the handshake never runs,
+`_log_child_stderr` never runs, and the launcher's stderr *containing the genuine
+row* is **never read at all**. #443's headline promise ("a genuine launcher refusal
+at boot ⟹ exactly one attributed row") is **false on the fast-refusal path**.
+
+Issue #444 does **not** fix this: it writes `provider_key_delivery_failed`, a *different*
+reason — the launcher's true reason is still lost. And a naive "drain and record on
+the EPIPE arm" **reopens the forgery**: EPIPE proves only that all read ends
+closed, not that the launcher never exec'd. **This is a structurally distinct hole
+requiring option (C) or a consciously accepted residual — recorded as §11.4, not
+deferred to #444.**
+
+## 9. Testing
 
 - 100% line + branch on the boundary (CLAUDE.md: every security boundary).
-- **No AST call-site guard.** Under (B)-inside-the-spawn, correctness does not
-  depend on "spawned exactly once", so a lexical guard would advertise a property
-  it cannot hold — and would be blind to the lazy, function-local import
-  production actually uses (`daemon_runtime.py:328`). Structure, not lexical rule.
-- Real-execution oracles instead:
-  1. child double writing zero stdout ⟹ `spawn_quarantine_child_io` raises **and**
-     the row is recorded (the mutation-killing test);
-  2. `_child_wrote_stdout` monotonicity — no path assigns `False` after
-     `__init__` (the single fact the design rests on);
-  3. extend the docker-gated real-spawn lane
-     (`tests/integration/test_quarantine_child_real_spawn.py:195`) to assert boot
-     refuses on a genuine refusal, with an **assert-RAN (not skipped)** floor
-     (`domain_paper_only_gates`, the #245 pattern).
+- **No AST call-site guard.** Under handshake-inside-the-spawn, correctness does
+  not depend on "spawned exactly once", so a lexical guard would advertise a
+  property it cannot hold — and would be blind to the lazy function-local import
+  production uses (`daemon_runtime.py:328`). Structure, not lexical rule.
+- **The design rests on TWO facts, not one** (rev 2): (a) `_child_wrote_stdout`
+  lifetime monotonicity, and (b) the **intra-`read_frame` set at `:457`**, firing
+  between header and body (§3.1). A monotonicity-only test passes straight through
+  a mutation that moves `:457` below the body read — which *is* the #446 bypass.
+  Both need their own test.
+- Real-execution oracles: a child double writing zero stdout ⟹
+  `spawn_quarantine_child_io` raises **and** the row is recorded; extend the
+  docker-gated real-spawn lane (`test_quarantine_child_real_spawn.py:195`) with an
+  **assert-RAN (not skipped)** floor (`domain_paper_only_gates`, the #245 pattern).
+- **A probe leg is required** for every oracle (§6.1).
 - One guard **is** warranted: pin that `bwrap`/`runuser` stderr can never parse as
-  a valid row (feed real `bwrap --bogus-flag` / `runuser -u nosuchuser` output,
-  assert zero rows). It is a claim about third-party output — the kind that rots.
+  a valid row — a claim about third-party output, the kind that rots.
 
 ### Adversarial corpus (next free id: 021)
 
-- **`sbx-2026-021`** `boot_barrier_absent_launcher_refusal_reaches_runtime` — a
-  real refusal ⟹ `QuarantineChildSpawnError` **from the spawn**, exactly one row
-  with the true reason, and the `fail_closed` T0 hookpoint **actually dispatched**
-  (not `refusal_record_failed`). **This is the core-001 regression oracle** — it
-  fails today. Write it first; assert on the **dispatch**, not just the row (a
-  row-only assertion passes straight through the bug).
+- **`sbx-2026-021`** `boot_barrier_absent_launcher_refusal_reaches_runtime` — a real
+  refusal ⟹ `QuarantineChildSpawnError` **from the spawn**, exactly one row with
+  the true reason, and the `fail_closed` T0 hookpoint **actually dispatched** (not
+  `refusal_record_failed`). The core-001 regression oracle; it fails today. Assert
+  on the **dispatch**, not just the row — a row-only assertion passes straight
+  through the bug (§6.2).
+  **Rev 2: pin the refusal reason explicitly** — a fast reason (§8.1) records
+  nothing and a slow one records a row, so an unpinned reason makes this test
+  **nondeterministic**. Use a slow path.
 - **`sbx-2026-022`** `exec_d_child_cannot_forge_refusal_after_boot_handshake` — the
   #446 residual, closed. Derive "no row written" from the audit store, never from
   the gate predicate (`domain_a_test_that_asks_the_code_if_the_code_is_right`).
-- **`sbx-2026-023`** `slow_launcher_refusal_still_refuses_boot` — the (A)-refutation
-  pinned, so a future "let's just bounded-wait" PR goes red instead of going in.
-- **`sbx-2026-024`** `child_boot_performs_no_external_io` — §4's forward gate made
-  executable. The only thing standing between "the child's provider client is
-  lazy" and "the child's provider client *used to be* lazy."
-- **Amend `sbx-2026-019`**: under (B) a successful exec now produces a hello frame
-  — precisely the success-path signal ADR-0051:228-231 says #447 needs and lacks.
-  **(B) may make #447 tractable rather than blocked.** Note on #447; do not fold.
+- **`sbx-2026-023`** `slow_launcher_refusal_still_refuses_boot` — the §3.3
+  refutation pinned, so a future "let's just bounded-wait" PR goes red.
+- **`sbx-2026-024`** `child_boot_performs_no_external_io` — **downgraded by rev 2**
+  from load-bearing to defence-in-depth (§4.1: the empty netns already forecloses
+  it). Still worth having; no longer the thing holding the argument up.
+- **Amend `sbx-2026-019`**: a successful exec now produces frames — precisely the
+  success-path signal ADR-0051:228-231 says #447 needs and lacks. **The handshake
+  may make #447 tractable rather than blocked.** Note on #447; do not fold.
+
+## 10. Decomposition and status
+
+**PR1 — declaration placement (no behaviour change). READY; needs no maintainer
+call.** Extract the four sandbox/boot tuples into a `declare_hookpoints(registry)`
+on the sandbox publisher; register it in `hooks/boot.py:_declare_all_subsystem_hookpoints`
+(discharging an obligation that docstring already imposes); re-key
+`KNOWN_HOOKPOINTS` (`_known_hookpoints.py:76-92`) off `alfred.supervisor.core`;
+delegate from `_register_hookpoints`; drop the `_StubSupervisor` unbound-call dance
+(`test_known_hookpoints_sync.py:62-67`), which exists only because these are not
+boot-declarable. Ships `sbx-2026-021`. **Converts core-001 from a silent fail-open
+into a fixed one — a live hard-rule-#7 defect — independently of everything else,
+and unblocks #444.**
+
+**PR2 — the two-frame boot handshake (#443 proper).** §5 + §6.1's probe hello +
+the §8 ADR amendments + corpus 022/023/024. **Awaiting maintainer confirmation** on
+the child protocol change (both the security engineer and the architect recommend
+taking it: the collision with PR2b is textually trivial — PR2b's `main()` edits land
+at `:351-352`, so hello-before at `:339` collides *less* than the alternative).
 
 ## 11. Residuals (named, per CLAUDE.md hard rule 7)
 
-1. **Supply-chain compromise of the wheel or bound interpreter** — accepted;
-   strictly-stronger attacker (§4). Closable only by (C).
+1. **Supply-chain compromise of the wheel, the bound interpreter, or `anthropic`**
+   (which the host imports too, §4.1) — accepted; strictly-stronger attacker.
 2. **`bwrap`/`runuser` diagnostics on the shared fd 2 after exec** — not
    exploitable (`parse_launcher_refusal_rows` requires a JSON object with keys ⊆
    `SANDBOX_REFUSED_FIELDS`, string values, Cc/Cf-free, `reason` in the closed
-   vocab), but this is an assumption about third-party stderr. **Pin it.**
+   vocab), but it is an assumption about third-party stderr. **Pin it.**
 3. **Grandchildren inheriting fd 2** — not reachable under the shipped
    `--unshare-pid` policy; at boot the child forks nothing. **Name the policy
    dependency** (`domain_lexical_rules_cannot_decide_filesystem_facts`).
-4. **The fast-refusal race (§7.1)** surfaces as `ProviderKeyDeliveryError`, which
-   writes no row today — reserved reason #444. #443 and #444 are coupled.
+4. **The fast-refusal EPIPE path (§8.4)** — a genuine launcher refusal whose row is
+   never read. Structurally outside this mechanism. Option (C) or accept.
+5. **The pre-hello window.** `_emit_fd3_framing_error_and_exit`
+   (`__main__.py:84-98`) prints to stderr and exits with zero stdout, and sits
+   before the hello in **every** variant. So the gate opens on child-authored
+   stderr at boot in all designs; only the parser stands there. Two frames minimise
+   the window; they do not eliminate it.
 
-## 12. Related
+## 12. Related — and a pattern worth naming
 
-- #455 — `request_plugin_restart` documents a restart scheduler that was never
-  built (filed during this analysis; contradicts `supervisor/core.py:51-54`).
-- #449 — the blank-REASON premise did not reproduce for `sandbox_refused`
-  (`cli/audit.py:126-145` returns `subject.reason`; `as_subject()` always sets it).
-  Evidence posted; awaiting a repro. #450's half is real.
-- `daemon_runtime.py:324-326` claims the spawn await is "the only await in this
-  builder"; `:355`/`:357` are post-spawn awaits in the same function. The real
-  invariant is "no await INSIDE dup2→restore" (window opens
-  `quarantine_child_io.py:844`, closes `:881`, around a synchronous `Popen` at
-  `:859`), enforced within the spawn. Correct the comment in this PR.
+Six false or stale claims found in this subsystem while designing one issue:
+
+| claim | reality |
+| --- | --- |
+| `supervisor/core.py:954` — "the existing restart scheduler spawns a fresh adapter" | never built (`core.py:51-54`); filed as **#455** |
+| `supervisor/core.py:1021` — "the supervisor's **six** hookpoints" | the tuple holds **ten** |
+| `daemon_runtime.py:324-326` — the spawn await is "the only await in this builder" | `:355`/`:357` are post-spawn awaits |
+| `quarantine_child_io.py:802-805` — a refusal "REFUSES the spawn" | a launcher refusal returns a **corpse** |
+| ADR-0051:44-54 — the writev "never fires on a refusal", proven on two platforms | a **race** (§8.1) |
+| ADR-0051:21-24 — "four spawn sites drain that stderr today" | **one** does (§8.2) |
+
+Plus **#449** — the blank-REASON premise did not reproduce (`cli/audit.py:126-145`
+returns `subject.reason`; `as_subject()` always sets it). Evidence posted; awaiting
+a repro. #450's half is real.
+
+**The pattern:** every one is prose that was *read* rather than *executed*, and
+each became load-bearing for someone's later reasoning — the same thesis #434-436
+shipped. Correct `daemon_runtime.py:324-326`, `core.py:1021`, and
+`quarantine_child_io.py:802-805` in the PRs that touch them.
