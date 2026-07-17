@@ -2,17 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the supervisor a proper boot-time hookpoint publisher so
-`supervisor.plugin.sandbox_refused` is declared *before* the quarantine child is
-spawned — closing core-001, a live CLAUDE.md hard-rule-#7 silent fail-open.
+**Goal:** Make the supervisor a boot-declarable hookpoint publisher, so
+`supervisor.plugin.sandbox_refused` is declared before `Supervisor(...)` exists —
+the prerequisite for #443 PR2's in-spawn handshake, and the fix #444 is blocked on.
 
-**Architecture:** Extract the supervisor's hookpoint tuple into a new
+**Architecture:** Move `Supervisor._register_hookpoints`'s tuple into a
 `declare_hookpoints(registry)` publisher at `src/alfred/supervisor/hookpoints.py`,
 register it in the existing `hooks/boot.py:_declare_all_subsystem_hookpoints`
-seam, and have `Supervisor._register_hookpoints` delegate to it. **One tuple, two
-callers** — drift becomes structurally impossible. No module-bottom call (core-010).
+seam, and have `_register_hookpoints` delegate to it. One definition, two callers.
 
 **Tech Stack:** Python 3.14+, pytest, `alfred.hooks` registry.
+
+> **Rev 2 (2026-07-17).** Rewritten after a 5-reviewer plan review found the rev-1
+> premise **false** and the plan **un-runnable**. See "What rev 1 got wrong".
 
 ## Global Constraints
 
@@ -20,114 +22,181 @@ callers** — drift becomes structurally impossible. No module-bottom call (core
   (`supervisor/core.py:1023-1028`) rejected import-time registration: pytest
   collects every test module's imports before any fixture runs, so publisher
   metadata would persist across tests expecting a clean registry. Add the
-  *function*; never the import-time *call*. Every other publisher has both; the
-  supervisor gets only the function.
-- **One tuple.** `_register_hookpoints` MUST delegate, never keep its own copy.
+  *function*; never the import-time *call*. **Note the asymmetry honestly:** all
+  nine existing publishers DO have a module-bottom call, so the supervisor becomes
+  the only one without, guarded by nothing but a docstring. core-010's rationale
+  applies equally to those nine — the asymmetry is inherited, not introduced here.
+- **The tuple MUST stay function-local**, inline immediately before the `for` loop
+  — see Task 1 Step 3. A module-level constant silently blinds a live drift guard.
+- **`HookRegistry` cannot be constructed bare.** `gate` is keyword-only with no
+  default (`hooks/registry.py:515-522`). Use `make_deny_all_gate()`
+  (`tests/helpers/gates.py:186`) — declaration is not gated, only subscription is.
+  **Never** stub the capability layer to "always allow" (CLAUDE.md hard rule #2);
+  use a fixture gate.
 - **`register_hookpoint` is idempotent on equal metadata, strict on drift**
-  (`hooks/registry.py:587`). Drift is compared **by value** — `registry.py:734`
-  does `stored != new_meta` on a dataclass with eagerly-normalized frozensets.
-  `core.py:1035-1038`'s "SAME frozenset objects" is stricter than the code needs;
-  do not treat identity as required.
-- **Touches `src/alfred/security/`** (`sandbox_refusal_audit.py` is the publisher
-  of `sandbox_refused`) → **the adversarial suite is release-blocking**:
-  `uv run pytest tests/adversarial`.
+  (`hooks/registry.py:587`). Drift compares **by value** — `registry.py:734` does
+  `stored != new_meta` on a dataclass over eagerly-normalized frozensets, so
+  `core.py:1035-1038`'s "SAME frozenset objects" is stricter than the code demands.
+- **PR1 touches no file under `src/alfred/security/`**, so the adversarial suite is
+  not *mandated* by CLAUDE.md here. Run it anyway (`uv run pytest tests/adversarial`):
+  it exercises the `sandbox_refused` row family whose declaration timing this PR
+  changes. Prudence, not a hard rule — say so accurately in the PR body.
 - **`make check` before every push.** `make ... | tail` masks the exit code.
-- **Commit subjects need a literal `#443` AFTER the colon** (the
-  `Conventional commit format` required check).
-- **i18n:** this PR adds no operator-facing strings. structlog event keys are not
-  `t()` scope.
+- **Commit subjects need a literal `#443` AFTER the colon** (`Conventional commit
+  format` is a required check).
+- **i18n:** no operator-facing strings here. structlog event keys are not `t()` scope.
 
-## Why this is worth its own PR
+## Why this PR exists — stated accurately
 
-core-001 is live on main today. Chain, verified @ `967d8e2e`:
+**core-001 is LATENT, not live.** Rev 1 claimed it was "a live hard-rule-#7 silent
+fail-open on main today." **That is false**, and ADR-0051:81-89 says so verbatim:
 
-- spawn at `_commands.py:658`; `Supervisor(...)` at `:783` — **125 lines later**
-- `supervisor.plugin.sandbox_refused` declared **only** at `supervisor/core.py:1089`
-  via `core.py:307`
-- `strict_declarations` defaults **True** (`hooks/registry.py:521`)
-- `invoke()` on an undeclared hookpoint raises `HookError` (`hooks/invoke.py:1439`)
-- `SandboxRefusalAuditor.record()` writes the row (`sandbox_refusal_audit.py:53-65`)
-  then **raises**; `_record_launcher_refusals` catches it and logs
-  `refusal_record_failed` (`quarantine_child_io.py:648-652`)
+> "(B) means core-001 … **is moot for this specific call site** — the dispatch
+> happens well after `Supervisor.__init__` has already called
+> `_register_hookpoints()`, so the hookpoint is always declared by then. A future
+> boot-time fail-closed health-check (option A, deferred) would need to
+> **re-examine core-001 for itself**, since a probe that runs before `Supervisor`
+> is constructed cannot assume the hookpoint is declared yet."
 
-**The fail-closed T0 hookpoint never fires on the one path whose purpose is to
-trip quarantine** — and because `record()` appends-then-invokes **per row** inside
-the `for` at `:51` while the caller catches at the call level, **only the first
-row is ever written**. Rows 2..N are silently dropped.
+Verified: `SandboxRefusalAuditor.record()` reaches `invoke` only via
+`_record_launcher_refusals` (`quarantine_child_io.py:647`) ← the gate at `:580` ←
+**only** `read_frame`'s except arm (`:488`) — `aclose` (`:674`) passes
+`refusal_candidate=False` and can never reach it. And `_SubprocessChildIO.read_frame`
+has exactly one driver: `quarantine_transport.py:307`, inside `dispatch()`, the
+extract RPC — **turn time, after `Supervisor(...)` at `_commands.py:783`**.
+`spawn_quarantine_child_io` contains zero `read_frame` calls.
 
-This PR fixes that independently of #443's A/B question and **unblocks #444**.
+So the hookpoint is always declared by the time anything dispatches it.
 
-## Deviation from the spec (flag at plan review)
+**What is true, and why this PR is still right work:**
 
-Spec §10 says "extract the **four** sandbox/boot tuples". This plan moves **all
-ten**. Splitting 4-at-boot / 6-in-`__init__` yields **two tuples** and reinstates
-the drift this epic keeps shipping (#432 was a vocab drift guard; #434-436 were
-false-docstring drift). One tuple with two callers is the architect's own stated
-principle. Declaring the other six earlier is safe: idempotent, strictly earlier,
-no new dispatch.
+1. The boot seam genuinely does **not** declare `supervisor.plugin.sandbox_refused`
+   today — empirically confirmed: the seam registers 27 hookpoints and
+   `hookpoint_meta("supervisor.plugin.sandbox_refused")` returns `None`.
+2. **#443 PR2 makes that fatal.** PR2 moves the first read *into the spawn*
+   (`_commands.py:658`), 125 lines before `Supervisor(...)`. Then the dispatch hits
+   `strict_declarations` (`hooks/registry.py:521`) → `HookError`
+   (`hooks/invoke.py:1439`) → caught by `_record_launcher_refusals` (`:648-652`) →
+   demoted to a `refusal_record_failed` log line. The fail-closed T0 hookpoint
+   would never fire, silently.
+3. **#444 is blocked on exactly this fix.** Its body names it: *"its dispatch would
+   be pre-`Supervisor` (needs the `declare_hookpoints()` fix — the
+   `comms_mcp/hookpoints.py` convention)"*, echoed in ADR-0051's Follow-ups.
+
+**PR1 is a prerequisite, not a bug fix.** Do not write "closes a live fail-open"
+into the PR body, a docstring, or a corpus provenance field — that is the #434-436
+failure mode, in the PR whose subject is declaration drift.
+
+## What rev 1 got wrong (kept as the record)
+
+A 5-reviewer plan review found **eight** false or unrunnable claims. All corroborated
+3-5× and independently re-verified:
+
+| rev-1 claim | reality |
+| --- | --- |
+| "core-001 is live on main today" | latent; ADR-0051:81-89 says it is moot for this call site |
+| "rows 2..N are silently dropped" | only if `invoke` raises — it does not when declared |
+| `HookRegistry()` in 4 tests | `TypeError`; `gate` is keyword-only, no default |
+| module-level `SUPERVISOR_HOOKPOINTS` | silently blinds the drift guard: 10 names → **0**, still green |
+| `git stash` proves the oracle bites | stashes the oracle, not the fix; 0 tests collected; exit 5 |
+| "touches `src/alfred/security/`" | it touches no file there |
+| "the coverage test kills zero mutants" | it kills the *ignores-the-`registry`-arg* mutant Task 1 depends on |
+| "a count-assertion will need updating" | phantom — only a `>= 32` floor exists, unaffected |
+| "two tuples reinstate drift" | overstated; disjoint sets cannot drift in the #432 sense |
+| import block "from the module header" | they are function-local at `core.py:1063-1064` |
+
+**The deviation (four tuples vs ten) was upheld — but rev 1's rationale was wrong.**
+The real argument: spec §10 demands *both* "extract the four" *and* "drop the
+`_StubSupervisor` dance", which are **incompatible**. Under 4/6 the six
+breaker/lifecycle tuples stay reachable only via
+`Supervisor._register_hookpoints(stub)`, so the dance must survive and
+`_known_hookpoints.py` needs two supervisor keys. **Ten is the only scope that
+delivers §10's own deliverables.** Security verified the widened window is safe:
+`register()` gates strict-declaration (`:854`) → tier-allowlist (`:874`) →
+capability gate (`:899`), and `SYSTEM_ONLY_TIERS` is `frozenset({'system'})`
+(`:342`), so it admits only in-tree T0 code.
 
 ## File Structure
 
-- **Create** `src/alfred/supervisor/hookpoints.py` — the single tuple + the
-  `declare_hookpoints(registry=None)` publisher. One responsibility: *declare the
-  supervisor's hookpoints*. Mirrors the `comms_mcp/hookpoints.py` naming
-  convention.
-- **Modify** `src/alfred/supervisor/core.py:1018-1132` — `_register_hookpoints`
-  becomes a delegation; correct the "six hookpoints" docstring (there are ten).
-- **Modify** `src/alfred/hooks/boot.py:81-105` — one import + one call.
-- **Modify** `src/alfred/hooks/_known_hookpoints.py:76-92` — re-key the group.
-- **Modify** `tests/unit/hooks/test_known_hookpoints_sync.py:55-67` — drop the
-  `_StubSupervisor` unbound-call dance.
-- **Create** `tests/unit/supervisor/test_hookpoints_publisher.py`
-- **Create** `tests/adversarial/sandbox_escape/sbx_2026_021_*.yaml` + its leg.
+- **Create** `src/alfred/supervisor/hookpoints.py` — `declare_hookpoints(registry=None)`
+  with the tuple **inline, function-local**.
+- **Modify** `src/alfred/supervisor/core.py:1018-1132` — delegate; fix the "six"
+  docstring (there are ten).
+- **Modify** `src/alfred/hooks/boot.py:81-105` — one aliased import + one call.
+- **Modify** `src/alfred/hooks/_known_hookpoints.py` — re-key the group (`:76`) and
+  correct the now-false comment (`:47-55`).
+- **Modify** three test files that carry the retired `_StubSupervisor` dance and/or
+  stale docstrings.
+- **Create** `tests/unit/supervisor/test_hookpoints_publisher.py`.
+
+**Not in PR1:** `sbx-2026-021`. Its threat has no production path until PR2 moves
+the read into the spawn, so its oracle would have to manufacture its own premise —
+the self-referential oracle this repo has twice written down as worthless. The
+adversarial corpus pins **reachable** threats; every entry 001-020 names one. It
+ships with PR2, renumbered.
 
 ---
 
-### Task 1: The publisher module
+### Task 1: Publisher + boot wiring + delegation — ONE atomic commit
 
 **Files:**
 
 - Create: `src/alfred/supervisor/hookpoints.py`
+- Modify: `src/alfred/supervisor/core.py:1018-1132`
+- Modify: `src/alfred/hooks/boot.py:81-105`
 - Test: `tests/unit/supervisor/test_hookpoints_publisher.py`
 
 **Interfaces:**
 
-- Consumes: `alfred.hooks.registry.HookRegistry`, `get_registry`;
-  `alfred.hooks.SYSTEM_ONLY_TIERS`, `SYSTEM_OPERATOR_TIERS`;
-  `alfred.security.tiers.T0` (import exactly as `supervisor/core.py:1066-1132`
-  does — read that block first and copy the import spellings verbatim).
-- Produces: `SUPERVISOR_HOOKPOINTS: tuple[...]` and
-  `declare_hookpoints(registry: HookRegistry | None = None) -> None`.
+- Consumes: `alfred.hooks.registry.HookRegistry` / `get_registry`;
+  `SYSTEM_ONLY_TIERS`, `SYSTEM_OPERATOR_TIERS`, `T0`, `TrustTier` — the imports are
+  **function-local at `core.py:1063-1064`**, not in the module header. Read that
+  block; the module-level tuple is gone, so hoist only what the new module needs.
+- Produces: `declare_hookpoints(registry: HookRegistry | None = None) -> None`.
 
-- [ ] **Step 1: Write the failing test**
+**Why one commit:** `tests/unit/hooks/test_boot_registry.py:152-210` AST-walks every
+`.py` under `src/alfred` for `def declare_hookpoints` and asserts each is both
+imported into the aggregator with an **asname** (`:192`) and called with a
+**positional arg named `registry`** (`:194-200`). So the instant the publisher file
+lands, that guard fails until boot.py is wired. Splitting these would ship two red
+commits and poison bisect. They are one deliverable.
+
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/unit/supervisor/test_hookpoints_publisher.py
-"""The supervisor is a boot-declarable hookpoint publisher (#443 PR1, core-001)."""
+"""The supervisor is a boot-declarable hookpoint publisher (#443 PR1).
+
+Prerequisite for PR2's in-spawn handshake, which dispatches
+``supervisor.plugin.sandbox_refused`` before ``Supervisor(...)`` exists. Also the
+fix #444 is blocked on. core-001 is LATENT today — see the plan's rationale.
+"""
 
 from __future__ import annotations
 
+from alfred.hooks.boot import _declare_all_subsystem_hookpoints
 from alfred.hooks.registry import HookRegistry
-from alfred.supervisor.hookpoints import SUPERVISOR_HOOKPOINTS, declare_hookpoints
+from alfred.supervisor.hookpoints import declare_hookpoints
+from tests.helpers.gates import make_deny_all_gate
 
 
-def test_declare_hookpoints_registers_every_supervisor_hookpoint() -> None:
-    """Every entry in the tuple lands in the passed registry."""
-    registry = HookRegistry()
+def _registry() -> HookRegistry:
+    """A real registry over a deny-all fixture gate.
 
-    declare_hookpoints(registry)
-
-    for name, *_rest in SUPERVISOR_HOOKPOINTS:
-        assert registry.hookpoint_meta(name) is not None, f"{name} not declared"
-
-
-def test_sandbox_refused_is_fail_closed_t0() -> None:
-    """core-001's target: the fail-closed T0 row must be declarable at boot.
-
-    Pinned by value, not by re-reading the tuple: a test that asks the tuple
-    what the tuple says kills zero mutants.
+    ``gate`` is keyword-only with no default (registry.py:515-522). Declaration is
+    not gated — only subscription is — so deny-all is correct here and honours
+    CLAUDE.md hard rule #2 (never stub the gate to "always allow").
     """
-    registry = HookRegistry()
+    return HookRegistry(gate=make_deny_all_gate())
+
+
+def test_sandbox_refused_is_declared_fail_closed_t0() -> None:
+    """PR2's target: the fail-closed T0 row, declarable without a Supervisor.
+
+    Named independently of the tuple — an oracle that iterates the tuple and asks
+    the tuple what the tuple says kills zero mutants.
+    """
+    registry = _registry()
 
     declare_hookpoints(registry)
 
@@ -136,88 +205,122 @@ def test_sandbox_refused_is_fail_closed_t0() -> None:
     assert meta.fail_closed is True
 
 
+def test_declare_hookpoints_honours_the_registry_argument() -> None:
+    """The passed registry is used, not the global singleton.
+
+    Kills the "ignores the ``registry`` arg and calls get_registry()" mutant —
+    which is exactly what the boot seam depends on.
+    """
+    registry = _registry()
+
+    declare_hookpoints(registry)
+
+    assert registry.hookpoint_meta("supervisor.breaker.tripped") is not None
+
+
 def test_declare_hookpoints_is_idempotent() -> None:
     """Re-declaration on equal metadata is a no-op, not a drift raise.
 
-    Load-bearing: Supervisor.__init__ re-declares after the boot seam already did.
+    Load-bearing: the boot seam declares, then Supervisor.__init__ re-declares.
     """
-    registry = HookRegistry()
+    registry = _registry()
 
     declare_hookpoints(registry)
     declare_hookpoints(registry)  # must not raise
+
+
+def test_boot_seam_declares_sandbox_refused_without_a_supervisor() -> None:
+    """The core-001 oracle: the boot registry carries the row with no Supervisor.
+
+    Fails before this task: the seam registers 27 hookpoints and this one is not
+    among them.
+    """
+    registry = _registry()
+
+    _declare_all_subsystem_hookpoints(registry)
+
+    meta = registry.hookpoint_meta("supervisor.plugin.sandbox_refused")
+    assert meta is not None, "core-001: sandbox_refused undeclared at boot"
+    assert meta.fail_closed is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/unit/supervisor/test_hookpoints_publisher.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'alfred.supervisor.hookpoints'`
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Write the publisher — tuple INLINE, function-local**
 
-First read `src/alfred/supervisor/core.py:1018-1132` in full. Move the tuple
-**verbatim** — every entry, every comment. Do not retype the values; cut and paste
-so a transcription typo cannot silently change a trust tier.
+Read `src/alfred/supervisor/core.py:1018-1132` in full. Move the tuple and every
+comment **verbatim** — cut and paste, do not retype: a transcription typo would
+silently change a trust tier.
 
-`declare_hookpoints` must NOT have a module-bottom call (core-010). Give the
-module a docstring saying so, and why, or a future contributor will "fix" the
-omission.
+**The tuple MUST stay inline inside the function, immediately before the `for`
+loop.** A module-level `SUPERVISOR_HOOKPOINTS` constant would silently blind a live
+guard: `test_known_hookpoints_sync.py`'s AST resolver handles the function-local
+`hookpoints = (...)`-then-`for` shape only (its docstring at `:345-347` names that
+pattern), and falls through to `# Unresolvable — silently skip` at `:290`. A
+reviewer ran the resolver both ways: **10 names today → 0 under a module-level
+constant, still green.** That is the #432 silent-under-count residual, and this PR
+must not reintroduce it.
 
 ```python
 # src/alfred/supervisor/hookpoints.py
 """Boot-declarable hookpoint publisher for the supervisor (#443 PR1).
 
-Extracted from ``Supervisor._register_hookpoints`` so the supervisor can be a
-first-class publisher in ``alfred.hooks.boot._declare_all_subsystem_hookpoints``
-— whose docstring requires that every publisher register there so its hookpoints
-are declarable at boot.
+Extracted from ``Supervisor._register_hookpoints`` so the supervisor satisfies
+``alfred.hooks.boot._declare_all_subsystem_hookpoints``'s stated obligation
+(``boot.py:76-79``): every in-tree publisher MUST register there so its hookpoints
+are declarable at boot. The supervisor was absent because its declaration was a
+METHOD ON A CLASS, reachable only by constructing a ``Supervisor`` — making
+``supervisor.plugin.sandbox_refused`` the only ``fail_closed=True`` security
+hookpoint in the tree that a boot-time caller cannot declare.
 
-**core-001**: ``supervisor.plugin.sandbox_refused`` is dispatched by
-``SandboxRefusalAuditor`` from the quarantine-child spawn at
-``cli/daemon/_commands.py:658`` — 125 lines BEFORE ``Supervisor(...)`` at ``:783``.
-While the tuple lived only in ``__init__``, that dispatch hit an undeclared
-hookpoint under ``strict_declarations`` and raised ``HookError``, which
-``_record_launcher_refusals`` demoted to a ``refusal_record_failed`` log line: the
-fail-closed T0 hookpoint never fired on the one path meant to trip quarantine.
+That is harmless today (core-001 is moot for the current call site — ADR-0051:81-89;
+the dispatch happens at first extraction, post-``Supervisor``). It becomes fatal at
+#443 PR2, whose in-spawn handshake dispatches 125 lines BEFORE ``Supervisor(...)``:
+under ``strict_declarations`` that raises ``HookError``, which the caller demotes to
+a log line, so the fail-closed T0 hookpoint would never fire. #444 is blocked on the
+same fix.
 
 **No module-bottom ``declare_hookpoints()`` call — deliberately.** core-010
-(``supervisor/core.py``) rejected import-time registration for these hookpoints:
-pytest collects every test module's imports before any fixture runs, so the
-metadata would persist across tests that expect a clean registry. The boot seam
-calls this explicitly instead; that is the shape core-010 wants. Do not add an
-import-time call.
+(``supervisor/core.py:1023-1028``) rejected import-time registration for these
+hookpoints: pytest collects every test module's imports before any fixture runs, so
+the metadata would persist across tests expecting a clean registry. The boot seam
+calls this explicitly instead. Do not "fix" the omission — all nine other publishers
+have a module-bottom call and the supervisor deliberately does not.
 
-``Supervisor._register_hookpoints`` delegates here, so this tuple has two callers
-and exactly one definition — drift is structurally impossible.
+**The tuple is function-local on purpose.** ``test_known_hookpoints_sync.py``'s AST
+drift resolver only resolves the inline ``hookpoints = (...)``-then-``for`` shape;
+hoisting it to a module constant makes the resolver silently skip this module and
+supervisor drift coverage drops to zero while staying green.
+
+``Supervisor._register_hookpoints`` delegates here — one definition, two callers.
 """
 
 from __future__ import annotations
 
-# NOTE: copy the import block verbatim from supervisor/core.py's module header —
-# SYSTEM_ONLY_TIERS / SYSTEM_OPERATOR_TIERS / T0 / TrustTier / HookRegistry /
-# get_registry. Match its spellings exactly.
-
-SUPERVISOR_HOOKPOINTS: tuple[
-    tuple[str, frozenset[str], frozenset[str], bool, type[TrustTier]], ...
-] = (
-    # <-- the ten entries, moved VERBATIM from supervisor/core.py:1075-1123,
-    #     comments included.
-)
+# NOTE: copy the import spellings from supervisor/core.py:1063-1064 (they are
+# FUNCTION-LOCAL there, not in the module header) plus HookRegistry/get_registry.
 
 
 def declare_hookpoints(registry: HookRegistry | None = None) -> None:
     """Register every supervisor hookpoint.
 
-    Idempotent on equal metadata and strict on drift
-    (``HookRegistry.register_hookpoint``), so the boot seam and
+    Idempotent on equal metadata, strict on drift, so the boot seam and
     ``Supervisor.__init__`` may both call it.
 
     Args:
         registry: Optional override; defaults to the active singleton.
     """
     target = get_registry() if registry is None else registry
-    for name, subscribable_tiers, refusable_tiers, fail_closed, carrier_tier in (
-        SUPERVISOR_HOOKPOINTS
-    ):
+    # Per-hookpoint trust-tier rationale: <-- move core.py's comment block here.
+    hookpoints: tuple[
+        tuple[str, frozenset[str], frozenset[str], bool, type[TrustTier]], ...
+    ] = (
+        # <-- the TEN entries, verbatim from core.py:1075-1123, comments included.
+    )
+    for name, subscribable_tiers, refusable_tiers, fail_closed, carrier_tier in hookpoints:
         target.register_hookpoint(
             name=name,
             subscribable_tiers=subscribable_tiers,
@@ -227,191 +330,37 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Delegate `_register_hookpoints`**
 
-Run: `uv run pytest tests/unit/supervisor/test_hookpoints_publisher.py -v`
-Expected: 3 passed.
-
-The accessor is `HookRegistry.hookpoint_meta(name) -> HookpointMeta | None`
-(`hooks/registry.py:744`) — verified, not assumed. There is no `get_hookpoint`.
-
-- [ ] **Step 5: Prove the test is non-vacuous**
-
-Delete the `sandbox_refused` entry from `SUPERVISOR_HOOKPOINTS`; re-run.
-Expected: `test_declare_hookpoints_registers_every_supervisor_hookpoint` still
-PASSES (it iterates the tuple — a tautological oracle), while
-`test_sandbox_refused_is_fail_closed_t0` FAILS.
-
-**This is the point.** The first test asks the tuple what the tuple says and kills
-zero mutants; the second names the row independently. Restore the entry. Keep
-both, but understand which one is load-bearing —
-`domain_a_test_that_asks_the_code_if_the_code_is_right`.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/alfred/supervisor/hookpoints.py tests/unit/supervisor/test_hookpoints_publisher.py
-git commit -m "feat(supervisor): #443 add a boot-declarable hookpoint publisher"
-```
-
----
-
-### Task 2: Delegate `_register_hookpoints`; correct the count docstring
-
-**Files:**
-
-- Modify: `src/alfred/supervisor/core.py:1018-1132`
-- Test: `tests/unit/supervisor/test_hookpoints_publisher.py`
-
-**Interfaces:**
-
-- Consumes: `alfred.supervisor.hookpoints.declare_hookpoints` (Task 1).
-- Produces: no signature change — `Supervisor._register_hookpoints(self) -> None`.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-def test_supervisor_register_hookpoints_delegates_to_the_publisher(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One tuple, two callers: __init__ must not keep a second copy.
-
-    Patches the publisher and asserts _register_hookpoints routes through it —
-    so a future edit that re-inlines the tuple fails here.
-    """
-    import importlib
-
-    calls: list[object] = []
-    mod = importlib.import_module("alfred.supervisor.hookpoints")
-    monkeypatch.setattr(mod, "declare_hookpoints", lambda registry=None: calls.append(registry))
-
-    from alfred.supervisor.core import Supervisor
-
-    class _StubSupervisor:
-        """No-state stub — _register_hookpoints reads no self state."""
-
-    Supervisor._register_hookpoints(_StubSupervisor())  # type: ignore[arg-type]
-
-    assert len(calls) == 1, "_register_hookpoints did not delegate to the publisher"
-```
-
-Note the `importlib.import_module` + two-arg `setattr`: patching a lazily-imported
-symbol re-exported from a package `__init__` via the dotted-string form resolves to
-the shadowing function, not the module attribute. This repo has been bitten by that
-(`procedural_433_launcher_refusal_audit`).
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/unit/supervisor/test_hookpoints_publisher.py::test_supervisor_register_hookpoints_delegates_to_the_publisher -v`
-Expected: FAIL — `assert 0 == 1` (the inlined tuple never calls the publisher).
-
-- [ ] **Step 3: Replace the body with a delegation**
-
-Delete the inlined `hookpoints = (...)` tuple and its `for` loop. Keep the
-per-hookpoint trust-tier rationale comments — move them into
-`supervisor/hookpoints.py` beside the entries they explain (Task 1), do not delete
-them.
+Replace the body (`core.py:1018-1132`). Move the per-hookpoint rationale comments
+into the publisher (Step 3) rather than deleting them. Fix the stale count: `:1021`
+says "the supervisor's **six** hookpoints"; there are **ten**.
 
 ```python
     def _register_hookpoints(self) -> None:
         """Register every supervisor hookpoint with the global registry.
 
-        Delegates to :func:`alfred.supervisor.hookpoints.declare_hookpoints` —
-        the single definition, also called by the boot seam
-        (``alfred.hooks.boot._declare_all_subsystem_hookpoints``) so
-        ``supervisor.plugin.sandbox_refused`` is declared BEFORE the
-        quarantine-child spawn dispatches it (#443 PR1, core-001).
+        Delegates to :func:`alfred.supervisor.hookpoints.declare_hookpoints` — the
+        single definition, also called by the boot seam so the hookpoints are
+        declarable before any ``Supervisor`` exists (#443 PR1).
 
-        Kept as a method (rather than dropping it for the boot call alone)
-        because tests and non-boot callers construct ``Supervisor`` directly and
-        must still find the hookpoints declared. ``register_hookpoint`` is
-        idempotent on equal metadata, so the double declaration is a no-op.
+        Kept as a method because tests and non-boot callers construct
+        ``Supervisor`` directly and must still find the hookpoints declared;
+        ``register_hookpoint`` is idempotent on equal metadata, so the double
+        declaration is a no-op.
 
-        core-010 still holds: the publisher exposes a FUNCTION, not a
-        module-import side effect.
+        core-010 still holds: the publisher exposes a FUNCTION, not an import-time
+        side effect.
         """
         from alfred.supervisor.hookpoints import declare_hookpoints
 
         declare_hookpoints()
 ```
 
-Also fix the stale count: `core.py:1021` says "the supervisor's **six**
-hookpoints"; the tuple has **ten**. That false docstring is one of six found in
-this subsystem (spec §12) — do not leave it behind in a PR whose whole subject is
-declaration drift.
+- [ ] **Step 5: Wire the boot seam**
 
-- [ ] **Step 4: Run tests**
-
-Run: `uv run pytest tests/unit/supervisor tests/unit/hooks -v`
-Expected: all pass. If a test asserts the exact `_register_hookpoints` body or
-patches a `core.py`-local symbol, update it to target the publisher.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/alfred/supervisor/core.py tests/unit/supervisor/test_hookpoints_publisher.py
-git commit -m "refactor(supervisor): #443 delegate _register_hookpoints to the publisher"
-```
-
----
-
-### Task 3: Register in the boot seam — the actual core-001 fix
-
-**Files:**
-
-- Modify: `src/alfred/hooks/boot.py:81-105`
-- Test: `tests/unit/hooks/test_boot_registry_declares_supervisor.py` (create)
-
-**Interfaces:**
-
-- Consumes: `alfred.supervisor.hookpoints.declare_hookpoints` (Task 1).
-- Produces: no signature change.
-
-- [ ] **Step 1: Write the failing test**
-
-This is the core-001 oracle. It asserts the *dispatch works*, not that a name is
-present — a presence-only assertion passes straight through the bug.
-
-```python
-# tests/unit/hooks/test_boot_registry_declares_supervisor.py
-"""core-001: sandbox_refused must be declarable BEFORE Supervisor exists (#443 PR1)."""
-
-from __future__ import annotations
-
-import pytest
-
-from alfred.hooks.boot import _declare_all_subsystem_hookpoints
-from alfred.hooks.registry import HookRegistry
-
-
-def test_boot_seam_declares_sandbox_refused_without_a_supervisor() -> None:
-    """The boot registry must carry the fail-closed T0 row with no Supervisor built.
-
-    Before #443 PR1 the ONLY declarer was Supervisor.__init__ (core.py:307), which
-    runs 125 lines after the quarantine-child spawn dispatches this hookpoint —
-    so the dispatch raised HookError and was demoted to a log line.
-    """
-    registry = HookRegistry()
-
-    _declare_all_subsystem_hookpoints(registry)
-
-    meta = registry.hookpoint_meta("supervisor.plugin.sandbox_refused")
-    assert meta is not None, "core-001: sandbox_refused undeclared at boot"
-    assert meta.fail_closed is True
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/unit/hooks/test_boot_registry_declares_supervisor.py -v`
-Expected: FAIL — `core-001: sandbox_refused undeclared at boot`.
-
-**If it PASSES, stop.** Something else already declares it and this plan's premise
-is wrong — report before proceeding.
-
-- [ ] **Step 3: Add the import + call**
-
-In `_declare_all_subsystem_hookpoints`, add to the function-local import block
-(alphabetical, matching the existing style) and to the call list:
+In `hooks/boot.py:_declare_all_subsystem_hookpoints`, add to the function-local
+import block (alphabetical) and the call list:
 
 ```python
     from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
@@ -421,59 +370,98 @@ In `_declare_all_subsystem_hookpoints`, add to the function-local import block
     declare_supervisor(registry)
 ```
 
-Function-local imports are the established shape here — they avoid an import cycle
-(`hooks` ← `supervisor` ← `hooks`). Do not hoist to module level.
+The **asname** and the **positional `registry`** are both required by the
+completeness guard (`test_boot_registry.py:192`, `:194-200`) — not stylistic.
 
-- [ ] **Step 4: Run test to verify it passes**
+Keep the import function-local. The rationale is **import weight, not a cycle**:
+`src/alfred/supervisor/` has zero module-level `alfred.hooks` imports, so no cycle
+exists in either direction. But `supervisor/__init__.py:35` eagerly imports
+`core.py` (dragging in sqlalchemy, structlog, audit_row_schemas, breaker…), and
+Python always runs the parent package `__init__` first — so a module-level import
+would make `alfred.hooks.boot` heavy, contradicting its own docstring
+(`boot.py:63`: "Imports are local to keep `alfred.hooks.boot` import-light").
 
-Run: `uv run pytest tests/unit/hooks/test_boot_registry_declares_supervisor.py -v`
-Expected: PASS.
+- [ ] **Step 6: Run the tests**
 
-- [ ] **Step 5: Run the full hooks + supervisor + daemon-boot suites**
+Run: `uv run pytest tests/unit/supervisor/test_hookpoints_publisher.py -v`
+Expected: 4 passed.
 
 Run: `uv run pytest tests/unit/hooks tests/unit/supervisor tests/unit/cli/daemon -q`
-Expected: all pass. A test asserting the boot registry's exact hookpoint count
-will need its expected value updated — that is a real signal, not noise: confirm
-the delta is exactly the supervisor's ten.
+Expected: all pass — **including** `test_boot_registry.py` (8 tests), which is the
+completeness guard this task must satisfy, and `test_known_hookpoints_sync.py`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Prove the drift guard is still sighted (non-vacuity)**
+
+The single highest-risk regression in this PR is silently blinding the resolver.
+Prove it did not happen:
 
 ```bash
-git add src/alfred/hooks/boot.py tests/unit/hooks/test_boot_registry_declares_supervisor.py
-git commit -m "fix(hooks): #443 declare supervisor hookpoints at boot, closing core-001"
+uv run pytest tests/unit/hooks/test_known_hookpoints_sync.py -q
+```
+
+Then **break the guarded code**: add a bogus entry `("supervisor.bogus.drift",
+SYSTEM_ONLY_TIERS, frozenset(), False, T0),` to the publisher's tuple and re-run.
+Expected: **FAIL** (the sync test sees an off-manifest registration).
+Remove it; re-run. Expected: PASS.
+
+**If it stays green with the bogus entry present, the resolver has gone blind** —
+the tuple is not in the shape it can resolve. Stop and fix the shape; do not
+proceed.
+
+A guard's non-vacuity must be proven by breaking the guarded code, never asserted
+(`domain_guard_completeness_and_oracle_independence`).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/alfred/supervisor/hookpoints.py src/alfred/supervisor/core.py \
+        src/alfred/hooks/boot.py tests/unit/supervisor/test_hookpoints_publisher.py
+git commit -m "feat(supervisor): #443 make the supervisor a boot-declarable hookpoint publisher"
 ```
 
 ---
 
-### Task 4: Re-key the drift map; drop the `_StubSupervisor` dance
+### Task 2: Re-key the drift map; retire all three stub sites; kill the stale docstrings
 
 **Files:**
 
-- Modify: `src/alfred/hooks/_known_hookpoints.py:76-92`
-- Modify: `tests/unit/hooks/test_known_hookpoints_sync.py:55-67`
+- Modify: `src/alfred/hooks/_known_hookpoints.py` (`:47-55` comment, `:76` key)
+- Modify: `tests/unit/hooks/test_known_hookpoints_sync.py` (`:23-30` docstring, `:55-67` dance)
+- Modify: `tests/unit/hooks/test_sandbox_hookpoints_registered.py` (`:3-4` docstring, `:26-31` helper)
+- Modify: `tests/unit/security/test_sandbox_refusal_audit.py` (`:165-186` stub, `:216` use)
 
 **Interfaces:**
 
-- Consumes: Tasks 1-3.
+- Consumes: Task 1's `declare_hookpoints`.
 - Produces: nothing new.
 
-- [ ] **Step 1: Read the map's contract**
+- [ ] **Step 1: Re-key the map**
 
-Read `src/alfred/hooks/_known_hookpoints.py:1-75`. The dict key names the
-**declaring module**. Since the declaration moved, the key
-`"alfred.supervisor.core"` is now false. Confirm this from the header before
-editing — if the key means something else, stop and report.
+Read `src/alfred/hooks/_known_hookpoints.py:39-41` first and confirm the dict key
+names the **declaring module** (it does — the sync test imports
+`KNOWN_HOOKPOINTS.keys()` at `:47-48`). Then rename `"alfred.supervisor.core"` →
+`"alfred.supervisor.hookpoints"`, keeping every hookpoint name and inline comment.
 
-- [ ] **Step 2: Re-key the group**
+- [ ] **Step 2: Correct the now-false comment above the dict**
 
-Rename the key `"alfred.supervisor.core"` → `"alfred.supervisor.hookpoints"`.
-Keep every hookpoint name and comment in the tuple unchanged.
+`_known_hookpoints.py:47-55` asserts the supervisor's hookpoints are "registered
+inside `Supervisor._register_hookpoints` rather than a module-level
+`declare_hookpoints()`" and that "the sync test reaches them via
+`Supervisor._register_hookpoints(object())`". After Task 1 **both halves are
+false**. Rewrite it to state what is now true: a `declare_hookpoints` function
+exists and the boot seam calls it; core-010 still forbids the module-bottom call.
 
-- [ ] **Step 3: Drop the stub dance**
+Leaving it is not an option — this PR's subject is declaration drift, and this repo
+has six recorded incidents of exactly this shape (spec §12).
 
-In `tests/unit/hooks/test_known_hookpoints_sync.py`, replace the
-`_StubSupervisor` + unbound `Supervisor._register_hookpoints(...)` call (lines
-~55-67, including its seven-line justification comment) with the real publisher:
+- [ ] **Step 3: Retire the `_StubSupervisor` dance — all three sites**
+
+The dance calls an unbound method with a fake `self` purely to reach a tuple. It
+existed only because the hookpoints were not boot-declarable. Task 1 retires the
+reason; retire all three uses:
+
+1. `tests/unit/hooks/test_known_hookpoints_sync.py:55-67` — replace the stub class
+   and `Supervisor._register_hookpoints(_StubSupervisor())` with:
 
 ```python
     from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
@@ -481,120 +469,48 @@ In `tests/unit/hooks/test_known_hookpoints_sync.py`, replace the
     declare_supervisor()
 ```
 
-The stub existed **only** because these hookpoints were not boot-declarable. It is
-a test smell the fix retires — calling an unbound method with a fake `self` to
-reach a tuple. Deleting it is part of the deliverable.
+   Also fix its module docstring (`:23-30`), which repeats the false "registers its
+   **six** hookpoints inside `Supervisor._register_hookpoints`" claim.
+2. `tests/unit/hooks/test_sandbox_hookpoints_registered.py:26-31` — the
+   `_fresh_registry_with_supervisor_hookpoints` helper. Same replacement. Fix its
+   `:3-4` docstring ("PR-S4-6 ships **three** supervisor hookpoints, registered
+   inside `Supervisor._register_hookpoints`").
+3. `tests/unit/security/test_sandbox_refusal_audit.py:165-186` + `:216` — the
+   `_StubSupervisor` class and its two users. Same replacement.
 
-- [ ] **Step 4: Run the sync test**
+None of these *break* (the delegation reads no `self` state, so the unbound call
+keeps working) — but leaving two behind means the next reader finds contradictory
+precedents for the same question.
 
-Run: `uv run pytest tests/unit/hooks/test_known_hookpoints_sync.py -v`
+- [ ] **Step 4: Reconcile the ADR-0051-premise comment**
+
+`tests/unit/security/test_sandbox_refusal_audit.py:145-162` is a comment block
+pinning the ADR-0051-(B) premise — that dispatch happens post-`Supervisor`. **That
+block is CORRECT and must stay.** Rev 1 of this plan contradicted it; rev 2 does
+not. If anything, extend it with a pointer: PR2 changes this, and PR1 is the
+prerequisite. Do not delete it.
+
+- [ ] **Step 5: Run**
+
+Run: `uv run pytest tests/unit/hooks tests/unit/security/test_sandbox_refusal_audit.py -q`
+Expected: all pass.
+
+- [ ] **Step 6: Prove the sync guard still bites**
+
+Add `"supervisor.bogus.drift"` to the `"alfred.supervisor.hookpoints"` tuple in
+`_known_hookpoints.py`; re-run the sync test. Expected: **FAIL**. Remove it; re-run.
 Expected: PASS.
 
-- [ ] **Step 5: Prove the drift guard still bites**
-
-Add a fake entry `"supervisor.bogus.drift"` to the `"alfred.supervisor.hookpoints"`
-tuple in `_known_hookpoints.py`; re-run the sync test.
-Expected: FAIL.
-Then remove it and re-run. Expected: PASS.
-
-A guard's non-vacuity must be **proven by breaking the guarded code**, never
-asserted (`domain_guard_completeness_and_oracle_independence`).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/alfred/hooks/_known_hookpoints.py tests/unit/hooks/test_known_hookpoints_sync.py
-git commit -m "refactor(hooks): #443 re-key the supervisor drift map to its publisher"
+git add src/alfred/hooks/_known_hookpoints.py tests/unit/hooks/ tests/unit/security/test_sandbox_refusal_audit.py
+git commit -m "refactor(hooks): #443 re-key the supervisor drift map and retire the stub dance"
 ```
 
 ---
 
-### Task 5: `sbx-2026-021` — the core-001 adversarial oracle
-
-**Files:**
-
-- Create: `tests/adversarial/sandbox_escape/sbx_2026_021_sandbox_refused_dispatch_demoted_pre_supervisor.yaml`
-- Modify: whichever leg executes the corpus — read
-  `tests/adversarial/sandbox_escape/test_sbx_corpus_executable.py` first and
-  follow it exactly. It iterates the YAML's own variant lists; do **not** add a
-  second hardcoded copy (the #428 lesson).
-
-**Interfaces:**
-
-- Consumes: Tasks 1-3.
-- Produces: corpus id 021 (001-020 taken).
-
-**Scope note — deviation from spec §9.** The spec described `sbx-2026-021` as
-`boot_barrier_absent_launcher_refusal_reaches_runtime`, asserting
-`QuarantineChildSpawnError` **from the spawn**. That is PR2 behaviour (it needs the
-handshake). PR1's corpus entry is scoped to core-001 alone: **the dispatch is
-silently demoted when the hookpoint is undeclared.** PR2 renumbers its entries
-from 022. Fix the spec's §9 numbering when PR2 lands.
-
-- [ ] **Step 1: Read the corpus conventions**
-
-```bash
-sed -n '1,60p' tests/adversarial/sandbox_escape/sbx_2026_018_launcher_refusal_row_injection.yaml
-sed -n '1,80p' tests/adversarial/sandbox_escape/test_sbx_corpus_executable.py
-```
-
-Match `id / category / threat / ingestion_path / payload / expected_outcome /
-provenance / references` exactly.
-
-- [ ] **Step 2: Write the failing corpus entry + leg**
-
-The threat: *a `sandbox_refused` dispatch against a registry that has not declared
-the hookpoint raises `HookError`, which `_record_launcher_refusals` swallows into
-`refusal_record_failed` — so the fail-closed T0 hookpoint never fires and rows
-2..N are never written.*
-
-The oracle MUST assert the **dispatch fired**, not that a row exists. `record()`
-appends at `:53-65` *then* invokes at `:73` — so a row-only assertion passes
-straight through the bug. Assert a subscriber on
-`supervisor.plugin.sandbox_refused` actually ran.
-
-Derive "the dispatch fired" from the **subscriber**, never from re-reading the
-registry's own predicate — an oracle that reuses the implementation predicate kills
-zero mutants (`domain_a_test_that_asks_the_code_if_the_code_is_right`).
-
-Use `structlog.testing.capture_logs()` filtering `e["event"]` to assert
-`refusal_record_failed` is **absent** — structlog does **not** land in `caplog`, so
-a `caplog`-based assertion here is vacuous.
-
-- [ ] **Step 3: Run it against the PRE-fix code to verify it fails**
-
-```bash
-git stash
-uv run pytest tests/adversarial/sandbox_escape -k 2026_021 -v
-git stash pop
-```
-
-Expected: FAIL (or error on the missing module) — proving the oracle bites.
-**If it passes against pre-fix code, the oracle is vacuous. Rewrite it.**
-
-- [ ] **Step 4: Run against the fixed code**
-
-Run: `uv run pytest tests/adversarial/sandbox_escape -k 2026_021 -v`
-Expected: PASS.
-
-- [ ] **Step 5: Run the whole adversarial suite (release-blocking)**
-
-Run: `uv run pytest tests/adversarial -q`
-Expected: all pass. This PR touches `src/alfred/security/`, so this is mandatory,
-not optional.
-
-Also run the density check: `uv run pytest tests/adversarial/test_corpus_density.py -q`
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add tests/adversarial/sandbox_escape/
-git commit -m "test(sandbox): #443 pin the core-001 dispatch demotion as sbx-2026-021"
-```
-
----
-
-### Task 6: Full gates + PR
+### Task 3: Full gates + PR
 
 **Files:** none — verification only.
 
@@ -608,12 +524,11 @@ uv run pytest tests/adversarial -q
 uv run pytest tests/integration -q
 ```
 
-Check `$?` explicitly after each — do **not** pipe to `tail`, it masks the exit
-code (`feedback_make_check_before_push`).
+Check `$?` explicitly after each — do **not** pipe to `tail`.
 
-The macOS integration lane is flaky **under load** (mass testcontainers setup
-errors). If a failure looks load-shaped, re-run that file **in isolation** before
-believing it is a regression; trust the Linux CI lanes.
+The macOS integration lane is flaky **under load**. If a failure looks load-shaped,
+re-run that file **in isolation** before believing it is a regression; trust the
+Linux CI lanes.
 
 - [ ] **Step 2: i18n drift check**
 
@@ -623,8 +538,8 @@ uv run pybabel update --no-fuzzy-matching -i /tmp/alfred.pot -d locale -l en
 uv run pybabel compile -d locale
 ```
 
-This PR adds no `t()` strings, but a **line-shifting edit re-stales the `#:` refs**
-— re-run and commit the churn if the catalog moves. Never `--omit-header`.
+No `t()` strings are added, but a **line-shifting edit re-stales the `#:` refs** —
+re-run and commit the churn. Never `--omit-header`.
 
 - [ ] **Step 3: Markdown lint**
 
@@ -638,40 +553,49 @@ npx -y markdownlint-cli2@0.22.1 "docs/**/*.md"
 git push -u origin fix/443-boot-time-quarantine-health-check
 ```
 
-PR body must state: this closes core-001 (a live hard-rule-#7 silent fail-open);
-it is PR1 of two for #443; it **unblocks #444**; it makes no behavioural change
-beyond *when* declaration happens; and the deviation above (ten tuples moved, not
-four) with its rationale.
+The PR body **must** say, accurately:
+
+- This is **PR1 of two** for #443. It is a **prerequisite**, not a bug fix.
+- **core-001 is latent, not live** — ADR-0051:81-89 records that it is moot for the
+  current call site. PR2's in-spawn handshake activates it.
+- It **unblocks #444**, whose body names this fix.
+- No behavioural change beyond *when* declaration happens.
+- The deviation: ten hookpoints moved, not the spec's four — because §10's two
+  deliverables ("extract the four" + "drop the stub dance") are incompatible at 4/6.
+- The tuple is function-local **on purpose** (drift-resolver shape).
+- **Do not claim it closes a live fail-open.**
 
 - [ ] **Step 5: Review**
 
-Full `/review-pr` fleet — **security always**, plus UAT is not applicable here (no
-operator surface). Then CodeRabbit CLI (`--base origin/main`; local main is stale)
-**and** cloud — they catch disjoint bugs and neither is the last word. Resolve
-every thread. Merge with a plain `gh pr merge --rebase`. **Never `--admin`.**
+Full `/review-pr` fleet — **security always**. UAT is not applicable (no operator
+surface). Then CodeRabbit CLI (`--base origin/main`; local main is stale) **and**
+cloud — they catch disjoint bugs and neither is the last word. Resolve every thread.
+Merge with a plain `gh pr merge --rebase`. **Never `--admin`.** Do not arm `--auto`
+while anything Critical is open.
 
 ---
 
 ## Self-Review
 
-**Spec coverage.** §6.2's fix (the existing seam, not a new site) → Tasks 1+3.
-§6.2's core-010 constraint → Global Constraints + Task 1 Step 3. §10's re-key →
-Task 4. §10's `_StubSupervisor` retirement → Task 4 Step 3. §10's "assert the
-dispatch, not the row" → Task 5 Step 2. §12's `core.py:1021` false docstring →
-Task 2 Step 3.
+**Spec coverage.** Spec §6.2's fix (existing seam, not a new site) → Task 1 Steps
+3-5. core-010 → Global Constraints + the publisher docstring. §10's re-key → Task 2
+Step 1. §10's stub retirement → Task 2 Step 3 (all three sites). §12's false
+docstrings → Task 1 Step 4 + Task 2 Step 2.
 
-**Deliberately deferred to PR2** (documented above, not gaps): the two-frame
-handshake (§5), the probe hello (§6.1), the ADR-0051 amendments (§8), corpus
-022/023/024, and the `daemon_runtime.py:324-326` / `quarantine_child_io.py:802-805`
-docstring corrections — PR1 does not touch those files.
+**Deferred to PR2, deliberately:** the two-frame handshake, the probe hello, the
+ADR-0051 amendments, and the whole corpus (021 renumbered) — its threat is not
+reachable until PR2.
 
-**Placeholders.** None. The one intentional gap is Task 1 Step 3's import block
-and tuple body, which say *copy verbatim from `core.py:1066-1132`* — deliberate:
-retyping trust-tier values from memory is exactly how a frozenset silently
-widens.
+**Spec corrections this rev forces (fold into the spec):** §6.2's "a live
+hard-rule-#7 defect" and §10's "converts core-001 from a silent fail-open into a
+fixed one" are both **false** and must be restated as latent-activated-by-PR2.
+
+**Placeholders.** One intentional: the publisher's tuple body and import spellings
+say *copy verbatim from `core.py:1063-1064` and `:1075-1123`*. Deliberate —
+retyping trust-tier values is how a frozenset silently widens.
 
 **Type consistency.** `declare_hookpoints(registry: HookRegistry | None = None) ->
-None` is used identically in Tasks 1, 2, 3, 4. `SUPERVISOR_HOOKPOINTS` is
-referenced only in Tasks 1 and 4. Accessor `registry.hookpoint_meta` was verified against
-`hooks/registry.py:744` while writing this plan — an earlier draft used a
-`get_hookpoint` that does not exist.
+None` matches `comms_mcp/hookpoints.py:53`. `registry.hookpoint_meta` verified at
+`registry.py:744`; `HookpointMeta.fail_closed` verified. `HookRegistry(gate=...)`
+verified at `registry.py:515-522` — rev 1 checked the accessor and never the
+constructor two lines above it.

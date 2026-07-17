@@ -1,11 +1,36 @@
 # #443 — boot-time fail-closed quarantine health-check (design)
 
 - **Issue**: [#443](https://github.com/alfred-os/AlfredOS/issues/443)
-- **Status**: DESIGN COMPLETE — **PR1 ready to build; PR2 awaiting maintainer confirmation** (§10)
-- **Date**: 2026-07-16 (rev 2: 2026-07-17)
+- **Status**: DESIGN COMPLETE — **all three open decisions resolved 2026-07-17**
+  (below). PR1 building; PR2 follows.
+- **Date**: 2026-07-16 (rev 2: 2026-07-17; rev 3: 2026-07-17)
 - **Amends**: ADR-0051 (four corrections — §8)
 - **Pre-gates**: #340 PR2b (maintainer decision, 2026-07-16, recorded on #443)
 - **Predecessors**: #433 (PR #445), #446 (the fast-follow whose residual this closes)
+
+## 0. The three decisions — RESOLVED 2026-07-17
+
+Delegated by the maintainer to the specialist agents, then cross-examined against
+each other. Both conceded their own position and converged.
+
+1. **Is the flip off?** — **YES, off.** Not merely unnecessary but *unsafe*: the
+   `except` at `quarantine_child_io.py:469` wraps both reads and `:457` sets the
+   flag between them, so on header-then-body-EOF both conditions fire on a fresh
+   instance's first read. The second conjunct is the **only** thing suppressing the
+   forged row (pinned by `test_first_turn_full_header_then_body_eof_not_recorded`).
+   Under this design the first read **is** the boot handshake — so flipping would
+   reopen #446's bypass at the boot barrier itself. §3.1.
+2. **Is a quarantine-child protocol change acceptable inside #443?** — **YES.**
+   Both reviewers recommend taking it. The collision with #340 PR2b is textually
+   trivial (PR2b's `main()` edits land at `:351-352`; the hello sits at `:339`, so
+   it collides *less* than the alternative), it adds **zero** inbound methods (both
+   frames are unsolicited outbound, so `:418`'s closed refusal surface is
+   untouched), no protocol-free alternative attests the right proposition (§3.5),
+   and splitting it into a hello-only PR would **break extraction** (§5.3).
+3. **Does core-001's fix fold #444 in?** — **NO: it UNBLOCKS it.** #444 additionally
+   needs a `provider_key_delivery_failed` writer at the `ProviderKeyDeliveryError`
+   arm — a separate writer, corpus entry, and reachability argument (§8.1's race).
+   PR1 ships the declaration #444 is blocked on; #444 ships its writer.
 
 ## 1. Problem
 
@@ -287,7 +312,26 @@ member and reopening #446 on the probe path. It is unexploitable today only
 because no probe test passes a `refusal_recorder` (`:640-641` returns early) — an
 accident, not a defence.
 
-### 6.2 core-001 — a live hard-rule-#7 defect, and rev 1's fix was WRONG
+### 6.2 core-001 — LATENT today, activated by this design; rev 1's fix was WRONG
+
+**Rev 3 correction.** Rev 2 called core-001 "a live hard-rule-#7 defect". **False**,
+and ADR-0051:81-89 — quoted in this very spec — says so verbatim: *"core-001 … is
+moot for this specific call site — the dispatch happens well after
+`Supervisor.__init__` … A future boot-time fail-closed health-check (option A,
+deferred) would need to re-examine core-001 for itself."*
+
+Verified: `record()` reaches `invoke` only via `_record_launcher_refusals`
+(`quarantine_child_io.py:647`) ← the gate at `:580` ← **only** `read_frame`'s except
+arm (`:488`); `aclose` (`:674`) passes `refusal_candidate=False` and can never reach
+it. `_SubprocessChildIO.read_frame` has exactly one driver —
+`quarantine_transport.py:307`, inside `dispatch()`, the extract RPC at **turn time,
+after `Supervisor(...)`**. `spawn_quarantine_child_io` contains zero `read_frame`
+calls. So the hookpoint is always declared before anything dispatches it.
+
+**§5's in-spawn handshake is what activates it** — that is the whole point: this
+design moves the first read 125 lines before `Supervisor(...)`. So core-001 is a
+**blocker for this design**, not a bug on main. Everything below stands; only the
+"live" framing was wrong. It is also the fix **#444** is blocked on.
 
 The chain, verified: spawn at `_commands.py:658`; `Supervisor(...)` at `:783` —
 **125 lines later**; `supervisor.plugin.sandbox_refused` declared **only** at
@@ -478,16 +522,36 @@ on the sandbox publisher; register it in `hooks/boot.py:_declare_all_subsystem_h
 (discharging an obligation that docstring already imposes); re-key
 `KNOWN_HOOKPOINTS` (`_known_hookpoints.py:76-92`) off `alfred.supervisor.core`;
 delegate from `_register_hookpoints`; drop the `_StubSupervisor` unbound-call dance
-(`test_known_hookpoints_sync.py:62-67`), which exists only because these are not
-boot-declarable. Ships `sbx-2026-021`. **Converts core-001 from a silent fail-open
-into a fixed one — a live hard-rule-#7 defect — independently of everything else,
-and unblocks #444.**
+(all **three** sites, not one), which exists only because these are not
+boot-declarable.
+
+**Rev 3 corrections** (from the 5-reviewer plan review — see the plan's "What rev 1
+got wrong"):
+
+- **PR1 does NOT close a live defect.** core-001 is latent (§6.2). PR1 is **PR2's
+  prerequisite** and the fix **#444** is blocked on. State it that way everywhere;
+  the opposite claim is the #434-436 failure mode.
+- **`sbx-2026-021` does NOT ship in PR1.** Its threat has no production path until
+  §5's handshake lands, so its oracle would have to manufacture its own premise —
+  the self-referential oracle this repo has twice recorded as worthless. It ships
+  with PR2.
+- **The tuple stays function-local.** A module-level constant silently blinds
+  `test_known_hookpoints_sync.py`'s AST drift resolver (which handles the inline
+  `hookpoints = (...)`-then-`for` shape only, falling through to
+  `# Unresolvable — silently skip` at `:290`): a reviewer ran it both ways —
+  **10 names → 0, still green.** The #432 residual, reintroduced by a PR about
+  drift.
+- **Four-vs-ten resolved: ten.** Not for rev 2's "two tuples drift" reason
+  (disjoint sets cannot drift in the #432 sense) but because §10's two deliverables
+  are **incompatible** at 4/6: the six breaker/lifecycle tuples would stay reachable
+  only via the stub dance §10 also demands retiring.
+- **PR1 touches no file under `src/alfred/security/`** — run the adversarial suite
+  as prudence, not as the CLAUDE.md mandate rev 2 claimed.
 
 **PR2 — the two-frame boot handshake (#443 proper).** §5 + §6.1's probe hello +
-the §8 ADR amendments + corpus 022/023/024. **Awaiting maintainer confirmation** on
-the child protocol change (both the security engineer and the architect recommend
-taking it: the collision with PR2b is textually trivial — PR2b's `main()` edits land
-at `:351-352`, so hello-before at `:339` collides *less* than the alternative).
+the §8 ADR amendments + corpus **021**-024 (021 renumbers down from PR1, where its
+threat is not yet reachable). The child protocol change is **accepted** — §0
+decision 2. PR2 is where core-001 becomes live, which is why PR1 lands first.
 
 ## 11. Residuals (named, per CLAUDE.md hard rule 7)
 
