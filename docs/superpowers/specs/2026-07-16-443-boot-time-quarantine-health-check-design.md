@@ -516,7 +516,9 @@ deferred to #444.**
 
 ## 10. Decomposition and status
 
-**PR1 — declaration placement (no behaviour change). READY; needs no maintainer
+**PR1 — declaration placement (no dispatch/runtime behaviour change — it changes
+only *when* the hookpoints are declared, moving it ~298 lines earlier to the boot
+seam; nothing subscribes or dispatches in that window). READY; needs no maintainer
 call.** Move **all ten** supervisor hookpoints (the four sandbox/boot tuples plus
 the six breaker/lifecycle tuples — the four-vs-ten scope is resolved to ten below)
 into a `declare_hookpoints(registry)` publisher at `src/alfred/supervisor/hookpoints.py`;
