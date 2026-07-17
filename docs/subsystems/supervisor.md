@@ -345,7 +345,7 @@ override deferred).
 | `plugin.lifecycle.crashed` | `{"system"}` | `False` | Plugin crashed (breaker still CLOSED) |
 | `plugin.lifecycle.quarantined` | `{"system"}` | `False` | Plugin crash trips breaker to OPEN |
 | `supervisor.plugin.sandbox_refused` | `{"system"}` | `True` | Every `SANDBOX_REFUSED_FIELDS` emit (PR-S4-6) |
-| `supervisor.plugin.sandbox_stub_used` | `{"system"}` | `True` | Launcher execs unsandboxed in dev/test with no real sandbox available (PR-S4-7) — declared only, no `invoke()` call site yet (#447) |
+| `supervisor.plugin.sandbox_stub_used` | `{"system"}` | `True` | **Declared only — currently unpublished** (no `invoke()` call site; #447). Planned emission: launcher execs unsandboxed in dev/test with no real sandbox available (PR-S4-7) |
 | `supervisor.boot.mlock_unavailable` | `{"system"}` | `False` | `mlockall` unavailable at boot (PR-S4-6) |
 | `supervisor.boot.core_dumps_disabled` | `{"system"}` | `False` | `RLIMIT_CORE` set to 0 at boot (PR-S4-6) |
 
