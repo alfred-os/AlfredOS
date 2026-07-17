@@ -248,9 +248,17 @@ module-bottom, import-time call. Import-time registration in `hookpoints.py`
 (or `deadline.py` / `breaker.py`) was explicitly rejected at plan review:
 pytest collects every test module's imports before any fixture runs, so a
 module-level `register_hookpoint()` call would persist metadata across tests
-that expect a clean registry. Explicit-call registration (from boot, or from
-`Supervisor.__init__()`) keeps cleanup straightforward — a test that never
-boots and never constructs a `Supervisor` sees no supervisor hookpoints at all.
+that expect a clean registry. Explicit-call registration — from boot, from
+`Supervisor.__init__()`, or from a direct call to `declare_hookpoints()`
+itself — keeps cleanup straightforward: a test's registry holds exactly the
+hookpoints its own `declare_*` calls put there. The third pattern is how this
+repo's own tests reach the supervisor's hookpoints without booting or
+constructing a `Supervisor`:
+[`test_known_hookpoints_sync.py`](../../tests/unit/hooks/test_known_hookpoints_sync.py),
+[`test_sandbox_hookpoints_registered.py`](../../tests/unit/hooks/test_sandbox_hookpoints_registered.py),
+and
+[`test_sandbox_refusal_audit.py`](../../tests/unit/security/test_sandbox_refusal_audit.py)
+all call `declare_hookpoints()` (imported as `declare_supervisor`) directly.
 
 The original core-010 hookpoints (`supervisor.breaker.tripped`, `.reset`,
 `supervisor.action_timeout`, and the three `plugin.lifecycle.*` events) use
@@ -320,8 +328,11 @@ Hookpoints registered via `Supervisor._register_hookpoints()`, which delegates
 to `alfred.supervisor.hookpoints.declare_hookpoints()` (see [Hookpoint
 registration discipline](#hookpoint-registration-discipline) above). All carry
 `carrier_tier=T0` (system-internal observability). All `fail_closed=False`
-except `supervisor.plugin.sandbox_refused` (a subscriber timeout there must
-not let a refused spawn slip through).
+except the two PR-S4-6/PR-S4-7 sandbox-launcher rows,
+`supervisor.plugin.sandbox_refused` (a subscriber timeout there must not let a
+refused spawn slip through) and `supervisor.plugin.sandbox_stub_used`
+(mirrors `sandbox_refused`'s `fail_closed=True` verbatim — #167 per-kind
+override deferred).
 
 | Hookpoint | `subscribable_tiers` | `fail_closed` | Fires when |
 | --- | --- | --- | --- |
@@ -332,6 +343,7 @@ not let a refused spawn slip through).
 | `plugin.lifecycle.crashed` | `{"system"}` | `False` | Plugin crashed (breaker still CLOSED) |
 | `plugin.lifecycle.quarantined` | `{"system"}` | `False` | Plugin crash trips breaker to OPEN |
 | `supervisor.plugin.sandbox_refused` | `{"system"}` | `True` | Every `SANDBOX_REFUSED_FIELDS` emit (PR-S4-6) |
+| `supervisor.plugin.sandbox_stub_used` | `{"system"}` | `True` | Launcher execs unsandboxed in dev/test with no real sandbox available (PR-S4-7) — declared only, no `invoke()` call site yet (#447) |
 | `supervisor.boot.mlock_unavailable` | `{"system"}` | `False` | `mlockall` unavailable at boot (PR-S4-6) |
 | `supervisor.boot.core_dumps_disabled` | `{"system"}` | `False` | `RLIMIT_CORE` set to 0 at boot (PR-S4-6) |
 
