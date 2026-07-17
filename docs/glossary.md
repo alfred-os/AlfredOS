@@ -1203,9 +1203,10 @@ See [`Hookpoint`](glossary.md#hookpoint),
 ## supervisor.breaker.tripped / supervisor.breaker.reset hookpoints
 
 Two hookpoints that fire on circuit breaker state transitions (declared in
-`src/alfred/supervisor/hookpoints.py`'s `declare_hookpoints()`;
-`Supervisor.__init__` triggers it via a delegating `_register_hookpoints()`
-in `src/alfred/supervisor/core.py`).
+`src/alfred/supervisor/hookpoints.py`'s `declare_hookpoints()`, called from the
+boot seam (`hooks/boot.py:_declare_all_subsystem_hookpoints`) and, for direct
+`Supervisor` construction, via `Supervisor.__init__`'s delegating
+`_register_hookpoints()` in `src/alfred/supervisor/core.py`).
 
 - `supervisor.breaker.tripped` — fires after `CircuitBreaker._trip()`
   transitions the breaker to OPEN. `subscribable_tiers={"system"}`;

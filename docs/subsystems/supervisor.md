@@ -324,9 +324,11 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 
 ## Hookpoints
 
-Hookpoints registered via `Supervisor._register_hookpoints()`, which delegates
-to `alfred.supervisor.hookpoints.declare_hookpoints()` (see [Hookpoint
-registration discipline](#hookpoint-registration-discipline) above). All carry
+Hookpoints declared by `alfred.supervisor.hookpoints.declare_hookpoints()`,
+called both from the boot seam (`hooks/boot.py:_declare_all_subsystem_hookpoints`)
+and — for direct `Supervisor` construction — via a delegating
+`Supervisor._register_hookpoints()` (see [Hookpoint registration
+discipline](#hookpoint-registration-discipline) above). All carry
 `carrier_tier=T0` (system-internal observability). All `fail_closed=False`
 except the two PR-S4-6/PR-S4-7 sandbox-launcher rows,
 `supervisor.plugin.sandbox_refused` (a subscriber timeout there must not let a
