@@ -1,7 +1,7 @@
 """Sandbox/posture hookpoint registration (PR-S4-6 Component H).
 
-PR-S4-6 ships three supervisor hookpoints, registered inside
-:meth:`alfred.supervisor.core.Supervisor._register_hookpoints`:
+PR-S4-6 ships three supervisor hookpoints, registered via
+:func:`alfred.supervisor.hookpoints.declare_hookpoints` (#443 PR1):
 
 * ``supervisor.plugin.sandbox_refused`` — T0, fail_closed=True. Fires on
   every ``SANDBOX_REFUSED_FIELDS`` emit.
@@ -19,16 +19,11 @@ from __future__ import annotations
 from alfred.hooks import get_registry
 from alfred.hooks.registry import HookRegistry
 from alfred.security.tiers import T0
-from alfred.supervisor.core import Supervisor
+from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 
 
 def _fresh_registry_with_supervisor_hookpoints() -> HookRegistry:
-    class _StubSupervisor:
-        pass
-
-    # _register_hookpoints uses get_registry() internally and only touches
-    # ``self`` to dispatch — a bare stub is safe (mirrors the sync test).
-    Supervisor._register_hookpoints(_StubSupervisor())  # type: ignore[arg-type]
+    declare_supervisor()
     return get_registry()
 
 

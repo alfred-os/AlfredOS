@@ -16,11 +16,11 @@ a log line, so the fail-closed T0 hookpoint would never fire. #444 is blocked on
 same fix.
 
 **No module-bottom ``declare_hookpoints()`` call — deliberately.** core-010
-(``supervisor/core.py:1023-1028``) rejected import-time registration for these
-hookpoints: pytest collects every test module's imports before any fixture runs, so
-the metadata would persist across tests expecting a clean registry. The boot seam
-calls this explicitly instead. Do not "fix" the omission — all nine other publishers
-have a module-bottom call and the supervisor deliberately does not.
+rejected import-time registration for these hookpoints: pytest collects every
+test module's imports before any fixture runs, so the metadata would persist
+across tests expecting a clean registry. The boot seam calls this explicitly
+instead. Do not "fix" the omission — all nine other publishers have a
+module-bottom call and the supervisor deliberately does not.
 
 **The tuple is function-local on purpose.** ``test_known_hookpoints_sync.py``'s AST
 drift resolver only resolves the inline ``hookpoints = (...)``-then-``for`` shape;

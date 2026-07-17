@@ -44,15 +44,17 @@ CARRIER_SUBSTITUTION_REFUSED_HOOKPOINT: Final[str] = "hooks.carrier_substitution
 #    will fail loud if the runtime registry — after importing every
 #    listed subsystem — does not contain exactly this flat set.
 #
-# The supervisor's hookpoints are registered inside
-# :meth:`alfred.supervisor.core.Supervisor._register_hookpoints` rather
-# than a module-level ``declare_hookpoints()`` (core-010 rejected
-# import-time registration for that subsystem to keep test isolation
-# clean). The sync test reaches them via
-# ``Supervisor._register_hookpoints(object())`` — the method body only
-# uses ``self`` to dispatch to ``register_hookpoint`` on the global
-# registry, not to read any instance state, so the bare-object dispatch
-# is safe.
+# The supervisor's hookpoints are registered via
+# :func:`alfred.supervisor.hookpoints.declare_hookpoints` (#443 PR1), called
+# both by the boot seam — before any ``Supervisor`` exists — and by
+# ``Supervisor._register_hookpoints``, which delegates to it so non-boot
+# callers that construct a ``Supervisor`` directly still find the
+# hookpoints declared. core-010 still forbids a module-bottom
+# ``declare_hookpoints()`` call inside that module: pytest collects every
+# test module's imports before any fixture runs, so an import-time
+# registration would persist metadata across tests expecting a clean
+# registry. The sync test below calls ``declare_hookpoints()`` directly
+# rather than constructing a ``Supervisor``.
 KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
     "alfred.memory.episodic": (
         "memory.episodic.record.before_validate",
@@ -73,7 +75,7 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
     ),
     "alfred.security.quarantine": ("security.quarantined.extract",),
     "alfred.plugins.web_fetch": ("tool.web.fetch",),
-    "alfred.supervisor.core": (
+    "alfred.supervisor.hookpoints": (
         "supervisor.breaker.tripped",
         "supervisor.breaker.reset",
         "supervisor.action_timeout",
