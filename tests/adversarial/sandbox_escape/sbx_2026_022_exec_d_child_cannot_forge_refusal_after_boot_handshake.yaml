@@ -1,0 +1,74 @@
+id: sbx-2026-022
+category: sandbox_escape
+threat: >-
+  An exec'd quarantine child that completed the #443 boot handshake (wrote
+  both the hello and ready frames to stdout) and then crashes, emitting a
+  forged supervisor.plugin.sandbox_refused row on its shared stderr, must
+  NOT get that row persisted -- the FIRST stdout byte the child ever
+  writes latches _child_wrote_stdout True for the rest of that child's
+  life, permanently closing the launcher-vs-child drain gate.
+ingestion_path: launcher_refusal_stderr
+payload:
+  attack: exec_d_child_cannot_forge_refusal_after_boot_handshake
+  forged_refusal_row: >-
+    {"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}
+note: >-
+  The forged row is schema-valid and would parse cleanly through
+  parse_launcher_refusal_rows if the gate ever admitted it to that parser
+  at all (it is byte-identical in shape to the genuine launcher-authored
+  row sbx-2026-021 exercises) -- the defence here is entirely the
+  _child_wrote_stdout latch inside _SubprocessChildIO, not row validation.
+  This is the AFTER-handshake sibling of the existing #433/#446 first-turn
+  forgery tests in
+  tests/unit/security/test_quarantine_child_io_refusal_audit.py
+  (test_post_frame_read_failure_not_recorded,
+  test_first_turn_full_header_then_body_eof_not_recorded): those prove the
+  gate closes on the FIRST stdout byte of a JSON-RPC reply frame; this
+  entry proves it closes identically on the FIRST stdout byte of a boot
+  frame, which is new surface #443 introduces (the hello/ready frames did
+  not exist before this PR).
+expected_outcome: neutralized
+provenance: >-
+  #443's two-frame boot handshake (_await_boot_handshake,
+  quarantine_child_io.py) reads the child's unsolicited hello frame (proof
+  of exec) then its ready frame (proof of initialization) INSIDE
+  spawn_quarantine_child_io, before returning the _SubprocessChildIO to
+  the caller. The FIRST of those reads sets
+  _SubprocessChildIO._child_wrote_stdout = True the instant ANY byte
+  arrives on the child's stdout (read_frame's own comment: "the moment the
+  child writes even a partial header the child is live and exec'd ...
+  and its stderr must never be turned into an attributed audit row"). A
+  child that completes the boot handshake has therefore ALREADY tripped
+  that latch by the time spawn_quarantine_child_io returns -- every
+  subsequent read_frame() call on that same _SubprocessChildIO instance
+  (the extract-RPC drain the daemon uses post-boot) inherits a gate that
+  is permanently closed for that child's remaining life, per the drain
+  guard in _log_child_stderr: `if refusal_candidate and not
+  self._child_wrote_stdout: await self._record_launcher_refusals(raw)`.
+  So a live, exec'd child that later crashes and races a forged
+  sandbox_refused row onto the SAME stderr fd it shares with the launcher
+  (no delimiter between launcher-authored and child-authored bytes) cannot
+  manufacture an attributed T0 audit row or a fail_closed hookpoint
+  dispatch out of it -- the forgery is structurally inert, not merely
+  rejected by content inspection. This is the sec-001/arch-001 #433
+  follow-up discriminator (closed for the JSON-RPC reply-frame case by
+  #446) extended to cover the NEW boot-frame surface #443 adds: the
+  asserting test (test_sbx_2026_022_post_handshake_forgery_not_persisted,
+  tests/adversarial/sandbox_escape/test_sbx_boot_handshake.py) spawns a
+  fake child whose stdout carries exactly [HELLO_FRAME, READY_FRAME] (the
+  boot handshake completes cleanly, so spawn_quarantine_child_io returns
+  successfully) and whose stderr carries the forged_refusal_row above,
+  then drives one further read_frame() call on the returned IO (mirroring
+  the extract-RPC drain) which hits EOF against the now-exhausted stdout
+  buffer -- exactly the "child crashed after its last reply" shape. The
+  assertion derives "no row recorded" from a CAPTURING recorder double
+  that would show the row if it were ever written, never from reading
+  back _child_wrote_stdout itself (the domain_a_test_that_asks_the_code_if_the_code_is_right
+  lesson: an oracle that re-derives the gate's own predicate would pass
+  vacuously even if the gate's WIRING into the drain broke, since the flag
+  would still read True either way).
+references:
+  - "src/alfred/security/quarantine_child_io.py (_SubprocessChildIO._child_wrote_stdout, read_frame, _log_child_stderr, _record_launcher_refusals, _await_boot_handshake)"
+  - "src/alfred/security/quarantine_child/_handshake.py (HELLO_FRAME, READY_FRAME)"
+  - "tests/unit/security/test_quarantine_child_io_refusal_audit.py (the pre-#443 first-turn forgery tests this entry extends to the boot-frame surface)"
+  - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md"

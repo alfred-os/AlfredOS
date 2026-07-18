@@ -70,6 +70,14 @@ provenance: >-
   drain with its own out-of-band provenance signal -- a new interception
   point and its own ADR (tracked as a follow-up, not this parser being
   relaxed).
+  #443's in-spawn boot handshake (spawn_quarantine_child_io ->
+  _await_boot_handshake, verified by
+  tests/unit/security/test_quarantine_child_io.py's boot-frame tests)
+  now gives a successful exec its own out-of-band provenance signal --
+  the child's unsolicited hello/ready frames on stdout, read by the host
+  BEFORE any request/reply traffic -- a candidate success-path signal
+  #447's stderr-drain gap currently lacks entirely; the handshake MAY
+  make #447 tractable, but this PR does not fold #447.
 references:
   - "src/alfred/audit/launcher_refusal.py (parse_launcher_refusal_rows: event == supervisor.plugin.sandbox_refused only)"
   - "src/alfred/audit/audit_row_schemas.py (SANDBOX_STUB_USED_FIELDS: NOT PERSISTED, DELIBERATELY)"
