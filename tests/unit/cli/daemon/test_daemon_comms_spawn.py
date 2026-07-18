@@ -548,6 +548,7 @@ def test_boot_refuses_on_adapter_manifest_resolution_failure(
     tmp_path: Path,
     boot_success_env: FakeAuditWriter,
     quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
 ) -> None:
     """A manifest parse/resolution failure for an enabled adapter -> refuse boot.
 
@@ -555,7 +556,12 @@ def test_boot_refuses_on_adapter_manifest_resolution_failure(
     ``[comms_mcp]`` block surfaces as a typed error that REFUSES the boot rather
     than silently skipping the adapter (CLAUDE.md hard rule #7).
     """
-    del quarantine_registry  # installed via fixture side effect
+    # #443: the shared inbound extractor spawns the quarantined child BEFORE the
+    # per-adapter manifest resolution, and the two-frame boot handshake now
+    # fail-closes that spawn on a non-Linux/unprovisioned host. Fake the spawn so
+    # the boot reaches the manifest-resolution refusal this test targets (mirrors
+    # every other comms-enabled boot test) instead of refusing at the spawn.
+    del quarantine_registry, patch_quarantine_child_spawn  # installed via fixture side effect
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     _patch_comms_seams(monkeypatch)
@@ -590,6 +596,7 @@ def test_boot_refuses_on_unregistered_adapter_kind(
     tmp_path: Path,
     boot_success_env: FakeAuditWriter,
     quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
 ) -> None:
     """A typo'd/unregistered ``adapter_kind`` refuses the FULL boot at carrier selection (#374).
 
@@ -600,7 +607,12 @@ def test_boot_refuses_on_unregistered_adapter_kind(
     refusal (the exact kind reaches the operator via the stderr message + the boot-failed
     hookpoint; see ``test_build_wiring_refuses_on_unregistered_adapter_kind``).
     """
-    del quarantine_registry  # installed via fixture side effect
+    # #443: the shared inbound extractor spawns the quarantined child BEFORE the
+    # per-adapter carrier resolution, and the two-frame boot handshake now
+    # fail-closes that spawn on a non-Linux/unprovisioned host. Fake the spawn so
+    # the boot reaches the carrier-kind refusal this test targets (mirrors every
+    # other comms-enabled boot test) instead of refusing at the spawn.
+    del quarantine_registry, patch_quarantine_child_spawn  # installed via fixture side effect
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     _patch_comms_seams(monkeypatch)
