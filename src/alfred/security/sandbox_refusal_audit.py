@@ -48,6 +48,10 @@ class SandboxRefusalRecorder(Protocol):
 
     async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None: ...
 
+    async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+        """Persist the host-authored ``provider_key_delivery_failed`` row (#444)."""
+        ...
+
 
 _REFUSED_EVENT = "supervisor.plugin.sandbox_refused"
 
@@ -55,8 +59,35 @@ _REFUSED_EVENT = "supervisor.plugin.sandbox_refused"
 class SandboxRefusalAuditor:
     """Writes ``sandbox_refused`` rows + dispatches the fail-closed hookpoint."""
 
-    def __init__(self, *, audit_writer: AuditWriter) -> None:
+    def __init__(self, *, audit_writer: AuditWriter, host_os: str, environment: str) -> None:
         self._audit = audit_writer
+        self._host_os = host_os
+        self._environment = environment
+
+    async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+        """Persist the reserved ``provider_key_delivery_failed`` row (#444).
+
+        HOST-authored, not launcher-parsed: the parent's own ``os.writev`` over fd 3
+        failed while the child was still up (partial write / EAGAIN), so there is no
+        launcher stderr to parse. Every field is a trusted host constant (no T3), and
+        the write reuses ``record`` for the durable ``append_schema`` + the T0
+        ``fail_closed`` hookpoint dispatch (declared at ``hooks/boot.py`` ahead of the
+        spawn — ADR-0051's #443 PR2 amendment).
+        """
+        from alfred.audit.launcher_refusal import SandboxRefusalRow
+
+        # ``reason`` is the reserved constant ``ProviderKeyDeliveryError`` raises with
+        # (``fd3_key_delivery.py``) — hard-coded here (not read from the exception) so a
+        # caller cannot inject a reason outside ``SANDBOX_REFUSED_REASONS``. Keep the two
+        # bound: if the exception's default reason ever changes, change this literal too.
+        row = SandboxRefusalRow(
+            plugin_id=plugin_id,
+            policy_ref="",
+            host_os=self._host_os,
+            reason="provider_key_delivery_failed",
+            environment=self._environment,
+        )
+        await self.record((row,))
 
     async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
         from alfred.hooks import SYSTEM_ONLY_TIERS
