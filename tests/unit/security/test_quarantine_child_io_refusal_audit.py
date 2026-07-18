@@ -37,9 +37,13 @@ class _CapturingRecorder:
 
     def __init__(self) -> None:
         self.rows: list[SandboxRefusalRow] = []
+        self.delivery_failures: list[str] = []  # captured plugin_ids (#444)
 
     async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
         self.rows.extend(rows)
+
+    async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+        self.delivery_failures.append(plugin_id)
 
 
 def _exited_fake(stderr: bytes):
@@ -142,25 +146,73 @@ async def test_fast_refusal_arm_child_that_wrote_stdout_is_not_recorded(
     assert recorder.rows == []
 
 
-async def test_fast_refusal_arm_running_child_torn_down_not_drained(
+async def test_fast_refusal_arm_running_child_records_delivery_failure_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CR-2: a STILL-RUNNING child on the delivery-failure arm is torn down, never drained.
+    """#444: a STILL-RUNNING child on the delivery-failure arm is a genuine delivery
+    failure -> persist the reserved provider_key_delivery_failed row, THEN tear down.
 
-    ``ProviderKeyDeliveryError`` covers EPIPE (a fast launcher refusal, which has EXITED) AND
-    a partial-write / EAGAIN / other ``OSError`` where the child is still up (#444's domain).
-    On the latter, driving ``read_frame`` would block up to ``_READ_FRAME_TIMEOUT_S`` (~25s)
-    awaiting an EOF a live child never sends. The ``poll() is None`` gate tears the child down
-    at once instead: NO row recorded, ``QuarantineChildSpawnError`` still raised fail-closed,
-    and the child terminated + reaped. The test simply returning proves ``read_frame`` was not
-    driven (no wall-clock timing assertion).
+    ``poll() is None`` means the child is up (partial writev / EAGAIN), NOT a fast
+    (EPIPE, exited) launcher refusal. The row is host-authored (no read_frame drive,
+    no ~25s stall), the child is still terminated + reaped, and boot still refuses
+    fail-closed.
     """
     recorder = _CapturingRecorder()
     fake = _running_fake(_REFUSAL_ROW)  # returncode None -> poll() is None (still running)
     await _drive_epipe_spawn(fake, recorder, monkeypatch)  # raises QuarantineChildSpawnError
-    assert recorder.rows == []  # non-refusal delivery failure -> no attributed launcher row
+    assert recorder.rows == []  # NOT the launcher-authored stderr-parse path
+    assert recorder.delivery_failures == ["alfred.quarantined-llm"]  # #444 host-authored row
     assert fake.terminate_calls >= 1  # the live child was torn down (terminate)...
     assert fake.wait_calls >= 1  # ...and reaped (wait)
+
+
+async def test_delivery_failure_audit_error_does_not_mask_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorder that raises on the #444 write must NOT mask the delivery refusal.
+
+    The primary ``QuarantineChildSpawnError`` still propagates AND the guard logs
+    ``provider_key_delivery_audit_failed`` loudly (CLAUDE.md hard rule #7).
+
+    Test-guidance override (the brief's double-``pytest.raises`` version dead-ends:
+    ``_drive_epipe_spawn`` already wraps its OWN ``spawn_quarantine_child_io`` call in
+    ``pytest.raises(QuarantineChildSpawnError)`` -- it is the shared EPIPE-arm driver
+    every test in this module reuses -- so a SECOND outer ``pytest.raises`` here would
+    have nothing to catch (the inner one already did) and fails "DID NOT RAISE" even
+    though the primary error correctly still propagated up to that inner assertion).
+    The "still raises fail-closed" half is therefore asserted via the helper's own
+    internal ``pytest.raises``, not a redundant outer wrapper.
+    """
+    import structlog.testing
+
+    class _BoomDeliveryRecorder:
+        async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:  # pragma: no cover
+            raise AssertionError("record() is not the #444 path")
+
+        async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+            raise RuntimeError("audit down")
+
+    recorder = _BoomDeliveryRecorder()
+    with structlog.testing.capture_logs() as logs:
+        await _drive_epipe_spawn(_running_fake(_REFUSAL_ROW), recorder, monkeypatch)
+    failed = [
+        e
+        for e in logs
+        if e["event"] == "security.quarantine_child.provider_key_delivery_audit_failed"
+    ]
+    assert len(failed) == 1  # loud, not silent
+    assert failed[0]["error_class"] == "RuntimeError"
+
+
+async def test_running_child_delivery_failure_without_recorder_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recorder threaded -> the #444 write is a no-op, but boot still refuses fail-closed
+    and the live child is still torn down (covers the ``_refusal_recorder is None`` branch)."""
+    fake = _running_fake(_REFUSAL_ROW)
+    await _drive_epipe_spawn(fake, None, monkeypatch)  # raises QuarantineChildSpawnError
+    assert fake.terminate_calls >= 1
+    assert fake.wait_calls >= 1
 
 
 async def test_record_failure_does_not_mask_refusal() -> None:

@@ -663,6 +663,31 @@ class _SubprocessChildIO:
                 error_class=type(exc).__name__,
             )
 
+    async def _record_provider_key_delivery_failure(self) -> None:
+        """Persist the reserved ``provider_key_delivery_failed`` row (#444). Never raises.
+
+        Called from ``_record_fast_launcher_refusal``'s ``poll() is None`` branch — a
+        genuine fd-3 delivery failure with the child STILL UP (partial writev / EAGAIN),
+        NOT a fast launcher refusal (which has EXITED -> the sec-001 stderr-parse path).
+        The row is HOST-authored: every field is a trusted host constant carrying NO
+        T3-derived value, so the canary-forward gate guarding ``_record_launcher_refusals``
+        does not apply here.
+
+        Fully self-guarding (CLAUDE.md hard rule #7): an ``append_schema`` / ``invoke``
+        failure is logged LOUD with an explicit ``error_class`` and swallowed, so it
+        never preempts the delivery-failure ``QuarantineChildSpawnError`` the caller
+        re-raises.
+        """
+        if self._refusal_recorder is None:
+            return
+        try:
+            await self._refusal_recorder.record_provider_key_delivery_failure(plugin_id=_PLUGIN_ID)
+        except Exception as exc:
+            _log.error(
+                "security.quarantine_child.provider_key_delivery_audit_failed",
+                error_class=type(exc).__name__,
+            )
+
     async def aclose(self) -> None:
         """Terminate+reap the child; drain+log its stderr; close pipe/control-end.
 
@@ -811,10 +836,13 @@ async def _record_fast_launcher_refusal(child_io: _SubprocessChildIO) -> None:
     failure (#444's domain), not a fast refusal. A genuine fast refusal has already exited by
     the time we reach this arm (EPIPE means the launcher closed its inherited fd-3 read end,
     which happens at process exit). So this gates on ``poll()``: a still-running process
-    (``poll() is None``) is torn down IMMEDIATELY (``aclose``) with NO ``read_frame`` — driving
-    ``read_frame`` on a live child would block up to ``_READ_FRAME_TIMEOUT_S`` (~25s) awaiting
-    an EOF it will never send, needlessly stalling the fail-closed boot. Only an already-exited
-    launcher — the genuine fast-refusal signal — reaches the ``read_frame``-gated drain below.
+    (``poll() is None``) is a GENUINE delivery failure (#444's domain) — it first persists the
+    reserved ``provider_key_delivery_failed`` row (host-authored, NO ``read_frame`` drive), then
+    is torn down (``aclose``). Driving ``read_frame`` on a live child would block up to
+    ``_READ_FRAME_TIMEOUT_S`` (~25s) awaiting an EOF it will never send, needlessly stalling the
+    fail-closed boot — hence the row is host-authored rather than stderr-parsed. Only an
+    already-exited launcher — the genuine fast-refusal signal — reaches the
+    ``read_frame``-gated drain below.
 
     This does NOT reopen the forgery bypass §8.3's handshake closes: the drain is GATED on
     zero-stdout exactly as the runtime path is, and a post-``exec`` child cannot reach this arm
@@ -826,11 +854,18 @@ async def _record_fast_launcher_refusal(child_io: _SubprocessChildIO) -> None:
     only recovers the attributed row a fast refusal would otherwise lose.
     """
     if child_io._process.poll() is None:
-        # A LIVE child is NOT a fast refusal (see docstring): a genuine refusal has already
-        # exited. This is a non-refusal delivery failure with the child still up (#444's
-        # domain) — tear it down at once rather than driving read_frame and blocking ~25s on
-        # an EOF that never comes.
-        await child_io.aclose()
+        # A LIVE child is a genuine delivery failure (#444's domain), NOT a fast
+        # refusal (which has EXITED). Persist the reserved provider_key_delivery_failed
+        # row BEFORE teardown, then terminate+reap at once rather than driving read_frame
+        # and blocking ~25s on an EOF a live child never sends. ``aclose`` runs in a
+        # ``finally`` so the bwrap child is ALWAYS reaped + the control socket ALWAYS
+        # closed, even if the (self-guarded) row-write escapes with a BaseException
+        # (e.g. a CancelledError, which the writer's ``except Exception`` does not catch)
+        # — leak-free fail-closed, mirroring the else arm's own ``finally`` below.
+        try:
+            await child_io._record_provider_key_delivery_failure()
+        finally:
+            await child_io.aclose()
         return
     try:
         await child_io.read_frame()  # zero-stdout EOF -> sec-001 gate records the launcher row
