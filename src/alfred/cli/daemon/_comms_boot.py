@@ -720,6 +720,7 @@ async def _build_comms_boot_graph(
             outbound_dlp=cast("OutboundDlp", outbound_dlp),
             secret_broker=secret_broker,
             staging=staging,
+            environment=settings.environment,
         )
     except Exception:
         with suppress(Exception):

@@ -45,6 +45,7 @@ none of them is constructed by the daemon yet (that is Wave 4's
 
 from __future__ import annotations
 
+import platform
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
@@ -270,6 +271,23 @@ class CommsAdapterCrashedHookInvoker:
         )
 
 
+def _resolve_host_os() -> str:
+    """Normalise the parent host OS to the launcher's {linux, macos, windows, unknown}.
+
+    Mirrors ``bin/alfred-plugin-launcher.sh``'s ``_host_os()`` so a host-authored
+    ``provider_key_delivery_failed`` row (#444) renders uniformly beside the
+    launcher-authored ``sandbox_refused`` rows in ``alfred audit graph``.
+    """
+    system = platform.system().lower()
+    if system == "linux":
+        return "linux"
+    if system == "darwin":
+        return "macos"
+    if system == "windows":
+        return "windows"
+    return "unknown"
+
+
 def _resolve_provider_key(secret_broker: SecretBroker) -> str:
     """Resolve the quarantined child's provider key from the secret broker.
 
@@ -304,6 +322,7 @@ async def _build_comms_inbound_extractor(
     outbound_dlp: OutboundDlp,
     secret_broker: SecretBroker,
     staging: QuarantineStagingMap,
+    environment: str,
 ) -> tuple[QuarantinedExtractor, QuarantineStdioTransport]:
     """Construct a REAL :class:`QuarantinedExtractor` over a LIVE quarantined child.
 
@@ -336,7 +355,11 @@ async def _build_comms_inbound_extractor(
     provider_key = _resolve_provider_key(secret_broker)
     # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await
     # to the fd-3-clobber window; the await below remains the only one that touches it.
-    refusal_recorder = SandboxRefusalAuditor(audit_writer=audit_writer)
+    refusal_recorder = SandboxRefusalAuditor(
+        audit_writer=audit_writer,
+        host_os=_resolve_host_os(),
+        environment=environment,
+    )
     # SINGLE await — the spawn owns the process-wide fd-3 clobber window and must
     # not race any other coroutine. Do not interleave awaits here.
     child_io = await spawn_quarantine_child_io(

@@ -62,7 +62,9 @@ async def test_record_writes_exact_schema_and_dispatches(
     _fake_invoke: list[dict[str, Any]],
 ) -> None:
     audit = _FakeAudit()
-    await SandboxRefusalAuditor(audit_writer=audit).record((_row(),))
+    await SandboxRefusalAuditor(
+        audit_writer=audit, host_os="linux", environment="development"
+    ).record((_row(),))
     assert len(audit.calls) == 1
     call = audit.calls[0]
     assert call["event"] == "supervisor.plugin.sandbox_refused"
@@ -80,9 +82,9 @@ async def test_record_writes_exact_schema_and_dispatches(
 @pytest.mark.asyncio
 async def test_record_writes_every_row(_fake_invoke: list[dict[str, Any]]) -> None:
     audit = _FakeAudit()
-    await SandboxRefusalAuditor(audit_writer=audit).record(
-        (_row("unknown_host_os"), _row("policy_ref_missing"))
-    )
+    await SandboxRefusalAuditor(
+        audit_writer=audit, host_os="linux", environment="development"
+    ).record((_row("unknown_host_os"), _row("policy_ref_missing")))
     assert [c["subject"]["reason"] for c in audit.calls] == [
         "unknown_host_os",
         "policy_ref_missing",
@@ -92,7 +94,9 @@ async def test_record_writes_every_row(_fake_invoke: list[dict[str, Any]]) -> No
 @pytest.mark.asyncio
 async def test_empty_rows_writes_nothing(_fake_invoke: list[dict[str, Any]]) -> None:
     audit = _FakeAudit()
-    await SandboxRefusalAuditor(audit_writer=audit).record(())
+    await SandboxRefusalAuditor(
+        audit_writer=audit, host_os="linux", environment="development"
+    ).record(())
     assert audit.calls == []
 
 
@@ -103,7 +107,9 @@ async def test_append_schema_failure_propagates(_fake_invoke: list[dict[str, Any
             raise RuntimeError("db down")
 
     with pytest.raises(RuntimeError, match="db down"):
-        await SandboxRefusalAuditor(audit_writer=_BoomAudit()).record((_row(),))
+        await SandboxRefusalAuditor(
+            audit_writer=_BoomAudit(), host_os="linux", environment="development"
+        ).record((_row(),))
 
 
 @pytest.mark.asyncio
@@ -130,7 +136,9 @@ async def test_invoke_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> Non
 
     audit = _FakeAudit()
     with pytest.raises(RuntimeError, match="hookpoint dispatch down"):
-        await SandboxRefusalAuditor(audit_writer=audit).record((_row(),))
+        await SandboxRefusalAuditor(
+            audit_writer=audit, host_os="linux", environment="development"
+        ).record((_row(),))
     # The row WAS persisted before the dispatch failure -- proves the failure
     # is downstream of append_schema, not a mask of it never having run.
     assert len(audit.calls) == 1
@@ -170,6 +178,32 @@ async def test_invoke_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> Non
 # constructing a ``Supervisor``, mirroring
 # ``tests/unit/hooks/test_sandbox_hookpoints_registered.py``.
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_provider_key_delivery_failure_writes_host_authored_row(
+    _fake_invoke: list[dict[str, Any]],
+) -> None:
+    audit = _FakeAudit()
+    auditor = SandboxRefusalAuditor(audit_writer=audit, host_os="linux", environment="production")
+    await auditor.record_provider_key_delivery_failure(plugin_id="alfred.quarantined-llm")
+
+    assert len(audit.calls) == 1
+    call = audit.calls[0]
+    assert call["event"] == "supervisor.plugin.sandbox_refused"
+    assert call["trust_tier_of_trigger"] == "T0"
+    assert call["result"] == "refused"
+    assert call["subject"] == {
+        "plugin_id": "alfred.quarantined-llm",
+        "policy_ref": "",
+        "host_os": "linux",
+        "reason": "provider_key_delivery_failed",
+        "environment": "production",
+    }
+    # The T0 fail_closed hookpoint fired exactly once for this row.
+    assert len(_fake_invoke) == 1
+    assert _fake_invoke[0]["name"] == "supervisor.plugin.sandbox_refused"
+    assert _fake_invoke[0]["fail_closed"] is True
 
 
 def test_sandbox_refused_hookpoint_declared_at_auditor_dispatch_phase() -> None:
@@ -216,5 +250,7 @@ async def test_record_real_dispatch_against_declared_hookpoint() -> None:
     assert get_registry().hookpoint_meta("supervisor.plugin.sandbox_refused") is not None
 
     audit = _FakeAudit()
-    await SandboxRefusalAuditor(audit_writer=audit).record((_row(),))
+    await SandboxRefusalAuditor(
+        audit_writer=audit, host_os="linux", environment="development"
+    ).record((_row(),))
     assert len(audit.calls) == 1

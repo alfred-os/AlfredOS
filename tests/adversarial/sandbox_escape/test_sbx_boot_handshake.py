@@ -272,7 +272,9 @@ async def test_sbx_2026_021_boot_barrier_refusal_reaches_runtime(
             async def append_schema(self, **kwargs: Any) -> None:
                 rows.append(kwargs)
 
-        recorder = SandboxRefusalAuditor(audit_writer=_CapturingWriter())
+        recorder = SandboxRefusalAuditor(
+            audit_writer=_CapturingWriter(), host_os="linux", environment="development"
+        )
 
         fake = _FakePopen(
             stdout_frames=[], stderr_bytes=_corpus_refusal_row(payload, "launcher_refusal_row")

@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import alfred.comms_mcp.daemon_runtime as daemon_runtime_mod
 from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.comms_mcp.bootstrap import CommsBodyExtraction, CommsExtractorBridge
 from alfred.comms_mcp.daemon_runtime import (
@@ -430,6 +431,7 @@ async def test_build_extractor_drives_real_transport_over_spawned_child(
             outbound_dlp=outbound_dlp,
             secret_broker=broker,
             staging=staging,
+            environment="production",
         )
         # The builder returns the live transport too so the daemon can reap the
         # child on every exit path (CR #255); it owns the faked child-IO here.
@@ -503,6 +505,7 @@ async def test_build_extractor_reaps_child_when_construction_fails(
             outbound_dlp=outbound_dlp,
             secret_broker=broker,
             staging=staging,
+            environment="production",
         )
 
     assert len(spawned) == 1
@@ -555,6 +558,7 @@ async def test_build_extractor_reaps_child_when_transport_construction_fails(
             outbound_dlp=outbound_dlp,
             secret_broker=broker,
             staging=QuarantineStagingMap(),
+            environment="production",
         )
 
     assert len(spawned) == 1
@@ -595,6 +599,10 @@ async def test_extractor_injects_refusal_auditor(
     monkeypatch.setattr(
         "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
     )
+    # Deterministic across dev/CI host OSes: pin the resolved host context so the
+    # assertion below on `refusal_recorder._host_os` doesn't vary by where the
+    # suite runs (matches test_resolve_host_os_maps_to_launcher_vocab's pattern).
+    monkeypatch.setattr(daemon_runtime_mod.platform, "system", lambda: "Linux")
 
     with pytest.raises(RuntimeError, match="stop after capturing kwargs"):
         await _build_comms_inbound_extractor(
@@ -602,9 +610,15 @@ async def test_extractor_injects_refusal_auditor(
             outbound_dlp=outbound_dlp,
             secret_broker=broker,
             staging=QuarantineStagingMap(),
+            environment="production",
         )
 
-    assert isinstance(seen["refusal_recorder"], SandboxRefusalAuditor)
+    recorder = seen["refusal_recorder"]
+    assert isinstance(recorder, SandboxRefusalAuditor)
+    # #444 live-proof: the builder threads the RESOLVED host OS + the passed
+    # `environment` into the auditor — not just constructs *a* SandboxRefusalAuditor.
+    assert recorder._host_os == "linux"
+    assert recorder._environment == "production"
 
 
 def test_resolve_provider_key_returns_broker_value_when_set() -> None:
@@ -642,3 +656,14 @@ def test_resolve_provider_key_warns_and_falls_back_when_unset() -> None:
         and entry.get("log_level") == "warning"
         for entry in captured
     ), captured
+
+
+@pytest.mark.parametrize(
+    ("system", "expected"),
+    [("Linux", "linux"), ("Darwin", "macos"), ("Windows", "windows"), ("Plan9", "unknown")],
+)
+def test_resolve_host_os_maps_to_launcher_vocab(
+    monkeypatch: pytest.MonkeyPatch, system: str, expected: str
+) -> None:
+    monkeypatch.setattr(daemon_runtime_mod.platform, "system", lambda: system)
+    assert daemon_runtime_mod._resolve_host_os() == expected
