@@ -54,7 +54,10 @@ def _provider_key_fd3_bytes(key: str) -> bytes:
 
 
 def test_child_stdout_is_pure_wire_frame_when_locale_absent() -> None:
-    """stdout decodes to exactly one clean reply frame — nothing leaks onto fd 1."""
+    """stdout decodes to exactly three clean frames — hello, ready, extracted reply.
+
+    Nothing leaks onto fd 1.
+    """
     context = "hello over the wire"
     stdin_bytes = _frame("quarantine.ingest", {"handle_id": "h1", "context": context}) + _frame(
         "quarantine.extract",
