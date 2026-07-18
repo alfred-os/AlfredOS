@@ -35,8 +35,10 @@ import yaml
 
 import alfred.security.quarantine_child_io as child_io_mod
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
+from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import spawn_quarantine_child_io
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.unit.security.test_quarantine_child_io import _FakeStdout
 
 _DIR = Path(__file__).parent
 
@@ -67,7 +69,10 @@ class _FakePopen:
         self.argv = argv
         self.pass_fds = tuple(kwargs.get("pass_fds", ()))
         self.stdin = None
-        self.stdout = None
+        # A real child emits hello+ready at boot; the host handshake reads them inside
+        # the spawn (#443). Pre-seeded so this dormancy-focused fake still satisfies
+        # the future read — the frames sit unread under today's spawn.
+        self.stdout = _FakeStdout([HELLO_FRAME, READY_FRAME])
         self.stderr = None
         self.returncode: int | None = None
 

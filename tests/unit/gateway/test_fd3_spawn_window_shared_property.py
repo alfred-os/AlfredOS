@@ -34,19 +34,36 @@ import pytest
 
 import alfred.gateway.adapter_child_factory as factory_mod
 import alfred.security.quarantine_child_io as quarantine_mod
+from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 
 
 class _Stdio:
-    def __init__(self) -> None:
+    """A synchronous pipe-shaped double: write/flush/read/readline/close.
+
+    ``read`` optionally drains a caller-seeded ``frames`` buffer (raw-pipe
+    semantics: at most ``n`` bytes per call, ``b""`` at EOF) so a real child's
+    boot-handshake frames (#443) can be served; with no frames it stays the
+    original always-empty stand-in. ``close`` stays real regardless of which —
+    the gateway leg's ``GatewayAdapterStdioTransport.close`` calls ``.close()``
+    on both stdin and stdout (rev-001), so a frames-bearing stdout must keep it.
+    """
+
+    def __init__(self, frames: list[bytes] | None = None) -> None:
         self.closed = False
-        self._frames: list[bytes] = []
+        self._buf = bytearray(b"".join(frames)) if frames else bytearray()
 
     def write(self, _data: bytes) -> None: ...
 
     def flush(self) -> None: ...
 
-    def read(self, _n: int = -1) -> bytes:
-        return b""
+    def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            chunk = bytes(self._buf)
+            self._buf.clear()
+            return chunk
+        chunk = bytes(self._buf[:n])
+        del self._buf[:n]
+        return chunk
 
     def readline(self) -> bytes:
         return b""
@@ -69,7 +86,9 @@ class _SyncFakePopen:
         self.pass_fds = kwargs.get("pass_fds")
         self.fd3_open_at_fork = _fd_open(3)
         self.stdin = _Stdio()
-        self.stdout = _Stdio()
+        # Seeded so a future host-side handshake read (#443, Task 5) finds frames;
+        # today neither spawn window reads stdout, so this sits unread (no-op).
+        self.stdout = _Stdio([HELLO_FRAME, READY_FRAME])
         self.stderr = _Stdio()
         self.returncode: int | None = None
         type(self).last = self
