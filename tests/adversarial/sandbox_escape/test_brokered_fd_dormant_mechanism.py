@@ -38,9 +38,25 @@ from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
 from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import spawn_quarantine_child_io
 from tests.adversarial.payload_schema import AdversarialPayload
-from tests.unit.security.test_quarantine_child_io import _FakeStdout
 
 _DIR = Path(__file__).parent
+
+
+class _FakeStdout:
+    """Raw-pipe stand-in: synchronous ``read(n)`` over a length-prefixed stream, ``b""`` at EOF.
+
+    Adversarial-LOCAL double (CR-3): a release-blocking test imports no behaviour from a
+    mutable unit-test helper. Mirrors the shape ``_blocking_read_exactly`` drives (returns at
+    most ``n`` bytes per call, EOF when drained).
+    """
+
+    def __init__(self, frames: list[bytes]) -> None:
+        self._buf = bytearray(b"".join(frames))
+
+    def read(self, n: int) -> bytes:
+        chunk = bytes(self._buf[:n])
+        del self._buf[:n]
+        return chunk
 
 
 def _load(payload_id: str) -> AdversarialPayload:

@@ -805,6 +805,17 @@ async def _record_fast_launcher_refusal(child_io: _SubprocessChildIO) -> None:
     no parseable ``sandbox_refused`` row (a genuine non-refusal delivery failure — #444's
     domain), the parser yields nothing and this adds no row.
 
+    **Only drain a launcher that has ALREADY EXITED** (CR-2). ``ProviderKeyDeliveryError``
+    covers more than EPIPE: a partial ``writev`` / EAGAIN / other ``OSError`` (see
+    ``fd3_key_delivery.py``) can fire while the child is STILL RUNNING — a non-refusal delivery
+    failure (#444's domain), not a fast refusal. A genuine fast refusal has already exited by
+    the time we reach this arm (EPIPE means the launcher closed its inherited fd-3 read end,
+    which happens at process exit). So this gates on ``poll()``: a still-running process
+    (``poll() is None``) is torn down IMMEDIATELY (``aclose``) with NO ``read_frame`` — driving
+    ``read_frame`` on a live child would block up to ``_READ_FRAME_TIMEOUT_S`` (~25s) awaiting
+    an EOF it will never send, needlessly stalling the fail-closed boot. Only an already-exited
+    launcher — the genuine fast-refusal signal — reaches the ``read_frame``-gated drain below.
+
     This does NOT reopen the forgery bypass §8.3's handshake closes: the drain is GATED on
     zero-stdout exactly as the runtime path is, and a post-``exec`` child cannot reach this arm
     without out-racing the synchronous ``writev`` (``exec`` of bwrap→runuser→python takes
@@ -814,6 +825,13 @@ async def _record_fast_launcher_refusal(child_io: _SubprocessChildIO) -> None:
     the caller re-raises the delivery-failure ``QuarantineChildSpawnError`` regardless — this
     only recovers the attributed row a fast refusal would otherwise lose.
     """
+    if child_io._process.poll() is None:
+        # A LIVE child is NOT a fast refusal (see docstring): a genuine refusal has already
+        # exited. This is a non-refusal delivery failure with the child still up (#444's
+        # domain) — tear it down at once rather than driving read_frame and blocking ~25s on
+        # an EOF that never comes.
+        await child_io.aclose()
+        return
     try:
         await child_io.read_frame()  # zero-stdout EOF -> sec-001 gate records the launcher row
     except QuarantineChildSpawnError:
