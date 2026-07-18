@@ -40,11 +40,14 @@ from typing import Any
 import pytest
 
 import alfred.security.quarantine_child_io as child_io_mod
+from alfred.audit.launcher_refusal import SandboxRefusalRow
+from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
     _SubprocessChildIO,
     spawn_quarantine_child_io,
 )
+from alfred.security.quarantine_transport import _decode_result_payload
 from alfred.supervisor.fd3_key_delivery import ProviderKeyDeliveryError
 
 
@@ -131,12 +134,22 @@ def _framed(body: bytes) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
+def _boot_frames() -> list[bytes]:
+    """The two frames a real child emits at boot (hello + ready), for a fake stdout (#443)."""
+    return [HELLO_FRAME, READY_FRAME]
+
+
 @pytest.fixture
 def _spawn_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Capture the spawn argv/env/pass_fds + the fd-3 delivery call."""
     captured: dict[str, Any] = {"proc": None, "delivery": None, "dup2": []}
 
-    fake_proc = _FakePopen(stdout_frames=[_framed(b'{"jsonrpc":"2.0","result":{"ok":1}}')])
+    # The spawn now reads the two-frame boot handshake INSIDE itself (#443): the
+    # default stdout leads with [hello, ready] so the handshake completes and the
+    # returned IO's first post-spawn read is the reply.
+    fake_proc = _FakePopen(
+        stdout_frames=[*_boot_frames(), _framed(b'{"jsonrpc":"2.0","result":{"ok":1}}')]
+    )
     captured["proc"] = fake_proc
 
     def _fake_popen(args: Any, *_a: Any, **kwargs: Any) -> _FakePopen:
@@ -299,8 +312,10 @@ async def test_read_frame_returns_full_frame_for_transport_decode(
 
 async def test_read_frame_loud_on_truncated_eof(_spawn_capture: dict[str, Any]) -> None:
     """A truncated reply (EOF mid-frame) raises — never a silent empty body."""
-    # Replace the proc's stdout with a stream that EOFs after a partial header.
-    _spawn_capture["proc"].stdout = _FakeStdout([b"\x00\x00"])
+    # Replace the proc's stdout with a stream that EOFs after a partial header. The
+    # boot frames lead so the in-spawn handshake completes; the truncated reply is what
+    # the test's own post-spawn read_frame then hits (#443).
+    _spawn_capture["proc"].stdout = _FakeStdout([*_boot_frames(), b"\x00\x00"])
     cio = await spawn_quarantine_child_io(provider_key="k")
     try:
         with pytest.raises(QuarantineChildSpawnError):
@@ -311,8 +326,9 @@ async def test_read_frame_loud_on_truncated_eof(_spawn_capture: dict[str, Any]) 
 
 async def test_read_frame_loud_on_truncated_body_eof(_spawn_capture: dict[str, Any]) -> None:
     """A full header but a body that EOFs short raises — exercises the body read."""
-    # A 4-byte header claiming 8 bytes, but only 2 body bytes before EOF.
-    _spawn_capture["proc"].stdout = _FakeStdout([struct.pack(">I", 8) + b"ab"])
+    # A 4-byte header claiming 8 bytes, but only 2 body bytes before EOF. Boot frames
+    # lead so the in-spawn handshake completes before the test's own read (#443).
+    _spawn_capture["proc"].stdout = _FakeStdout([*_boot_frames(), struct.pack(">I", 8) + b"ab"])
     cio = await spawn_quarantine_child_io(provider_key="k")
     try:
         with pytest.raises(QuarantineChildSpawnError):
@@ -321,10 +337,13 @@ async def test_read_frame_loud_on_truncated_body_eof(_spawn_capture: dict[str, A
         await cio.aclose()
 
 
-async def test_read_frame_is_bounded(
-    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
-) -> None:
-    """A child that never replies trips the wait_for deadline (loud, not a hang)."""
+async def test_read_frame_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child that never replies trips the wait_for deadline (loud, not a hang).
+
+    Constructs ``_SubprocessChildIO`` DIRECTLY rather than via the spawn: the #443
+    boot handshake reads a hello inside the spawn, which a never-replying stdout would
+    hang — this is a ``read_frame``-method test, not a spawn test.
+    """
     # An Event the test releases in finally so the executor thread (which the
     # cancelled wait_for orphans) exits promptly rather than lingering to the
     # interpreter teardown and warning about a slow executor join.
@@ -337,9 +356,10 @@ async def test_read_frame_is_bounded(
             release.wait(timeout=30)
             return b""  # pragma: no cover - the wait_for fires first
 
-    _spawn_capture["proc"].stdout = _HangingStdout()
+    fake: Any = _FakePopen(stdout_frames=[])  # Any: the fake carries a non-_FakeStdout stdout
+    fake.stdout = _HangingStdout()
     monkeypatch.setattr(child_io_mod, "_READ_FRAME_TIMEOUT_S", 0.05)
-    cio = await spawn_quarantine_child_io(provider_key="k")
+    cio = _SubprocessChildIO(fake)  # construct directly — do NOT go through the spawn handshake
     try:
         with pytest.raises(QuarantineChildSpawnError):
             await cio.read_frame()
@@ -557,7 +577,9 @@ async def test_read_frame_failure_logs_child_stderr_when_exited(
     import structlog.testing
 
     proc = _spawn_capture["proc"]
-    proc.stdout = _FakeStdout([b"\x00\x00"])  # truncated header -> _TruncatedFrameError
+    # Boot frames lead so the in-spawn handshake completes; the truncated header is what
+    # the test's own post-spawn read_frame hits -> _TruncatedFrameError (#443).
+    proc.stdout = _FakeStdout([*_boot_frames(), b"\x00\x00"])
     proc.stderr = _FakeStderr(b"supervisor.plugin.sandbox_refused reason=environment_not_set")
     proc.returncode = 1  # child has EXITED -> poll() gate passes, drain proceeds
 
@@ -579,9 +601,13 @@ async def test_read_frame_failure_logs_child_stderr_when_exited(
 
 
 async def test_read_frame_failure_skips_stderr_when_child_still_running(
-    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A wedged (still-running) child is NOT drained at the failure point (no block)."""
+    """A wedged (still-running) child is NOT drained at the failure point (no block).
+
+    Constructs ``_SubprocessChildIO`` DIRECTLY (the #443 in-spawn hello read would hang
+    on a never-replying stdout) — this exercises the ``read_frame`` failure arm.
+    """
     import structlog.testing
 
     release = threading.Event()
@@ -591,14 +617,14 @@ async def test_read_frame_failure_skips_stderr_when_child_still_running(
             release.wait(timeout=30)
             return b""  # pragma: no cover - the wait_for fires first
 
-    proc = _spawn_capture["proc"]
-    proc.stdout = _HangingStdout()
+    fake: Any = _FakePopen(stdout_frames=[])  # Any: the fake carries a non-_FakeStdout stdout
+    fake.stdout = _HangingStdout()
     # If the drain were ever attempted on this running child it would read this;
     # the poll()-gate must skip it (returncode stays None -> poll() is None).
-    proc.stderr = _FakeStderr(b"should-not-be-read-while-running")
+    fake.stderr = _FakeStderr(b"should-not-be-read-while-running")
     monkeypatch.setattr(child_io_mod, "_READ_FRAME_TIMEOUT_S", 0.05)
 
-    cio = await spawn_quarantine_child_io(provider_key="k")
+    cio = _SubprocessChildIO(fake)  # construct directly — do NOT go through the spawn handshake
     try:
         with (
             structlog.testing.capture_logs() as logs,
@@ -609,7 +635,7 @@ async def test_read_frame_failure_skips_stderr_when_child_still_running(
         assert not [e for e in logs if e["event"] == "security.quarantine_child.child_stderr"]
         # And the poll()-gate genuinely skipped the read — the stderr pipe was never
         # touched (proves non-drain by mechanism, not merely by log-event absence).
-        assert proc.stderr.read_calls == 0
+        assert fake.stderr.read_calls == 0
     finally:
         release.set()
         await cio.aclose()
@@ -629,7 +655,9 @@ async def test_read_frame_failure_drain_error_does_not_preempt_spawn_error(
     import structlog.testing
 
     proc = _spawn_capture["proc"]
-    proc.stdout = _FakeStdout([b"\x00\x00"])  # truncated header -> read_frame raises
+    # Boot frames lead so the in-spawn handshake completes; the truncated header is what
+    # the test's own post-spawn read_frame hits -> read_frame raises (#443).
+    proc.stdout = _FakeStdout([*_boot_frames(), b"\x00\x00"])
     proc.returncode = 1  # child EXITED -> drain proceeds past the poll() gate
 
     def _boom(_process: Any, _cap: int) -> bytes:
@@ -781,9 +809,13 @@ async def test_log_child_stderr_read_is_bounded(
 
 
 async def test_aclose_drains_stderr_after_reap_for_wedged_child(
-    monkeypatch: pytest.MonkeyPatch, _spawn_capture: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """aclose drains the stderr the read_frame arm skipped (the wedged/timeout case)."""
+    """aclose drains the stderr the read_frame arm skipped (the wedged/timeout case).
+
+    Constructs ``_SubprocessChildIO`` DIRECTLY (the #443 in-spawn hello read would hang
+    on a never-replying stdout) — this exercises the aclose-after-wedge drain arm.
+    """
     import structlog.testing
 
     release = threading.Event()
@@ -793,12 +825,12 @@ async def test_aclose_drains_stderr_after_reap_for_wedged_child(
             release.wait(timeout=30)
             return b""  # pragma: no cover - the wait_for fires first
 
-    proc = _spawn_capture["proc"]
-    proc.stdout = _HangingStdout()
-    proc.stderr = _FakeStderr(b"child wedged: stderr buffer full")
+    fake: Any = _FakePopen(stdout_frames=[])  # Any: the fake carries a non-_FakeStdout stdout
+    fake.stdout = _HangingStdout()
+    fake.stderr = _FakeStderr(b"child wedged: stderr buffer full")
     monkeypatch.setattr(child_io_mod, "_READ_FRAME_TIMEOUT_S", 0.05)
 
-    cio = await spawn_quarantine_child_io(provider_key="k")
+    cio = _SubprocessChildIO(fake)  # construct directly — do NOT go through the spawn handshake
     with structlog.testing.capture_logs() as logs:
         with pytest.raises(QuarantineChildSpawnError):
             await cio.read_frame()  # child still "running" -> arm skips the drain
@@ -814,7 +846,9 @@ async def test_child_stderr_logged_at_most_once(_spawn_capture: dict[str, Any]) 
     import structlog.testing
 
     proc = _spawn_capture["proc"]
-    proc.stdout = _FakeStdout([b"\x00\x00"])  # truncated -> read_frame raises
+    # Boot frames lead so the in-spawn handshake completes; the truncated frame is what
+    # the test's own post-spawn read_frame hits -> read_frame raises (#443).
+    proc.stdout = _FakeStdout([*_boot_frames(), b"\x00\x00"])
     proc.stderr = _FakeStderr(b"boom reason")
     proc.returncode = 1  # exited
 
@@ -971,3 +1005,119 @@ def test_lift_above_targets_no_collision_is_a_noop() -> None:
     )
     assert (usable, moved) == (5, False)
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# #443: the host reads the two-frame boot handshake INSIDE the spawn. Built on
+# ``_spawn_capture`` (its ``_tracking_pipe`` keeps fd hygiene identical to every
+# sibling spawn test — core-engineer-002), swapping the fake's stdout/stderr/
+# returncode per case rather than re-monkeypatching Popen/delivery/dup2 standalone.
+# ---------------------------------------------------------------------------
+
+
+async def test_spawn_completes_two_frame_handshake_and_returns(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """A child that emits hello+ready lets the spawn return a live IO (#443).
+
+    The fixture default pre-loads [hello, ready, {ok:1}]; the boot frames are consumed by
+    the handshake INSIDE the spawn, so the first post-spawn read is the reply (rev-007).
+    """
+    cio = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        frame = await cio.read_frame()
+        assert _decode_result_payload(frame) == {"ok": 1}
+    finally:
+        await cio.aclose()
+
+
+async def test_spawn_probe_module_reads_hello_only(_spawn_capture: dict[str, Any]) -> None:
+    """The probe module handshakes on hello ALONE — a second read would deadlock (§6.1).
+
+    ``_BROKERED_PROBE_MODULE`` is not in ``_MODULES_EMITTING_READY``, so a stdout carrying
+    ONLY a hello (no ready) still lets the spawn RETURN — if the host waited for a ready it
+    would hit EOF and raise.
+    """
+    _spawn_capture["proc"].stdout = _FakeStdout([HELLO_FRAME])  # hello only, no ready
+    cio = await spawn_quarantine_child_io(
+        provider_key="k", child_module=child_io_mod._BROKERED_PROBE_MODULE
+    )
+    # SEC-001 (load-bearing): the returned probe instance MUST have proven exec via the
+    # hello read. This is the §6.1 invariant — a future conditional-hello mutation that
+    # returned a probe with _child_wrote_stdout False would reopen #446 on the probe path
+    # while branch coverage stayed green. Assert it directly, not just "no deadlock".
+    assert cio._child_wrote_stdout is True
+    await cio.aclose()  # returned without a second read → no deadlock
+
+
+async def test_spawn_launcher_refusal_records_row_and_refuses_boot(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """A zero-stdout refusal at the hello read records the launcher row + raises (§9 sbx-021)."""
+    import structlog.testing
+
+    refusal_row = (
+        b'{"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm",'
+        b'"policy_ref":"","host_os":"linux","reason":"sandbox_block_missing",'
+        b'"environment":"development"}\n'
+    )
+    proc = _spawn_capture["proc"]
+    proc.stdout = _FakeStdout([])  # zero stdout → EOF at the hello read
+    proc.stderr = _FakeStderr(refusal_row)
+    proc.returncode = 0  # a refused launcher exits pre-exec
+    recorded: list[tuple[SandboxRefusalRow, ...]] = []
+
+    class _Recorder:
+        async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
+            recorded.append(rows)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(QuarantineChildSpawnError),
+    ):
+        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=_Recorder())
+    assert len(recorded) == 1
+    assert recorded[0][0].reason == "sandbox_block_missing"
+    # torn down via aclose (reaped; an already-exited child skips terminate)
+    assert proc.wait_calls >= 1
+    # te-006: the boot-handshake failure surfaces the security event with child_module
+    # (structlog events do NOT reach caplog — assert via capture_logs).
+    boot_failed = [
+        e for e in logs if e["event"] == "security.quarantine_child.boot_handshake_failed"
+    ]
+    assert len(boot_failed) == 1
+    assert boot_failed[0]["child_module"] == child_io_mod._CHILD_MODULE
+
+
+async def test_spawn_hello_then_no_ready_refuses_without_recording(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """hello but no ready (a `_build_provider` death) refuses boot but records NO launcher row.
+
+    The child proved exec with the hello (``_child_wrote_stdout`` True), so the missing
+    ready is child-authored — the gate must NOT attribute it to the launcher (§3.2 row 2).
+    """
+    import structlog.testing
+
+    proc = _spawn_capture["proc"]
+    proc.stdout = _FakeStdout([HELLO_FRAME])  # hello, then EOF at the ready read
+    proc.stderr = _FakeStderr(b"provider build crashed\n")
+    proc.returncode = 1
+    recorded: list[tuple[SandboxRefusalRow, ...]] = []
+
+    class _Recorder:
+        async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
+            recorded.append(rows)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(QuarantineChildSpawnError),
+    ):
+        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=_Recorder())
+    assert recorded == []  # child-authored → NOT recorded as a launcher refusal
+    # te-006: the boot-handshake failure still surfaces the security event.
+    boot_failed = [
+        e for e in logs if e["event"] == "security.quarantine_child.boot_handshake_failed"
+    ]
+    assert len(boot_failed) == 1
+    assert boot_failed[0]["child_module"] == child_io_mod._CHILD_MODULE
