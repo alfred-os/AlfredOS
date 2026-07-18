@@ -8,12 +8,23 @@ METHOD ON A CLASS, reachable only by constructing a ``Supervisor`` — making
 ``supervisor.plugin.sandbox_refused`` the only ``fail_closed=True`` security
 hookpoint in the tree that a boot-time caller cannot declare.
 
-That is harmless today (core-001 is moot for the current call site — ADR-0051:81-89;
-the dispatch happens at first extraction, post-``Supervisor``). It becomes fatal at
-#443 PR2, whose in-spawn handshake dispatches 125 lines BEFORE ``Supervisor(...)``:
-under ``strict_declarations`` that raises ``HookError``, which the caller demotes to
-a log line, so the fail-closed T0 hookpoint would never fire. #444 is blocked on the
-same fix.
+This module's fix is what makes PR2's boot-time dispatch safe. PR2 (#443,
+landed on this branch) moved the quarantine-child refusal dispatch into the
+in-spawn two-frame boot handshake (``spawn_quarantine_child_io`` ->
+``_await_boot_handshake``, ``quarantine_child_io.py:753,984``), which now
+fires BEFORE ``Supervisor(...)`` is ever constructed. Verified boot order in
+``daemon/_commands.py``: the boot-hook-registry install (``:485``, which
+reaches this module's ``declare_hookpoints`` via
+``boot.install_boot_hook_registry`` -> ``_declare_all_subsystem_hookpoints``)
+precedes the quarantine-child spawn (``:658``), which precedes
+``Supervisor(...)`` (``:783``). Because the hookpoint is already declared by
+``:485``, the pre-``Supervisor`` dispatch finds it registered instead of
+hitting the ``strict_declarations`` arm that raises ``HookError`` — which the
+caller demotes to a ``refusal_record_failed`` log line, silently dropping the
+fail-closed T0 hookpoint. Without this module's fix, that is exactly what
+would happen. #444, whose writer would dispatch at the same
+pre-``Supervisor`` point, is unblocked by the same fix (not folded into it —
+it still needs its own writer).
 
 **No module-bottom ``declare_hookpoints()`` call — deliberately.** core-010
 rejected import-time registration for these hookpoints: pytest collects every

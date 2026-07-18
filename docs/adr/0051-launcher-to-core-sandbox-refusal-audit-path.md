@@ -77,8 +77,15 @@ new barrier that could itself introduce a startup race or a new failure mode
 to reason about. It also correctly matches today's *first-extraction*
 semantics: the quarantine child is spawned once and reused across
 extractions, so the refusal is discovered (and now persisted) at the moment
-the first extraction actually needs the child, not preemptively at boot. The
-tradeoff, recorded honestly: (B) means core-001 (whether
+the first extraction actually needs the child, not preemptively at boot.
+
+> **SUPERSEDED for the quarantine-child call site by the "Amendment (#443
+> PR2 — boot-time handshake)" section below.** #443 PR2 moves this call
+> site's dispatch into the boot-time spawn handshake — before
+> `Supervisor.__init__` runs — which the paragraph below did not anticipate.
+> See the amendment for what makes the moved dispatch safe.
+
+The tradeoff, recorded honestly at the time: (B) means core-001 (whether
 `supervisor.plugin.sandbox_refused` is *declared* in the hook registry by the
 time this dispatch fires) is moot for this specific call site — the
 dispatch happens well after `Supervisor.__init__` has already called
@@ -139,25 +146,47 @@ undetected for a month.
   point-of-use.** Every quarantine-child spawn refusal now produces a
   durable, hookpoint-dispatched audit row instead of a stderr log line with
   no downstream trace.
-- **core-001 is moot for the quarantine-child call site, by construction.**
-  The dispatch happens strictly after `Supervisor.__init__`, so
-  `supervisor.plugin.sandbox_refused` is always declared. This is proven,
+- **core-001 is moot for the quarantine-child call site, by construction —
+  SUPERSEDED for the quarantine path by the "Amendment (#443 PR2 —
+  boot-time handshake)" section below.** As shipped at the time of this
+  ADR: the dispatch happens strictly after `Supervisor.__init__`, so
+  `supervisor.plugin.sandbox_refused` is always declared. This was proven,
   not merely assumed, by the core-001 registry test
   (`tests/unit/security/test_sandbox_refusal_audit.py`), which registers the
   real supervisor hookpoints into the real registry and then runs the
-  auditor's real (unpatched) `invoke(...)` dispatch end-to-end.
+  auditor's real (unpatched) `invoke(...)` dispatch end-to-end. #443 PR2
+  moves the dispatch to fire *inside* the boot-time spawn handshake —
+  before `Supervisor.__init__` — so this bullet's premise no longer holds
+  for that call site; see the amendment for what makes the moved dispatch
+  safe.
 - **Three producers remain unwired.** The comms-adapter, gateway-adapter, and
   foreground-TUI launcher spawns still only log to `child_stderr` — they do
   not yet call `SandboxRefusalAuditor`. Tracked as #433 follow-ups (the TUI
   producer additionally needs an stderr-capture change, since it inherits
   stderr today rather than piping it).
-- **The `provider_key_delivery_failed` reason stays reserved, not emitted.**
-  The v1 premise's interception point is now known not to fire in practice; a
-  genuine fd-3 delivery failure (the read end actually closed — a much rarer
-  condition than a launcher refusal) would still need a writer for this
-  reason, and that writer is deferred (see Follow-ups) because its dispatch
-  point is *pre*-`Supervisor`, which reopens the core-001 question this ADR
-  otherwise closes for the quarantine-child path.
+- **The `provider_key_delivery_failed` reason stays reserved, not emitted —
+  see the "Amendment (#443 PR2 — boot-time handshake)" section below,
+  §8.1/§8.4, for the corrected picture.** As shipped at the time of this
+  ADR: a genuine fd-3 delivery failure was believed to be a much rarer
+  condition than a launcher refusal, largely disjoint from it — Task 0
+  (Decision 5) sampled only the slow refusal paths. §8.1 below shows this
+  premise was incomplete: the fd-3 `writev` and the launcher's exit race
+  nondeterministically, and on the arm where the launcher wins fast (e.g.
+  the charset-gate refusal, which exits before the first `python3`
+  subprocess spins up), the `writev` fails with EPIPE — the very
+  `ProviderKeyDeliveryError` this bullet originally said "is now known not
+  to fire in practice." §8.4 goes further: on that EPIPE arm the launcher
+  genuinely did refuse, so `provider_key_delivery_failed` and a launcher
+  refusal are frequently the SAME underlying event observed through a
+  different arm, not a rarer, disjoint condition. A writer for this reason
+  stays deferred (see Follow-ups and §8.4) — not because a pre-`Supervisor`
+  dispatch point reopens core-001 (PR1, #443, merged to main, makes the
+  supervisor hookpoints boot-declarable — see
+  `src/alfred/supervisor/hookpoints.py`), but because #444's reserved
+  writer would record only that *some* delivery failure occurred, not the
+  launcher's true reason, and recovering that true reason from stderr on
+  the EPIPE arm would itself reopen the forgery residual the two-frame
+  handshake was built to close.
 
 ## Alternatives considered
 
@@ -201,10 +230,17 @@ and `plugins/`.
   detect a refusal at spawn/boot and refuse boot, rather than at first
   extraction. A separate operability concern from what this ADR ships.
 - **Synthesized `provider_key_delivery_failed` row** (#444): on a genuine
-  fd-3 delivery failure (the rare case where the read end is actually
-  closed), write the reserved reason. Deferred because its dispatch would be
-  pre-`Supervisor` (needs a `declare_hookpoints()`-shaped fix first) and the
-  underlying condition is rare.
+  fd-3 delivery failure, write the reserved reason. The
+  `declare_hookpoints()`-shaped fix this bullet named as a prerequisite has
+  landed: PR1 (#443, PR #456) is merged to main (`65d86886`) and makes the
+  supervisor hookpoints boot-declarable, so a pre-`Supervisor` dispatch no
+  longer reopens core-001. **#444 is UNBLOCKED, not folded into PR1** — per
+  the spec's own §0 decision 3, it still needs its own writer at the
+  `ProviderKeyDeliveryError` arm (see §8.1's race and §8.4, which is why
+  #444's writer alone would not close the fast-refusal hole). The
+  "underlying condition is rare" framing above is also stale: §8.1 shows the
+  fd-3 `writev` and a launcher's exit race nondeterministically, not that
+  one side is structurally rare.
 - #434 (the `2>/dev/null` five-key collapse + `policy_translate_failed`
   alarm/real conflation), #435 (six launcher refusal paths that emit no
   audit row at all — the issue as filed named four at stale line numbers),
@@ -309,3 +345,129 @@ failure shape.
   launcher-refusal audit-persistence.
 - Spec: `docs/superpowers/specs/2026-07-15-433-launcher-refusal-audit-design.md`
   — the design this ADR records.
+
+## Amendment (#443 PR2 — boot-time handshake)
+
+- **Date**: 2026-07-18
+- **Relates to**: issue [#443](https://github.com/alfred-os/AlfredOS/issues/443)
+  (the boot-time fail-closed quarantine health-check this amendment records),
+  issue [#446](https://github.com/alfred-os/AlfredOS/issues/446) (the forgery
+  residual this handshake closes), issue
+  [#444](https://github.com/alfred-os/AlfredOS/issues/444) (the reserved
+  `provider_key_delivery_failed` writer this amendment's §8.4 distinguishes
+  from), epic [#340](https://github.com/alfred-os/AlfredOS/issues/340) PR2b
+  (the real-LLM quarantine child go-live this amendment pre-gates)
+- **Source**: `docs/superpowers/specs/2026-07-16-443-boot-time-quarantine-health-check-design.md`
+  §8, recorded here per that spec's own "Amends: ADR-0051" header
+
+Every claim below was re-verified against the code on this branch (grep/read,
+not recollection) before being written — this ADR's Decision 1 already
+corrected one falsified premise on this exact drift surface (the fd-3
+`writev`), and the spec this amendment records documents two more prose
+claims (§8.1, §8.2) wrong in the same ADR. The retraction at Decision 2 and
+Consequences above is the load-bearing part of this amendment: without it,
+this ADR asserts a proposition (`core-001 is moot for the quarantine-child
+call site`) that #443 PR2 makes false, and the document would be internally
+self-contradictory.
+
+### §8.1 — the fd-3 `writev`-buffers premise (Decision 1) is a RACE, not structural
+
+Decision 1 (above) records that the fd-3 `writev` "buffers into the pipe and
+returns success" on a refusal, so `ProviderKeyDeliveryError` "never fires on
+a refusal" — confirmed, it says, on two platforms. **That is only true on
+the slow refusal paths Task 0 sampled.** Verified on this branch:
+`spawn_quarantine_child_io`'s `finally` block
+(`quarantine_child_io.py:931-959`) closes every parent-held read-end copy of
+the fd-3 pipe — the lifted alias always, and the pre-lift original whenever a
+lift happened — **before** `deliver_provider_key_via_fd3` is called four
+lines later (`:963`). Only the child holds a read end by the time the
+`writev` (`fd3_key_delivery.py:104`) runs. A launcher that exits before the
+child opens that read end therefore closes the only remaining read end
+first, the `writev` raises `OSError` (EPIPE), `deliver_provider_key_via_fd3`
+re-raises it as `ProviderKeyDeliveryError` (`fd3_key_delivery.py:105-108`),
+and `spawn_quarantine_child_io` converts that into `QuarantineChildSpawnError`
+(`quarantine_child_io.py:964-972`) — boot already refuses, **nondeterministically**,
+via the path Decision 1 says never fires.
+
+The fast `alfred-plugin-launcher.sh` refusal path
+(`reason="plugin_id_charset_invalid"`, emitted at `alfred-plugin-launcher.sh:133`,
+**before** the first `python3` subprocess spins up at `:216`) exits in the
+time it takes the shell to validate an argument — a strong candidate to win
+this race — and was never in Task 0's sample (Decision 5 above records "two
+platforms," not which refusal reasons). Whether the EPIPE arm or the
+`read_frame`-EOF arm (Decision 1's documented path) fires for a given
+refusal is a race the parent does not control; §8.4 below records what this
+means for that arm's row.
+
+### §8.2 — "four spawn sites drain that stderr" (Context, `:21-24`) is wrong
+
+Only the quarantine child drains its stderr today.
+`_SubprocessChildIO._log_child_stderr` (`quarantine_child_io.py:516`, the
+executor read at `:568`) is the sole drain in the tree. Verified by grep:
+the comms-adapter (`comms_stdio_transport.py:173`,
+`stderr=asyncio.subprocess.PIPE`) and the gateway-adapter
+(`adapter_child_factory.py:497`, `stderr=subprocess.PIPE`) both **pipe**
+stderr and never read it — no `.stderr.read`/`.stderr_reader` call exists in
+either file. So #440 (comms-adapter) and #441 (gateway-adapter) are each
+"build the drain, **then** attach `SandboxRefusalAuditor`" — materially
+larger than "Follow-ups" above implies by describing all three remaining
+producers as symmetric adoptions of the same auditor.
+
+Separately — a §7-decomposition finding, not a stderr-draining one, and it
+does not touch or contradict this ADR's existing "Follow-ups" note that the
+foreground-TUI producer "inherits stderr today rather than piping it" (that
+describes real, still-present code: `spawn_plugin_via_launcher`'s
+`inherit_stdio` branch). The verified fact is narrower and orthogonal:
+`alfred.cli._launcher_spawn.spawn_plugin_via_launcher`
+(`_launcher_spawn.py:188`) has **zero production call sites** — `alfred
+chat` (`cli/main.py:273`) dials the gateway socket (Spec A G5) instead of
+calling it — though the module is still imported elsewhere for `repo_root`
+and `PluginLaunchSpec`. #442 (foreground-TUI) should be rescoped to deleting
+this dead seam rather than wiring an auditor onto a call site nothing
+reaches in production.
+
+### §8.3 — the A-vs-B reversal for the quarantine-child path
+
+The maintainer decision recorded in the spec (2026-07-16, spec §0/§1):
+for the quarantine-child call site specifically, option **(A)** — the
+spawn-time probe barrier rejected in Decision 2 and "Alternatives
+considered" above — is now **adopted**, superseding Decision 2's choice of
+**(B)** for that one call site. §5 of this amendment's own PR2 implements it
+as a two-frame boot handshake (`_await_boot_handshake`,
+`quarantine_child_io.py:753`, invoked from inside `spawn_quarantine_child_io`
+at `:984`, before the function returns a child instance to any caller). This
+issue, #443, is a hard pre-gate on #340 PR2b (the real-LLM quarantine child
+go-live): PR2b must not ship before this handshake closes the forgery
+residual on a soon-to-be-untrusted, real-LLM-backed child.
+
+CodeRabbit's #446 🔒 Major — "parser validation cannot establish provenance"
+— stands **vindicated**. It was declined on #446 only on the narrow
+procedural basis that reversing a recorded ADR decision is the maintainer's
+call, never on its technical merits; the maintainer has now made that call
+in #443's favour.
+
+### §8.4 — the fast-refusal EPIPE hole (§8.1) is a distinct residual this handshake cannot close, and #444 does not fix it
+
+On the EPIPE arm identified in §8.1, `deliver_provider_key_via_fd3` raises
+`ProviderKeyDeliveryError` (`quarantine_child_io.py:963-964`), which is
+re-raised as `QuarantineChildSpawnError` at `:970-972` — **before**
+`_SubprocessChildIO` is ever constructed (`:974`). The two-frame handshake
+in §8.3 lives entirely inside that instance's `read_frame` calls, so it
+never runs on this arm; `_log_child_stderr` never runs either, and the
+launcher's stderr — which, on this arm, genuinely *does* contain the true
+`sandbox_refused` row, since the launcher really did refuse — is **never
+read at all**. #443's headline promise ("a genuine launcher refusal at boot
+⟹ exactly one attributed row") is **false on the fast-refusal path**.
+
+Issue #444 does **not** fix this. #444's reserved writer fires at the same
+`ProviderKeyDeliveryError` arm but writes a fixed, different reason
+(`reason="provider_key_delivery_failed"`, `fd3_key_delivery.py:61`) — it
+would record that *some* delivery failure occurred, not recover the
+launcher's true reason from stderr. Reading and attributing that stderr on
+the EPIPE arm would itself reopen the forgery residual this handshake
+closes elsewhere: an EPIPE proves only that every read end closed, not that
+the launcher never exec'd, so a live, compromised child could deliberately
+trigger EPIPE (e.g. by closing its own inherited read end early) and forge
+a row exactly as §8.3's handshake was built to prevent. This is recorded as
+an accepted residual — option **(C)**, a dedicated launcher-only fd, or a
+conscious accept — not deferred to #444.
