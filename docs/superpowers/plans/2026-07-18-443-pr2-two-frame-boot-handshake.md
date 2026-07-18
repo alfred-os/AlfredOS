@@ -10,6 +10,14 @@
 
 **Design source:** `docs/superpowers/specs/2026-07-16-443-boot-time-quarantine-health-check-design.md` (rev 3). The three open decisions are RESOLVED (§0) — do not re-litigate. This plan implements §5 (two frames), §6.1 (probe hello), §8 (ADR amendments), §9 (testing + corpus), §11 (residuals), §12 (prose corrections).
 
+## Review status (rev 2)
+
+Reviewed by the 6-agent `/review-plan` fleet + coordinator (0 Critical, 5 High, 10 Medium, 14 Low; 13 corroborated, all 11 cross-checks confirmed, nothing retracted). **No design defect** — the design was validated sound on every hard-rule axis. This revision folds every High + every corroborated Medium and the cheap Lows:
+
+- **Highs:** the sbx-2026-021 oracle now points at the real-registry tests (not the vacuous `_fake_invoke` model) with a code skeleton asserting the dispatch fired (arch-002); the ADR amendment now MANDATES retracting ADR-0051's "core-001 is moot" (docs-002/arch-006) and grounds the "#442" claim instead of writing "dead code" (docs-001); the probe test now pins `_child_wrote_stdout is True` (SEC-001); the coverage command now includes the `control_fd` + dormant files (te-001).
+- **Corroborated Mediums:** the §12 list now includes `sandbox_refusal_audit.py:12-14` + `quarantine_child_io.py:578-579` + the `_write_verdict` docstring (arch-001/core-engineer-001/docs-003/te-004); green-per-commit is scoped to the unit lanes with the docker-window caveat (te-002/arch-004); the fd3-window fake keeps `close()` (rev-001/core-engineer-003); the hello emitter is hoisted to a single shared `emit_hello()` (rev-002); `git add -p` is replaced with named-path adds (arch-003/rev-005).
+- **Lows folded:** rev-004 (sbx-024 `ingestion_path` pinned), rev-006 (`.chunks` hedge dropped), rev-007 (`_decode_result_payload` import), core-engineer-002 (`os.pipe` leak note), te-005 (no bwrap-skip on corpus tests), te-006 (assert `boot_handshake_failed`), rev-008 (child-ordering guarded only by Task 8).
+
 ## Global Constraints
 
 Every task's requirements implicitly include this section.
@@ -46,6 +54,7 @@ Every task's requirements implicitly include this section.
 - Produces (consumed by Tasks 2, 3, 5-test, 6):
   - `HELLO_FRAME: bytes` — a complete length-prefixed frame `struct.pack(">I", len(body)) + body`, body = `{"jsonrpc":"2.0","method":"boot.hello"}` (UTF-8).
   - `READY_FRAME: bytes` — same shape, method `boot.ready`.
+  - `emit_hello() -> None` — raw `sys.stdout.buffer` write of `HELLO_FRAME` + flush; the single shared hello emitter both `main()`s call (rev-002 DRY).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -58,6 +67,9 @@ from __future__ import annotations
 import json
 import struct
 
+import pytest
+
+from alfred.security.quarantine_child import _handshake as hs
 from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 
 
@@ -78,6 +90,27 @@ def test_ready_frame_is_wellformed_and_names_boot_ready() -> None:
 
 def test_hello_and_ready_are_distinct() -> None:
     assert HELLO_FRAME != READY_FRAME
+
+
+def test_emit_hello_writes_hello_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``emit_hello`` writes exactly HELLO_FRAME to the raw stdout buffer + flushes (rev-002)."""
+    written: list[bytes] = []
+    flushes = {"n": 0}
+
+    class _Buf:
+        def write(self, data: bytes) -> None:
+            written.append(bytes(data))
+
+        def flush(self) -> None:
+            flushes["n"] += 1
+
+    class _Stdout:
+        buffer = _Buf()
+
+    monkeypatch.setattr(hs.sys, "stdout", _Stdout())
+    hs.emit_hello()
+    assert written == [HELLO_FRAME]
+    assert flushes["n"] == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -108,14 +141,15 @@ Both use the SAME 4-byte big-endian length prefix as the JSON-RPC wire
 (``struct.pack(">I", len(body)) + body``), so the host reads them with the existing
 ``read_frame`` — no special-casing, and the host never parses the body (the security
 property is byte-arrival + frame-count, not content). Stdlib-only (``json``,
-``struct``) so the child's minimal import surface (ADR-0030 import-closure gate) is
-preserved; the diagnostic probe imports ``HELLO_FRAME`` too.
+``struct``, ``sys``) so the child's minimal import surface (ADR-0030 import-closure
+gate) is preserved; both the child and the diagnostic probe call ``emit_hello``.
 """
 
 from __future__ import annotations
 
 import json
 import struct
+import sys
 
 _HELLO_METHOD = "boot.hello"
 _READY_METHOD = "boot.ready"
@@ -129,8 +163,26 @@ def _boot_frame(method: str) -> bytes:
 HELLO_FRAME: bytes = _boot_frame(_HELLO_METHOD)
 READY_FRAME: bytes = _boot_frame(_READY_METHOD)
 
-__all__ = ["HELLO_FRAME", "READY_FRAME"]
+
+def emit_hello() -> None:
+    """Write the boot ``hello`` frame to fd 1 via a RAW buffered write + flush (#443).
+
+    Shared by BOTH the quarantine child (`__main__.main`) and the diagnostic probe
+    (`_brokered_probe.main`) — the emitter bodies were byte-identical, so this is the
+    single definition (rev-002 DRY; also unifies the name — no per-module
+    `_write_boot_hello`/`_emit_boot_hello`). A raw write because at the child's hello
+    point the asyncio writer does not exist yet; safe because both callers pin logging
+    to stderr before calling it, keeping fd 1 byte-pure. Stdlib-only, so the child's
+    import closure (ADR-0030) is unchanged.
+    """
+    sys.stdout.buffer.write(HELLO_FRAME)
+    sys.stdout.buffer.flush()
+
+
+__all__ = ["HELLO_FRAME", "READY_FRAME", "emit_hello"]
 ```
+
+> **rev-002 (DRY):** `emit_hello()` lives HERE and is called by both `main()`s (Tasks 2 and 3). Do NOT define per-module `_write_boot_hello` / `_emit_boot_hello` — that was byte-identical duplication with an inconsistent name. The child keeps its own `_write_boot_ready` (it uses the asyncio writer, not a raw write, so it is genuinely different).
 
 - [ ] **Step 4: Run tests + the import-closure guard**
 
@@ -150,84 +202,45 @@ git commit -m "feat(security): #443 add shared boot-handshake frame constants"
 
 **Files:**
 
-- Modify: `src/alfred/security/quarantine_child/__main__.py` (import; add `_write_boot_hello` + `_write_boot_ready`; wire into `main()` at `:338`→pre-`_build_provider` and `:351`→pre-`_run_mcp_server`)
-- Test: `tests/unit/quarantine/test_quarantine_child_loop.py` (add helper tests; reuse its `_FakeWriter` at `:62`)
+- Modify: `src/alfred/security/quarantine_child/__main__.py` (import `emit_hello` + `READY_FRAME`; add `_write_boot_ready`; wire `emit_hello()` into `main()` at `:338`→pre-`_build_provider` and `_write_boot_ready` at `:351`→pre-`_run_mcp_server`)
+- Test: `tests/unit/quarantine/test_quarantine_child_loop.py` (add the ready-helper test; reuse its `_FakeWriter` at `:62`). The hello emitter is the shared `emit_hello`, already covered by Task 1's test.
 
 **Interfaces:**
 
-- Consumes: `HELLO_FRAME`, `READY_FRAME` (Task 1); the module's existing `_FrameWriter` Protocol (`__main__.py:288`).
-- Produces: `_write_boot_hello() -> None` (raw stdout write + flush); `async def _write_boot_ready(writer: _FrameWriter) -> None`.
+- Consumes: `emit_hello`, `READY_FRAME` (Task 1); the module's existing `_FrameWriter` Protocol (`__main__.py:288`).
+- Produces: `async def _write_boot_ready(writer: _FrameWriter) -> None`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/unit/quarantine/test_quarantine_child_loop.py`:
+Add to `tests/unit/quarantine/test_quarantine_child_loop.py` (the hello emitter is already covered by Task 1's `emit_hello` test — Task 2 tests only the child-specific `_write_boot_ready`):
 
 ```python
-def test_write_boot_hello_emits_hello_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_write_boot_hello`` writes exactly HELLO_FRAME to the raw stdout buffer + flushes."""
-    from alfred.security.quarantine_child import __main__ as qc
-    from alfred.security.quarantine_child._handshake import HELLO_FRAME
-
-    written: list[bytes] = []
-    flushes = {"n": 0}
-
-    class _Buf:
-        def write(self, data: bytes) -> None:
-            written.append(bytes(data))
-
-        def flush(self) -> None:
-            flushes["n"] += 1
-
-    class _Stdout:
-        buffer = _Buf()
-
-    monkeypatch.setattr(qc.sys, "stdout", _Stdout())
-    qc._write_boot_hello()
-    assert written == [HELLO_FRAME]
-    assert flushes["n"] == 1
-
-
 async def test_write_boot_ready_emits_ready_frame_via_writer() -> None:
     """``_write_boot_ready`` writes READY_FRAME through the asyncio writer + drains."""
     from alfred.security.quarantine_child import __main__ as qc
     from alfred.security.quarantine_child._handshake import READY_FRAME
 
-    writer = _FakeWriter()  # the existing double at test_quarantine_child_loop.py:62
+    writer = _FakeWriter()  # the existing double at test_quarantine_child_loop.py:62 — collects into .chunks
     await qc._write_boot_ready(writer)
-    assert b"".join(writer.chunks) == READY_FRAME  # adapt to _FakeWriter's collected-bytes attr
+    assert b"".join(writer.chunks) == READY_FRAME
 ```
-
-> Note: adapt the `_FakeWriter` accessor to whatever attribute it collects into (the recon shows it "collects written frame chunks"). If `_FakeWriter` is not importable at module scope, define a 3-line local writer double with `write`/`async drain`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/unit/quarantine/test_quarantine_child_loop.py -k boot -q`
-Expected: FAIL — `AttributeError: module ... has no attribute '_write_boot_hello'`.
+Expected: FAIL — `AttributeError: module ... has no attribute '_write_boot_ready'`.
 
-- [ ] **Step 3: Add the import + helpers to `__main__.py`**
+- [ ] **Step 3: Add the import + the ready helper to `__main__.py`**
 
 Add the import near the other `alfred` import (after `__main__.py:54`):
 
 ```python
-from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
+from alfred.security.quarantine_child._handshake import READY_FRAME, emit_hello
 ```
 
-Add the two helpers (place them just above `async def main()` at `:317`):
+Add the ready helper (place it just above `async def main()` at `:317`). Do NOT define a per-module hello emitter — `main()` calls the shared `emit_hello` from Task 1 (rev-002 DRY):
 
 ```python
-def _write_boot_hello() -> None:
-    """Emit the boot ``hello`` frame on fd 1 via a RAW buffered write + flush (#443).
-
-    Called from ``main`` after the fd-3 key read and BEFORE ``_build_provider``: the
-    asyncio writer does not exist that early, and the raw write is safe because
-    ``configure_stderr_logging`` has already pinned all logging to stderr, so fd 1
-    stays byte-pure. This is the child's PROVENANCE signal — the host sets its
-    launcher-vs-child audit discriminator on this first stdout byte.
-    """
-    sys.stdout.buffer.write(HELLO_FRAME)
-    sys.stdout.buffer.flush()
-
-
 async def _write_boot_ready(writer: _FrameWriter) -> None:
     """Emit the boot ``ready`` frame via the asyncio ``writer`` — LIVENESS signal (#443).
 
@@ -245,7 +258,7 @@ In `main()`, insert the hello immediately after the fd-3 read (`:338`) and befor
 ```python
     configure_stderr_logging()
     provider_key = _read_provider_key_from_fd3()
-    _write_boot_hello()  # provenance: proves this is a real exec'd child (#443)
+    emit_hello()  # provenance: proves this is a real exec'd child (#443)
     try:
         provider = _build_provider(provider_key)
     finally:
@@ -278,94 +291,45 @@ git commit -m "feat(security): #443 emit boot hello+ready frames from the quaran
 
 **Files:**
 
-- Modify: `src/alfred/security/quarantine_child/_brokered_probe.py` (import; add `_emit_boot_hello`; wire into `main()` after fd-4 socket at `:106`, before `while True:` at `:107`)
-- Test: `tests/unit/quarantine/test_brokered_probe_import.py`
+- Modify: `src/alfred/security/quarantine_child/_brokered_probe.py` (import `emit_hello`; call it in `main()` after the fd-4 socket at `:106`, before `while True:` at `:107`; correct the `_write_verdict` docstring — te-004)
+- Test: `tests/unit/quarantine/test_brokered_probe_import.py` (the existing import test stays the guard)
 
 **Interfaces:**
 
-- Consumes: `HELLO_FRAME` (Task 1).
-- Produces: `_emit_boot_hello() -> None` (raw stdout write + flush). **Only a hello — never a ready.**
+- Consumes: `emit_hello` (Task 1). The probe emits **only a hello — never a ready** (it has no provider to build; a second host read would deadlock — §6.1).
+- Produces: nothing new — the wiring calls the shared emitter.
 
-- [ ] **Step 1: Write the failing test**
+> No new unit-testable symbol here: Task 3 wires the shared `emit_hello` (Task 1, already unit-covered) into the probe's `# pragma: no cover` `main()` and corrects one docstring. The behavioral proof — no deadlock — is the Task 8 docker `test_quarantine_fd_broker_real_spawn.py` lane, which must not be skipped (rev-008). So Task 3 is a wiring + docs commit, not a fresh TDD cycle.
 
-Add to `tests/unit/quarantine/test_brokered_probe_import.py`:
-
-```python
-def test_emit_boot_hello_writes_hello_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The probe emits exactly HELLO_FRAME (and only a hello) before its recv loop (#443 §6.1)."""
-    from alfred.security.quarantine_child import _brokered_probe as bp
-    from alfred.security.quarantine_child._handshake import HELLO_FRAME
-
-    written: list[bytes] = []
-
-    class _Buf:
-        def write(self, data: bytes) -> None:
-            written.append(bytes(data))
-
-        def flush(self) -> None:
-            return None
-
-    class _Stdout:
-        buffer = _Buf()
-
-    monkeypatch.setattr(bp.sys, "stdout", _Stdout())
-    bp._emit_boot_hello()
-    assert written == [HELLO_FRAME]
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/unit/quarantine/test_brokered_probe_import.py -k boot_hello -q`
-Expected: FAIL — `AttributeError: ... has no attribute '_emit_boot_hello'`.
-
-- [ ] **Step 3: Add the import + helper to `_brokered_probe.py`**
+- [ ] **Step 1: Add the import + wire `emit_hello` into `main()`**
 
 Add near the existing import (after `_brokered_probe.py:32`):
 
 ```python
-from alfred.security.quarantine_child._handshake import HELLO_FRAME
+from alfred.security.quarantine_child._handshake import emit_hello
 ```
 
-Add the helper (place above `def main()` at `:99`):
-
-```python
-def _emit_boot_hello() -> None:
-    """Emit the boot ``hello`` frame on fd 1 (raw write + flush) — deadlock fix (#443 §6.1).
-
-    The probe is parent-speaks-first: after reconstructing fd 4 it blocks in
-    ``recv_passed_fd`` waiting for the parent to broker a socket, writing its first
-    verdict only AFTER. Without an early hello, the host's in-spawn handshake read
-    would block waiting for a frame while the probe blocks waiting for a brokered fd —
-    a deadlock that trips the 25s ``read_frame`` bound and reds the arm64 real-spawn
-    CI lane. Emitting the hello BEFORE the recv loop lets the host complete its
-    (hello-only) handshake for the probe module and proceed to broker the socket. The
-    probe emits ONLY a hello — never a ``ready`` — it has no provider to build.
-    """
-    sys.stdout.buffer.write(HELLO_FRAME)
-    sys.stdout.buffer.flush()
-```
-
-- [ ] **Step 4: Wire it into `main()`**
-
-Insert the hello after the fd-4 socket is reconstructed (`:106`) and before the `while True:` loop (`:107`):
+Call it after the fd-4 socket is reconstructed (`:106`) and before the `while True:` loop (`:107`):
 
 ```python
     control_end = socket.socket(fileno=_CONTROL_FD, family=socket.AF_UNIX, type=socket.SOCK_STREAM)
-    _emit_boot_hello()  # #443 §6.1: unblock the host handshake before the parent-speaks-first recv loop
+    emit_hello()  # #443 §6.1: unblock the host handshake before the parent-speaks-first recv loop
     while True:
 ```
 
-> `main()` stays `# pragma: no cover` (docker-only subprocess entry). The hello logic is covered by the Step-1 helper test.
+- [ ] **Step 2: Correct the `_write_verdict` docstring (te-004)**
 
-- [ ] **Step 5: Run the probe test**
+`_write_verdict`'s docstring at `_brokered_probe.py:56` claims the verdict is "the only thing this process ever puts on fd 1" — no longer true after the boot hello. Reword to acknowledge the one pre-loop boot `hello` frame (e.g. "besides the single boot `hello` frame emitted before the recv loop, the verdict is the only thing this process writes to fd 1").
+
+- [ ] **Step 3: Run the probe import test**
 
 Run: `uv run pytest tests/unit/quarantine/test_brokered_probe_import.py -q`
-Expected: PASS.
+Expected: PASS (the module still imports; no fd-4 touch at import time).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/alfred/security/quarantine_child/_brokered_probe.py tests/unit/quarantine/test_brokered_probe_import.py
+git add src/alfred/security/quarantine_child/_brokered_probe.py
 git commit -m "fix(security): #443 emit a boot hello from the diagnostic probe to avoid the handshake deadlock"
 ```
 
@@ -373,7 +337,9 @@ git commit -m "fix(security): #443 emit a boot hello from the diagnostic probe t
 
 ### Task 4: Pre-seed boot frames into the non-frame-reading spawn fakes
 
-**Why first:** Task 5 flips `spawn_quarantine_child_io` to READ the handshake. Test fakes that only assert `pass_fds`/dup2/`broker_socket` (never `read_frame` post-spawn) would then fail on a `None`/empty stdout. Pre-seeding their stdout with `[HELLO_FRAME, READY_FRAME]` is a **no-op under today's spawn** (the frames sit unread) and satisfies the new handshake read — so each commit stays green regardless of task order.
+**Why first:** Task 5 flips `spawn_quarantine_child_io` to READ the handshake. Test fakes that only assert `pass_fds`/dup2/`broker_socket` (never `read_frame` post-spawn) would then fail on a `None`/empty stdout. Pre-seeding their stdout with `[HELLO_FRAME, READY_FRAME]` is a **no-op under today's spawn** (the frames sit unread) and satisfies the new handshake read — so each commit stays green **on the unit + `make check` lanes** regardless of task order.
+
+> **Green-per-commit scope (te-002 / arch-004 — read before pushing).** The "green per commit" guarantee is **unit-lane only**. The docker-gated real-spawn lanes (`test_quarantine_child_real_spawn.py`, `test_quarantine_fd_broker_real_spawn.py`, CI's privileged Linux job) are RED between the Task 2/3 commits (child/probe now emit frames) and the Task 5 commit (host reads them) — child and host are one atomic wire change (spec §5.3). This is a transient mid-sequence red, not a bug. **Push the Task 2→5 sequence together (or push only once Task 5 has landed), never a partial prefix**, so CI's privileged lane never observes the half-applied wire.
 
 **Files:**
 
@@ -412,7 +378,7 @@ Change `_FakePopen.__init__` (`:72`) so `stdout` yields the boot frames (leave `
 
 - [ ] **Step 2: fd3-window fake — seed `_SyncFakePopen` stdout**
 
-In `test_fd3_spawn_window_shared_property.py`, ensure `_SyncFakePopen` exposes a `stdout` that yields `[HELLO_FRAME, READY_FRAME]` (import them + a `_FakeStdout`-equivalent, or reuse the base `_FakeStdout`). The test asserts the fd-3 window discipline + `pass_fds`; the handshake `await`s run AFTER the dup2 window closes, so `sentinel_ran_at_spawn` (captured at Popen time) is unaffected — but the spawn must now find frames on stdout to return.
+In `test_fd3_spawn_window_shared_property.py`, teach `_SyncFakePopen`'s stdio double to serve `[HELLO_FRAME, READY_FRAME]` from `read()` **while keeping its `close()` method** (rev-001 / core-engineer-003): the gateway leg of this file's shared fake drives `adapter_child_factory.aclose`, which calls `.close()` on the stdio, so do NOT substitute the base `_FakeStdout` (it has no `close()`) — extend `_SyncFakePopen`'s existing stdio type with an optional frames buffer instead, and set `self.stdout` to it seeded with the two boot frames. The test asserts the fd-3 window discipline + `pass_fds`; the handshake `await`s run AFTER the dup2 window closes, so `sentinel_ran_at_spawn` (captured at Popen time) is unaffected — but the spawn must now find frames on stdout to return.
 
 - [ ] **Step 3: dormant-mechanism fake — seed its `_FakePopen` stdout**
 
@@ -486,6 +452,11 @@ async def test_spawn_probe_module_reads_hello_only(monkeypatch) -> None:
     cio = await spawn_quarantine_child_io(
         provider_key="k", child_module=child_io_mod._BROKERED_PROBE_MODULE
     )
+    # SEC-001 (load-bearing): the returned probe instance MUST have proven exec via the
+    # hello read. This is the §6.1 invariant — a future conditional-hello mutation that
+    # returned a probe with _child_wrote_stdout False would reopen #446 on the probe path
+    # while branch coverage stayed green. Assert it directly, not just "no deadlock".
+    assert cio._child_wrote_stdout is True
     await cio.aclose()  # returned without a second read → no deadlock
 
 
@@ -537,6 +508,12 @@ async def test_spawn_hello_then_no_ready_refuses_without_recording(monkeypatch) 
         await spawn_quarantine_child_io(provider_key="k", refusal_recorder=_Recorder())
     assert recorded == []  # child-authored → NOT recorded as a launcher refusal
 ```
+
+Three refinements to the tests above before you write them:
+
+- **rev-007 (import):** `test_spawn_completes_two_frame_handshake_and_returns` uses `_decode_result_payload` — import it at the top of the file (the sibling `test_read_frame_returns_full_frame` already does).
+- **core-engineer-002 (fd hygiene):** the standalone tests that monkeypatch `Popen`/`deliver_provider_key_via_fd3`/`os.dup2` directly (rather than via `_spawn_capture`) must ALSO wrap `os.pipe` with a tracking closer that closes the real write-end — the faked delivery no-ops the close the real `deliver_provider_key_via_fd3` performs, so the real `os.pipe()` the spawn opens would leak its write-end. Mirror `_spawn_capture`'s `_tracking_pipe`, or build these tests on top of `_spawn_capture` and swap the fake's stdout per case.
+- **te-006 (assert the security event):** add a `structlog.testing.capture_logs()` assertion for `security.quarantine_child.boot_handshake_failed` (with the `child_module` field) to at least one handshake-failure test — the module's discipline is to assert every emitted security event (hard rule #7), and structlog events do not reach `caplog`.
 
 - [ ] **Step 2: Run the new tests to verify they fail**
 
@@ -688,11 +665,16 @@ Expected: PASS. Fix any straggler that overrides `.stdout` and drives `read_fram
 Run:
 
 ```bash
-uv run pytest tests/unit/security/test_quarantine_child_io.py tests/unit/security/test_quarantine_child_io_refusal_audit.py \
-  --cov=alfred.security.quarantine_child_io --cov-report=term-missing --cov-branch
+uv run pytest \
+  tests/unit/security/test_quarantine_child_io.py \
+  tests/unit/security/test_quarantine_child_io_refusal_audit.py \
+  tests/unit/security/test_quarantine_child_io_control_fd.py \
+  tests/adversarial/sandbox_escape/test_brokered_fd_dormant_mechanism.py \
+  --cov=alfred.security.quarantine_child_io --cov=alfred.security.quarantine_child._handshake \
+  --cov-report=term-missing --cov-branch
 ```
 
-Expected: 100% line + branch on `quarantine_child_io.py` (add a targeted test for any uncovered handshake branch — e.g. the probe-only path, the hello-EOF path, the hello-then-no-ready path are all covered by Step 1's tests).
+Expected: 100% line + branch on `quarantine_child_io.py` and `_handshake.py`. **te-001 (load-bearing):** `test_quarantine_child_io_control_fd.py` is the ONLY exerciser of the `control_fd=True` / `broker_socket` / fd-4-dance branches (the base file has zero such references), and `test_brokered_fd_dormant_mechanism.py` exercises the dormant-path spawn — omitting them under-reports and makes the "Expected 100%" claim undemonstrable. Add a targeted test for any uncovered handshake branch (the probe-only path, the hello-EOF path, and the hello-then-no-ready path are covered by Step 1's tests). Alternatively, accumulate coverage across the whole `tests/unit` + adversarial run exactly as CI does (`ci.yml` coverage-gate), rather than a hand-picked file list.
 
 - [ ] **Step 9: Commit**
 
@@ -714,13 +696,45 @@ git commit -m "feat(security): #443 read the two-frame boot handshake inside spa
 - Modify: `tests/adversarial/sandbox_escape/sbx_2026_019_stub_used_forgery_not_persisted.yaml` (append a provenance note only)
 - Modify: `tests/adversarial/sandbox_escape/test_sbx_corpus_executable.py` (add `test_sbx_2026_021..024`)
 
-Each YAML uses the schema in `tests/adversarial/payload_schema.py` (`id`, `category: sandbox_escape`, `threat`, `ingestion_path`, `payload`, `expected_outcome`, `provenance`, `references`). `ingestion_path` for 021/023 = `launcher_refusal_stderr`; choose the closest existing `IngestionPath` member for 022/024 (`launcher_refusal_stderr` fits 022; 024 asserts a boot-time no-IO property — reuse `stdio_fd3_key_delivery` or add a new member to `IngestionPath` if none fits, updating `payload_schema.py` accordingly). `expected_outcome`: 021 `refused`, 022 `neutralized`, 023 `refused`, 024 `neutralized`.
+Each YAML uses the schema in `tests/adversarial/payload_schema.py` (`id`, `category: sandbox_escape`, `threat`, `ingestion_path`, `payload`, `expected_outcome`, `provenance`, `references`). `ingestion_path`: 021/023 = `launcher_refusal_stderr`; 022 = `launcher_refusal_stderr`; **024 = `stdio_fd3_key_delivery`** (the existing boot-time fd-3 member — pinned per rev-004; prefer reusing an existing `IngestionPath` member over adding a new one, which would also require updating the `.rulesync/skills/alfred-adversarial-corpus/SKILL.md` source-of-truth in the same commit to avoid `.rulesync` drift). `expected_outcome`: 021 `refused`, 022 `neutralized`, 023 `refused`, 024 `neutralized`.
+
+> **te-005 (no paper-gate):** all four asserting tests are PURE-UNIT (monkeypatched `Popen`, no bwrap). They MUST carry **no** bwrap/docker skip marker (mirror `test_brokered_fd_dormant_mechanism.py`), or they become paper-only gates (#245). `test_sbx_corpus_executable.py` mixes bwrap-required tests — if placing them there risks an ambient skip, put sbx-021..024's asserting tests in a dedicated non-bwrap module (e.g. `test_sbx_boot_handshake.py`) that the corpus-health gate still discovers, and keep the `_load()` helper import.
 
 - [ ] **Step 1: Write sbx-2026-021 (the core-001 regression oracle) + its asserting test**
 
 YAML `threat`: "A genuine (slow) launcher sandbox refusal must refuse BOOT with exactly one attributed `sandbox_refused` row AND an actually-dispatched `fail_closed` T0 hookpoint — not surface late at first extraction." Pin a **slow** reason (`sandbox_block_missing`) in the payload — a fast reason (`plugin_id_charset_invalid`) EPIPEs before the child is constructed (§8.4), records nothing, and would make the oracle nondeterministic.
 
-Asserting test in `test_sbx_corpus_executable.py` (models the existing `test_sandbox_refusal_audit.py` real-registry pattern — declare the supervisor hookpoints into a real registry, wire a real `SandboxRefusalAuditor` over a capturing `AuditWriter`, drive `spawn_quarantine_child_io` with a fake refusing launcher, assert: `QuarantineChildSpawnError` raised FROM the spawn, exactly one row, `reason == "sandbox_block_missing"`, and the `invoke` dispatch SUCCEEDED — not a `refusal_record_failed`). Assert on the **dispatch**, not just the row (a row-only assertion passes straight through the core-001 bug).
+Asserting test — model it on the **real-registry** tests in `test_sandbox_refusal_audit.py` (the ones ~line 175+ that build a real `HookRegistry` and run the auditor's real, UNPATCHED `invoke`), **NOT** that file's dominant `_fake_invoke`-monkeypatch tests: arch-002 / te-003 — a monkeypatched `invoke` makes the dispatch assertion **vacuous** (it "succeeds" even on `main`, certifying nothing). Assert on the **dispatch**, not just the row. Skeleton (confirm the exact `HookRegistry`/`set_registry`/`declare_hookpoints`/`_REFUSAL_ROW_*` symbols against the real `test_sandbox_refusal_audit.py` — this is a shape, not a drop-in):
+
+```python
+async def test_sbx_2026_021_boot_barrier_refusal_reaches_runtime(monkeypatch) -> None:
+    payload = _load("sbx-2026-021")
+    assert payload.expected_outcome == "refused"
+    registry = HookRegistry(strict_declarations=True)   # real registry, not a fake invoke
+    declare_hookpoints(registry)                          # alfred.supervisor.hookpoints (PR1)
+    set_registry(registry)                                # so the auditor's invoke() resolves it
+    rows: list[dict] = []
+
+    class _CapturingWriter:                               # minimal AuditWriter double
+        async def append_schema(self, **kw): rows.append(kw)
+
+    recorder = SandboxRefusalAuditor(audit_writer=_CapturingWriter())
+    fake = _FakePopen(stdout_frames=[], stderr_bytes=_REFUSAL_ROW_SANDBOX_BLOCK_MISSING)
+    fake.returncode = 0                                   # a refused launcher exits pre-exec
+    monkeypatch.setattr(qcio.subprocess, "Popen", lambda *a, **k: fake)
+    monkeypatch.setattr(qcio, "deliver_provider_key_via_fd3", lambda **_k: None)
+    monkeypatch.setattr(qcio.os, "dup2", lambda s, d, *a, **k: d)
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(qcio.QuarantineChildSpawnError):
+            await qcio.spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+    assert len(rows) == 1 and rows[0]["subject"]["reason"] == "sandbox_block_missing"
+    # THE core-001 assertion: the fail_closed dispatch actually FIRED — it was NOT
+    # swallowed as refusal_record_failed (which is exactly what an undeclared hookpoint
+    # produces; a row-only assertion passes straight through the core-001 bug).
+    assert not any(e["event"] == "security.quarantine_child.refusal_record_failed" for e in logs)
+```
+
+> **te-003 (scope the claim honestly):** this oracle declares the hookpoint MANUALLY, so it proves the record→dispatch **mechanism**, not the production boot **ordering** (that `install_boot_hook_registry` runs before the spawn). That ordering rests on PR1's boot seam + `test_boot_registry` membership + the extractor-builds-later invariant. Do not let this test's existence be cited as proof of the production sequence — the "Notes for the executor" wording is softened accordingly.
 
 - [ ] **Step 2: Write sbx-2026-022 (post-handshake forgery is inert) + test**
 
@@ -764,9 +778,11 @@ git commit -m "test(security): #443 add sbx-2026-021..024 boot-handshake corpus 
 
 **Files:**
 
-- Modify: `docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md` (add an "Amendment (#443 PR2)" section)
-- Modify: `src/alfred/comms_mcp/daemon_runtime.py` (verify + correct the §12 "only await" comment IF still false)
-- Modify: `src/alfred/supervisor/core.py` (verify the §12 "six hookpoints" comment — likely already corrected by PR1; correct only if still present)
+- Modify: `docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md` (add an "Amendment (#443 PR2)" section **and** retract the now-false core-001-moot claims in Decision 2 :81-89 + Consequences :142-148 — docs-002 / arch-006)
+- Modify: `src/alfred/security/sandbox_refusal_audit.py` (§12 — the module docstring :12-14 "dispatch happens at first extraction, post-`Supervisor`" is falsified by PR2 — arch-001 / core-engineer-001 / docs-003)
+- Modify: `src/alfred/security/quarantine_child_io.py` (§12 — the `_log_child_stderr` residual comment ~:578-579 "defers to the boot-time probe (ADR-0051 option A, #443)" now describes THIS PR's mechanism, not future work — docs-003; may be folded into Task 5's commit since that task already edits this file)
+- Modify: `src/alfred/comms_mcp/daemon_runtime.py` (verify + correct the §12 "only await" comment IF still false — preserve any load-bearing "dup2 window" clause)
+- Modify: `src/alfred/supervisor/core.py` (verify the §12 "six hookpoints" comment — PR1 already delegated `_register_hookpoints`; correct only if a false "six" claim remains, else skip)
 - Modify: `docs/superpowers/specs/2026-07-16-443-boot-time-quarantine-health-check-design.md` (flip §10 PR2 status to LANDED once merged; not a code claim)
 
 - [ ] **Step 1: Add the ADR-0051 amendment section**
@@ -774,11 +790,12 @@ git commit -m "test(security): #443 add sbx-2026-021..024 boot-handshake corpus 
 Append a new `## Amendment (#443 PR2 — boot-time handshake)` section to ADR-0051 recording spec §8:
 
 - **§8.1** the writev-buffers premise is a RACE, not structural — the parent closes every read-end copy before the `writev`, so a launcher that exits first ⟹ EPIPE ⟹ `ProviderKeyDeliveryError` ⟹ boot refuses *nondeterministically*; the fast path (`plugin_id_charset_invalid`, pre-`python3`) was never in Task 0's slow-only sample.
-- **§8.2** ADR-0051's "four spawn sites drain that stderr" is wrong — only the quarantine child drains; the comms-adapter and gateway-adapter pipe stderr and never read it, so #440/#441 are "build the drain, THEN attach the auditor" (materially larger than the ADR implies), and #442's producer is dead code.
+- **§8.2** ADR-0051's "four spawn sites drain that stderr" is wrong — verified: only the quarantine child drains (`_log_child_stderr`); the comms-adapter and gateway-adapter **pipe** stderr but never read it, so #440/#441 are "build the drain, THEN attach the auditor" (materially larger than the ADR implies). **docs-001: do NOT write the bare phrase "#442's producer is dead code."** State the verified fact: `cli/_launcher_spawn.spawn_plugin_via_launcher` has **zero production call sites** (`alfred chat` dials the gateway socket, Spec A G5) though the module is still imported — that "unreachable in production, rescope #442 to delete the dead seam" claim belongs to the §7-decomposition framing, NOT to an §8.2 stderr-draining bullet, and it must not be phrased so as to contradict ADR-0051's existing "the TUI inherits stderr today rather than piping it" note.
 - **§8.3** the A-vs-B reversal — option A (boot-time barrier) is now adopted for the quarantine path; #443 is a hard pre-gate on #340 PR2b; CodeRabbit's #446 Major stands vindicated.
 - **§8.4** the fast-refusal EPIPE hole is a distinct residual (§11.4) that this handshake cannot close (no `_SubprocessChildIO` is constructed on that arm) and that #444 does not fix (it writes a *different* reason). Name it as an accepted residual requiring option (C) or a conscious accept — NOT deferred to #444.
+- **Retraction (docs-002 / arch-006 — MANDATORY, not optional).** The amendment section alone is insufficient: ADR-0051's Decision 2 (:81-89) and Consequences (:142-148) still assert "core-001 is moot … the dispatch happens strictly after `Supervisor.__init__`". PR2 makes that FALSE (dispatch now fires inside the boot handshake, pre-`Supervisor`). Edit those two passages to mark them **superseded for the quarantine path by this amendment** (a one-line "SUPERSEDED by the #443 PR2 amendment below" pointer at Decision 2 also discharges arch-006's A/B back-reference), so the ADR is not internally self-contradicting after PR2 lands.
 
-Verify each claim against the code by execution before writing it (prose-wave rule).
+Verify each claim against the code by execution before writing it (prose-wave rule — this epic has shipped a false prose claim on a drift surface three times; every bullet above is a candidate).
 
 - [ ] **Step 2: Verify + correct the §12 prose targets**
 
@@ -789,8 +806,10 @@ grep -n "only await\|the only await" src/alfred/comms_mcp/daemon_runtime.py
 grep -n "six hookpoints\|six\b" src/alfred/supervisor/core.py | head
 ```
 
-- If `daemon_runtime.py` still claims the spawn await is "the only await in this builder", correct it (there are post-spawn awaits). If already accurate, skip.
-- The `core.py` "six hookpoints" comment was rewritten by PR1 (the area now delegates to `hookpoints.declare_hookpoints`); if no false "six" claim remains, skip. Do NOT invent an edit.
+- **`sandbox_refusal_audit.py:12-14` (MUST — arch-001/core-engineer-001/docs-003):** the docstring says the quarantine-child dispatch "happens at first extraction, post-`Supervisor`, so the hookpoint is registered". PR2 inverts it — reword to: the quarantine child now dispatches at BOOT, inside the spawn handshake, pre-`Supervisor`, relying on PR1's boot-time declaration.
+- **`quarantine_child_io.py:~578-579` (MUST — docs-003):** the `_log_child_stderr` residual comment "defers to the boot-time probe (ADR-0051 option A, #443)" describes THIS PR as future work — reword to say the boot handshake (this PR) performs that check at boot, leaving only the fast-refusal EPIPE sliver (§8.4) as a residual.
+- If `daemon_runtime.py` still claims the spawn await is "the only await in this builder", correct it (there are post-spawn awaits) — but **preserve any load-bearing second clause** about nothing interleaving in the dup2 window (docs-003). If already accurate, skip.
+- The `core.py` "six hookpoints" comment was rewritten by PR1 (the area now delegates to `hookpoints.declare_hookpoints`); the grep in the box above confirms whether a false "six" claim remains — skip if none. Do NOT invent an edit.
 
 - [ ] **Step 3: Markdown lint + commit**
 
@@ -799,9 +818,11 @@ Expected: clean.
 
 ```bash
 git add docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md \
-  docs/superpowers/specs/2026-07-16-443-boot-time-quarantine-health-check-design.md
-# add src files only if an edit was actually needed:
-git add -p src/alfred/comms_mcp/daemon_runtime.py src/alfred/supervisor/core.py 2>/dev/null || true
+  docs/superpowers/specs/2026-07-16-443-boot-time-quarantine-health-check-design.md \
+  src/alfred/security/sandbox_refusal_audit.py src/alfred/security/quarantine_child_io.py
+# arch-003 / rev-005: NO interactive `git add -p`. Add each src file by name ONLY if Step 2
+# actually edited it — omit the line for any file the "verify then skip" branch left untouched:
+git add src/alfred/comms_mcp/daemon_runtime.py   # only if Step 2 corrected the "only await" comment
 git commit -m "docs(security): #443 amend ADR-0051 for the boot-time handshake + correct stale prose"
 ```
 
@@ -846,6 +867,7 @@ pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins && pybabel up
 ## Notes for the executor
 
 - **Do not activate #340 PR2b.** This plan builds the handshake mechanism against the deterministic-echo child only.
-- **core-001 "goes live" here** and is exercised by sbx-2026-021 — it *fails on today's main* and must pass after Task 5. Its oracle asserts the dispatch actually fired, not merely that a row exists.
+- **core-001's dispatch fires at boot after PR2.** sbx-2026-021 proves the record→dispatch **mechanism** (with a manually-declared registry) — it *fails on today's main* and must pass after Task 5, asserting the dispatch actually fired (not merely that a row exists), i.e. no `refusal_record_failed`. **te-003:** it does NOT by itself prove the production boot *ordering* (that `install_boot_hook_registry` runs before the spawn) — that rests on PR1's boot seam + `test_boot_registry` membership + the extractor-builds-later invariant. Do not overstate sbx-021 as certifying the production sequence.
+- **Child-side frame ordering is only guarded by the docker lane (rev-008).** The hello-before-`_build_provider` / ready-before-loop ordering lives in `main()` (`# pragma: no cover`), so the only executable guard is Task 8's real-spawn round-trip — Task 8 must not be skipped even though it needs no code change.
 - **The probe reads hello-only** — if you ever find yourself adding a conditional that returns a probe IO with `_child_wrote_stdout` False, STOP: that reopens #446 on the probe path (§6.1). The hello read must be unconditional; only the `ready` read is gated by `_MODULES_EMITTING_READY`.
 - **#444 is coupled but separate** — its `provider_key_delivery_failed` writer is NOT in this PR; the fast-refusal EPIPE path (§8.4) is a named residual, not this handshake's job.
