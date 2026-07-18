@@ -157,11 +157,11 @@ undetected for a month.
 - **The T3-adjacent refusal is persisted at first-use, fail-closed at
   point-of-use.** Every quarantine-child spawn refusal now produces a
   durable, hookpoint-dispatched audit row instead of a stderr log line with
-  no downstream trace. **Scoped by the §8.4 amendment below to the
-  handshake-observable arm:** the fast-refusal EPIPE arm still refuses boot
-  fail-closed but produces NO attributed row (a named accepted residual, spec
-  §11.4) — so "every … refusal produces a durable row" holds for the
-  handshake-observable arm only.
+  no downstream trace. **This holds on BOTH refusal arms** (see the §8.4
+  amendment below): the handshake-observable (slow) arm records via the
+  `read_frame` zero-stdout EOF, and the fast-refusal EPIPE arm records via the
+  SAME zero-stdout-gated drain (`_record_fast_launcher_refusal`). The only
+  residual is spec §11.5's pre-hello window, common to both arms.
 - **core-001 is moot for the quarantine-child call site, by construction —
   SUPERSEDED for the quarantine path by the "Amendment (#443 PR2 —
   boot-time handshake)" section below.** As shipped at the time of this
@@ -194,15 +194,15 @@ undetected for a month.
   to fire in practice." §8.4 goes further: on that EPIPE arm the launcher
   genuinely did refuse, so `provider_key_delivery_failed` and a launcher
   refusal are frequently the SAME underlying event observed through a
-  different arm, not a rarer, disjoint condition. A writer for this reason
-  stays deferred (see Follow-ups and §8.4) — not because a pre-`Supervisor`
-  dispatch point reopens core-001 (PR1, #443, merged to main, makes the
-  supervisor hookpoints boot-declarable — see
-  `src/alfred/supervisor/hookpoints.py`), but because #444's reserved
-  writer would record only that *some* delivery failure occurred, not the
-  launcher's true reason, and recovering that true reason from stderr on
-  the EPIPE arm would itself reopen the forgery residual the two-frame
-  handshake was built to close.
+  different arm, not a rarer, disjoint condition. For that common case — a
+  genuine launcher refusal that surfaces as EPIPE — the §8.4 amendment now
+  RECOVERS the launcher's true reason via the same zero-stdout-gated drain
+  (`_record_fast_launcher_refusal`), WITHOUT reopening the forgery the
+  two-frame handshake closes (the earlier claim that it would has been
+  reversed). `provider_key_delivery_failed` (#444) therefore stays reserved
+  for a narrower case only: a genuine NON-refusal delivery failure, where the
+  launcher's stderr carries no `sandbox_refused` row and this gated drain
+  records nothing.
 
 ## Alternatives considered
 
@@ -258,8 +258,11 @@ and `plugins/`.
   supervisor hookpoints boot-declarable, so a pre-`Supervisor` dispatch no
   longer reopens core-001. **#444 is UNBLOCKED, not folded into PR1** — per
   the spec's own §0 decision 3, it still needs its own writer at the
-  `ProviderKeyDeliveryError` arm (see §8.1's race and §8.4, which is why
-  #444's writer alone would not close the fast-refusal hole). The
+  `ProviderKeyDeliveryError` arm — but for a narrower case now: §8.4's
+  amendment CLOSED the fast-refusal hole itself (`_record_fast_launcher_refusal`
+  recovers a genuine fast refusal's true reason via the zero-stdout-gated
+  drain), so #444's remaining scope is the genuine NON-refusal delivery
+  failure, where the launcher's stderr carries no `sandbox_refused` row. The
   "underlying condition is rare" framing above is also stale: §8.1 shows the
   fd-3 `writev` and a launcher's exit race nondeterministically, not that
   one side is structurally rare.
@@ -468,39 +471,43 @@ procedural basis that reversing a recorded ADR decision is the maintainer's
 call, never on its technical merits; the maintainer has now made that call
 in #443's favour.
 
-### §8.4 — the fast-refusal EPIPE hole (§8.1) is a distinct residual this handshake cannot close, and #444 does not fix it
+### §8.4 — the fast-refusal EPIPE hole (§8.1) is CLOSED by the same zero-stdout-gated drain
 
 On the EPIPE arm identified in §8.1, `deliver_provider_key_via_fd3` raises
-`ProviderKeyDeliveryError` (`quarantine_child_io.py:963-964`), which is
-re-raised as `QuarantineChildSpawnError` at `:970-972` — **before**
-`_SubprocessChildIO` is ever constructed (`:974`). The two-frame handshake
-in §8.3 lives entirely inside that instance's `read_frame` calls, so it
-never runs on this arm; `_log_child_stderr` never runs either, and the
-launcher's stderr — which, on this arm, genuinely *does* contain the true
-`sandbox_refused` row, since the launcher really did refuse — is **never
-read at all**. #443's headline promise ("a genuine launcher refusal at boot
-⟹ exactly one attributed row") is **false on the fast-refusal path**, and so
-is the Consequences bullet "Every quarantine-child spawn refusal now produces
-a durable, hookpoint-dispatched audit row" (scoped there by a pointer to this
-section). **Boot still refuses fail-closed on this arm** — the
-`QuarantineChildSpawnError` propagates to `_refuse_boot` exactly as on the
-handshake arm — it simply produces **no attributed row and no hookpoint
-dispatch**. The durability guarantee is therefore scoped to the
-**handshake-observable** arm; the fast-refusal EPIPE arm is a NAMED accepted
-residual (spec §11.4).
+`ProviderKeyDeliveryError` (`quarantine_child_io.py`) — the launcher exited
+PRE-`exec`, closing its inherited fd-3 read end before the parent's synchronous
+`writev`, so no `_SubprocessChildIO` is constructed on the normal path. Its true
+`sandbox_refused` row, however, is captured in `process.stderr`
+(`subprocess.Popen(stderr=PIPE)`). An **earlier revision of this ADR deferred
+this arm** (option (C) / accept), reasoning that draining that stderr would
+reopen the forgery bypass §8.3 closes. **That was over-pessimistic — it assumed
+a *naive*, ungated drain.** The shipped fix (`_record_fast_launcher_refusal`)
+routes the EPIPE arm through the **same sec-001 gate** the handshake uses: one
+`read_frame` whose zero-byte-stdout EOF (`refusal_candidate and not
+self._child_wrote_stdout`) records the launcher-authored row and fires the
+`fail_closed` T0 hookpoint, before the delivery-failure `QuarantineChildSpawnError`
+re-raises. So **a genuine fast launcher refusal now produces exactly one
+attributed row**, restoring #443's headline promise across BOTH the
+handshake-observable and the fast-refusal arms. Boot still refuses fail-closed
+either way.
 
-Issue #444 does **not** fix this. #444's reserved writer fires at the same
-`ProviderKeyDeliveryError` arm but writes a fixed, different reason
-(`reason="provider_key_delivery_failed"`, `fd3_key_delivery.py:61`) — it
-would record that *some* delivery failure occurred, not recover the
-launcher's true reason from stderr. Reading and attributing that stderr on
-the EPIPE arm would itself reopen the forgery residual this handshake
-closes elsewhere: an EPIPE proves only that every read end closed, not that
-the launcher never exec'd, so a live, compromised child could deliberately
-trigger EPIPE (e.g. by closing its own inherited read end early) and forge
-a row exactly as §8.3's handshake was built to prevent. This is recorded as
-an accepted residual — option **(C)**, a dedicated launcher-only fd, or a
-conscious accept — not deferred to #444, and now **tracked as a release
-follow-up in [#459](https://github.com/alfred-os/AlfredOS/issues/459)** so the
-consciously-accepted scope of #443's guarantee (handshake-observable refusals
-only) is auditable rather than prose-only.
+**Why the gate is safe here — even safer than on the slow arm.** The forgery
+§8.3 worries about is a live, compromised child triggering EPIPE then forging a
+row. But a child cannot *reach* the EPIPE arm without out-racing the parent's
+**synchronous** `writev`: `exec` of bwrap→runuser→python takes milliseconds
+while the writev is microseconds after `fork` (only the fd-restore `finally`
+sits between them), so EPIPE ⟹ the *launcher* (not a child) closed the read end
+⟹ a pre-`exec` refusal with launcher-authored stderr. As defence in depth, the
+zero-stdout gate additionally discards the drained stderr the instant a child
+writes *any* stdout byte, so the only surviving sliver is **identical to §11.5's
+already-accepted pre-hello window** (an exec'd child that writes zero stdout
+then forges). This fix introduces **no new** forgery path.
+
+Issue #444 remains distinct and separate: its reserved writer fires at the same
+`ProviderKeyDeliveryError` arm for a *genuine, non-refusal* delivery failure
+(the read end closed for some other reason), writing the fixed
+`reason="provider_key_delivery_failed"` (`fd3_key_delivery.py:61`) — a case
+where the launcher's stderr carries no `sandbox_refused` row, so this gated
+drain records nothing and #444's writer is what would add the row. The two are
+complementary: this fix recovers the launcher's *true* reason on a refusal,
+while #444 records the *delivery-failure* reason on a non-refusal.

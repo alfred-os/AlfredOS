@@ -34,6 +34,7 @@ from alfred.security.quarantine_child_io import (
     spawn_quarantine_child_io,
 )
 from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
+from alfred.supervisor.fd3_key_delivery import ProviderKeyDeliveryError
 from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.adversarial.sandbox_escape.test_sbx_corpus_executable import _load
@@ -304,3 +305,56 @@ def test_sbx_2026_024_child_boot_performs_no_external_io(monkeypatch: pytest.Mon
     monkeypatch.setattr(socket, "socket", _boom_socket)
     provider = child_main._build_provider("sk-test-quarantine-key")
     assert isinstance(provider, child_main._DeterministicProvider)
+
+
+def _patch_spawn_seam_epipe(monkeypatch: pytest.MonkeyPatch, fake: _FakePopen) -> None:
+    """Like ``_patch_spawn_seam`` but ``deliver_provider_key_via_fd3`` RAISES — the fd-3 EPIPE
+    (fast-refusal) arm. ``Popen`` -> ``fake``, ``dup2`` -> record-only."""
+
+    def _boom(**_k: Any) -> None:
+        raise ProviderKeyDeliveryError()
+
+    monkeypatch.setattr(qcio.subprocess, "Popen", lambda *_a, **_k: fake)
+    monkeypatch.setattr(qcio, "deliver_provider_key_via_fd3", _boom)
+    monkeypatch.setattr(qcio.os, "dup2", lambda _s, d, *_a, **_k: d)
+
+
+async def test_sbx_2026_025_fast_launcher_refusal_epipe_records_attributed_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sbx-2026-025: the fast (EPIPE) refusal arm records its attributed row, and a
+    stdout-writing child cannot forge one (#443 §8.4 CLOSE).
+
+    The launcher exits pre-``exec`` and closes its fd-3 read end before the writev, so
+    ``deliver_provider_key_via_fd3`` raises ``ProviderKeyDeliveryError`` before the child
+    exists. The gated drain on that arm records the launcher-authored row (zero stdout);
+    a child that wrote a partial header is discarded by the zero-stdout gate. Pairs with
+    sbx-2026-021 (the slow/handshake arm) to cover both refusal arms.
+    """
+    payload = _load("sbx-2026-025")
+    assert payload.expected_outcome == "refused"
+    assert isinstance(payload.payload, dict)
+    pinned = payload.payload["pinned_reason"]
+
+    # (a) genuine fast refusal: zero stdout + the launcher's row on stderr + exited -> recorded.
+    recorder = _CapturingRecorder()
+    fake = _FakePopen(
+        stdout_frames=[], stderr_bytes=_corpus_refusal_row(payload, "launcher_refusal_row")
+    )
+    fake.returncode = 1
+    _patch_spawn_seam_epipe(monkeypatch, fake)
+    with pytest.raises(qcio.QuarantineChildSpawnError):
+        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+    assert len(recorder.rows) == 1
+    assert recorder.rows[0].reason == pinned
+
+    # (b) a child that wrote a partial header before EPIPE -> child-authored -> NOT recorded.
+    recorder2 = _CapturingRecorder()
+    fake2 = _FakePopen(
+        stdout_frames=[b"\x00\x00"], stderr_bytes=_corpus_refusal_row(payload, "forged_refusal_row")
+    )
+    fake2.returncode = 1
+    _patch_spawn_seam_epipe(monkeypatch, fake2)
+    with pytest.raises(qcio.QuarantineChildSpawnError):
+        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder2)
+    assert recorder2.rows == []

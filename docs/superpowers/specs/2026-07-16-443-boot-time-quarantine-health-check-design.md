@@ -457,20 +457,27 @@ long-lived adapter is a wedge waiting to happen.)
 Record the maintainer's 2026-07-16 decision: option A adopted; #443 is a hard
 pre-gate on #340 PR2b; CodeRabbit's #446 Major stands vindicated.
 
-### 8.4 The fast-refusal hole is NOT #444's, and the barrier cannot close it
+### 8.4 The fast-refusal hole is NOT #444's — CLOSED in implementation by a zero-stdout-gated drain
 
-On the EPIPE branch (§8.1) `:913-921` raises **before** `:923` — so **no
-`_SubprocessChildIO` is ever constructed**, the handshake never runs,
-`_log_child_stderr` never runs, and the launcher's stderr *containing the genuine
-row* is **never read at all**. #443's headline promise ("a genuine launcher refusal
-at boot ⟹ exactly one attributed row") is **false on the fast-refusal path**.
+> **Superseded in implementation (PR2).** This section's original conclusion —
+> "the barrier cannot close it; requires option (C)" — assumed a *naive*,
+> ungated stderr drain and was reversed while building PR2. The EPIPE arm is
+> routed through the SAME zero-stdout sec-001 gate the handshake uses, which
+> closes the hole safely. See ADR-0051 §8.4 for the shipped design.
 
-Issue #444 does **not** fix this: it writes `provider_key_delivery_failed`, a *different*
-reason — the launcher's true reason is still lost. And a naive "drain and record on
-the EPIPE arm" **reopens the forgery**: EPIPE proves only that all read ends
-closed, not that the launcher never exec'd. **This is a structurally distinct hole
-requiring option (C) or a consciously accepted residual — recorded as §11.4, not
-deferred to #444.**
+On the EPIPE branch (§8.1) `deliver_provider_key_via_fd3` raises **before** the
+`_SubprocessChildIO` construction — the launcher exited PRE-`exec`, and its
+stderr *containing the genuine row* would be lost if simply discarded. The
+shipped fix (`_record_fast_launcher_refusal`) constructs the IO on that arm and
+drives one `read_frame`, so the zero-stdout gate records the launcher-authored
+row and fires the `fail_closed` T0 hookpoint — **restoring #443's promise across
+both arms**. Issue #444 stays distinct: it writes `provider_key_delivery_failed`
+for a *non-refusal* delivery failure, where the launcher's stderr carries no row.
+The "naive drain reopens forgery" objection does not apply to the GATED drain: a
+post-`exec` child cannot reach the EPIPE arm without out-racing the synchronous
+`writev`, and the zero-stdout gate discards any child that wrote stdout — so the
+surviving residual is identical to §11.5's accepted pre-hello window, not a new
+hole.
 
 ## 9. Testing
 
@@ -570,8 +577,10 @@ where core-001 becomes live, which is why PR1 lands first.
 3. **Grandchildren inheriting fd 2** — not reachable under the shipped
    `--unshare-pid` policy; at boot the child forks nothing. **Name the policy
    dependency** (`domain_lexical_rules_cannot_decide_filesystem_facts`).
-4. **The fast-refusal EPIPE path (§8.4)** — a genuine launcher refusal whose row is
-   never read. Structurally outside this mechanism. Option (C) or accept.
+4. **The fast-refusal EPIPE path (§8.4)** — **CLOSED in PR2** (not a residual). The
+   EPIPE arm now routes through the same zero-stdout-gated drain, so a genuine fast
+   launcher refusal records its attributed row. What remains is item 5's pre-hello
+   window, common to both arms — not a distinct fast-refusal hole.
 5. **The pre-hello window.** `_emit_fd3_framing_error_and_exit`
    (`__main__.py:84-98`) prints to stderr and exits with zero stdout, and sits
    before the hello in **every** variant. So the gate opens on child-authored
