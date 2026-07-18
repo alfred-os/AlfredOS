@@ -53,6 +53,16 @@ def _exited_fake(stderr: bytes):
     return fake
 
 
+def _running_fake(stderr: bytes):
+    # Like ``_exited_fake`` but the launcher is STILL RUNNING: ``returncode`` stays
+    # None so ``poll()`` returns None. Models a NON-refusal delivery failure (partial
+    # writev / EAGAIN / other OSError with a live child — #444's domain), NOT a fast
+    # refusal (which exits pre-exec). Drives the CR-2 ``poll() is None`` teardown gate.
+    from tests.unit.security.test_quarantine_child_io import _FakePopen
+
+    return _FakePopen(stdout_frames=[], stderr_bytes=stderr)  # returncode defaults to None
+
+
 async def test_refusal_recorded_on_read_frame_eof() -> None:
     recorder = _CapturingRecorder()
     io = _SubprocessChildIO(_exited_fake(_REFUSAL_ROW), refusal_recorder=recorder)
@@ -130,6 +140,27 @@ async def test_fast_refusal_arm_child_that_wrote_stdout_is_not_recorded(
     fake = _exited_fake_stdout(b"\x00\x00", _REFUSAL_ROW)  # partial header -> child wrote stdout
     await _drive_epipe_spawn(fake, recorder, monkeypatch)
     assert recorder.rows == []
+
+
+async def test_fast_refusal_arm_running_child_torn_down_not_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR-2: a STILL-RUNNING child on the delivery-failure arm is torn down, never drained.
+
+    ``ProviderKeyDeliveryError`` covers EPIPE (a fast launcher refusal, which has EXITED) AND
+    a partial-write / EAGAIN / other ``OSError`` where the child is still up (#444's domain).
+    On the latter, driving ``read_frame`` would block up to ``_READ_FRAME_TIMEOUT_S`` (~25s)
+    awaiting an EOF a live child never sends. The ``poll() is None`` gate tears the child down
+    at once instead: NO row recorded, ``QuarantineChildSpawnError`` still raised fail-closed,
+    and the child terminated + reaped. The test simply returning proves ``read_frame`` was not
+    driven (no wall-clock timing assertion).
+    """
+    recorder = _CapturingRecorder()
+    fake = _running_fake(_REFUSAL_ROW)  # returncode None -> poll() is None (still running)
+    await _drive_epipe_spawn(fake, recorder, monkeypatch)  # raises QuarantineChildSpawnError
+    assert recorder.rows == []  # non-refusal delivery failure -> no attributed launcher row
+    assert fake.terminate_calls >= 1  # the live child was torn down (terminate)...
+    assert fake.wait_calls >= 1  # ...and reaped (wait)
 
 
 async def test_record_failure_does_not_mask_refusal() -> None:

@@ -507,9 +507,12 @@ hole.
   `refusal_record_failed`). The core-001 regression oracle; it fails today. Assert
   on the **dispatch**, not just the row — a row-only assertion passes straight
   through the bug (§6.2).
-  **Rev 2: pin the refusal reason explicitly** — a fast reason (§8.1) records
-  nothing and a slow one records a row, so an unpinned reason makes this test
-  **nondeterministic**. Use a slow path.
+  **Rev 2: pin the refusal reason explicitly** — pin a *slow* reason so this
+  oracle deterministically exercises the **handshake** arm. The fast-refusal
+  (EPIPE) arm now records its row too (§8.4 CLOSE) and is covered separately by
+  `sbx-2026-025`; the slow pin is for **determinism** (which arm this test
+  takes), not because fast refusals are unaudited. An unpinned reason would leave
+  the test free to take either arm nondeterministically.
 - **`sbx-2026-022`** `exec_d_child_cannot_forge_refusal_after_boot_handshake` — the
   #446 residual, closed. Derive "no row written" from the audit store, never from
   the gate predicate (`domain_a_test_that_asks_the_code_if_the_code_is_right`).

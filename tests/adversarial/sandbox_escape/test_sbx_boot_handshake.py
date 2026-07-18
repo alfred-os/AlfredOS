@@ -8,12 +8,16 @@ paper-only-gate pattern). This module carries no bwrap/docker skip marker at all
 so a missing bwrap on the runner (macOS dev, some CI legs) can never mask these
 four assertions.
 
-Reuses the SAME fakes + helpers the source-of-truth unit suites already use
-(``_FakePopen`` / ``_boot_frames`` from ``test_quarantine_child_io.py``, the
-``_load()`` YAML loader from ``test_sbx_corpus_executable.py``) rather than a
-second hardcoded copy, and derives each fake refusal-row stderr FROM the corpus
-YAML payload (``_corpus_refusal_row()``) so a payload change can never leave
-these tests silently stale -- the #428 single-source-of-truth lesson.
+Uses adversarial-LOCAL fakes (``_FakePopen`` / ``_boot_frames`` defined in THIS
+module, not imported from a mutable unit-test helper) so a release-blocking
+adversarial test never inherits behaviour from a unit suite that can change out
+from under it (test-isolation, CR-3). It still reuses the ``_load()`` YAML loader
+from ``test_sbx_corpus_executable.py`` and derives each fake refusal-row stderr
+FROM the corpus YAML payload (``_corpus_refusal_row()``) so a payload change can
+never leave these tests silently stale -- the #428 single-source-of-truth lesson.
+The sbx-021 oracle drives a RealGate-backed ``make_allow_system_gate`` (not the
+``make_permissive_fixture_gate`` shim) so a RealGate grant-policy regression stays
+visible (CLAUDE.md hard rule #2, CR-4).
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import alfred.security.quarantine_child.__main__ as child_main
 import alfred.security.quarantine_child_io as qcio
 from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.hooks import HookRegistry, get_registry, set_registry
+from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
     spawn_quarantine_child_io,
@@ -38,8 +43,85 @@ from alfred.supervisor.fd3_key_delivery import ProviderKeyDeliveryError
 from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.adversarial.sandbox_escape.test_sbx_corpus_executable import _load
-from tests.helpers.gates import make_permissive_fixture_gate
-from tests.unit.security.test_quarantine_child_io import _boot_frames, _FakePopen
+from tests.helpers.gates import make_allow_system_gate
+
+# --- adversarial-LOCAL subprocess doubles (CR-3: a release-blocking test imports no --------
+# behaviour from a mutable unit-test helper; a minimal ``subprocess.Popen``-shaped shape) ---
+
+
+def _boot_frames() -> list[bytes]:
+    """The two frames a real child emits at boot (hello + ready), for a fake stdout (#443)."""
+    return [HELLO_FRAME, READY_FRAME]
+
+
+class _FakeStdout:
+    """Raw-pipe stand-in: synchronous ``read(n)`` over a length-prefixed stream, ``b""`` at EOF."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        self._buf = bytearray(b"".join(frames))
+
+    def read(self, n: int) -> bytes:
+        chunk = bytes(self._buf[:n])
+        del self._buf[:n]
+        return chunk
+
+
+class _FakeStderr:
+    """Raw-pipe stderr stand-in: ``read(n)`` over a byte buffer, plus an observable ``close()``."""
+
+    def __init__(self, data: bytes = b"") -> None:
+        self._buf = bytearray(data)
+        self.closed = False
+
+    def read(self, n: int) -> bytes:
+        chunk = bytes(self._buf[:n])
+        del self._buf[:n]
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeStdin:
+    """A no-op stdin pipe stand-in (the sbx tests only read)."""
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _FakePopen:
+    """Minimal ``subprocess.Popen``-shaped double — adversarial-LOCAL (CR-3).
+
+    The real spawn's ``Popen`` call is intercepted before any fork/exec, so this asserts
+    purely on what the SEAM decided; it forks nothing. Copies only the shape these tests
+    need (``stdin`` / ``stdout`` / ``stderr`` / ``poll`` / ``terminate`` / ``wait`` /
+    ``returncode``) so it never inherits behaviour from the unit suite's ``_FakePopen``.
+    """
+
+    def __init__(self, stdout_frames: list[bytes], stderr_bytes: bytes = b"") -> None:
+        self.stdin = _FakeStdin()
+        self.stdout = _FakeStdout(stdout_frames)
+        self.stderr = _FakeStderr(stderr_bytes)
+        self.returncode: int | None = None
+        self.terminate_calls = 0
+        self.wait_calls = 0
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def wait(self) -> int:
+        self.wait_calls += 1
+        self.returncode = 0
+        return 0
 
 
 def _corpus_refusal_row(payload: AdversarialPayload, field: str) -> bytes:
@@ -144,13 +226,25 @@ async def test_sbx_2026_021_boot_barrier_refusal_reaches_runtime(
     assert payload.expected_outcome == "refused"
     assert payload.payload["pinned_reason"] == "sandbox_block_missing"
 
-    # A FRESH real registry with a permissive system-tier gate, swapped in for the
+    # A FRESH real registry with a RealGate-backed system-tier grant, swapped in for the
     # duration: the default singleton's _DenyAllGate would refuse the subscriber
     # registration, and declare_supervisor(registry) puts the supervisor hookpoints on
     # THIS registry (the same declaration Supervisor.__init__ delegates to). The
     # auditor's record() -> invoke() resolves this same registry via get_registry().
+    #
+    # CR-4 / CLAUDE.md hard rule #2: use the RealGate-backed make_allow_system_gate (an
+    # EXPLICIT scoped grant), NOT the make_permissive_fixture_gate shim whose docstring
+    # warns it is not RealGate-shaped ("a RealGate regression would be invisible"). The
+    # grant is scoped to the SUBSCRIBER's attribution: HookRegistry.register consults
+    # gate.check(plugin_id=hook_fn.__module__, ...), and the subscriber below is defined
+    # in THIS module, so its plugin_id is __name__. A RealGate grant-policy regression
+    # (wrong plugin_id / hookpoint matching) now surfaces here as a refused registration
+    # -> an empty fired_reasons -> a red test, instead of being papered over by the shim.
     registry = HookRegistry(
-        gate=make_permissive_fixture_gate(allow_system=True), strict_declarations=True
+        gate=make_allow_system_gate(
+            plugin_id=__name__, hookpoint="supervisor.plugin.sandbox_refused"
+        ),
+        strict_declarations=True,
     )
     prior = get_registry()
     set_registry(registry)
