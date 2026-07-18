@@ -86,8 +86,10 @@ class _SyncFakePopen:
         self.pass_fds = kwargs.get("pass_fds")
         self.fd3_open_at_fork = _fd_open(3)
         self.stdin = _Stdio()
-        # Seeded so a future host-side handshake read (#443, Task 5) finds frames;
-        # today neither spawn window reads stdout, so this sits unread (no-op).
+        # Seeded so the host-side handshake read (#443, Task 5 landed) finds frames.
+        # The QUARANTINE leg of this shared fake now CONSUMES hello+ready inside the
+        # two-frame boot handshake; the GATEWAY leg never reads stdout, so the frames
+        # sit unread there — harmless on both legs.
         self.stdout = _Stdio([HELLO_FRAME, READY_FRAME])
         self.stderr = _Stdio()
         self.returncode: int | None = None

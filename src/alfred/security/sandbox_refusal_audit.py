@@ -17,10 +17,18 @@ strictly before ``Supervisor`` is constructed. That is safe only because PR1
 hookpoints boot-declarable, registered at the ``hooks/boot.py`` seam ahead of
 the spawn; see ADR-0051's "Amendment (#443 PR2 — boot-time handshake)" section
 for the full history (this docstring previously asserted the dispatch happened
-post-``Supervisor``, which PR2 inverted). The comms-adapter, gateway-adapter,
-and foreground-TUI producers adopt this same auditor in the #433 follow-ups.
-``record`` raising is the caller's contract to handle (the quarantine drain
-guards it so it never masks the refusal).
+post-``Supervisor``, which PR2 inverted). The three other producers do NOT
+simply adopt this auditor: the comms-adapter (#440) and gateway-adapter (#441)
+PIPE their child's stderr but never READ it today (verified —
+``comms_stdio_transport.py:173`` / ``adapter_child_factory.py:497``), so they
+must first BUILD an stderr drain before this auditor has any bytes to persist;
+and the foreground-TUI producer
+(``cli/_launcher_spawn.spawn_plugin_via_launcher``, #442) has ZERO production
+call sites (``alfred chat`` dials the gateway socket, Spec A G5), so #442 is a
+rescope-to-delete the dead seam, not an adoption. See ADR-0051's §8.2 amendment
+for the verified stderr-draining picture. ``record`` raising is the caller's
+contract to handle (the quarantine drain guards it so it never masks the
+refusal).
 """
 
 from __future__ import annotations

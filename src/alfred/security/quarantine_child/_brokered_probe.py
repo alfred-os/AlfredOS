@@ -105,8 +105,13 @@ def main() -> None:  # pragma: no cover - subprocess entry (docker-only)
     module in test / mypy / ruff / IDE contexts must not touch fd 4 (mirrors the
     ``__main__.py`` sec-007 fd-3 contract).
     """
+    # #443 §6.1: emit the boot `hello` FIRST — before the fd-4 control socket is
+    # reconstructed — so the provenance frame is signalled even if fd-4 reconstruction
+    # later fails (a bad/missing fd 4 would otherwise SUPPRESS the hello, hanging the
+    # host handshake with no signal). The host reads this hello to prove exec; it must
+    # not sit behind the fd-4 socket build.
+    emit_hello()
     control_end = socket.socket(fileno=_CONTROL_FD, family=socket.AF_UNIX, type=socket.SOCK_STREAM)
-    emit_hello()  # #443 §6.1: unblock the host handshake before the parent-speaks-first recv loop
     while True:
         try:
             verdict = _probe_once(control_end)

@@ -9,10 +9,11 @@ so a missing bwrap on the runner (macOS dev, some CI legs) can never mask these
 four assertions.
 
 Reuses the SAME fakes + helpers the source-of-truth unit suites already use
-(``_FakePopen`` / ``_boot_frames`` from ``test_quarantine_child_io.py``,
-``_REFUSAL_ROW`` from ``test_quarantine_child_io_refusal_audit.py``, the
+(``_FakePopen`` / ``_boot_frames`` from ``test_quarantine_child_io.py``, the
 ``_load()`` YAML loader from ``test_sbx_corpus_executable.py``) rather than a
-second hardcoded copy -- the #428 lesson.
+second hardcoded copy, and derives each fake refusal-row stderr FROM the corpus
+YAML payload (``_corpus_refusal_row()``) so a payload change can never leave
+these tests silently stale -- the #428 single-source-of-truth lesson.
 """
 
 from __future__ import annotations
@@ -27,15 +28,32 @@ import structlog.testing
 import alfred.security.quarantine_child.__main__ as child_main
 import alfred.security.quarantine_child_io as qcio
 from alfred.audit.launcher_refusal import SandboxRefusalRow
+from alfred.hooks import HookRegistry, get_registry, set_registry
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
     spawn_quarantine_child_io,
 )
 from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
 from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
+from tests.adversarial.payload_schema import AdversarialPayload
 from tests.adversarial.sandbox_escape.test_sbx_corpus_executable import _load
+from tests.helpers.gates import make_permissive_fixture_gate
 from tests.unit.security.test_quarantine_child_io import _boot_frames, _FakePopen
-from tests.unit.security.test_quarantine_child_io_refusal_audit import _REFUSAL_ROW
+
+
+def _corpus_refusal_row(payload: AdversarialPayload, field: str) -> bytes:
+    """The launcher-authored refusal row, sourced FROM the corpus YAML (single source of truth).
+
+    Deriving the fake's stderr from the corpus payload (not a hardcoded copy imported from
+    another test module) means a changed corpus row can never leave this executable test
+    asserting against stale bytes while still reading green -- the #428 lesson. The launcher
+    emits one JSON line terminated by a newline; the YAML folded scalar (``>-``) strips the
+    trailing newline, so re-add exactly one to match the real launcher stderr shape (the
+    parser ``splitlines()``s either way, so this is fidelity, not a parse requirement).
+    """
+    row = payload.payload[field]
+    assert isinstance(row, str), f"corpus field {field!r} must carry the row as a string"
+    return row.encode("utf-8") + b"\n"
 
 
 def _patch_spawn_seam(monkeypatch: pytest.MonkeyPatch, fake: _FakePopen) -> None:
@@ -98,14 +116,21 @@ async def test_sbx_2026_021_boot_barrier_refusal_reaches_runtime(
 
     Modelled on the REAL-REGISTRY tests in ``test_sandbox_refusal_audit.py``
     (``test_record_real_dispatch_against_declared_hookpoint`` et al.) -- NOT that
-    file's dominant ``_fake_invoke``-monkeypatch fixture. Calling the real
-    ``declare_hookpoints()`` (the same function ``Supervisor.__init__``
-    delegates to) against the real ``get_registry()`` singleton, then running
-    ``SandboxRefusalAuditor.record`` UNPATCHED, means the assertion below on the
-    ABSENCE of ``refusal_record_failed`` is what actually proves the
-    ``fail_closed`` T0 hookpoint dispatch succeeded (arch-002 / te-003): a
-    monkeypatched ``invoke`` would make that assertion pass even on a build
-    where the hookpoint was never declared, certifying nothing.
+    file's dominant ``_fake_invoke``-monkeypatch fixture. It swaps in a FRESH but
+    REAL ``HookRegistry`` (the default singleton carries a fail-closed
+    ``_DenyAllGate`` that would refuse the positive-dispatch subscriber below), calls
+    the real ``declare_hookpoints()`` (the same function ``Supervisor.__init__``
+    delegates to) on it, and runs ``SandboxRefusalAuditor.record`` UNPATCHED -- so the
+    real, unpatched ``invoke`` resolves this registry. A monkeypatched ``invoke`` would
+    make the dispatch assertions vacuous (they would pass even on a build where the
+    hookpoint was never declared -- arch-002 / te-003), so it is deliberately avoided.
+
+    The oracle proves dispatch on TWO independent signals: (a) the ABSENCE of
+    ``refusal_record_failed`` (an undeclared hookpoint would log it), AND (b) a REAL
+    registered T0 subscriber actually FIRED with the attributed reason. Signal (b) is
+    the stronger oracle: a declared hookpoint with ZERO subscribers is a dispatch no-op
+    that ALSO passes (a), so registering a subscriber and asserting it ran proves
+    POSITIVE dispatch, not merely the absence of a failure.
 
     Non-vacuity: temporarily commenting out the
     ``await _await_boot_handshake(child_io, child_module=child_module)`` line
@@ -118,31 +143,71 @@ async def test_sbx_2026_021_boot_barrier_refusal_reaches_runtime(
     assert payload.expected_outcome == "refused"
     assert payload.payload["pinned_reason"] == "sandbox_block_missing"
 
-    declare_supervisor()  # real registry -- the same call Supervisor.__init__ makes at boot
-    rows: list[dict[str, Any]] = []
+    # A FRESH real registry with a permissive system-tier gate, swapped in for the
+    # duration: the default singleton's _DenyAllGate would refuse the subscriber
+    # registration, and declare_supervisor(registry) puts the supervisor hookpoints on
+    # THIS registry (the same declaration Supervisor.__init__ delegates to). The
+    # auditor's record() -> invoke() resolves this same registry via get_registry().
+    registry = HookRegistry(
+        gate=make_permissive_fixture_gate(allow_system=True), strict_declarations=True
+    )
+    prior = get_registry()
+    set_registry(registry)
+    try:
+        declare_supervisor(registry)
 
-    class _CapturingWriter:
-        async def append_schema(self, **kwargs: Any) -> None:
-            rows.append(kwargs)
+        # A REAL fixture T0 subscriber: proves POSITIVE dispatch (signal (b) above).
+        fired_reasons: list[str] = []
 
-    recorder = SandboxRefusalAuditor(audit_writer=_CapturingWriter())
+        async def _sandbox_refused_subscriber(ctx: Any) -> None:
+            # An implicit None return is the subscriber contract's "no change / proceed"
+            # for a post-kind hook (the dispatcher keys off the None return).
+            fired_reasons.append(ctx.input["reason"])
 
-    fake = _FakePopen(stdout_frames=[], stderr_bytes=_REFUSAL_ROW)
-    fake.returncode = 1  # the launcher exited pre-exec -- poll() returns non-None
-    _patch_spawn_seam(monkeypatch, fake)
+        registry.register(
+            hook_fn=_sandbox_refused_subscriber,
+            hookpoint="supervisor.plugin.sandbox_refused",
+            kind="post",
+            tier="system",
+        )
 
-    with structlog.testing.capture_logs() as logs, pytest.raises(QuarantineChildSpawnError):
-        await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+        rows: list[dict[str, Any]] = []
 
-    assert len(rows) == 1, f"expected exactly one attributed row, got {rows!r}"
-    assert rows[0]["subject"]["reason"] == "sandbox_block_missing"
-    # THE core-001 assertion: the fail_closed dispatch actually FIRED -- it was
-    # NOT swallowed as refusal_record_failed (exactly what an undeclared
-    # hookpoint produces). A row-only assertion above passes straight through
-    # a core-001 regression, because SandboxRefusalAuditor.record calls
-    # append_schema BEFORE invoke() -- this is the load-bearing signal.
-    failed = [e for e in logs if e["event"] == "security.quarantine_child.refusal_record_failed"]
-    assert not failed, f"hookpoint dispatch was swallowed as refusal_record_failed: {failed!r}"
+        class _CapturingWriter:
+            async def append_schema(self, **kwargs: Any) -> None:
+                rows.append(kwargs)
+
+        recorder = SandboxRefusalAuditor(audit_writer=_CapturingWriter())
+
+        fake = _FakePopen(
+            stdout_frames=[], stderr_bytes=_corpus_refusal_row(payload, "launcher_refusal_row")
+        )
+        fake.returncode = 1  # the launcher exited pre-exec -- poll() returns non-None
+        _patch_spawn_seam(monkeypatch, fake)
+
+        with structlog.testing.capture_logs() as logs, pytest.raises(QuarantineChildSpawnError):
+            await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+
+        assert len(rows) == 1, f"expected exactly one attributed row, got {rows!r}"
+        assert rows[0]["subject"]["reason"] == payload.payload["pinned_reason"]
+        # Signal (a) -- the fail_closed dispatch was NOT swallowed as
+        # refusal_record_failed (exactly what an undeclared hookpoint produces). A
+        # row-only assertion passes straight through a core-001 regression, because
+        # SandboxRefusalAuditor.record calls append_schema BEFORE invoke().
+        failed = [
+            e for e in logs if e["event"] == "security.quarantine_child.refusal_record_failed"
+        ]
+        assert not failed, f"hookpoint dispatch was swallowed as refusal_record_failed: {failed!r}"
+        # Signal (b) -- the load-bearing POSITIVE-dispatch proof: the real registered T0
+        # subscriber RAN once with the attributed reason. Without this, the oracle only
+        # proves "no dispatch error was logged", which a zero-subscriber hookpoint also
+        # satisfies while dispatching to nobody.
+        assert fired_reasons == [payload.payload["pinned_reason"]], (
+            f"expected the T0 subscriber to fire once with the attributed reason, "
+            f"got {fired_reasons!r}"
+        )
+    finally:
+        set_registry(prior)
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +232,10 @@ async def test_sbx_2026_022_post_handshake_forgery_not_persisted(
     assert payload.expected_outcome == "neutralized"
 
     recorder = _CapturingRecorder()
-    fake = _FakePopen(stdout_frames=list(_boot_frames()), stderr_bytes=_REFUSAL_ROW)
+    fake = _FakePopen(
+        stdout_frames=list(_boot_frames()),
+        stderr_bytes=_corpus_refusal_row(payload, "forged_refusal_row"),
+    )
     fake.returncode = 1  # the child has already exited by the time the drain runs
     _patch_spawn_seam(monkeypatch, fake)
 
@@ -198,7 +266,9 @@ async def test_sbx_2026_023_slow_refusal_still_refuses_boot(
     delay_s = float(payload.payload["simulated_delay_seconds"])
 
     recorder = _CapturingRecorder()
-    fake = _FakePopen(stdout_frames=[], stderr_bytes=_REFUSAL_ROW)
+    fake = _FakePopen(
+        stdout_frames=[], stderr_bytes=_corpus_refusal_row(payload, "launcher_refusal_row")
+    )
     fake.stdout = _SlowEofStdout(delay_s)  # type: ignore[assignment]
     fake.returncode = 1
     _patch_spawn_seam(monkeypatch, fake)
@@ -206,7 +276,7 @@ async def test_sbx_2026_023_slow_refusal_still_refuses_boot(
     with pytest.raises(QuarantineChildSpawnError):
         await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
     assert len(recorder.rows) == 1
-    assert recorder.rows[0].reason == "sandbox_block_missing"
+    assert recorder.rows[0].reason == payload.payload["pinned_reason"]
 
 
 # ---------------------------------------------------------------------------
