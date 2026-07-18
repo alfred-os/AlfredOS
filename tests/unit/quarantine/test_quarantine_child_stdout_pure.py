@@ -7,9 +7,9 @@ pip-installed alfred whose catalog is absent — the warning bytes prepend the
 reply frame and corrupt the wire the host transport reads.
 
 This drives the REAL child as a subprocess over real fd 0/1/3 (no bwrap, no LLM),
-with the i18n catalog forced absent, and asserts stdout decodes to exactly one
-clean ``extracted`` reply frame with NO extra bytes around it — proving nothing
-leaked onto fd 1.
+with the i18n catalog forced absent, and asserts stdout decodes to exactly three
+clean frames — hello boot frame, ready boot frame, and the ``extracted`` reply
+frame — with NO extra bytes around them — proving nothing leaked onto fd 1 (#443).
 
 In the 2b deterministic-echo cut the loop never imports ``provider_dispatch``
 (the lazy extract-path import that loads the translator), so the warning does not
@@ -90,15 +90,36 @@ def test_child_stdout_is_pure_wire_frame_when_locale_absent() -> None:
 
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
 
-    # stdout must be EXACTLY one length-prefixed frame — no warning bytes prepended.
+    # stdout must contain THREE length-prefixed frames: hello, ready, extracted reply.
+    # No warning bytes or extra content.
     out = proc.stdout
     assert len(out) >= 4, f"stdout too short to be a framed reply: {out!r}"
-    length = struct.unpack(">I", out[:4])[0]
-    frame_body = out[4 : 4 + length]
-    assert len(out) == 4 + length, (
-        f"stdout has {len(out) - (4 + length)} extra byte(s) around the frame — "
-        f"a log line leaked onto fd 1: {out!r}"
-    )
-    reply = json.loads(frame_body)
+
+    # Parse first frame (hello boot frame)
+    frame_offset = 0
+    length1 = struct.unpack(">I", out[frame_offset : frame_offset + 4])[0]
+    frame_body1 = out[frame_offset + 4 : frame_offset + 4 + length1]
+    boot_hello = json.loads(frame_body1)
+    assert boot_hello["method"] == "boot.hello"
+    frame_offset += 4 + length1
+
+    # Parse second frame (ready boot frame)
+    length2 = struct.unpack(">I", out[frame_offset : frame_offset + 4])[0]
+    frame_body2 = out[frame_offset + 4 : frame_offset + 4 + length2]
+    boot_ready = json.loads(frame_body2)
+    assert boot_ready["method"] == "boot.ready"
+    frame_offset += 4 + length2
+
+    # Parse third frame (extracted reply)
+    length3 = struct.unpack(">I", out[frame_offset : frame_offset + 4])[0]
+    frame_body3 = out[frame_offset + 4 : frame_offset + 4 + length3]
+    reply = json.loads(frame_body3)
     assert reply["result"]["kind"] == "extracted"
     assert reply["result"]["data"]["text"] == context
+
+    # Verify no extra bytes
+    expected_total = frame_offset + 4 + length3
+    assert len(out) == expected_total, (
+        f"stdout has {len(out) - expected_total} extra byte(s) — "
+        f"a log line leaked onto fd 1: {out!r}"
+    )

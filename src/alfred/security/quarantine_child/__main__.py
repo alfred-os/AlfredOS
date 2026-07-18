@@ -52,6 +52,7 @@ from typing import Any, Protocol, runtime_checkable
 # child's stdout stays byte-pure for length-prefixed JSON-RPC frames. Called from
 # main() before the fd-3 read / loop (BUG-1, PR-S4-11c-2b0).
 from alfred._stdio_logging import configure_stderr_logging
+from alfred.security.quarantine_child._handshake import READY_FRAME, emit_hello
 
 # In-process content cache for the Slice-3 skeleton. The production
 # implementation (PR-S3-5) replaces this with a Redis-backed
@@ -314,6 +315,16 @@ def _echo_extracted_frame(context: str) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
+async def _write_boot_ready(writer: _FrameWriter) -> None:
+    """Emit the boot ``ready`` frame via the asyncio ``writer`` — LIVENESS signal (#443).
+
+    Called from ``main`` after the asyncio streams are built and BEFORE the request
+    loop is entered: proof the child initialized and is serving.
+    """
+    writer.write(READY_FRAME)
+    await writer.drain()
+
+
 async def main() -> None:  # pragma: no cover - subprocess entry; loop covered via _run_mcp_server
     """Entry point: read provider key from fd 3, then run the MCP server.
 
@@ -336,6 +347,7 @@ async def main() -> None:  # pragma: no cover - subprocess entry; loop covered v
     """
     configure_stderr_logging()
     provider_key = _read_provider_key_from_fd3()
+    emit_hello()  # provenance: proves this is a real exec'd child (#443)
     try:
         provider = _build_provider(provider_key)
     finally:
@@ -349,6 +361,7 @@ async def main() -> None:  # pragma: no cover - subprocess entry; loop covered v
         asyncio.streams.FlowControlMixin, sys.stdout
     )
     writer = asyncio.StreamWriter(w_transport, w_protocol, reader, loop)
+    await _write_boot_ready(writer)  # liveness: proves initialized + serving (#443)
     await _run_mcp_server(provider, reader=reader, writer=writer)
 
 
