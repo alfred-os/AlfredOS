@@ -1,0 +1,103 @@
+id: sbx-2026-021
+category: sandbox_escape
+threat: >-
+  Absent the #443 in-spawn boot handshake, a genuine (slow) launcher
+  sandbox_refused stderr row must still refuse BOOT with exactly one
+  attributed supervisor.plugin.sandbox_refused audit row AND an
+  actually-dispatched fail_closed T0 hookpoint -- not surface late, as a
+  corpse the caller only discovers dead at first extraction.
+ingestion_path: launcher_refusal_stderr
+payload:
+  attack: boot_barrier_absent_launcher_refusal_reaches_runtime
+  launcher_refusal_row: >-
+    {"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}
+  pinned_reason: sandbox_block_missing
+note: >-
+  pinned_reason is deliberately SLOW, not the fastest available refusal.
+  sandbox_block_missing is resolved only after the launcher has already
+  parsed the manifest and walked past environment/host-OS resolution --
+  the fd-3 provider-key pipe is fully drained (deliver_provider_key_via_fd3
+  completes its writev) before the launcher exits, so read_frame observes a
+  clean zero-byte EOF with no prior stdout byte, which is the exact
+  refusal_candidate shape the drain gate keys on. A FAST refusal reason
+  (e.g. plugin_id_charset_invalid, which fires before any manifest read at
+  all) instead EPIPEs the fd-3 write mid-flight (spec §8.4) -- the launcher
+  is already gone by the time the parent tries to deliver the key, the
+  write raises before the child-spawn bookkeeping even completes, and
+  nothing gets to record deterministically. Pinning a slow reason keeps
+  this oracle's outcome the same on every run.
+expected_outcome: refused
+provenance: >-
+  #443 PR2 (this PR) + #443 PR1 (PR #456, merged): PR1 extracted
+  Supervisor._register_hookpoints into a free function
+  (alfred.supervisor.hookpoints.declare_hookpoints) reachable at boot,
+  before any Supervisor is constructed -- PR1's own docstring names the
+  gap this closes as "core-001": supervisor.plugin.sandbox_refused was the
+  only fail_closed=True security hookpoint in the tree that a boot-time
+  caller could not declare, because its declaration lived only on a method
+  reachable by constructing a Supervisor. That gap was LATENT, not live,
+  under #433/#446 (ADR-0051): the only dispatcher of this hookpoint --
+  SandboxRefusalAuditor.record, called from the quarantine_child_io drain
+  -- only ever ran at first extraction, well after Supervisor(...) had
+  already run _register_hookpoints() at daemon boot. #443 PR2 is what
+  makes the gap live: spawn_quarantine_child_io now calls
+  _await_boot_handshake INSIDE the spawn (before any Supervisor exists in
+  the boot sequence), reading the child's two boot frames
+  (quarantine_child._handshake.HELLO_FRAME then READY_FRAME). A genuine
+  launcher refusal never produces a hello frame at all -- the launcher
+  exits pre-exec, so the FIRST read_frame() call hits the same zero-byte
+  EOF / _log_child_stderr(refusal_candidate=True) drain gate #433/#446
+  hardened, which now runs at boot instead of at first extraction. Without
+  PR1's boot-time declaration, that dispatch would hit
+  HookRegistry.invoke's strict_declarations branch and raise HookError,
+  which SandboxRefusalAuditor.record's caller
+  (_SubprocessChildIO._record_launcher_refusals) catches and demotes to a
+  loud but SILENT-TO-THE-REFUSAL-PATH
+  security.quarantine_child.refusal_record_failed log line -- the audit
+  row would still get written (append_schema runs before invoke inside
+  record()) but the fail_closed T0 hookpoint would never fire, exactly the
+  half-silent failure mode #443's title names.
+  This entry's asserting test (test_sbx_2026_021_boot_barrier_refusal_reaches_runtime,
+  tests/adversarial/sandbox_escape/test_sbx_boot_handshake.py) is modelled
+  on the REAL-REGISTRY tests in tests/unit/security/test_sandbox_refusal_audit.py
+  (test_sandbox_refused_hookpoint_declared_at_auditor_dispatch_phase /
+  test_record_real_dispatch_against_declared_hookpoint), NOT that file's
+  dominant _fake_invoke-monkeypatch fixture -- a monkeypatched invoke would
+  make the dispatch assertion pass even on a build with the core-001 gap
+  still open, certifying nothing (arch-002 / te-003). It calls the real
+  alfred.supervisor.hookpoints.declare_hookpoints() (the same function
+  Supervisor.__init__ delegates to) against the real
+  alfred.hooks.get_registry() singleton, drives spawn_quarantine_child_io
+  end-to-end against a fake refusing Popen (zero stdout frames, the
+  launcher_refusal_row above on stderr) with a REAL SandboxRefusalAuditor
+  over a capturing AuditWriter double, and asserts on TWO independent
+  signals: (a) exactly one captured row whose subject.reason ==
+  "sandbox_block_missing", and (b) structlog.testing.capture_logs() never
+  observes security.quarantine_child.refusal_record_failed -- signal (b)
+  is the load-bearing one, because (a) alone passes even when the
+  hookpoint-dispatch half fails (append_schema runs before invoke inside
+  SandboxRefusalAuditor.record, so a row-count-only assertion is
+  insufficient to prove core-001 closed). Verified non-vacuous by
+  temporarily removing the `await _await_boot_handshake(...)` call from
+  spawn_quarantine_child_io: with the boot barrier absent, the spawn
+  returns the half-refused child successfully instead of raising
+  QuarantineChildSpawnError, and this test fails on the `pytest.raises`
+  assertion -- exactly the threat this entry names ("a genuine refusal
+  reaches runtime" instead of refusing boot).
+  Scope note (te-003): this test declares the hookpoint MANUALLY via
+  declare_hookpoints(), so it proves the record-then-dispatch MECHANISM
+  (the hookpoint is declared, and invoke() against it does not raise), not
+  the production BOOT ORDERING (that alfred.hooks.boot's
+  install_boot_hook_registry step actually runs before
+  spawn_quarantine_child_io in the real daemon-boot sequence). That
+  ordering claim rests on PR1's boot seam plus
+  test_known_hookpoints_sync.py's supervisor coverage and the
+  extractor-builds-later invariant documented on
+  alfred.supervisor.hookpoints, not on this entry.
+references:
+  - "src/alfred/security/quarantine_child_io.py (_await_boot_handshake, spawn_quarantine_child_io, _SubprocessChildIO._record_launcher_refusals)"
+  - "src/alfred/security/sandbox_refusal_audit.py (SandboxRefusalAuditor.record)"
+  - "src/alfred/supervisor/hookpoints.py (declare_hookpoints -- the #443 PR1 boot-declarable publisher)"
+  - "src/alfred/security/quarantine_child/_handshake.py (HELLO_FRAME, READY_FRAME)"
+  - "tests/unit/security/test_sandbox_refusal_audit.py (the real-registry core-001 proof this entry mirrors)"
+  - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md"

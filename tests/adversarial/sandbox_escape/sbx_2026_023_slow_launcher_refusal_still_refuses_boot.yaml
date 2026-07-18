@@ -1,0 +1,62 @@
+id: sbx-2026-023
+category: sandbox_escape
+threat: >-
+  A launcher that reaches a genuine sandbox_refused refusal only after a
+  short delay (resolving environment/host-OS/sandbox-kind before exiting)
+  but still ultimately closes stdout at zero bytes must refuse BOOT
+  identically to an instant refusal -- a future "bounded-wait, default-open
+  on did-not-exit-in-N-seconds" redesign of the boot handshake would go
+  red here.
+ingestion_path: launcher_refusal_stderr
+payload:
+  attack: slow_launcher_refusal_still_refuses_boot
+  simulated_delay_seconds: 0.05
+  pinned_reason: sandbox_block_missing
+  launcher_refusal_row: >-
+    {"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm","reason":"sandbox_block_missing","environment":"development","host_os":"linux"}
+note: >-
+  The delay is deliberately SHORT (well under
+  quarantine_child_io._READ_FRAME_TIMEOUT_S, 25s) so the resulting
+  read_frame failure is a genuine zero-byte _TruncatedFrameError (a real
+  EOF), never a TimeoutError -- the two failure shapes are attributed
+  differently (_TruncatedFrameError with bytes_read == 0 is a
+  refusal_candidate; TimeoutError never is, per
+  test_read_frame_timeout_not_attributed_to_launcher in
+  tests/unit/security/test_quarantine_child_io_refusal_audit.py). This
+  entry is deliberately NOT the timeout case; it targets the boundary
+  where the CURRENT design (read until EOF, however long that legitimately
+  takes) is correct and a hypothetical alternative (treat "no bytes within
+  N ms" as the refusal signal and otherwise proceed) would be wrong -- the
+  correct design refuses on the EOF itself, with no clock in the decision
+  at all.
+expected_outcome: refused
+provenance: >-
+  spawn_quarantine_child_io's boot handshake (_await_boot_handshake) reads
+  the child's hello frame via a single BOUNDED read_frame() call
+  (asyncio.wait_for(..., timeout=_READ_FRAME_TIMEOUT_S)); the bound exists
+  to fail a WEDGED child loudly (CLAUDE.md hard rule #7), not to define
+  refusal by elapsed time. A launcher that is merely slow to reach its
+  own conclusion -- resolving ALFRED_ENVIRONMENT, probing the host OS,
+  reading the manifest, evaluating [sandbox] -- and then genuinely refuses
+  (exits pre-exec, closing stdout at zero bytes) must refuse the spawn
+  exactly as an instant refusal does: read_frame's
+  _blocking_read_exactly hits _TruncatedFrameError(bytes_read=0)
+  regardless of how much wall-clock elapsed before that EOF arrived, so
+  refusal_candidate is True and the drain-and-record path in
+  _log_child_stderr fires unconditionally. The asserting test
+  (test_sbx_2026_023_slow_refusal_still_refuses_boot,
+  tests/adversarial/sandbox_escape/test_sbx_boot_handshake.py) drives a
+  fake process whose stdout.read() sleeps briefly before returning b""
+  (the zero-byte EOF) -- run inside read_frame's executor thread, so the
+  sleep never blocks the event loop -- and asserts
+  spawn_quarantine_child_io still raises QuarantineChildSpawnError with
+  the refusal row attributed to sandbox_block_missing. This guards the
+  §3.3 design note that the handshake is EOF-driven, not a race against a
+  clock; a regression that swapped in a "assume refused only if nothing
+  arrived within N ms, otherwise treat the child as live" heuristic would
+  either mis-time this delay into the wrong bucket or (worse) proceed past
+  a refusal it never actually confirmed.
+references:
+  - "src/alfred/security/quarantine_child_io.py (_await_boot_handshake, _blocking_read_exactly, _TruncatedFrameError, _READ_FRAME_TIMEOUT_S)"
+  - "tests/unit/security/test_quarantine_child_io_refusal_audit.py (test_read_frame_timeout_not_attributed_to_launcher -- the sibling TimeoutError-is-never-a-refusal case this entry is deliberately distinct from)"
+  - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md"
