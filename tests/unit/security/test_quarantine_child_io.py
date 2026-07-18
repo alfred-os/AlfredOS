@@ -1089,6 +1089,42 @@ async def test_spawn_launcher_refusal_records_row_and_refuses_boot(
     assert boot_failed[0]["child_module"] == child_io_mod._CHILD_MODULE
 
 
+async def test_boot_handshake_tears_down_child_on_non_contract_exit() -> None:
+    """A CancelledError mid-handshake (boot cancelled) still tears the child down (#443).
+
+    The `_await_boot_handshake` teardown must fire on EVERY abnormal exit, not only the
+    contracted `QuarantineChildSpawnError`: a `read_frame` that propagates a
+    `CancelledError` (a daemon boot cancelled mid-handshake — a `BaseException`, NOT an
+    `Exception`, so a narrower `except QuarantineChildSpawnError`/`except Exception` would
+    miss it) or any other unexpected exception must not leak the bwrap child + control
+    socket. This pins the `except BaseException` teardown: the child is reaped and the
+    exception propagates, while the loud `boot_handshake_failed` log stays scoped to the
+    contract exception (a cancellation is not a security event).
+    """
+    import structlog.testing
+
+    fake = _FakePopen(stdout_frames=[])  # returncode None -> aclose terminates+reaps
+
+    async def _cancelled_read() -> bytes:
+        raise asyncio.CancelledError
+
+    cio = _SubprocessChildIO(fake)
+    cio.read_frame = _cancelled_read  # type: ignore[method-assign]
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(asyncio.CancelledError),  # the BaseException propagates, never demoted
+    ):
+        await child_io_mod._await_boot_handshake(cio, child_module=child_io_mod._CHILD_MODULE)
+
+    # Torn down: aclose ran (terminate+reap) so the child never leaks on the cancelled path.
+    assert fake.terminate_calls >= 1
+    assert fake.wait_calls >= 1
+    assert cio._closed is True
+    # The loud security log is scoped to the contract exception — a cancellation is silent.
+    assert not [e for e in logs if e["event"] == "security.quarantine_child.boot_handshake_failed"]
+
+
 async def test_spawn_hello_then_no_ready_refuses_without_recording(
     _spawn_capture: dict[str, Any],
 ) -> None:

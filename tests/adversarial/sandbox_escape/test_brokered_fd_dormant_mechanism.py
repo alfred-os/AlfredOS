@@ -69,9 +69,10 @@ class _FakePopen:
         self.argv = argv
         self.pass_fds = tuple(kwargs.get("pass_fds", ()))
         self.stdin = None
-        # A real child emits hello+ready at boot; the host handshake reads them inside
-        # the spawn (#443). Pre-seeded so this dormancy-focused fake still satisfies
-        # the future read — the frames sit unread under today's spawn.
+        # A real child emits hello+ready at boot; the quarantine spawn now CONSUMES
+        # both frames inside the two-frame boot handshake (#443, Task 5 landed). This
+        # dormancy-focused fake is pre-seeded so that handshake read is satisfied and
+        # the spawn returns.
         self.stdout = _FakeStdout([HELLO_FRAME, READY_FRAME])
         self.stderr = None
         self.returncode: int | None = None

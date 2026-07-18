@@ -767,17 +767,26 @@ async def _await_boot_handshake(child_io: _SubprocessChildIO, *, child_module: s
     row + dispatches the ``fail_closed`` T0 hookpoint iff the failure is a zero-byte EOF
     with no prior stdout byte (the sec-001 gate) — so a GENUINE launcher refusal now
     persists its row + fires the hookpoint HERE, at boot, instead of at first extraction
-    (the dispatch PR1 made boot-declarable). On any handshake failure the half-spawned
-    child is torn down (``aclose``: terminate+reap, close the control-parent) before the
-    error propagates; the stderr drain already ran inside ``read_frame``, so ``aclose``'s
-    own drain is an idempotent no-op.
+    (the dispatch PR1 made boot-declarable).
+
+    Teardown is unconditional on EVERY abnormal exit (``except BaseException``): the
+    contracted ``QuarantineChildSpawnError``, a ``CancelledError`` from a daemon boot
+    cancelled mid-handshake, or any unexpected exception ``read_frame`` might propagate all
+    tear the half-spawned child down (``aclose``: terminate+reap, close the control-parent)
+    before the error re-raises — a narrower ``except QuarantineChildSpawnError`` would leak
+    the bwrap child + control socket on a ``CancelledError`` (which is a ``BaseException``,
+    not an ``Exception``). The loud ``boot_handshake_failed`` log stays scoped to the
+    contract exception — a cancellation is not a security event. The stderr drain already
+    ran inside ``read_frame`` on the contract path, so ``aclose``'s own drain is an
+    idempotent no-op there; on a cancellation the drain simply runs once in ``aclose``.
     """
     try:
         await child_io.read_frame()  # hello: provenance — sets _child_wrote_stdout
         if child_module in _MODULES_EMITTING_READY:
             await child_io.read_frame()  # ready: liveness
-    except QuarantineChildSpawnError:
-        _log.error("security.quarantine_child.boot_handshake_failed", child_module=child_module)
+    except BaseException as exc:
+        if isinstance(exc, QuarantineChildSpawnError):
+            _log.error("security.quarantine_child.boot_handshake_failed", child_module=child_module)
         await child_io.aclose()
         raise
 

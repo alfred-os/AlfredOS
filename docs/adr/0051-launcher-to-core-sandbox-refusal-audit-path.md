@@ -29,6 +29,18 @@ This ADR records the design for the **first** producer this epic wires up —
 the quarantine-child spawn — and the reusable pieces the other three
 producers adopt as #433 follow-ups.
 
+> **SUPERSEDED by the "Amendment (#443 PR2 — boot-time handshake)" §8.2
+> below.** The claim "Four spawn sites drain that stderr today" is **false**:
+> verified on this branch, ONLY the quarantine-child spawn drains its stderr
+> (`_log_child_stderr`). The comms-adapter (`comms_stdio_transport.py:173`)
+> and gateway-adapter (`adapter_child_factory.py:497`) **pipe** stderr but
+> never read it, and the foreground-TUI producer
+> (`cli/_launcher_spawn.spawn_plugin_via_launcher`) has zero production call
+> sites. So #440/#441 must first BUILD a drain before adopting the auditor,
+> and #442 is a rescope-to-delete the dead seam — not the symmetric
+> "adopt the same auditor" this paragraph implies. This historical text is
+> kept, not deleted; §8.2 is the current picture.
+
 ## Decision
 
 ### 1. The v1 → v2 interception-point correction
@@ -145,7 +157,11 @@ undetected for a month.
 - **The T3-adjacent refusal is persisted at first-use, fail-closed at
   point-of-use.** Every quarantine-child spawn refusal now produces a
   durable, hookpoint-dispatched audit row instead of a stderr log line with
-  no downstream trace.
+  no downstream trace. **Scoped by the §8.4 amendment below to the
+  handshake-observable arm:** the fast-refusal EPIPE arm still refuses boot
+  fail-closed but produces NO attributed row (a named accepted residual, spec
+  §11.4) — so "every … refusal produces a durable row" holds for the
+  handshake-observable arm only.
 - **core-001 is moot for the quarantine-child call site, by construction —
   SUPERSEDED for the quarantine path by the "Amendment (#443 PR2 —
   boot-time handshake)" section below.** As shipped at the time of this
@@ -226,6 +242,12 @@ and `plugins/`.
 - Persist `sandbox_refused` for the **comms-adapter** (#440),
   **gateway-adapter** (#441), and **foreground-TUI** (#442) producers via the
   same `SandboxRefusalAuditor`.
+  > **SUPERSEDED by §8.2 below.** "Via the same `SandboxRefusalAuditor`"
+  > overstates the work: #440/#441 must first BUILD an stderr drain (both
+  > **pipe** stderr but never read it today), and #442's producer
+  > (`spawn_plugin_via_launcher`) has zero production call sites, so #442 is a
+  > rescope-to-delete the dead seam, not an adoption. §8.2 is the current
+  > picture; this bullet is kept as the historical record.
 - **Boot-time fail-closed quarantine health-check** (#443 — option A above):
   detect a refusal at spawn/boot and refuse boot, rather than at first
   extraction. A separate operability concern from what this ADR ships.
@@ -457,7 +479,15 @@ never runs on this arm; `_log_child_stderr` never runs either, and the
 launcher's stderr — which, on this arm, genuinely *does* contain the true
 `sandbox_refused` row, since the launcher really did refuse — is **never
 read at all**. #443's headline promise ("a genuine launcher refusal at boot
-⟹ exactly one attributed row") is **false on the fast-refusal path**.
+⟹ exactly one attributed row") is **false on the fast-refusal path**, and so
+is the Consequences bullet "Every quarantine-child spawn refusal now produces
+a durable, hookpoint-dispatched audit row" (scoped there by a pointer to this
+section). **Boot still refuses fail-closed on this arm** — the
+`QuarantineChildSpawnError` propagates to `_refuse_boot` exactly as on the
+handshake arm — it simply produces **no attributed row and no hookpoint
+dispatch**. The durability guarantee is therefore scoped to the
+**handshake-observable** arm; the fast-refusal EPIPE arm is a NAMED accepted
+residual (spec §11.4).
 
 Issue #444 does **not** fix this. #444's reserved writer fires at the same
 `ProviderKeyDeliveryError` arm but writes a fixed, different reason

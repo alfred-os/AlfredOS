@@ -60,16 +60,17 @@ class _FakeReader:
 
 
 class _FakeWriter:
-    """Collects the frames the loop writes."""
+    """Collects the frames the loop writes + counts ``drain()`` calls."""
 
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
+        self.drain_calls = 0
 
     def write(self, data: bytes) -> None:
         self.chunks.append(bytes(data))
 
     async def drain(self) -> None:
-        return None
+        self.drain_calls += 1
 
     def joined(self) -> bytes:
         return b"".join(self.chunks)
@@ -183,9 +184,16 @@ def test_build_provider_reads_key_without_llm() -> None:
 
 
 async def test_write_boot_ready_emits_ready_frame_via_writer() -> None:
-    """``_write_boot_ready`` writes READY_FRAME through the asyncio writer + drains."""
+    """``_write_boot_ready`` writes READY_FRAME through the asyncio writer + drains.
+
+    The ``drain()`` assertion is load-bearing: draining is part of the boot-liveness
+    contract (the host must SEE the ready frame, not have it sit in the writer's buffer),
+    so a no-op fake would pass even if the readiness flush were removed. Counting the
+    call pins that ``_write_boot_ready`` actually flushes exactly once.
+    """
     from alfred.security.quarantine_child._handshake import READY_FRAME
 
-    writer = _FakeWriter()  # collects written chunks in .chunks
+    writer = _FakeWriter()  # collects written chunks in .chunks + counts drain() calls
     await quarantine_child._write_boot_ready(writer)
     assert b"".join(writer.chunks) == READY_FRAME
+    assert writer.drain_calls == 1
