@@ -2,8 +2,8 @@
 
 - **Issue**: [#443](https://github.com/alfred-os/AlfredOS/issues/443)
 - **Status**: DESIGN COMPLETE — **all three open decisions resolved 2026-07-17**
-  (below). **PR1 MERGED** 2026-07-17 (PR #456); **PR2 implemented on branch,
-  not yet opened as a PR** — see §10.
+  (below). **PR1 MERGED** 2026-07-17 (PR #456); **PR2 implemented; pending
+  merge** — see §10.
 - **Date**: 2026-07-16 (rev 2: 2026-07-17; rev 3: 2026-07-17)
 - **Amends**: ADR-0051 (four corrections — §8)
 - **Pre-gates**: #340 PR2b (maintainer decision, 2026-07-16, recorded on #443)
@@ -554,8 +554,7 @@ got wrong"):
   as prudence, not as the CLAUDE.md mandate rev 2 claimed.
 
 **PR2 — the two-frame boot handshake (#443 proper). IMPLEMENTED on branch
-`fix/443-pr2-two-frame-boot-handshake`; not yet opened as a pull request, not
-yet merged.** §5 + §6.1's probe hello + the §8 ADR amendments + corpus
+`fix/443-pr2-two-frame-boot-handshake`; pending merge.** §5 + §6.1's probe hello + the §8 ADR amendments + corpus
 **021**-024 (021 renumbers down from PR1, where its threat is not yet
 reachable). The child protocol change is **accepted** — §0 decision 2. PR2 is
 where core-001 becomes live, which is why PR1 lands first.

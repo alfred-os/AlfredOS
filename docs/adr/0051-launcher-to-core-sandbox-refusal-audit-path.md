@@ -500,4 +500,7 @@ the launcher never exec'd, so a live, compromised child could deliberately
 trigger EPIPE (e.g. by closing its own inherited read end early) and forge
 a row exactly as §8.3's handshake was built to prevent. This is recorded as
 an accepted residual — option **(C)**, a dedicated launcher-only fd, or a
-conscious accept — not deferred to #444.
+conscious accept — not deferred to #444, and now **tracked as a release
+follow-up in [#459](https://github.com/alfred-os/AlfredOS/issues/459)** so the
+consciously-accepted scope of #443's guarantee (handshake-observable refusals
+only) is auditable rather than prose-only.
