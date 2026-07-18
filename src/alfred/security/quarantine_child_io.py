@@ -145,6 +145,13 @@ _BROKERED_PROBE_MODULE = "alfred.security.quarantine_child._brokered_probe"
 # is set]). Only the real child or the docker probe may be spawned.
 _ALLOWED_CHILD_MODULES: frozenset[str] = frozenset({_CHILD_MODULE, _BROKERED_PROBE_MODULE})
 
+# Modules whose child emits a `ready` frame after the `hello` (the real quarantine
+# child builds a provider + asyncio streams, then signals liveness). The diagnostic
+# probe is DELIBERATELY excluded: it is parent-speaks-first on fd 4, so a second
+# handshake read would deadlock (spec §6.1). The `hello` read is UNCONDITIONAL for
+# every allowed module, so every returned instance has proven exec.
+_MODULES_EMITTING_READY: frozenset[str] = frozenset({_CHILD_MODULE})
+
 # 4-byte big-endian length prefix — peer to the child loop's framing.
 _LENGTH_HEADER_BYTES = 4
 
@@ -575,8 +582,13 @@ class _SubprocessChildIO:
             # False) or any stdout byte -- full/partial header, or the aclose teardown path
             # -- is CHILD-authored: its stderr must NOT become an attributed supervisor
             # audit row. Residual: a child that execs, writes zero stdout, then dies at a
-            # clean EOF emitting a forged row is indistinguishable here and defers to the
-            # boot-time probe (ADR-0051 option A, #443) -- far narrower than "any crash".
+            # clean EOF emitting a forged row is indistinguishable HERE -- but the #443
+            # two-frame boot handshake (``_await_boot_handshake``, read inside
+            # ``spawn_quarantine_child_io``) now forces a real child to emit an unsolicited
+            # ``hello`` at boot BEFORE it could forge such a row, so a genuine exec'd child
+            # always sets ``_child_wrote_stdout`` first and this gate only ever fires on a
+            # true pre-exec launcher EOF. The one surviving sliver is the §8.4 EPIPE race
+            # (a child killed after exec but before its hello flush) -- far narrower still.
             if refusal_candidate and not self._child_wrote_stdout:
                 await self._record_launcher_refusals(raw)
             truncated = len(raw) > _STDERR_LOG_CAP_BYTES
@@ -738,6 +750,38 @@ def _lift_above_targets(
     return fd, moved
 
 
+async def _await_boot_handshake(child_io: _SubprocessChildIO, *, child_module: str) -> None:
+    """Read the child's boot frames INSIDE the spawn; refuse boot if any is missing (#443).
+
+    Every allowed child emits an unsolicited ``hello`` frame before it builds its
+    provider — proof it exec'd (provenance; the read sets ``_child_wrote_stdout``). The
+    real quarantine child ADDITIONALLY emits a ``ready`` frame before its request loop —
+    proof it initialized and is serving (liveness). The diagnostic probe emits ONLY a
+    hello (``_MODULES_EMITTING_READY`` excludes it — a second read would deadlock, §6.1).
+    The hello read is UNCONDITIONAL, so every returned instance has proven exec — the
+    invariant the launcher-vs-child audit gate rests on.
+
+    A missing frame surfaces as a ``read_frame`` failure -> ``QuarantineChildSpawnError``,
+    which the boot caller maps to ``_refuse_boot`` (fail-closed, hard rule #7).
+    ``read_frame``'s own failure arm records the launcher-authored ``sandbox_refused``
+    row + dispatches the ``fail_closed`` T0 hookpoint iff the failure is a zero-byte EOF
+    with no prior stdout byte (the sec-001 gate) — so a GENUINE launcher refusal now
+    persists its row + fires the hookpoint HERE, at boot, instead of at first extraction
+    (the dispatch PR1 made boot-declarable). On any handshake failure the half-spawned
+    child is torn down (``aclose``: terminate+reap, close the control-parent) before the
+    error propagates; the stderr drain already ran inside ``read_frame``, so ``aclose``'s
+    own drain is an idempotent no-op.
+    """
+    try:
+        await child_io.read_frame()  # hello: provenance — sets _child_wrote_stdout
+        if child_module in _MODULES_EMITTING_READY:
+            await child_io.read_frame()  # ready: liveness
+    except QuarantineChildSpawnError:
+        _log.error("security.quarantine_child.boot_handshake_failed", child_module=child_module)
+        await child_io.aclose()
+        raise
+
+
 async def spawn_quarantine_child_io(
     *,
     provider_key: str,
@@ -803,6 +847,13 @@ async def spawn_quarantine_child_io(
     spawn failure REFUSES the spawn: the half-spawned child is terminated, any
     owned control-parent socket is closed (no fd leak on the refusal path), and a
     loud :class:`QuarantineChildSpawnError` is raised (CLAUDE.md hard rule #7).
+
+    A launcher refusal (the launcher exits pre-``exec``, so the child produces no
+    ``hello``) now refuses the spawn HERE via the boot handshake
+    (:func:`_await_boot_handshake`) — the first ``read_frame`` hits a zero-byte EOF,
+    records the launcher-authored ``sandbox_refused`` row, and raises
+    :class:`QuarantineChildSpawnError` — rather than returning a corpse the caller only
+    discovers dead at first extraction (#443).
     """
     if child_module not in _ALLOWED_CHILD_MODULES:
         raise QuarantineChildSpawnError(t("security.quarantine_child.child_module_not_allowed"))
@@ -920,12 +971,18 @@ async def spawn_quarantine_child_io(
             t("security.quarantine_child.provider_key_delivery_failed")
         ) from exc
 
-    return _SubprocessChildIO(
+    child_io = _SubprocessChildIO(
         process,
         control_parent=control_parent,
         egress_config=egress_config,
         refusal_recorder=refusal_recorder,
     )
+    # Read the two-frame boot handshake INSIDE the spawn (#443): a launcher refusal now
+    # refuses boot with an attributed audit row here, instead of surfacing as a corpse at
+    # first extraction. The recorder was threaded into `child_io` above so the read_frame
+    # failure arm can persist the row + fire the fail_closed T0 hookpoint at boot.
+    await _await_boot_handshake(child_io, child_module=child_module)
+    return child_io
 
 
 __all__ = [
