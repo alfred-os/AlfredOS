@@ -323,7 +323,11 @@ async def _build_comms_inbound_extractor(
 
     fd-3-clobber discipline: the provider key is resolved SYNCHRONOUSLY before the
     spawn, so the single ``await spawn_quarantine_child_io(...)`` is the only
-    await in this builder — nothing interleaves in its dup2 window.
+    await that runs before or during the spawn's dup2 window — nothing
+    interleaves in it. (Two further awaits exist in this builder, but only in the
+    ``except`` cleanup arm below, and only AFTER the spawn has returned — by which
+    point ``spawn_quarantine_child_io``'s own ``finally`` has already closed that
+    window, so they do not reopen it.)
     """
     from alfred.security.quarantine_child_io import spawn_quarantine_child_io
     from alfred.security.quarantine_transport import QuarantineStdioTransport
@@ -331,7 +335,7 @@ async def _build_comms_inbound_extractor(
 
     provider_key = _resolve_provider_key(secret_broker)
     # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await
-    # to the fd-3-clobber window; the single await below is still the only one.
+    # to the fd-3-clobber window; the await below remains the only one that touches it.
     refusal_recorder = SandboxRefusalAuditor(audit_writer=audit_writer)
     # SINGLE await — the spawn owns the process-wide fd-3 clobber window and must
     # not race any other coroutine. Do not interleave awaits here.

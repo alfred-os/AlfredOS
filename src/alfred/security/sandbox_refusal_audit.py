@@ -9,11 +9,18 @@ key-set) and dispatches the registered ``fail_closed`` T0 hookpoint, mirroring
 ``alfred.hooks`` is imported lazily (function-local), mirroring ``_boot_audit.py``
 and respecting the known ``hooks -> security.tiers`` back-import.
 
-The quarantine-child spawn is the first adopter (dispatch happens at first
-extraction, post-``Supervisor``, so the hookpoint is registered — ADR-0051); the
-comms-adapter, gateway-adapter, and foreground-TUI producers adopt this same
-auditor in the #433 follow-ups. ``record`` raising is the caller's contract to
-handle (the quarantine drain guards it so it never masks the refusal).
+The quarantine-child spawn is the first adopter. As of the #443 PR2 two-frame
+boot handshake, dispatch now happens AT BOOT, inside the spawn handshake
+(``_await_boot_handshake``, read from inside ``spawn_quarantine_child_io``) —
+strictly before ``Supervisor`` is constructed. That is safe only because PR1
+(``alfred.supervisor.hookpoints.declare_hookpoints``) made the supervisor's
+hookpoints boot-declarable, registered at the ``hooks/boot.py`` seam ahead of
+the spawn; see ADR-0051's "Amendment (#443 PR2 — boot-time handshake)" section
+for the full history (this docstring previously asserted the dispatch happened
+post-``Supervisor``, which PR2 inverted). The comms-adapter, gateway-adapter,
+and foreground-TUI producers adopt this same auditor in the #433 follow-ups.
+``record`` raising is the caller's contract to handle (the quarantine drain
+guards it so it never masks the refusal).
 """
 
 from __future__ import annotations
