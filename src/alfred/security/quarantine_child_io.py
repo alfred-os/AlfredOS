@@ -791,6 +791,37 @@ async def _await_boot_handshake(child_io: _SubprocessChildIO, *, child_module: s
         raise
 
 
+async def _record_fast_launcher_refusal(child_io: _SubprocessChildIO) -> None:
+    """Drain + record a GENUINE fast launcher refusal on the fd-3 EPIPE arm (#443 §8.4).
+
+    A *fast* launcher refusal exits the launcher PRE-``exec`` — closing its inherited fd-3
+    read end before the parent's SYNCHRONOUS ``writev`` — so ``deliver_provider_key_via_fd3``
+    raises ``ProviderKeyDeliveryError`` (EPIPE) before this instance is normally constructed,
+    and the launcher's ``sandbox_refused`` row sits unread in ``process.stderr``. Drive ONE
+    ``read_frame`` so the SAME sec-001 gate the handshake uses records that row: a genuine
+    refusal presents as a zero-byte stdout EOF (``refusal_candidate`` and
+    ``not _child_wrote_stdout``), its stderr is launcher-authored, and the drain persists the
+    attributed row + fires the ``fail_closed`` T0 hookpoint. When the launcher's stderr carries
+    no parseable ``sandbox_refused`` row (a genuine non-refusal delivery failure — #444's
+    domain), the parser yields nothing and this adds no row.
+
+    This does NOT reopen the forgery bypass §8.3's handshake closes: the drain is GATED on
+    zero-stdout exactly as the runtime path is, and a post-``exec`` child cannot reach this arm
+    without out-racing the synchronous ``writev`` (``exec`` of bwrap→runuser→python takes
+    milliseconds; the writev is microseconds after ``fork``), so EPIPE ⟹ a launcher that
+    exited before ``exec``. The residual is therefore identical to §11.5's accepted pre-hello
+    window (an exec'd child that writes zero stdout then forges), not a new hole. Best-effort:
+    the caller re-raises the delivery-failure ``QuarantineChildSpawnError`` regardless — this
+    only recovers the attributed row a fast refusal would otherwise lose.
+    """
+    try:
+        await child_io.read_frame()  # zero-stdout EOF -> sec-001 gate records the launcher row
+    except QuarantineChildSpawnError:
+        pass  # expected: the launcher refused; the row (if any) was recorded by the drain
+    finally:
+        await child_io.aclose()
+
+
 async def spawn_quarantine_child_io(
     *,
     provider_key: str,
@@ -972,10 +1003,20 @@ async def spawn_quarantine_child_io(
         deliver_provider_key_via_fd3(write_fd=write_fd, key=provider_key)
     except ProviderKeyDeliveryError as exc:
         _log.error("security.quarantine_child.provider_key_delivery_failed", reason=exc.reason)
-        await _terminate_and_reap(process)
-        if control_parent is not None:
-            with contextlib.suppress(OSError):
-                control_parent.close()
+        # §8.4 CLOSE: a fast launcher refusal EPIPEs the key writev before the child exists,
+        # so its ``sandbox_refused`` row would otherwise be lost. Route this arm through the
+        # SAME sec-001-gated drain the handshake uses so a genuine (zero-stdout) fast refusal
+        # persists its attributed row + fires the T0 hookpoint. ``_record_fast_launcher_refusal``
+        # owns the IO — its ``aclose`` terminates+reaps the process and closes the control-parent
+        # (replacing the old ``_terminate_and_reap`` + ``control_parent.close`` here).
+        await _record_fast_launcher_refusal(
+            _SubprocessChildIO(
+                process,
+                control_parent=control_parent,
+                egress_config=egress_config,
+                refusal_recorder=refusal_recorder,
+            )
+        )
         raise QuarantineChildSpawnError(
             t("security.quarantine_child.provider_key_delivery_failed")
         ) from exc

@@ -1,0 +1,52 @@
+id: sbx-2026-025
+category: sandbox_escape
+threat: >-
+  A FAST launcher sandbox refusal — one where the launcher exits pre-exec and
+  closes its inherited fd-3 read end before the provider-key writev, so
+  deliver_provider_key_via_fd3 raises ProviderKeyDeliveryError (EPIPE) before the
+  quarantine child is ever constructed — must still persist exactly one attributed
+  supervisor.plugin.sandbox_refused row (not merely fail-closed with no trace); and
+  a post-exec child that wrote stdout must NOT be able to forge such a row on that
+  same EPIPE arm.
+ingestion_path: launcher_refusal_stderr
+payload:
+  attack: fast_launcher_refusal_epipe_audit_gap
+  launcher_refusal_row: >-
+    {"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm","reason":"plugin_id_charset_invalid","environment":"development","host_os":"linux"}
+  pinned_reason: plugin_id_charset_invalid
+  # A child that wrote a partial header before triggering EPIPE: its stderr is
+  # child-authored, so the zero-stdout gate must discard it (0 rows).
+  forged_refusal_row: >-
+    {"event":"supervisor.plugin.sandbox_refused","plugin_id":"attacker.example","reason":"sandbox_block_missing","environment":"production","host_os":"linux"}
+expected_outcome: refused
+provenance: >-
+  #443 §8.4 CLOSE (ADR-0051 §8.4). Earlier revisions treated the fast-refusal EPIPE
+  arm as an accepted residual ("the barrier cannot close it; needs option (C)"),
+  reasoning that draining the launcher's stderr on that arm would reopen the forgery
+  bypass the two-frame handshake closes. That reasoning assumed a NAIVE, ungated
+  drain. The shipped fix (quarantine_child_io._record_fast_launcher_refusal) routes
+  the ProviderKeyDeliveryError arm through the SAME sec-001 gate the runtime handshake
+  uses: it constructs the _SubprocessChildIO and drives one read_frame, whose
+  zero-byte-stdout EOF (refusal_candidate and not self._child_wrote_stdout) records the
+  launcher-authored sandbox_refused row and fires the fail_closed T0 hookpoint before
+  the delivery-failure QuarantineChildSpawnError re-raises. The gate is safe — safer
+  than on the slow arm: a post-exec child cannot reach the EPIPE arm at all without
+  out-racing the parent's SYNCHRONOUS writev (exec of bwrap->runuser->python takes
+  milliseconds; the writev is microseconds after fork, with only the fd-restore finally
+  between them), so EPIPE implies the launcher (not a child) closed the read end = a
+  pre-exec refusal with launcher-authored stderr. As defence-in-depth the zero-stdout
+  gate additionally discards the drained stderr the instant any child writes a stdout
+  byte, so the only surviving sliver is identical to spec §11.5's already-accepted
+  pre-hello window (an exec'd child that writes zero stdout then forges), NOT a new
+  hole. #444 stays distinct: it writes provider_key_delivery_failed for a genuine
+  NON-refusal delivery failure, where the launcher's stderr carries no sandbox_refused
+  row. Asserted by test_sbx_2026_025_fast_launcher_refusal_epipe_records_attributed_row,
+  which drives spawn_quarantine_child_io through the faked EPIPE arm and checks: a
+  zero-stdout launcher refusal records exactly one row with the pinned reason; a
+  child that wrote a partial header records ZERO (forgery gated). Pairs with
+  sbx-2026-021 (the slow/handshake arm) — together they cover both refusal arms.
+references:
+  - "src/alfred/security/quarantine_child_io.py (_record_fast_launcher_refusal; the ProviderKeyDeliveryError arm)"
+  - "src/alfred/supervisor/fd3_key_delivery.py (deliver_provider_key_via_fd3: EPIPE -> ProviderKeyDeliveryError)"
+  - "src/alfred/audit/launcher_refusal.py (parse_launcher_refusal_rows)"
+  - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md (§8.4)"

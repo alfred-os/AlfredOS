@@ -12,13 +12,19 @@ real bwrap subprocess.
 
 from __future__ import annotations
 
+import contextlib
+import os
+
 import pytest
 
+import alfred.security.quarantine_child_io as child_io_mod
 from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
     _SubprocessChildIO,
+    spawn_quarantine_child_io,
 )
+from alfred.supervisor.fd3_key_delivery import ProviderKeyDeliveryError
 
 _REFUSAL_ROW = (
     b'{"event":"supervisor.plugin.sandbox_refused","plugin_id":"alfred.quarantined-llm",'
@@ -61,6 +67,69 @@ async def test_default_none_records_nothing() -> None:
     with pytest.raises(QuarantineChildSpawnError):
         await io.read_frame()
     # no crash, unchanged behavior
+
+
+async def _drive_epipe_spawn(fake, recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive ``spawn_quarantine_child_io`` through the fd-3 EPIPE (fast-refusal) arm.
+
+    Fakes ``Popen`` -> ``fake``, ``deliver_provider_key_via_fd3`` -> raise
+    ``ProviderKeyDeliveryError`` (the fast refusal), ``os.dup2`` -> record-only; tracks the
+    real ``os.pipe`` fds so the write-end the faked delivery never closes does not leak.
+    Asserts the spawn refuses fail-closed (``QuarantineChildSpawnError``).
+    """
+    opened: list[int] = []
+    real_pipe = child_io_mod.os.pipe
+
+    def _tracking_pipe() -> tuple[int, int]:
+        r, w = real_pipe()
+        opened.extend((r, w))
+        return r, w
+
+    def _boom_deliver(*, write_fd: int, key: str) -> None:
+        raise ProviderKeyDeliveryError()
+
+    monkeypatch.setattr(child_io_mod.subprocess, "Popen", lambda *a, **k: fake)
+    monkeypatch.setattr(child_io_mod, "deliver_provider_key_via_fd3", _boom_deliver)
+    monkeypatch.setattr(child_io_mod.os, "dup2", lambda s, d, *a, **k: d)
+    monkeypatch.setattr(child_io_mod.os, "pipe", _tracking_pipe)
+    try:
+        with pytest.raises(QuarantineChildSpawnError):
+            await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+    finally:
+        for fd in opened:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+async def test_fast_launcher_refusal_epipe_records_attributed_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fast (EPIPE) launcher refusal now persists its attributed row (#443 §8.4 CLOSE).
+
+    The launcher exits PRE-``exec``, closing its inherited fd-3 read end before the parent's
+    synchronous ``writev`` -> ``ProviderKeyDeliveryError`` (EPIPE) before the child exists.
+    The gated drain on that arm records the launcher-authored ``sandbox_refused`` row (zero
+    stdout) instead of losing it, and boot still refuses fail-closed.
+    """
+    recorder = _CapturingRecorder()
+    await _drive_epipe_spawn(_exited_fake(_REFUSAL_ROW), recorder, monkeypatch)
+    assert len(recorder.rows) == 1
+    assert recorder.rows[0].reason == "sandbox_block_missing"
+
+
+async def test_fast_refusal_arm_child_that_wrote_stdout_is_not_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the EPIPE arm, ANY stdout byte means a child exec'd -> its stderr is NOT attributed.
+
+    Closes the same forgery bypass the handshake gate closes: a (pathological) exec'd child
+    that wrote a partial header then triggered EPIPE cannot forge a ``sandbox_refused`` row —
+    ``_child_wrote_stdout`` is set, so the gate discards the drained stderr.
+    """
+    recorder = _CapturingRecorder()
+    fake = _exited_fake_stdout(b"\x00\x00", _REFUSAL_ROW)  # partial header -> child wrote stdout
+    await _drive_epipe_spawn(fake, recorder, monkeypatch)
+    assert recorder.rows == []
 
 
 async def test_record_failure_does_not_mask_refusal() -> None:
