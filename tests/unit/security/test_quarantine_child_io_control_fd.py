@@ -52,12 +52,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 import alfred.security.quarantine_child_io as qcio
+from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
     _SubprocessChildIO,
     spawn_quarantine_child_io,
 )
 from alfred.supervisor.fd3_key_delivery import ProviderKeyDeliveryError
+from tests.unit.security.test_quarantine_child_io import _FakeStdout
 
 
 class _Cfg:
@@ -72,7 +74,11 @@ class _FakePopen:
     def __init__(self, argv: list[str], **kwargs: Any) -> None:
         self.argv = argv
         self.pass_fds = tuple(kwargs.get("pass_fds", ()))
-        self.stdin = self.stdout = self.stderr = None
+        self.stdin = self.stderr = None
+        # A real child emits hello+ready at boot; the host handshake reads them inside
+        # the spawn (#443). The probe reads hello only, so an extra ready sits unread —
+        # harmless. Both control_fd spawn tests therefore work with the same seed.
+        self.stdout = _FakeStdout([HELLO_FRAME, READY_FRAME])
         self.returncode: int | None = None
 
     def poll(self) -> int | None:
