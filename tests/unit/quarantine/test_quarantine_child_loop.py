@@ -180,3 +180,12 @@ def test_build_provider_reads_key_without_llm() -> None:
     assert provider is not None
     # The key never lands on the sentinel's public surface.
     assert "sk-secret" not in repr(provider)
+
+
+async def test_write_boot_ready_emits_ready_frame_via_writer() -> None:
+    """``_write_boot_ready`` writes READY_FRAME through the asyncio writer + drains."""
+    from alfred.security.quarantine_child._handshake import READY_FRAME
+
+    writer = _FakeWriter()  # collects written chunks in .chunks
+    await quarantine_child._write_boot_ready(writer)
+    assert b"".join(writer.chunks) == READY_FRAME
