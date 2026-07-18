@@ -30,6 +30,7 @@ import struct
 import sys
 
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
+from alfred.security.quarantine_child._handshake import emit_hello
 
 _CONTROL_FD = 4
 # A routable public IP — a fresh connect MUST fail ENETUNREACH in the empty netns.
@@ -52,8 +53,9 @@ def _write_verdict(verdict: dict[str, object]) -> None:  # pragma: no cover - su
     """Write ONE length-prefixed JSON verdict frame to stdout (fd 1).
 
     Peer to the core-side frame reader the docker test drives. Stdout stays
-    frame-only: no stray writes happen between verdict frames, and the verdict is
-    the only thing this process ever puts on fd 1.
+    frame-only: no stray writes happen between verdict frames, and besides the
+    single boot ``hello`` frame emitted before the recv loop, the verdict is
+    the only thing this process writes to fd 1.
     """
     body = json.dumps(verdict).encode("utf-8")
     sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
@@ -104,6 +106,7 @@ def main() -> None:  # pragma: no cover - subprocess entry (docker-only)
     ``__main__.py`` sec-007 fd-3 contract).
     """
     control_end = socket.socket(fileno=_CONTROL_FD, family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    emit_hello()  # #443 §6.1: unblock the host handshake before the parent-speaks-first recv loop
     while True:
         try:
             verdict = _probe_once(control_end)
