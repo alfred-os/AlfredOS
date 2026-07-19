@@ -163,7 +163,7 @@ async def handle_extract(
     handle_id: str,
     schema_json: str,
     schema_version: int,
-    provider: Any,
+    source: Any,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Dispatch a structured extraction against the cached T3 content.
@@ -216,7 +216,7 @@ async def handle_extract(
         content=content,
         schema_json=schema_json,
         schema_version=schema_version,
-        provider=provider,
+        source=source,
         max_tokens=max_tokens,
     )
 

@@ -110,10 +110,12 @@ _COMPLETION_DEFAULT_MAX_TOKENS: int = int(CompletionRequest.model_fields["max_to
 # quarantine_child_io._READ_FRAME_TIMEOUT_S) UNDER the orchestrator
 # action_deadline (30s) — monotone per P1e (#340); the prior 30s was EQUAL to
 # action_deadline (the "well under" claim was wrong, surviving only because the
-# echo child replies instantly). NB the check is loop-top only, so it is not a
-# hard ceiling by itself — PR2b-golive wraps each provider.complete() in
-# asyncio.wait_for(remaining_budget) to make it one, and injects a child SDK read
-# timeout <= this budget.
+# echo child replies instantly). The loop-top check alone is NOT a hard ceiling
+# (a single provider.complete() could outrun it), so dispatch_extraction wraps
+# each per-attempt call in asyncio.wait_for(remaining_budget) — the REMAINING
+# budget, so N attempts share one wall-clock ceiling, not N of them (#340 PR2b
+# Task 5). The 8s socket-level SDK read (brokered_egress._CHILD_SDK_READ_TIMEOUT,
+# Task 3) is the inner ceiling <= this budget.
 _MAX_TOTAL_WALL_CLOCK_SECONDS: float = 20.0
 
 # Exponential back-off base. Sleep between attempt N and N+1 is
@@ -177,12 +179,30 @@ async def dispatch_extraction(
     content: bytes,
     schema_json: str,
     schema_version: int,  # noqa: ARG001 — accepted for ExtractionResult parity (audit row)
-    provider: Any,
+    source: Any,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Dispatch a structured extraction via the quarantined LLM provider.
+    """Dispatch a structured extraction via a per-attempt provider ``source``.
 
-    Selects the dispatch path from the provider's capability set
+    ``source`` is the provider-binding seam (``capabilities()`` +
+    ``bind()``, the :class:`BrokeredProviderSource` surface from #340
+    PR2b Task 4). Per extraction the host brokers ONE fresh gateway socket
+    per retry attempt, and a bound provider cannot re-dial its single
+    socket, so each attempt binds a FRESH provider off the source
+    (``async with source.bind() as provider``). Capabilities are picked
+    ONCE before the loop — they are a model-invariant property of the
+    source, not the socket.
+
+    ``source`` is typed ``Any`` (not the ``ProviderSource`` Protocol) on
+    purpose: that Protocol lives in ``brokered_egress.py``, whose module
+    scope imports httpx/ssl/socket. Annotating against it here — even only
+    for the type — would drag the egress-capable import closure onto this
+    module's graph and trip the child-import-closure gate. This module
+    stays egress-free; the real network client is built inside
+    ``source.bind()``, never here (same rationale that typed the pre-seam
+    ``provider`` as ``Any``).
+
+    Selects the dispatch path from the source's capability set
     (fork b, #340):
 
     * ``NATIVE_CONSTRAINED_GENERATION`` → ``native_constrained`` mode
@@ -191,14 +211,17 @@ async def dispatch_extraction(
       the user prompt, parsed + validated host-side).
 
     Up to ``EXTRACTION_MAX_RETRIES + 1`` attempts; on exhaustion returns
-    ``{"kind": "typed_refusal", "reason": "cannot_extract"}``.
+    ``{"kind": "typed_refusal", "reason": "cannot_extract", ...}``.
 
     Between attempts the loop sleeps ``_BACKOFF_BASE_SECONDS * (2 ** attempt)``
     seconds (perf-1 fix: the prior loop fired back-to-back). Total
     wall-clock per extraction is capped at
-    :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`; exceeding the cap short-circuits
-    to ``cannot_extract`` so the dispatcher does not block forever on a
-    thrashing provider.
+    :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`: the loop-top check short-circuits
+    a breached budget, and each per-attempt call is wrapped in
+    ``asyncio.wait_for(remaining_budget)`` so a single slow call cannot
+    outrun the cap. A wait_for ``TimeoutError`` is TERMINAL
+    ``cannot_extract`` — not retry-eligible (a call that blew the budget
+    will not recover inside a shrinking one; HARD #7 forbids a silent hang).
 
     :class:`ValidationError`, :class:`json.JSONDecodeError`, and
     :class:`ProviderMalformedToolArgumentsError` (an empty/malformed
@@ -210,6 +233,15 @@ async def dispatch_extraction(
     exception propagates so the supervisor's audit log captures
     unexpected failures with their real shape (err-009).
 
+    ``cost_usd`` (P1c, #340 PR2b Task 5) accrues across EVERY provider
+    call that returns a ``(text, cost)`` pair — a call whose response the
+    host then rejects in validation was still paid for, so a 3-attempt
+    thrash is 3 paid calls. The summed cost rides BOTH the ``extracted``
+    and every ``typed_refusal`` return. It is a structured, non-T3 field
+    (never T3-derived) — the privileged-side turn-record consumer that
+    joins it with the #338 privileged cost is out of scope here
+    (child-boundary-out; ADR-0052 names the owner / Task 12).
+
     ``schema_version`` is accepted-and-ignored here because it travels
     on the audit row via the orchestrator-side caller
     (:class:`QuarantinedExtractor`); the dispatcher itself doesn't act
@@ -217,7 +249,10 @@ async def dispatch_extraction(
     on the orchestrator side gates the version invariant before any
     subprocess call lands).
     """
-    caps = provider.capabilities()
+    # Capabilities are model-invariant — read once off the source, not per
+    # socket. ``source`` is duck-typed Any (egress-free rationale in the
+    # docstring above), so ``.capabilities()`` / ``.bind()`` resolve at runtime.
+    caps = source.capabilities()
     if ProviderCapability.NATIVE_CONSTRAINED_GENERATION in caps:
         extraction_mode = "native_constrained"
     else:
@@ -244,32 +279,61 @@ async def dispatch_extraction(
     parsed_schema = _cached_parsed_schema(schema_json)
     deadline_monotonic = time.monotonic() + _MAX_TOTAL_WALL_CLOCK_SECONDS
     retry_category: ValidatorErrorCategory | None = None
+    # cost_usd sums across every paid attempt and rides every return (P1c).
+    cost_total = 0.0
     for attempt in range(EXTRACTION_MAX_RETRIES + 1):
-        if time.monotonic() >= deadline_monotonic:
+        remaining_budget = deadline_monotonic - time.monotonic()
+        if remaining_budget <= 0:
             # Per-extraction wall-clock budget breach (perf-1 fix). Short
             # circuit to cannot_extract so a thrashing provider does not
             # block the orchestrator's action_deadline_seconds.
-            return {"kind": "typed_refusal", "reason": "cannot_extract"}
+            return {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": cost_total}
         prompt = _build_extraction_prompt(content_text, schema_json, retry_category)
         try:
-            raw_response = await _call_provider(
-                prompt=prompt,
-                schema=parsed_schema,
-                provider=provider,
-                extraction_mode=extraction_mode,
-                max_tokens=max_tokens,
-            )
+            # Bind a FRESH provider off the source for THIS attempt: the host
+            # brokers one gateway socket per attempt and a bound provider
+            # cannot re-dial its single socket (RedialError). The call is
+            # wrapped in asyncio.wait_for(remaining_budget) so
+            # _MAX_TOTAL_WALL_CLOCK_SECONDS is a HARD per-call ceiling via the
+            # REMAINING budget — the loop-top check alone is not one. The 8s
+            # socket-level SDK read (Task 3) is the inner ceiling.
+            async with source.bind() as provider:
+                raw_response, call_cost = await asyncio.wait_for(
+                    _call_provider(
+                        prompt=prompt,
+                        schema=parsed_schema,
+                        provider=provider,
+                        extraction_mode=extraction_mode,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=remaining_budget,
+                )
+            # The call returned, so it was paid for — count it before
+            # validation, which may still reject the response and retry.
+            cost_total += call_cost
             validated = _validate_response(raw_response, schema_json)
             return {
                 "kind": "extracted",
                 "data": validated,
                 "extraction_mode": extraction_mode,
+                "cost_usd": cost_total,
             }
+        except TimeoutError:
+            # Per-call wall-clock ceiling breach (spec §4 P1e / §19-A3):
+            # TERMINAL, NOT retry-eligible. A provider slow enough to blow the
+            # remaining budget will not recover inside a shrinking one, and the
+            # orchestrator's action_deadline is closing. HARD #7: a loud
+            # closed-vocab refusal, never a silent hang.
+            return {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": cost_total}
         except ProviderUnavailableError:
             # Terminal (NOT retry-eligible): a provider outage, not a
             # model-output failure, so audit consumers can tell them
             # apart (err-002).
-            return {"kind": "typed_refusal", "reason": "provider_unavailable"}
+            return {
+                "kind": "typed_refusal",
+                "reason": "provider_unavailable",
+                "cost_usd": cost_total,
+            }
         except (ValidationError, json.JSONDecodeError, ProviderMalformedToolArgumentsError) as exc:
             # ONE try wraps BOTH the provider call and validation so an
             # empty/malformed forced-tool response
@@ -291,7 +355,7 @@ async def dispatch_extraction(
             await asyncio.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
     # Exhaustion is a closed-domain TypedRefusal, NOT an Extracted with
     # a malformed_output mode (spec §6.7 / prov-011).
-    return {"kind": "typed_refusal", "reason": "cannot_extract"}
+    return {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": cost_total}
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +399,7 @@ async def _call_provider(
     provider: Any,
     extraction_mode: str,
     max_tokens: int | None = None,
-) -> str:
+) -> tuple[str, float]:
     """Dispatch the provider call for ``extraction_mode`` via the #339 seam.
 
     Two shapes (fork b, #340):
@@ -354,8 +418,13 @@ async def _call_provider(
       embedded in the prompt and the response text is validated
       host-side.
 
-    Returns a JSON string in both branches so :func:`_validate_response`
-    has a uniform shape to work with.
+    Returns ``(json_text, cost_usd)`` in both branches: the JSON string so
+    :func:`_validate_response` has a uniform shape to work with, and the
+    response's ``cost_usd`` so the caller can sum spend across attempts
+    (P1c, #340). ``cost_usd`` is a structured, non-T3 field (never
+    T3-derived). NB the empty-``tool_calls`` guard below raises BEFORE it
+    can read a cost — a truncated forced-tool response is not summed (see
+    the caller's cost note); every path that RETURNS surfaces the cost.
 
     ``schema`` is the ALREADY-PARSED dict (FIX-A) — the caller parses it
     once via :func:`_cached_parsed_schema` outside the per-attempt retry
@@ -385,7 +454,7 @@ async def _call_provider(
             raise ProviderMalformedToolArgumentsError(
                 "quarantine extractor: forced tool returned no tool_call"
             )
-        return json.dumps(dict(response.tool_calls[0].arguments))
+        return json.dumps(dict(response.tool_calls[0].arguments)), response.cost_usd
     # prompt_embedded_fallback: bare completion, no tools advertised.
     # The schema is embedded in the prompt and the validator catches
     # malformed output on the host.
@@ -393,7 +462,7 @@ async def _call_provider(
         messages=[Message(role="user", content=prompt)], max_tokens=resolved_max_tokens
     )
     response = await provider.complete(request)
-    return str(response.content)
+    return str(response.content), response.cost_usd
 
 
 # ---------------------------------------------------------------------------
