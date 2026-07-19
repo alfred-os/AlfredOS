@@ -38,7 +38,7 @@
 
 **New files:**
 
-- `src/alfred/security/quarantine_child/brokered_egress.py` — the child-side per-call transport: `PassedFdBackend` (httpcore backend over a passed fd; `sock.settimeout(read)` — Task 3 R.2.6), `_PassedFdTransport` (httpx transport wrapping it, `follow_redirects=False`, injected timeout), `build_child_client` (→ `AnthropicProvider` with a public `aclose()`), `BrokeredProviderSource` (the §8 wrapper-provider: socket-free `capabilities()`, per-attempt `bind()` CM with the no-dial fd-close, `drain_leftovers()` reusing `recv_passed_fd`), `_ProviderFactory` (frozen key+model+budget). Egress-capable imports (`httpx`/`httpcore`/`anthropic`/`ssl`/`socket`) live at THIS module's scope — **allowlisted in the in-core guards by Task 3** (folded forward from Task 11 so the module lands green). NOT imported at `__main__.py` module scope (kept lazy so the closure gate stays green).
+- `src/alfred/security/quarantine_child/brokered_egress.py` — the child-side per-call transport: `PassedFdBackend` (httpcore backend over a passed fd; `sock.settimeout(read)` — Task 3 R.2.6), `_PassedFdTransport` (httpx transport wrapping it, `follow_redirects=False`, injected timeout), `build_child_client` (→ `AnthropicProvider` with a public `aclose()`), `BrokeredProviderSource` (the §8 wrapper-provider: socket-free `capabilities()`, per-attempt `bind()` CM with the no-dial fd-close, `drain_leftovers()` reusing `recv_passed_fd`), `_ProviderFactory` (frozen key+model+budget). Egress-capable imports (`httpx`/`httpcore`/`ssl`/`socket`) + the `AnthropicProvider` seam (NOT a direct `import anthropic`) live at THIS module's scope — the `httpx.AsyncClient` construction is allowlisted via **`_CONSTRUCT_ALLOWLIST` in Task 3** (folded forward from Task 11 so the module lands green). **No `_IMPORT_ALLOWLIST` entry** — the module uses the provider seam, not a direct SDK import, so an `_IMPORT_ALLOWLIST` entry would be a no-op pre-authorizing a future un-reviewed import (Task 3 review adjudication). NOT imported at `__main__.py` module scope (kept lazy so the closure gate stays green).
 - `docs/adr/0052-real-quarantine-child-golive.md` — the quarantine-half go-live ADR (sibling to ADR-0049; Task 12).
 - `tests/adversarial/prompt_injection/pi_2026_015_t3_steers_real_extractor.yaml` — the T3-steers-extraction release-blocking payload, driven **executably** through the real child (Task 13/14).
 - Unit tests co-located under `tests/unit/security/`, `tests/unit/egress/`, `tests/unit/gateway/`, `tests/unit/cli/`; the integration test extends `tests/integration/test_quarantine_fd_broker_real_spawn.py` (or a new `_real_extract` sibling).
@@ -254,9 +254,12 @@ EOF
 >    reconciled in Task 15). The gateway per-listener 22s handshake is **Task 16**.
 > 3. **Fold the Task-11 egress-gate allowlist edits into THIS task [R.3 / self-flagged cross-task
 >    risk].** `brokered_egress.py`'s `httpx` construction + `anthropic` import trip
->    `test_in_core_http_egress_guard` the moment the module exists. Add the `_IMPORT_ALLOWLIST` /
->    `_CONSTRUCT_ALLOWLIST` entries (Task 11's list) **here** so this task lands green; Task 11 then
->    keeps only the bwrap policy edit.
+>    `test_in_core_http_egress_guard` the moment the module exists. Add the **`_CONSTRUCT_ALLOWLIST`**
+>    entry (Task 11's list) **here** so this task lands green (the module constructs `httpx.AsyncClient`).
+>    Do **NOT** add an `_IMPORT_ALLOWLIST` entry — the module imports the `AnthropicProvider` seam, not
+>    `anthropic` directly, so an `_IMPORT_ALLOWLIST` entry would be a no-op that pre-authorizes a future
+>    un-reviewed import (Task 3 review adjudication — the egress ratchet stays tight). Task 11 then keeps
+>    only the bwrap policy edit.
 > 4. **Named 100% line+branch coverage gate on `brokered_egress.py` [R.2.3 / test-001].**
 > 5. **E2 no-redirects stays** (httpx `follow_redirects=False`).
 
@@ -320,8 +323,9 @@ Expected: FAIL (`ModuleNotFoundError: brokered_egress`).
 """Child-side per-call transport: the official Anthropic SDK over a bare TCP fd
 brokered by the core (#340 PR2b-golive, spike verdict M1).
 
-Egress-capable imports (httpx/httpcore/anthropic/ssl/socket) live at THIS module's
-scope — allowlisted in the in-core HTTP-egress + import guards (test_in_core_http_egress_guard).
+Egress-capable imports (httpx/httpcore/ssl/socket) + the AnthropicProvider seam live at THIS
+module's scope — the httpx.AsyncClient construction is allowlisted via _CONSTRUCT_ALLOWLIST
+(test_in_core_http_egress_guard); no _IMPORT_ALLOWLIST entry (seam, not a direct SDK import).
 This module is imported LAZILY from __main__.py's extract path, so the child-import
 closure gate (test_quarantine_child_import_closure) never sees it at __main__ module scope.
 
@@ -1569,20 +1573,21 @@ EOF
 ## Task 11: bwrap policy edit + egress-gate allowlist entries
 
 > **rev.2 fold — authoritative; supersedes conflicting text below (R.3 cross-task fold).** The
-> egress-gate allowlist edits (`_IMPORT_ALLOWLIST` / `_CONSTRUCT_ALLOWLIST` for `brokered_egress`)
-> **MOVE to Task 3** so that task lands green the moment the module exists. **This task keeps ONLY the
+> egress-gate allowlist edit (the load-bearing `_CONSTRUCT_ALLOWLIST` entry for `brokered_egress`; **no
+> `_IMPORT_ALLOWLIST` entry** — the module uses the `AnthropicProvider` seam, per Task 3's adjudication)
+> **MOVES to Task 3** so that task lands green the moment the module exists. **This task keeps ONLY the
 > bwrap policy edit** — `keep_fds=[3,4]`, the `/etc/ssl/certs` CA bind, `SSL_CERT_FILE`, net STAYS
 > (empty-netns unchanged). The ADR-0037 `/etc/ssl/certs` carve-out cross-ref is **Task 12**.
 
 **Files:**
 
 - Modify: `config/sandbox/quarantined-llm.linux.bwrap.policy` (`keep_fds:105`; add CA bind; update the NO-/etc note `:26-30`)
-- Modify: `tests/unit/egress/test_in_core_http_egress_guard.py` (`_IMPORT_ALLOWLIST:45`, `_CONSTRUCT_ALLOWLIST:53`)
+- (the `_CONSTRUCT_ALLOWLIST` entry in `tests/unit/egress/test_in_core_http_egress_guard.py` is added in **Task 3** — do NOT re-add here; NO `_IMPORT_ALLOWLIST` entry)
 - Test: the four egress-gate tests + a policy-parse test
 
 **Interfaces:**
 
-- Produces: the shipped policy now declares `keep_fds = [3, 4]` and binds the narrow `/etc/ssl/certs` CA subpath (never `/etc`); the in-core guards allowlist `brokered_egress.py` for the `anthropic` import + the `httpx.AsyncClient` construct. `net` stays unshared (the closed-egress anchor is untouched). `SSL_CERT_FILE` rides the spawn env (Task 2/8), not the policy.
+- Produces: the shipped policy now declares `keep_fds = [3, 4]` and binds the narrow `/etc/ssl/certs` CA subpath (never `/etc`). (The in-core-guard `_CONSTRUCT_ALLOWLIST` entry for `brokered_egress.py`'s `httpx.AsyncClient` construct is added in Task 3; no `_IMPORT_ALLOWLIST` entry — the module uses the provider seam.) `net` stays unshared (the closed-egress anchor is untouched). `SSL_CERT_FILE` rides the spawn env (Task 2/8), not the policy.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1621,25 +1626,14 @@ Expected: FAIL (`keep_fds == [3]`; no `/etc/ssl/certs`).
 - Leave `unshare = [..., "net"]` untouched.
 - `--ro-bind /lib64` stays in `ro_binds_try` (x86-only soft bind; #269 arm64 drops it — a known arch residual).
 
-- [ ] **Step 4: Allowlist `brokered_egress.py` in the in-core guards**
+- [ ] **Step 4: Verify the egress-gate allowlist (added in Task 3 — no edit here)**
 
-In `test_in_core_http_egress_guard.py`, add to `_IMPORT_ALLOWLIST`:
-
-```python
-    "security/quarantine_child/brokered_egress.py": (
-        "the sanctioned quarantine-child egress transport — wraps the Anthropic SDK over "
-        "the SCM_RIGHTS-brokered gateway socket (#340 PR2b-golive, ADR-0052)"
-    ),
-```
-
-and to `_CONSTRUCT_ALLOWLIST`:
-
-```python
-    "security/quarantine_child/brokered_egress.py": (
-        "builds the httpx.AsyncClient over the passed-fd transport for the brokered "
-        "quarantine egress path (#340 PR2b-golive, ADR-0052)"
-    ),
-```
+The `_CONSTRUCT_ALLOWLIST` entry for `security/quarantine_child/brokered_egress.py` (its
+`httpx.AsyncClient` construct) was added in **Task 3**. Do NOT re-add it, and do **NOT** add an
+`_IMPORT_ALLOWLIST` entry — the module imports the `AnthropicProvider` seam, not `anthropic` directly,
+so an `_IMPORT_ALLOWLIST` entry is a no-op that would pre-authorize a future un-reviewed import (Task 3
+review adjudication — keep the egress ratchet tight). Just confirm
+`uv run pytest tests/unit/egress/test_in_core_http_egress_guard.py` stays green after your policy edit.
 
 - [ ] **Step 5: Run ALL egress gates + the closed-egress anchor + raw-socket ratchet**
 
@@ -1701,7 +1695,7 @@ EOF
 
 - [ ] **Step 1: Write ADR-0052** mirroring ADR-0049's structure — header block + a `> Sign-off flag.` blockquote (this ships the raw-T3→real-provider quarantine half with alfred-security-engineer sign-off + the adversarial suite + 100% boundary coverage as release-blocking gates) + `## Context` / `## Decision` / `## Consequences` (Positive/Negative/Neutral) / `## Alternatives considered` / `## References`. Record: the §14 forks 2 (broker-N-up-front) + 3 (wrapper-provider) as decided; the per-call no-keepalive socket lifecycle; the `/etc/ssl/certs` CA carve-out; **the refuse-boot Option A decision (host pre-spawn primary + child last-line secondary, §20.2)**; **the `_PROVIDER_KEY_PLACEHOLDER` deletion (§20.3.1)**; the boot-ordering invariant (§20.3.2); the `ready`=liveness non-claim (§20.3.3); the turn-level cost-aggregation owner (P1c); the explicit non-claims (canned-stub validates no gateway allowlist/DNS/IP/proxy-auth; #358 residual; #269 arm64). Status: `Proposed (accepted on #340 PR2b-golive merge)`.
 
-- [ ] **Step 2: Amend ADR-0050** — flip the dormancy forward-gates it recorded as now-activated: `control_fd` dormant→on, the CA bind + `keep_fds=[3,4]` landed, the `_CONSTRUCT_ALLOWLIST`/`_IMPORT_ALLOWLIST` entries added, Decision 5 CONNECT-location = child-does-CONNECT (since #358 is still open). Add a short "PR2b-golive amendment (2026-07-19)" section pointing at ADR-0052.
+- [ ] **Step 2: Amend ADR-0050** — flip the dormancy forward-gates it recorded as now-activated: `control_fd` dormant→on, the CA bind + `keep_fds=[3,4]` landed, the `_CONSTRUCT_ALLOWLIST` entry added (no `_IMPORT_ALLOWLIST` entry — the module uses the provider seam, not a direct SDK import), Decision 5 CONNECT-location = child-does-CONNECT (since #358 is still open). Add a short "PR2b-golive amendment (2026-07-19)" section pointing at ADR-0052.
 
 - [ ] **Step 3: Amend ADR-0040 residual panel** — row (iv): the child's brokered CONNECT is now a live confused-deputy path until #358 (per-caller Proxy-Auth/mTLS) lands — state explicitly. Row (vii): the per-call signed core-side egress-audit row (ADR-0050 Decision 7 / Task 10) now writes durable rows for the broker path — mark it partially resolved for this path, full reconcile still deferred.
 
@@ -2020,7 +2014,7 @@ connect/timer start).
 
 **3. Type consistency:** `source` is the consistent name from Task 4 (`BrokeredProviderSource`) through Task 5 (`dispatch_extraction(source=)`) and Task 6 (`_run_mcp_server(source, ...)`, `handle_extract(source=)`). `EXTRACTION_MAX_RETRIES`/`BROKER_SOCKET_COUNT` consistent (T1→T5/T9). `broker_sockets(count)` consistent (T9 producer, T9 dispatch consumer, T10 audit). `_ProviderFactory.from_key`/`.build` consistent (T4→T6). `record_broker_success`/`record_broker_failure` consistent (T10 producer, T9 consumer).
 
-**Known cross-task risk — RESOLVED in rev.2:** Task 3's `brokered_egress.py` trips `test_in_core_http_egress_guard` (httpx construct + anthropic import) the moment the module exists. rev.2 **folds the `_IMPORT_ALLOWLIST`/`_CONSTRUCT_ALLOWLIST` edits into Task 3** (Task 11 keeps only the bwrap policy edit), so each task lands green — no red gate between T3 and T11.
+**Known cross-task risk — RESOLVED in rev.2:** Task 3's `brokered_egress.py` trips `test_in_core_http_egress_guard` (it constructs `httpx.AsyncClient`) the moment the module exists. rev.2 **folds the `_CONSTRUCT_ALLOWLIST` edit into Task 3** (Task 11 keeps only the bwrap policy edit), so each task lands green — no red gate between T3 and T11. Only `_CONSTRUCT_ALLOWLIST` is load-bearing; the module imports the `AnthropicProvider` seam (not `anthropic` directly), so no `_IMPORT_ALLOWLIST` entry is added (Task 3 review adjudication).
 
 ---
 
