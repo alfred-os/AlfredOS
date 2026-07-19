@@ -197,23 +197,21 @@ async def test_handle_extract_delegates_to_dispatch_extraction(
 
     monkeypatch.setattr(pd, "dispatch_extraction", _fake_dispatch)
 
-    fake_provider = AsyncMock()
-    fake_provider.capabilities = lambda: frozenset(
-        {ProviderCapability.NATIVE_CONSTRAINED_GENERATION}
-    )
+    fake_source = AsyncMock()
+    fake_source.capabilities = lambda: frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION})
 
     result = await qp.handle_extract(
         handle_id="handle-xyz",
         schema_json='{"type":"object"}',
         schema_version=1,
-        provider=fake_provider,
+        source=fake_source,
         max_tokens=8192,
     )
     # The cached bytes flowed through to the dispatcher.
     assert captured["content"] == b'{"title": "hi"}'
     assert captured["schema_json"] == '{"type":"object"}'
     assert captured["schema_version"] == 1
-    assert captured["provider"] is fake_provider
+    assert captured["source"] is fake_source
     # max_tokens is forwarded verbatim (P1b, #340) — golive feeds it from the spawn env.
     assert captured["max_tokens"] == 8192
     assert result["extraction_mode"] == "native_constrained"
@@ -363,14 +361,14 @@ async def test_handle_extract_passes_empty_bytes_when_handle_missing(
 
     monkeypatch.setattr(pd, "dispatch_extraction", _fake_dispatch)
 
-    fake_provider = AsyncMock()
-    fake_provider.capabilities = lambda: frozenset()
+    fake_source = AsyncMock()
+    fake_source.capabilities = lambda: frozenset()
 
     result = await qp.handle_extract(
         handle_id="missing-handle",
         schema_json='{"type":"object"}',
         schema_version=1,
-        provider=fake_provider,
+        source=fake_source,
     )
     assert captured["content"] == b""
     assert result["kind"] == "typed_refusal"

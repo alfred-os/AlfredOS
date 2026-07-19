@@ -1,5 +1,7 @@
 """Provider dispatch — capability branches + retry hygiene (PR-S3-4 Task 5;
-ported to the #339 seam / fork-b two-branch model by #340 PR1 Task 2).
+ported to the #339 seam / fork-b two-branch model by #340 PR1 Task 2; reshaped
+onto the per-attempt ``source`` seam + per-call wall-clock ceiling + cost sum by
+#340 PR2b-golive Task 5).
 
 The dispatch path branches on the provider's declared
 :class:`alfred.providers.base.ProviderCapability` set (fork b, #340):
@@ -16,6 +18,14 @@ The dispatch path branches on the provider's declared
 This file tests the dispatcher in isolation — the orchestrator-side
 ``QuarantinedExtractor`` (Task 6) wraps the dispatch in audit-emit +
 hookpoint plumbing.
+
+Seam (#340 PR2b-golive Task 5): the dispatcher no longer takes a single
+long-lived ``provider``. Per extraction the host brokers ONE fresh gateway
+socket per retry attempt, and a bound provider cannot re-dial, so the
+dispatcher takes a ``source`` (capabilities()/bind()) and binds a FRESH
+provider off it per attempt. Tests drive it through a minimal
+:class:`_FakeSource` whose ``bind()`` is an async-CM yielding a fake provider
+and counting binds.
 
 Security invariants pinned here:
 
@@ -40,11 +50,18 @@ Security invariants pinned here:
   raised by ``_call_provider`` when ``tool_calls`` is empty) is
   retry-eligible and can never escape ``dispatch_extraction`` uncaught —
   HARD #7 (no silent failures in security paths).
+* A per-call wall-clock ceiling breach (``asyncio.wait_for`` ``TimeoutError``)
+  is a TERMINAL ``cannot_extract`` — never a silent hang (HARD #7, P1c).
+* ``cost_usd`` (summed across EVERY paid attempt) rides BOTH the
+  ``extracted`` and every ``typed_refusal`` return (P1c) — a structured,
+  non-T3 field, never summed-then-dropped.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -71,7 +88,8 @@ _SCHEMA_JSON = json.dumps(
 )
 
 # ---------------------------------------------------------------------------
-# Fake provider helpers — #339-seam CompletionResponse builders.
+# Fake provider + source helpers — #339-seam CompletionResponse builders and
+# the Task-5 per-attempt bind seam (_FakeSource).
 # ---------------------------------------------------------------------------
 
 
@@ -91,23 +109,56 @@ def _fake_provider_with_capabilities(
     return provider
 
 
-def _tool_use_response(payload: dict[str, Any]) -> CompletionResponse:
+class _FakeSource:
+    """Minimal ``ProviderSource`` double for the Task-5 dispatch seam.
+
+    ``capabilities()`` delegates to the wrapped provider (picked ONCE by the
+    dispatcher before the loop); ``bind()`` is an async-CM yielding that same
+    provider and counting binds so a test can assert one fresh bind per
+    attempt. ``drain_leftovers`` is a no-op — the dispatcher never calls it
+    (that is the Task-6 caller's job), but it keeps the double structurally
+    close to :class:`BrokeredProviderSource`.
+
+    The wrapped provider's ``complete`` may carry an :class:`AsyncMock`
+    ``side_effect`` sequence, so successive binds observe successive
+    responses just as they would across real per-attempt sockets.
+    """
+
+    def __init__(self, provider: Any) -> None:
+        self._provider = provider
+        self.binds = 0
+
+    def capabilities(self) -> frozenset[ProviderCapability]:
+        caps = self._provider.capabilities()
+        assert isinstance(caps, frozenset)
+        return caps
+
+    @contextlib.asynccontextmanager
+    async def bind(self) -> AsyncIterator[Any]:
+        self.binds += 1
+        yield self._provider
+
+    def drain_leftovers(self) -> None:  # pragma: no cover - dispatcher never calls it
+        return None
+
+
+def _tool_use_response(payload: dict[str, Any], *, cost_usd: float = 0.0) -> CompletionResponse:
     """A forced-tool response: one ToolCall whose arguments are the payload."""
     return CompletionResponse(
         content="",
         tokens_in=1,
         tokens_out=1,
-        cost_usd=0.0,
+        cost_usd=cost_usd,
         model="fake-model",
         stop_reason="tool_use",
         tool_calls=(ToolCall(id="t0", name="extract_structured_data", arguments=payload),),
     )
 
 
-def _text_response(content: str) -> CompletionResponse:
+def _text_response(content: str, *, cost_usd: float = 0.0) -> CompletionResponse:
     """A plain-completion response (prompt_embedded_fallback path)."""
     return CompletionResponse(
-        content=content, tokens_in=1, tokens_out=1, cost_usd=0.0, model="fake-model"
+        content=content, tokens_in=1, tokens_out=1, cost_usd=cost_usd, model="fake-model"
     )
 
 
@@ -146,12 +197,13 @@ async def test_native_constrained_reads_tool_call_arguments() -> None:
         _tool_use_response(payload),
     )
     result = await dispatch_extraction(
-        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, provider=provider
+        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, source=_FakeSource(provider)
     )
     assert result == {
         "kind": "extracted",
         "data": payload,
         "extraction_mode": "native_constrained",
+        "cost_usd": 0.0,
     }
     sent: CompletionRequest = provider.complete.call_args.args[0]
     assert sent.tool_choice == ForcedTool(name="extract_structured_data")
@@ -176,7 +228,7 @@ async def test_provider_without_native_uses_prompt_embedded_fallback() -> None:
         _text_response('{"text": "hi", "intent": "greeting"}'),
     )
     result = await dispatch_extraction(
-        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, provider=provider
+        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, source=_FakeSource(provider)
     )
     assert result["extraction_mode"] == "prompt_embedded_fallback"
     sent: CompletionRequest = provider.complete.call_args.args[0]
@@ -201,7 +253,7 @@ async def test_dispatch_uses_fallback_for_no_capability_provider() -> None:
         content=b'{"title": "hello"}',
         schema_json='{"type":"object","properties":{"title":{"type":"string"}}}',
         schema_version=1,
-        provider=provider,
+        source=_FakeSource(provider),
     )
     assert result["kind"] == "extracted"
     assert result["extraction_mode"] == "prompt_embedded_fallback"
@@ -236,9 +288,104 @@ async def test_native_path_wins_when_provider_has_both_capabilities() -> None:
         content=b'{"title": "hello"}',
         schema_json='{"type":"object","properties":{"title":{"type":"string"}}}',
         schema_version=1,
-        provider=provider,
+        source=_FakeSource(provider),
     )
     assert result["extraction_mode"] == "native_constrained"
+
+
+# ---------------------------------------------------------------------------
+# Per-attempt bind + cost sum — the load-bearing assertions of Task 5 (P1c).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sums_cost_on_extracted() -> None:
+    """The extracted return carries the summed ``cost_usd``; one attempt =
+    one bind = one paid call (P1c / rev.2 req 2).
+    """
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
+
+    provider = _fake_provider_with_capabilities(
+        frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
+        _tool_use_response({"text": "hi", "intent": "greeting"}, cost_usd=0.02),
+    )
+    src = _FakeSource(provider)
+    out = await dispatch_extraction(
+        content=b"hi", schema_json=_SCHEMA_JSON, schema_version=1, source=src
+    )
+    assert out["kind"] == "extracted"
+    assert out["cost_usd"] == pytest.approx(0.02)
+    assert src.binds == 1  # one bind per attempt; one attempt on first success
+
+
+@pytest.mark.asyncio
+async def test_dispatch_binds_fresh_provider_per_attempt_and_accumulates_cost() -> None:
+    """A retry binds a FRESH provider each attempt (a bound provider cannot
+    re-dial the single brokered socket), and every paid call — the failed
+    one AND the winning one — is summed into ``cost_usd`` (P1c).
+    """
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
+
+    bad = _text_response("not json", cost_usd=0.01)
+    good = _text_response('{"title": "hello"}', cost_usd=0.02)
+    provider = AsyncMock()
+    # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
+    provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
+    provider.complete = AsyncMock(side_effect=[bad, good])
+    src = _FakeSource(provider)
+
+    result = await dispatch_extraction(
+        content=b'{"title": "hello"}',
+        schema_json='{"type":"object","properties":{"title":{"type":"string"}}}',
+        schema_version=1,
+        source=src,
+    )
+    assert result["kind"] == "extracted"
+    # Both the rejected attempt (0.01) and the winning attempt (0.02) are paid.
+    assert result["cost_usd"] == pytest.approx(0.03)
+    assert provider.complete.await_count == 2
+    assert src.binds == 2  # one fresh bind per attempt
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_ceiling_timeout_is_terminal_cannot_extract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-call ``asyncio.wait_for`` ``TimeoutError`` is a TERMINAL
+    ``cannot_extract`` — NOT retry-eligible — and the remaining budget is
+    the timeout passed (rev.2 req 1 / spec §4 P1e).
+
+    The wait_for is patched to fire the ceiling deterministically (no real
+    sleep): it records the timeout it was handed, closes the unused
+    provider coroutine, and raises ``TimeoutError``.
+    """
+    from alfred.security.quarantine_child import provider_dispatch as pd
+
+    provider = _fake_provider_with_capabilities(
+        frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
+        _tool_use_response({"text": "hi", "intent": "greeting"}),  # never reached
+    )
+    src = _FakeSource(provider)
+
+    captured_timeouts: list[float | None] = []
+
+    async def _timeout_wait_for(coro: Any, timeout: float | None = None) -> Any:
+        captured_timeouts.append(timeout)
+        coro.close()  # the provider call is never awaited — avoid an unawaited-coro warning
+        raise TimeoutError
+
+    monkeypatch.setattr(pd.asyncio, "wait_for", _timeout_wait_for)
+
+    result = await pd.dispatch_extraction(
+        content=b"hi", schema_json=_SCHEMA_JSON, schema_version=1, source=src
+    )
+    assert result == {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": 0.0}
+    # Terminal: bound exactly once, no retry after the ceiling fired.
+    assert src.binds == 1
+    provider.complete.assert_not_awaited()
+    # The remaining wall-clock budget was passed as the per-call timeout.
+    assert captured_timeouts and captured_timeouts[0] is not None
+    assert 0 < captured_timeouts[0] <= pd._MAX_TOTAL_WALL_CLOCK_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -261,14 +408,16 @@ async def test_empty_tool_calls_exhausts_to_cannot_extract() -> None:
         frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
         _empty_tool_use_response(),
     )
+    src = _FakeSource(provider)
     result = await dispatch_extraction(
-        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, provider=provider
+        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, source=src
     )
-    assert result == {"kind": "typed_refusal", "reason": "cannot_extract"}
+    assert result == {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": 0.0}
     # Non-vacuity (FIX-C): prove the empty-tool_calls path actually
     # retried to exhaustion rather than short-circuiting on the first
-    # attempt with a result that happens to match.
+    # attempt with a result that happens to match. One fresh bind per attempt.
     assert provider.complete.await_count == EXTRACTION_MAX_RETRIES + 1
+    assert src.binds == EXTRACTION_MAX_RETRIES + 1
 
 
 # ---------------------------------------------------------------------------
@@ -277,58 +426,36 @@ async def test_empty_tool_calls_exhausts_to_cannot_extract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_retries_on_json_decode_error_then_succeeds() -> None:
-    """A JSONDecodeError on attempt N retries; success on attempt N+1 wins.
-
-    JSONDecodeError is one of the retry-eligible ``except`` legs the
-    dispatcher catches (the others are ValidationError and
-    ProviderMalformedToolArgumentsError). Anything else propagates.
-    """
-    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
-
-    bad = _text_response("not json")
-    good = _text_response('{"title": "hello"}')
-    provider = AsyncMock()
-    # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
-    provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
-    # First call returns malformed bytes; second call returns valid JSON.
-    provider.complete = AsyncMock(side_effect=[bad, good])
-
-    result = await dispatch_extraction(
-        content=b'{"title": "hello"}',
-        schema_json='{"type":"object","properties":{"title":{"type":"string"}}}',
-        schema_version=1,
-        provider=provider,
-    )
-    assert result["kind"] == "extracted"
-    assert provider.complete.await_count == 2
-
-
-@pytest.mark.asyncio
 async def test_dispatch_returns_typed_refusal_on_retry_exhaustion() -> None:
-    """All retries malformed → TypedRefusal(reason='cannot_extract').
+    """All retries malformed → TypedRefusal(reason='cannot_extract') carrying
+    the summed cost of every paid attempt (P1c).
 
     The dispatcher caps retries at ``EXTRACTION_MAX_RETRIES + 1`` total attempts.
     Exhaustion produces a TypedRefusal — NOT an ``Extracted`` with a
     ``malformed_output`` mode, which would be a protocol violation
-    (spec §6.7 / prov-011).
+    (spec §6.7 / prov-011). A 3-attempt thrash is 3 paid calls.
     """
+    from alfred.security.quarantine import EXTRACTION_MAX_RETRIES
     from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
-    bad = _text_response("definitely not json")
+    bad = _text_response("definitely not json", cost_usd=0.05)
     provider = AsyncMock()
     # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
     provider.complete = AsyncMock(return_value=bad)
+    src = _FakeSource(provider)
 
     result = await dispatch_extraction(
         content=b'{"title": "hello"}',
         schema_json='{"type":"object","properties":{"title":{"type":"string"}}}',
         schema_version=1,
-        provider=provider,
+        source=src,
     )
     assert result["kind"] == "typed_refusal"
     assert result["reason"] == "cannot_extract"
+    # Every retry attempt was a paid call — the refusal carries the sum.
+    assert result["cost_usd"] == pytest.approx(0.05 * (EXTRACTION_MAX_RETRIES + 1))
+    assert src.binds == EXTRACTION_MAX_RETRIES + 1
 
 
 @pytest.mark.asyncio
@@ -339,9 +466,10 @@ async def test_dispatch_propagates_non_validation_errors() -> None:
     present them as ``cannot_extract`` — which would hide outages from
     the audit log. The dispatcher catches only the retry-eligible
     exception types (ValidationError, JSONDecodeError,
-    ProviderMalformedToolArgumentsError) and the closed-vocab
-    ``provider_unavailable`` leg (ProviderUnavailableError); every other
-    exception propagates to the supervisor.
+    ProviderMalformedToolArgumentsError), the ``TimeoutError`` ceiling leg,
+    and the closed-vocab ``provider_unavailable`` leg
+    (ProviderUnavailableError); every other exception propagates to the
+    supervisor.
     """
     from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
@@ -349,30 +477,29 @@ async def test_dispatch_propagates_non_validation_errors() -> None:
     # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
     provider.complete = AsyncMock(side_effect=RuntimeError("provider SDK bug"))
+    src = _FakeSource(provider)
 
     with pytest.raises(RuntimeError, match="provider SDK bug"):
         await dispatch_extraction(
             content=b"",
             schema_json='{"type":"object"}',
             schema_version=1,
-            provider=provider,
+            source=src,
         )
+    # Bound once, then the non-retry-eligible error propagated out (no retry).
+    assert src.binds == 1
 
 
 @pytest.mark.asyncio
 async def test_dispatch_propagates_malformed_schema_json() -> None:
     """A syntactically-invalid ``schema_json`` raises ``json.JSONDecodeError``
-    LOUD — never retried (FIX-A).
+    LOUD — never retried, and never bound (FIX-A).
 
     ``schema_json`` is host/orchestrator-supplied and identical across
-    every retry attempt. Before FIX-A, ``_cached_parsed_schema`` was
-    called as the first line of ``_call_provider``, which sat inside the
-    unified per-attempt try (FIX-1) — a syntax error there was
-    indistinguishable from a retry-eligible model failure and got
-    silently retried to ``cannot_extract``, burning backoff budget and
-    never calling the provider at all. The parse now happens once,
-    outside the loop and outside any try, so a host-side schema bug
-    propagates loud instead of being absorbed.
+    every retry attempt. The parse happens once, outside the loop and
+    outside any try (before any ``source.bind()``), so a host-side schema
+    bug propagates loud instead of being absorbed by the retry-eligible
+    catch and silently retried to ``cannot_extract``.
     """
     from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
@@ -380,15 +507,17 @@ async def test_dispatch_propagates_malformed_schema_json() -> None:
     # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
     provider.complete = AsyncMock(return_value=_text_response('{"title": "hello"}'))
+    src = _FakeSource(provider)
 
     with pytest.raises(json.JSONDecodeError):
         await dispatch_extraction(
             content=b"hello",
             schema_json="{not valid json",
             schema_version=1,
-            provider=provider,
+            source=src,
         )
     provider.complete.assert_not_awaited()
+    assert src.binds == 0  # the parse failed before any socket was brokered
 
 
 @pytest.mark.asyncio
@@ -396,7 +525,7 @@ async def test_dispatch_short_circuits_on_wall_clock_budget_breach(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """perf-1 fix: the per-extraction wall-clock budget short-circuits to
-    cannot_extract before any further provider call lands.
+    cannot_extract before any bind/provider call lands.
 
     The test compresses the budget to a value smaller than the first
     monotonic-clock tick so the budget-check at the top of the loop
@@ -412,11 +541,12 @@ async def test_dispatch_short_circuits_on_wall_clock_budget_breach(
     # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
     provider.complete = AsyncMock(return_value=bad)
+    src = _FakeSource(provider)
 
     # First read computes the deadline; every read after sits past it
-    # so the loop short-circuits before the first provider call. Use a
-    # callable that returns 0 once and then 9999.0 forever so we don't
-    # have to count interpreter-internal time.monotonic reads.
+    # so the loop short-circuits before the first bind. Use a callable
+    # that returns 0 once and then 9999.0 forever so we don't have to
+    # count interpreter-internal time.monotonic reads.
     state = {"first": True}
 
     def _fake_monotonic() -> float:
@@ -431,11 +561,12 @@ async def test_dispatch_short_circuits_on_wall_clock_budget_breach(
         content=b"",
         schema_json='{"type":"object"}',
         schema_version=1,
-        provider=provider,
+        source=src,
     )
-    assert result == {"kind": "typed_refusal", "reason": "cannot_extract"}
-    # And the provider was NEVER called — budget breach skipped dispatch.
+    assert result == {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": 0.0}
+    # And nothing was bound or called — budget breach skipped dispatch.
     provider.complete.assert_not_called()
+    assert src.binds == 0
 
 
 def test_cached_parsed_schema_refuses_non_object_json() -> None:
@@ -457,7 +588,7 @@ def test_cached_parsed_schema_refuses_non_object_json() -> None:
 async def test_provider_unavailable_maps_to_typed_refusal() -> None:
     """A :class:`ProviderUnavailableError` (raised by the adapter at its
     own SDK-call boundary, #340 Task 1) maps to
-    ``TypedRefusal(reason="provider_unavailable")``.
+    ``TypedRefusal(reason="provider_unavailable")`` carrying the cost so far.
 
     Renamed/repurposed from the pre-#340
     ``test_dispatch_returns_provider_unavailable_on_httpx_error`` — the
@@ -470,10 +601,12 @@ async def test_provider_unavailable_maps_to_typed_refusal() -> None:
         frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}), None
     )
     provider.complete = AsyncMock(side_effect=ProviderUnavailableError("down"))
+    src = _FakeSource(provider)
     result = await dispatch_extraction(
-        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, provider=provider
+        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, source=src
     )
-    assert result == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert result == {"kind": "typed_refusal", "reason": "provider_unavailable", "cost_usd": 0.0}
+    assert src.binds == 1
 
 
 # ---------------------------------------------------------------------------
@@ -578,12 +711,13 @@ async def test_dispatch_treats_non_object_json_as_retry_eligible() -> None:
     # JSON_OBJECT_MODE without NATIVE_CONSTRAINED_GENERATION → prompt_embedded_fallback (fork b)
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
     provider.complete = AsyncMock(return_value=array_response)
+    src = _FakeSource(provider)
 
     result = await dispatch_extraction(
         content=b'{"title": "hello"}',
         schema_json='{"type":"object"}',
         schema_version=1,
-        provider=provider,
+        source=src,
     )
     # All attempts produced a non-object → retry exhaustion → refusal.
     assert result["kind"] == "typed_refusal"
@@ -638,7 +772,7 @@ async def test_dispatch_threads_max_tokens_into_completion_request() -> None:
         content=b"hi",
         schema_json=_SCHEMA_JSON,
         schema_version=1,
-        provider=provider,
+        source=_FakeSource(provider),
         max_tokens=8192,
     )
     assert result["kind"] == "extracted"
@@ -652,7 +786,7 @@ async def test_dispatch_threads_max_tokens_into_completion_request() -> None:
         content=b"hi",
         schema_json=_SCHEMA_JSON,
         schema_version=1,
-        provider=provider_default,
+        source=_FakeSource(provider_default),
     )
     # default preserved when max_tokens is None (CompletionRequest.max_tokens=1024)
     assert provider_default.complete.call_args.args[0].max_tokens == 1024
@@ -672,7 +806,7 @@ async def test_dispatch_threads_max_tokens_on_prompt_embedded_fallback() -> None
         content=b"hi",
         schema_json=_SCHEMA_JSON,
         schema_version=1,
-        provider=provider,
+        source=_FakeSource(provider),
         max_tokens=4096,
     )
     assert result["kind"] == "extracted"
