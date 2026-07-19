@@ -387,20 +387,32 @@ def test_sbx_2026_024_child_boot_performs_no_external_io(monkeypatch: pytest.Mon
     Lightweight by design (payload note): the kernel-enforced containment is
     the shipped bwrap policy's ``--unshare-net``, asserted directly against the
     real policy bytes by sbx-2026-005. This entry catches a FUTURE regression
-    at the Python level (e.g. a PR-S4-11c-2c real-client cutover that eagerly
-    opens a connection at construction time) before it would ever reach that
-    kernel boundary.
+    at the Python level before it would ever reach that kernel boundary.
+
+    #340 PR2b golive is the CONSCIOUS UPDATE the corpus entry anticipated: the
+    deterministic-echo ``_DeterministicProvider`` sentinel is replaced by a boot-cheap
+    ``_ProviderFactory`` (the real Anthropic client is assembled per attempt inside
+    ``source.bind()`` over a brokered fd, NOT at boot). The load-bearing invariant is
+    UNCHANGED and directly re-asserted: ``_build_provider`` constructs NO socket at
+    boot (``socket.socket`` monkeypatched to raise).
     """
+    from alfred.security.quarantine_child.brokered_egress import _ProviderFactory
+
     payload = _load("sbx-2026-024")
     assert payload.expected_outcome == "neutralized"
-    assert payload.payload["expected_provider_type"] == "_DeterministicProvider"
+    assert payload.payload["expected_provider_type"] == "_ProviderFactory"
+
+    # The spawn-env config _build_provider reads (Task 8 delivers these live); the model
+    # id / budget values are irrelevant to the no-socket property under test.
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-test-model")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
 
     def _boom_socket(*_a: Any, **_k: Any) -> None:
         raise AssertionError("child boot path attempted to construct a socket")
 
     monkeypatch.setattr(socket, "socket", _boom_socket)
     provider = child_main._build_provider("sk-test-quarantine-key")
-    assert isinstance(provider, child_main._DeterministicProvider)
+    assert isinstance(provider, _ProviderFactory)
 
 
 def _patch_spawn_seam_epipe(monkeypatch: pytest.MonkeyPatch, fake: _FakePopen) -> None:

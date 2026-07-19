@@ -133,6 +133,17 @@ async def _rows_with_event(sm: Any, event: str) -> list[AuditEntry]:
         return list(result.scalars().all())
 
 
+@pytest.mark.skip(
+    reason=(
+        "#340 golive: deterministic-echo removed; the real-extract integration proof is "
+        "rebuilt in Task 14 with a canned-Anthropic TLS stub + control_fd + spawn env. "
+        "This test spawns __main__ WITHOUT control_fd/model/max_tokens env and asserts "
+        "the child ECHOES the inbound body (result.data['text'] == _INBOUND_BODY), which "
+        "the cutover makes impossible: main() now unconditionally reconstructs fd 4 and "
+        "_build_provider requires ALFRED_QUARANTINE_MODEL/ALFRED_QUARANTINE_MAX_TOKENS. "
+        "Task 14 re-greens this under the #245 assert-RAN gate."
+    )
+)
 @_DOCKER_ONLY
 @pytest.mark.asyncio
 async def test_real_bwrap_quarantine_child_round_trip_over_real_transport(

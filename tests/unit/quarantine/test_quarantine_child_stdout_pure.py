@@ -6,23 +6,31 @@ translator's import-time "translations disabled" warning, which fires on a
 pip-installed alfred whose catalog is absent — the warning bytes prepend the
 reply frame and corrupt the wire the host transport reads.
 
-This drives the REAL child as a subprocess over real fd 0/1/3 (no bwrap, no LLM),
+This drives the REAL child as a subprocess over real fd 0/1/3/4 (no bwrap, no LLM),
 with the i18n catalog forced absent, and asserts stdout decodes to exactly three
-clean frames — hello boot frame, ready boot frame, and the ``extracted`` reply
-frame — with NO extra bytes around them — proving nothing leaked onto fd 1 (#443).
+clean frames — hello boot frame, ready boot frame, and the reply frame — with NO
+extra bytes around them — proving nothing leaked onto fd 1 (#443).
 
-In the 2b deterministic-echo cut the loop never imports ``provider_dispatch``
-(the lazy extract-path import that loads the translator), so the warning does not
-fire on this path; the stdout-purity guard nonetheless pins the wire contract, and
-``main()``'s ``configure_stderr_logging()`` pin (asserted by
-``test_stdout_protocol_logging_pinned.py``) keeps it safe for the 2c real-client
-cut, which DOES load the translator on the extract path.
+#340 PR2b golive: the deterministic-echo cut is gone; the loop's extract branch now
+calls ``handle_extract`` -> imports ``provider_dispatch`` (the lazy extract-path
+import that loads the translator, whose missing-catalog warning is the leak this
+guards). To keep this a UNIT-level proof WITHOUT a live provider, the drive extracts
+a MISSING handle: ``handle_extract`` imports ``provider_dispatch`` (loading the
+translator — the property under test) then SHORT-CIRCUITS empty content to a
+``typed_refusal`` reply BEFORE any provider call or fd-4 brokering (spec §8). So the
+translator genuinely loads on the extract path here, and ``main()``'s
+``configure_stderr_logging()`` pin (also asserted structurally by
+``test_stdout_protocol_logging_pinned.py``) must keep its warning off fd 1. The child
+reconstructs its fd-4 control socket at boot; the drive supplies one end of a real
+``socketpair`` so that reconstruction + the extract-branch drain succeed. The live
+provider round-trip is the Task 14 docker/TLS-stub proof.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import socket
 import struct
 import subprocess
 import sys
@@ -54,14 +62,17 @@ def _provider_key_fd3_bytes(key: str) -> bytes:
 
 
 def test_child_stdout_is_pure_wire_frame_when_locale_absent() -> None:
-    """stdout decodes to exactly three clean frames — hello, ready, extracted reply.
+    """stdout decodes to exactly three clean frames — hello, ready, typed_refusal reply.
 
-    Nothing leaks onto fd 1.
+    Nothing leaks onto fd 1 even though the extract path imports ``provider_dispatch``
+    (loading the translator) before short-circuiting empty content.
     """
-    context = "hello over the wire"
-    stdin_bytes = _frame("quarantine.ingest", {"handle_id": "h1", "context": context}) + _frame(
+    # Extract a MISSING handle (never ingested): handle_extract imports
+    # provider_dispatch (loading the translator — the leak this guards) then
+    # short-circuits empty content to a typed_refusal BEFORE any provider call.
+    stdin_bytes = _frame(
         "quarantine.extract",
-        {"handle_id": "h1", "schema_json": "{}", "schema_version": 1},
+        {"handle_id": "never-ingested", "schema_json": "{}", "schema_version": 1},
     )
 
     # The provider key is delivered on fd 3 (spec §5.3). Use a pipe and remap its
@@ -73,27 +84,44 @@ def test_child_stdout_is_pure_wire_frame_when_locale_absent() -> None:
     os.write(fd3_write, _provider_key_fd3_bytes("sk-fake-test-key"))
     os.close(fd3_write)
 
-    def _remap_fd3_to_three() -> None:  # pragma: no cover - runs in the child process
-        os.dup2(fd3_read, 3)
+    # The child reconstructs its one-way control channel from fd 4 at boot (#340
+    # PR2a). Supply one end of a real AF_UNIX socketpair so that reconstruction — and
+    # the extract-branch drain (a MSG_DONTWAIT recv that returns EAGAIN on this empty,
+    # connected socket) — succeed without a live gateway. The other end is held by the
+    # test so the child end stays connected (not reset).
+    control_parent, control_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 
-    env = {"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin"}
+    def _remap_inherited_fds() -> None:  # pragma: no cover - runs in the child process
+        os.dup2(fd3_read, 3)
+        os.dup2(control_child.fileno(), 4)
+
+    # _build_provider reads the spawn-env model/max_tokens (Task 8 delivers these
+    # live). A non-empty fd-3 key + these vars let the child boot past _build_provider.
+    env = {
+        "PYTHONPATH": str(REPO_ROOT / "src"),
+        "PATH": "/usr/bin:/bin",
+        "ALFRED_QUARANTINE_MODEL": "claude-test-model",
+        "ALFRED_QUARANTINE_MAX_TOKENS": "8192",
+    }
     try:
         proc = subprocess.run(  # noqa: S603 — sys.executable + repo-owned inline driver
             [sys.executable, "-c", _FORCE_NO_LOCALE_THEN_RUN_CHILD],
             input=stdin_bytes,
             capture_output=True,
             env=env,
-            pass_fds=(fd3_read, 3),
-            preexec_fn=_remap_fd3_to_three,
+            pass_fds=(fd3_read, control_child.fileno(), 3, 4),
+            preexec_fn=_remap_inherited_fds,
             check=False,
             timeout=30,
         )
     finally:
         os.close(fd3_read)
+        control_parent.close()
+        control_child.close()
 
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
 
-    # stdout must contain THREE length-prefixed frames: hello, ready, extracted reply.
+    # stdout must contain THREE length-prefixed frames: hello, ready, typed_refusal reply.
     # No warning bytes or extra content.
     out = proc.stdout
     assert len(out) >= 4, f"stdout too short to be a framed reply: {out!r}"
@@ -113,12 +141,12 @@ def test_child_stdout_is_pure_wire_frame_when_locale_absent() -> None:
     assert boot_ready["method"] == "boot.ready"
     frame_offset += 4 + length2
 
-    # Parse third frame (extracted reply)
+    # Parse third frame (typed_refusal reply — empty-content short-circuit, spec §8)
     length3 = struct.unpack(">I", out[frame_offset : frame_offset + 4])[0]
     frame_body3 = out[frame_offset + 4 : frame_offset + 4 + length3]
     reply = json.loads(frame_body3)
-    assert reply["result"]["kind"] == "extracted"
-    assert reply["result"]["data"]["text"] == context
+    assert reply["result"]["kind"] == "typed_refusal"
+    assert reply["result"]["reason"] == "cannot_extract"
 
     # Verify no extra bytes
     expected_total = frame_offset + 4 + length3

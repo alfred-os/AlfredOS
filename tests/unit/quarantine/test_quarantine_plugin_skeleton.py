@@ -338,28 +338,26 @@ def test_fd3_read_exits_when_trailing_bytes_present(
 
 
 @pytest.mark.asyncio
-async def test_handle_extract_passes_empty_bytes_when_handle_missing(
+async def test_handle_extract_short_circuits_empty_content_without_dispatch(
     _clear_content_cache: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unknown handle id → empty bytes flow to ``dispatch_extraction``.
+    """An unknown handle id → empty-content short-circuit, ``dispatch_extraction`` NOT called.
 
-    The skeleton MUST NOT raise on a missing handle_id — raising would
-    crash the subprocess and bypass the audit row. Instead the missing
-    handle yields empty bytes and lets the dispatcher's retry-exhaustion
-    path produce a TypedRefusal that the audit-emit path can persist with
-    result="refused" (Task 6 wires this in QuarantinedExtractor).
+    #340 PR2b golive (spec §8): a missing handle_id pops to ``b""`` and returns a
+    ``TypedRefusal(reason="cannot_extract")`` DIRECTLY, BEFORE any dispatch — so the
+    child never brokers a socket or pays for 3 doomed provider attempts on content that
+    cannot yield an extraction. Returning (not raising) keeps the audit row at
+    ``result="refused"`` rather than crashing the subprocess and bypassing the audit
+    write (HARD #7). ``dispatch_extraction`` is patched to a BOOM to prove it never runs.
     """
     from alfred.security.quarantine_child import __main__ as qp
     from alfred.security.quarantine_child import provider_dispatch as pd
 
-    captured: dict[str, Any] = {}
+    async def _boom_dispatch(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("dispatch must not run on empty content (§8 short-circuit)")
 
-    async def _fake_dispatch(**kwargs: Any) -> dict[str, Any]:
-        captured.update(kwargs)
-        return {"kind": "typed_refusal", "reason": "cannot_extract"}
-
-    monkeypatch.setattr(pd, "dispatch_extraction", _fake_dispatch)
+    monkeypatch.setattr(pd, "dispatch_extraction", _boom_dispatch)
 
     fake_source = AsyncMock()
     fake_source.capabilities = lambda: frozenset()
@@ -370,6 +368,4 @@ async def test_handle_extract_passes_empty_bytes_when_handle_missing(
         schema_version=1,
         source=fake_source,
     )
-    assert captured["content"] == b""
-    assert result["kind"] == "typed_refusal"
-    assert result["reason"] == "cannot_extract"
+    assert result == {"kind": "typed_refusal", "reason": "cannot_extract"}
