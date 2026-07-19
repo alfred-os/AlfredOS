@@ -58,6 +58,11 @@ _CONSTRUCT_ALLOWLIST: dict[str, str] = {
         "the sanctioned gateway-side egress ORIGINATION site — builds the direct-originating "
         "httpx.AsyncClient for mode-(b) tool egress (Spec C G7-2b; the gateway IS the egress plane)"
     ),
+    "security/quarantine_child/brokered_egress.py": (
+        "the sanctioned child-side per-call egress seam (#340 PR2b-golive) — builds the "
+        "httpx.AsyncClient over a bare passed TCP fd (one-shot, no keepalive, no redirects), "
+        "terminating TLS in the child (HARD #5)"
+    ),
 }
 
 # A broken _SRC_ROOT (a future dir-depth refactor or a src/ rename) would make rglob
