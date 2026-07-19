@@ -320,10 +320,11 @@ async def test_success_row_destination_is_host_port_not_url(
     child = _FakeBrokeringChildIO(destinations=[("gw", 8889)], reply=_extracted_reply_frame())
     # QuarantineStdioTransport.__init__ types broker_auditor as the concrete
     # EgressBrokerAuditor class (not a Protocol) — the fake only needs to satisfy
-    # dispatch's structural use (record_broker_success/record_broker_failure; the
-    # runtime code only ever does an `is not None` check, never isinstance). Mirrors
+    # dispatch's structural use (record_broker_success/record_broker_failure; the runtime
+    # code never does an isinstance check). Mirrors
     # tests/unit/security/test_quarantine_transport.py's `_staged_transport(auditor: Any)`
-    # escape for the identical fake-vs-concrete-class mismatch.
+    # escape for the identical fake-vs-concrete-class mismatch. Since #340 review A5 the
+    # argument is REQUIRED (no None default), so every caller must supply one.
     transport = QuarantineStdioTransport(
         child_io=child, staging=staging, broker_auditor=cast(EgressBrokerAuditor, auditor)
     )

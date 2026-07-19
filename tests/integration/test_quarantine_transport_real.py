@@ -40,7 +40,12 @@ from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.memory.models import AuditEntry, Base
 from alfred.security import tiers as _tiers
 from alfred.security.dlp import OutboundDlp
-from alfred.security.quarantine import Extracted, QuarantinedExtractor, declare_hookpoints
+from alfred.security.quarantine import (
+    BROKER_SOCKET_COUNT,
+    Extracted,
+    QuarantinedExtractor,
+    declare_hookpoints,
+)
 from alfred.security.quarantine_transport import (
     QuarantineStagingMap,
     QuarantineStdioTransport,
@@ -174,7 +179,17 @@ async def test_real_extractor_over_real_transport_records_body_and_audits(
             # daemon-flip + real-bwrap proofs live in the daemon integration tests.
             staging = QuarantineStagingMap()
             child = _EchoingChildDouble()
-            transport = QuarantineStdioTransport(child_io=child, staging=staging)
+            # The REAL EgressBrokerAuditor over the REAL Postgres AuditWriter (#340 review
+            # A5: broker_auditor is now a required constructor argument — a ``None`` default
+            # was fail-open on the durable egress rows). Using the production auditor here,
+            # rather than a double, makes this integration proof also cover that the
+            # ``egress.broker.connected`` row actually PERSISTS through the real
+            # ``append_schema`` + schema validation on the brokered path.
+            from alfred.egress.broker_audit import EgressBrokerAuditor
+
+            transport = QuarantineStdioTransport(
+                child_io=child, staging=staging, broker_auditor=EgressBrokerAuditor(audit)
+            )
             extractor = QuarantinedExtractor(
                 transport=transport,
                 audit_writer=audit,
@@ -199,6 +214,13 @@ async def test_real_extractor_over_real_transport_records_body_and_audits(
             rows = await _rows_with_event(sm, "quarantine.extract")
             assert len(rows) == 1
             assert rows[0].result == "extracted"
+
+            # #340 review A5: the required auditor really persisted one durable
+            # ``egress.broker.connected`` row per brokered destination, through the real
+            # append_schema + schema validation — not just a double that recorded a call.
+            broker_rows = await _rows_with_event(sm, "egress.broker.connected")
+            assert len(broker_rows) == BROKER_SOCKET_COUNT
+            assert all(row.result == "success" for row in broker_rows)
     finally:
         with _NONCE_LOCK:
             _tiers._set_authorized_t3_nonce(prior_nonce)

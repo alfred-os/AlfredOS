@@ -185,7 +185,9 @@ async def test_dispatch_brokers_n_before_writing() -> None:
     nonce = CapabilityGateNonce()
     staging.stage("deadbeef", _tag(nonce, "hello there"))
     child = _OrderRecordingChildIO()
-    transport = QuarantineStdioTransport(child_io=child, staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=staging, broker_auditor=_RecordingAuditor()
+    )
 
     await transport.dispatch(
         "quarantine.extract",
@@ -212,14 +214,40 @@ class _RecordingAuditor:
 
 
 class _RaisingChildIO(_RecordingChildIO):
-    """A ChildIO double whose ``broker_sockets`` raises a caller-supplied error."""
+    """A ChildIO double whose ``broker_sockets`` raises a caller-supplied error.
 
-    def __init__(self, error: ControlFdBrokerError) -> None:
+    Typed ``BaseException`` (not ``ControlFdBrokerError``) so the A4 cases can drive the
+    ``IOPlaneUnavailableError`` / ``QuarantineChildSpawnError`` arms that used to escape raw.
+    """
+
+    def __init__(self, error: BaseException) -> None:
         super().__init__()
         self._error = error
 
     async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
         raise self._error
+
+
+class _StallingChildIO(_RecordingChildIO):
+    """A ChildIO double whose ``broker_sockets`` outlives the preamble bound (A7).
+
+    Sleeps well past ``_BROKER_PREAMBLE_TIMEOUT_S`` — a stand-in for a degraded gateway whose
+    CONNECT never completes. The ``asyncio.sleep`` is cancellable, so the bound tears it down
+    promptly and the test costs the bound, not the sleep.
+    """
+
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        import asyncio
+
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable: the preamble bound must fire first")
+
+
+class _CloseRaisingChildIO(_RaisingChildIO):
+    """A ChildIO double whose ``aclose`` itself fails — the loud-teardown-failure path."""
+
+    async def aclose(self) -> None:
+        raise OSError("teardown failed")
 
 
 async def _dispatch_extract(transport: QuarantineStdioTransport) -> Any:
@@ -271,14 +299,228 @@ async def test_dispatch_broker_failure_unresolved_destination_fallback() -> None
 
 
 @pytest.mark.asyncio
-async def test_dispatch_broker_failure_without_auditor_still_refuses() -> None:
-    """The None-auditor path: a broker failure still yields the typed refusal (no audit call)."""
-    child = _RaisingChildIO(ControlFdBrokerError("sendmsg_failed", destination="gw:8889"))
-    transport = _staged_transport(child, auditor=None)
+async def test_dispatch_broker_failure_row_precedes_the_typed_refusal() -> None:
+    """The refusal row is DURABLE before the refusal is returned (HARD #5: non-skippable).
+
+    Replaces the former ``without_auditor`` case: the auditor is now a required constructor
+    argument (A5), so there is no auditor-less path left to cover. What still needs pinning is
+    that the durable row is written on the way OUT — a refusal returned before its forensic row
+    would leave the operator with a refused extraction and no record of which destination
+    failed.
+    """
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(
+        ControlFdBrokerError("sendmsg_failed", destination="gw:8889", delivered=0)
+    )
+    transport = _staged_transport(child, auditor=auditor)
 
     result = await _dispatch_extract(transport)
 
     assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert auditor.failures == [("gw:8889", "sendmsg_failed")]
+
+
+# ---------------------------------------------------------------------------
+# #340 review batch A — broker transport invariants (A2/A3/A4/A5/A7).
+# ---------------------------------------------------------------------------
+
+
+class _RaisingAuditor(_RecordingAuditor):
+    """An auditor whose ``record_broker_success`` fails (a hung/failed durable write)."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        super().__init__()
+        self._error = error or RuntimeError("append_schema failed")
+
+    async def record_broker_success(self, *, destination: str) -> None:
+        raise self._error
+
+
+@pytest.mark.asyncio
+async def test_send_phase_partial_failure_tears_down_the_child() -> None:
+    """A2: a broker failure AFTER the first successful ``sendmsg`` revokes the capability.
+
+    Connect-defer only makes the CONNECT half all-or-nothing. When ``_send_one`` fails on
+    socket k of N, k-1 fds are ALREADY in the child's SCM_RIGHTS queue — and because the
+    refusal writes NO extract frame, the child's ``drain_leftovers()`` ``finally`` (its only
+    reclaim path) never runs. Those live gateway-reachable sockets would otherwise sit in a
+    T3-holding child indefinitely, un-drained and recorded by an audit row that says the
+    broker REFUSED. Tearing the child down revokes the capability and discards the desynced
+    queue atomically, making the connect-defer invariant TRUE rather than merely narrower.
+    """
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(
+        ControlFdBrokerError("short_data_send", destination="gw:8889", delivered=1)
+    )
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert child.closed is True  # the capability is revoked, not merely refused
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert auditor.failures == [("gw:8889", "short_data_send")]
+    assert child.received == []  # still no ingest/extract frame on the wire
+
+
+@pytest.mark.asyncio
+async def test_connect_phase_failure_leaves_the_child_alive() -> None:
+    """A2 boundary: the COMMON gateway-down case (``delivered == 0``) must NOT tear down.
+
+    Connect-defer guarantees nothing reached the child, so there is no un-revoked capability
+    and no desynced queue. Killing the child here would turn a transient, self-healing gateway
+    outage into a hard-down quarantine path — the teardown is scoped to the case that actually
+    granted a capability.
+    """
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(
+        ControlFdBrokerError("gateway_unreachable", destination="gw:8889", delivered=0)
+    )
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert child.closed is False
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert auditor.failures == [("gw:8889", "gateway_unreachable")]
+
+
+@pytest.mark.asyncio
+async def test_post_broker_audit_failure_tears_down_the_child_and_propagates() -> None:
+    """A3: broker-then-audit ordering — a failed success-row write must revoke first.
+
+    ``broker_sockets`` puts N live gateway sockets in the child's queue BEFORE
+    ``record_broker_success`` is awaited. If that await raises (audit-write timeout,
+    ``append_schema`` failure, fail-closed hookpoint) the extract frame is never written, so
+    no drain runs and the ``transport_failed`` path never calls ``aclose()`` — leaving live
+    provider-reachable fds in a T3-holding child with NO durable audit row and NO teardown.
+    The exception still PROPAGATES (a failed audit write is loud, never laundered into a soft
+    refusal — HARD #5/#7); the teardown just happens first.
+    """
+    child = _RecordingChildIO()
+    transport = _staged_transport(child, auditor=_RaisingAuditor())
+
+    with pytest.raises(RuntimeError, match="append_schema failed"):
+        await _dispatch_extract(transport)
+
+    assert child.closed is True
+    assert child.received == []  # no ingest/extract frame followed the failed audit
+
+
+@pytest.mark.asyncio
+async def test_broker_preamble_is_bounded_and_refuses_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A7: the per-extraction broker preamble is bounded by the §17 nesting budget.
+
+    Unbounded, the preamble sits entirely outside the timeout hierarchy: under gateway
+    degradation the outer 30s ``action_deadline`` fires before the graceful
+    ``provider_unavailable`` + ``egress.broker.refused`` forensics are ever reached. The bound
+    makes the refusal reachable. Because a deadline cannot tell us how many fds reached the
+    child, it revokes conservatively.
+    """
+    import alfred.security.quarantine_transport as qt
+
+    # Shrink the real bound rather than waiting it out: the invariant under test is that a
+    # bound EXISTS and refuses gracefully, not its numeric value (pinned separately by
+    # ``test_broker_preamble_bound_nests_under_the_action_deadline``).
+    monkeypatch.setattr(qt, "_BROKER_PREAMBLE_TIMEOUT_S", 0.01)
+    auditor = _RecordingAuditor()
+    child = _StallingChildIO()
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert child.closed is True  # conservative revoke — delivery count is unknowable
+    assert auditor.failures == [("<unresolved>", "control_fd_broker_failed")]
+    assert child.received == []
+
+
+@pytest.mark.asyncio
+async def test_broker_preamble_bound_nests_under_the_action_deadline() -> None:
+    """A7 arithmetic: preamble + host read-frame must fit INSIDE the action deadline.
+
+    The preamble is SEQUENTIAL with (not nested inside) the ``read_frame`` bound, so for
+    ``action_deadline`` to remain the dominating outer bound the two must sum below it:
+    ``_BROKER_PREAMBLE_TIMEOUT_S + _READ_FRAME_TIMEOUT_S < action_deadline``. Drawn from LIVE
+    constants so a drift in ANY term trips this guard.
+    """
+    from alfred.plugins.web_fetch.constants import _DEFAULT_ACTION_DEADLINE_SECONDS
+    from alfred.security.quarantine_child_io import _READ_FRAME_TIMEOUT_S
+    from alfred.security.quarantine_transport import _BROKER_PREAMBLE_TIMEOUT_S
+
+    host_side_worst_case = _BROKER_PREAMBLE_TIMEOUT_S + _READ_FRAME_TIMEOUT_S
+    assert host_side_worst_case < float(_DEFAULT_ACTION_DEADLINE_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_io_plane_unavailable_becomes_a_typed_refusal() -> None:
+    """A4: ``IOPlaneUnavailableError`` must not escape ``dispatch`` raw.
+
+    ``broker_sockets`` raises it for an unset/malformed proxy URL (via ``_resolve_proxy_addr``),
+    strictly BEFORE any connect — so nothing was delivered and the child stays alive.
+    """
+    from alfred.egress.errors import IOPlaneUnavailableError
+
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(IOPlaneUnavailableError(detail="proxy url unset"))
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert child.closed is False  # pre-connect failure — no capability was granted
+    assert auditor.failures == [("<unresolved>", "control_fd_broker_failed")]
+
+
+@pytest.mark.asyncio
+async def test_child_spawn_error_becomes_a_typed_refusal() -> None:
+    """A4: ``QuarantineChildSpawnError`` (the unconfigured-broker guard) must not escape raw."""
+    from alfred.security.quarantine_child_io import QuarantineChildSpawnError
+
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(QuarantineChildSpawnError("broker unconfigured"))
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert child.closed is False
+    assert auditor.failures == [("<unresolved>", "control_fd_broker_failed")]
+
+
+def test_broker_auditor_is_a_required_constructor_argument() -> None:
+    """A5: the auditor has no default — omitting it is a TypeError, not a silent audit hole.
+
+    A ``broker_auditor: EgressBrokerAuditor | None = None`` default is fail-OPEN: a caller that
+    forgets it silently loses every durable ``egress.broker.*`` row while the broker keeps
+    handing live gateway sockets to a T3 child. Audit writes are non-skippable (HARD #5).
+    """
+    with pytest.raises(TypeError):
+        QuarantineStdioTransport(child_io=_RecordingChildIO(), staging=QuarantineStagingMap())  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_teardown_failure_is_loud_and_does_not_mask_the_refusal() -> None:
+    """HARD #7: a teardown that itself fails is logged LOUD, never silently swallowed.
+
+    The refusal must still reach the orchestrator — a failed revoke must not convert a graceful
+    typed refusal into an unhandled exception.
+    """
+    import structlog
+
+    auditor = _RecordingAuditor()
+    child = _CloseRaisingChildIO(
+        ControlFdBrokerError("short_data_send", destination="gw:8889", delivered=2)
+    )
+    transport = _staged_transport(child, auditor=auditor)
+
+    with structlog.testing.capture_logs() as logs:
+        result = await _dispatch_extract(transport)
+
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    events = [entry["event"] for entry in logs]
+    assert "security.quarantine_transport.capability_revoke_failed" in events
 
 
 @pytest.mark.asyncio
@@ -310,7 +552,9 @@ async def test_dispatch_sends_ingest_then_extract_in_order() -> None:
     nonce = CapabilityGateNonce()
     staging.stage("deadbeef", _tag(nonce, "hello there"))
     child = _RecordingChildIO()
-    transport = QuarantineStdioTransport(child_io=child, staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=staging, broker_auditor=_RecordingAuditor()
+    )
 
     result = await transport.dispatch(
         "quarantine.extract",
@@ -340,7 +584,9 @@ async def test_dispatch_returns_control_result_not_content_handle() -> None:
     nonce = CapabilityGateNonce()
     staging.stage("deadbeef", _tag(nonce, "body"))
     child = _ContentHandleReturningChildIO()
-    transport = QuarantineStdioTransport(child_io=child, staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=staging, broker_auditor=_RecordingAuditor()
+    )
 
     result = await transport.dispatch(
         "quarantine.extract",
@@ -360,7 +606,9 @@ async def test_dispatch_returns_control_result_not_content_handle() -> None:
 async def test_close_delegates_to_child_io() -> None:
     """``close`` closes the injected child-IO seam."""
     child = _RecordingChildIO()
-    transport = QuarantineStdioTransport(child_io=child, staging=QuarantineStagingMap())
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=QuarantineStagingMap(), broker_auditor=_RecordingAuditor()
+    )
     await transport.close()
     assert child.closed is True
 
@@ -469,7 +717,9 @@ async def test_dispatch_replay_after_consume_refused(
     staging = QuarantineStagingMap()
     staging.stage("deadbeef", _tag(authorized_t3_nonce, "body"))
     child = _RecordingChildIO()
-    transport = QuarantineStdioTransport(child_io=child, staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=staging, broker_auditor=_RecordingAuditor()
+    )
 
     await transport.dispatch(
         "quarantine.extract",
@@ -556,7 +806,9 @@ async def test_dispatch_unsupported_method_fails_loud() -> None:
     from alfred.errors import AlfredError
 
     transport = QuarantineStdioTransport(
-        child_io=_RecordingChildIO(), staging=QuarantineStagingMap()
+        child_io=_RecordingChildIO(),
+        staging=QuarantineStagingMap(),
+        broker_auditor=_RecordingAuditor(),
     )
     with pytest.raises(AlfredError, match="unsupported wire method"):
         await transport.dispatch("quarantine.ingest", {"handle_id": "x"})
@@ -581,7 +833,9 @@ async def test_dispatch_non_dict_result_yields_empty_payload(
             if obj["method"] == "quarantine.extract":
                 self._pending_reply = _frame({"jsonrpc": "2.0", "result": "not-a-dict"})
 
-    transport = QuarantineStdioTransport(child_io=_NonDictResultChild(), staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=_NonDictResultChild(), staging=staging, broker_auditor=_RecordingAuditor()
+    )
     result = await transport.dispatch(
         "quarantine.extract",
         {"handle_id": "deadbeef", "schema_json": "{}", "schema_version": 1},

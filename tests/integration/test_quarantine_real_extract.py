@@ -569,7 +569,18 @@ async def _extraction_stack(
 
         audit_writer = _CapturingAuditWriter()
         staging = QuarantineStagingMap()
-        transport = QuarantineStdioTransport(child_io=child_io, staging=staging)
+        # The REAL EgressBrokerAuditor (#340 review A5: broker_auditor is a required
+        # constructor argument — a ``None`` default silently lost every durable
+        # ``egress.broker.*`` row while the broker kept handing live gateway sockets to the
+        # T3 child). Wiring the production auditor here means this crown-jewel proof also
+        # captures the ``egress.broker.connected`` rows for the REAL brokered sockets.
+        from alfred.egress.broker_audit import EgressBrokerAuditor
+
+        transport = QuarantineStdioTransport(
+            child_io=child_io,
+            staging=staging,
+            broker_auditor=EgressBrokerAuditor(cast("AuditWriter", audit_writer)),
+        )
         extractor = QuarantinedExtractor(
             transport=transport,
             audit_writer=cast("AuditWriter", audit_writer),

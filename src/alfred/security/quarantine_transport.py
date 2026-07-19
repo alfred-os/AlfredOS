@@ -35,6 +35,7 @@ Three collaborators:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -42,10 +43,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import structlog
 
 from alfred.egress.control_fd_broker import ControlFdBrokerError
+from alfred.egress.errors import IOPlaneUnavailableError
 from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.plugins.transport import ControlResult
 from alfred.security.quarantine import BROKER_SOCKET_COUNT
+from alfred.security.quarantine_child_io import QuarantineChildSpawnError
 from alfred.security.tiers import T3, tag_t3_with_nonce
 
 if TYPE_CHECKING:
@@ -78,6 +81,44 @@ _BROKER_FAILURE_REFUSAL_REASON = "provider_unavailable"
 # The unresolved-destination sentinel for the failure row when a ``ControlFdBrokerError``
 # somehow carries no ``destination`` (defensive — every broker-path error stamps one).
 _UNRESOLVED_DESTINATION = "<unresolved>"
+
+# The generic member of the CLOSED ``EGRESS_BROKER_REFUSED_REASONS`` vocabulary
+# (``ControlFdBrokerError.__init__``'s own default). Used for the two broker-preamble failures
+# the broker itself never raises a specific code for: the preamble deadline (A7) and the
+# pre-connect misconfiguration errors (``IOPlaneUnavailableError`` /
+# ``QuarantineChildSpawnError``, A4). Deliberately NOT new vocabulary members: that frozenset is
+# AST-drift-guarded against ``ControlFdBrokerError``'s literals
+# (``tests/unit/audit/test_egress_broker_reason_vocab.py``), so growing it for a CALLER's
+# convenience would either break the guard or force a fake raise site in the broker. The
+# specific cause is preserved in the loud structlog event at each call site instead.
+_GENERIC_BROKER_REFUSAL_REASON = "control_fd_broker_failed"
+
+# Bound on the per-extraction broker preamble — the ``broker_sockets`` batch PLUS its
+# ``egress.broker.connected`` audit rows (golive spec §17, review item A7).
+#
+# WHY IT MUST EXIST: unbounded, the preamble sits entirely OUTSIDE the §17 timeout nesting.
+# Under gateway degradation the outer ``action_deadline`` fires mid-preamble and the extraction
+# dies as an anonymous deadline kill — the graceful ``provider_unavailable`` refusal and the
+# ``egress.broker.refused`` forensic row (the very artefacts this path exists to produce) are
+# never reached.
+#
+# THE ARITHMETIC: the preamble is SEQUENTIAL with the ``read_frame`` bound, not nested inside
+# it, so both must fit within the outer deadline:
+#
+#     preamble(4) + host_read(25) = 29 < action_deadline(30)          [success path]
+#     preamble(4) + failure-row write(<=5) = 9 << action_deadline(30) [refusal path]
+#
+# which preserves the documented nesting ``action_deadline(30) > host_read(25) >
+# gateway_handshake(22) > child_budget(20) > sdk_read(8)`` — pinned by
+# ``test_broker_preamble_bound_nests_under_the_action_deadline`` and the §17 hierarchy suite.
+#
+# WHY 4s IS AMPLE: with the CONNECT phase now gathered (A1) the batch costs ONE connect RTT to a
+# co-located gateway (sub-millisecond on a docker network), N local AF_UNIX ``sendmsg`` calls
+# (microseconds), and N+1 audit appends (single-digit ms). 4s is ~3 orders of magnitude of
+# headroom. It does mean this bound, not ``control_fd_broker._CONNECT_TIMEOUT_S`` (10s), is the
+# effective connect ceiling on the golive path — deliberate: 10s of connect latency is already a
+# dead extraction, and refusing at 4s buys the forensics.
+_BROKER_PREAMBLE_TIMEOUT_S = 4.0
 
 
 class StagingNonceUnconfiguredError(AlfredError):
@@ -291,13 +332,15 @@ class QuarantineStdioTransport:
         *,
         child_io: ChildIO,
         staging: QuarantineStagingMap,
-        broker_auditor: EgressBrokerAuditor | None = None,
+        broker_auditor: EgressBrokerAuditor,
     ) -> None:
         self._child_io = child_io
         self._staging = staging
-        # OPTIONAL: golive Task 10 threads the real dormant-pre-gate auditor + declares
-        # the ``egress.broker.*`` hookpoints. Until then it is ``None`` (no audit rows).
-        # None-safe on EVERY use below — a missing auditor never blocks brokering.
+        # REQUIRED (no default). An ``EgressBrokerAuditor | None = None`` default was
+        # fail-OPEN: a caller that forgot the auditor silently lost every durable
+        # ``egress.broker.*`` row while the broker kept handing live gateway sockets to a T3
+        # child. Audit-log writes are non-skippable (CLAUDE.md HARD #5), so the wiring mistake
+        # must be a construction-time TypeError, not a runtime audit hole.
         self._broker_auditor = broker_auditor
 
     async def dispatch(self, method: str, params: dict[str, object]) -> ControlResult:
@@ -319,23 +362,9 @@ class QuarantineStdioTransport:
         # ingest then fail.
         tagged = self._staging.drain(handle_id)
 
-        # Broker N one-shot gateway sockets up-front (spec §6, connect-defer) BEFORE the
-        # ingest/extract writes: all N ``sendmsg``s enqueue into the child's fd-4 buffer
-        # ahead of the extract frame, so the child's post-read drain is race-free. A
-        # partial connect failure sends NOTHING; the ``ControlFdBrokerError`` is caught
-        # here and converted to a typed refusal — NEVER propagated raw (HARD #7).
-        try:
-            destinations = await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)
-        except ControlFdBrokerError as exc:
-            if self._broker_auditor is not None:
-                await self._broker_auditor.record_broker_failure(
-                    destination=exc.destination or _UNRESOLVED_DESTINATION,
-                    reason=exc.reason,
-                )
-            return _broker_failure_refusal()
-        if self._broker_auditor is not None:
-            for host, port in destinations:
-                await self._broker_auditor.record_broker_success(destination=f"{host}:{port}")
+        refusal = await self._run_broker_preamble()
+        if refusal is not None:
+            return refusal
 
         # Inline-over-wire (ADR-0029): ingest carries the raw T3 body; extract
         # carries only the opaque handle id + schema. Ingest goes FIRST so the
@@ -360,6 +389,128 @@ class QuarantineStdioTransport:
         # guards (quarantine.py:1050-1145) do the lift; this transport never
         # synthesises a ContentHandle or an ExtractionResult on this path.
         return ControlResult(method=_EXTRACT_METHOD, payload=payload)
+
+    async def _run_broker_preamble(self) -> ControlResult | None:
+        """Broker N gateway sockets + write their audit rows. ``None`` == proceed to the wire.
+
+        Brokers ``BROKER_SOCKET_COUNT`` one-shot gateway sockets up-front (spec §6,
+        connect-defer) BEFORE the ingest/extract writes, so all N ``sendmsg``s enqueue into the
+        child's fd-4 buffer ahead of the extract frame and the child's post-read drain is
+        race-free. Returns a typed-refusal :class:`ControlResult` on any broker failure — a raw
+        broker error NEVER reaches the orchestrator (HARD #7).
+
+        Two invariants beyond the happy path:
+
+        **The whole preamble is BOUNDED** (:data:`_BROKER_PREAMBLE_TIMEOUT_S`, review item A7).
+        Unbounded it sits outside the §17 timeout nesting, so a degraded gateway kills the
+        extraction on the outer ``action_deadline`` before the graceful refusal + forensic row
+        are ever produced.
+
+        **Any failure that could leave fds in the child REVOKES the capability** (A2/A3) by
+        tearing the child down. Three arcs reach it:
+
+        * a SEND-phase partial failure (``exc.delivered > 0``): connect-defer makes the CONNECT
+          half all-or-nothing but cannot make the SEND half atomic, so k-1 live sockets sit in
+          the child's SCM_RIGHTS queue that no drain will reclaim (the drain only runs in the
+          extract branch's ``finally``, and this path writes no extract frame);
+        * the preamble deadline: the delivery count is unknowable, so revoke conservatively;
+        * a post-broker exception — an audit-row write that raises or a fail-closed hookpoint
+          that denies (A3). The sockets are ALREADY queued at that point, so without the revoke
+          the child would hold live provider-reachable fds with NO durable audit row and NO
+          teardown: an un-recorded, un-revoked capability grant. The exception still propagates
+          (a failed audit write is loud — HARD #5 — never laundered into a soft refusal); the
+          revoke merely happens first.
+
+        A ``delivered == 0`` broker failure (the COMMON gateway-down case) deliberately does NOT
+        revoke: nothing reached the child, so there is no capability to revoke and no desynced
+        queue, and killing the child would turn a transient outage into a hard-down quarantine
+        path.
+        """
+        try:
+            async with asyncio.timeout(_BROKER_PREAMBLE_TIMEOUT_S):
+                destinations = await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)
+                for host, port in destinations:
+                    await self._broker_auditor.record_broker_success(destination=f"{host}:{port}")
+        except TimeoutError:
+            _log.error(
+                "security.quarantine_transport.broker_preamble_deadline_exceeded",
+                timeout_s=_BROKER_PREAMBLE_TIMEOUT_S,
+            )
+            return await self._refuse_broker(
+                destination=_UNRESOLVED_DESTINATION,
+                reason=_GENERIC_BROKER_REFUSAL_REASON,
+                revoke=True,  # conservative: we cannot know how many fds reached the child
+            )
+        except ControlFdBrokerError as exc:
+            return await self._refuse_broker(
+                destination=exc.destination or _UNRESOLVED_DESTINATION,
+                reason=exc.reason,
+                revoke=exc.delivered > 0,
+            )
+        except (IOPlaneUnavailableError, QuarantineChildSpawnError) as exc:
+            # Both escape ``broker_sockets`` strictly BEFORE any connect — an unset/malformed
+            # proxy URL (``_resolve_proxy_addr``) or an IO built without a control-end/egress
+            # config. Nothing was delivered, so no revoke. Previously these propagated RAW past
+            # the ``except ControlFdBrokerError`` narrowing, bypassing the typed refusal (A4).
+            _log.error(
+                "security.quarantine_transport.broker_unconfigured",
+                error_class=type(exc).__name__,
+            )
+            return await self._refuse_broker(
+                destination=_UNRESOLVED_DESTINATION,
+                reason=_GENERIC_BROKER_REFUSAL_REASON,
+                revoke=False,
+            )
+        except BaseException:
+            # A3: the sockets are already in the child's queue. Revoke BEFORE the exception
+            # propagates — deliberately ``BaseException`` so a ``CancelledError`` (an outer
+            # action-deadline firing mid-preamble) revokes too: that path also writes no extract
+            # frame, so the child would keep un-drained live fds. Mirrors the
+            # ``_await_boot_handshake`` teardown discipline in ``quarantine_child_io``.
+            await self._revoke_child_capability()
+            raise
+        return None
+
+    async def _refuse_broker(self, *, destination: str, reason: str, revoke: bool) -> ControlResult:
+        """Revoke (if the child holds fds), persist the refusal row, return the typed refusal.
+
+        Revoke-FIRST ordering is deliberate: if the durable ``egress.broker.refused`` write
+        itself fails it propagates loudly (HARD #5 — audit writes are non-skippable), and the
+        capability must already be revoked by then rather than left live behind a raised error.
+        """
+        if revoke:
+            await self._revoke_child_capability()
+        await self._broker_auditor.record_broker_failure(destination=destination, reason=reason)
+        return _broker_failure_refusal()
+
+    async def _revoke_child_capability(self) -> None:
+        """Tear the quarantine child down, revoking every fd already in its SCM_RIGHTS queue.
+
+        Killing the child is what makes the connect-defer invariant TRUE rather than merely
+        narrower: it revokes the granted capability and discards the desynced socket queue
+        atomically, in one step the kernel guarantees.
+
+        **Operational consequence (tracked):** the child is spawned exactly ONCE, at daemon boot
+        (``_build_comms_inbound_extractor``); there is no respawn scheduler. After a revoke,
+        subsequent extractions degrade GRACEFULLY rather than crashing — the control-parent
+        socket is closed, so ``_send_one`` fails immediately with ``sendmsg_failed`` and every
+        later dispatch returns this same ``provider_unavailable`` typed refusal plus its own
+        ``egress.broker.refused`` row — but the quarantine path stays down until the daemon is
+        restarted. That is the correct fail-closed trade against leaving un-revoked gateway
+        capability in a T3-holding child.
+
+        A teardown that itself fails is logged LOUD with an explicit ``error_class`` and
+        swallowed (never silent — HARD #7): it must not preempt the caller's graceful typed
+        refusal, which is the orchestrator's only clean exit from this path.
+        """
+        _log.error("security.quarantine_transport.capability_revoked")
+        try:
+            await self._child_io.aclose()
+        except Exception as exc:
+            _log.error(
+                "security.quarantine_transport.capability_revoke_failed",
+                error_class=type(exc).__name__,
+            )
 
     async def close(self) -> None:
         """Close the injected child-IO seam (idempotent at the seam level)."""
