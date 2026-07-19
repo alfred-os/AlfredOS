@@ -153,14 +153,20 @@ async def test_control_fd_spawn_passes_fd_3_and_4(
     """An opt-in ``control_fd=True`` spawn passes BOTH fd 3 and fd 4.
 
     ``broker_sockets()`` on the returned IO delegates to
-    ``control_fd_broker.broker_connected_sockets`` with the owned parent
-    control-end and the injected ``egress_config``.
+    ``control_fd_broker.broker_connected_sockets`` with THIS instance's own owned parent
+    control-end and the exact injected ``egress_config``.
+
+    Identity assertions, not liveness ones (CodeRabbit): a ``proxy_config is not None`` check
+    passes even if the delegation wired up some OTHER instance's endpoint, which on this seam
+    would mean brokering a live gateway socket into the wrong sandboxed child. ``is``-identity
+    against ``io._control_parent`` / the injected config is what actually pins the wiring.
     """
+    cfg = _Cfg()
     io = await spawn_quarantine_child_io(
         provider_key="k",
         control_fd=True,
         child_module=qcio._BROKERED_PROBE_MODULE,
-        egress_config=_Cfg(),
+        egress_config=cfg,
     )
     try:
         assert _spawn_capture["pass_fds"] == (3, 4)
@@ -168,8 +174,10 @@ async def test_control_fd_spawn_passes_fd_3_and_4(
         monkeypatch.setattr(qcio.control_fd_broker, "broker_connected_sockets", broker_mock)
         await io.broker_sockets(1)
         broker_mock.assert_awaited_once()
-        assert broker_mock.await_args.kwargs["proxy_config"] is not None
-        assert broker_mock.await_args.kwargs["count"] == 1
+        kwargs = broker_mock.await_args.kwargs
+        assert kwargs["parent_end"] is io._control_parent  # THIS io's own control endpoint
+        assert kwargs["proxy_config"] is cfg  # the exact config injected at spawn
+        assert kwargs["count"] == 1
     finally:
         await io.aclose()
 
@@ -178,6 +186,56 @@ async def test_control_fd_with_no_egress_config_raises(_spawn_capture: dict[str,
     """``control_fd=True`` with no ``egress_config`` refuses loudly (misconfigured opt-in)."""
     with pytest.raises(QuarantineChildSpawnError):
         await spawn_quarantine_child_io(provider_key="k", control_fd=True, egress_config=None)
+
+
+@pytest.mark.parametrize(
+    ("model", "max_tokens"),
+    [
+        (None, 8192),  # model omitted
+        ("claude-haiku-4-5", None),  # budget omitted
+        (None, None),  # both omitted
+    ],
+)
+async def test_control_fd_without_provider_config_refuses(
+    _spawn_capture: dict[str, Any], model: str | None, max_tokens: int | None
+) -> None:
+    """A6: the live-spawn guard is SYMMETRIC — model/max_tokens are as required as egress.
+
+    ``control_fd=True`` already refused loudly on a missing ``egress_config``, but let a
+    missing ``model`` / ``max_tokens`` through. ``_child_env`` only sets each var when its
+    argument is non-``None``, so the child would boot without them and fail LATE and
+    obscurely: ``_build_provider`` ``KeyError``s on ``ALFRED_QUARANTINE_MODEL`` at boot, and a
+    missing ``ALFRED_QUARANTINE_MAX_TOKENS`` ``KeyError``s inside the extract loop
+    (``_run_mcp_server``) — after the two-frame handshake has already reported the child
+    healthy. Refusing pre-spawn keeps every ``control_fd=True`` misconfiguration one loud
+    failure of the same shape, and costs no spawn.
+    """
+    with pytest.raises(QuarantineChildSpawnError):
+        await spawn_quarantine_child_io(
+            provider_key="k",
+            control_fd=True,
+            egress_config=_Cfg(),
+            model=model,
+            max_tokens=max_tokens,
+        )
+    assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
+
+
+async def test_dormant_spawn_still_ignores_provider_config(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """A6 boundary: the guard is scoped to ``control_fd=True`` — dormancy is unchanged.
+
+    A ``control_fd=False`` spawn passes neither model nor max_tokens and must still succeed
+    (ADR-0050 dormancy invariant: the dormant env stays byte-identical to pre-golive).
+    """
+    io = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        assert _spawn_capture["pass_fds"] == (3,)
+        assert "ALFRED_QUARANTINE_MODEL" not in _spawn_capture["env"]
+        assert "ALFRED_QUARANTINE_MAX_TOKENS" not in _spawn_capture["env"]
+    finally:
+        await io.aclose()
 
 
 async def test_child_module_outside_allowlist_refuses(_spawn_capture: dict[str, Any]) -> None:
@@ -495,9 +553,20 @@ async def test_default_spawn_env_omits_golive_provider_config(
 async def test_control_fd_spawn_env_carries_provider_config(
     _spawn_capture: dict[str, Any],
 ) -> None:
-    """A control_fd=True spawn threads model + budget + the default CA path into the env."""
+    """A control_fd=True spawn threads model + budget + the default CA path into the env.
+
+    AND — the load-bearing half (CodeRabbit) — it proves the provider KEY is NOT there. The
+    key crosses ONLY over fd 3 (ADR-0015 #218); the scrubbed env is an allowlist that must
+    never carry it. Asserting the three config vars are present says nothing about that, so
+    this drives a UNIQUE sentinel key and asserts it appears nowhere in ``env.values()``: a
+    regression that copied the key into the child environment (the most adversary-facing
+    surface in the system) would otherwise ship silently.
+    """
+    # Unique + improbable: a generic value like "k" could collide with a legitimate env value
+    # and make the absence assertion vacuously true.
+    key_sentinel = "sentinel-provider-key-8f3a1c47-must-never-reach-the-child-env"
     io = await spawn_quarantine_child_io(
-        provider_key="k",
+        provider_key=key_sentinel,
         control_fd=True,
         child_module=qcio._BROKERED_PROBE_MODULE,
         egress_config=_Cfg(),
@@ -509,5 +578,11 @@ async def test_control_fd_spawn_env_carries_provider_config(
         assert env["ALFRED_QUARANTINE_MODEL"] == "claude-haiku-4-5"
         assert env["ALFRED_QUARANTINE_MAX_TOKENS"] == "8192"
         assert env["SSL_CERT_FILE"] == qcio._DEFAULT_SSL_CERT_FILE
+        # The key was really delivered — over fd 3, the ONLY sanctioned channel.
+        assert _spawn_capture["delivery"]["key"] == key_sentinel
+        # …and it is absent from the child env, by value and by substring (a var that merely
+        # EMBEDDED the key would still be a leak).
+        assert key_sentinel not in env.values()
+        assert not any(key_sentinel in value for value in env.values())
     finally:
         await io.aclose()

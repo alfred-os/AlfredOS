@@ -159,6 +159,13 @@ _ALLOWED_CHILD_MODULES: frozenset[str] = frozenset({_CHILD_MODULE, _BROKERED_PRO
 # every allowed module, so every returned instance has proven exec.
 _MODULES_EMITTING_READY: frozenset[str] = frozenset({_CHILD_MODULE})
 
+# Modules whose child READS the golive provider config out of its spawn env
+# (``ALFRED_QUARANTINE_MODEL`` / ``ALFRED_QUARANTINE_MAX_TOKENS``). Only the real child does:
+# ``_build_provider`` indexes both, and ``_run_mcp_server`` re-reads the budget per extract.
+# The diagnostic probe reads neither, so requiring the config for a probe spawn would be a
+# guard that refuses a correct call. Keeps the A6 symmetry guard precise rather than blanket.
+_MODULES_REQUIRING_PROVIDER_CONFIG: frozenset[str] = frozenset({_CHILD_MODULE})
+
 # 4-byte big-endian length prefix — peer to the child loop's framing.
 _LENGTH_HEADER_BYTES = 4
 
@@ -1005,6 +1012,20 @@ async def spawn_quarantine_child_io(
         raise QuarantineChildSpawnError(t("security.quarantine_child.child_module_not_allowed"))
     if control_fd and egress_config is None:
         raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
+    if (
+        control_fd
+        and child_module in _MODULES_REQUIRING_PROVIDER_CONFIG
+        and (model is None or max_tokens is None)
+    ):
+        # SYMMETRY with the egress guard above. ``_child_env`` sets each provider-config var
+        # ONLY when its argument is non-``None`` (the ADR-0050 dormancy invariant), so a live
+        # spawn missing either one produces a child that boots without it and fails LATE and
+        # obscurely: ``_build_provider`` ``KeyError``s on ``ALFRED_QUARANTINE_MODEL`` at boot,
+        # and a missing ``ALFRED_QUARANTINE_MAX_TOKENS`` ``KeyError``s inside the extract loop
+        # — AFTER the two-frame handshake already reported the child healthy. Refusing here
+        # makes every live misconfiguration one loud pre-spawn failure of the same shape, and
+        # costs no spawn (hard rule #7).
+        raise QuarantineChildSpawnError(t("security.quarantine_child.provider_config_missing"))
 
     # Build the scrubbed child env ONCE, up front (no ``await``, no fd op — safe
     # anywhere). The LIVE (``control_fd=True``) spawn threads the golive provider
