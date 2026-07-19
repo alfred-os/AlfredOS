@@ -50,11 +50,16 @@ def _source_tree() -> ast.Module:
 
 
 def _call_site_reasons(tree: ast.Module) -> set[str]:
-    """String-literal args passed to ``ControlFdBrokerError`` or ``_refuse_and_close``."""
+    """String-literal args passed to ``ControlFdBrokerError`` or ``_refuse_and_close`` —
+    positionally, or via a ``reason=`` keyword. Every real call site in
+    ``control_fd_broker.py`` today is positional, but a keyword-form call site
+    (``ControlFdBrokerError(reason="x")``) is legal Python the exception's signature
+    already permits, so the walk must not blind itself to it (CodeRabbit #462)."""
     reasons: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "id", "") in _CONSTRUCTING_CALL_NAMES:
-            for arg in node.args:
+            candidates = [*node.args, *(kw.value for kw in node.keywords if kw.arg == "reason")]
+            for arg in candidates:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     reasons.add(arg.value)
     return reasons
@@ -134,3 +139,15 @@ def test_derivation_is_not_vacuous() -> None:
     """
     derived = _controlfdbrokererror_reasons()
     assert len(derived) == 6, f"expected 6 reasons, derived {len(derived)}: {sorted(derived)}"
+
+
+def test_call_site_walk_sees_keyword_form_reason() -> None:
+    """Regression (CodeRabbit #462): ``_call_site_reasons`` must pick up a keyword-form
+    ``reason=`` call site, not only the positional form every real call site in
+    ``control_fd_broker.py`` uses today. A future call site written as
+    ``ControlFdBrokerError(reason="some_new_reason")`` would otherwise slip past this
+    drift-guard's walk entirely — silently under-counting, the exact failure mode this
+    file exists to prevent.
+    """
+    synthetic_tree = ast.parse('ControlFdBrokerError(reason="synthetic_keyword_reason")')
+    assert _call_site_reasons(synthetic_tree) == {"synthetic_keyword_reason"}
