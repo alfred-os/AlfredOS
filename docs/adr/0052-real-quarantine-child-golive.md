@@ -104,6 +104,32 @@ socket in its empty network namespace. The specific decisions:
   pins `max_retries=0`. fd-4 stays strictly one-way — PR2a's
   reverse-fd-injection closure is untouched.
 
+- **A partial fd hand-off REVOKES the child; connect-defer alone is not enough.**
+  Connect-defer makes the CONNECT half all-or-nothing, but it cannot make the
+  SEND half atomic: if `_send_one` fails on socket *k* of *N*, *k−1* descriptors
+  are already in the child's SCM_RIGHTS queue. Because a failed batch writes **no
+  extract frame**, the child's `drain_leftovers()` `finally` — its only reclaim
+  path — never runs, and the `transport_failed` arm never calls `aclose()`. The
+  child would be left holding live, gateway-reachable capability behind an audit
+  row that says the broker *refused*, accumulating up to `N−1` such sockets per
+  failure. So `QuarantineStdioTransport` **tears the child down** on any preamble
+  failure that could have delivered an fd (`ControlFdBrokerError.delivered > 0`,
+  the preamble deadline, or a post-broker audit failure): killing the child
+  revokes the capability and discards the desynced queue atomically, in one step
+  the kernel guarantees. A `delivered == 0` failure — the common gateway-down
+  case — deliberately does **not** revoke; nothing reached the child, and killing
+  it would turn a transient outage into a hard-down quarantine path.
+
+  **Accepted operational consequence.** The child is spawned exactly once, at
+  daemon boot (`_build_comms_inbound_extractor`); there is **no respawn
+  scheduler**. A revoke therefore takes the quarantine path down until the daemon
+  restarts. It degrades gracefully rather than crashing — with the control parent
+  closed, `_send_one` fails immediately and every later extraction returns the
+  same `provider_unavailable` typed refusal plus its own `egress.broker.refused`
+  row — but the path stays down. This is the deliberate fail-closed trade against
+  leaving un-revoked gateway capability in a T3-holding child. A supervised
+  respawn for the quarantine child is a tracked follow-up (see References).
+
 - **Fork 3 — a `BrokeredProviderSource` wrapper-provider, not a bare factory.**
   `dispatch_extraction` is egress-free by contract (its docstring guarantees it
   imports no SDK/httpx), so the per-call socket must not come from a factory the
@@ -207,6 +233,28 @@ socket in its empty network namespace. The specific decisions:
   This composes with the `sock.settimeout(read)` prerequisite (which makes the
   20s budget a real hard ceiling — the blocking SDK `recv` is otherwise
   un-cancellable by `asyncio.wait_for`) and with connect-defer.
+
+- **The broker preamble is bounded at 4s and joins the nesting as a SUM term.**
+  The per-extraction preamble (`broker_sockets` plus its
+  `egress.broker.connected` rows) was the one term bounded by nothing. Unbounded
+  it sits *outside* the hierarchy above: under gateway degradation the outer
+  `action_deadline` fires mid-preamble and the extraction dies as an anonymous
+  deadline kill, so the graceful `provider_unavailable` refusal and the
+  `egress.broker.refused` forensic row — the artefacts this path exists to
+  produce — are never reached. Because the preamble is **sequential with**, not
+  nested inside, the `read_frame` bound, the invariant is a sum rather than an
+  ordering: `preamble(4) + host_read(25) = 29 < action_deadline(30)` on the
+  success path, and `preamble(4) + failure-row(≤5) = 9 ≪ 30` on the refusal path.
+  The concurrent CONNECT phase is what makes a bound this tight viable (a serial
+  loop's `N × _CONNECT_TIMEOUT_S = 30s` could not fit under any of it). Two
+  consequences are deliberate and recorded: this bound, not
+  `control_fd_broker._CONNECT_TIMEOUT_S` (10s), is the effective connect ceiling
+  on the golive path; and it is *tighter* than `EgressBrokerAuditor`'s own 5s
+  per-write budget, so a hung `append_schema` surfaces as
+  `broker_preamble_deadline_exceeded` rather than the auditor's
+  `egress.broker.audit_write_timeout`. Both are loud, typed and fail closed; an
+  invariant test pins the inversion so a future retune cannot silently restore an
+  unbounded hot-path stall.
 
 - **The echo path is DELETED, not bypassed.** `_echo_extracted_frame`,
   `_DeterministicProvider`, and the `_build_provider` sentinel return are
@@ -399,6 +447,12 @@ the `egress.broker.refused` audit row.
   still describe the deterministic-echo child; an `alfred-docs-author` pass
   should record the live real-LLM child. Recorded per golive spec §19-E5; not
   written here.
+- **Supervised respawn for the quarantine child.** The child is spawned once at
+  daemon boot with no respawn scheduler, so the partial-hand-off revoke (and any
+  other child death) takes the quarantine path down until the daemon restarts.
+  Extractions degrade to a graceful `provider_unavailable` refusal rather than
+  crashing, so this is availability, not a security gate — but a supervised
+  respawn would turn a revoke into a self-healing event.
 - **#358** — core→proxy `Proxy-Authorization`/mTLS (the residual (iv)
   forward-gate the live brokered caller now exercises).
 - **Nightly real-key smoke** — real Anthropic + real gateway + real key in CI
