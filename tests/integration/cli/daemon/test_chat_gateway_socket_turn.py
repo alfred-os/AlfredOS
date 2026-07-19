@@ -32,7 +32,7 @@ Real-chain discipline (CLAUDE.md hard rules)
 
 The ONLY off-Linux substitution is the quarantined-child spawn (an in-proc echo
 double in place of the bwrap child this leg cannot spawn) — the docker-only
-``test_daemon_comms_flip_real_spawn`` proves the genuine bwrap spawn. Everything
+``test_quarantine_real_extract`` proves the genuine bwrap spawn. Everything
 that matters for the gateway↔daemon composition under proof is production code.
 
 Skip posture mirrors the inbound-turn proof: the ``alfred_tui`` manifest is

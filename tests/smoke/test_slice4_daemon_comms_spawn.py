@@ -87,7 +87,7 @@ _LAUNCHER_TEST_UID = getpass.getuser()
 
 # PR-S4-11c-2b: the daemon's go-live flip spawns the bwrap quarantined child at boot,
 # so this smoke needs the docker-only provisioning (bwrap + Linux + root + the
-# ADR-0030 bound interpreter) — mirrors test_daemon_comms_flip_real_spawn. Without it
+# ADR-0030 bound interpreter) — mirrors test_quarantine_real_extract. Without it
 # the daemon refuses to boot fail-closed and the boot.completed row never lands.
 _HAS_BWRAP = shutil.which("bwrap") is not None
 _CHILD_PYTHON = os.environ.get("ALFRED_QUARANTINE_CHILD_PYTHON")

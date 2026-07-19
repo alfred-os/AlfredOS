@@ -111,8 +111,9 @@ class _EchoingChildDouble:
     child. This end-to-end proof runs on macOS / non-root Linux (no bwrap), so it
     monkeypatches ``spawn_quarantine_child_io`` to return this double — the daemon's
     real ``QuarantineStdioTransport`` drives it exactly as it would the live child.
-    The docker-only ``test_daemon_comms_flip_real_spawn`` proves the genuine bwrap
-    spawn; this proof keeps the full inbound-turn path runnable off-Linux.
+    The docker-only ``test_quarantine_real_extract`` proves the genuine bwrap
+    spawn (real child + real broker + real TLS -> a real Extracted); this proof
+    keeps the full inbound-turn path runnable off-Linux.
     """
 
     def __init__(self, *, provider_key: str) -> None:

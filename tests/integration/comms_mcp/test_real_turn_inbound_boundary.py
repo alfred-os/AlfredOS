@@ -125,6 +125,28 @@ class _ExtractionAwareChildDouble:
     makes it return a ``typed_refusal`` instead (the error-leg tests' escape
     hatch) — mirrors what a real quarantined LLM does when it cannot make sense
     of malformed/adversarial input.
+
+    R.2.10 provenance reconcile (#340 golive; sec-002/ai-003). This double's
+    key-projection is a faithful STAND-IN for — not a proof of — the real
+    extractor's behaviour, and the security property it exercises is the
+    STRUCTURAL one (golive spec Section 12 / Section 19-B2), NOT a "the double
+    happens to drop ``__injected_frame__``" fiction:
+
+    * whatever the child emits MUST validate against ``CommsBodyExtraction`` on
+      the ORCHESTRATOR side (``QuarantinedExtractor._extract_body`` ->
+      ``schema.model_validate``); a schema-break — a real hostile LLM returning
+      an extra/renamed field — is a ``PluginProtocolViolation`` (refused,
+      ``result="protocol_violation"``), never a silently-widened T2 payload; and
+    * a FAITHFUL extraction (a valid ``{text, intent}``) — even one whose ``text``
+      an adversary steered — is typed T2 and can reach the planner ONLY via the
+      gate-checked ``downgrade_to_orchestrator`` receipt.
+
+    So the invariant is "only the schema shape crosses, validated host-side, and
+    only through the gate" — a structural property that holds regardless of what a
+    real (possibly hostile) LLM chooses to put in ``text``. The REAL extractor
+    end-to-end (real bwrap child + real broker + real TLS -> a schema-validated
+    ``Extracted``, a schema-break refused) is proven in
+    ``tests/integration/test_quarantine_real_extract.py`` (Task 14).
     """
 
     def __init__(self, *, provider_key: str) -> None:
@@ -571,6 +593,18 @@ async def test_privileged_prompt_arrives_only_through_the_gate_checked_downgrade
     marker — planted in ``__injected_frame__``, a key
     ``CommsBodyExtraction`` does not surface — never appears in ANY captured
     planner request.
+
+    R.2.10 (#340 golive; sec-002/ai-003): assertion (d) is STRUCTURAL, not the
+    "double drops the key" fiction. The security guarantee is that the extraction
+    schema (``CommsBodyExtraction{text, intent}``) is the ONLY shape that crosses,
+    validated ORCHESTRATOR-side (a schema-break is a refused
+    ``PluginProtocolViolation``, golive spec Section 12 / Section 19-B2), and it
+    reaches the planner ONLY through the gate-checked downgrade (assertions
+    a/c). ``__injected_frame__`` is not a ``CommsBodyExtraction`` field, so a
+    conformant extraction structurally cannot surface it — regardless of what a
+    real hostile LLM chooses to emit. The real extractor proving that same shape
+    end-to-end (schema-valid ``Extracted``; schema-break refused) is
+    ``tests/integration/test_quarantine_real_extract.py`` (Task 14).
     """
     async with _boot_stack(postgres_url, monkeypatch) as stack:
         await stack.send_inbound(body={"text": "hi", "__injected_frame__": _MARKER})

@@ -40,8 +40,8 @@ How it differs from the two mirrors
   :meth:`GatewayProcess._build_adapter_runner_factory`) + a REAL bwrap probe spawn,
   so the credential round-trip (never exercised by A1 — its spawn never ran) is
   proven for real and the inbound is PRODUCED by a live child, not injected.
-* vs the flip mirror (``test_daemon_comms_flip_real_spawn``): that test makes the
-  QUARANTINE child a real bwrap spawn; here the quarantine child stays the in-proc
+* vs the quarantine real-spawn proof (``test_quarantine_real_extract``): that test
+  makes the QUARANTINE child a real bwrap spawn; here the quarantine child stays the in-proc
   ``_EchoingChildDouble`` (monkeypatched, exactly as A1) and ONLY the gateway
   ADAPTER child (the probe) is a real bwrap spawn — a DIFFERENT sandbox host
   (``alfred.gateway.adapter_child_factory`` / ``bin/alfred-plugin-launcher.sh``).
@@ -78,8 +78,8 @@ quarantine child stays the in-proc echo double, so it is never spawned here.
 Reproduce locally via the docker-privileged reproduction recipe in
 ``docs/subsystems/comms.md`` (proto py3.14 + ``uv pip install --python "$PROTO_PY" .``
 + ``uv sync --dev`` + the bound ``sudo env`` / ``uv run pytest`` invocation). See
-``tests/integration/cli/daemon/test_daemon_comms_flip_real_spawn.py`` (the daemon-
-layer real-spawn proof this mirrors) and procedural_local_docker_for_ci_only_failures
+``tests/integration/test_quarantine_real_extract.py`` (the quarantine-child
+real-spawn proof this mirrors) and procedural_local_docker_for_ci_only_failures
 in project memory.
 """
 
