@@ -54,6 +54,7 @@ import structlog
 
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
 from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.errors import AlfredError
 from alfred.hooks.context import HookContext
 from alfred.hooks.registry import SYSTEM_OPERATOR_TIERS
 from alfred.i18n import t
@@ -72,13 +73,6 @@ if TYPE_CHECKING:
 # test_routing_yaml_quarantine_block). Resolved at boot and delivered over fd 3
 # to the bwrap child; NEVER read from the child's own env.
 _PROVIDER_KEY_SECRET_ID = "quarantine_provider_api_key"  # noqa: S105 - broker lookup id, not a credential
-
-# Documented fallback used when ``quarantine_provider_api_key`` is unset. The 2b
-# deterministic-echo child reads + scrubs + discards it (no LLM call), so a
-# placeholder is safe for now; PR-S4-11c-2c flips unset -> refuse-boot once the
-# child makes a real provider call. The key MUST still flow over fd 3 (the
-# real-spawn test asserts delivery), so it is NEVER empty/omitted.
-_PROVIDER_KEY_PLACEHOLDER = "quarantine-provider-key-unset-placeholder"
 
 _log = structlog.get_logger(__name__)
 
@@ -288,18 +282,34 @@ def _resolve_host_os() -> str:
     return "unknown"
 
 
+class QuarantineProviderKeyUnsetError(AlfredError):
+    """No ``quarantine_provider_api_key`` is configured — refuse boot.
+
+    The §20.2 PRIMARY refuse-boot (#340 golive): the quarantined child now makes
+    a REAL provider call, so an unset key must fail LOUD at boot (CLAUDE.md hard
+    rule #7) rather than resolve to a fallback placeholder — a real client built
+    on a bogus key would be a SILENT dead-LLM (§20.3.1 must-not-regress). Rooted
+    at :class:`AlfredError` so the CLI boot path's ``except`` arm can pattern-match
+    it into an audited ``daemon.boot.failed`` refusal (exit 2).
+    """
+
+
 def _resolve_provider_key(secret_broker: SecretBroker) -> str:
-    """Resolve the quarantined child's provider key from the secret broker.
+    """Resolve the quarantined child's provider key; refuse boot if unset.
 
     Returns the broker-held ``quarantine_provider_api_key`` when configured. When
-    unset, returns :data:`_PROVIDER_KEY_PLACEHOLDER` and emits a LOUD structlog
-    warning: the 2b deterministic-echo child reads + scrubs + discards the key
-    (``_build_provider`` does ``del key``), so a placeholder is currently safe.
+    unset, emits a LOUD structlog error and raises
+    :class:`QuarantineProviderKeyUnsetError` — the §20.2 PRIMARY refuse-boot
+    defense (#340 golive). The go-live child makes a REAL provider call, so an
+    unset key is a fail-closed boot refusal, NOT a silent placeholder fallback
+    that would build a real client on a bogus key (§20.3.1 must-not-regress,
+    CLAUDE.md hard rule #7).
 
-    The key is NEVER empty/omitted — the real-spawn proof asserts fd-3 delivery,
-    and ``spawn_quarantine_child_io`` refuses a partial/empty delivery. PR-S4-11c-2c
-    (the real provider client) flips this unset path to a refuse-boot once the
-    child actually calls the provider over the network.
+    SYNCHRONOUS by design (no ``await``): the caller
+    (:func:`_build_comms_inbound_extractor`) invokes this BEFORE the single
+    ``await spawn_quarantine_child_io(...)``, so a refuse here raises pre-spawn —
+    the fd-3 clobber window never opens on the refuse path. Adding an ``await``
+    would reopen that window; do not.
     """
     # ``has`` returns False (never raises) for a registered-but-unset secret, so
     # this branch is the clean "operator has not configured a quarantine provider
@@ -307,13 +317,14 @@ def _resolve_provider_key(secret_broker: SecretBroker) -> str:
     # earlier at ``build_broker``).
     if secret_broker.has(_PROVIDER_KEY_SECRET_ID):
         return secret_broker.get(_PROVIDER_KEY_SECRET_ID)
-    # TODO(PR-S4-11c-2c): flip this to a fail-closed refuse-boot once the child
-    # makes a real provider call — a placeholder key would then mean a dead LLM.
-    _log.warning(
+    # Fail LOUD + fail CLOSED: a real provider client built on a bogus placeholder
+    # key would be a silent dead-LLM (§20.3.1). The secret id is a closed
+    # broker-lookup token (never a secret value), safe to log + carry in the error.
+    _log.error(
         "comms.daemon_runtime.quarantine_provider_key_unset",
         secret_id=_PROVIDER_KEY_SECRET_ID,
     )
-    return _PROVIDER_KEY_PLACEHOLDER
+    raise QuarantineProviderKeyUnsetError(_PROVIDER_KEY_SECRET_ID)
 
 
 async def _build_comms_inbound_extractor(
@@ -400,4 +411,5 @@ __all__ = [
     "CommsAdapterCrashedHookInvoker",
     "CommsInboundOrchestratorAdapter",
     "OutboundSenderLike",
+    "QuarantineProviderKeyUnsetError",
 ]

@@ -99,6 +99,7 @@ from alfred.cli.daemon._failures import (
     OperatorNotSeededFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
+    QuarantineProviderKeyUnsetFailure,
     RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
     T3NonceRegistrationFailedFailure,
@@ -112,6 +113,13 @@ from alfred.cli.daemon._gate_boot import (
     build_boot_handshake,
     build_boot_real_gate_for_daemon,
 )
+
+# #340 golive (§20.2 PRIMARY refuse-boot): the comms-graph build resolves the
+# quarantined child's provider key SYNCHRONOUSLY (``_resolve_provider_key``) BEFORE
+# the spawn; an unset ``quarantine_provider_api_key`` raises this so the boot call
+# site refuses fail-closed (audited, exit 2) rather than build a real client on a
+# bogus placeholder key = a silent dead-LLM (§20.3.1 must-not-regress).
+from alfred.comms_mcp.daemon_runtime import QuarantineProviderKeyUnsetError
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
     EnvironmentSource,
@@ -689,6 +697,22 @@ async def _start_async() -> None:
                 audit,
                 QuarantineChildSpawnFailedFailure(),
                 t("daemon.boot.quarantine_child_spawn_failed"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except QuarantineProviderKeyUnsetError:
+            # #340 golive (§20.2 PRIMARY refuse-boot): _build_comms_inbound_extractor
+            # resolves the quarantined child's provider key SYNCHRONOUSLY (pre-spawn);
+            # an unset quarantine_provider_api_key raises this BEFORE the bwrap child
+            # is spawned. REFUSE boot fail-closed (audited, exit 2) rather than build
+            # a real provider client on a bogus placeholder key = a silent dead-LLM
+            # (§20.3.1 must-not-regress, CLAUDE.md hard rule #7). Distinct reason from
+            # quarantine_child_spawn_failed (spawn fault) — the operator message names
+            # the missing secret + how to set it. Pre-spawn, so no live child leaks.
+            await _refuse_boot(
+                audit,
+                QuarantineProviderKeyUnsetFailure(),
+                t("daemon.boot.quarantine_provider_key_unset"),
                 boot_id=boot_id,
                 environment_source=source,
             )

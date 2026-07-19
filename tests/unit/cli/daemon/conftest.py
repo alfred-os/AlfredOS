@@ -170,6 +170,18 @@ def apply_boot_success_patches(
     # every non-comms boot test too (the router is only built when comms adapters
     # are enabled).
     monkeypatch.setenv("ALFRED_EGRESS_PROXY_URL", "http://proxy.invalid:3128")
+    # #340 golive Task 7: a comms-enabled boot resolves the quarantined child's
+    # provider key SYNCHRONOUSLY (``_resolve_provider_key``) BEFORE the spawn, and
+    # now REFUSES boot (``quarantine_provider_key_unset``) when
+    # ``quarantine_provider_api_key`` is unset — the §20.2 PRIMARY refuse-boot (a
+    # real client on a bogus placeholder key would be a silent dead-LLM, §20.3.1).
+    # Every OTHER comms boot test wants to reach ITS targeted fault (spawn / egress /
+    # identity / handshake), so give them a configured key here (mirrors the deepseek
+    # / egress seams above). The dedicated refuse-boot test unsets this to drive the
+    # unset path (test_daemon_comms_spawn.py). Read via the SecretBroker's env layer
+    # (prefix ALFRED_, key upper-cased). Harmless for non-comms boots (the comms
+    # graph — and thus the resolve — is only built when adapters are enabled).
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER_API_KEY", "sk-quarantine-test")
     # #338 PR2: _build_comms_boot_graph's lazy import re-reads THIS seam (the
     # SOURCE module) at call time, so patching it here (not a _comms_boot-local
     # name) is what actually intercepts it. Without this, build_orchestrator's

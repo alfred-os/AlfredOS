@@ -294,13 +294,18 @@ def _boot_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> Iterator[No
     drives the launcher to resolve the kind="full" bwrap policy (the env only gates
     the kind="none" / non-Linux paths — "test" still bwraps the kind="full" Linux
     child). ``ALFRED_QUARANTINE_CHILD_PYTHON`` is preserved from the harness (the
-    bound interpreter); the broker provider key stays UNSET so the documented
-    placeholder path is exercised (the 2b echo child scrubs + discards it).
+    bound interpreter). #340 golive Task 7: the broker provider key is now SET to a
+    placeholder value — the host refuses boot on an UNSET key (the §20.2 primary
+    defense; the old placeholder-resolve path is gone), and the 2b echo child still
+    reads + scrubs + discards the delivered value (no real provider call yet).
     """
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_ENV", "test")
     monkeypatch.setenv("ALFRED_DATABASE_URL", postgres_url)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "not-a-real-secret-integration-placeholder")
+    monkeypatch.setenv(
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY", "not-a-real-secret-quarantine-placeholder"
+    )
     monkeypatch.setenv("ALFRED_AUDIT.HASH_PEPPER", _AUDIT_HASH_PEPPER)
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ADAPTER_ID}"]')
     monkeypatch.setenv("ALFRED_PLUGIN_UID", _LAUNCHER_TEST_UID)

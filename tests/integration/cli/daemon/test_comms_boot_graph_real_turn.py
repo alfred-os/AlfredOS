@@ -184,6 +184,13 @@ def _boot_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> None:
     monkeypatch.setenv("ALFRED_ENV", "test")
     monkeypatch.setenv("ALFRED_DATABASE_URL", postgres_url)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "not-a-real-secret-integration-placeholder")
+    # #340 golive Task 7: the comms boot now REFUSES on an unset quarantine provider
+    # key (host pre-spawn §20.2 primary defense — the placeholder path is gone). The
+    # 2b echo child still reads + scrubs + discards it, so a placeholder value clears
+    # the refuse and lets _build_comms_boot_graph assemble the graph under test.
+    monkeypatch.setenv(
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY", "not-a-real-secret-quarantine-placeholder"
+    )
 
 
 @pytest.mark.usefixtures("_boot_env")

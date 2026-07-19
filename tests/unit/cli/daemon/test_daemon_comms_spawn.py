@@ -414,6 +414,53 @@ def test_boot_refuses_fail_closed_on_quarantine_child_spawn_failure(
     assert "bwrap" in result.output
 
 
+def test_boot_refuses_fail_closed_on_quarantine_provider_key_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """An unset ``quarantine_provider_api_key`` on a comms boot refuses (exit 2), no pump.
+
+    #340 golive (§20.2 PRIMARY refuse-boot): ``_build_comms_inbound_extractor``
+    resolves the quarantined child's provider key SYNCHRONOUSLY (pre-spawn); an
+    unset key raises ``QuarantineProviderKeyUnsetError`` BEFORE the bwrap child is
+    spawned. The daemon must REFUSE the boot fail-closed (audited, exit 2) rather
+    than build a real provider client on a bogus placeholder key = a silent
+    dead-LLM (§20.3.1 must-not-regress, CLAUDE.md hard rule #7). ``boot_success_env``
+    sets a dummy key for every OTHER comms boot test; unset it here to drive
+    exactly the fault this test targets.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+    monkeypatch.delenv("ALFRED_QUARANTINE_PROVIDER_API_KEY", raising=False)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    # The fail-closed refusal contract: exit 2, never a degraded boot.
+    assert result.exit_code == 2
+
+    sup = FakeSupervisor.last_instance
+    assert sup is not None
+    # The pump was NEVER registered — the refusal happens during the comms-graph
+    # build (the pre-spawn key resolve), BEFORE supervisor.start / the spawn loop.
+    assert sup.registered_tasks == []
+    # The refuse is PRE-spawn, so no bwrap child was ever spawned (the §20.2 host
+    # primary defense fires before the single spawn await — no fd-3 clobber window).
+    assert patch_quarantine_child_spawn == []
+    # A loud daemon.boot.failed row with the EXACT reason — DISTINCT from the
+    # spawn-failed and #444 delivery-failed tokens (catches a wrong-arm regression).
+    rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+    assert rows
+    reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
+    assert "quarantine_provider_key_unset" in reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The operator-facing message names the missing secret + how to set it.
+    assert "quarantine_provider_api_key" in result.output
+
+
 def test_boot_refuses_audited_on_comms_graph_broker_config_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

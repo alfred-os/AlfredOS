@@ -400,6 +400,13 @@ def _boot_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> Iterator[No
     monkeypatch.setenv("ALFRED_ENV", "test")
     monkeypatch.setenv("ALFRED_DATABASE_URL", postgres_url)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "not-a-real-secret-integration-placeholder")
+    # #340 golive Task 7: the comms boot now REFUSES on an unset quarantine provider
+    # key (the host pre-spawn §20.2 primary defense — the placeholder path is gone).
+    # The 2b echo child still reads + scrubs + discards it, so a placeholder value is
+    # enough to clear the refuse and reach the real bwrap spawn under test.
+    monkeypatch.setenv(
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY", "not-a-real-secret-quarantine-placeholder"
+    )
     monkeypatch.setenv("ALFRED_AUDIT.HASH_PEPPER", _AUDIT_HASH_PEPPER)
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ADAPTER_ID}"]')
     monkeypatch.setenv("ALFRED_PLUGIN_UID", _LAUNCHER_TEST_UID)

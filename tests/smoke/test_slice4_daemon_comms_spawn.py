@@ -130,6 +130,11 @@ def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
         # ALFRED_DEEPSEEK_API_KEY is a REQUIRED Settings field; mirror the dispatch
         # smoke's placeholder so the daemon boots.
         env["ALFRED_DEEPSEEK_API_KEY"] = "not-a-real-secret-smoke-test-placeholder"
+        # #340 golive Task 7: the comms boot now REFUSES on an unset quarantine
+        # provider key (host pre-spawn §20.2 primary defense — the placeholder path
+        # is gone). The 2b echo child still reads + scrubs + discards it, so a
+        # placeholder value clears the refuse and lets the real bwrap spawn proceed.
+        env["ALFRED_QUARANTINE_PROVIDER_API_KEY"] = "not-a-real-secret-smoke-quarantine"
         # #338 PR2: the daemon now builds a REAL ProviderRouter inside
         # _build_comms_boot_graph (the deterministic-echo adapter is gone), and
         # build_router's EgressClient.from_settings raises IOPlaneUnavailableError
