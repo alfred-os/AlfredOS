@@ -26,7 +26,7 @@ Security invariants pinned here:
   AI-5 consolidation; replaces the prior free-form
   ``sanitize_validator_error`` path). The prior helper is removed
   because keeping a free-form sanitiser around invites accidental reuse.
-* Retry-exhaustion (``_MAX_RETRIES`` exceeded) MUST yield a
+* Retry-exhaustion (``EXTRACTION_MAX_RETRIES`` exceeded) MUST yield a
   ``TypedRefusal(reason="cannot_extract")``, NOT a malformed-output
   variant of ``Extracted``. ``kind="malformed_output"`` is a transport-
   layer protocol-violation marker, not a legitimate extraction outcome
@@ -254,10 +254,8 @@ async def test_empty_tool_calls_exhausts_to_cannot_extract() -> None:
     retry-eligible; exhaustion yields ``cannot_extract`` — never an
     uncaught ``IndexError`` that would skip the audit write.
     """
-    from alfred.security.quarantine_child.provider_dispatch import (
-        _MAX_RETRIES,
-        dispatch_extraction,
-    )
+    from alfred.security.quarantine import EXTRACTION_MAX_RETRIES
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = _fake_provider_with_capabilities(
         frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
@@ -270,7 +268,7 @@ async def test_empty_tool_calls_exhausts_to_cannot_extract() -> None:
     # Non-vacuity (FIX-C): prove the empty-tool_calls path actually
     # retried to exhaustion rather than short-circuiting on the first
     # attempt with a result that happens to match.
-    assert provider.complete.await_count == _MAX_RETRIES + 1
+    assert provider.complete.await_count == EXTRACTION_MAX_RETRIES + 1
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +308,7 @@ async def test_dispatch_retries_on_json_decode_error_then_succeeds() -> None:
 async def test_dispatch_returns_typed_refusal_on_retry_exhaustion() -> None:
     """All retries malformed → TypedRefusal(reason='cannot_extract').
 
-    The dispatcher caps retries at ``_MAX_RETRIES + 1`` total attempts.
+    The dispatcher caps retries at ``EXTRACTION_MAX_RETRIES + 1`` total attempts.
     Exhaustion produces a TypedRefusal — NOT an ``Extracted`` with a
     ``malformed_output`` mode, which would be a protocol violation
     (spec §6.7 / prov-011).

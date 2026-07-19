@@ -275,6 +275,17 @@ ExtractionMode = Literal[
     "prompt_embedded_fallback",
 ]
 
+# The quarantined extractor retries a schema-validation failure this many times
+# (total attempts = EXTRACTION_MAX_RETRIES + 1). Hoisted here (#340 PR2b-golive)
+# so BOTH the child dispatcher (validation-retry loop) AND the privileged host
+# (which brokers one gateway socket per possible provider.complete() call) share
+# one source of truth. Configurable later via policies.yaml quarantine.extraction_max_retries.
+EXTRACTION_MAX_RETRIES: int = 2
+
+# The number of one-shot gateway sockets the host brokers up-front per extraction
+# (spec §6): one per attempt, since a consumed passed fd cannot serve a 2nd dial.
+BROKER_SOCKET_COUNT: int = EXTRACTION_MAX_RETRIES + 1
+
 
 class Extracted(BaseModel):
     """Successful structured extraction from T3 content (spec §6.7).
