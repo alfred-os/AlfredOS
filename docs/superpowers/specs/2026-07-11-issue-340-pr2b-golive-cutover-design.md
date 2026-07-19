@@ -611,3 +611,181 @@ Haiku model id in `_ANTHROPIC_PRICING` + the SDK per-request `timeout` still app
 `http_client` (A3).
 
 Review transcripts (agent outputs) were consumed inline; no separate audit-trail dir this pass.
+
+## 20. #443 two-frame-handshake reconciliation (fold-appendix, 2026-07-19)
+
+Since rev.2 was ratified, **#443 PR2 (PR #458, main `0e4c4fc3`, #443 CLOSED) shipped the two-frame
+boot handshake** — a delta that lands *between* this spec's `42377a52` anchor tree and the golive
+implementation. This appendix records the reconciliation and **overrides the section bodies it names
+(§2 anchors, §11, §9/§19-D8's ADR number, §13 non-claims) where they conflict.** The ratified design
+otherwise **stands**: §14 forks 1–5 and every §19 fold are untouched — the #443 delta is orthogonal
+to all of them (it only relocated the boot-refuse surface host-primary and shifted line-anchors).
+Sourced from a 3-lens read (alfred-security-engineer / -core-engineer / -architect, **unanimous**;
+user: "happy to do whatever the agents think") plus a re-verification pass against tree `6dee9f94`.
+
+**What #443 changed (the mechanism this appendix folds in):** the child now emits a `hello` frame
+(before `_build_provider` → *provenance*: proves a real exec'd child) and a `ready` frame (before the
+request loop → *liveness*: proves initialized + serving); the host reads **both** inside
+`spawn_quarantine_child_io` via `_await_boot_handshake`, so a launcher refusal is caught *at boot*
+(was previously discovered late, at first extraction). This is MECHANISM ONLY — `_build_provider`
+still returns `_DeterministicProvider()`; golive is the cutover.
+
+### 20.1 Re-anchored §2 (verified vs tree `6dee9f94`; supersedes the `42377a52` line-anchors)
+
+- **Path correction:** the daemon boot module is `src/alfred/comms_mcp/daemon_runtime.py` (**not**
+  `src/alfred/core/daemon_runtime.py`, as §2 / the launch brief stated); the refuse-boot except-arm
+  lives in `src/alfred/cli/daemon/_commands.py` (**not** `src/alfred/core/_commands.py`).
+- **`daemon_runtime.py`:** `_PROVIDER_KEY_PLACEHOLDER` (`:81`); `_resolve_provider_key` (`:291`)
+  returns the placeholder at `:316` under a `TODO(PR-S4-11c-2c)` (`:310`). The key is resolved
+  **synchronously** at `:355`, *before* the single `await spawn_quarantine_child_io(...)` at `:365`;
+  the fd-3-clobber-discipline comment (`:343–349`) confirms that single await is the only one that
+  touches the dup2 window — so a **synchronous** pre-spawn key check adds *no* await to it.
+- **Child `__main__.py`:** `main()` (`:328`) → `emit_hello()` (`:350`) → `_build_provider(provider_key)`
+  (`:352`) → `_write_boot_ready(writer)` (`:364`) → loop. `_build_provider` (`:368`) →
+  `_DeterministicProvider()` (`:377`); the echo write is at `:427`.
+- **Handshake module** `src/alfred/security/quarantine_child/_handshake.py`: `HELLO_FRAME` /
+  `READY_FRAME` (methods `boot.hello` / `boot.ready`); `emit_hello()` (`:43`) does a *raw*
+  `sys.stdout.buffer.write` + flush (fd 1) — the boot point is before the asyncio streams exist.
+- **Host `quarantine_child_io.py`:** `_await_boot_handshake(child_io, *, child_module)` (`:779`),
+  called from `spawn_quarantine_child_io` (`:879`) at `:1088`; the `ready` read is gated on
+  `_MODULES_EMITTING_READY` (`:811`) — golive's real child module is already in that set, so the
+  handshake is complete-as-shipped. The sec-001 gate is
+  `if refusal_candidate and not self._child_wrote_stdout` (`:592`); `control_parent` is a
+  `_SubprocessChildIO` field (`:404`, teardown at `:429`).
+- **`_commands.py`:** `_refuse_boot` is `NoReturn` (raises `_BootRefusedError` → exit 2 + a
+  `daemon.boot.failed` row; `:487`/`:594`); a `SecretBrokerConfigError` refuse-arm already exists
+  (`:599`); `QuarantineChildSpawnError` is imported (`:146`).
+
+### 20.2 Refuse-boot = Option A (supersedes §11's child-side lean)
+
+§11 leaned child-side (typed error + `_BootFailure` carrier at `_commands.py`). **Reconciled to
+Option A** — a two-layer refuse, host-*primary*:
+
+- **PRIMARY — HOST pre-spawn refuse [security + core + architect].** Check the resolved key non-empty
+  in `_resolve_provider_key` (or at the top of `spawn_quarantine_child_io`) **synchronously**, before
+  the single spawn await, and refuse with a typed error routed through the *existing* `_refuse_boot`
+  arm (mirror the shipped `SecretBrokerConfigError` / `QuarantineChildSpawnError` handling; an
+  optional distinct `failure_reason` gives an actionable operator message). This is the primary
+  defense: it lives in the *trusted* host, costs no spawn, and — because the key is already resolved
+  synchronously at `daemon_runtime.py:355` — adds **no** await to the fd-3 clobber window. Mirrors
+  §11's own "a missing proxy config fails pre-spawn (`IOPlaneUnavailableError`)".
+- **SECONDARY — child minimal last-line guard [defense-in-depth].** The child refuses if it reaches
+  `_build_provider` with no real provider, fired **strictly between `emit_hello()` and
+  `_write_boot_ready()`** (see 20.3.2). §16 already mandates "no provider → refuse/raise, never
+  echo"; this is that guard, placed at the ordering-safe point.
+
+### 20.3 Must-not-regress (NOT in §16 — surfaced by the 3-lens)
+
+1. **DELETE `_PROVIDER_KEY_PLACEHOLDER`.** `_resolve_provider_key` today returns a *non-empty*
+   placeholder under a TODO to "flip to fail-closed once the child makes a real call." A surviving
+   placeholder would build a **real client on a bogus key = a silent dead LLM** — the daemon-side
+   sibling of §16 / §19-B1's echo-path deletion (raw-T3 laundered with no working LLM in the loop;
+   HARD #7 shape). Delete the constant *and* the placeholder-return branch, and add a no-placeholder
+   test. This is what the 20.2 PRIMARY refuse replaces.
+2. **Boot-ordering is load-bearing — pin it.** The exact sequence in `main()` must be
+   `emit_hello` → `_build_provider` (the §8 **factory** — boot-cheap, opens **no** socket) →
+   **fd-4 control-socket reconstruction** (golive *adds* this to `main()`; it must precede
+   `_write_boot_ready` *and* refuse-boot on its own failure, else a `ready` frame would lie about a
+   child that can't broker) → `_write_boot_ready` → loop. A child that refused *before* `emit_hello`
+   would produce a zero-stdout EOF, and the sec-001 gate (`quarantine_child_io.py:592`) would
+   **mis-attribute it to the T0 launcher = a forged `sandbox_refused` row**. Hence the 20.2 secondary
+   guard fires *strictly between* `emit_hello` and `_write_boot_ready`. Add an ordering assertion so a
+   `main()` refactor cannot reorder these steps.
+3. **`ready` = liveness (initialized + serving), NOT provider reachability.** A wrong-but-non-empty
+   key (a "class-3" failure) passes both refuse layers and surfaces only at *first extraction*. Record
+   this as an explicit **§13 sign-off non-claim** (append to §13's "Explicit non-claims"): the go-live
+   gate attests boot-refuses an *unset/empty* key, **not** that the key is *valid*.
+4. **fd-4 teardown on all refusal paths is ALREADY handled — no new work.** `aclose()` closes
+   `control_parent` (`:429`); the host is already golive-aware (`spawn_quarantine_child_io` carries
+   `control_fd` / `egress_config` / `child_module` / `refusal_recorder`; `_await_boot_handshake` reads
+   hello + ready under a `BaseException` teardown; §8.4's `poll()`-gated fast-refusal drain). The only
+   must-not-regress here is: **do not drop `control_parent`** from either `_SubprocessChildIO`
+   construction.
+
+### 20.4 ADR = ADR-0052 (supersedes §9 / §19-D8's "ADR-0051")
+
+§9 and §19-D8 named a "new ADR-0051" for the quarantine-half go-live. That number is now **taken**
+by #433's launcher-to-core sandbox-refusal audit-path ADR (`docs/adr/0051-*.md`, 2026-07-18). The
+quarantine-half go-live ADR is therefore **ADR-0052** (confirmed free). It records §14 forks 2 + 3,
+the per-call no-keepalive socket lifecycle, the `/etc/ssl/certs` CA carve-out, **and** the refuse-boot
+Option A decision (20.2) + the placeholder deletion (20.3.1). It still amends **ADR-0050**
+(Proposed → Accepted) and the **ADR-0040 residual panel** (row (iv) now has a live brokered caller;
+row (vii) per §19-B4's per-call egress-audit row). ADR-0052 goes through **alfred-reviewer** — the
+architect does not self-approve.
+
+### 20.5 Next
+
+`writing-plans` for PR2b-golive off this reconciled spec → focused plan-review (core + security own
+the dense transport + gate code) → subagent-driven TDD → full `/review-pr` fleet (security ALWAYS) +
+BOTH CodeRabbit → **HUMAN SIGN-OFF** (first raw-T3 → real provider; present for an explicit go, do not
+merge without it) → merge → file the nightly-real-key-smoke follow-up. **#461** (bound audit-write
+awaits) stays its own follow-up — not folded into golive.
+
+## 21. Broker audit-row family amendment (fold-appendix, 2026-07-19)
+
+Resolves the audit-row-family question the full 11-lens `/review-plan` flagged
+`requires_human_judgment` (reviewer / architect / security lenses). **This appendix amends §7's
+"Failure audit" bullet and overrides §16/§19-B4 where they conflict.** Authored by the architect
+lens; **it goes through `alfred-reviewer` before ship — the architect does not self-approve.**
+
+### 21.1 The amendment
+
+§7 said a broker `ControlFdBrokerError` writes a **"SANDBOX_REFUSED-class row"**. That is **amended**:
+the per-call broker rows — both the success row (already ratified egress-audit in §7 line ~253 and
+ADR-0050 Decision 7) and the **failure** row — live in the **egress-audit family**, not the
+`sandbox_refused` family. Concretely:
+
+- Success → `EGRESS_BROKER_SUCCESS_FIELDS = {destination, egress_id}`, `result="success"`, T0.
+- Failure → `EGRESS_BROKER_REFUSED_FIELDS = {destination, reason, egress_id}`, `result="refused"`,
+  T0 — a byte-for-byte mirror of the **already-shipped** `EGRESS_RELAY_REFUSED_FIELDS`
+  (`audit_row_schemas.py:1567`), the correct in-core, payload-blind, destination-keyed egress-refusal
+  precedent. The `quarantine.transport_failed` typed refusal (§7, HARD #7) is unchanged.
+
+### 21.2 Why egress-audit, not `sandbox_refused` (the field-level rationale)
+
+A `ControlFdBrokerError` carries a `destination` (host:port) and an `egress_id`. `SANDBOX_REFUSED_FIELDS
+= {plugin_id, policy_ref, host_os, reason, environment}` **structurally cannot hold either** — forcing
+the failure row into that family would drop `destination`, the exact forensic subject ADR-0040 residual
+(vii) exists to get into the signed core log, and would pollute the AST-guarded, closed sandbox-refusal
+vocabulary (35 reasons about bwrap / policy / bind / manifest) with six egress-transport reasons that
+are categorically *not* sandbox refusals. A broker failure is an **egress event**, not a sandbox
+refusal. §20 did not override §7; this §21 does, with `alfred-reviewer` ratification.
+
+### 21.3 Drift-guard (preserved, egress-family form)
+
+A new closed `EGRESS_BROKER_REFUSED_REASONS` frozenset is bound to `ControlFdBrokerError`'s six-member
+reason vocab (`gateway_unreachable`, `sendmsg_failed`, `ancillary_truncated`, `expected_exactly_one_fd`,
+`short_data_send`, `control_fd_broker_failed`); both new `*_FIELDS` constants join the bidirectional
+AST-walk roster in `tests/unit/audit/test_slice_4_audit_row_fields.py` (which already guards
+`EGRESS_RELAY_REFUSED_FIELDS`); and a reason-vocab binding test (the #432/#434-436 pattern) binds the
+frozenset to the `ControlFdBrokerError` reason source so a new broker reason cannot silently drift the
+audit vocab.
+
+### 21.4 Scope — a `#444`-style pre-gate PR, NOT folded into golive
+
+This is a durable, signed audit write + a T0 fail-closed hookpoint + adversarial coverage — the
+"small-but-security-weighted" shape the repo's own rule keeps **out** of a human-sign-off-gated PR
+(the `#444` precedent). So the `EgressBrokerAuditor`, the two schemas, `EGRESS_BROKER_REFUSED_REASONS`,
+the drift-guards, adversarial coverage, and this §21 amendment ship as their **own fast normal-cadence
+pre-gate PR ahead of golive** (plan: `docs/superpowers/plans/2026-07-19-issue-340-broker-audit-pregate.md`).
+The per-extraction success-row await is **bounded** in that PR (a fresh unbounded hot-path await distinct
+from #461's teardown case — full 11-lens finding err-004/sec-006). **Golive then only wires it**: flips
+`control_fd=True` and calls the already-shipped `EgressBrokerAuditor` — no new schema, no new hookpoint
+under the sign-off. `broker_connected_socket` returning `(host, port)` (the row's `destination` input)
+also lands in the pre-gate PR (behavior-neutral; unused until golive wires it).
+
+### 21.5 Gateway CONNECT-wait resolution (fold of the §13(8) / §19-C1 sign-off item)
+
+The full 11-lens review (architect, verified against `gateway/egress_proxy.py:81`) found the §6/§19-C1
+invariant "gateway CONNECT-wait ≥ child budget" is currently **violated**: the gateway handshake idle
+timeout is `_HANDSHAKE_TIMEOUT_S = 10.0`s but the child budget is 20s, so a pre-brokered socket used on
+a late retry (attempt 3 ≈ t=17.5s) is dead-on-arrival. **Resolution (core lens):** make the gateway
+handshake timeout a **per-instance** constructor parameter (default 10.0s unchanged) and pass **22.0s
+only on the provider-plane** CONNECT proxy (`cli/gateway/_commands.py`); the Discord AF_UNIX adapter and
+the relay plane keep their tight 10s slow-loris guard. Timeout nesting becomes **`action_deadline(30) >
+host_read(25) > gateway_handshake(22) > child_budget(20) > SDK_read(8)`**, pinned by an ordering-invariant
+unit test (`provider_handshake ≥ child_budget + margin`, the §4 P1e 4-term pattern). This composes with
+the `sock.settimeout(read)` fix (the prerequisite that makes the 20s budget a real hard ceiling — the
+blocking SDK `recv` in `anyio.to_thread.run_sync(abandon_on_cancel=False)` is otherwise un-cancellable by
+`asyncio.wait_for`) and with connect-defer (independent). This is a golive change (it touches the shared
+provider-plane proxy) and a §13(8) sign-off item; it is recorded in ADR-0052.

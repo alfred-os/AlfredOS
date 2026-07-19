@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -26,7 +26,11 @@ from alfred.audit.audit_row_schemas import (
     EGRESS_BROKER_REFUSED_FIELDS,
     EGRESS_BROKER_SUCCESS_FIELDS,
 )
-from alfred.audit.log import AuditWriter
+
+if TYPE_CHECKING:
+    # Annotation-only (``from __future__ import annotations`` stringizes it) — kept
+    # off the runtime import graph, mirroring ``SandboxRefusalAuditor`` (#340 final review).
+    from alfred.audit.log import AuditWriter
 
 _log = structlog.get_logger(__name__)
 
