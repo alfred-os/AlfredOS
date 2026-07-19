@@ -38,7 +38,7 @@
 - `tests/unit/audit/test_slice_4_audit_row_fields.py` — extend the bidirectional AST-walk roster + a reason-vocab binding test.
 - `.github/workflows/ci.yml` — named 100% coverage gate for `broker_audit.py`.
 - `docs/adr/0050-*.md` (Decision 7: mark the row now shipped) + `docs/adr/0040-*.md` residual (vii) note (the broker path now writes durable rows).
-- The golive spec `2026-07-11-issue-340-pr2b-golive-cutover-design.md` already carries the §21 amendment — this PR ships it for `alfred-reviewer` ratification.
+- The golive spec `2026-07-11-issue-340-pr2b-golive-cutover-design.md` already carries the §20 (`#443` two-frame-handshake reconciliation) and §21 (broker audit-row family) fold-appendices — this PR ships both for `alfred-reviewer` ratification.
 
 ---
 
