@@ -708,10 +708,16 @@ Option A** — a two-layer refuse, host-*primary*:
 by #433's launcher-to-core sandbox-refusal audit-path ADR (`docs/adr/0051-*.md`, 2026-07-18). The
 quarantine-half go-live ADR is therefore **ADR-0052** (confirmed free). It records §14 forks 2 + 3,
 the per-call no-keepalive socket lifecycle, the `/etc/ssl/certs` CA carve-out, **and** the refuse-boot
-Option A decision (20.2) + the placeholder deletion (20.3.1). It still amends **ADR-0050**
-(Proposed → Accepted) and the **ADR-0040 residual panel** (row (iv) now has a live brokered caller;
-row (vii) per §19-B4's per-call egress-audit row). ADR-0052 goes through **alfred-reviewer** — the
-architect does not self-approve.
+Option A decision (20.2) + the placeholder deletion (20.3.1).
+
+The ADR-0050 Decision 7 (row shipped) + Status Proposed → Accepted flip, and the ADR-0040 residual
+panel's **row (vii)** partial-resolution note, already landed in the **broker-audit pre-gate PR**
+(`src/alfred/egress/broker_audit.py`) — not here (see §21). ADR-0052 instead amends **ADR-0050**'s
+remaining *dormancy-flip* decisions (`control_fd` on for the live spawn path, the `/etc/ssl/certs`
+CA bind, the `keep_fds=[3,4]` declaration, and the new `_CONSTRUCT_ALLOWLIST` entry) and the
+**ADR-0040 residual panel row (iv)** (the provider forward-proxy's confused-deputy gap gains a
+*live* brokered caller only once golive flips `control_fd=True`). ADR-0052 goes through
+**alfred-reviewer** — the architect does not self-approve.
 
 ### 20.5 Next
 
