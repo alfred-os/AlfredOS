@@ -486,9 +486,7 @@ def test_boot_refuses_fail_closed_on_quarantine_max_tokens_invalid(
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     _patch_comms_seams(monkeypatch)
-    monkeypatch.setattr(
-        "alfred.comms_mcp.daemon_runtime._QUARANTINE_MAX_TOKENS_PER_EXTRACTION", 0
-    )
+    monkeypatch.setattr("alfred.comms_mcp.daemon_runtime._QUARANTINE_MAX_TOKENS_PER_EXTRACTION", 0)
 
     result = CliRunner().invoke(daemon_app, ["start"])
     # The fail-closed refusal contract: exit 2, never a degraded boot.
