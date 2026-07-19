@@ -1,7 +1,13 @@
 # ADR-0050 — Quarantine-child SCM_RIGHTS reachability-broker (core-side topology)
 
-- **Status**: Proposed (accepted on #340 PR2a merge)
+- **Status**: Accepted (on #340 PR2a merge)
 - **Date**: 2026-07-10
+- **Amended**: 2026-07-19 — Decision 7 updated: the per-extraction core-side egress-audit row
+  recorded there as a "hard PR2b pre-gate, not yet wired" has **shipped** ahead of PR2b, as its
+  own egress-audit family (`EgressBrokerAuditor`, `src/alfred/egress/broker_audit.py`), ratified
+  by the golive spec's §21 amendment (`2026-07-11-issue-340-pr2b-golive-cutover-design.md`). See
+  Decision 7 and the corresponding [ADR-0040](0040-connectivity-free-core-mandatory-egress-chokepoint.md)
+  residual (vii) amendment.
 - **Slice**: #340 (2c real-LLM quarantine child) — PR2a fd-broker topology mechanism
   (`docs/superpowers/specs/2026-07-10-issue-340-pr2a-fd-broker-topology-design.md`)
 - **Relates to**: [ADR-0015](0015-slice4-containerised-quarantined-llm.md) (quarantine-child
@@ -179,20 +185,38 @@ carrying a socketpair end rather than key bytes); [ADR-0043](0043-discord-adapte
 — the reservation this ADR realises; [ADR-0042](0042-connectivity-free-core-cutover.md) — the
 raw-socket guard exemption this mechanism relies on and narrows.
 
-### 7. The per-extraction core-side egress-audit row is a hard PR2b pre-gate, not a PR2a deliverable
+### 7. The per-extraction core-side egress-audit row — shipped ahead of PR2b, as its own egress-audit family
 
 ADR-0040 residual (vii) records that routine egress audit today is gateway-local (structlog +
 Prometheus counters), not the signed, hash-chained core audit log. A natural question for this
 mechanism is whether a signed core-side row should record each brokered-socket target
 (host:port) per extraction, not merely rely on the gateway-local CONNECT audit.
 
-**PR2a does not wire this.** There is no live caller of `control_fd_broker` on the audited path
-in PR2a — only the docker C1/C2 probe test drives it, spawned outside the daemon's boot graph.
-Claiming PR2a "wires the audit row" would overstate what ships. PR2a defines only the loud-failure
-error type, `ControlFdBrokerError` (rooted at `AlfredError`, per the fail-loud-in-security-paths
-rule), and its closed `reason` vocabulary. The durable per-call, core-side egress-audit row — and
-its write-path test — is a **hard PR2b pre-gate**: it must be decided and implemented before the
-go-live sign-off, not left as an open residual at that point.
+**PR2a did not wire this.** There was no live caller of `control_fd_broker` on the audited path
+in PR2a — only the docker C1/C2 probe test drove it, spawned outside the daemon's boot graph.
+PR2a defined only the loud-failure error type, `ControlFdBrokerError` (rooted at `AlfredError`,
+per the fail-loud-in-security-paths rule), and its closed `reason` vocabulary. This ADR originally
+recorded the durable per-call, core-side egress-audit row as a **hard PR2b pre-gate** — decided
+and implemented before the go-live sign-off, not left as an open residual at that point.
+
+**Shipped (2026-07-19).** `EgressBrokerAuditor` (`src/alfred/egress/broker_audit.py`) now writes
+that row on both arms of a broker call: `egress.broker.connected` (success,
+`EGRESS_BROKER_SUCCESS_FIELDS`) and `egress.broker.refused` (failure,
+`EGRESS_BROKER_REFUSED_FIELDS`), via the same `append_schema` + fail-closed T0 hookpoint pattern
+`SandboxRefusalAuditor` established (#433, ADR-0051). It is a **distinct audit family**, not an
+extension of the sandbox-refusal one: a broker failure is an egress event carrying `destination`
+(host:port) — a field `SANDBOX_REFUSED_FIELDS` cannot hold and was never meant to. The per-call
+hot-path await is bounded (5s) so a hung write fails loud rather than wedging the per-extraction
+N-broker loop. This egress-audit-family choice, and the pre-gate carve-out itself, are ratified
+by the golive spec's §21 amendment (`docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md`).
+
+`EgressBrokerAuditor` still ships **dormant**: golive's `broker_sockets` wiring (the flip to
+`control_fd=True`, Decision 8) is its only production caller, so today it is exercised solely by
+its own unit tests. The two-layer dormancy invariant (Decision 8) is unchanged by this shipment.
+Once golive wires the live caller, PR2b's remaining audit-row task shrinks to wiring the
+already-shipped auditor rather than designing and building it. See also
+[ADR-0040](0040-connectivity-free-core-mandatory-egress-chokepoint.md) residual (vii), amended
+alongside this decision.
 
 ### 8. The dormancy contract as an explicit, auditable invariant
 

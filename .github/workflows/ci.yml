@@ -280,6 +280,25 @@ jobs:
           uv run coverage report \
             --include='src/alfred/egress/control_fd_broker.py' \
             --fail-under=100
+      - name: Egress-broker audit 100% line+branch coverage
+        # #340 (ADR-0050 Decision 7; golive spec §21; ADR-0040 residual (vii)):
+        # ``broker_audit.py`` is ``EgressBrokerAuditor`` — the durable, signed,
+        # core-side per-call egress-audit row for the SCM_RIGHTS broker (both
+        # the connected-success and refused-failure arms). It lives OUTSIDE
+        # ``src/alfred/security/``, so the ``security/*`` glob gate above does
+        # NOT catch it — this named gate is its ONLY 100% coverage protection
+        # (ops-001). Ships dormant (golive's ``broker_sockets`` wiring is the
+        # only caller), but the fail-closed T0 hookpoint + bounded hot-path
+        # await are trust-boundary code today. Fully covered by the unit tier
+        # (``tests/unit/egress/test_broker_audit.py``), so gating on unit-only
+        # ``.coverage`` data is sound. The combined ``coverage-gates`` job
+        # names it too (the two-gates pattern — keep BOTH in sync when this
+        # file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/broker_audit.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/egress/broker_audit.py' \
+            --fail-under=100
       - name: Daemon control-plane trust-boundary 100% line+branch coverage
         # G6-2b-2c (#288, ADR-0038): the daemon control plane — a 0600 local-socket
         # request/response introspection RPC. ``_local_socket.py`` is the EXTRACTED
@@ -2149,6 +2168,17 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/egress/control_fd_broker.py' \
+            --fail-under=100
+      - name: Egress-broker audit 100% line+branch coverage (combined)
+        # Combined twin of the python-job gate (two-gates pattern, #340,
+        # ADR-0050 Decision 7 / ADR-0040 residual (vii)). ``broker_audit.py``
+        # is ``EgressBrokerAuditor``, the durable signed core-side per-call
+        # egress-audit row for the SCM_RIGHTS broker; keep the --include in
+        # lockstep with the python-job step.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/broker_audit.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/egress/broker_audit.py' \
             --fail-under=100
       - name: Comms-MCP trust-boundary 100% line+branch coverage (combined)
         # PR-S4-8 (#152) host-side comms-MCP foundations (spec §8). Every file

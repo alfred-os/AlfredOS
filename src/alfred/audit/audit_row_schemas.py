@@ -1576,13 +1576,13 @@ EGRESS_RELAY_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # security.egress_broker family (#340 Task 1 — SCM_RIGHTS gateway-socket broker)
 # ---------------------------------------------------------------------------
 #
-# Schemas ONLY — Task 1 of the #340 broker-audit pre-gate PR (a #444-style normal-cadence
-# PR shipping ahead of the human-sign-off-gated golive cutover). No auditor writes these rows
-# yet; Task 2's ``EgressBrokerAuditor`` wires ``ControlFdBrokerError`` catch sites in
-# ``control_fd_broker.py`` to a writer. Shape mirrors ``EGRESS_RELAY_REFUSED_FIELDS`` directly
-# above: payload-blind — destination host authority + a deterministic egress_id, never the
-# proxy URL, never socket bytes (the broker passes a bare fd; it never reads or writes
-# application content itself, HARD #5).
+# Fields for the #340 broker-audit pre-gate PR (a #444-style normal-cadence PR shipping ahead
+# of the human-sign-off-gated golive cutover). ``EgressBrokerAuditor``
+# (``src/alfred/egress/broker_audit.py``) writes these rows, but ships **dormant**: golive's
+# ``broker_sockets`` wiring is its only caller, landing at go-live (PR2b), not in this PR. Shape
+# mirrors ``EGRESS_RELAY_REFUSED_FIELDS`` directly above: payload-blind — destination host
+# authority + a deterministic egress_id, never the proxy URL, never socket bytes (the broker
+# passes a bare fd; it never reads or writes application content itself, HARD #5).
 #
 # EGRESS_BROKER_SUCCESS_FIELDS: emitted once ``broker_connected_socket`` hands a connected fd
 #   to the quarantine child.
@@ -1691,8 +1691,8 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     # #338 PR2 Task 1: the RealTurnOrchestratorAdapter adapter-owned loud refusal
     # row (content-free; downgrade-deny / malformed / budget / turn-error / send-error).
     "COMMS_INBOUND_TURN_REFUSED_FIELDS",
-    # #340 Task 1: the SCM_RIGHTS gateway-socket broker's success + refused rows
-    # (payload-blind; schemas only — the auditor lands in Task 2).
+    # #340: the SCM_RIGHTS gateway-socket broker's success + refused rows (payload-blind).
+    # ``EgressBrokerAuditor`` writes these, dormant until golive's ``broker_sockets`` wiring.
     "EGRESS_BROKER_SUCCESS_FIELDS",
     "EGRESS_BROKER_REFUSED_FIELDS",
 )

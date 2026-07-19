@@ -11,6 +11,11 @@
   mechanism that touches residual (iv) (its core→gateway `connect()` inherits the same
   confused-deputy/no-per-caller-authentication gap until `#358` lands) and residual (vii) (it
   defers the durable per-extraction core-side egress-audit row to a hard PR2b pre-gate).
+- **Amended**: 2026-07-19 — the 2026-07-10 deferral above is now partially resolved: the
+  ADR-0050 SCM_RIGHTS broker path writes durable, signed, core-side rows for its own per-call
+  egress events (`EgressBrokerAuditor`, `src/alfred/egress/broker_audit.py`; ADR-0050 Decision
+  7; golive spec §21). This resolves residual (vii) for that one path only — see the residual
+  (vii) text below for scope.
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
@@ -230,6 +235,17 @@ client raises, which writes the durable core row — but the durable signed reco
 full egress audit stream into the core log is deferred (both egress-audit modules mark it a
 deferred ADR-0040 residual, mirroring the G6-2b durable-audit disposition). Until it lands,
 the routine allow/forward audit stream is only as durable as the gateway's logs and metrics.
+
+**Partial resolution for the SCM_RIGHTS broker path (2026-07-19).** Unlike the gateway-hosted
+CONNECT/relay paths above, the ADR-0050 SCM_RIGHTS reachability-broker is core-side code — it
+holds no vault-key constraint and can write the signed core audit log directly. `EgressBrokerAuditor`
+(`src/alfred/egress/broker_audit.py`; ADR-0050 Decision 7; golive spec §21) now writes a durable,
+signed, core-side row on every per-call broker outcome — `egress.broker.connected` and
+`egress.broker.refused` — so that path's routine egress audit is no longer only as durable as
+gateway logs and metrics. This is a **partial** resolution scoped to the one path: the gateway's
+routine CONNECT/relay-forward audit stream (`egress_audit.py` / `egress_relay_audit.py`) is
+unaffected, and the full signed reconcile of that stream into the core log remains the open
+residual described above.
 
 ## Alternatives considered
 
