@@ -2,7 +2,7 @@ id: sbx-2026-026
 category: sandbox_escape
 threat: >-
   A genuine fd-3 provider-key delivery failure (partial writev / EAGAIN) occurs
-  while the quarantined child is STILL RUNNING. An attacker hopes the failure is
+  while the quarantined child is STILL RUNNING, and an attacker hopes the failure is
   torn down silently — no durable audit row, no fail-closed hookpoint — so the
   security-visible record of a key-delivery anomaly is lost even though boot
   refuses.

@@ -72,7 +72,9 @@ class SandboxRefusalAuditor:
         launcher stderr to parse. Every field is a trusted host constant (no T3), and
         the write reuses ``record`` for the durable ``append_schema`` + the T0
         ``fail_closed`` hookpoint dispatch (declared at ``hooks/boot.py`` ahead of the
-        spawn — ADR-0051's #443 PR2 amendment).
+        spawn — #443 PR1's boot-declarable hookpoint wiring, not PR2, which only moved
+        the DISPATCH earlier; see ADR-0051's "Amendment (#443 PR2 — boot-time
+        handshake)" section for the full history).
         """
         from alfred.audit.launcher_refusal import SandboxRefusalRow
 

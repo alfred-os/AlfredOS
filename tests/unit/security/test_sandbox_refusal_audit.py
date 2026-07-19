@@ -11,6 +11,7 @@ from alfred.audit.audit_row_schemas import SANDBOX_REFUSED_FIELDS
 from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.hooks import get_registry
 from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
+from alfred.supervisor.fd3_key_delivery import ProviderKeyDeliveryError
 from alfred.supervisor.hookpoints import declare_hookpoints as declare_supervisor
 
 
@@ -204,6 +205,15 @@ async def test_record_provider_key_delivery_failure_writes_host_authored_row(
     assert len(_fake_invoke) == 1
     assert _fake_invoke[0]["name"] == "supervisor.plugin.sandbox_refused"
     assert _fake_invoke[0]["fail_closed"] is True
+
+
+def test_reason_literal_stays_bound_to_provider_key_delivery_error() -> None:
+    """The auditor's hard-coded ``reason="provider_key_delivery_failed"`` literal
+    (chosen over reading ``exc.reason`` so a caller cannot inject an out-of-vocabulary
+    reason) promises to stay bound to ``ProviderKeyDeliveryError``'s own default. Bind
+    that promise to an assertion so a change to one side does not silently drift from
+    the other."""
+    assert ProviderKeyDeliveryError().reason == "provider_key_delivery_failed"
 
 
 def test_sandbox_refused_hookpoint_declared_at_auditor_dispatch_phase() -> None:

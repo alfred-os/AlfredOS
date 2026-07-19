@@ -12,6 +12,7 @@ real bwrap subprocess.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 
@@ -215,6 +216,80 @@ async def test_running_child_delivery_failure_without_recorder_still_refuses(
     assert fake.wait_calls >= 1
 
 
+async def test_cancelled_error_from_delivery_audit_still_reaps_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BaseException (``CancelledError``) from the #444 write must not skip the reap.
+
+    ``_record_provider_key_delivery_failure``'s ``except Exception`` (CLAUDE.md hard
+    rule #7's "loud, not silent" guard) does NOT catch ``asyncio.CancelledError`` --
+    it is rooted at ``BaseException``, not ``Exception``, and is deliberately let
+    through rather than demoted to a log line. The ``try/finally`` wrapped around the
+    write in ``_record_fast_launcher_refusal``'s ``poll() is None`` arm
+    (``quarantine_child_io.py:865-869``) is the ONLY thing standing between that escape
+    and a leaked bwrap child: this test proves the ``finally: await child_io.aclose()``
+    still runs even when the write raises something the guard cannot catch.
+
+    Tracing the propagation: the ``CancelledError`` escapes
+    ``_record_provider_key_delivery_failure`` uncaught, the ``finally`` reaps the child
+    anyway, then the ``CancelledError`` keeps propagating OUT of
+    ``_record_fast_launcher_refusal`` and out of ``spawn_quarantine_child_io`` --
+    the ``raise QuarantineChildSpawnError(...) from exc`` a few lines below the
+    ``await _record_fast_launcher_refusal(...)`` call site is never reached, because a
+    ``BaseException`` skips straight past it. So this test expects
+    ``asyncio.CancelledError`` from the spawn call, NOT ``QuarantineChildSpawnError``.
+    This is the mutation-killer for the ``try/finally``: delete it and ``aclose`` never
+    runs -- ``terminate_calls``/``wait_calls`` stay 0 while the CancelledError still
+    propagates, so only the assertions below (not the exception type) would catch that
+    regression.
+
+    Can't reuse ``_drive_epipe_spawn`` -- it wraps its OWN
+    ``pytest.raises(QuarantineChildSpawnError)`` internally, which has nothing to catch
+    here (a ``CancelledError``, not a ``QuarantineChildSpawnError``, is what escapes),
+    so the Popen/deliver/dup2/pipe monkeypatching is inlined instead, mirroring
+    ``_drive_epipe_spawn``'s own setup.
+    """
+
+    class _CancellingRecorder:
+        async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:  # pragma: no cover
+            raise AssertionError("record() is not the #444 path")
+
+        async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+            raise asyncio.CancelledError
+
+    fake = _running_fake(_REFUSAL_ROW)  # returncode None -> poll() is None (still running)
+
+    opened: list[int] = []
+    real_pipe = child_io_mod.os.pipe
+
+    def _tracking_pipe() -> tuple[int, int]:
+        r, w = real_pipe()
+        opened.extend((r, w))
+        return r, w
+
+    def _boom_deliver(*, write_fd: int, key: str) -> None:
+        raise ProviderKeyDeliveryError()
+
+    monkeypatch.setattr(child_io_mod.subprocess, "Popen", lambda *a, **k: fake)
+    monkeypatch.setattr(child_io_mod, "deliver_provider_key_via_fd3", _boom_deliver)
+    monkeypatch.setattr(child_io_mod.os, "dup2", lambda s, d, *a, **k: d)
+    monkeypatch.setattr(child_io_mod.os, "pipe", _tracking_pipe)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await spawn_quarantine_child_io(
+                provider_key="k", refusal_recorder=_CancellingRecorder()
+            )
+    finally:
+        for fd in opened:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    # The finally in _record_fast_launcher_refusal's poll()-is-None arm ran despite
+    # the BaseException escaping the guard -- the live child was still torn down.
+    assert fake.terminate_calls >= 1
+    assert fake.wait_calls >= 1
+
+
 async def test_record_failure_does_not_mask_refusal() -> None:
     """A recorder that raises must NOT mask the ``read_frame`` refusal error.
 
@@ -231,6 +306,9 @@ async def test_record_failure_does_not_mask_refusal() -> None:
     class _BoomRecorder:
         async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
             raise RuntimeError("audit down")
+
+        async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+            raise RuntimeError("audit down")  # not exercised on this arm; boom for conformance
 
     io = _SubprocessChildIO(_exited_fake(_REFUSAL_ROW), refusal_recorder=_BoomRecorder())
     with (
