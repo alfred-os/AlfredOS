@@ -21,5 +21,5 @@ provenance: >-
   mount namespace.
 references:
   - "spec §7.2 plugin sandbox policy"
-  - "config/sandbox/quarantined-llm.linux.bwrap.policy (no /etc bind)"
+  - "config/sandbox/quarantined-llm.linux.bwrap.policy (no broad /etc bind; only /etc/ssl/certs CA store, #340 golive / ADR-0052)"
   - "tests/integration/test_quarantined_llm_policy_kernel_enforced.py"

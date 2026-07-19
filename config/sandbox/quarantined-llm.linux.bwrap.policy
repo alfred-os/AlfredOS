@@ -96,13 +96,18 @@ dev = true
 #   * uts    — its own hostname; cannot read the host's.
 #   * cgroup — cannot observe/escape the host cgroup hierarchy.
 #   * ipc    — cannot reach host System V IPC / POSIX shm.
-#   * net    — Spec C G7-1 (#333): an EMPTY network namespace. The shipped child
-#              runs a DETERMINISTIC ECHO loop (no provider client, no socket), so
-#              it needs ZERO egress; `--unshare-net` closes the #230 egress hole
-#              for it at the kernel. The 2c real-LLM child (separate follow-on,
-#              still #230) reaches its provider PROVIDER-ONLY via the gateway L7
-#              CONNECT proxy — NOT by re-opening this namespace. SECURITY-CRITICAL:
-#              read the egress note below before dropping `net`.
+#   * net    — Spec C G7-1 (#333): an EMPTY network namespace. The shipped
+#              real-LLM child (#340 golive) DOES make a provider call, but it
+#              reaches the provider ONLY over the gateway socket the TRUSTED core
+#              connects outside this namespace and passes in over fd 4 (SCM_RIGHTS;
+#              see `keep_fds` + the egress note below) — it never opens a socket
+#              of its own from inside here. `--unshare-net` keeps the #230 egress
+#              hole closed at the kernel: even a compromised child cannot open an
+#              outbound connection, because an empty namespace has no route; the
+#              ONLY reachable connection is the one already-scoped, core-brokered
+#              fd. Egress stays PROVIDER-ONLY, gated by the gateway L7 CONNECT
+#              proxy — NOT by re-opening this namespace. SECURITY-CRITICAL: read
+#              the egress note below before dropping `net`.
 unshare = ["pid", "uts", "cgroup", "ipc", "net"]
 
 # Reap the sandbox subtree when the Supervisor process exits — no orphaned
@@ -110,11 +115,10 @@ unshare = ["pid", "uts", "cgroup", "ipc", "net"]
 die_with_parent = true
 
 # fd 3 carries the Supervisor's provider-key channel (arch-2). The shipped
-# deterministic-echo child does NOT make a provider call (it `--unshare-net`s,
-# below) and does not consume the key; the fd-3 channel is retained as the
-# stable substrate the 2c real-LLM child will use to receive the key, and the
-# 2c provider HTTPS call goes through the gateway L7 CONNECT proxy (Spec C, #230),
-# never by re-opening this child's network namespace. fd 3 arrives over the
+# real-LLM child (#340 golive) CONSUMES that key to build its provider client
+# and makes a real provider HTTPS call — routed through the gateway L7 CONNECT
+# proxy (Spec C, #230) over the brokered fd-4 socket below, never by re-opening
+# this child's network namespace. fd 3 arrives over the
 # inherited descriptor (NO CLI flag — see the `policy_to_bwrap_flags` docstring +
 # #218); `keep_fds` is the validated DECLARATION that fd 3 must survive — omitting
 # it is refused at parse time (`kind_full_requires_keep_fd_3`).
@@ -131,23 +135,27 @@ die_with_parent = true
 keep_fds = [3, 4]
 
 # ============================================================================
-# EGRESS IS CLOSED for the shipped echo child (Spec C G7-1, #333)
+# DIRECT EGRESS IS KERNEL-CLOSED; PROVIDER REACH IS BROKERED-ONLY
+# (Spec C G7-1, #333; #340 golive)
 # ============================================================================
-# The shipped quarantined-LLM child runs a DETERMINISTIC ECHO loop with NO
-# provider client and NO socket of its own (the import-graph invariant in
-# `tests/adversarial/sandbox_escape/test_quarantined_llm_not_yet_spawned_while_egress_open.py`
-# keeps it honest). It therefore needs ZERO outbound network, so `unshare`
-# now includes `net`: the child runs in an EMPTY network namespace. Even a
-# compromised echo child cannot open an outbound connection — there is no
-# network namespace to connect from. This closes the #230 egress hole for the
-# component that exists today; `sbx-2026-005` flips from `out_of_scope` to an
-# enforced-containment payload accordingly.
+# The shipped quarantined-LLM child (#340 golive) is a REAL-LLM extractor: it
+# builds a provider client from the fd-3 key and makes a provider HTTPS call. It
+# has NO network namespace of its own to open a socket from — `unshare` includes
+# `net`, so the child runs in an EMPTY network namespace. Even a compromised
+# child cannot open an outbound connection: an empty namespace has no route to
+# connect from. Its ONLY provider reach is the already-scoped gateway socket the
+# TRUSTED core connects OUTSIDE this namespace and passes in over fd 4 (SCM_RIGHTS;
+# `egress/control_fd_broker.py`), over which the child terminates TLS in-child
+# against the gateway L7 CONNECT proxy — the `ro_binds` /etc/ssl/certs carve-out
+# above is what makes that in-child TLS verify possible. Egress is therefore
+# PROVIDER-ONLY and gated by the gateway (the core is connectivity-free; the
+# gateway is the sole external I/O plane — Spec C), never by re-opening this
+# child's network namespace.
 #
-# STILL #230 — the 2c real-LLM child (a separate follow-on) DOES make a provider
-# call and needs egress. It will NOT re-open this namespace: it reaches the
-# provider endpoint PROVIDER-ONLY through the gateway L7 CONNECT proxy (the core
-# is connectivity-free; the gateway is the sole external I/O plane — Spec C). The
-# unset-provider-key boot guard + the real egress wiring land with 2c, behind the
-# `#230` release-blocker. Dropping `net` from the unshare set above would silently
-# re-open this child's egress and is refused by the closed-egress anchor gate.
+# The empty-netns containment `sbx-2026-005` asserts stays valid: no socket is
+# opened from WITHIN the child (its `socket.create_connection` probe is refused
+# at the kernel); the brokered fd is connected by the core and handed in. The
+# executable adversarial corpus (`sbx-2026-005`) + the policy unit tests assert
+# the SHIPPED policy unshares `net`, so dropping `net` from the unshare set above
+# — which would silently re-open this child's DIRECT egress — fails those gates.
 # ============================================================================

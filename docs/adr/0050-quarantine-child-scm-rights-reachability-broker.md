@@ -8,6 +8,13 @@
   by the golive spec's §21 amendment (`2026-07-11-issue-340-pr2b-golive-cutover-design.md`). See
   Decision 7 and the corresponding [ADR-0040](0040-connectivity-free-core-mandatory-egress-chokepoint.md)
   residual (vii) amendment.
+- **Amended**: 2026-07-19 (PR2b-golive) — the dormancy-flip forward-gates this ADR recorded
+  (Decision 8 `control_fd`, the "What is unchanged" CA bind + `keep_fds=[3,4]`, Decision 4's
+  companion `_CONSTRUCT_ALLOWLIST` flip, Decision 5's CONNECT-location fork) are now **activated**
+  by [ADR-0052](0052-real-quarantine-child-golive.md) (the real quarantine-child go-live). See the
+  "PR2b-golive amendment" section at the end. This amendment does **not** re-flip the Status or
+  re-claim the Decision 7 row (the pre-gate PR shipped those; the 2026-07-19 amendment above records
+  them).
 - **Slice**: #340 (2c real-LLM quarantine child) — PR2a fd-broker topology mechanism
   (`docs/superpowers/specs/2026-07-10-issue-340-pr2a-fd-broker-topology-design.md`)
 - **Relates to**: [ADR-0015](0015-slice4-containerised-quarantined-llm.md) (quarantine-child
@@ -346,3 +353,34 @@ a process that never executes the child's untrusted output").
   egress path.
 - Spec: `docs/superpowers/specs/2026-07-10-issue-340-pr2a-fd-broker-topology-design.md` §6, §7,
   §8 — the design this ADR records.
+
+## PR2b-golive amendment (2026-07-19)
+
+[ADR-0052](0052-real-quarantine-child-golive.md) (the real quarantine-child go-live) flips the
+dormant mechanism this ADR shipped live. The forward-gates recorded above are now activated:
+
+- **Decision 8 dormancy flip — `control_fd` off → on.** The production spawn site now passes
+  `spawn_quarantine_child_io(control_fd=True, child_module=<real child>, egress_config=…)`. The
+  security-posture change Decision 8 named as "*the* PR2b sign-off item" is the change under
+  golive's human sign-off. The two-layer dormancy contract's kernel guard (Decision 2, the empty
+  netns) is **unchanged** — only the software guard is flipped on.
+- **The "What is unchanged" CA bind + `keep_fds` land.** The shipped bwrap policy's
+  `keep_fds = [3]` → `[3, 4]` declaration and the narrow `["/etc/ssl/certs", "/etc/ssl/certs"]`
+  CA bind (both deferred to PR2b in the "What is unchanged" section) are now applied — the child
+  drives real in-child TLS against its brokered gateway socket and needs the public-CA trust store
+  to verify. `sbx-2026-005` stays valid: no socket is opened *from within* the child's empty netns;
+  the brokered fd is connected by the trusted core and passed in.
+- **Decision 4's companion `_CONSTRUCT_ALLOWLIST` flip.** The child's `httpx.AsyncClient`
+  construction (in `brokered_egress`) gets exactly one in-core HTTP-egress guard
+  `_CONSTRUCT_ALLOWLIST` entry. There is **no** `_IMPORT_ALLOWLIST` entry: the module reaches
+  egress through the `alfred.providers` seam (already allowed), not a direct SDK import. The
+  core-side raw-socket ratchet (Decision 4) is untouched — the child only `recvmsg`s the fd, so the
+  connect ∧ `SCM_RIGHTS` conjunction never fires in the child.
+- **Decision 5 CONNECT-location stays Option A (child-does-CONNECT).** Decision 5's forward-gate
+  said PR2b must re-decide if #358 (`Proxy-Authorization`/mTLS) landed first. #358 is still open,
+  so golive keeps Option A: the child drives CONNECT + TLS + HTTP over the bare passed fd and the
+  gateway remains the destination-allowlist enforcement point. Option B stays in reserve for when
+  #358 lands.
+
+The Decision 7 audit row and the Status `Proposed → Accepted` flip were shipped by the broker-audit
+pre-gate PR, **not** by golive — see the 2026-07-19 amendment at the head of this ADR.

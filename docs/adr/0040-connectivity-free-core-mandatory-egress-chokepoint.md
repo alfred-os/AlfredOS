@@ -16,6 +16,11 @@
   egress events (`EgressBrokerAuditor`, `src/alfred/egress/broker_audit.py`; ADR-0050 Decision
   7; golive spec §21). This resolves residual (vii) for that one path only — see the residual
   (vii) text below for scope.
+- **Amended**: 2026-07-19 (PR2b-golive) — see [ADR-0052](0052-real-quarantine-child-golive.md)
+  (the real quarantine-child go-live), which activates the *live* brokered caller of the ADR-0050
+  broker path: residual (iv)'s confused-deputy gap now has a live caller (until #358), and the
+  `EgressBrokerAuditor` recorded as dormant in the 2026-07-19 amendment above is now driven on the
+  live extraction path. See residuals (iv) and (vii) below.
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
@@ -195,6 +200,15 @@ per-caller `Proxy-Authorization` / mTLS on the core→proxy channel, tracked in 
 AF_UNIX Discord instance is materially less exposed: its socket lives on a gateway-only
 volume never mounted into the core (§4; ADR-0043 devops-001).
 
+**Live brokered caller since #340 golive (2026-07-19).** Until the quarantine-child go-live
+([ADR-0052](0052-real-quarantine-child-golive.md)) this gap had no live audited caller — the
+ADR-0050 SCM_RIGHTS reachability-broker shipped dormant (`control_fd=False`). Golive flips
+`control_fd=True` on the live spawn path, so the quarantine child's brokered CONNECT is now a
+*live* path through this same per-caller-unauthenticated provider forward-proxy. The kernel
+empty-netns isolation still bars a *direct* external socket from the child, and the brokered fd is
+one already-scoped, core-vetted connection to one allowlisted destination — but the confused-deputy
+consequence above is now exercised, not merely latent. Same fix (#358); tracked there.
+
 **(v) Reply-path / tool-arg laundering to an allowlisted destination.** A T3 injection can
 drive the model to launder a secret — or other sensitive content already in its context —
 into its user-visible **reply** (egressed to a correctly-allowlisted `discord.com` over
@@ -245,7 +259,10 @@ signed, core-side row on every per-call broker outcome — `egress.broker.connec
 gateway logs and metrics. This is a **partial** resolution scoped to the one path: the gateway's
 routine CONNECT/relay-forward audit stream (`egress_audit.py` / `egress_relay_audit.py`) is
 unaffected, and the full signed reconcile of that stream into the core log remains the open
-residual described above.
+residual described above. **The live caller lands with #340 golive**
+([ADR-0052](0052-real-quarantine-child-golive.md)): the pre-gate shipped `EgressBrokerAuditor`
+dormant, and golive's `control_fd=True` flip is what drives it on the live extraction path, so
+these durable broker rows are now written in production rather than only exercised by unit tests.
 
 ## Alternatives considered
 

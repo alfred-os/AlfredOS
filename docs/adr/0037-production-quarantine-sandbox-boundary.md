@@ -244,3 +244,35 @@ misattribution: the five schema refusals that predate this PR
 `soft_bind_forbidden_path`) were all logged as `policy_ref_unreadable`; the launcher
 now stamps each with its own reason, and the new `bind_source_too_broad` is
 attributed correctly from the start.
+
+## Amendment (2026-07-19, #340 golive) — the "no `/etc` bind" property carves out `/etc/ssl/certs`
+
+Decision 1 above lists "no `/etc` bind" among the load-bearing bwrap-policy
+properties (alongside synthesised `/dev`, unshared namespaces, tmpfs-only writable
+surface, `--die-with-parent`). The #340 quarantine-child go-live
+([ADR-0052](0052-real-quarantine-child-golive.md)) makes that property **imprecise**:
+the real-LLM child now terminates TLS in-child against its brokered gateway socket
+(HARD #5) and therefore needs the public-CA trust store to verify the provider
+certificate. The shipped Linux policy gains **exactly one** `/etc` bind —
+`["/etc/ssl/certs", "/etc/ssl/certs"]`, HARD, read-only — and **nothing else** under
+`/etc`.
+
+The property is restated precisely: **no *broad* `/etc` bind; the sole `/etc` subpath
+bound anywhere in the policy is `/etc/ssl/certs`.** This carries no host secret — it is
+the same public root-CA bundle every TLS client on the host reads. `/etc/passwd`,
+`/etc/shadow`, `resolv.conf`, and ssh configs stay **invisible**: an adversary owning
+the T3 response still cannot read host usernames, credentials, or the DNS posture. The
+carve-out is bound at the exact subpath (never a bare `/etc`), the same #428
+over-broad-bind class this ADR's own amendment above fixed; a bare `/etc` bind would
+additionally expose passwd/shadow/resolv.conf and is refused.
+
+The containment the adversarial sandbox-escape corpus asserts is **unchanged** in
+substance: `sbx-2026-003` (`open('/etc/passwd').read()` → refused) and `sbx-2026-013`
+(the real-spawn escape probe reading `/etc/passwd`) still pass identically, because
+`/etc/passwd` is not bound — only `/etc/ssl/certs` is. Their `references` prose strings
+(which read "(no `/etc` bind)" / "(no `/etc`, no `/bin` bind; `--unshare-pid`)") are
+reconciled to name the CA-store carve-out so the corpus metadata does not read as an
+absolute "no `/etc` at all"; the executable `probe` and `expected_outcome` are
+untouched. See the golive-updated policy comments in
+`config/sandbox/quarantined-llm.linux.bwrap.policy` and the CA carve-out record in
+[ADR-0052](0052-real-quarantine-child-golive.md).
