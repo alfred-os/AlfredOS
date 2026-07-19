@@ -117,10 +117,13 @@ async def test_failure_row_carries_closed_vocab_reason(
     assert _fake_invoke[0]["fail_closed"] is True
 
 
-async def test_bounded_await_fails_loud_not_silent() -> None:
+async def test_bounded_await_fails_loud_not_silent(
+    _fake_invoke: list[dict[str, Any]],
+) -> None:
     # A hung append_schema must not hang the extraction hot path forever (D3).
-    # No _fake_invoke fixture needed: the timeout fires (and re-raises) before
-    # _write ever reaches the invoke(...) dispatch call.
+    # The timeout fires (and re-raises) before _write ever reaches the
+    # invoke(...) dispatch call — the _fake_invoke fixture proves that
+    # positively rather than merely by absence of a wired hookpoint.
     w = _RecordingAuditWriter(hang=True)
     with (
         structlog.testing.capture_logs() as captured,
@@ -135,14 +138,19 @@ async def test_bounded_await_fails_loud_not_silent() -> None:
     assert timeout_events[0]["audit_event"] == "egress.broker.connected"
     # Never silently swallowed: nothing was ever appended to the writer.
     assert w.rows == []
+    # The fail-closed hookpoint must never dispatch when the row was never persisted.
+    assert _fake_invoke == []
 
 
-async def test_bounded_await_applies_to_failure_row_too() -> None:
+async def test_bounded_await_applies_to_failure_row_too(
+    _fake_invoke: list[dict[str, Any]],
+) -> None:
     w = _RecordingAuditWriter(hang=True)
     with pytest.raises((TimeoutError, asyncio.TimeoutError)):
         await EgressBrokerAuditor(w, audit_await_timeout_s=0.05).record_broker_failure(
             destination="gateway:8889", reason="gateway_unreachable"
         )
+    assert _fake_invoke == []
 
 
 async def test_append_schema_failure_propagates_not_swallowed(
