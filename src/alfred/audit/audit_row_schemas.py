@@ -1573,6 +1573,47 @@ EGRESS_RELAY_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# security.egress_broker family (#340 Task 1 — SCM_RIGHTS gateway-socket broker)
+# ---------------------------------------------------------------------------
+#
+# Schemas ONLY — Task 1 of the #340 broker-audit pre-gate PR (a #444-style normal-cadence
+# PR shipping ahead of the human-sign-off-gated golive cutover). No auditor writes these rows
+# yet; Task 2's ``EgressBrokerAuditor`` wires ``ControlFdBrokerError`` catch sites in
+# ``control_fd_broker.py`` to a writer. Shape mirrors ``EGRESS_RELAY_REFUSED_FIELDS`` directly
+# above: payload-blind — destination host authority + a deterministic egress_id, never the
+# proxy URL, never socket bytes (the broker passes a bare fd; it never reads or writes
+# application content itself, HARD #5).
+#
+# EGRESS_BROKER_SUCCESS_FIELDS: emitted once ``broker_connected_socket`` hands a connected fd
+#   to the quarantine child.
+# EGRESS_BROKER_REFUSED_FIELDS: emitted on any ``ControlFdBrokerError`` refusal path.
+# EGRESS_BROKER_REFUSED_REASONS: the CLOSED reason vocabulary, bound to
+#   ``ControlFdBrokerError``'s six string literals (control_fd_broker.py) by an independent
+#   AST drift-guard (tests/unit/audit/test_egress_broker_reason_vocab.py, #432 pattern) — this
+#   copy must never silently diverge from the exception source.
+EGRESS_BROKER_SUCCESS_FIELDS: Final[frozenset[str]] = frozenset({"destination", "egress_id"})
+
+EGRESS_BROKER_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "destination",
+        "reason",
+        "egress_id",
+    }
+)
+
+# Closed vocab bound to ControlFdBrokerError (spec §21.3; #432/#434-436 drift-guard pattern).
+EGRESS_BROKER_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "gateway_unreachable",
+        "sendmsg_failed",
+        "ancillary_truncated",
+        "expected_exactly_one_fd",
+        "short_data_send",
+        "control_fd_broker_failed",
+    }
+)
+
+# ---------------------------------------------------------------------------
 # comms.inbound.real_turn.refused family (#338 PR2 Task 1)
 # ---------------------------------------------------------------------------
 #
@@ -1650,4 +1691,8 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     # #338 PR2 Task 1: the RealTurnOrchestratorAdapter adapter-owned loud refusal
     # row (content-free; downgrade-deny / malformed / budget / turn-error / send-error).
     "COMMS_INBOUND_TURN_REFUSED_FIELDS",
+    # #340 Task 1: the SCM_RIGHTS gateway-socket broker's success + refused rows
+    # (payload-blind; schemas only — the auditor lands in Task 2).
+    "EGRESS_BROKER_SUCCESS_FIELDS",
+    "EGRESS_BROKER_REFUSED_FIELDS",
 )
