@@ -1,10 +1,15 @@
 """#432 — bind the launcher's audit-reason vocabulary to the Python closed vocab.
 
-``bin/alfred-plugin-launcher.sh`` is the SOLE emitter of
-``supervisor.plugin.sandbox_refused`` audit-JSON rows — no Python writes one (``src/alfred``
-only registers the hookpoint; nothing parses the launcher's stderr into an ``append_schema``
-call — see #433). The launcher decides each row's ``reason`` from a vocabulary it hand-copies
-from Python in two ``case`` statements, and until #432 nothing bound the copies to their source:
+``bin/alfred-plugin-launcher.sh`` is the SOLE emitter of the STDERR ``reason`` values this file
+binds against the Python closed vocab. (Historical note: at #432 time no Python parsed the
+launcher's stderr into a durable row; since #433,
+``alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor`` DOES persist a
+``supervisor.plugin.sandbox_refused`` row per launcher-emitted reason, and since #444 it also
+persists a HOST-authored row for the launcher-silent ``provider_key_delivery_failed`` reason —
+see ``_RESERVED_UNEMITTED`` below. This file's binding is scoped to the REASON VOCABULARY the
+launcher's bash can emit, independent of which layer performs the durable write.) The launcher
+decides each row's ``reason`` from a vocabulary it hand-copies from Python in two ``case``
+statements, and until #432 nothing bound the copies to their source:
 a new ``SandboxPolicyInvalid(reason=...)`` added without touching bash silently fell back to the
 generic ``policy_translate_failed`` — the exact failure #431 corrected (#427 / #422 drift class).
 
@@ -44,7 +49,8 @@ _RESERVED_UNEMITTED = frozenset(
     {
         "policy_ref_os_mismatch",  # documented; no code path emits it
         "bwrap_mode_userns_unavailable",  # documented; no code path emits it
-        "provider_key_delivery_failed",  # ProviderKeyDeliveryError default; not a refused row
+        "provider_key_delivery_failed",  # host-authored refused row (#444); no LAUNCHER emitter
+        # — stays reserved w.r.t. the launcher printf vocab this file binds.
         "sandbox_info_handshake_mismatch",  # session.py handshake; not a sandbox_refused row
     }
 )

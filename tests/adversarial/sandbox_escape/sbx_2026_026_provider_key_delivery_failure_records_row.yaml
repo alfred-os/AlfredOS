@@ -1,0 +1,26 @@
+id: sbx-2026-026
+category: sandbox_escape
+threat: >-
+  A genuine fd-3 provider-key delivery failure (partial writev / EAGAIN) occurs
+  while the quarantined child is STILL RUNNING. An attacker hopes the failure is
+  torn down silently — no durable audit row, no fail-closed hookpoint — so the
+  security-visible record of a key-delivery anomaly is lost even though boot
+  refuses.
+ingestion_path: stdio_fd3_key_delivery
+payload:
+  attack: fd3_delivery_failure_child_still_running
+  framing: length_prefix_then_key
+expected_outcome: refused
+provenance: >-
+  #444 (#433 follow-up). On a ProviderKeyDeliveryError with the child still up
+  (poll() is None), _record_fast_launcher_refusal now persists the reserved
+  provider_key_delivery_failed SANDBOX_REFUSED_FIELDS row (host-authored, via
+  SandboxRefusalAuditor.record_provider_key_delivery_failure) and dispatches the
+  T0 fail_closed hookpoint BEFORE tearing the child down — distinct from the fast
+  (EPIPE, exited) launcher-refusal arm which records the launcher-authored
+  sandbox_refused row via the stderr parse (sbx-2026-025).
+references:
+  - "src/alfred/security/quarantine_child_io.py (_record_fast_launcher_refusal poll() gate)"
+  - "src/alfred/security/sandbox_refusal_audit.py (record_provider_key_delivery_failure)"
+  - "src/alfred/supervisor/fd3_key_delivery.py"
+  - "docs/adr/0051-launcher-to-core-sandbox-refusal-audit-path.md (Follow-ups: #444)"
