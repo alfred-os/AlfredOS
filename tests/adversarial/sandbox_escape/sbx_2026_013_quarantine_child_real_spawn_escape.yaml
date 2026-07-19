@@ -33,7 +33,7 @@ provenance: >-
   deterministic-echo child makes NO egress call at all.
 references:
   - "spec §7.2 plugin sandbox policy"
-  - "config/sandbox/quarantined-llm.linux.bwrap.policy (no /etc, no /bin bind; --unshare-pid)"
+  - "config/sandbox/quarantined-llm.linux.bwrap.policy (no broad /etc bind — only /etc/ssl/certs CA store, #340 golive / ADR-0052; no /bin bind; --unshare-pid)"
   - "src/alfred/security/quarantine_child_io.py (spawn via the kind=full launcher)"
   - "src/alfred/security/quarantine_child/__main__.py (wheel-co-located child, ADR-0030)"
   - "tests/integration/test_quarantined_llm_policy_kernel_enforced.py (peer — direct bwrap)"

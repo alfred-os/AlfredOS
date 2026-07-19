@@ -30,14 +30,17 @@ carve-out). Their policy files:
 | `discord-adapter.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
 
 The **quarantined-LLM** policy `unshare net`s (Spec C G7-1, #333): the shipped
-deterministic-echo child needs no egress, so it runs in an empty network
-namespace — egress is kernel-closed for it. The **Discord adapter** policy now
-also `unshare net`s (Spec C G7-4, #333, ADR-0043): the Discord child runs in an
-empty network namespace and reaches the gateway L7 CONNECT proxy via a bind-mounted
-AF_UNIX socket on the gateway-only `alfred_discord_egress` volume — this closes
-the **Discord half** of `#230`. The **2c real-LLM quarantined child** (#230/#340)
-is NOT closed here: when that child lands, it likewise reaches its provider only
-through the gateway proxy, never by re-opening the child's network namespace.
+real-LLM child (#340 golive) runs in an empty network namespace, so its **direct**
+egress is kernel-closed — it makes its provider call ONLY over a gateway socket the
+trusted core brokers in over fd 4 (SCM_RIGHTS), never by opening a socket of its
+own (see the policy's egress note + `keep_fds = [3, 4]`). The **Discord adapter**
+policy now also `unshare net`s (Spec C G7-4, #333, ADR-0043): the Discord child
+runs in an empty network namespace and reaches the gateway L7 CONNECT proxy via a
+bind-mounted AF_UNIX socket on the gateway-only `alfred_discord_egress` volume —
+this closes the **Discord half** of `#230`. The **quarantined-LLM half** of `#230`
+closes with #340 golive (ADR-0052): the child now makes a real provider call,
+provider-only, through the gateway proxy, never by re-opening its network
+namespace.
 
 `_fixtures/` holds policy files used only by tests; they are NOT production
 policies.
@@ -82,14 +85,18 @@ The Linux policy is TOML validated by `alfred.plugins.sandbox_policy.SandboxPoli
 | `dev` | bool (default `true`) | Synthesise a minimal `/dev` (no host device passthrough). Required for CPython startup. |
 | `unshare` | subset of `pid uts cgroup ipc user net` | Linux namespaces to isolate. |
 | `die_with_parent` | bool (default `true`) | Reap the sandbox subtree when the Supervisor exits. |
-| `keep_fds` | `[int, …]` (must contain `3`) | Declares fd 3 (the provider-key channel) survives. Omitting `3` is refused (`kind_full_requires_keep_fd_3`). |
+| `keep_fds` | `[int, …]` (must contain `3`) | Declares the inherited fds that must survive: fd 3 (the provider-key channel) and — since #340 golive — fd 4 (the SCM_RIGHTS gateway-socket control channel). Omitting `3` is refused (`kind_full_requires_keep_fd_3`). |
 
 The shipped quarantined-LLM Linux policy binds only `/usr` and `/lib` read-only
-(hard) plus `/lib64` **softly** (the interpreter + its loader/libs), a tmpfs
-scratch dir, synthesises `/dev`, unshares `pid/uts/cgroup/ipc/net` (Spec C G7-1 —
-the echo child runs in an empty network namespace), dies with its parent, and
-keeps fd 3. It binds **no** `/etc` and **no** `/bin` — so host secrets are
-unreadable and `/bin/sh` / `/bin/*` are not exec targets.
+(hard) plus `/lib64` **softly** (the interpreter + its loader/libs) and the narrow
+`/etc/ssl/certs` CA store (hard, #340 golive — for the child's in-child TLS
+verify), a tmpfs scratch dir, synthesises `/dev`, unshares `pid/uts/cgroup/ipc/net`
+(Spec C G7-1 — the real-LLM child runs in an empty network namespace and reaches
+its provider only over the core-brokered fd-4 gateway socket), dies with its
+parent, and keeps fd 3 + fd 4. It binds **no broad** `/etc` (only the public-CA
+`/etc/ssl/certs` subpath) and **no** `/bin` — so host secrets (`/etc/passwd`,
+`/etc/shadow`, `resolv.conf`) are unreadable and `/bin/sh` / `/bin/*` are not exec
+targets.
 
 ### Why `/lib64` is a soft bind (arch portability — [#269](https://github.com/alfred-os/AlfredOS/issues/269))
 
@@ -128,34 +135,40 @@ Kernel enforcement of these bytes is proven by the merge-blocking integration
 test `tests/integration/test_quarantined_llm_policy_kernel_enforced.py` and the
 adversarial corpus `tests/adversarial/sandbox_escape/sbx-2026-003/004/006`.
 
-## Outbound egress — CLOSED for the echo child (G7-1) and the Discord adapter (G7-4); 2c real-LLM egress is #230
+## Outbound egress — direct egress KERNEL-CLOSED for both children (G7-1 / G7-4); provider reach is brokered-only
 
-The shipped quarantined-LLM child runs a **deterministic echo loop** with no
-provider client and no socket of its own, so it needs **zero** outbound network.
-Spec C G7-1 (#333) therefore makes the Linux policy `unshare net`, putting the
-child in an **empty network namespace**. Spec C G7-4 (#333, ADR-0043) applies the
-same to the **Discord adapter**: its policy now `--unshare-net`s the child; egress
-routes through the gateway's L7 CONNECT proxy via a bind-mounted AF_UNIX socket on
-the gateway-only `alfred_discord_egress` volume. Consequently:
+The shipped quarantined-LLM child (#340 golive) is a **real-LLM extractor**: it
+builds a provider client and makes a provider HTTPS call. Spec C G7-1 (#333) puts
+it in an **empty network namespace** (`unshare net`), so it cannot open a socket of
+its own — its provider reach is ONLY the gateway socket the trusted core brokers in
+over fd 4 (SCM_RIGHTS), against which it terminates TLS in-child. Spec C G7-4 (#333,
+ADR-0043) applies the same empty-netns treatment to the **Discord adapter**: its
+egress routes through the gateway's L7 CONNECT proxy via a bind-mounted AF_UNIX
+socket on the gateway-only `alfred_discord_egress` volume. Consequently:
 
 - Filesystem, process, and pid/uts/cgroup/ipc isolation **are** kernel-enforced
   for both children.
-- Outbound network egress is now **kernel-closed** for the echo child and the
-  Discord adapter — even a compromised child has no network namespace to connect
-  from; the sole hole is the sanctioned AF_UNIX socket to the gateway proxy.
+- **Direct** outbound network egress is **kernel-closed** for both children — even
+  a compromised child has no network namespace to connect from. The sole
+  sanctioned egress is a brokered gateway socket (the quarantine child's
+  core-brokered fd-4 provider socket; the Discord adapter's AF_UNIX socket to the
+  gateway proxy).
 
-The adversarial corpus records the echo-child egress as an **enforced-containment**
-vector in `tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml`
+The adversarial corpus records the quarantine-child direct egress as an
+**enforced-containment** vector in
+`tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml`
 (`out_of_scope: false`; the executable corpus asserts the shipped policy unshares
-`net`). A new Discord-specific corpus entry records the Discord adapter's enforced
+`net`). A Discord-specific corpus entry records the Discord adapter's enforced
 containment.
 
-**Still tracked by #230 — the 2c real-LLM child.** The real-LLM quarantined child
-(a separate follow-on) DOES make a provider call. It will **not** re-open this
-namespace: the core is connectivity-free and the gateway is the sole external I/O
-plane (Spec C), so the 2c child reaches its provider **provider-only** through the
-gateway L7 CONNECT proxy. The provider-only egress path + the unset-provider-key
-boot guard land with 2c, behind release-blocker **#230**.
+**Landed with #340 golive (ADR-0052) — the real-LLM child.** The real-LLM
+quarantined child now makes its provider call **provider-only** through the gateway
+L7 CONNECT proxy over the core-brokered fd-4 socket, never by re-opening its network
+namespace (the core is connectivity-free and the gateway is the sole external I/O
+plane — Spec C). The provider-only egress path, the `/etc/ssl/certs` CA carve-out,
+and the unset-provider-key refuse-boot guard ship with golive; the last
+real-external-egress exercise (real key + real gateway) is the nightly-smoke
+follow-up.
 
 ## Also deferred to #230
 
