@@ -1,0 +1,69 @@
+# de-2026-020 — SCM_RIGHTS gateway-socket broker failure audit completeness.
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_de_2026_020_broker_failure_audited.py.
+#
+# The #340 PR2a SCM_RIGHTS reachability-broker (control_fd_broker.py, ADR-0050) is
+# the ONE sanctioned in-core site that opens a raw socket toward the gateway L7
+# CONNECT proxy and hands the connected fd to the quarantine child (HARD #5 — it
+# writes zero application bytes). Any failure on that path (gateway unreachable,
+# a truncated/malformed SCM_RIGHTS frame, a short sendmsg) raises a loud, closed-
+# vocab ControlFdBrokerError. Task 2 of this same PR wired EgressBrokerAuditor
+# to persist that refusal as a signed T0 egress.broker.refused row (ADR-0050
+# Decision 7; addresses ADR-0040 residual (vii)) — BEFORE golive (PR2b) makes
+# this the live per-extraction egress path for a real-LLM quarantine child. This
+# payload pins that the row is durably written and that the write can never be
+# silently swallowed (HARD rule #7): a ControlFdBrokerError refusal with no row,
+# or a hung/failing audit write that vanishes instead of failing loud, would let
+# a denied quarantine-child egress attempt pass with no forensic trail.
+id: de-2026-020
+category: dlp_egress
+threat: >-
+  A gateway-socket broker failure on the quarantine egress path (unreachable
+  gateway, a malformed SCM_RIGHTS frame, a short sendmsg) raises a
+  ControlFdBrokerError that could be caught and discarded without a durable
+  record, leaving no forensic trail that an extraction's brokered egress was
+  denied. This payload asserts the failure is written to the signed core audit
+  log as a closed-vocab egress.broker.refused row (ADR-0050 Decision 7,
+  ADR-0040 residual (vii)), and that the write itself cannot be silently
+  swallowed — a failing or hung append must re-raise loud (HARD #7).
+note: >-
+  ingestion_path reuses `stdio_fd3_key_delivery`, the same value sbx-2026-015
+  (the sibling sandbox_escape corpus entry covering this SAME ControlFdBrokerError
+  / ADR-0050 mechanism) declares — ADR-0050 frames the SCM_RIGHTS control channel
+  as "an extension of the existing fd-3-framing key-delivery family," and no
+  ingestion_path enum member names the broker mechanism more specifically.
+  expected_outcome=audit_row_emitted mirrors de-2026-010 (the closest dlp_egress
+  precedent): both assert a SPECIFIC named audit row exists on a refusal path,
+  rather than a generic `refused`/`caught_by_dlp` classification.
+ingestion_path: stdio_fd3_key_delivery
+payload:
+  attack: broker_failure_silent_swallow
+  mechanism: >-
+    SCM_RIGHTS reachability-broker (ADR-0050) — control_fd_broker.py's
+    broker_connected_socket / _connect_and_send, the sole in-core raw-socket
+    + SCM_RIGHTS egress site.
+  probe:
+    error: ControlFdBrokerError
+    reason: gateway_unreachable
+  invariant: >-
+    EgressBrokerAuditor.record_broker_failure writes exactly one payload-blind
+    egress.broker.refused row (destination, closed-vocab reason, egress_id)
+    for a ControlFdBrokerError refusal; a failing or hung append_schema write
+    must propagate loud, never be swallowed.
+expected_outcome: audit_row_emitted
+provenance: >-
+  Authored with the #340 broker-audit pre-gate (golive spec §21): the durable
+  signed egress-audit row for the SCM_RIGHTS broker lands ahead of the golive
+  cutover. Task 1 (this PR) shipped the closed-vocab EGRESS_BROKER_REFUSED_FIELDS
+  / EGRESS_BROKER_REFUSED_REASONS schemas; Task 2 shipped EgressBrokerAuditor
+  with the bounded fail-loud await; this Task 4 payload is the release-blocking
+  adversarial pin that the two compose correctly on a REAL ControlFdBrokerError.
+references:
+  - "src/alfred/egress/broker_audit.py (EgressBrokerAuditor.record_broker_failure)"
+  - "src/alfred/egress/control_fd_broker.py (ControlFdBrokerError, broker_connected_socket)"
+  - "src/alfred/audit/audit_row_schemas.py (EGRESS_BROKER_REFUSED_FIELDS, EGRESS_BROKER_REFUSED_REASONS)"
+  - "docs/adr/0050-quarantine-child-scm-rights-reachability-broker.md (Decision 7)"
+  - "docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md (residual (vii))"
+  - "docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md (§21)"
+  - "CLAUDE.md hard rule #7 — audit-write non-skippable, fail-loud"
+  - "#340"
