@@ -145,6 +145,8 @@ class EgressBrokerAuditor:
                 "egress.broker.audit_write_timeout",
                 audit_event=event,
                 correlation_id=correlation_id,
+                destination=subject["destination"],
+                egress_id=subject["egress_id"],
             )
             raise
 
