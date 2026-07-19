@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **rev.2 (2026-07-19) — self-contained.** The full 11-lens `/review-plan` fold, the three
+> human-judgment decisions (D1/D2/D3), and the three broker-audit pre-gate carry-forwards have been
+> **distributed into the task bodies** as authoritative `> **rev.2 fold**` blocks that supersede any
+> conflicting rev.1 text within their task. Read each task's rev.2 block first. **16 tasks** (rev.1 had
+> 14: Task 10 is now WIRING-only after pre-gate PR #462 shipped the `EgressBrokerAuditor` dormant on
+> main `cecb1058`; Task 9 is a connect-defer rewrite; Tasks 15 + 16 are new). The consolidated
+> `## Review rev.2 fold` appendix is retained below as the rationale / audit trail.
+
 **Goal:** Cut the quarantined dual-LLM extractor over from the deterministic-echo loop to a REAL Anthropic-Haiku provider call, driven over the audited SCM_RIGHTS-brokered gateway socket (empty netns preserved, TLS terminating in the child) — the first time raw T3 reaches a real provider.
 
 **Architecture:** The bwrapped child stays in an empty network namespace. Per extraction the privileged host brokers `N = EXTRACTION_MAX_RETRIES + 1` bare TCP sockets to the gateway L7 CONNECT proxy over the one-way fd-4 control channel (SCM_RIGHTS), *then* writes the extract frame; the child consumes one socket per validation-retry attempt, drives CONNECT+TLS+HTTP over it via the official Anthropic SDK (spike verdict M1: `httpcore.AsyncHTTPProxy` on a `PassedFdBackend`, `max_retries=0`, no keepalive), and drains any leftover sockets. The privileged orchestrator never sees raw T3 — only the child does, only via the structured-extraction path, and the reply is a schema-valid T2 model. An unset provider key refuses boot host-side (primary) with a child last-line guard (secondary).
@@ -22,7 +30,7 @@
 - **Commit subjects carry `#340` immediately after the colon** (`feat(security): #340 …`) and end with the `MrReasonable <4990954+MrReasonable@users.noreply.github.com>` trailer. Body: "Part of #340", NO closing keyword (keep the epic open).
 - **Never `git stash`/`checkout`/`reset` to inspect base state** — read a base via `git show <base>:<path>`.
 
-**Authoritative spec:** `docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md` — read §5–§16, §19 fold-log, and **§20 the #443-handshake fold-appendix (overrides section bodies where they conflict; refuse-boot = Option A; ADR-0052 not 0051; the four must-not-regress items; the boot-ordering rule)**.
+**Authoritative spec:** `docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md` — read §5–§16, §19 fold-log, **§20 the #443-handshake fold-appendix (overrides section bodies where they conflict; refuse-boot = Option A; ADR-0052 not 0051; the four must-not-regress items; the boot-ordering rule; §20.4 on main is the corrected ADR attribution — the pre-gate did the ADR-0050 D7/Status + ADR-0040 (vii) flips, not ADR-0052)**, and **§21 the broker audit-row family amendment (egress-audit family; §21.4 the pre-gate carve-out; §21.5 the D1 gateway 22s per-listener handshake timeout)**.
 
 ---
 
@@ -30,33 +38,40 @@
 
 **New files:**
 
-- `src/alfred/security/quarantine_child/brokered_egress.py` — the child-side per-call transport: `PassedFdBackend` (httpcore backend over a passed fd), `_PassedFdTransport` (httpx transport wrapping it), `build_child_client` (→ `AnthropicProvider`), `BrokeredProviderSource` (the §8 wrapper-provider: socket-free `capabilities()`, per-attempt `bind()` CM, `drain_leftovers()`), `_ProviderFactory` (frozen key+model+budget). Egress-capable imports (`httpx`/`httpcore`/`anthropic`/`ssl`/`socket`) live at THIS module's scope — allowlisted in the in-core guards (Task 11). NOT imported at `__main__.py` module scope (kept lazy so the closure gate stays green).
-- `src/alfred/egress/broker_audit.py` — `EgressBrokerAuditor` (the ADR-0050 Decision 7 durable signed per-call egress-audit success row + the broker-failure refused row), constructed host-side with the `AuditWriter`.
-- `docs/adr/0052-real-quarantine-child-golive.md` — the quarantine-half go-live ADR (sibling to ADR-0049).
-- `tests/adversarial/prompt_injection/pi_2026_015_t3_steers_real_extractor.yaml` — the T3-steers-extraction release-blocking payload.
-- Unit tests co-located under `tests/unit/security/`, `tests/unit/egress/`; the integration test extends `tests/integration/test_quarantine_fd_broker_real_spawn.py` (or a new `_real_extract` sibling).
+- `src/alfred/security/quarantine_child/brokered_egress.py` — the child-side per-call transport: `PassedFdBackend` (httpcore backend over a passed fd; `sock.settimeout(read)` — Task 3 R.2.6), `_PassedFdTransport` (httpx transport wrapping it, `follow_redirects=False`, injected timeout), `build_child_client` (→ `AnthropicProvider` with a public `aclose()`), `BrokeredProviderSource` (the §8 wrapper-provider: socket-free `capabilities()`, per-attempt `bind()` CM with the no-dial fd-close, `drain_leftovers()` reusing `recv_passed_fd`), `_ProviderFactory` (frozen key+model+budget). Egress-capable imports (`httpx`/`httpcore`/`anthropic`/`ssl`/`socket`) live at THIS module's scope — **allowlisted in the in-core guards by Task 3** (folded forward from Task 11 so the module lands green). NOT imported at `__main__.py` module scope (kept lazy so the closure gate stays green).
+- `docs/adr/0052-real-quarantine-child-golive.md` — the quarantine-half go-live ADR (sibling to ADR-0049; Task 12).
+- `tests/adversarial/prompt_injection/pi_2026_015_t3_steers_real_extractor.yaml` — the T3-steers-extraction release-blocking payload, driven **executably** through the real child (Task 13/14).
+- Unit tests co-located under `tests/unit/security/`, `tests/unit/egress/`, `tests/unit/gateway/`, `tests/unit/cli/`; the integration test extends `tests/integration/test_quarantine_fd_broker_real_spawn.py` (or a new `_real_extract` sibling).
+
+**Pre-gate-shipped — NOT created here (on main `cecb1058` via PR #462, DORMANT):**
+
+- `src/alfred/egress/broker_audit.py` — `EgressBrokerAuditor` + `record_broker_success`/`record_broker_failure` (bounded await), the `EGRESS_BROKER_{SUCCESS,REFUSED}_FIELDS` schemas, the `EGRESS_BROKER_REFUSED_REASONS` drift-guard, the `de-2026-020` adversarial payload, and `broker_connected_socket` returning `(host, port)`. Golive **wires** it (Task 10 declares the hookpoints + threads the calls) — it does NOT re-create it.
 
 **Modified files (one responsibility each):**
 
 - `src/alfred/security/quarantine.py` — hoist `EXTRACTION_MAX_RETRIES` + expose `BROKER_SOCKET_COUNT`.
-- `src/alfred/security/quarantine_child/provider_dispatch.py` — `provider` → `source` reshape; per-call `asyncio.wait_for`; cost sum (P1c).
-- `src/alfred/security/quarantine_child/__main__.py` — boot-ordering, extract-branch swap, echo deletion, empty-content short-circuit, drain finally.
-- `src/alfred/security/quarantine_child_io.py` — `broker_sockets(n)`, model/max_tokens spawn params → child env, ChildIO seam.
-- `src/alfred/security/quarantine_transport.py` — `ChildIO` Protocol widening + broker-N-then-write in `dispatch`.
-- `src/alfred/egress/control_fd_broker.py` — `broker_connected_socket` returns `(host, port)`; audited caller.
-- `src/alfred/comms_mcp/daemon_runtime.py` — delete `_PROVIDER_KEY_PLACEHOLDER`; refuse-boot on unset; spawn `control_fd=True` + egress_config + model/max_tokens.
+- `src/alfred/security/quarantine_child/provider_dispatch.py` — `provider` → `source` reshape (atomic with `__main__.py`); per-call `asyncio.wait_for` (D1 8s read); cost sum (P1c) **wired to a turn-level owner** (R.2.12).
+- `src/alfred/security/quarantine_child/__main__.py` — boot-ordering (behavioural test), extract-branch swap, echo deletion, empty-content short-circuit, drain finally; `import socket` + `_CONTROL_FD` lazy inside `main()`.
+- `src/alfred/security/quarantine_child_io.py` — `broker_sockets(n)` (connect-defer), holds the threaded `broker_auditor`, model/max_tokens spawn params → child env, ChildIO seam.
+- `src/alfred/security/quarantine_transport.py` — `ChildIO` Protocol widening (+ update existing doubles) + broker-N-then-write in `dispatch` + catch `ControlFdBrokerError` → `quarantine.transport_failed` typed refusal.
+- `src/alfred/egress/control_fd_broker.py` — **`broker_connected_sockets` (connect-defer batch)**: connect all N, `sendmsg` only if all connect; delete any reclaim helper.
+- `src/alfred/comms_mcp/daemon_runtime.py` — delete `_PROVIDER_KEY_PLACEHOLDER`; refuse-boot on unset; spawn `control_fd=True` + egress_config + model/max_tokens; construct + thread `EgressBrokerAuditor` (Task 10).
 - `src/alfred/cli/daemon/_commands.py` + `_failures.py` — new refuse-boot arm + failure token.
 - `src/alfred/plugins/_comms_child_env.py` — allowlist `SSL_CERT_FILE`, `ALFRED_QUARANTINE_MODEL`, `ALFRED_QUARANTINE_MAX_TOKENS`.
+- `src/alfred/cli/config.py` — `max_tokens > 0` fail-loud validation + `action-deadline` floor-guard (Task 15).
+- the strict hook/event declaration registry — declare `egress.broker.connected` + `egress.broker.refused` (Task 10 carry-forward #1).
+- the gateway CONNECT forward-proxy (`egress_proxy.py`, `EgressForwardProxy.__init__` per-instance `handshake_timeout_s`) + `src/alfred/cli/gateway/_commands.py` (pass `22.0` on the provider plane) — Task 16 (D1).
+- `locale/en/LC_MESSAGES/alfred.po` — `pybabel extract` + `update` after all line-shifting edits (Task 7 R.2.13).
 - `src/alfred/providers/anthropic_native.py` — `_ANTHROPIC_PRICING` already has `claude-haiku-4-5`; no change (config fix is `routing.yaml`).
 - `config/sandbox/quarantined-llm.linux.bwrap.policy` — `keep_fds=[3,4]`, `/etc/ssl/certs` CA bind, update the NO-/etc note.
 - `config/routing.yaml` — `[quarantine].model` `claude-haiku-3-5` → `claude-haiku-4-5`.
-- The four egress-gate tests (Task 11); `docs/adr/0050-*.md`, `docs/adr/0040-*.md` (Task 12); `tests/adversarial/sandbox_escape/sbx_2026_015_brokered_fd_dormant.yaml` (Task 13).
+- `docs/adr/0050-*.md`, `docs/adr/0040-*.md`, `docs/adr/0037-*.md` (Task 12); `tests/adversarial/sandbox_escape/sbx_2026_015_brokered_fd_dormant.yaml` (Task 13).
 
-**Open micro-decisions for the focused plan-review (core + security own the dense code):**
+**Micro-decisions — RESOLVED in rev.2 (were open for the focused plan-review; now closed by the 11-lens fold + D1/D2/D3):**
 
-1. **Egress-audit failure seam** — this plan writes the broker FAILURE row via `EgressBrokerAuditor` (egress-audit family, ADR-0040 vii), NOT a `sandbox_refused` row; spec §7 wrote "SANDBOX_REFUSED-class". Confirm the family, or map `ControlFdBrokerError.reason` into `SANDBOX_REFUSED_REASONS`.
-2. **Gateway CONNECT-wait / idle-accept timeout value** (§6/§13/§19-C1) — the invariant "gateway CONNECT-wait ≥ child budget (20s)" must be verified against the actual gateway config before sign-off; if the idle window is shorter, the pre-brokered-socket #2/#3 delayed-use is dead-on-arrival. Task 14 drives a delayed-use socket; the value itself is a sign-off checklist item.
-3. **`brokered_egress` module-scope egress imports vs the closed-egress anchor** — the closure gate scans only `__main__.py`; keeping the egress imports in `brokered_egress.py` + lazy in `__main__.py` keeps it green without inverting the anchor. Task 11 confirms; if any `__main__.py` module-scope egress import proves unavoidable, invert per the sbx-2026-005 precedent.
+1. **Egress-audit failure seam → egress-audit family (D2).** The broker FAILURE row is the egress-audit family (`EGRESS_BROKER_REFUSED_FIELDS`, ADR-0040 vii), NOT `sandbox_refused` — `alfred-reviewer`-ratified via spec §21 and shipped in pre-gate PR #462. Task 9 records it with the real `ControlFdBrokerError.reason`; Task 10 wires the auditor.
+2. **Gateway CONNECT-wait ≥ child budget → D1 (spec §21.5).** VERIFIED violated (`egress_proxy.py:81` = 10s < 20s). Resolved: a per-instance handshake timeout, **22s on the provider plane only** (Task 16), nesting `action_deadline(30) > host_read(25) > gateway_handshake(22) > child_budget(20) > SDK_read(8)`, pinned by an ordering-invariant test; composes with Task 3's `sock.settimeout`.
+3. **`brokered_egress` module-scope egress imports vs the closed-egress anchor → keep lazy in `__main__.py`.** The egress imports live in `brokered_egress.py` (allowlisted by **Task 3**, folded forward from Task 11) + are kept lazy in `__main__.py` so the closure gate stays green without inverting the anchor.
 
 ---
 
@@ -150,6 +165,11 @@ EOF
 
 ## Task 2: routing.yaml model fix + the spawn-env delivery channel
 
+> **rev.2 fold (self-contained):** this task delivers `MODEL` / `MAX_TOKENS` through the spawn-env
+> allowlist, but the **`max_tokens > 0` fail-loud validation** lives in **Task 15** (config-load /
+> spawn-env boundary — a `≤ 0` must NOT launder to `cannot_extract`; §17 / R.2.9). Deliver the env
+> here; validate in Task 15.
+
 **Files:**
 
 - Modify: `config/routing.yaml:31` (`claude-haiku-3-5` → `claude-haiku-4-5`)
@@ -220,6 +240,25 @@ EOF
 ---
 
 ## Task 3: Child-side `brokered_egress` transport (spike M1 port)
+
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.2.3, R.2.6, R.3, D1/§21.5).**
+>
+> 1. **`sock.settimeout(read)` on the passed socket [R.2.6 / prov-001] — REQUIRED.** The blocking SDK
+>    `recv` runs in `anyio.to_thread.run_sync(abandon_on_cancel=False)` and is otherwise
+>    **un-cancellable** by `asyncio.wait_for`, so the child's 20s budget has no teeth. Set
+>    `sock.settimeout(<read>)` on the brokered socket **and** inject the same timeout into the injected
+>    httpx client. This is the **prerequisite** that makes the wall-clock budget a real hard ceiling
+>    (and the prerequisite for D1).
+> 2. **D1 read timeout under the 20s budget** — nesting `… > child_budget(20) > SDK_read(8)`. The
+>    child-side read timeout sits at **8s** (three attempts fit the 20s budget — the §17 arithmetic is
+>    reconciled in Task 15). The gateway per-listener 22s handshake is **Task 16**.
+> 3. **Fold the Task-11 egress-gate allowlist edits into THIS task [R.3 / self-flagged cross-task
+>    risk].** `brokered_egress.py`'s `httpx` construction + `anthropic` import trip
+>    `test_in_core_http_egress_guard` the moment the module exists. Add the `_IMPORT_ALLOWLIST` /
+>    `_CONSTRUCT_ALLOWLIST` entries (Task 11's list) **here** so this task lands green; Task 11 then
+>    keeps only the bwrap policy edit.
+> 4. **Named 100% line+branch coverage gate on `brokered_egress.py` [R.2.3 / test-001].**
+> 5. **E2 no-redirects stays** (httpx `follow_redirects=False`).
 
 **Files:**
 
@@ -425,6 +464,19 @@ EOF
 
 ## Task 4: `_ProviderFactory` + `BrokeredProviderSource` (§8 wrapper-provider) + child refuse-boot guard
 
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.2.7, R.2.11, R.3).**
+>
+> 1. **`bind()` fd leak on the no-dial path [R.2.7 / core-002/err-006].** The `finally` MUST close the
+>    received fd when the client never dialed (`backend.calls == 0`) — cover the pre-dial-raise /
+>    `wait_for`-cancel path so the persistent child cannot leak the passed fd.
+> 2. **`drain_leftovers` must NOT swallow + must NOT re-implement [R.2.11 / err-001/rev-004].** Do
+>    **not** `except OSError: return`: log loud and distinguish benign `EAGAIN`/peer-close from a real
+>    fault. **Reuse** the shipped `recv_passed_fd`'s `MSG_CTRUNC` + leaked-fd-close hardening (factor a
+>    shared `MSG_DONTWAIT` variant) instead of re-implementing `_recv_nonblocking`.
+> 3. **Add a public `AnthropicProvider.aclose()` [R.3]** so the D5 sole-fd-owner has a real close hook.
+> 4. **`source: Any` → a Protocol under `mypy --strict` [R.3].** `BrokeredProviderSource` is the
+>    concrete impl; the `source` param type is a Protocol, not `Any`.
+
 **Files:**
 
 - Modify: `src/alfred/security/quarantine_child/brokered_egress.py` (add the factory + source)
@@ -601,6 +653,18 @@ EOF
 
 ## Task 5: `dispatch_extraction` reshape — `source` param, per-call wall-clock ceiling, cost sum (P1c)
 
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.2.12, R.3, D1).**
+>
+> 1. **`provider=` → `source=` rename lands ATOMICALLY across Task 5 + Task 6 [R.3]** — no red
+>    intermediate. `dispatch_extraction(source=…)` (T5) and `_run_mcp_server(source, …)` /
+>    `handle_extract(source=…)` (T6) change in one coherent step.
+> 2. **Per-call wall-clock ceiling uses D1's SDK-read budget** — the `asyncio.wait_for` around each
+>    `provider.complete()` sits under the 20s child budget (8s SDK read; see the Task 3 nesting).
+> 3. **Cost is NOT dead data [R.2.12 / prov-002/arch-003] — wire the turn-level owner.**
+>    `_call_provider` returns `(text, cost)`; the summed quarantine cost must reach a real turn record
+>    carrying a `cost_usd` field, joined with the privileged (#338) cost — the §19-D2 "name the owner"
+>    action. Do NOT leave `cost_usd` summed-then-dropped.
+
 **Files:**
 
 - Modify: `src/alfred/security/quarantine_child/provider_dispatch.py` (`dispatch_extraction`, `_call_provider`)
@@ -769,6 +833,20 @@ EOF
 ---
 
 ## Task 6: Child `__main__.py` cutover — boot-ordering, extract-branch swap, echo deletion, empty-content, drain finally
+
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.2.5, R.3, §16).**
+>
+> 1. **Boot-ordering test is BEHAVIOURAL, not lexical [R.2.5 / test-003/sec-001].** Replace any
+>    `src.index()` string-order assertion with a **runtime call-order spy** proving (a) `emit_hello` →
+>    `_build_provider` (factory, boot-cheap, no socket) → **fd-4 control-socket reconstruction** →
+>    `_write_boot_ready` fire in that order at runtime, and (b) a **pre-`emit_hello`** refuse (empty
+>    key / fd-3 read failure) is attributed to the **launcher** (zero-stdout EOF → the sec-001 gate),
+>    **not** a forged `sandbox_refused` row.
+> 2. **Keep `import socket` + `_CONTROL_FD` LAZY inside `main()`** (not module scope) so the in-core
+>    egress-closure gate stays green **and** the behavioural test isn't self-contradictory.
+> 3. **`source=` rename atomic with Task 5** (no red intermediate).
+> 4. **DELETE the deterministic-echo path** (§16/§19-B1 must-not-regress) + a no-echo test; keep
+>    `os.close(original)`; empty-content short-circuit; drain in `finally`.
 
 **Files:**
 
@@ -943,6 +1021,16 @@ EOF
 
 ## Task 7: Host refuse-boot on unset provider key (delete the placeholder)
 
+> **rev.2 fold — authoritative; supersedes conflicting text below (§20.3.1, R.2.13).**
+>
+> 1. **DELETE `_PROVIDER_KEY_PLACEHOLDER` [§20.3.1 must-not-regress].** `_resolve_provider_key` must
+>    RAISE on an unset/empty key (host pre-spawn refuse-boot, Option A) — a surviving non-empty
+>    placeholder builds a real client on a bogus key = silent dead-LLM. Add a no-placeholder test.
+> 2. **i18n locale path = repo-root `locale/en/LC_MESSAGES/alfred.po` [R.2.13 / i18n-001/002]** — NOT
+>    `src/alfred/i18n/locale`. Run `pybabel extract` **+ `pybabel update`** (not just `compile`) as a
+>    **FINAL** step after ALL line-shifting edits across the plan (multiple tasks shift `#:` refs),
+>    then `git add locale/`. A stale `#:` ref reds CI.
+
 **Files:**
 
 - Modify: `src/alfred/comms_mcp/daemon_runtime.py` (delete `_PROVIDER_KEY_PLACEHOLDER:81`; `_resolve_provider_key:291`)
@@ -1061,6 +1149,11 @@ EOF
 
 ## Task 8: Production spawn — `control_fd=True` + egress_config + model/max_tokens env wiring
 
+> **rev.2 fold (self-contained):** guard `_child_env`'s required-kwargs so the `control_fd=False`
+> byte-identity holds [R.3]; **must-not-regress §20.3.4** — do NOT drop `control_parent` from either
+> `_SubprocessChildIO` construction (`aclose()` closing `control_parent` is the fd-4 teardown on all
+> refusal paths; already golive-aware, so NO new work — just don't remove it).
+
 **Files:**
 
 - Modify: `src/alfred/comms_mcp/daemon_runtime.py` (`_build_comms_inbound_extractor` spawn call)
@@ -1150,19 +1243,46 @@ EOF
 
 ---
 
-## Task 9: Broker-N-concurrently in the transport + partial-failure reclaim + ChildIO widening
+## Task 9: Broker-N via connect-defer in the transport + ChildIO widening + typed-refusal on failure
+
+> **rev.2 fold — authoritative; supersedes any conflicting text in this task below (11-lens review R.2.1 + R.2.8 + R.3, carry-forward #2).**
+>
+> 1. **CONNECT-DEFER replaces the whole reclaim design [6-lens: arch/rev/err×2/core/test/sec].**
+>    The host-side `_reclaim_inflight_control_fds` is **unworkable** (the un-received fds sit in the
+>    *child's* fd-4 buffer, unreachable from the host) and is **DELETED**. Instead **split connect
+>    from send**: `broker_sockets` (a) opens all `count` gateway-connected sockets on the host first
+>    (connect phase), and (b) `sendmsg(SCM_RIGHTS)`s them to the child over fd-4 **only if every
+>    connect succeeded** (send phase). A partial failure therefore sends **nothing** to the child →
+>    the child buffer never sees a partial batch → **no reclaim needed**. The connected-but-unsent
+>    host sockets are closed. The child's post-read drain still sweeps genuinely-unused (fully-sent
+>    but unconsumed) sockets — that path is unchanged.
+> 2. **Failure row + typed refusal; resolves the Task 9↔10 contradiction [sec-004/err-003].** On a
+>    batch failure, call `broker_auditor.record_broker_failure(destination=…, reason=…)` with the
+>    **real** `ControlFdBrokerError.reason` (one of the closed 6-member vocab — NOT a generic string),
+>    **then raise** `ControlFdBrokerError` → `dispatch` **catches** it and returns a
+>    `quarantine.transport_failed` **typed refusal** (HARD #7 — no raw exception propagation to the
+>    orchestrator). The auditor is the one shipped **dormant in the pre-gate PR #462** (Task 10 wires
+>    the success path + declares the hookpoints).
+> 3. **ChildIO Protocol widening breaks existing doubles under pyright [R.3].** Widening `ChildIO`
+>    with `broker_sockets` requires updating every existing `ChildIO` test double to satisfy the
+>    Protocol (else pyright reds). Carry-forward #2: `QuarantineChildIO.broker_socket()` today is
+>    typed `-> None` and discards the `(host, port)` — golive re-shapes it into the batch
+>    `broker_sockets` returning `list[tuple[str, int]]`.
+> 4. **Coverage gate MUST include `quarantine_child_io` [R.2.3 / test-001 Crit].** Step 5's `--cov`
+>    list adds `--cov=alfred.security.quarantine_child_io` (named 100% line+branch), not only
+>    `quarantine_transport` + `control_fd_broker`.
 
 **Files:**
 
-- Modify: `src/alfred/security/quarantine_transport.py` (`ChildIO` Protocol `:89-103`; `dispatch` `:271-312`)
-- Modify: `src/alfred/security/quarantine_child_io.py` (`_SubprocessChildIO.broker_sockets`, reclaim)
-- Modify: `src/alfred/egress/control_fd_broker.py` (`broker_connected_socket` returns `(host, port)`)
+- Modify: `src/alfred/security/quarantine_transport.py` (`ChildIO` Protocol `:89-103` — widen; `dispatch` `:271-312` — broker-then-write + catch `ControlFdBrokerError` → `quarantine.transport_failed`)
+- Modify: `src/alfred/security/quarantine_child_io.py` (`_SubprocessChildIO.broker_sockets` connect-defer; **delete** any `_reclaim_inflight_control_fds`; update existing `ChildIO` doubles for the widened Protocol)
+- Modify: `src/alfred/egress/control_fd_broker.py` (split connect from send; a batch primitive; `_resolve_proxy_addr` already returns `(host, port)`)
 - Test: `tests/unit/security/test_quarantine_transport.py`, `test_quarantine_child_io_broker.py` (extend/create)
 
 **Interfaces:**
 
-- Consumes: `BROKER_SOCKET_COUNT` (Task 1); `broker_connected_socket` (now returning `(host, port)`).
-- Produces: `ChildIO.broker_sockets(count: int) -> list[tuple[str, int]]` (widened Protocol method — brokers `count` sockets CONCURRENTLY via `asyncio.gather`, returns the destinations for audit; on a mid-batch failure reclaims the in-flight fds and raises `ControlFdBrokerError`); `QuarantineStdioTransport.dispatch` brokers `BROKER_SOCKET_COUNT` sockets *then* writes the ingest+extract frames (atomic ordering). All N `sendmsg`s enqueue into the fd-4 buffer before the extract frame → the child's post-read drain sees them all (race-free, spec §6).
+- Consumes: `BROKER_SOCKET_COUNT` (Task 1); the connect/send split in `control_fd_broker`; the pre-gate `EgressBrokerAuditor.record_broker_failure` (Task 10 threads it in).
+- Produces: `ChildIO.broker_sockets(count: int) -> list[tuple[str, int]]` (widened Protocol method — **connect-defer**: connect all `count` gateway sockets first, `sendmsg` them to the child only if all connects succeed, else close the connected host sockets, record a failure row, and raise `ControlFdBrokerError`); `QuarantineStdioTransport.dispatch` brokers `BROKER_SOCKET_COUNT` sockets *then* writes the ingest+extract frames (atomic ordering), and **catches** a broker `ControlFdBrokerError` → `quarantine.transport_failed` typed refusal. The N sent `sendmsg`s enqueue into the fd-4 buffer before the extract frame → the child's post-read drain sees them all (race-free, spec §6).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1191,9 +1311,16 @@ async def test_dispatch_brokers_n_before_writing(monkeypatch) -> None:
 
 ```python
 # tests/unit/security/test_quarantine_child_io_broker.py
-async def test_broker_sockets_reclaims_on_partial_failure() -> None:
-    # Broker fails on socket 2 of 3 -> the 1 in-flight fd is reclaimed (no stale
-    # socket consumed by the next extraction), and ControlFdBrokerError propagates.
+async def test_broker_sockets_sends_nothing_on_partial_connect_failure() -> None:
+    # Connect-defer: connect fails on socket 2 of 3 -> ZERO sendmsg reaches the child
+    # (nothing to reclaim), the already-connected host sockets are closed, a failure
+    # row is recorded with the real ControlFdBrokerError.reason, and the error raises.
+    # Assert: sendmsg call count == 0; connected-but-unsent sockets are closed (no fd leak);
+    #         record_broker_failure called once with reason in the closed 6-member vocab.
+    ...
+
+async def test_broker_sockets_sends_all_on_full_connect_success() -> None:
+    # All N connect -> all N sendmsg'd -> returns N destinations; record path is Task 10's.
     ...
 ```
 
@@ -1210,56 +1337,88 @@ In `quarantine_transport.py`, add to the `ChildIO` Protocol:
     async def broker_sockets(self, count: int) -> list[tuple[str, int]]: ...
 ```
 
-In `dispatch`, broker N BEFORE the ingest/extract writes:
+In `dispatch`, broker N BEFORE the ingest/extract writes, wrapped in the Step-3b try/except so a
+partial batch becomes a typed refusal rather than a raw exception:
 
 ```python
         handle_id = str(params["handle_id"])
         tagged = self._staging.drain(handle_id)
-        # Broker N one-shot gateway sockets up-front (spec §6): all N enqueue into
-        # the child's fd-4 buffer BEFORE the extract frame, so the child's post-read
-        # drain is race-free. A broker failure refuses before any wire write.
-        await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)
+        # Broker N one-shot gateway sockets up-front (spec §6, connect-defer): all N enqueue
+        # into the child's fd-4 buffer BEFORE the extract frame, so the child's post-read drain
+        # is race-free. A partial connect failure sends NOTHING (Step 3b handles the refusal).
+        try:
+            await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)  # see Step 3b for the except arm
+        except ControlFdBrokerError as exc:
+            await self._broker_auditor.record_broker_failure(destination=self._provider_destination, reason=exc.reason)
+            return _typed_refusal("quarantine.transport_failed")
         self._child_io.write_frame(_frame(_INGEST_METHOD, {"handle_id": handle_id, "context": tagged.content}))
         self._child_io.write_frame(_frame(_EXTRACT_METHOD, {...}))  # unchanged
         raw = await self._child_io.read_frame()
         ...
 ```
 
-In `_SubprocessChildIO` (`quarantine_child_io.py`), implement `broker_sockets` (concurrent gather + reclaim on partial failure), replacing/augmenting the PR2a single `broker_socket`:
+In `control_fd_broker.py`, **split connect from send** so a partial batch never reaches the child.
+The gateway L7-CONNECT handshake is the only step that can fail; do it for all N first, and only then
+`sendmsg(SCM_RIGHTS)` the fds over fd-4:
+
+```python
+async def broker_connected_sockets(
+    *, parent_end: socket.socket, proxy_config: EgressProxyConfig, count: int
+) -> list[tuple[str, int]]:
+    host, port = _resolve_proxy_addr(proxy_config)  # userinfo already stripped
+    loop = asyncio.get_running_loop()
+    connected: list[socket.socket] = []
+    try:
+        # CONNECT phase — establish all N gateway-connected host sockets first. A failure here
+        # (the common case: gateway down) means the SEND phase never runs -> the child buffer
+        # never sees a partial batch -> no reclaim.
+        for _ in range(count):
+            connected.append(await loop.run_in_executor(None, _connect_one, host, port))
+        # SEND phase — only reached if EVERY connect succeeded.
+        for sock in connected:
+            await loop.run_in_executor(None, _send_one, parent_end, sock)
+    except OSError as exc:
+        raise ControlFdBrokerError("gateway_unreachable") from exc  # real closed-vocab reason
+    finally:
+        for sock in connected:  # sole cleanup: host end is dup'd into the child by sendmsg
+            sock.close()                     # (success), or closed as connected-but-unsent (failure)
+    return [(host, port)] * count
+```
+
+> **SEND-phase residual (implementation-time, pin with the security lens):** a `sendmsg` failure
+> *mid-batch* (after ≥1 fd already reached the child) is far rarer than a CONNECT failure but is not
+> impossible. It does NOT reopen the stale-socket bug: the child's **end-of-extraction drain** is the
+> universal backstop — any fd that reached the child but was never consumed is swept before the next
+> extraction. Connect-defer removes the common partial case; the child drain covers the residual.
+
+In `_SubprocessChildIO` (`quarantine_child_io.py`), implement `broker_sockets` on top of the batch
+primitive (replacing the PR2a single `broker_socket`; **delete** any `_reclaim_inflight_control_fds`):
 
 ```python
     async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
         if self._control_parent is None or self._egress_config is None:
             raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
-        results = await asyncio.gather(
-            *(control_fd_broker.broker_connected_socket(
-                parent_end=self._control_parent, proxy_config=self._egress_config)
-              for _ in range(count)),
-            return_exceptions=True,
-        )
-        failures = [r for r in results if isinstance(r, BaseException)]
-        if failures:
-            # k-1 fds are already in the child's fd-4 buffer un-received — reclaim by
-            # draining the control channel so the next extraction's attempt-1 does not
-            # consume a stale socket (spec §6 partial-broker-failure).
-            await self._reclaim_inflight_control_fds()
-            raise ControlFdBrokerError("broker_batch_partial_failure")
-        return [r for r in results if not isinstance(r, BaseException)]
+        destinations = await control_fd_broker.broker_connected_sockets(
+            parent_end=self._control_parent, proxy_config=self._egress_config, count=count,
+        )  # raises ControlFdBrokerError on a partial batch — sends nothing, nothing to reclaim
+        for host, port in destinations:  # Task 10 wiring: success row per brokered target
+            await self._broker_auditor.record_broker_success(destination=f"{host}:{port}")
+        return destinations
 ```
 
-Change `broker_connected_socket` to return `(host, port)` (it already resolves them):
+The batch-failure path (the `ControlFdBrokerError` raised above) is caught one layer up — in `dispatch`
+(Step 3b below) — which records the failure row and converts to a `quarantine.transport_failed` typed
+refusal. (`record_broker_failure`/`record_broker_success` wiring is Task 10; the auditor is the one
+shipped **dormant in pre-gate PR #462**.)
 
-```python
-async def broker_connected_socket(*, parent_end, proxy_config) -> tuple[str, int]:
-    host, port = _resolve_proxy_addr(proxy_config)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _connect_and_send, parent_end, host, port)
-    return host, port
-```
+- [ ] **Step 3b: `dispatch` catches the broker error → typed refusal (HARD #7)**
 
-Add `_reclaim_inflight_control_fds` (a bounded non-blocking `MSG_DONTWAIT` drain of the parent-end... note: the parent SENDS; the in-flight fds sit in the CHILD's buffer, not the parent's — reclaiming from the host means the CHILD must drain them. Reconcile: on a partial batch, the cleanest reclaim is to close+rebuild the control socketpair (the child's next `recv_passed_fd` then blocks until re-brokered, and the stale in-flight fds die with the old socket). **Decide the reclaim mechanism at implementation time (plan-review core-lens) — the two candidates are (i) close+rebuild the socketpair, (ii) a next-extraction preamble drain on the child. Prefer (i): deterministic, no child-side state.**).
-
-> **Plan-review note (core-lens):** the "reclaim" for a partial broker batch is genuinely the trickiest bit — the un-received fds are in the *child's* buffer. Option (i) close+rebuild the `control_parent` socketpair (and re-hand the child end — which requires a child re-init, not possible on a persistent child) vs option (ii) a child-side preamble drain on the next extraction. Given the child is persistent and fd-4 is one-way, **option (ii)** (child drains any stale leftover at the TOP of each extraction, before consuming attempt-1's socket) is likely the only workable one. Confirm and pin the mechanism here before TDD.
+Contract (the code is the try/except in the Step-3 `dispatch` snippet above): a broker
+`ControlFdBrokerError` must NEVER propagate raw to the orchestrator. `dispatch` catches it, calls
+`record_broker_failure(destination, reason=exc.reason)` with the **real** closed-vocab reason, and
+returns a `quarantine.transport_failed` typed refusal. Add a test asserting a broker failure yields
+the typed refusal (not a raised exception) and that `record_broker_failure` was called once with the
+`ControlFdBrokerError.reason` verbatim.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1268,21 +1427,23 @@ Expected: PASS.
 
 - [ ] **Step 5: Coverage**
 
-Run: `uv run pytest tests/unit/security/ -k "transport or broker" --cov=alfred.security.quarantine_transport --cov=alfred.egress.control_fd_broker --cov-branch --cov-report=term-missing`
-Expected: 100% line + branch on the touched files.
+Run: `uv run pytest tests/unit/security/ -k "transport or broker" --cov=alfred.security.quarantine_transport --cov=alfred.security.quarantine_child_io --cov=alfred.egress.control_fd_broker --cov-branch --cov-report=term-missing`
+Expected: 100% line + branch on the touched files (named gate on `quarantine_child_io` — R.2.3 / test-001).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/alfred/security/quarantine_transport.py src/alfred/security/quarantine_child_io.py src/alfred/egress/control_fd_broker.py tests/unit/security/test_quarantine_transport.py tests/unit/security/test_quarantine_child_io_broker.py
 git commit -m "$(cat <<'EOF'
-feat(security): #340 broker N gateway sockets per extraction (concurrent, reclaim)
+feat(security): #340 broker N gateway sockets per extraction (connect-defer)
 
 Part of #340. QuarantineStdioTransport.dispatch brokers BROKER_SOCKET_COUNT sockets
-concurrently (asyncio.gather) BEFORE writing the ingest/extract frames, so all N
-enqueue into the child's fd-4 buffer ahead of the extract frame (race-free drain,
-§6). broker_connected_socket returns (host, port) for the audit row; a partial-batch
-failure reclaims the in-flight fds and refuses before any wire write. fd-4 stays one-way.
+via connect-defer BEFORE writing the ingest/extract frames: connect all N first, and
+sendmsg them to the child only if every connect succeeded, so a partial failure sends
+nothing (no reclaim). All sent fds enqueue into the child's fd-4 buffer ahead of the
+extract frame (race-free drain, §6). broker_connected_sockets returns the (host, port)
+destinations for the Task-10 audit row; a batch failure records a failure row and
+converts to a quarantine.transport_failed typed refusal (HARD #7). fd-4 stays one-way.
 
 MrReasonable <4990954+MrReasonable@users.noreply.github.com>
 EOF
@@ -1291,132 +1452,112 @@ EOF
 
 ---
 
-## Task 10: Per-call egress-audit success row (ADR-0050 Decision 7) + broker-failure row
+## Task 10: WIRING ONLY — declare the broker hookpoints + thread the (pre-gate-shipped) `EgressBrokerAuditor`
+
+> **rev.2 fold — authoritative; this task is WIRING ONLY (R.0 structural carve-out + carry-forwards
+> 1–3 from the broker-audit pre-gate SDD).**
+>
+> The `EgressBrokerAuditor`, the `EGRESS_BROKER_SUCCESS_FIELDS` / `EGRESS_BROKER_REFUSED_FIELDS`
+> schemas, the closed `EGRESS_BROKER_REFUSED_REASONS` drift-guard, the **bounded** per-call
+> `append_schema` await (D3), and the `de-2026-020` adversarial coverage all **already shipped
+> DORMANT in pre-gate PR #462** (`src/alfred/egress/broker_audit.py`, on main `cecb1058`), ratified
+> by `alfred-reviewer` (§21). **Golive does NOT re-create any of that** — no new module, no new schema,
+> no new hookpoint *definition*, no bounded-await re-implementation under the sign-off. Golive only:
+>
+> 1. **Declares the two hookpoints** `egress.broker.connected` + `egress.broker.refused` in the
+>    strict hook/event registry **before** the auditor gets a live caller (carry-forward #1) —
+>    strict-mode `invoke()` **RAISES on an undeclared event**, so an undeclared hookpoint would
+>    fail-loud break on the first live dispatch.
+> 2. **Threads the auditor** from `daemon_runtime` → `spawn_quarantine_child_io(..., broker_auditor=…)`
+>    → held on `_SubprocessChildIO`; Task 9's `broker_sockets` calls `record_broker_success(...)` per
+>    brokered target and Task 9's `dispatch` except-arm calls `record_broker_failure(...)`
+>    (carry-forward #2). `QuarantineChildIO.broker_socket()` (today typed `-> None`, discarding the
+>    `(host, port)`) is re-shaped by Task 9 into the batch that returns the destinations.
+> 3. **Passes host+port, NOT the proxy URL**, to `record_broker_success` (carry-forward #3):
+>    `destination` is an opaque credential surface. `_resolve_proxy_addr` already strips userinfo, but
+>    harden at the wiring boundary — derive `destination = f"{host}:{port}"` from the returned tuple
+>    and assert it contains no `@` and no `//` (no scheme, no credentials).
 
 **Files:**
 
-- Create: `src/alfred/egress/broker_audit.py` (`EgressBrokerAuditor`)
-- Modify: `src/alfred/audit/audit_row_schemas.py` (new `EGRESS_BROKER_*_FIELDS`)
-- Modify: `src/alfred/security/quarantine_child_io.py` (`broker_sockets` writes a row per success; failure row)
-- Modify: `src/alfred/comms_mcp/daemon_runtime.py` (construct + thread the auditor to spawn)
-- Test: `tests/unit/egress/test_broker_audit.py` (create)
+- Modify: the strict hook/event declaration registry (declare `egress.broker.connected` + `egress.broker.refused` — the pre-gate SDD T2 note flagged "strict hook-registry rejects undeclared events"; find the declaration site the live `invoke()` validates against)
+- Modify: `src/alfred/comms_mcp/daemon_runtime.py` (construct `EgressBrokerAuditor(audit_writer)` in `_build_comms_inbound_extractor`; pass `broker_auditor=` into `spawn_quarantine_child_io`)
+- Modify: `src/alfred/security/quarantine_child_io.py` (hold `broker_auditor` on `_SubprocessChildIO`; Task 9's `broker_sockets` + `dispatch` are the call sites)
+- Test: `tests/unit/egress/test_broker_audit_wiring.py` (create — hookpoints declared; auditor threaded; host:port not URL)
 
 **Interfaces:**
 
-- Consumes: `AuditWriter.append_schema` (`audit/log.py:105`, symmetric key validation); the `(host, port)` returned by `broker_connected_socket`.
-- Produces: `EgressBrokerAuditor(audit_writer)` with `record_broker_success(*, destination: str)` (a durable signed `EGRESS_BROKER_SUCCESS_FIELDS` row: `{destination, egress_id}`, `result="success"`, T0) and `record_broker_failure(*, destination: str, reason: str)` (an `EGRESS_BROKER_REFUSED_FIELDS` row mirroring `EGRESS_RELAY_REFUSED_FIELDS`). `broker_sockets` (Task 9) writes one success row per brokered target; the batch-failure path writes a failure row. This closes ADR-0050 Decision 7 (a HARD PR2b pre-gate) + ADR-0040 residual (vii).
+- Consumes: the pre-gate `EgressBrokerAuditor` (shipped in #462, `record_broker_success(*, destination: str)` / `record_broker_failure(*, destination: str, reason: str)`, both bounded-await, dormant); the `(host, port)` returned by Task 9's `broker_connected_sockets`.
+- Produces: the LIVE wiring — the two declared hookpoints, a threaded `broker_auditor`, and `host:port` destinations (no credential/scheme leak). No new durable-audit surface under the sign-off.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/unit/egress/test_broker_audit.py
-import structlog.testing
-from alfred.egress.broker_audit import EgressBrokerAuditor
+# tests/unit/egress/test_broker_audit_wiring.py
+async def test_broker_hookpoints_are_declared() -> None:
+    # Strict-mode invoke() on egress.broker.connected/refused must NOT raise (declared).
+    # Regression for carry-forward #1: an undeclared event fail-loud breaks first live dispatch.
+    ...
 
-class _RecordingAuditWriter:
-    def __init__(self) -> None:
-        self.rows: list[dict] = []
-    async def append_schema(self, **kw) -> None:
-        self.rows.append(kw)
+async def test_auditor_is_threaded_into_spawn() -> None:
+    # _build_comms_inbound_extractor constructs an EgressBrokerAuditor and passes it as
+    # broker_auditor= to spawn_quarantine_child_io; _SubprocessChildIO holds it.
+    ...
 
-async def test_success_row_is_signed_t0_with_destination() -> None:
-    w = _RecordingAuditWriter()
-    await EgressBrokerAuditor(w).record_broker_success(destination="gateway:8889")
-    row = w.rows[-1]
-    assert row["event"] == "egress.broker.connected"
-    assert row["trust_tier_of_trigger"] == "T0"
-    assert row["subject"]["destination"] == "gateway:8889"
-    assert set(row["subject"]) == row["fields"]  # symmetric key validation
-
-async def test_failure_row_carries_reason() -> None:
-    w = _RecordingAuditWriter()
-    await EgressBrokerAuditor(w).record_broker_failure(destination="gateway:8889", reason="gateway_unreachable")
-    assert w.rows[-1]["subject"]["reason"] == "gateway_unreachable"
-    assert w.rows[-1]["result"] == "refused"
+async def test_success_row_destination_is_host_port_not_url() -> None:
+    # carry-forward #3: destination passed to record_broker_success is "host:port" —
+    # no "@" (userinfo) and no "//" (scheme). Drive broker_sockets with a fake auditor.
+    assert "@" not in dest and "//" not in dest
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/unit/egress/test_broker_audit.py -v`
-Expected: FAIL (`ModuleNotFoundError: broker_audit`).
+Run: `uv run pytest tests/unit/egress/test_broker_audit_wiring.py -v`
+Expected: FAIL (hookpoints undeclared; auditor not threaded).
 
-- [ ] **Step 3: Add the schema constants + the auditor**
+- [ ] **Step 3: Declare the hookpoints + thread the auditor**
 
-In `audit_row_schemas.py` (near `EGRESS_RELAY_REFUSED_FIELDS:1567`), add + register in the exported schema list:
+Declare `egress.broker.connected` and `egress.broker.refused` in the strict hook/event registry
+(alongside the other declared audit events). Then thread the dormant auditor:
 
 ```python
-EGRESS_BROKER_SUCCESS_FIELDS: Final[frozenset[str]] = frozenset({"destination", "egress_id"})
-EGRESS_BROKER_REFUSED_FIELDS: Final[frozenset[str]] = frozenset({"destination", "reason", "egress_id"})
+# daemon_runtime.py, in _build_comms_inbound_extractor
+broker_auditor = EgressBrokerAuditor(audit_writer)  # pre-gate #462; dormant until now
+child_io = await spawn_quarantine_child_io(..., broker_auditor=broker_auditor)
 ```
 
-Create `src/alfred/egress/broker_audit.py`:
+`_SubprocessChildIO` holds `broker_auditor`; Task 9's `broker_sockets` (success) and `dispatch`
+except-arm (failure) are the only call sites. Derive `destination` as `f"{host}:{port}"` from Task 9's
+returned `(host, port)` tuples — **never** the proxy URL (carry-forward #3; assert no `@`/`//`).
 
-```python
-"""Durable, signed, core-side per-call egress-audit rows for the SCM_RIGHTS broker
-(ADR-0050 Decision 7 — a hard PR2b pre-gate; addresses ADR-0040 residual (vii))."""
-from __future__ import annotations
+> **Note (do NOT regress):** the auditor's `append_schema` await is already **bounded** in the pre-gate
+> (D3, `asyncio.wait_for`). Do not add a second bound and do not remove it. #461 (the systemic
+> teardown-await bound) stays its own follow-up — do NOT fold it here.
 
-import hashlib
-import uuid
+- [ ] **Step 4: Run tests to verify they pass**
 
-from alfred.audit.audit_row_schemas import EGRESS_BROKER_REFUSED_FIELDS, EGRESS_BROKER_SUCCESS_FIELDS
-from alfred.audit.log import AuditWriter
+Run: `uv run pytest tests/unit/egress/test_broker_audit_wiring.py tests/unit/security/test_quarantine_child_io_broker.py -v`
+Expected: PASS (hookpoints declared; auditor threaded; success/failure rows emitted with `host:port`).
 
-_CONNECTED_EVENT = "egress.broker.connected"
-_REFUSED_EVENT = "egress.broker.refused"
+- [ ] **Step 5: Coverage**
 
-def _egress_id(destination: str) -> str:
-    return hashlib.sha256(destination.encode("utf-8")).hexdigest()  # non-secret, deterministic
-
-class EgressBrokerAuditor:
-    def __init__(self, audit_writer: AuditWriter) -> None:
-        self._audit = audit_writer
-
-    async def record_broker_success(self, *, destination: str) -> None:
-        await self._audit.append_schema(
-            fields=EGRESS_BROKER_SUCCESS_FIELDS, schema_name="EGRESS_BROKER_SUCCESS_FIELDS",
-            event=_CONNECTED_EVENT, actor_user_id=None, actor_persona="supervisor",
-            subject={"destination": destination, "egress_id": _egress_id(destination)},
-            trust_tier_of_trigger="T0", result="success", cost_estimate_usd=0.0,
-            cost_actual_usd=0.0, trace_id=str(uuid.uuid4()),
-        )
-
-    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
-        await self._audit.append_schema(
-            fields=EGRESS_BROKER_REFUSED_FIELDS, schema_name="EGRESS_BROKER_REFUSED_FIELDS",
-            event=_REFUSED_EVENT, actor_user_id=None, actor_persona="supervisor",
-            subject={"destination": destination, "reason": reason, "egress_id": _egress_id(destination)},
-            trust_tier_of_trigger="T0", result="refused", cost_estimate_usd=0.0,
-            cost_actual_usd=0.0, trace_id=str(uuid.uuid4()),
-        )
-```
-
-Thread the auditor: construct `EgressBrokerAuditor(audit_writer)` in `_build_comms_inbound_extractor`, pass it to `spawn_quarantine_child_io(..., broker_auditor=...)` → held on `_SubprocessChildIO`; `broker_sockets` calls `record_broker_success` per returned destination and `record_broker_failure` on the batch-failure path.
-
-> **Plan-review note (§7 vs family):** this writes the FAILURE row in the egress-audit family, not `sandbox_refused`; spec §7 said "SANDBOX_REFUSED-class". Confirm the family with the security lens (this plan's open micro-decision #1). Whichever family, the write must be fail-loud and never block teardown unboundedly (#461 is the systemic bound-the-await follow-up — do NOT fold it here, but do NOT regress it either).
-
-- [ ] **Step 4: Run tests + wire tests to verify they pass**
-
-Run: `uv run pytest tests/unit/egress/test_broker_audit.py tests/unit/security/test_quarantine_child_io_broker.py -v`
-Expected: PASS (success row per socket; failure row on partial batch).
-
-- [ ] **Step 5: Coverage + audit-schema registry test**
-
-Run: `uv run pytest tests/unit/egress/test_broker_audit.py tests/unit/audit -k "schema" --cov=alfred.egress.broker_audit --cov-branch --cov-report=term-missing`
-Expected: 100% on `broker_audit.py`; the new schemas registered (the audit-schema drift test passes).
+Run: `uv run pytest tests/unit/egress -k "wiring" tests/unit/security -k "broker" --cov=alfred.comms_mcp.daemon_runtime --cov=alfred.security.quarantine_child_io --cov-branch --cov-report=term-missing`
+Expected: 100% line + branch on the wiring paths. (`broker_audit.py`'s own 100% gate shipped in the pre-gate.)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/alfred/egress/broker_audit.py src/alfred/audit/audit_row_schemas.py src/alfred/security/quarantine_child_io.py src/alfred/comms_mcp/daemon_runtime.py tests/unit/egress/test_broker_audit.py
+git add src/alfred/comms_mcp/daemon_runtime.py src/alfred/security/quarantine_child_io.py tests/unit/egress/test_broker_audit_wiring.py
 git commit -m "$(cat <<'EOF'
-feat(security): #340 durable per-call egress-audit rows for the broker (ADR-0050 D7)
+feat(security): #340 wire the dormant EgressBrokerAuditor live (declare hookpoints)
 
-Part of #340. Adds EgressBrokerAuditor writing a signed T0 core-side row per
-brokered gateway target (host:port + deterministic egress_id) on success and a
-refused row (with the ControlFdBrokerError reason) on failure — the ADR-0050
-Decision 7 hard pre-gate, closing ADR-0040 residual (vii). broker_sockets emits
-one success row per target; the batch-failure path emits a refusal.
+Part of #340. Declares the egress.broker.connected/refused hookpoints in the strict
+hook registry and threads the pre-gate-shipped (dormant, #462) EgressBrokerAuditor
+from daemon_runtime through spawn_quarantine_child_io onto _SubprocessChildIO, so
+broker_sockets records a signed T0 success row per brokered target and the dispatch
+except-arm records a refusal. destination is derived as host:port (no URL / no creds).
+No new schema or hookpoint definition under the sign-off; the auditor's bounded await
+ships in the pre-gate.
 
 MrReasonable <4990954+MrReasonable@users.noreply.github.com>
 EOF
@@ -1426,6 +1567,12 @@ EOF
 ---
 
 ## Task 11: bwrap policy edit + egress-gate allowlist entries
+
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.3 cross-task fold).** The
+> egress-gate allowlist edits (`_IMPORT_ALLOWLIST` / `_CONSTRUCT_ALLOWLIST` for `brokered_egress`)
+> **MOVE to Task 3** so that task lands green the moment the module exists. **This task keeps ONLY the
+> bwrap policy edit** — `keep_fds=[3,4]`, the `/etc/ssl/certs` CA bind, `SSL_CERT_FILE`, net STAYS
+> (empty-netns unchanged). The ADR-0037 `/etc/ssl/certs` carve-out cross-ref is **Task 12**.
 
 **Files:**
 
@@ -1521,6 +1668,28 @@ EOF
 
 ## Task 12: ADR-0052 (new) + amend ADR-0050 + ADR-0040 residual panel
 
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.3 docs cluster + the §20.4-on-main
+> correction landed by pre-gate PR #462).**
+>
+> 1. **Do NOT re-do what the pre-gate already did.** PR #462 (on main `cecb1058`) ALREADY performed the
+>    ADR-0050 **Decision 7 row** + the **Status `Proposed → Accepted`** flip + the **ADR-0040 residual
+>    (vii)** partial-resolution. ADR-0052 must NOT claim those (spec §20.4 on main is the corrected
+>    authority).
+> 2. **ADR-0052 (new) records:** §14 forks 2+3, the per-call no-keepalive socket lifecycle, the
+>    `/etc/ssl/certs` CA carve-out, refuse-boot **Option A** (§20.2), the `_PROVIDER_KEY_PLACEHOLDER`
+>    deletion (§20.3.1), **ready = liveness NOT provider-reachability** (§20.3.3), and **D1 — the
+>    gateway 22s per-listener handshake** (§21.5). It **amends ADR-0050**'s remaining **dormancy-flip**
+>    decisions (`control_fd=True` on the live spawn path, the `/etc/ssl/certs` CA bind, `keep_fds=[3,4]`,
+>    the new `_CONSTRUCT_ALLOWLIST` entry) and takes **ADR-0040 residual (iv)** (the provider
+>    forward-proxy gains a *live* brokered caller). ADR-0052 goes through **alfred-reviewer** — the
+>    architect does not self-approve.
+> 3. **Cross-ref / amend ADR-0037 [R.3].** Its "no `/etc` bind" property is now imprecise — carve out
+>    `/etc/ssl/certs` (+ the matching sbx-corpus assertion).
+> 4. **Thread §19-E5 + the human-gated acknowledgment [R.3 / docs].** Record that golive makes
+>    CLAUDE.md HARD #5 fully true **and** that CLAUDE.md / PRD edits are **HUMAN-GATED** — file a
+>    follow-up, do NOT edit them here. The hub deep-docs (`quarantine.md` / `security.md`) golive note
+>    is a follow-up too.
+
 **Files:**
 
 - Create: `docs/adr/0052-real-quarantine-child-golive.md`
@@ -1567,6 +1736,16 @@ EOF
 ---
 
 ## Task 13: Adversarial corpus — T3-steers-extraction payload + flip the dormant-broker payload
+
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.2.2 / test-002 Crit +
+> ai-001/002/004 + sec-003).** `pi-2026-015` must be an **executable driver**, not a
+> schema-validate-only paper gate. Feed the T3-steers payload through the **real child extraction**
+> (the docker lane — Task 14) with a **STRUCTURAL oracle**: schema-valid / `extra=forbid` / **no
+> `tool_calls`** / result is T2 **or** a typed_refusal — never a free-form / tool_call / extra-key
+> passthrough. Do **NOT** use the "token-not-verbatim" oracle (it contradicts §12 — this is not content
+> sanitization). Drive the real gate where it lives — orchestrator-side `QuarantinedExtractor`
+> re-validation (`quarantine.py:1050-1145`). `ingestion_path` = **`comms_inbound_message`** (NOT
+> `web.fetch` — that path is #410-deferred).
 
 **Files:**
 
@@ -1642,6 +1821,20 @@ EOF
 
 ## Task 14: Integration docker test — real extract over a canned-Anthropic TLS stub
 
+> **rev.2 fold — authoritative; supersedes conflicting text below (R.2.10, R.2.14, R.2.3).**
+>
+> 1. **HARD #5 provenance re-validation [R.2.10 / sec-002/ai-003].** Reconcile
+>    `_ExtractionAwareChildDouble` to the **real** extractor schema — restate the invariant
+>    **STRUCTURALLY** (§12 / §19-B2), NOT the `__injected_frame__`-drop fiction (vacuous for the real
+>    extractor).
+> 2. **assert-RAN paper-gate [R.2.14 / ops-002 / #245].** A static test asserting the docker
+>    real-extract test is **NOT skipped** on the privileged-Linux lane. Do NOT break the existing
+>    file's `1 passed` grep — use a new file or update the grep.
+> 3. **Named 100% line+branch coverage gates** for `brokered_egress.py`, `__main__.py`, and
+>    `quarantine_child_io.py` [R.2.3 / test-001].
+> 4. **The executable `pi-2026-015` driver + structural oracle (Task 13) runs on THIS docker lane** —
+>    with the `comms_inbound_message` ingestion path and the structural oracle.
+
 **Files:**
 
 - Modify/Create: `tests/integration/test_quarantine_fd_broker_real_spawn.py` (extend) or `tests/integration/test_quarantine_real_extract.py` (new)
@@ -1698,7 +1891,114 @@ EOF
 
 ---
 
+## Task 15: `max_tokens > 0` fail-loud guard + the §17 carry-forward set
+
+> **rev.2 fold — NEW task (R.2.9 / 5-lens: rev/err/test/prov/core + spec §17).** rev.1 omitted the spec
+> §17 carry-forwards entirely; this task lands them. A `max_tokens ≤ 0` laundered into a
+> `cannot_extract` typed refusal is the HARD #7 silent-failure shape — it must fail LOUD instead.
+
+**Files:**
+
+- Modify: `src/alfred/cli/config.py` (the `action-deadline` floor-guard; `max_tokens` validation if it is a `config set` key) + the spawn-env boundary in `daemon_runtime.py` / `quarantine.py` where `MAX_TOKENS` is read into the child env
+- Test: `tests/unit/.../test_max_tokens_guard.py`, `tests/unit/cli/test_config_action_deadline_floor.py`
+
+**Interfaces:**
+
+- Produces: a fail-loud `max_tokens > 0` validation at the config-load / spawn-env boundary that RAISES a typed config error and is **NOT retry-eligible**; the read-timeout × attempt-count reconciliation against the 20s child budget; and the `action-deadline` floor-guard.
+
+- [ ] **Step 1: Write the failing tests**
+  - `max_tokens = 0` / negative at config-load → a **loud typed config error**, NOT a `cannot_extract`.
+  - `alfred config set action-deadline <below-floor>` → rejected with an actionable message (must stay
+    `> host_read(25)` in the nesting), in `cli/config.py`.
+  - **Budget arithmetic invariant:** rev.1 left `3 × SDK_read(8) + framing > 20` **unreconciled**
+    (three 8s attempts overrun the 20s child budget). Pin the reconciliation with an arithmetic test —
+    either shorten the per-attempt SDK read or cap attempts so the **worst case fits** the 20s budget,
+    and assert the `2 × _READ_FRAME_TIMEOUT_S` outer bound holds. (Cross-check with Task 3's read
+    timeout + Task 1's `EXTRACTION_MAX_RETRIES`.)
+
+- [ ] **Step 2: Run to verify they fail.**
+- [ ] **Step 3: Implement** — `max_tokens > 0` fail-loud (config-load + spawn-env); tune SDK-read vs
+  attempt count so the worst case fits the 20s budget (§17 + D1); the `2 × _READ_FRAME_TIMEOUT_S` outer
+  bound; the `action-deadline` floor-guard in `cli/config.py`. All operator-facing strings via `t()`.
+- [ ] **Step 4: Run to verify they pass.**
+- [ ] **Step 5: Coverage** — 100% line+branch on the touched guard paths.
+- [ ] **Step 6: Commit**
+
+```bash
+git commit -m "$(cat <<'EOF'
+feat(security): #340 fail-loud max_tokens>0 guard + §17 timeout-budget reconciliation
+
+Part of #340. Validates max_tokens > 0 fail-loud at the config-load / spawn-env
+boundary (a <=0 must NOT launder into a cannot_extract typed refusal — the HARD #7
+shape). Reconciles the SDK-read x attempt-count arithmetic against the 20s child
+budget, adds the 2 x _READ_FRAME_TIMEOUT_S outer bound, and an action-deadline
+floor-guard in cli/config.py.
+
+MrReasonable <4990954+MrReasonable@users.noreply.github.com>
+EOF
+)"
+```
+
+---
+
+## Task 16: D1 — gateway per-listener handshake timeout (22s provider-plane) + ordering-invariant test
+
+> **rev.2 fold — NEW task (R.1 D1 / spec §21.5 / arch-001 VERIFIED `egress_proxy.py:81
+> _HANDSHAKE_TIMEOUT_S = 10.0`).** The gateway handshake idle timeout is 10s but the child budget is
+> 20s, so a pre-brokered socket used on a late retry (attempt 3 ≈ t ≈ 17.5s) is dead-on-arrival. Fix on
+> the **gateway** (shared provider-plane), not the child. This is a golive change (it touches the shared
+> provider-plane proxy) and a §13(8) sign-off item; recorded in ADR-0052 (Task 12).
+
+**Files:**
+
+- Modify: the gateway CONNECT forward-proxy (`egress_proxy.py` — `EgressForwardProxy.__init__` takes `handshake_timeout_s: float = 10.0`, **default unchanged**)
+- Modify: the provider-plane CONNECT-proxy construction site (`cli/gateway/_commands.py:~319` — pass `22.0` **only here**; the Discord AF_UNIX adapter + the relay plane keep their tight 10s slow-loris guard)
+- Test: `tests/unit/gateway/test_handshake_timeout_nesting.py`
+
+**Interfaces:**
+
+- Produces: a per-instance gateway handshake timeout, **22s on the provider plane only**. Nesting
+  `action_deadline(30) > host_read(25) > gateway_handshake(22) > child_budget(20) > SDK_read(8)`, pinned
+  by an ordering-invariant test (the §4 P1e 4-term pattern: `provider_handshake ≥ child_budget + margin`)
+  so the cross-module constants cannot drift.
+
+- [ ] **Step 1: Write the failing test** — assert `provider_handshake (22) ≥ child_budget (20) + margin`
+  and that the Discord / relay planes still construct with 10s.
+- [ ] **Step 2: Run to verify it fails.**
+- [ ] **Step 3: Implement** — make `handshake_timeout_s` a ctor param (default 10.0); pass 22.0 at the
+  provider-plane site only.
+- [ ] **Step 4: Run to verify it passes.**
+- [ ] **Step 5: Coverage** — 100% on the touched gateway paths.
+- [ ] **Step 6: Commit**
+
+```bash
+git commit -m "$(cat <<'EOF'
+feat(gateway): #340 per-listener 22s provider-plane handshake timeout (D1)
+
+Part of #340. Makes the gateway CONNECT-proxy handshake idle timeout a per-instance
+ctor param (default 10s unchanged) and passes 22s on the provider plane only, so a
+late-retry pre-brokered socket (attempt 3 ~ t=17.5s) survives the 10s idle reap while
+the Discord/relay slow-loris guard stays tight. Nesting action_deadline(30) >
+host_read(25) > gateway_handshake(22) > child_budget(20) > SDK_read(8) is pinned by an
+ordering-invariant test.
+
+MrReasonable <4990954+MrReasonable@users.noreply.github.com>
+EOF
+)"
+```
+
+**Sequencing note:** composes with Task 3's `sock.settimeout(read)` (the prerequisite that makes the
+20s budget a real ceiling) and Task 9's connect-defer (independent — defers `sendmsg`, not the
+connect/timer start).
+
+---
+
 ## Self-Review
+
+> **rev.2 note:** this Self-Review is the rev.1 artifact; **R.4 in the fold below corrects it** (rev.1
+> over-claimed "A1–E5 threaded" but stopped at E2 and omitted spec §17). rev.2 threads E3–E5 + §17
+> (Task 15) and applies: Task 10 = wiring-only (pre-gate ships the auditor); Task 9 = connect-defer
+> (no reclaim); the T3↔T11 allowlist fold; Tasks 15 (`max_tokens>0` + §17) and 16 (D1 gateway) added.
 
 **1. Spec coverage** (each §5–§16 requirement → a task):
 
@@ -1720,7 +2020,7 @@ EOF
 
 **3. Type consistency:** `source` is the consistent name from Task 4 (`BrokeredProviderSource`) through Task 5 (`dispatch_extraction(source=)`) and Task 6 (`_run_mcp_server(source, ...)`, `handle_extract(source=)`). `EXTRACTION_MAX_RETRIES`/`BROKER_SOCKET_COUNT` consistent (T1→T5/T9). `broker_sockets(count)` consistent (T9 producer, T9 dispatch consumer, T10 audit). `_ProviderFactory.from_key`/`.build` consistent (T4→T6). `record_broker_success`/`record_broker_failure` consistent (T10 producer, T9 consumer).
 
-**Known cross-task risk (called out, not silently deferred):** Task 3's `brokered_egress.py` trips `test_in_core_http_egress_guard` (httpx construct + anthropic import) BEFORE Task 11 adds the allowlist. If executing strictly in order, either (a) pull the two Task-11 allowlist edits forward into Task 3, or (b) accept a red gate between T3 and T11. **Recommendation: fold the Task-11 `_IMPORT_ALLOWLIST`/`_CONSTRUCT_ALLOWLIST` edits into Task 3** so each task lands green; the plan keeps them in Task 11 for narrative grouping — the executing agent should move them. (Flagged for plan-review.)
+**Known cross-task risk — RESOLVED in rev.2:** Task 3's `brokered_egress.py` trips `test_in_core_http_egress_guard` (httpx construct + anthropic import) the moment the module exists. rev.2 **folds the `_IMPORT_ALLOWLIST`/`_CONSTRUCT_ALLOWLIST` edits into Task 3** (Task 11 keeps only the bwrap policy edit), so each task lands green — no red gate between T3 and T11.
 
 ---
 
@@ -1738,6 +2038,11 @@ Two execution options once the plan is reviewed:
 ---
 
 ## Review rev.2 fold — full 11-lens `/review-plan` (2026-07-19)
+
+> **Distribution note (consolidation, 2026-07-19):** the resolutions below have been **folded into the
+> task bodies above** as authoritative `> **rev.2 fold**` blocks so each SDD brief is self-contained.
+> This appendix is retained as the **rationale / audit trail** — it and the task blocks agree; where a
+> task body ever conflicts, the task's own rev.2 block (and this appendix) wins over the rev.1 text.
 
 Ran the full 11-lens `/review-plan` (architect · reviewer · test · security · provider · core · devops
 · error · ai-expert · i18n · docs). **2 Critical, 31 High, 36 Medium, 23 Low; NO release-killer** —
