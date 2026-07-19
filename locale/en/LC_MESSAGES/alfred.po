@@ -3201,6 +3201,12 @@ msgstr ""
 msgid "security.quarantine_child.broker_unconfigured"
 msgstr "Quarantine child egress broker is not configured."
 
+#: src/alfred/security/quarantine_child_io.py:1016
+msgid "security.quarantine_child.provider_config_missing"
+msgstr ""
+"Refusing to spawn the live quarantine child without its provider model and"
+" token budget."
+
 #: src/alfred/security/quarantine_child_io.py:1005
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
