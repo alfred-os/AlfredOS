@@ -250,6 +250,7 @@ def start_gateway() -> None:
     from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.egress_audit import record_egress_connect
     from alfred.gateway.egress_proxy import (
+        _PROVIDER_HANDSHAKE_TIMEOUT_S,
         EgressForwardProxy,
         resolve_deepseek_base_url,
         resolve_egress_proxy_bind,
@@ -326,6 +327,12 @@ def start_gateway() -> None:
             # The field-allowlisted ({destination, reason}) gateway-local egress audit sink.
             audit=record_egress_connect,
             plane="proxy",
+            # Provider plane ONLY: raise the handshake idle reap to 22s so a late-retry
+            # pre-brokered one-shot socket (attempt 3 ~ t=17.5s, still inside the 20s child
+            # budget) survives — the Discord/relay planes keep the tight 10s default
+            # slow-loris guard (spec §21.5 / R.1 D1 / ADR-0052; nesting pinned by
+            # test_handshake_timeout_nesting).
+            handshake_timeout_s=_PROVIDER_HANDSHAKE_TIMEOUT_S,
         )
 
         # Spec C G7-2b (#333): the gateway is also the SOLE maker of inspectable tool

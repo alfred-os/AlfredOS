@@ -76,9 +76,20 @@ _DEEPSEEK_BASE_URL_ENV: Final[str] = "ALFRED_DEEPSEEK_BASE_URL"
 _DEFAULT_DEEPSEEK_BASE_URL: Final[str] = "https://api.deepseek.com/v1"
 
 # Bounded request-line read: a CONNECT handshake is tiny; cap the buffer + the read
-# so a slow-loris / oversized line is refused rather than pinning a task.
+# so a slow-loris / oversized line is refused rather than pinning a task. This is the
+# DEFAULT for every plane; a per-instance ``handshake_timeout_s`` (see ``__init__``)
+# overrides it — but ONLY the provider plane does (see ``_PROVIDER_HANDSHAKE_TIMEOUT_S``).
 _REQUEST_LINE_CAP: Final[int] = 8192
 _HANDSHAKE_TIMEOUT_S: Final[float] = 10.0
+# The PROVIDER-plane handshake idle timeout (spec §21.5 / R.1 D1 / ADR-0052). A pre-brokered
+# one-shot socket used on a LATE retry (attempt 3 ~ t=17.5s, still inside the 20s child budget)
+# would be dead-on-arrival under the 10s default the moment the child dials it, so the provider
+# plane raises the idle reap to 22s — ONE margin (2s) above the child budget and strictly UNDER
+# the 25s host read-frame bound, so the nesting ``host_read(25) > gateway_handshake(22) >
+# child_budget(20)`` holds (pinned by test_handshake_timeout_nesting). The Discord/adapter plane
+# KEEPS the tight 10s default (its slow-loris guard must not be weakened). 22.0 is EXACT — the
+# nesting depends on the value and ADR-0052 records it as the merge-gate.
+_PROVIDER_HANDSHAKE_TIMEOUT_S: Final[float] = 22.0
 _SPLICE_CHUNK: Final[int] = 65536
 
 # Provisional metric (G7-5 owns the canonical egress metric/alert set). Default
@@ -165,6 +176,7 @@ class EgressForwardProxy:
         port: int | None = None,
         unix_path: Path | None = None,
         plane: str = "proxy",
+        handshake_timeout_s: float = _HANDSHAKE_TIMEOUT_S,
         denied_counter: Counter | None = None,
     ) -> None:
         partial_tcp_mode = (bind_host is None) != (port is None)
@@ -186,6 +198,10 @@ class EgressForwardProxy:
         self._open_upstream = open_upstream
         self._conns: set[asyncio.Task[None]] = set()
         self._plane = plane
+        # Per-instance handshake idle timeout. Default (10s) is UNCHANGED for every existing
+        # caller; only the provider plane passes 22s (spec §21.5 / ADR-0052). This is a shared
+        # slow-loris guard everywhere else, so the default must stay tight.
+        self._handshake_timeout_s = handshake_timeout_s
         self._denied_counter = (
             denied_counter if denied_counter is not None else GATEWAY_EGRESS_DENIED
         )
@@ -301,7 +317,7 @@ class EgressForwardProxy:
         """Read + parse the bounded CONNECT request line. None => already denied."""
         try:
             raw = await asyncio.wait_for(
-                reader.readuntil(b"\r\n\r\n"), timeout=_HANDSHAKE_TIMEOUT_S
+                reader.readuntil(b"\r\n\r\n"), timeout=self._handshake_timeout_s
             )
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
             await self._deny(writer, 400, EgressDenyReason.MALFORMED_CONNECT, "<unread>")
