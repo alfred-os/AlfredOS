@@ -61,9 +61,13 @@ def test_slice_4_fieldset_names_count() -> None:
     PR2 Task 1 added ``COMMS_INBOUND_TURN_REFUSED_FIELDS`` — the 42nd (the
     ``RealTurnOrchestratorAdapter``-owned loud refusal row: content-free, keyed
     by the peppered ``inbound_id_hash`` like the dispatched-edge sibling, closed-
-    vocab ``refusal_stage`` + exception-class-name-only ``error_class``).
+    vocab ``refusal_stage`` + exception-class-name-only ``error_class``); and #340
+    Task 1 added ``EGRESS_BROKER_SUCCESS_FIELDS`` + ``EGRESS_BROKER_REFUSED_FIELDS``
+    — the 43rd-44th (the SCM_RIGHTS gateway-socket broker's payload-blind success/
+    refused rows, mirroring ``EGRESS_RELAY_REFUSED_FIELDS``; schemas only, the
+    auditor lands in Task 2).
     """
-    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 42
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 44
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
