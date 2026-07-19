@@ -28,9 +28,12 @@ provenance: >-
   Pydantic refusal. Docker-only: run in
   `docker run --rm --privileged debian:bookworm` (bubblewrap 0.8.0) with
   ALFRED_QUARANTINE_CHILD_PYTHON=/usr/bin/python3 + alfred pip-installed there
-  (the bound-interpreter contract, ADR-0030). Egress is NOT kernel-enforced (#230,
-  the quarantined LLM makes its own provider HTTPS call) and in 2b the
-  deterministic-echo child makes NO egress call at all.
+  (the bound-interpreter contract, ADR-0030). The golive real-LLM child (#340 PR2b)
+  reaches its provider ONLY through the core-brokered gateway socket handed over
+  the control fd (control_fd=True, ADR-0052) in an empty net namespace
+  (--unshare-net) -- it never opens its own provider socket -- so this payload's
+  filesystem / pid / proc host-escape probes are orthogonal to, and unaffected by,
+  the provider-egress path.
 references:
   - "spec §7.2 plugin sandbox policy"
   - "config/sandbox/quarantined-llm.linux.bwrap.policy (no broad /etc bind — only /etc/ssl/certs CA store, #340 golive / ADR-0052; no /bin bind; --unshare-pid)"
