@@ -268,6 +268,15 @@ async def broker_connected_sockets(
       consumes one socket per retry attempt in enqueue order — and two concurrent ``sendmsg``
       calls on one control fd could interleave.
 
+    KNOWN RESIDUAL (cancellation): ``run_in_executor`` futures cannot be cancelled once the
+    worker has started, so if the CALLER cancels this coroutine mid-CONNECT (the transport's
+    preamble bound firing, or an outer action-deadline) the in-flight ``_connect_one`` threads run
+    to completion and their sockets never reach ``connected`` for the ``finally`` to close. They
+    are closed by CPython refcounting the instant the discarded future is collected — prompt in
+    practice, but NOT closed by this function's own cleanup. The caller compensates where it
+    matters: a cancelled preamble revokes the whole child (tearing down the control channel), so
+    an orphaned host-side socket cannot become a capability the child holds.
+
     Fail-closed: any failure raises :class:`ControlFdBrokerError` (or an
     :class:`IOPlaneUnavailableError` for an unset/malformed proxy) — never a hang (HARD #7). On a
     batch failure the raised error carries ``destination = "host:port"`` (NEVER the raw proxy URL)
