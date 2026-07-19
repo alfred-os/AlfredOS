@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import struct
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -42,6 +42,27 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from alfred.security.tiers import CapabilityGateNonce
+
+
+class _NoopBrokerAuditor:
+    """A recording ``EgressBrokerAuditor``-shaped double for the required constructor arg.
+
+    The auditor is a REQUIRED ``QuarantineStdioTransport`` argument (#340 review A5 — a
+    ``None`` default was fail-open on the durable ``egress.broker.*`` rows). These laundering
+    payloads attack the extract REPLY, not the broker, so a recording double keeps the audit
+    surface honest and observable without dragging a real ``AuditWriter`` + the fail-closed
+    ``egress.broker.*`` hookpoint dispatch into a corpus test that exercises neither.
+    """
+
+    def __init__(self) -> None:
+        self.successes: list[str] = []
+        self.failures: list[tuple[str, str]] = []
+
+    async def record_broker_success(self, *, destination: str) -> None:
+        self.successes.append(destination)
+
+    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
+        self.failures.append((destination, reason))
 
 
 class _MaliciousChild:
@@ -122,7 +143,9 @@ def _stub_outbound_dlp() -> Any:
 
 def _extractor_over(child: Any, *, audit: Any) -> tuple[QuarantinedExtractor, QuarantineStagingMap]:
     staging = QuarantineStagingMap()
-    transport = QuarantineStdioTransport(child_io=child, staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=staging, broker_auditor=cast(Any, _NoopBrokerAuditor())
+    )
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=audit,
@@ -220,7 +243,11 @@ async def test_c_handle_replay_reread_refused_loud(
     before the wire).
     """
     staging = QuarantineStagingMap()
-    transport = QuarantineStdioTransport(child_io=_MaliciousChild({}), staging=staging)
+    transport = QuarantineStdioTransport(
+        child_io=_MaliciousChild({}),
+        staging=staging,
+        broker_auditor=cast(Any, _NoopBrokerAuditor()),
+    )
     handle = _handle()
     _stage_body(staging, authorized_t3_nonce, handle)
 

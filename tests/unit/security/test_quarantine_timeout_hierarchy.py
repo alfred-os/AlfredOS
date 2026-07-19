@@ -5,14 +5,16 @@ guard only pins the ORDERING against silent re-inversion. See the PR2b design sp
 ``docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md`` §4 P1e / §19-A3.
 """
 
+from alfred.egress.broker_audit import _AUDIT_AWAIT_TIMEOUT_S
 from alfred.plugins.web_fetch.constants import _DEFAULT_ACTION_DEADLINE_SECONDS
-from alfred.security.quarantine import EXTRACTION_MAX_RETRIES
+from alfred.security.quarantine import BROKER_SOCKET_COUNT, EXTRACTION_MAX_RETRIES
 from alfred.security.quarantine_child.brokered_egress import _CHILD_SDK_READ_TIMEOUT
 from alfred.security.quarantine_child.provider_dispatch import (
     _BACKOFF_BASE_SECONDS,
     _MAX_TOTAL_WALL_CLOCK_SECONDS,
 )
 from alfred.security.quarantine_child_io import _READ_FRAME_TIMEOUT_S
+from alfred.security.quarantine_transport import _BROKER_PREAMBLE_TIMEOUT_S
 
 
 def _sdk_read_seconds() -> float:
@@ -72,6 +74,44 @@ def test_action_deadline_dominates_the_two_phase_read_frame_bound() -> None:
     """
     action_deadline = float(_DEFAULT_ACTION_DEADLINE_SECONDS)
     assert action_deadline < 2 * _READ_FRAME_TIMEOUT_S
+
+
+def test_broker_preamble_term_nests_inside_the_action_deadline() -> None:
+    """§17 (#340 review A7): the per-extraction broker preamble is INSIDE the hierarchy.
+
+    The preamble (``broker_sockets`` + its ``egress.broker.connected`` rows) was the one
+    per-extraction term bounded by nothing. Unbounded it sits entirely OUTSIDE this hierarchy:
+    under gateway degradation the outer ``action_deadline`` fires mid-preamble and the
+    extraction dies as an anonymous deadline kill, so the graceful ``provider_unavailable``
+    refusal and the ``egress.broker.refused`` forensic row are never produced.
+
+    The preamble is SEQUENTIAL with the host ``read_frame`` bound, not nested inside it, so
+    the invariant is a SUM, not an ordering: both must fit within the outer deadline. Drawn
+    from LIVE constants so a drift in any term trips this guard.
+    """
+    action_deadline = float(_DEFAULT_ACTION_DEADLINE_SECONDS)
+    # Success path: the full preamble, then a full-length reply read.
+    host_side_worst_case = _BROKER_PREAMBLE_TIMEOUT_S + _READ_FRAME_TIMEOUT_S
+    assert host_side_worst_case < action_deadline
+    # The preamble must also stay the INNERMOST host-side term — it bounds a step that runs
+    # before the child is even asked to work, so it must never rival the child's own budget.
+    assert _BROKER_PREAMBLE_TIMEOUT_S < _MAX_TOTAL_WALL_CLOCK_SECONDS
+
+
+def test_broker_preamble_bound_dominates_its_own_audit_write_budget() -> None:
+    """§17: the preamble bound is the EFFECTIVE ceiling for a hung broker audit write.
+
+    ``EgressBrokerAuditor`` bounds each ``append_schema`` at its own
+    ``_AUDIT_AWAIT_TIMEOUT_S``, and the preamble awaits ``BROKER_SOCKET_COUNT`` of them. Left
+    to compose, ``N x 5s`` would blow any sane preamble budget, so the preamble bound is
+    deliberately TIGHTER than a single audit-write bound and preempts it. Documented here
+    because it is an inversion of the usual inner-<-outer nesting: a hung audit write now
+    surfaces as ``broker_preamble_deadline_exceeded`` rather than the auditor's own
+    ``egress.broker.audit_write_timeout``. Both are loud, typed, and fail closed (HARD #7) —
+    but a future retune that raised the preamble bound above ``N x _AUDIT_AWAIT_TIMEOUT_S``
+    would silently restore the unbounded hot-path stall this guard exists to prevent.
+    """
+    assert _BROKER_PREAMBLE_TIMEOUT_S < _AUDIT_AWAIT_TIMEOUT_S * BROKER_SOCKET_COUNT
 
 
 def test_worst_case_attempts_fit_the_child_budget() -> None:
