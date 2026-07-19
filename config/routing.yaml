@@ -28,7 +28,7 @@ quarantine:
 
   # Model identifier for the quarantined LLM.
   # Haiku is the default: fast, cheap, adequate for structured extraction.
-  model: "claude-haiku-3-5"
+  model: "claude-haiku-4-5"
 
   # Secret broker ID for the quarantined provider API key.
   # The SecretBroker resolves this before subprocess spawn via fd-3 handshake

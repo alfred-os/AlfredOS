@@ -54,6 +54,11 @@ _SCRUBBED_ENV_ALLOWLIST: tuple[str, ...] = (
     "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED",
     "ALFRED_PLUGIN_UID",
     "FAKE_UNAME",
+    # #340 PR2b-golive: host-controlled, non-secret, non-T3 provider config for the
+    # real-LLM quarantine child (no config bind → delivered via the scrubbed env).
+    "SSL_CERT_FILE",
+    "ALFRED_QUARANTINE_MODEL",
+    "ALFRED_QUARANTINE_MAX_TOKENS",
 )
 
 

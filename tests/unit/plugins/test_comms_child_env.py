@@ -56,6 +56,10 @@ def test_allowlist_is_exactly_the_expected_key_set() -> None:
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED",
         "ALFRED_PLUGIN_UID",
         "FAKE_UNAME",
+        # #340 PR2b-golive: host-controlled quarantine-child provider config.
+        "SSL_CERT_FILE",
+        "ALFRED_QUARANTINE_MODEL",
+        "ALFRED_QUARANTINE_MAX_TOKENS",
     )
     for secret in _SECRET_NAMES:
         assert secret not in _SCRUBBED_ENV_ALLOWLIST
@@ -129,3 +133,10 @@ def test_launcher_control_vars_pass_through(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert env["ALFRED_ENVIRONMENT"] == "test"
     assert "PATH" in env
+
+
+def test_child_env_allowlist_carries_golive_provider_keys() -> None:
+    # #340 PR2b-golive: the bwrapped child has no config bind, so the model id,
+    # token budget, and CA bundle path reach it via the scrubbed spawn env.
+    for key in ("SSL_CERT_FILE", "ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS"):
+        assert key in _SCRUBBED_ENV_ALLOWLIST
