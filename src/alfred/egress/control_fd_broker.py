@@ -156,17 +156,23 @@ def _connect_and_send(parent_end: socket.socket, host: str, port: int) -> None:
 
 async def broker_connected_socket(
     *, parent_end: socket.socket, proxy_config: EgressProxyConfig
-) -> None:
+) -> tuple[str, int]:
     """Broker ONE connected gateway socket to the child over ``parent_end`` (off-loop).
 
     ``sendmsg``/``recvmsg`` with ``SCM_RIGHTS`` are blocking with no asyncio ancillary helper, so
     the connect+send run in the default executor (the ``_blocking_read_exactly`` precedent).
     Fail-closed: any failure raises :class:`ControlFdBrokerError` (or
     :class:`IOPlaneUnavailableError` for an unset proxy) — never a hang (HARD #7).
+
+    Returns the resolved ``(host, port)`` destination (already computed via
+    ``_resolve_proxy_addr``) so a caller can attribute a ``destination`` to an audit row.
+    Behavior-neutral as of #340 broker-audit pre-gate Task 3: the only current caller (the PR2a
+    docker probe) ignores this return value — the golive wiring is what consumes it.
     """
     host, port = _resolve_proxy_addr(proxy_config)
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _connect_and_send, parent_end, host, port)
+    return host, port
 
 
 __all__ = [

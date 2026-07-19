@@ -279,6 +279,44 @@ async def test_broker_connected_socket_passes_a_live_fd() -> None:
     sys.platform == "win32",
     reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
 )
+async def test_broker_connected_socket_returns_destination() -> None:
+    """``broker_connected_socket`` returns the resolved ``(host, port)`` it brokered to.
+
+    Behavior-neutral (#340 broker-audit pre-gate, Task 3): golive's ``broker_sockets`` will
+    pass this tuple as the ``destination`` to ``EgressBrokerAuditor.record_broker_success``.
+    The only current caller (the PR2a docker probe) ignores the return value, so nothing else
+    changes. Reuses the real-listener + accept-thread harness from
+    ``test_broker_connected_socket_passes_a_live_fd`` above (no stubbed executor exists in this
+    suite — the existing tests all drive ``_connect_and_send`` against a live loopback socket).
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    t = threading.Thread(target=_accept_once, args=(listener,), daemon=True)
+    t.start()
+    parent, child = make_control_socketpair()
+    try:
+        result = await broker_connected_socket(
+            parent_end=parent, proxy_config=_Cfg(f"http://{host}:{port}")
+        )
+        assert result == (host, port)
+        _data, fd = recv_passed_fd(child)  # drain the passed fd so the accept thread completes
+        os.close(fd)
+    finally:
+        parent.close()
+        child.close()
+        # Join BEFORE closing the listener (see the happy-path test's finally for the rationale).
+        t.join(timeout=2)
+        assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
+        listener.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 async def test_broker_connected_socket_unreachable_is_loud() -> None:
     """A refused connection (closed port, immediate ECONNREFUSED) raises ``gateway_unreachable``.
 
