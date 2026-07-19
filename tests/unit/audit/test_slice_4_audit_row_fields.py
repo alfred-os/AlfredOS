@@ -30,7 +30,7 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 41 entries (post-marker field-set surface).
+    """Roster must contain exactly 44 entries (post-marker field-set surface).
 
     Adding a new post-marker ``*_FIELDS`` constant requires bumping this
     assertion AND extending ``AUDIT_FIELDSET_ROSTER`` in the same commit. The
