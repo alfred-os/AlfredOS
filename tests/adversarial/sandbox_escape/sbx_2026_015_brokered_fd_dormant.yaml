@@ -1,46 +1,56 @@
 id: sbx-2026-015
 category: sandbox_escape
 threat: >-
-  A runtime-compromised quarantine child attempts to leverage the #340 PR2a
-  SCM_RIGHTS reachability-broker (ADR-0050) to obtain a live, core-brokered
-  gateway socket -- either by relying on the live/echo spawn to hand it a
-  control fd it never requested, or by forging a zero- or multi-fd frame over
-  an inherited control channel to smuggle a socket past the "exactly one fd"
-  capability envelope. PR2a ships the broker MECHANISM (
-  make_control_socketpair / recv_passed_fd / broker_connected_socket / the
-  opt-in ``control_fd`` parameter on ``spawn_quarantine_child_io``) but wires
-  it to NO live caller: the daemon's only production spawn leaves
-  ``control_fd`` at its default ``False``, so this mechanism -- an extension
-  of the existing fd-3-framing key-delivery family -- stays dormant
-  end-to-end until PR2b's go-live cutover.
+  A runtime-compromised quarantine child attempts to leverage the #340 SCM_RIGHTS
+  reachability-broker (ADR-0050) -- now LIVE on the golive spawn (control_fd=True)
+  -- to obtain MORE egress than its one sanctioned, core-brokered gateway socket:
+  either by coaxing the broker into handing it a second control fd it never
+  requested, or by forging a zero- or multi-fd frame over the control channel to
+  smuggle an extra socket past the "exactly one fd" capability envelope, or by
+  opening its own outbound connection outside the brokered fd. The containment is
+  two-layer: the child's network namespace is EMPTY (--unshare-net), so the single
+  pre-connected brokered fd is its SOLE egress and any direct connect is refused at
+  the kernel; and recv_passed_fd admits EXACTLY one SCM_RIGHTS fd per frame, so a
+  compromised child cannot coax a zero- or multi-fd frame through even though the
+  broker is now wired live.
 ingestion_path: stdio_fd3_key_delivery
 payload:
-  attack: coax_or_forge_a_control_fd_on_the_live_spawn_path
+  attack: coax_or_forge_a_second_control_fd_or_egress_outside_the_broker
   mechanism: >-
-    SCM_RIGHTS reachability-broker (ADR-0050) — the opt-in control_fd
-    parameter on spawn_quarantine_child_io, peer to the fd-3 provider-key
-    delivery this payload's ingestion_path names.
+    SCM_RIGHTS reachability-broker (ADR-0050) -- the control_fd parameter on
+    spawn_quarantine_child_io, now flipped to True on the golive production spawn
+    (daemon_runtime.py), peer to the fd-3 provider-key delivery this payload's
+    ingestion_path names.
   probe: >-
-    (1) spawn_quarantine_child_io(provider_key=...) with control_fd left at
-    its default (False) — assert pass_fds carries no fd 4; (2) a bare
-    data-only sendmsg frame (no SCM_RIGHTS ancillary data) sent over a fresh
-    control-channel socketpair, fed to recv_passed_fd.
+    (1) the opt-in discipline: spawn_quarantine_child_io(provider_key=...) with
+    control_fd left at its default (False) passes fd 3 only -- no ambient/accidental
+    egress fd is ever granted without an explicit opt-in; (2) the capability
+    envelope: a bare data-only sendmsg frame (no SCM_RIGHTS ancillary) and a
+    two-fd frame, each fed to recv_passed_fd, are both refused
+    (ControlFdBrokerError); (3) net stays unshared -- the shipped quarantined-LLM
+    Linux policy --unshare-net's the child so the brokered fd is its only egress.
 expected_outcome: refused
 provenance: >-
-  #340 PR2a — the SCM_RIGHTS reachability-broker ships dormant: the live/echo
-  child spawn (spawn_quarantine_child_io,
-  src/alfred/security/quarantine_child_io.py) never sets control_fd=True, so
-  pass_fds is (3,) only and no fd 4 crosses to the child on the production
-  path today. The control channel itself is a narrow capability envelope, not
-  a general-purpose pipe: recv_passed_fd
-  (src/alfred/egress/control_fd_broker.py) raises ControlFdBrokerError on any
-  frame that does not carry EXACTLY one SCM_RIGHTS fd, so a compromised child
-  cannot coax a zero-fd or multi-fd frame through even once PR2b flips the
-  opt-in live. ADR-0050 (landing via this same PR2a's Task 9) records the
-  dormancy invariant this payload verifies.
+  #340 PR2b golive -- the SCM_RIGHTS reachability-broker is now wired LIVE: the
+  daemon's production spawn (comms_mcp/daemon_runtime.py) sets control_fd=True and
+  brokers the child exactly one gateway socket over fd 4 per extraction attempt.
+  The dormancy this payload originally documented (PR2a shipped the mechanism with
+  no live caller) is retired; the filename keeps its historical "_dormant" suffix.
+  The containment now under test is the LIVE-enforced posture: (a) the control
+  channel is a narrow capability envelope -- recv_passed_fd
+  (src/alfred/egress/control_fd_broker.py) raises ControlFdBrokerError on any frame
+  that does not carry EXACTLY one SCM_RIGHTS fd, so a compromised child cannot
+  smuggle a second or zero fd; (b) the child's net namespace is unshared
+  (config/sandbox/quarantined-llm.linux.bwrap.policy), so the brokered fd is its
+  SOLE egress and a direct outbound is kernel-refused; and (c) the mechanism stays
+  opt-in -- a spawn that does not set control_fd=True is passed fd 3 only, so no
+  egress fd is ever granted by accident. ADR-0050 (broker mechanism) and ADR-0052
+  (golive cutover) record the invariants this payload verifies.
 references:
-  - "src/alfred/security/quarantine_child_io.py (spawn_quarantine_child_io control_fd: bool = False default — ADR-0050 dormancy invariant)"
-  - "src/alfred/egress/control_fd_broker.py (recv_passed_fd — exactly-one-fd capability envelope, ControlFdBrokerError)"
-  - "ADR-0050 (dormancy invariant — lands via #340 PR2a Task 9, this same PR)"
-  - "docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md (ADR-0040 residual panel)"
+  - "src/alfred/comms_mcp/daemon_runtime.py (golive spawn sets control_fd=True -- brokered egress now LIVE)"
+  - "src/alfred/security/quarantine_child_io.py (spawn_quarantine_child_io control_fd parameter -- opt-in discipline, default False)"
+  - "src/alfred/egress/control_fd_broker.py (recv_passed_fd -- exactly-one-fd capability envelope, ControlFdBrokerError)"
+  - "config/sandbox/quarantined-llm.linux.bwrap.policy (--unshare-net -- brokered fd is the sole egress)"
+  - "docs/adr/0050-quarantine-child-scm-rights-reachability-broker.md"
+  - "docs/adr/0052-real-quarantine-child-golive.md"
   - "#340"

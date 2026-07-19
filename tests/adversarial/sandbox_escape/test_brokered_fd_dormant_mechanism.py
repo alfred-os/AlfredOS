@@ -1,24 +1,36 @@
-"""Executable counterpart to sbx-2026-015 — the PR2a fd-broker mechanism ships dormant (#340).
+"""Executable counterpart to sbx-2026-015 — the fd-broker mechanism is LIVE-enforced (#340).
 
-#340 PR2a lands the SCM_RIGHTS reachability-broker (``control_fd_broker.py`` +
-the opt-in ``control_fd`` parameter on ``spawn_quarantine_child_io``), but the
-daemon's ONLY live/echo caller never opts in. This module proves that claim
+#340 PR2b golive wires the SCM_RIGHTS reachability-broker (``control_fd_broker.py``
++ the opt-in ``control_fd`` parameter on ``spawn_quarantine_child_io``) LIVE: the
+daemon's production spawn (``comms_mcp/daemon_runtime.py``) now sets
+``control_fd=True`` and brokers the child exactly one gateway socket over fd 4.
+The PR2a dormancy this payload originally documented is retired; the file keeps
+its historical ``_dormant`` name. This module proves the LIVE-enforced containment
 rather than merely documenting it (fold-log L4 — every sbx payload gets an
 EXECUTABLE test, not just a schema-valid YAML):
 
 * :func:`test_payload_loads` — the corpus entry schema-validates and declares
   the expected containment.
-* :func:`test_live_echo_spawn_passes_no_control_fd` — the dormancy proof: the
-  default (``control_fd=False``) live spawn passes fd 3 only, never fd 4.
+* :func:`test_live_echo_spawn_passes_no_control_fd` — the opt-in-discipline proof:
+  a spawn that does NOT opt in (``control_fd=False``, the default) is passed fd 3
+  only, so no egress fd is ever granted by accident — only the golive caller's
+  explicit ``control_fd=True`` crosses fd 4.
 * :func:`test_control_channel_refuses_a_second_or_zero_fd` — the capability-
   envelope proof: the control channel accepts EXACTLY one SCM_RIGHTS fd per
-  frame; a data-only (zero-fd) frame is a loud refusal, not a silent no-op.
+  frame; a data-only (zero-fd) or multi-fd frame is a loud refusal, not a silent
+  no-op, so a compromised child cannot smuggle a second socket even with the
+  broker live.
+* :func:`test_live_brokered_child_net_stays_unshared` — the sole-egress proof: the
+  shipped quarantined-LLM Linux policy ``--unshare-net``'s the child, so the single
+  brokered fd is its only egress and a direct outbound is kernel-refused.
 
-[L-7] These are PURE UNIT tests (mocked ``Popen`` + a real ``socketpair``, no
-bwrap, no real subprocess) and MUST NOT carry a ``@_bwrap_required`` (or any
-other bwrap-skip) marker — that would skip them on ordinary CI and defeat the
-whole point of registering their node-ids in the release-blocking gate (see
-``.github/workflows/adversarial.yml``).
+[L-7] The first three are PURE UNIT tests (mocked ``Popen`` + a real
+``socketpair``, no bwrap, no real subprocess) and MUST NOT carry a
+``@_bwrap_required`` (or any other bwrap-skip) marker — that would skip them on
+ordinary CI and defeat the whole point of registering their node-ids in the
+release-blocking gate (see ``.github/workflows/adversarial.yml``). The
+net-unshared proof reads the shipped policy TOML (no bwrap) and likewise always
+runs.
 """
 
 from __future__ import annotations
@@ -35,11 +47,18 @@ import yaml
 
 import alfred.security.quarantine_child_io as child_io_mod
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
+from alfred.plugins.sandbox_policy import read_policy_toml
 from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import spawn_quarantine_child_io
 from tests.adversarial.payload_schema import AdversarialPayload
 
 _DIR = Path(__file__).parent
+_QUARANTINED_LINUX_POLICY = (
+    Path(__file__).resolve().parents[3]
+    / "config"
+    / "sandbox"
+    / "quarantined-llm.linux.bwrap.policy"
+)
 
 
 class _FakeStdout:
@@ -99,12 +118,14 @@ class _FakePopen:
 
 @pytest.mark.asyncio
 async def test_live_echo_spawn_passes_no_control_fd(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dormancy proof: the default (``control_fd=False``) live spawn passes fd 3 ONLY.
+    """Opt-in-discipline proof: a spawn that does NOT opt in passes fd 3 ONLY.
 
-    This is the load-bearing assertion behind sbx-2026-015: the daemon's
-    live/echo caller never opts into ``control_fd=True`` (ADR-0050), so the
-    fd-broker mechanism #340 PR2a ships is inert on the production path today
-    — no fd 4 ever reaches the child.
+    Now that the golive caller wires the broker live (``control_fd=True`` in
+    ``daemon_runtime.py``, ADR-0052), the load-bearing residual property is that
+    the mechanism stays OPT-IN: a spawn that leaves ``control_fd`` at its default
+    ``False`` (this test) is passed fd 3 only — no egress fd is ever granted by
+    accident. A fd 4 reaches the child ONLY when a caller explicitly opts in, so
+    the brokered egress channel can never appear on the wire unintentionally.
 
     MONKEYPATCH DISCIPLINE mirrors ``test_quarantine_child_io.py``'s
     ``_spawn_capture`` fixture exactly: ``subprocess.Popen``,
@@ -146,7 +167,7 @@ async def test_live_echo_spawn_passes_no_control_fd(monkeypatch: pytest.MonkeyPa
 
     try:
         await spawn_quarantine_child_io(provider_key="k")  # default: control_fd=False
-        assert captured["pass_fds"] == (3,)  # dormant: no fd 4 on the live path
+        assert captured["pass_fds"] == (3,)  # opt-in discipline: no fd 4 without an explicit opt-in
     finally:
         for fd in opened_fds:
             with contextlib.suppress(OSError):
@@ -187,3 +208,26 @@ def test_control_channel_refuses_a_second_or_zero_fd() -> None:
         child.close()
         donor_a.close()
         donor_b.close()
+
+
+def test_live_brokered_child_net_stays_unshared() -> None:
+    """Sole-egress proof: the child's net namespace is empty, so the brokered fd is its ONLY egress.
+
+    The golive spawn hands the child exactly one pre-connected gateway socket over
+    the control fd; the SHIPPED quarantined-LLM Linux policy ``--unshare-net``'s the
+    child into an EMPTY network namespace, so it cannot open any OTHER outbound
+    connection — a direct connect is refused at the kernel. Together with the
+    exactly-one-fd capability envelope
+    (:func:`test_control_channel_refuses_a_second_or_zero_fd`) this is what makes
+    "egress ONLY via the brokered fd" true under the now-live broker. Mirrors
+    ``test_sbx_2026_005_outbound_network_egress_contained`` — a dropped ``net`` from
+    ``unshare`` would silently re-open the child's egress outside the broker.
+    """
+    payload = _load("sbx-2026-015")
+    assert payload.expected_outcome == "refused"
+    policy = read_policy_toml(_QUARANTINED_LINUX_POLICY.read_text())
+    assert "net" in policy.unshare, (
+        "quarantined-LLM policy no longer unshares net — sbx-2026-015 asserts the "
+        "golive child's ONLY egress is the single brokered fd (--unshare-net); a "
+        "dropped 'net' silently re-opens direct egress outside the broker"
+    )
