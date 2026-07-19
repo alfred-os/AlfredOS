@@ -45,14 +45,29 @@ class ControlFdBrokerError(AlfredError):
     when a batch fails so ``dispatch`` can write the failure row's ``destination`` from
     ``exc.destination``. ``reason`` stays the audit-vocab key (the ``EGRESS_BROKER_REFUSED_REASONS``
     drift-guard binds to it, NOT to ``destination``).
+
+    ``delivered`` is the count of descriptors that had ALREADY been ``sendmsg``'d into the child's
+    SCM_RIGHTS queue when the batch failed. Connect-defer makes the CONNECT half all-or-nothing,
+    but it cannot make the SEND half atomic: a failure on socket *k* leaves *k-1* live,
+    gateway-reachable fds in a T3-holding child that no drain will ever reclaim (the drain only
+    runs in the extract branch's ``finally``, and a failed batch writes no extract frame). A
+    non-zero ``delivered`` is therefore the signal that the child holds an un-revoked capability
+    and must be torn down — see :meth:`alfred.security.quarantine_transport.
+    QuarantineStdioTransport._run_broker_preamble`. It is diagnostic/control state only: the
+    closed ``EGRESS_BROKER_REFUSED_FIELDS`` audit schema has no slot for it.
     """
 
     def __init__(
-        self, reason: str = "control_fd_broker_failed", *, destination: str | None = None
+        self,
+        reason: str = "control_fd_broker_failed",
+        *,
+        destination: str | None = None,
+        delivered: int = 0,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.destination = destination
+        self.delivered = delivered
 
 
 def make_control_socketpair() -> tuple[socket.socket, socket.socket]:
@@ -238,27 +253,61 @@ async def broker_connected_sockets(
     ``SCM_RIGHTS`` are blocking with no asyncio ancillary helper, so each connect/send runs in the
     default executor (the ``_blocking_read_exactly`` precedent).
 
+    **The CONNECT phase is CONCURRENT; the SEND phase is SERIAL.** Both halves are load-bearing and
+    deliberately asymmetric (golive spec §6, ADR-0052 "Fork 2"):
+
+    * CONNECT runs under ``asyncio.gather`` because a serial loop costs ``count x
+      _CONNECT_TIMEOUT_S`` (3 x 10 = 30s) of up-front latency before the extract frame even
+      dispatches — equal to the whole 30s ``action_deadline``, so a degraded gateway would
+      guarantee a deadline kill instead of the graceful ``provider_unavailable`` refusal.
+      ``return_exceptions=True`` is required, not incidental: it lets the collection loop below
+      recover EVERY socket that did connect, so the ``finally`` closes them all. A bare ``gather``
+      would propagate the first exception while sibling futures were still resolving, orphaning
+      their sockets.
+    * SEND stays a serial ``for`` because SCM_RIGHTS **queue order is load-bearing** — the child
+      consumes one socket per retry attempt in enqueue order — and two concurrent ``sendmsg``
+      calls on one control fd could interleave.
+
     Fail-closed: any failure raises :class:`ControlFdBrokerError` (or an
     :class:`IOPlaneUnavailableError` for an unset/malformed proxy) — never a hang (HARD #7). On a
     batch failure the raised error carries ``destination = "host:port"`` (NEVER the raw proxy URL)
-    so ``dispatch`` can attribute the ``egress.broker.refused`` audit row. Returns
-    ``[(host, port)] * count`` on full success (one ``destination`` per brokered target).
+    so ``dispatch`` can attribute the ``egress.broker.refused`` audit row, plus ``delivered`` — how
+    many fds already reached the child — so the caller can revoke a partially-granted capability.
+    Returns ``[(host, port)] * count`` on full success (one ``destination`` per brokered target).
     """
     host, port = _resolve_proxy_addr(proxy_config)  # userinfo already stripped; may raise IOPlane…
     loop = asyncio.get_running_loop()
     connected: list[socket.socket] = []
+    delivered = 0
     try:
-        # CONNECT phase — establish all ``count`` gateway-connected host sockets first. A failure
-        # here (gateway down) means the SEND phase never runs → the child buffer never sees a
-        # partial batch → no reclaim.
-        for _ in range(count):
-            connected.append(await loop.run_in_executor(None, _connect_one, host, port))
-        # SEND phase — only reached if EVERY connect succeeded.
+        # CONNECT phase — establish all ``count`` gateway-connected host sockets CONCURRENTLY.
+        # A failure here (gateway down) means the SEND phase never runs → the child buffer never
+        # sees a partial batch → no reclaim.
+        outcomes = await asyncio.gather(
+            *(loop.run_in_executor(None, _connect_one, host, port) for _ in range(count)),
+            return_exceptions=True,
+        )
+        # Partition BEFORE re-raising: every socket that connected must land in ``connected`` so
+        # the ``finally`` closes it, even on the error path. Keep only the FIRST failure — the
+        # rest are the same gateway outage observed N times, and re-raising a later one would
+        # mask the earliest evidence.
+        first_failure: BaseException | None = None
+        for outcome in outcomes:
+            if isinstance(outcome, socket.socket):
+                connected.append(outcome)
+            elif first_failure is None:
+                first_failure = outcome
+        if first_failure is not None:
+            raise first_failure
+        # SEND phase — only reached if EVERY connect succeeded. SERIAL + ordered (see docstring).
         for sock in connected:
             await loop.run_in_executor(None, _send_one, parent_end, sock)
+            delivered += 1  # this fd is now in the child's SCM_RIGHTS queue — a live capability
     except ControlFdBrokerError as exc:
-        # Stamp the destination (never the raw URL) so the failure audit row can key on it (§21).
+        # Stamp the destination (never the raw URL) so the failure audit row can key on it (§21),
+        # and how many fds the child already holds so the caller can revoke them (A2).
         exc.destination = f"{host}:{port}"
+        exc.delivered = delivered
         raise
     finally:
         # Sole socket cleanup: a SENT socket's host copy is already dup'd into the child (closing it

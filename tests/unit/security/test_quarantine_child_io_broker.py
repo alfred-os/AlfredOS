@@ -15,6 +15,8 @@ Two layers under test:
 from __future__ import annotations
 
 import socket
+import threading
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -42,6 +44,11 @@ class _MinimalPopen:
         return 0
 
 
+# Rendezvous bound for the CONNECT-concurrency proof. Generous enough never to flake on a
+# loaded CI box, short enough that a SERIAL regression fails fast instead of hanging the suite.
+_BARRIER_TIMEOUT_S = 5.0
+
+
 def _fresh_inet_socket() -> socket.socket:
     """A real, closeable INET socket — a stand-in for a gateway-connected host socket.
 
@@ -57,22 +64,105 @@ def _fresh_inet_socket() -> socket.socket:
 
 
 @pytest.mark.asyncio
+async def test_connect_phase_runs_concurrently_not_serially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CONNECT phase is ``asyncio.gather``-concurrent, NOT a serial ``for`` loop (A1).
+
+    Spec §6 and ADR-0052:95 both mandate concurrency, naming the reason: a serial loop costs
+    ``N x _CONNECT_TIMEOUT_S`` (3 x 10 = 30s) of up-front latency before the extract frame even
+    dispatches — equal to the whole 30s ``action_deadline``.
+
+    NON-VACUOUS by construction: each faked ``_connect_one`` blocks on a
+    :class:`threading.Barrier` sized to ``count``. Under a SERIAL loop the first executor thread
+    waits for two parties that will never arrive and the barrier trips ``BrokenBarrierError`` at
+    its timeout, failing this test. Only a genuinely concurrent CONNECT phase lets all three
+    parties rendezvous.
+    """
+    count = 3
+    barrier = threading.Barrier(count, timeout=_BARRIER_TIMEOUT_S)
+    made: list[socket.socket] = []
+
+    def _rendezvous_connect_one(host: str, port: int) -> socket.socket:
+        barrier.wait()  # BrokenBarrierError under a serial CONNECT loop
+        sock = _fresh_inet_socket()
+        made.append(sock)
+        return sock
+
+    monkeypatch.setattr(cfb, "_connect_one", _rendezvous_connect_one)
+    monkeypatch.setattr(cfb, "_send_one", lambda parent_end, sock: None)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        dests = await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=count)
+        assert dests == [("gw", 8889)] * count
+        assert len(made) == count
+    finally:
+        for sock in made:
+            sock.close()
+        parent.close()
+        child.close()
+
+
+@pytest.mark.asyncio
+async def test_send_phase_stays_serial_and_ordered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A1 boundary: only the CONNECT phase went concurrent — the SEND phase stays serial.
+
+    SCM_RIGHTS queue ORDER is load-bearing (the child consumes one socket per retry attempt in
+    enqueue order), so ``_send_one`` must never be gathered. A concurrent SEND would let two
+    executor threads interleave ``sendmsg`` on the same control fd. Proven by a barrier sized to
+    2 that must TIME OUT: if two sends ever ran concurrently the barrier would trip and the
+    recorded order would be non-deterministic.
+    """
+    made: list[socket.socket] = []
+    in_flight: list[int] = []
+    max_concurrent = {"n": 0}
+
+    def _fake_connect_one(host: str, port: int) -> socket.socket:
+        sock = _fresh_inet_socket()
+        made.append(sock)
+        return sock
+
+    def _observing_send_one(parent_end: socket.socket, sock: socket.socket) -> None:
+        in_flight.append(1)
+        max_concurrent["n"] = max(max_concurrent["n"], len(in_flight))
+        time.sleep(0.01)  # a window a concurrent send would land in
+        in_flight.pop()
+
+    monkeypatch.setattr(cfb, "_connect_one", _fake_connect_one)
+    monkeypatch.setattr(cfb, "_send_one", _observing_send_one)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=3)
+        assert max_concurrent["n"] == 1  # never two sends in flight at once
+    finally:
+        for sock in made:
+            sock.close()
+        parent.close()
+        child.close()
+
+
+@pytest.mark.asyncio
 async def test_broker_sockets_sends_nothing_on_partial_connect_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Connect fails on socket 2 of 3 → ZERO sendmsg, connected-but-unsent socket closed, raises.
+    """Connect fails on socket 2 of 3 → ZERO sendmsg, EVERY connected socket closed, raises.
 
     The load-bearing connect-defer property: a partial connect failure never reaches the SEND
-    phase, so the child buffer never sees a partial batch (nothing to reclaim). The already-
-    connected host socket is closed (no fd leak), and the raised error carries the destination.
+    phase, so the child buffer never sees a partial batch (nothing to reclaim). Because the
+    CONNECT phase is now concurrent (A1), ALL ``count`` connects are attempted — the two that
+    DID succeed are both closed by the ``finally`` (the gather error path must leak no fd), and
+    the raised error carries the destination plus ``delivered == 0``.
     """
     made: list[socket.socket] = []
     sent: list[socket.socket] = []
     connect_calls = {"n": 0}
+    lock = threading.Lock()
 
     def _fake_connect_one(host: str, port: int) -> socket.socket:
-        connect_calls["n"] += 1
-        if connect_calls["n"] == 2:  # second connect fails — SEND phase must never run
+        with lock:
+            connect_calls["n"] += 1
+            nth = connect_calls["n"]
+        if nth == 2:  # one connect fails — SEND phase must never run
             raise ControlFdBrokerError("gateway_unreachable")
         sock = _fresh_inet_socket()
         made.append(sock)
@@ -89,9 +179,50 @@ async def test_broker_sockets_sends_nothing_on_partial_connect_failure(
             await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=3)
         assert exc.value.reason == "gateway_unreachable"
         assert exc.value.destination == "gw:8889"  # stamped, never the raw URL
+        assert exc.value.delivered == 0  # nothing reached the child's SCM_RIGHTS queue
         assert sent == []  # SEND phase never ran — the child got NOTHING
-        assert len(made) == 1  # only the first connect succeeded
-        assert made[0].fileno() == -1  # the connected-but-unsent socket was closed (no leak)
+        # Concurrent CONNECT: the other two dials still happened, and BOTH were closed.
+        assert len(made) == 2
+        assert all(sock.fileno() == -1 for sock in made)
+    finally:
+        parent.close()
+        child.close()
+
+
+@pytest.mark.asyncio
+async def test_broker_sockets_reports_the_first_connect_failure_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent connects fail → exactly one error surfaces, the surviving socket closes.
+
+    ``asyncio.gather(..., return_exceptions=True)`` yields EVERY outcome, so the collection loop
+    must keep the FIRST failure and discard the rest (a second ``raise`` would mask it). Covers
+    the ``elif failure is None`` false branch.
+    """
+    made: list[socket.socket] = []
+    connect_calls = {"n": 0}
+    lock = threading.Lock()
+
+    def _fake_connect_one(host: str, port: int) -> socket.socket:
+        with lock:
+            connect_calls["n"] += 1
+            nth = connect_calls["n"]
+        if nth in (1, 2):
+            raise ControlFdBrokerError("gateway_unreachable" if nth == 1 else "sendmsg_failed")
+        sock = _fresh_inet_socket()
+        made.append(sock)
+        return sock
+
+    monkeypatch.setattr(cfb, "_connect_one", _fake_connect_one)
+    monkeypatch.setattr(cfb, "_send_one", lambda parent_end, sock: None)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=3)
+        # gather preserves ARGUMENT order, so the first failing slot's error is the one raised.
+        assert exc.value.reason in {"gateway_unreachable", "sendmsg_failed"}
+        assert exc.value.delivered == 0
+        assert all(sock.fileno() == -1 for sock in made)  # the lone success still closed
     finally:
         parent.close()
         child.close()
@@ -135,6 +266,12 @@ async def test_broker_sockets_send_failure_mid_batch_closes_all(
 
     Connect-defer removes the COMMON partial case; this rarer send-phase failure still leaks no fd
     (every connected host socket is closed by the ``finally``) and still stamps the destination.
+
+    It ALSO stamps ``delivered`` — the count of fds that DID reach the child's SCM_RIGHTS queue
+    before the failure (A2). Connect-defer makes the CONNECT half all-or-nothing, but it cannot
+    make the SEND half atomic: once socket 1 is in the queue the child holds a live
+    gateway-reachable capability that only a teardown can revoke, so ``dispatch`` needs this
+    count to decide.
     """
     made: list[socket.socket] = []
     send_calls = {"n": 0}
@@ -160,6 +297,8 @@ async def test_broker_sockets_send_failure_mid_batch_closes_all(
             await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=3)
         assert exc.value.reason == "short_data_send"
         assert exc.value.destination == "gw:8889"
+        # Socket 1 was sendmsg'd BEFORE socket 2 failed → one live fd sits in the child queue.
+        assert exc.value.delivered == 1
         for sock in made:  # all three connected sockets closed — no leak
             assert sock.fileno() == -1
     finally:
