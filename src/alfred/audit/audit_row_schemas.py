@@ -1588,9 +1588,11 @@ EGRESS_RELAY_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 #   to the quarantine child.
 # EGRESS_BROKER_REFUSED_FIELDS: emitted on any ``ControlFdBrokerError`` refusal path.
 # EGRESS_BROKER_REFUSED_REASONS: the CLOSED reason vocabulary, bound to
-#   ``ControlFdBrokerError``'s six string literals (control_fd_broker.py) by an independent
-#   AST drift-guard (tests/unit/audit/test_egress_broker_reason_vocab.py, #432 pattern) — this
-#   copy must never silently diverge from the exception source.
+#   ``ControlFdBrokerError``'s six reasons (control_fd_broker.py) by an independent AST
+#   drift-guard (tests/unit/audit/test_egress_broker_reason_vocab.py, #432 pattern) — five are
+#   call-site string literals, the sixth (``control_fd_broker_failed``) is ``__init__``'s
+#   default value, not a literal. This copy must never silently diverge from the exception
+#   source.
 EGRESS_BROKER_SUCCESS_FIELDS: Final[frozenset[str]] = frozenset({"destination", "egress_id"})
 
 EGRESS_BROKER_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
