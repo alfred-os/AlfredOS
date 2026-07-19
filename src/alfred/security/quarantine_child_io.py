@@ -686,6 +686,7 @@ class _SubprocessChildIO:
             _log.error(
                 "security.quarantine_child.provider_key_delivery_audit_failed",
                 error_class=type(exc).__name__,
+                plugin_id=_PLUGIN_ID,
             )
 
     async def aclose(self) -> None:

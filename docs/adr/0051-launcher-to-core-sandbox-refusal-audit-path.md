@@ -180,29 +180,31 @@ undetected for a month.
   not yet call `SandboxRefusalAuditor`. Tracked as #433 follow-ups (the TUI
   producer additionally needs an stderr-capture change, since it inherits
   stderr today rather than piping it).
-- **The `provider_key_delivery_failed` reason stays reserved, not emitted —
-  see the "Amendment (#443 PR2 — boot-time handshake)" section below,
-  §8.1/§8.4, for the corrected picture.** As shipped at the time of this
-  ADR: a genuine fd-3 delivery failure was believed to be a much rarer
-  condition than a launcher refusal, largely disjoint from it — Task 0
-  (Decision 5) sampled only the slow refusal paths. §8.1 below shows this
-  premise was incomplete: the fd-3 `writev` and the launcher's exit race
-  nondeterministically, and on the arm where the launcher wins fast (e.g.
-  the charset-gate refusal, which exits before the first `python3`
-  subprocess spins up), the `writev` fails with EPIPE — the very
-  `ProviderKeyDeliveryError` this bullet originally said "is now known not
-  to fire in practice." §8.4 goes further: on that EPIPE arm the launcher
-  genuinely did refuse, so `provider_key_delivery_failed` and a launcher
-  refusal are frequently the SAME underlying event observed through a
+- **The `provider_key_delivery_failed` reason is now WRITTEN, for a narrower
+  case than originally scoped — see the "Amendment (#443 PR2 — boot-time
+  handshake)" section below, §8.1/§8.4, for the corrected picture, and #444
+  for the writer.** As shipped at the time of this ADR: a genuine fd-3
+  delivery failure was believed to be a much rarer condition than a launcher
+  refusal, largely disjoint from it — Task 0 (Decision 5) sampled only the
+  slow refusal paths. §8.1 below shows this premise was incomplete: the fd-3
+  `writev` and the launcher's exit race nondeterministically, and on the arm
+  where the launcher wins fast (e.g. the charset-gate refusal, which exits
+  before the first `python3` subprocess spins up), the `writev` fails with
+  EPIPE — the very `ProviderKeyDeliveryError` this bullet originally said "is
+  now known not to fire in practice." §8.4 goes further: on that EPIPE arm the
+  launcher genuinely did refuse, so `provider_key_delivery_failed` and a
+  launcher refusal are frequently the SAME underlying event observed through a
   different arm, not a rarer, disjoint condition. For that common case — a
-  genuine launcher refusal that surfaces as EPIPE — the §8.4 amendment now
+  genuine launcher refusal that surfaces as EPIPE — the §8.4 amendment
   RECOVERS the launcher's true reason via the same zero-stdout-gated drain
   (`_record_fast_launcher_refusal`), WITHOUT reopening the forgery the
   two-frame handshake closes (the earlier claim that it would has been
-  reversed). `provider_key_delivery_failed` (#444) therefore stays reserved
-  for a narrower case only: a genuine NON-refusal delivery failure, where the
-  launcher's stderr carries no `sandbox_refused` row and this gated drain
-  records nothing.
+  reversed). `provider_key_delivery_failed` (#444) is therefore WRITTEN only
+  for the narrower case that remains: a genuine NON-refusal delivery failure,
+  where the launcher's stderr carries no `sandbox_refused` row and the §8.4
+  gated drain records nothing — a host-authored row via
+  `SandboxRefusalAuditor.record_provider_key_delivery_failure`, called from
+  `_record_fast_launcher_refusal`'s `poll() is None` arm.
 
 ## Alternatives considered
 
@@ -256,12 +258,12 @@ and `plugins/`.
   `declare_hookpoints()`-shaped fix this bullet named as a prerequisite has
   landed: PR1 (#443, PR #456) is merged to main (`65d86886`) and makes the
   supervisor hookpoints boot-declarable, so a pre-`Supervisor` dispatch no
-  longer reopens core-001. **#444 is UNBLOCKED, not folded into PR1** — per
-  the spec's own §0 decision 3, it still needs its own writer at the
-  `ProviderKeyDeliveryError` arm — but for a narrower case now: §8.4's
+  longer reopens core-001. **#444 was UNBLOCKED, not folded into PR1** — per
+  the spec's own §0 decision 3, it needed its own writer at the
+  `ProviderKeyDeliveryError` arm — but for a narrower case: §8.4's
   amendment CLOSED the fast-refusal hole itself (`_record_fast_launcher_refusal`
   recovers a genuine fast refusal's true reason via the zero-stdout-gated
-  drain), so #444's remaining scope is the genuine NON-refusal delivery
+  drain), so #444's scope was the genuine NON-refusal delivery
   failure, where the launcher's stderr carries no `sandbox_refused` row. The
   "underlying condition is rare" framing above is also stale: §8.1 shows the
   fd-3 `writev` and a launcher's exit race nondeterministically, not that

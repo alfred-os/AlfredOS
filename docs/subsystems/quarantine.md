@@ -566,6 +566,7 @@ serialised here.
 | Quarantined provider refused content on safety grounds | `TypedRefusal(reason="refused_by_safety")` | `quarantine.extract` audit row with `result="refused"` |
 | Post-DLP scan of `model_dump_result` detects canary | `security.canary_tripped` raised by transport | `security.canary_tripped` audit row in [plugins.md](plugins.md#failure-modes) |
 | Naive `fetch_timestamp` passed to `ContentHandle` | `ValueError` at `__post_init__` | exception; handle never constructed |
+| Fd-3 provider-key delivery failure, child still running (`poll() is None`) | Host-authored `provider_key_delivery_failed` audit row + T0 `fail_closed` hookpoint dispatch (`SandboxRefusalAuditor.record_provider_key_delivery_failure`, #444), then fail-closed `QuarantineChildSpawnError` | `supervisor.plugin.sandbox_refused` audit row (`reason="provider_key_delivery_failed"`) — see [security.md](security.md) |
 
 ## Trust-boundary contract
 

@@ -1071,6 +1071,9 @@ async def test_spawn_launcher_refusal_records_row_and_refuses_boot(
         async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
             recorded.append(rows)
 
+        async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+            pass  # not exercised on this arm; here only for Protocol conformance
+
     with (
         structlog.testing.capture_logs() as logs,
         pytest.raises(QuarantineChildSpawnError),
@@ -1144,6 +1147,9 @@ async def test_spawn_hello_then_no_ready_refuses_without_recording(
     class _Recorder:
         async def record(self, rows: tuple[SandboxRefusalRow, ...]) -> None:
             recorded.append(rows)
+
+        async def record_provider_key_delivery_failure(self, *, plugin_id: str) -> None:
+            pass  # not exercised on this arm; here only for Protocol conformance
 
     with (
         structlog.testing.capture_logs() as logs,

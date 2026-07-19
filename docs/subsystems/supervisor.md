@@ -395,13 +395,16 @@ flag is used; bwrap inherits open, non-CLOEXEC fds into the sandboxed child.
 (`--sync-fd` is bwrap's internal sync fd and would CONSUME fd 3 — verified
 bubblewrap 0.8.0/0.9.0, #218; there is no `--keep-fd` either.) The launcher
 never reads fd 3 itself. On a partial write / EAGAIN the Supervisor REFUSES to spawn
-(`reason="provider_key_delivery_failed"`). This reason stays **reserved** — a
-launcher sandbox refusal (a *different* failure mode, keyed on
-`sandbox_refused`-in-stderr) is now persisted at first-extraction via the
-`read_frame` drain (ADR-0051, #433); `provider_key_delivery_failed` has no
-writer yet because the genuine fd-3 delivery-failure path it covers is a
-separate, rarer condition (the read end actually closed) than a launcher
-refusal, and remains a tracked follow-up.
+(`reason="provider_key_delivery_failed"`). A launcher sandbox refusal (a
+*different* failure mode, keyed on `sandbox_refused`-in-stderr) is persisted via
+the `read_frame` drain (ADR-0051, #433). `provider_key_delivery_failed` covers the
+narrower, genuine NON-refusal case — a fd-3 delivery failure with the child STILL
+UP (`poll() is None`) — and is now WRITTEN: a host-authored row (no launcher
+stderr involved), via `SandboxRefusalAuditor.record_provider_key_delivery_failure`,
+called from `_record_fast_launcher_refusal`'s `poll() is None` arm in
+`quarantine_child_io.py` (#444). The sibling fast-refusal EPIPE case — where the
+launcher DID refuse and the key writev also EPIPEs — is a different arm, recovered
+by the §8.4 zero-stdout-gated drain (ADR-0051), not by this writer.
 
 **Honest residency-window limitation.** The provider key arrives at
 `deliver_provider_key_via_fd3` as a Python `str` (interned, non-zeroizable).
