@@ -233,6 +233,18 @@ class AnthropicProvider:
         # variant (see DeepSeekProvider for the pattern).
         return self.CAPABILITIES
 
+    async def aclose(self) -> None:
+        """Close the underlying Anthropic SDK client (and, transitively, its httpx transport).
+
+        The quarantine child's brokered-egress source (``BrokeredProviderSource.bind``, #340
+        PR2b-golive) owns one provider per extraction; on teardown it awaits this to release the
+        SDK's httpx client — which, once it has dialed, is the SOLE owner of the passed TCP fd
+        (§8 D5). Delegates to the SDK's documented public async close (``AsyncAnthropic.close``)
+        rather than reaching through the private ``_client._client`` httpx handle (project rule:
+        prefer official SDK clients + types).
+        """
+        await self._client.close()
+
     @classmethod
     def from_settings(
         cls,

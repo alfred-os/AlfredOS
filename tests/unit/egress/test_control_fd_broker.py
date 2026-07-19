@@ -411,3 +411,142 @@ def test_connect_and_send_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatc
         t.join(timeout=2)
         assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
         listener.close()
+
+
+# --- recv_passed_fd_nonblocking (#340 PR2b-golive Task 4: the drain-sweep variant) ---------
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+def test_recv_passed_fd_nonblocking_returns_one_fd() -> None:
+    """Happy path: a single SCM_RIGHTS fd is returned as an int."""
+    from alfred.egress.control_fd_broker import recv_passed_fd_nonblocking
+
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    donor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        parent.sendmsg(
+            [b"\x01"],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [donor.fileno()]))],
+        )
+        fd = recv_passed_fd_nonblocking(child)
+        assert fd is not None
+        got = socket.socket(fileno=fd)
+        try:
+            assert got.family == socket.AF_INET
+        finally:
+            got.close()
+    finally:
+        parent.close()
+        child.close()
+        donor.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+def test_recv_passed_fd_nonblocking_peer_close_returns_none() -> None:
+    """Peer-close EOF (empty frame, zero fds) returns ``None`` — the sweep's benign terminator."""
+    from alfred.egress.control_fd_broker import recv_passed_fd_nonblocking
+
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    parent.close()  # EOF on child, nothing queued
+    try:
+        assert recv_passed_fd_nonblocking(child) is None
+    finally:
+        child.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+def test_recv_passed_fd_nonblocking_no_data_raises_blockingio() -> None:
+    """Nothing queued (peer still open) raises ``BlockingIOError`` (EAGAIN) — caller stops sweep."""
+    from alfred.egress.control_fd_broker import recv_passed_fd_nonblocking
+
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(BlockingIOError):
+            recv_passed_fd_nonblocking(child)
+    finally:
+        parent.close()
+        child.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+def test_recv_passed_fd_nonblocking_ctrunc_closes_and_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MSG_CTRUNC is a loud fault (not a benign terminator): close any installed fd, then raise.
+
+    Reuses the SHARED leaked-fd-close hardening — the installed fd (a real ``dup``) must be
+    reclaimed, proven by the failing re-close. Driven via a class-level ``recvmsg`` monkeypatch
+    since a portable MSG_CTRUNC cannot be coaxed from a real socket.
+    """
+    from alfred.egress.control_fd_broker import recv_passed_fd_nonblocking
+
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())
+    cmsg = array.array("i", [victim]).tobytes()
+
+    def _fake_recvmsg(
+        self: socket.socket, bufsize: int, ancbufsize: int = 0, flags: int = 0
+    ) -> tuple[bytes, list[tuple[int, int, bytes]], int, None]:
+        return b"\x01", [(socket.SOL_SOCKET, socket.SCM_RIGHTS, cmsg)], socket.MSG_CTRUNC, None
+
+    monkeypatch.setattr(socket.socket, "recvmsg", _fake_recvmsg)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            recv_passed_fd_nonblocking(child)
+        assert exc.value.reason == "ancillary_truncated"
+        with pytest.raises(OSError):
+            os.close(victim)  # already reclaimed — no leak
+    finally:
+        parent.close()
+        child.close()
+        keeper.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+def test_recv_passed_fd_nonblocking_multi_fd_closes_and_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A >1-fd frame (no MSG_CTRUNC) is a loud fault: close every received fd, then refuse."""
+    from alfred.egress.control_fd_broker import recv_passed_fd_nonblocking
+
+    keeper_a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    keeper_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    v_a = os.dup(keeper_a.fileno())
+    v_b = os.dup(keeper_b.fileno())
+    cmsg = array.array("i", [v_a, v_b]).tobytes()
+
+    def _fake_recvmsg(
+        self: socket.socket, bufsize: int, ancbufsize: int = 0, flags: int = 0
+    ) -> tuple[bytes, list[tuple[int, int, bytes]], int, None]:
+        return b"\x01", [(socket.SOL_SOCKET, socket.SCM_RIGHTS, cmsg)], 0, None
+
+    monkeypatch.setattr(socket.socket, "recvmsg", _fake_recvmsg)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            recv_passed_fd_nonblocking(child)
+        assert exc.value.reason == "expected_exactly_one_fd"
+        for v in (v_a, v_b):
+            with pytest.raises(OSError):
+                os.close(v)  # both reclaimed — no leak
+    finally:
+        parent.close()
+        child.close()
+        keeper_a.close()
+        keeper_b.close()
