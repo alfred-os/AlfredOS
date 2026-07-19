@@ -94,12 +94,14 @@ def test_start_mounts_egress_proxy_with_provider_allowlist(
             bind_host: str,
             port: int,
             audit: object,
+            handshake_timeout_s: float = 10.0,
             **_kw: object,
         ) -> None:
             captured["allowlist"] = allowlist
             captured["bind_host"] = bind_host
             captured["port"] = port
             captured["audit"] = audit
+            captured["handshake_timeout_s"] = handshake_timeout_s
 
         async def serve(self, shutdown_event: asyncio.Event) -> None:
             del shutdown_event
@@ -117,6 +119,12 @@ def test_start_mounts_egress_proxy_with_provider_allowlist(
     assert ("api.anthropic.com", 443) in allowlist
     assert ("api.deepseek.com", 443) in allowlist
     assert captured.get("port") == 8889  # the resolved default proxy port
+    # The provider plane raises the handshake idle timeout to 22s (spec §21.5 / ADR-0052) so a
+    # late-retry pre-brokered socket survives; the Discord/relay planes keep the 10s default.
+    # Pinned to the live constant so the construction site cannot drift from the merge-gate value.
+    from alfred.gateway.egress_proxy import _PROVIDER_HANDSHAKE_TIMEOUT_S
+
+    assert captured.get("handshake_timeout_s") == _PROVIDER_HANDSHAKE_TIMEOUT_S == 22.0
     # The EXACT field-allowlisted audit sink (the payload-blind guard for PRD §7.1), not just
     # "some callable" — a regression to a stubbed logger must fail here.
     from alfred.gateway.egress_audit import record_egress_connect
