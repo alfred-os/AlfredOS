@@ -910,9 +910,11 @@ async def test_pi_2026_015_schema_break_reply_is_refused_end_to_end(
     cert, key = _canned_ca
 
     def _schema_break(_index: int) -> bytes:
-        # Obeys the steer: drops the required ``intent`` field. A real hostile LLM
-        # emitting extra keys is the tracked residual (CommsBodyExtraction is
-        # extra="ignore"); a MISSING required field is the clean structural break.
+        # Obeys the steer: drops the required ``intent`` field. Since #340 golive
+        # Task 17 the shipped ``CommsBodyExtraction`` inherits the base's
+        # ``extra="forbid"``, so extra keys are ALSO refused now (see the in-proc
+        # driver's ``test_production_comms_schema_extra_keys_and_tool_calls_are_refused``);
+        # a MISSING required field is the orthogonal structural break exercised here.
         return _http_response(_tool_body_with_input({"text": "only text, no intent field"}))
 
     proxy = _CannedAnthropicProxy(cert, key, responder=_schema_break)

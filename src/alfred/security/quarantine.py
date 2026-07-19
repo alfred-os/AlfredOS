@@ -111,7 +111,24 @@ class ExtractionSchema(BaseModel):
     ``Literal[1]`` to ``Literal[1, 2]`` and migrate the audit_row_schemas
     field to a discriminated union per version. Until then, the closed
     set keeps the audit-side consumer's deserialisation single-branched.
+
+    ``extra="forbid"`` (#340 golive Task 17) closes the spec §12 containment
+    gap the Task-13 corpus disclosed: the orchestrator-side re-validation in
+    :meth:`QuarantinedExtractor._extract_body`
+    (``schema.model_validate(data_dict)``) now RAISES ``ValidationError`` on any
+    key the (compromised / attacker-steered) quarantined child emits beyond the
+    declared surface, so ``_extract_body`` routes it through the
+    protocol-violation audit path and REFUSES it — a hostile ``tool_calls`` /
+    ``system`` extra key can no longer ride into the trusted T2
+    ``Extracted.data`` as inert-but-present passthrough (HARD #5 / HARD #7). A
+    subclass that legitimately needs extra keys silently dropped may override
+    with its own ``model_config = ConfigDict(extra="ignore")`` (Pydantic merges
+    child config over the base), but the SHIPPED extraction schemas
+    (``CommsBodyExtraction``, ``WebFetchExtraction``) declare a closed field set
+    and inherit the forbidding default.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # ClassVar so Pydantic does NOT treat ``schema_version`` as a model
     # field (which would surface in ``.model_dump()`` and the wire
@@ -1103,8 +1120,10 @@ class QuarantinedExtractor:
             data_obj = data_field
             extraction_mode_value = payload.get("extraction_mode")
             # Closed-set validator — anything outside the Literal is a
-            # protocol violation. Defence-in-depth alongside Pydantic's
-            # own ``extra="forbid"``. The cast below is safe because the
+            # protocol violation. Defence-in-depth alongside the base
+            # :class:`ExtractionSchema`'s ``extra="forbid"`` (which the
+            # ``schema.model_validate`` re-validation below enforces on the
+            # ``data`` payload). The cast below is safe because the
             # ``in get_args(...)`` check rejects any other value first;
             # mypy can't see through the ``in`` to narrow ``object`` to
             # the Literal, so we cast at the boundary.
