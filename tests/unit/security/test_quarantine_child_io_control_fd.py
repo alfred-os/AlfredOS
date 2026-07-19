@@ -113,6 +113,7 @@ def _spawn_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         captured["proc"] = proc
         captured["argv"] = argv
         captured["pass_fds"] = proc.pass_fds
+        captured["env"] = kwargs.get("env")
         return proc
 
     def _fake_deliver(*, write_fd: int, key: str) -> None:
@@ -406,3 +407,106 @@ async def test_aclose_closes_the_parent_control_end() -> None:
     with pytest.raises(OSError):
         parent.getsockname()  # closed
     child.close()
+
+
+# ---------------------------------------------------------------------------
+# #340 PR2b-golive Task 8: _child_env provider-config threading + byte-identity
+# ---------------------------------------------------------------------------
+
+#: The golive provider-config keys the LIVE (control_fd=True) spawn threads into the
+#: scrubbed child env. The dormant/echo (control_fd=False) spawn sets NONE of them —
+#: the ADR-0050 dormancy byte-identity invariant.
+_GOLIVE_ENV_KEYS = frozenset(
+    {"ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS", "SSL_CERT_FILE"}
+)
+
+
+def test_default_ssl_cert_file_is_the_spike_verified_system_bundle() -> None:
+    """The spawn's default CA bundle is the spike-verified system-store path."""
+    assert qcio._DEFAULT_SSL_CERT_FILE == "/etc/ssl/certs/ca-certificates.crt"
+
+
+def test_child_env_default_omits_golive_provider_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-arg (dormant/control_fd=False) ``_child_env`` sets NONE of the golive keys.
+
+    The three keys are on the scrubbed allowlist (Task 2), so ``delenv`` them first
+    to isolate the FUNCTION's behaviour from an ambient host value — the assertion is
+    "``_child_env`` does not ADD them", not "the host had none".
+    """
+    for key in _GOLIVE_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    env = qcio._child_env()
+    assert _GOLIVE_ENV_KEYS.isdisjoint(env)
+
+
+def test_child_env_live_carries_model_budget_and_ssl() -> None:
+    """The live (control_fd=True) ``_child_env`` carries model + budget + CA path."""
+    env = qcio._child_env(
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+        ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+    )
+    assert env["ALFRED_QUARANTINE_MODEL"] == "claude-haiku-4-5"
+    assert env["ALFRED_QUARANTINE_MAX_TOKENS"] == "8192"
+    assert env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-certificates.crt"
+
+
+def test_child_env_live_is_dormant_plus_exactly_the_three_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live env == dormant env + EXACTLY the three golive keys (strict byte-identity).
+
+    Nothing else in the dormant env changes value; the live path only ADDS the three
+    host-passed keys — the precise contract the ADR-0050 dormancy invariant rests on.
+    """
+    for key in _GOLIVE_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    dormant = qcio._child_env()
+    live = qcio._child_env(
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+        ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+    )
+    assert set(live) - set(dormant) == _GOLIVE_ENV_KEYS
+    for key in dormant:
+        assert live[key] == dormant[key]
+
+
+async def test_default_spawn_env_omits_golive_provider_config(
+    _spawn_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A control_fd=False spawn's child env carries NONE of the golive keys (dormancy)."""
+    for key in _GOLIVE_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    io = await spawn_quarantine_child_io(provider_key="k")
+    try:
+        assert _GOLIVE_ENV_KEYS.isdisjoint(_spawn_capture["env"])
+    finally:
+        await io.aclose()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+async def test_control_fd_spawn_env_carries_provider_config(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """A control_fd=True spawn threads model + budget + the default CA path into the env."""
+    io = await spawn_quarantine_child_io(
+        provider_key="k",
+        control_fd=True,
+        child_module=qcio._BROKERED_PROBE_MODULE,
+        egress_config=_Cfg(),
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+    )
+    try:
+        env = _spawn_capture["env"]
+        assert env["ALFRED_QUARANTINE_MODEL"] == "claude-haiku-4-5"
+        assert env["ALFRED_QUARANTINE_MAX_TOKENS"] == "8192"
+        assert env["SSL_CERT_FILE"] == qcio._DEFAULT_SSL_CERT_FILE
+    finally:
+        await io.aclose()

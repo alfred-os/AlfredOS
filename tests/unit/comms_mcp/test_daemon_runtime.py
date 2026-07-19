@@ -55,6 +55,13 @@ from tests.helpers.gates import make_quarantined_extract_chain_gate
 _ADAPTER_ID = "alfred_comms_test"
 
 
+class _EgressCfg:
+    """Minimal ``EgressProxyConfig``-shaped stub (structural, PEP 544)."""
+
+    def __init__(self, egress_proxy_url: str | None = "http://alfred-gateway:8889") -> None:
+        self.egress_proxy_url = egress_proxy_url
+
+
 class _EchoingChildDouble:
     """In-proc length-prefixed child double echoing the ingested body.
 
@@ -409,7 +416,7 @@ async def test_build_extractor_drives_real_transport_over_spawned_child(
     spawned: list[_EchoingChildDouble] = []
 
     async def _fake_spawn(
-        *, provider_key: str, refusal_recorder: object = None
+        *, provider_key: str, refusal_recorder: object = None, **_golive: object
     ) -> _EchoingChildDouble:
         child = _EchoingChildDouble(provider_key=provider_key)
         spawned.append(child)
@@ -431,6 +438,7 @@ async def test_build_extractor_drives_real_transport_over_spawned_child(
             secret_broker=broker,
             staging=staging,
             environment="production",
+            egress_config=_EgressCfg(),
         )
         # The builder returns the live transport too so the daemon can reap the
         # child on every exit path (CR #255); it owns the faked child-IO here.
@@ -482,7 +490,7 @@ async def test_build_extractor_reaps_child_when_construction_fails(
     spawned: list[_EchoingChildDouble] = []
 
     async def _fake_spawn(
-        *, provider_key: str, refusal_recorder: object = None
+        *, provider_key: str, refusal_recorder: object = None, **_golive: object
     ) -> _EchoingChildDouble:
         child = _EchoingChildDouble(provider_key=provider_key)
         spawned.append(child)
@@ -505,6 +513,7 @@ async def test_build_extractor_reaps_child_when_construction_fails(
             secret_broker=broker,
             staging=staging,
             environment="production",
+            egress_config=_EgressCfg(),
         )
 
     assert len(spawned) == 1
@@ -535,7 +544,7 @@ async def test_build_extractor_reaps_child_when_transport_construction_fails(
     spawned: list[_EchoingChildDouble] = []
 
     async def _fake_spawn(
-        *, provider_key: str, refusal_recorder: object = None
+        *, provider_key: str, refusal_recorder: object = None, **_golive: object
     ) -> _EchoingChildDouble:
         child = _EchoingChildDouble(provider_key=provider_key)
         spawned.append(child)
@@ -558,6 +567,7 @@ async def test_build_extractor_reaps_child_when_transport_construction_fails(
             secret_broker=broker,
             staging=QuarantineStagingMap(),
             environment="production",
+            egress_config=_EgressCfg(),
         )
 
     assert len(spawned) == 1
@@ -591,7 +601,9 @@ async def test_extractor_injects_refusal_auditor(
 
     seen: dict[str, object] = {}
 
-    async def _fake_spawn(*, provider_key: str, refusal_recorder: object = None) -> Any:
+    async def _fake_spawn(
+        *, provider_key: str, refusal_recorder: object = None, **_golive: object
+    ) -> Any:
         seen["refusal_recorder"] = refusal_recorder
         raise RuntimeError("stop after capturing kwargs")
 
@@ -610,6 +622,7 @@ async def test_extractor_injects_refusal_auditor(
             secret_broker=broker,
             staging=QuarantineStagingMap(),
             environment="production",
+            egress_config=_EgressCfg(),
         )
 
     recorder = seen["refusal_recorder"]
@@ -629,3 +642,124 @@ def test_resolve_host_os_maps_to_launcher_vocab(
 ) -> None:
     monkeypatch.setattr(daemon_runtime_mod.platform, "system", lambda: system)
     assert daemon_runtime_mod._resolve_host_os() == expected
+
+
+# ---------------------------------------------------------------------------
+# #340 PR2b-golive Task 8: the builder flips the spawn to control_fd=True + config
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_quarantine_model_config_mirrors_routing_yaml() -> None:
+    """``_resolve_quarantine_model_config`` returns the routing.yaml [quarantine] values."""
+    from alfred.comms_mcp.daemon_runtime import _resolve_quarantine_model_config
+
+    model, max_tokens = _resolve_quarantine_model_config()
+    assert model == "claude-haiku-4-5"
+    assert max_tokens == 8192
+
+
+async def test_build_extractor_spawns_control_fd_with_provider_config(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The golive builder spawns the child control_fd=True + the resolved provider config.
+
+    ADR-0050 Decision 8 (the posture change under sign-off): the live spawn now
+    carries control_fd=True + the EgressProxyConfig + the routing.yaml model/budget.
+    """
+    from alfred.security.dlp import OutboundDlp
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    broker = MagicMock()
+    broker.redact = MagicMock(side_effect=lambda x: x)
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+    audit_writer = MagicMock()
+    audit_writer.append_schema = AsyncMock()
+
+    seen: dict[str, object] = {}
+
+    async def _fake_spawn(
+        *,
+        provider_key: str,
+        control_fd: bool = False,
+        egress_config: object = None,
+        model: object = None,
+        max_tokens: object = None,
+        ssl_cert_file: str = "",
+        refusal_recorder: object = None,
+    ) -> _EchoingChildDouble:
+        seen.update(
+            control_fd=control_fd,
+            egress_config=egress_config,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        return _EchoingChildDouble(provider_key=provider_key)
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+
+    cfg = _EgressCfg()
+    _extractor, transport = await _build_comms_inbound_extractor(
+        audit_writer=audit_writer,
+        outbound_dlp=outbound_dlp,
+        secret_broker=broker,
+        staging=QuarantineStagingMap(),
+        environment="production",
+        egress_config=cfg,
+    )
+    await transport.close()
+
+    assert seen["control_fd"] is True
+    assert seen["egress_config"] is cfg
+    assert seen["model"] == "claude-haiku-4-5"
+    assert seen["max_tokens"] == 8192
+
+
+async def test_build_extractor_refuses_on_blank_egress_proxy_before_spawn(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank egress proxy URL refuses boot (IOPlaneUnavailableError) BEFORE the spawn.
+
+    Fail-closed pre-spawn (§20.2): the golive child brokers its gateway socket
+    through this proxy, so a misconfigured egress plane must refuse boot rather than
+    spawn a live child it would then abandon. The ``_commands.py`` boot arm maps this
+    to the audited ``egress_plane_unavailable`` refusal.
+    """
+    from alfred.egress.errors import IOPlaneUnavailableError
+    from alfred.security.dlp import OutboundDlp
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+
+    spawned: list[object] = []
+
+    async def _fake_spawn(**kwargs: object) -> object:
+        spawned.append(kwargs)
+        raise AssertionError("spawn must not be reached on the egress-refuse path")
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+
+    with pytest.raises(IOPlaneUnavailableError):
+        await _build_comms_inbound_extractor(
+            audit_writer=MagicMock(),
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=QuarantineStagingMap(),
+            environment="production",
+            egress_config=_EgressCfg(egress_proxy_url=""),
+        )
+    assert spawned == []

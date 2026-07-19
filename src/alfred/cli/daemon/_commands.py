@@ -738,14 +738,17 @@ async def _start_async() -> None:
             # the sibling _refuse_boot arms.
             raise AssertionError("unreachable") from exc  # pragma: no cover
         except IOPlaneUnavailableError:
-            # FOLD-2 (#338 PR2): _build_comms_boot_graph's Orchestrator assembly calls
-            # build_router, which calls EgressClient.from_settings FIRST — raising this
-            # fail-closed when ALFRED_EGRESS_PROXY_URL is unset/blank. Unlike the secrets
-            # arms above, this IS reachable via a real boot: egress_proxy_url is an
-            # OPTIONAL Settings field, so no earlier required-field guard trips first.
-            # The connectivity-free core (Spec C / ADR-0042) has no direct-egress
-            # fallback, so REFUSE boot fail-closed (audited, exit 2) rather than crash
-            # uncaught (CLAUDE.md hard rule #7 — the #368 anti-pattern).
+            # FOLD-2 (#338 PR2): _build_comms_boot_graph reaches EgressClient.from_settings
+            # when ALFRED_EGRESS_PROXY_URL is unset/blank. As of #340 PR2b-golive Task 8
+            # the FIRST site to raise this is the quarantine builder's pre-spawn
+            # `_resolve_egress_config` (it validates the child's egress proxy before the
+            # spawn); build_router's later EgressClient.from_settings raises it too if
+            # ever reached first. Unlike the secrets arms above, this IS reachable via a
+            # real boot: egress_proxy_url is an OPTIONAL Settings field, so no earlier
+            # required-field guard trips first. The connectivity-free core (Spec C /
+            # ADR-0042) has no direct-egress fallback, so REFUSE boot fail-closed
+            # (audited, exit 2) rather than crash uncaught (CLAUDE.md hard rule #7 — the
+            # #368 anti-pattern).
             await _refuse_boot(
                 audit,
                 EgressPlaneUnavailableFailure(),

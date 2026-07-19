@@ -386,7 +386,9 @@ def test_boot_refuses_fail_closed_on_quarantine_child_spawn_failure(
 
     from alfred.security.quarantine_child_io import QuarantineChildSpawnError
 
-    async def _failing_spawn(*, provider_key: str, refusal_recorder: object = None) -> Any:
+    async def _failing_spawn(
+        *, provider_key: str, refusal_recorder: object = None, **_golive: object
+    ) -> Any:
         del provider_key
         raise QuarantineChildSpawnError("no bwrap on this host (test)")
 

@@ -721,6 +721,11 @@ async def _build_comms_boot_graph(
             secret_broker=secret_broker,
             staging=staging,
             environment=settings.environment,
+            # #340 PR2b-golive Task 8: the builder now flips the spawn to
+            # control_fd=True and validates the child's egress proxy fail-closed
+            # PRE-spawn. ``settings`` structurally satisfies EgressProxyConfig
+            # (it exposes ``egress_proxy_url``) — the SAME field build_router reads.
+            egress_config=settings,
         )
     except Exception:
         with suppress(Exception):

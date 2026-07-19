@@ -616,7 +616,7 @@ async def test_real_bwrap_probe_spawn_forwarded_inbound_reaches_core_dispatch(
                 _tiers._set_authorized_t3_nonce(nonce)
 
             async def _fake_spawn(
-                *, provider_key: str, refusal_recorder: object = None
+                *, provider_key: str, refusal_recorder: object = None, **_golive: object
             ) -> _EchoingChildDouble:
                 return _EchoingChildDouble(provider_key=provider_key)
 
