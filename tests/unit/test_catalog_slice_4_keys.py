@@ -129,6 +129,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # PR-S4-11c-2b go-live flip: the daemon spawns the bwrap quarantined child at
     # boot; a non-Linux / unprovisioned host refuses fail-closed.
     "daemon.boot.quarantine_child_spawn_failed",
+    # #340 golive (§20.2 PRIMARY refuse-boot): the host resolves the quarantined
+    # child's provider key pre-spawn; an unset quarantine_provider_api_key refuses
+    # boot fail-closed rather than build a real client on a bogus placeholder key.
+    "daemon.boot.quarantine_provider_key_unset",
     # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
     # in `alfred daemon start` output (not just an audit-log SQL query).
     "daemon.comms.adapter_spawned",

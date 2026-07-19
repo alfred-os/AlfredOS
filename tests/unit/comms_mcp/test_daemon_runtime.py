@@ -17,9 +17,9 @@ Covers the three host-side surfaces ``daemon_runtime`` adds:
   monkeypatches the spawn seam to an in-proc echoing child double (no bwrap), so
   the genuine ``extract(handle, schema)`` + ingest-then-extract wire + post-stage
   DLP scan path is exercised host-only.
-* :func:`_resolve_provider_key` — resolves the quarantined child's provider key
-  from the secret broker; an UNSET key logs a loud warning + returns the documented
-  placeholder (PR-S4-11c-2c flips that to refuse-boot).
+``_resolve_provider_key`` (the host pre-spawn provider-key resolve + its #340
+golive refuse-boot on an unset key) is covered by its own focused module,
+``test_daemon_runtime_provider_key.py``.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ from alfred.comms_mcp.daemon_runtime import (
     CommsInboundOrchestratorAdapter,
     OutboundSenderLike,
     _build_comms_inbound_extractor,
-    _resolve_provider_key,
 )
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
 from alfred.comms_mcp.inbound import _OrchestratorLike
@@ -619,43 +618,6 @@ async def test_extractor_injects_refusal_auditor(
     # `environment` into the auditor — not just constructs *a* SandboxRefusalAuditor.
     assert recorder._host_os == "linux"
     assert recorder._environment == "production"
-
-
-def test_resolve_provider_key_returns_broker_value_when_set() -> None:
-    """A configured ``quarantine_provider_api_key`` is returned verbatim."""
-    broker = MagicMock()
-    broker.has = MagicMock(return_value=True)
-    broker.get = MagicMock(return_value="configured-key")
-    assert _resolve_provider_key(broker) == "configured-key"
-    broker.get.assert_called_once_with("quarantine_provider_api_key")
-
-
-def test_resolve_provider_key_warns_and_falls_back_when_unset() -> None:
-    """An unset key logs a loud warning + returns the documented placeholder.
-
-    The key is NEVER empty (the real-spawn proof asserts fd-3 delivery), so the
-    placeholder is non-empty. PR-S4-11c-2c flips this unset path to refuse-boot.
-    Uses ``structlog.testing.capture_logs`` (not pytest ``caplog``) because the
-    module logs via structlog, which does not route through stdlib logging here.
-    """
-    import structlog.testing
-
-    from alfred.comms_mcp.daemon_runtime import _PROVIDER_KEY_PLACEHOLDER
-
-    broker = MagicMock()
-    broker.has = MagicMock(return_value=False)
-    broker.get = MagicMock(side_effect=AssertionError("must not call get when unset"))
-
-    with structlog.testing.capture_logs() as captured:
-        key = _resolve_provider_key(broker)
-
-    assert key == _PROVIDER_KEY_PLACEHOLDER
-    assert key  # never empty — fd-3 delivery still happens
-    assert any(
-        entry.get("event") == "comms.daemon_runtime.quarantine_provider_key_unset"
-        and entry.get("log_level") == "warning"
-        for entry in captured
-    ), captured
 
 
 @pytest.mark.parametrize(

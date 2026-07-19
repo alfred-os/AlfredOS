@@ -184,6 +184,30 @@ class QuarantineChildSpawnFailedFailure(_BootFailureBase):
     failure_reason: Literal["quarantine_child_spawn_failed"] = "quarantine_child_spawn_failed"
 
 
+class QuarantineProviderKeyUnsetFailure(_BootFailureBase):
+    """No quarantine provider key is configured at boot (#340 golive refuse-boot).
+
+    The §20.2 PRIMARY refuse-boot: with a comms adapter enabled, the comms boot
+    graph resolves the quarantined child's provider key from the secret broker
+    (``_resolve_provider_key`` in ``comms_mcp.daemon_runtime``) SYNCHRONOUSLY,
+    BEFORE the ``spawn_quarantine_child_io`` await. When
+    ``quarantine_provider_api_key`` is unset that resolve raises
+    :class:`alfred.comms_mcp.daemon_runtime.QuarantineProviderKeyUnsetError`.
+
+    Fail-closed (CLAUDE.md hard rule #7 / §20.3.1 must-not-regress): the go-live
+    child makes a REAL provider call, so an unset key must REFUSE boot rather than
+    resolve to a fallback placeholder — a real client built on a bogus key would
+    be a SILENT dead-LLM. Distinct from ``quarantine_child_spawn_failed`` (the
+    child could not spawn) and from #444's ``provider_key_delivery_failed`` (a
+    child-still-up POST-spawn fd-3 delivery fault): THIS is the PRE-spawn,
+    key-unset-at-boot refusal. The operator-facing message names the
+    ``quarantine_provider_api_key`` secret + how to set it; the audit row carries
+    only the ``failure_reason`` (``_refuse_boot``'s fixed subject shape).
+    """
+
+    failure_reason: Literal["quarantine_provider_key_unset"] = "quarantine_provider_key_unset"
+
+
 class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     """An enabled comms adapter failed to spawn / handshake at boot (PR-S4-11b).
 
@@ -361,6 +385,7 @@ DaemonBootFailure = Annotated[
     | SecretsConfigFailedFailure
     | T3NonceRegistrationFailedFailure
     | QuarantineChildSpawnFailedFailure
+    | QuarantineProviderKeyUnsetFailure
     | CommsAdapterSpawnFailedFailure
     | CommsAdapterBindFailedFailure
     | CommsAdapterUnknownKindFailure
@@ -375,7 +400,8 @@ DaemonBootFailure = Annotated[
 ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 #370 item 2 ``secrets_config_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
-``quarantine_child_spawn_failed`` + PR-S4-11b ``comms_adapter_spawn_failed`` +
+``quarantine_child_spawn_failed`` + #340 golive ``quarantine_provider_key_unset`` +
+PR-S4-11b ``comms_adapter_spawn_failed`` +
 ADR-0031 ``comms_adapter_bind_failed`` +
 #374 ``comms_adapter_unknown_kind`` +
 PR-S4-235-1 ``comms_promoter_misconfigured`` +
