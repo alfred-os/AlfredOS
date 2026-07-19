@@ -37,4 +37,4 @@ references:
   - "src/alfred/security/quarantine_child_io.py (read_frame returns ControlResult bytes only)"
   - "src/alfred/security/quarantine_transport.py (_decode_result_payload — one result frame)"
   - "src/alfred/security/quarantine_child/__main__.py (child reads fd 3 in main() only, sec-007)"
-  - "tests/integration/test_quarantine_child_real_spawn.py (direct real-spawn round trip)"
+  - "tests/integration/test_quarantine_real_extract.py (real bwrap child + broker + TLS real-extract round trip)"

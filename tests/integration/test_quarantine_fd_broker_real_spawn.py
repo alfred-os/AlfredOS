@@ -61,7 +61,7 @@ from alfred.security import quarantine_child_io as qcio
 
 pytestmark = pytest.mark.integration
 
-# DOCKER-ONLY guard, mirroring ``test_quarantine_child_real_spawn.py``: bwrap + Linux +
+# DOCKER-ONLY guard, mirroring ``test_quarantine_real_extract.py``: bwrap + Linux +
 # root + the ADR-0030 bound-interpreter provisioning. The probe child (a peer of the
 # real quarantine child under the SAME ``kind="full"`` policy + manifest) execs
 # ``ALFRED_QUARANTINE_CHILD_PYTHON`` under the policy's ``/usr`` ro-bind, so the same
@@ -198,7 +198,7 @@ async def test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect(
 ) -> None:
     """A brokered socket crosses bwrap into an empty-netns child; the core leaks + writes nothing.
 
-    Mirrors ``test_quarantine_child_real_spawn.py``'s launcher setup: the daemon is
+    Mirrors ``test_quarantine_real_extract.py``'s launcher setup: the daemon is
     absent here, so the test itself sets ``ALFRED_ENVIRONMENT`` for the launcher to
     resolve the ``kind="full"`` bwrap policy (without it the launcher refuses with
     ``environment_not_set`` and the child exits before replying — a truncated
@@ -210,7 +210,7 @@ async def test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect(
     try:
         # Spawn INSIDE the try so a spawn failure still runs `proxy.close()` in `finally`
         # (the proxy's listener + threads would otherwise leak). Mirrors the sibling
-        # `test_quarantine_child_real_spawn.py` cleanup discipline.
+        # `test_quarantine_real_extract.py` cleanup discipline.
         io = await qcio.spawn_quarantine_child_io(
             provider_key="probe-key-placeholder",  # the probe never reads fd 3 — no LLM call
             control_fd=True,

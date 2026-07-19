@@ -1295,7 +1295,7 @@ jobs:
           # Keep in lockstep with the arm64 twin's pin.
           PROTO_INSTALL_VERSION: "0.58.2"
         # ADR-0030 bound-interpreter contract — make the REAL bwrap quarantine-child
-        # spawn RUNNABLE here instead of paper-only. `test_quarantine_child_real_spawn.py`
+        # spawn RUNNABLE here instead of paper-only. `test_quarantine_real_extract.py`
         # gates on `ALFRED_QUARANTINE_CHILD_PYTHON` being set (`_PROVISIONED`); without
         # this step it SKIPS even under root+bwrap, so the spawn proof gates nothing (#248).
         #
@@ -1418,7 +1418,7 @@ jobs:
           fi
           # #248: the real-spawn quarantine-child leg ADDITIONALLY gates on
           # `ALFRED_QUARANTINE_CHILD_PYTHON` being set to a real /usr interpreter
-          # (`_PROVISIONED` in test_quarantine_child_real_spawn.py). The provisioning
+          # (`_PROVISIONED` in test_quarantine_real_extract.py). The provisioning
           # step above must have produced it; if it silently no-op'd, the spawn leg
           # would SKIP and re-create the #245 paper-gate one level deeper. Assert it.
           # ``BOUND_PY`` arrives via the step ``env:`` (workflow-injection-safe).
@@ -1680,15 +1680,19 @@ jobs:
             || { echo "::error::Discord policy kernel proof did not report a passing run."; exit 1; }
       - name: Assert the dual-LLM quarantine-child real-spawn leg RAN (not skipped) — #245 / #269
         # #269 closed a gap here: the gateway, brokered-fd and Discord legs each had
-        # an assert-RAN guard, but `test_quarantine_child_real_spawn.py` — the REAL
-        # dual-LLM bwrap child round-trip, the single most arch-sensitive leg in the
-        # repo — had none. It `skipif`s on (not bwrap) / (sysname != Linux) /
-        # (geteuid != 0) / (not ALFRED_QUARANTINE_CHILD_PYTHON), so a provisioning
-        # regression would silently downgrade it to a skip and this required lane
-        # would still go green while gating nothing (the exact #245 failure mode).
-        # It is ALSO the leg that proves the #269 `/lib64` soft-bind on the arm64
-        # twin below, so an un-asserted skip there would make the whole arm64 gate
-        # vacuous. Run it in isolation and fail on skip / non-pass.
+        # an assert-RAN guard, but the REAL dual-LLM bwrap child round-trip — the
+        # single most arch-sensitive leg in the repo — had none. #340 golive Task 14
+        # SUPERSEDED the old deterministic-echo round-trip
+        # (`test_quarantine_child_real_spawn.py`, deleted) with the REAL-extract proof
+        # `test_quarantine_real_extract.py` (a real bwrap child + real broker + real
+        # TLS against a canned-Anthropic stub -> a real Extracted). It `skipif`s on
+        # (not bwrap) / (sysname != Linux) / (geteuid != 0) /
+        # (not ALFRED_QUARANTINE_CHILD_PYTHON), so a provisioning regression would
+        # silently downgrade it to a skip and this required lane would still go green
+        # while gating nothing (the exact #245 failure mode). It is ALSO the leg that
+        # proves the #269 `/lib64` soft-bind on the arm64 twin below (it spawns the
+        # SAME real bwrap child), so an un-asserted skip there would make the whole
+        # arm64 gate vacuous. Run it in isolation and fail on skip / non-pass.
         #
         # NO `hashFiles()` GUARD — deliberately. Every other assert-RAN step here is
         # gated on `if: hashFiles('<path>') != ''`, which means a RENAME of the test
@@ -1700,7 +1704,7 @@ jobs:
         if: steps.check.outputs.has_spawn == 'true'
         env:
           ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
-          SPAWN_TEST: tests/integration/test_quarantine_child_real_spawn.py
+          SPAWN_TEST: tests/integration/test_quarantine_real_extract.py
         run: |
           set -euo pipefail
           if [ ! -f "${SPAWN_TEST}" ]; then
@@ -1919,12 +1923,14 @@ jobs:
             -p no:cacheprovider --cov-fail-under=0 -m "not real_llm"
       - name: Assert the dual-LLM quarantine-child real-spawn leg RAN (not skipped) — #269 proof
         # THE gate this whole job exists for: the real bwrap dual-LLM child
-        # round-trip on aarch64. It is what the #269 `/lib64` soft-bind fixes, and
-        # it `skipif`s on (not bwrap) / (sysname != Linux) / (geteuid != 0) /
-        # (not ALFRED_QUARANTINE_CHILD_PYTHON) — so without this runtime assert a
-        # provisioning regression would silently skip it and this lane would go
-        # green while proving NOTHING about arm64 (the #245 paper-gate failure
-        # mode, one level deeper).
+        # round-trip on aarch64 — now the #340 golive Task 14 REAL-extract proof
+        # (`test_quarantine_real_extract.py`) that superseded the deleted
+        # deterministic-echo round-trip. It is what the #269 `/lib64` soft-bind
+        # fixes, and it `skipif`s on (not bwrap) / (sysname != Linux) /
+        # (geteuid != 0) / (not ALFRED_QUARANTINE_CHILD_PYTHON) — so without this
+        # runtime assert a provisioning regression would silently skip it and this
+        # lane would go green while proving NOTHING about arm64 (the #245 paper-gate
+        # failure mode, one level deeper).
         #
         # NO `hashFiles()` GUARD — deliberately (see the amd64 twin): gating the step
         # on the file's existence means a RENAME makes the step evaporate and the
@@ -1933,7 +1939,7 @@ jobs:
         if: steps.check.outputs.has_spawn == 'true'
         env:
           ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
-          SPAWN_TEST: tests/integration/test_quarantine_child_real_spawn.py
+          SPAWN_TEST: tests/integration/test_quarantine_real_extract.py
         run: |
           set -euo pipefail
           if [ ! -f "${SPAWN_TEST}" ]; then
@@ -2391,6 +2397,16 @@ jobs:
         #     + the length-prefixed JSON-RPC loop live here; a skipped branch
         #     on the launcher boundary is a CLAUDE.md hard rule #6
         #     (secrets-via-broker) violation candidate.
+        #   * ``src/alfred/security/quarantine_child/brokered_egress.py`` —
+        #     the #340 golive child-side per-call transport: the Anthropic SDK
+        #     over the core-brokered TCP fd (HARD #5 — TLS terminates in-child,
+        #     the core writes zero application bytes), the fixed wall-clock
+        #     socket ceiling (prov-001), and the ``BrokeredProviderSource``
+        #     bind/drain-leftovers fd ownership (§8 D5). A skipped branch here
+        #     is a leaked fd or a voided read ceiling on the crown-jewel egress
+        #     path. Proven 100% by the unit suite (``test_brokered_egress_transport``
+        #     + ``test_brokered_provider_source`` + the boot-ordering tests);
+        #     the docker real-extract proof (Task 14) exercises it end-to-end.
         #
         # Per-file ``--include`` mirrors the supervisor / plugins precedent
         # so a new quarantined-LLM trust-boundary file gets added to this
@@ -2398,10 +2414,10 @@ jobs:
         # < 100% coverage. Chained ``&&`` hashFiles guard per PR-S3-1 R1
         # F1: ANY-match must NOT no-op the gate; ALL files must be
         # present before the coverage report runs.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/providers/base.py') != '' && hashFiles('src/alfred/bootstrap/quarantine.py') != '' && hashFiles('src/alfred/security/quarantine_child/__init__.py') != '' && hashFiles('src/alfred/security/quarantine_child/provider_dispatch.py') != '' && hashFiles('src/alfred/security/quarantine_child/__main__.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/providers/base.py') != '' && hashFiles('src/alfred/bootstrap/quarantine.py') != '' && hashFiles('src/alfred/security/quarantine_child/__init__.py') != '' && hashFiles('src/alfred/security/quarantine_child/provider_dispatch.py') != '' && hashFiles('src/alfred/security/quarantine_child/__main__.py') != '' && hashFiles('src/alfred/security/quarantine_child/brokered_egress.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,src/alfred/security/quarantine_child/__init__.py,src/alfred/security/quarantine_child/provider_dispatch.py,src/alfred/security/quarantine_child/__main__.py' \
+            --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,src/alfred/security/quarantine_child/__init__.py,src/alfred/security/quarantine_child/provider_dispatch.py,src/alfred/security/quarantine_child/__main__.py,src/alfred/security/quarantine_child/brokered_egress.py' \
             --fail-under=100
       - name: Web-fetch trust-boundary 100% line+branch coverage (combined)
         id: web_fetch_cov_combined
