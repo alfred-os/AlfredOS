@@ -418,19 +418,38 @@ def _build_provider(key: str) -> _ProviderFactory:
     kernel containment.
 
     §20.2 SECONDARY refuse-boot (HARD #7): an empty key makes
-    ``_ProviderFactory.from_key`` raise :class:`QuarantineChildBootError`, which
-    propagates out of ``main`` (``asyncio.run`` re-raises) so the child exits
-    non-zero BEFORE writing ``ready`` — a dead-LLM child must never lie live. The
-    HOST pre-spawn key check (Task 7) is the PRIMARY guard; this is defence-in-depth.
+    ``_ProviderFactory.from_key`` raise :class:`QuarantineChildBootError`, and a
+    non-positive ``ALFRED_QUARANTINE_MAX_TOKENS`` raises it here too — both propagate out
+    of ``main`` (``asyncio.run`` re-raises) so the child exits non-zero BEFORE writing
+    ``ready``: a dead-LLM child must never lie live. The HOST pre-spawn checks (Task 7 key,
+    Task 15 budget) are the PRIMARY guards; these are defence-in-depth.
 
     ``ALFRED_QUARANTINE_MODEL`` / ``ALFRED_QUARANTINE_MAX_TOKENS`` arrive via the
     scrubbed spawn env (Task 8). A missing var is a supervisor-side wiring bug that
     fails loud with ``KeyError`` at boot rather than silently defaulting the model.
+
+    The ``max_tokens > 0`` guard (Task 15, HARD #7) fires HERE — before the request loop
+    that calls ``dispatch_extraction`` is ever entered — so a ``<= 0`` budget can never
+    reach the retry loop, where the ``CompletionRequest`` ``>0`` validator's
+    ``ValidationError`` would be caught as retry-eligible and LAUNDERED into a
+    ``cannot_extract`` typed refusal after N doomed attempts.
     """
-    from alfred.security.quarantine_child.brokered_egress import _ProviderFactory
+    from alfred.security.quarantine_child.brokered_egress import (
+        QuarantineChildBootError,
+        _ProviderFactory,
+    )
 
     model = os.environ["ALFRED_QUARANTINE_MODEL"]
     max_tokens = int(os.environ["ALFRED_QUARANTINE_MAX_TOKENS"])
+    if max_tokens <= 0:
+        # §20.2 SECONDARY refuse-boot (HARD #7): refuse LOUD at boot rather than let a
+        # non-positive budget reach dispatch_extraction, where it would launder into a
+        # cannot_extract refusal. Child-subprocess boot diagnostic (NOT t() scope); the
+        # value is host-set routing config, non-secret / non-T3.
+        raise QuarantineChildBootError(
+            f"ALFRED_QUARANTINE_MAX_TOKENS must be > 0, got {max_tokens} — refusing to "
+            "boot a child whose every extraction would fail its >0 validator (§20.2)"
+        )
     return _ProviderFactory.from_key(key, model=model, max_tokens=max_tokens)
 
 

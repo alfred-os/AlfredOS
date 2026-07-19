@@ -342,6 +342,24 @@ def _resolve_provider_key(secret_broker: SecretBroker) -> str:
     raise QuarantineProviderKeyUnsetError(_PROVIDER_KEY_SECRET_ID)
 
 
+class QuarantineMaxTokensInvalidError(AlfredError):
+    """The quarantine per-extraction ``max_tokens`` budget is ``<= 0`` — refuse boot.
+
+    §17 / §20.2 fail-loud (#340 golive, HARD #7): a non-positive
+    ``max_tokens_per_extraction`` would make every real ``CompletionRequest`` fail its
+    ``>0`` validator inside ``_call_provider``'s ``try`` — a
+    :class:`pydantic.ValidationError` the dispatch retry loop catches as RETRY-ELIGIBLE,
+    so N doomed attempts exhaust to a ``cannot_extract`` typed refusal that MASKS the
+    config misconfiguration as an extraction failure (the loud fail is lost — the HARD #7
+    silent-launder shape).
+
+    The host validates the budget SYNCHRONOUSLY, PRE-spawn (mirrors
+    :class:`QuarantineProviderKeyUnsetError`), so a bad budget NEVER reaches the child
+    or the retry loop. Rooted at :class:`AlfredError` so the CLI boot path's ``except``
+    arm maps it into an audited ``daemon.boot.failed`` refusal (exit 2).
+    """
+
+
 def _resolve_quarantine_model_config() -> tuple[str, int]:
     """Return the quarantined child's ``(model, max_tokens)`` — routing.yaml ``[quarantine]``.
 
@@ -350,12 +368,31 @@ def _resolve_quarantine_model_config() -> tuple[str, int]:
     test_routing_yaml_quarantine_block. The Slice-4 routing loader will replace these
     module constants with a parsed value; the seam is here so that swap is local.
 
+    §17 / §20.2 fail-loud (HARD #7): a ``max_tokens <= 0`` refuses boot with a loud
+    :class:`QuarantineMaxTokensInvalidError` BEFORE the spawn, rather than being threaded
+    into the child env where it would launder into a ``cannot_extract`` refusal via the
+    dispatch retry loop's ``ValidationError`` catch. The check lives here (the resolution
+    boundary) so a bad routing.yaml value — once the Slice-4 loader lands — can never
+    reach the retry loop.
+
     SYNCHRONOUS by design (no ``await``): the caller
     (:func:`_build_comms_inbound_extractor`) resolves this BEFORE the single spawn
     ``await`` so the fd-3 clobber window never opens on this path (mirrors
     :func:`_resolve_provider_key`). Adding an ``await`` would reopen it; do not.
     """
-    return _QUARANTINE_MODEL, _QUARANTINE_MAX_TOKENS_PER_EXTRACTION
+    max_tokens = _QUARANTINE_MAX_TOKENS_PER_EXTRACTION
+    if max_tokens <= 0:
+        # Fail LOUD + fail CLOSED, PRE-spawn (§17 / §20.2, HARD #7): a <=0 budget would
+        # launder into cannot_extract via the retry loop's ValidationError catch. The
+        # value is non-secret routing config, safe to log + carry in the error.
+        _log.error(
+            "comms.daemon_runtime.quarantine_max_tokens_invalid",
+            max_tokens=max_tokens,
+        )
+        raise QuarantineMaxTokensInvalidError(
+            f"quarantine max_tokens_per_extraction must be > 0, got {max_tokens}"
+        )
+    return _QUARANTINE_MODEL, max_tokens
 
 
 def _resolve_egress_config(egress_config: EgressProxyConfig) -> EgressProxyConfig:
@@ -529,5 +566,6 @@ __all__ = [
     "CommsAdapterCrashedHookInvoker",
     "CommsInboundOrchestratorAdapter",
     "OutboundSenderLike",
+    "QuarantineMaxTokensInvalidError",
     "QuarantineProviderKeyUnsetError",
 ]

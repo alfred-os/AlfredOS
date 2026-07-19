@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-19 16:40+0100\n"
+"POT-Creation-Date: 2026-07-19 21:48+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -194,50 +194,59 @@ msgstr ""
 "Check file permissions and rerun the command."
 
 #: src/alfred/cli/config.py:100 src/alfred/cli/config.py:121
-#: src/alfred/cli/config.py:246
+#: src/alfred/cli/config.py:288
 msgid "cli.config.error.malformed_yaml"
 msgstr ""
 "alfred config refused: {yaml_path} is malformed and cannot be parsed. "
 "YAML error: {error}. Fix the file and rerun the command."
 
+#: src/alfred/cli/config.py:240
+msgid "cli.config.set.action_deadline_below_floor"
+msgstr ""
+"alfred config set refused: action-deadline must be greater than {floor}s "
+"— the quarantine host read-frame timeout. A value at or below the floor "
+"(got {value}) inverts the extraction timeout nesting, tearing a live "
+"extraction at the orchestrator deadline before the framing and child "
+"bounds fire. Set a value above {floor}s and rerun."
+
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
 # quarantined-provider) queue a state.git reviewer-gated proposal.
-#: src/alfred/cli/config.py:346
+#: src/alfred/cli/config.py:388
 msgid "cli.config.help.group"
 msgstr "Get, set, or list operator configuration values."
 
-#: src/alfred/cli/config.py:356
+#: src/alfred/cli/config.py:398
 msgid "cli.config.set.help.short"
 msgstr "Set an operator configuration key."
 
-#: src/alfred/cli/config.py:360
+#: src/alfred/cli/config.py:402
 msgid "cli.config.set.arg.key"
 msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 
-#: src/alfred/cli/config.py:364
+#: src/alfred/cli/config.py:406
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:443
+#: src/alfred/cli/config.py:485
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:455
+#: src/alfred/cli/config.py:501
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:468
+#: src/alfred/cli/config.py:514
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:472
+#: src/alfred/cli/config.py:518
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:493
+#: src/alfred/cli/config.py:539
 msgid "cli.config.get.reviewer_gated_set_only"
 msgstr ""
 "'{key}' is a reviewer-gated (high-blast) configuration key. Its value "
@@ -246,37 +255,37 @@ msgstr ""
 " routing.yaml. There is no `alfred config get` surface for reviewer-gated"
 " keys in this release."
 
-#: src/alfred/cli/config.py:501
+#: src/alfred/cli/config.py:547
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:510
+#: src/alfred/cli/config.py:556
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:512
+#: src/alfred/cli/config.py:558
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:536
+#: src/alfred/cli/config.py:582
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:545 src/alfred/cli/config.py:549
+#: src/alfred/cli/config.py:591 src/alfred/cli/config.py:595
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
 "to seed the file."
 
-#: src/alfred/cli/config.py:573
+#: src/alfred/cli/config.py:619
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:575
+#: src/alfred/cli/config.py:621
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"
@@ -961,7 +970,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:366
+#: src/alfred/cli/daemon/_commands.py:370
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -969,7 +978,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:369
+#: src/alfred/cli/daemon/_commands.py:373
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -978,7 +987,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:420
+#: src/alfred/cli/daemon/_commands.py:424
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -986,7 +995,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:431
+#: src/alfred/cli/daemon/_commands.py:435
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -995,7 +1004,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:447
+#: src/alfred/cli/daemon/_commands.py:451
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1003,7 +1012,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:461
+#: src/alfred/cli/daemon/_commands.py:465
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1011,7 +1020,7 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:502
+#: src/alfred/cli/daemon/_commands.py:506
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1021,7 +1030,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:528
+#: src/alfred/cli/daemon/_commands.py:532
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "A mandatory first-party capability grant is not live after boot (the DLP-"
@@ -1031,7 +1040,7 @@ msgstr ""
 "errors — the daemon log names the specific plugin_id/hookpoint that "
 "failed — then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:556
+#: src/alfred/cli/daemon/_commands.py:560
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1042,7 +1051,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:628
+#: src/alfred/cli/daemon/_commands.py:632
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1050,7 +1059,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS to exactly one adapter and re-run `alfred "
 "daemon start`. Multi-adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:699
+#: src/alfred/cli/daemon/_commands.py:703
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1060,7 +1069,7 @@ msgstr ""
 "unset (comms disabled), or provision bwrap + the plugin launcher and re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:715
+#: src/alfred/cli/daemon/_commands.py:719
 msgid "daemon.boot.quarantine_provider_key_unset"
 msgstr ""
 "Cannot start: the quarantined LLM's provider key "
@@ -1070,8 +1079,18 @@ msgstr ""
 "via the ALFRED_QUARANTINE_PROVIDER_API_KEY environment variable, then re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:732
-#: src/alfred/cli/daemon/_comms_boot.py:1034
+#: src/alfred/cli/daemon/_commands.py:736
+msgid "daemon.boot.quarantine_max_tokens_invalid"
+msgstr ""
+"Cannot start: the quarantined LLM's per-extraction token budget "
+"(max_tokens_per_extraction) is not greater than zero. A non-positive "
+"budget would make every extraction fail its validator, so comms refuses "
+"to boot rather than silently returning cannot_extract on every message. "
+"Set a positive max_tokens_per_extraction in config/routing.yaml "
+"[quarantine], then re-run `alfred daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:753
+#: src/alfred/cli/daemon/_comms_boot.py:1039
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -1080,7 +1099,7 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:752
+#: src/alfred/cli/daemon/_commands.py:776
 msgid "daemon.boot.egress_plane_unavailable"
 msgstr ""
 "Cannot start: the egress proxy (ALFRED_EGRESS_PROXY_URL) is not "
@@ -1089,14 +1108,14 @@ msgstr ""
 "L7 CONNECT proxy (compose default http://alfred-gateway:8889) and re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:772
+#: src/alfred/cli/daemon/_commands.py:796
 msgid "daemon.boot.router_secret_missing"
 msgstr ""
 "Cannot start: the primary provider secret (`deepseek_api_key`) could not "
 "be resolved from the secret broker. Check the secrets file / environment "
 "variable for that key and re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:791
+#: src/alfred/cli/daemon/_commands.py:815
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
@@ -1105,38 +1124,38 @@ msgstr ""
 "set --authorization trusted <slug>` to demote each down to a single "
 "operator, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:937
+#: src/alfred/cli/daemon/_commands.py:961
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1053
+#: src/alfred/cli/daemon/_commands.py:1077
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1056
-#: src/alfred/cli/daemon/_commands.py:1061
+#: src/alfred/cli/daemon/_commands.py:1080
+#: src/alfred/cli/daemon/_commands.py:1085
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1063
+#: src/alfred/cli/daemon/_commands.py:1087
 #: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1078
+#: src/alfred/cli/daemon/_commands.py:1102
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1081
+#: src/alfred/cli/daemon/_commands.py:1105
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1089
+#: src/alfred/cli/daemon/_commands.py:1113
 #: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
@@ -1145,32 +1164,32 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1143
-#: src/alfred/cli/daemon/_commands.py:1150
-#: src/alfred/cli/daemon/_commands.py:1161
+#: src/alfred/cli/daemon/_commands.py:1167
+#: src/alfred/cli/daemon/_commands.py:1174
+#: src/alfred/cli/daemon/_commands.py:1185
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1165
+#: src/alfred/cli/daemon/_commands.py:1189
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1167
+#: src/alfred/cli/daemon/_commands.py:1191
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1172
+#: src/alfred/cli/daemon/_commands.py:1196
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1181
+#: src/alfred/cli/daemon/_commands.py:1205
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
 "incident(s)){latest_crash}"
 
 #: src/alfred/cli/daemon/_comms_boot.py:399
-#: src/alfred/cli/daemon/_comms_boot.py:983
+#: src/alfred/cli/daemon/_comms_boot.py:988
 msgid "daemon.boot.comms_adapter_unknown_kind"
 msgstr ""
 "Comms adapter '{adapter_id}' declares unknown adapter_kind "
@@ -1180,7 +1199,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
 #: src/alfred/cli/daemon/_comms_boot.py:412
-#: src/alfred/cli/daemon/_comms_boot.py:996
+#: src/alfred/cli/daemon/_comms_boot.py:1001
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -1188,18 +1207,18 @@ msgstr ""
 "and re-run `alfred daemon start`, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1234
+#: src/alfred/cli/daemon/_comms_boot.py:1239
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
 "boot. Check `alfred audit log --since 5m` for the adapter's load-refused "
 "/ crash row, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1248
+#: src/alfred/cli/daemon/_comms_boot.py:1253
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1344
+#: src/alfred/cli/daemon/_comms_boot.py:1349
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -1207,7 +1226,7 @@ msgstr ""
 "permissions (it must be owner-only, mode 0700), remove any stale "
 "`comms-*.sock`, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1421
+#: src/alfred/cli/daemon/_comms_boot.py:1426
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -1216,7 +1235,7 @@ msgstr ""
 "day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1481
+#: src/alfred/cli/daemon/_comms_boot.py:1486
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -1474,16 +1493,16 @@ msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:198
+#: src/alfred/comms_mcp/daemon_runtime.py:213
 #: src/alfred/comms_mcp/real_turn_adapter.py:380
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:224
+#: src/alfred/comms_mcp/daemon_runtime.py:239
 msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:231
+#: src/alfred/comms_mcp/daemon_runtime.py:246
 #: src/alfred/comms_mcp/real_turn_adapter.py:346
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
@@ -3163,54 +3182,54 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:436
+#: src/alfred/security/quarantine_child_io.py:467
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:454
+#: src/alfred/security/quarantine_child_io.py:485
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:497
+#: src/alfred/security/quarantine_child_io.py:528
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:511
-#: src/alfred/security/quarantine_child_io.py:955
+#: src/alfred/security/quarantine_child_io.py:551
+#: src/alfred/security/quarantine_child_io.py:1007
 msgid "security.quarantine_child.broker_unconfigured"
 msgstr "Quarantine child egress broker is not configured."
 
-#: src/alfred/security/quarantine_child_io.py:953
+#: src/alfred/security/quarantine_child_io.py:1005
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:1024
+#: src/alfred/security/quarantine_child_io.py:1086
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:1075
+#: src/alfred/security/quarantine_child_io.py:1137
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "
 "failed; the spawn was refused."
 
-#: src/alfred/security/quarantine_transport.py:142
+#: src/alfred/security/quarantine_transport.py:164
 msgid "security.quarantine_staging.handle_consumed"
 msgstr ""
 "Refusing to dereference a quarantine staging handle that was never staged"
 " or has already been consumed. Each inbound body is single-use; replay is"
 " refused."
 
-#: src/alfred/security/quarantine_transport.py:193
+#: src/alfred/security/quarantine_transport.py:215
 msgid "security.quarantine_staging.nonce_unconfigured"
 msgstr ""
 "Refusing to stage an inbound body for quarantine: the authorised T3 nonce"
 " is not configured. The daemon must register it at boot before wiring the"
 " comms inbound path."
 
-#: src/alfred/security/quarantine_transport.py:282
+#: src/alfred/security/quarantine_transport.py:314
 msgid "security.quarantine_transport.unsupported_method"
 msgstr ""
 "Quarantine transport refused an unsupported wire method '{method}'. "

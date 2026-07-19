@@ -99,6 +99,7 @@ from alfred.cli.daemon._failures import (
     OperatorNotSeededFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
+    QuarantineMaxTokensInvalidFailure,
     QuarantineProviderKeyUnsetFailure,
     RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
@@ -119,7 +120,10 @@ from alfred.cli.daemon._gate_boot import (
 # the spawn; an unset ``quarantine_provider_api_key`` raises this so the boot call
 # site refuses fail-closed (audited, exit 2) rather than build a real client on a
 # bogus placeholder key = a silent dead-LLM (§20.3.1 must-not-regress).
-from alfred.comms_mcp.daemon_runtime import QuarantineProviderKeyUnsetError
+from alfred.comms_mcp.daemon_runtime import (
+    QuarantineMaxTokensInvalidError,
+    QuarantineProviderKeyUnsetError,
+)
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
     EnvironmentSource,
@@ -713,6 +717,23 @@ async def _start_async() -> None:
                 audit,
                 QuarantineProviderKeyUnsetFailure(),
                 t("daemon.boot.quarantine_provider_key_unset"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except QuarantineMaxTokensInvalidError:
+            # #340 golive Task 15 (§17 / §20.2 fail-loud): _build_comms_inbound_extractor
+            # resolves the quarantined child's (model, max_tokens) SYNCHRONOUSLY (pre-spawn);
+            # a <=0 max_tokens_per_extraction raises this BEFORE the bwrap child is spawned.
+            # REFUSE boot fail-closed (audited, exit 2) rather than thread a non-positive
+            # budget into the child env, where every CompletionRequest would fail its >0
+            # validator and the dispatch retry loop would LAUNDER that ValidationError into a
+            # cannot_extract refusal (masking the misconfig — the HARD #7 silent-fail shape).
+            # Distinct reason from quarantine_provider_key_unset (key unset) and
+            # quarantine_child_spawn_failed (spawn fault). Pre-spawn, so no live child leaks.
+            await _refuse_boot(
+                audit,
+                QuarantineMaxTokensInvalidFailure(),
+                t("daemon.boot.quarantine_max_tokens_invalid"),
                 boot_id=boot_id,
                 environment_source=source,
             )

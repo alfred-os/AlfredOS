@@ -133,6 +133,9 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # child's provider key pre-spawn; an unset quarantine_provider_api_key refuses
     # boot fail-closed rather than build a real client on a bogus placeholder key.
     "daemon.boot.quarantine_provider_key_unset",
+    # #340 golive Task 15 (§17 / §20.2 fail-loud): a <=0 quarantine max_tokens budget
+    # refuses boot pre-spawn rather than laundering into a cannot_extract typed refusal.
+    "daemon.boot.quarantine_max_tokens_invalid",
     # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
     # in `alfred daemon start` output (not just an audit-log SQL query).
     "daemon.comms.adapter_spawned",

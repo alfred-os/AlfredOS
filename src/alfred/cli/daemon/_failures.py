@@ -208,6 +208,28 @@ class QuarantineProviderKeyUnsetFailure(_BootFailureBase):
     failure_reason: Literal["quarantine_provider_key_unset"] = "quarantine_provider_key_unset"
 
 
+class QuarantineMaxTokensInvalidFailure(_BootFailureBase):
+    """The quarantine per-extraction ``max_tokens`` budget is ``<= 0`` at boot (#340 golive).
+
+    The §17 / §20.2 fail-loud: with a comms adapter enabled, the comms boot graph
+    resolves the quarantined child's ``(model, max_tokens)`` SYNCHRONOUSLY, PRE-spawn
+    (``_resolve_quarantine_model_config`` in ``comms_mcp.daemon_runtime``). A non-positive
+    budget raises
+    :class:`alfred.comms_mcp.daemon_runtime.QuarantineMaxTokensInvalidError`.
+
+    Fail-closed (CLAUDE.md hard rule #7): a ``<= 0`` budget would make every extraction's
+    ``CompletionRequest`` fail its ``>0`` validator — a retry-eligible
+    :class:`pydantic.ValidationError` the dispatch loop LAUNDERS into a ``cannot_extract``
+    refusal, masking the misconfiguration. REFUSE boot (audited, exit 2) rather than ship a
+    child whose every extraction silently refuses. Distinct from
+    ``quarantine_provider_key_unset`` (key unset) and ``quarantine_child_spawn_failed``
+    (spawn fault): THIS is the pre-spawn, budget-invalid refusal. The audit row carries only
+    the ``failure_reason`` (``_refuse_boot``'s fixed subject shape).
+    """
+
+    failure_reason: Literal["quarantine_max_tokens_invalid"] = "quarantine_max_tokens_invalid"
+
+
 class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     """An enabled comms adapter failed to spawn / handshake at boot (PR-S4-11b).
 
@@ -386,6 +408,7 @@ DaemonBootFailure = Annotated[
     | T3NonceRegistrationFailedFailure
     | QuarantineChildSpawnFailedFailure
     | QuarantineProviderKeyUnsetFailure
+    | QuarantineMaxTokensInvalidFailure
     | CommsAdapterSpawnFailedFailure
     | CommsAdapterBindFailedFailure
     | CommsAdapterUnknownKindFailure
@@ -401,6 +424,7 @@ ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 #370 item 2 ``secrets_config_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + #340 golive ``quarantine_provider_key_unset`` +
+#340 golive Task 15 ``quarantine_max_tokens_invalid`` +
 PR-S4-11b ``comms_adapter_spawn_failed`` +
 ADR-0031 ``comms_adapter_bind_failed`` +
 #374 ``comms_adapter_unknown_kind`` +
