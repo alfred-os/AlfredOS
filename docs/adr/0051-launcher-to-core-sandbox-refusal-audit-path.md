@@ -266,6 +266,16 @@ and `plugins/`.
   "underlying condition is rare" framing above is also stale: §8.1 shows the
   fd-3 `writev` and a launcher's exit race nondeterministically, not that
   one side is structurally rare.
+  > **DONE (#444), 2026-07-19.** The genuine (child-still-up, `poll() is
+  > None`) delivery-failure arm now persists the reserved
+  > `provider_key_delivery_failed` row via
+  > `SandboxRefusalAuditor.record_provider_key_delivery_failure`, called
+  > from `_record_fast_launcher_refusal`'s `poll() is None` branch in
+  > `quarantine_child_io.py` — host-authored (no launcher stderr involved),
+  > written before the child is torn down. Executable coverage:
+  > `test_sbx_2026_026_provider_key_delivery_failure_records_row` in
+  > `tests/adversarial/sandbox_escape/test_sbx_boot_handshake.py`, driven from the
+  > `sbx_2026_026_provider_key_delivery_failure_records_row.yaml` payload.
 - #434 (the `2>/dev/null` five-key collapse + `policy_translate_failed`
   alarm/real conflation), #435 (six launcher refusal paths that emit no
   audit row at all — the issue as filed named four at stale line numbers),

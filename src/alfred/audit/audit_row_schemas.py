@@ -1197,17 +1197,24 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # ``alfred.audit.launcher_refusal.parse_launcher_refusal_rows`` validates it, and
 # ``alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor`` writes it +
 # dispatches the fail_closed T0 hookpoint (ADR-0051). The three other launcher
-# producers (comms adapter, gateway adapter, foreground TUI) and the reserved
-# ``provider_key_delivery_failed`` writer adopt the same auditor in #433 follow-ups.
+# producers (comms adapter, gateway adapter, foreground TUI) adopt the same
+# auditor in #433 follow-ups; the ``provider_key_delivery_failed`` writer is DONE
+# (#444 — see ``SandboxRefusalAuditor.record_provider_key_delivery_failure``).
 # This set governs what the launcher WRITES (plus the reserved reasons named below).
 #
-# Thirty-one reasons are launcher-emittable. Four are RESERVED with no emitter and are retained
-# deliberately (the binding requires the set to equal the union of emittable and reserved):
+# Thirty-one reasons are launcher-emittable. Four are RESERVED with no LAUNCHER emitter and are
+# retained deliberately (the binding requires the set to equal the union of emittable and
+# reserved). "No emitter" is scoped to the launcher's bash ``printf`` vocabulary specifically —
+# ``provider_key_delivery_failed`` below now HAS a writer, just not a launcher one (#444):
 #   * ``policy_ref_os_mismatch``, ``bwrap_mode_userns_unavailable`` —
 #     documented, no code path emits them;
 #   * ``provider_key_delivery_failed`` — the fd-3 partial-write / EAGAIN refusal from
-#     ``alfred.supervisor.fd3_key_delivery`` (sec-3); defined there as a sandbox-refusal reason
-#     but NOT emitted by the launcher, and (per #433) not yet written by any code;
+#     ``alfred.supervisor.fd3_key_delivery`` (sec-3); defined there as a sandbox-refusal reason;
+#     never emitted by the launcher, but (per #444) now WRITTEN as a durable
+#     ``SANDBOX_REFUSED_FIELDS`` row — host-authored, via
+#     ``SandboxRefusalAuditor.record_provider_key_delivery_failure`` (no launcher stderr
+#     involved) — so it stays outside the launcher-emittable set while no longer "not yet
+#     written by any code";
 #   * ``sandbox_info_handshake_mismatch`` — ``plugins/session.py`` handshake; likewise a defined
 #     sandbox-refusal reason the launcher never emits (unwired — #433).
 # ``policy_ref_escapes_root`` covers the path-traversal case the sandbox_escape adversarial

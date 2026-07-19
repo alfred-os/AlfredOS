@@ -454,3 +454,79 @@ async def test_sbx_2026_025_fast_launcher_refusal_epipe_records_attributed_row(
     with pytest.raises(qcio.QuarantineChildSpawnError):
         await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder2)
     assert recorder2.rows == []
+
+
+# ---------------------------------------------------------------------------
+# sbx-2026-026 -- a genuine (child-still-up) fd-3 delivery failure records the
+# host-authored provider_key_delivery_failed row (#444).
+# ---------------------------------------------------------------------------
+
+
+async def test_sbx_2026_026_provider_key_delivery_failure_records_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sbx-2026-026: a genuine fd-3 delivery failure with the child STILL RUNNING persists the
+    host-authored provider_key_delivery_failed row + dispatches the T0 fail_closed hookpoint,
+    and boot still refuses fail-closed.
+
+    Real-registry oracle (per test_sbx_2026_021): a monkeypatched invoke would make the
+    dispatch assertion vacuous. Distinct from sbx-2026-025 (fast EPIPE refusal, child EXITED
+    -> launcher-authored sandbox_refused row via the stderr parse); here poll() is None.
+    """
+    payload = _load("sbx-2026-026")
+    assert payload.expected_outcome == "refused"
+
+    registry = HookRegistry(
+        gate=make_allow_system_gate(
+            plugin_id=__name__, hookpoint="supervisor.plugin.sandbox_refused"
+        ),
+        strict_declarations=True,
+    )
+    prior = get_registry()
+    set_registry(registry)
+    try:
+        declare_supervisor(registry)
+
+        fired_reasons: list[str] = []
+
+        async def _sandbox_refused_subscriber(ctx: Any) -> None:
+            fired_reasons.append(ctx.input["reason"])
+
+        registry.register(
+            hook_fn=_sandbox_refused_subscriber,
+            hookpoint="supervisor.plugin.sandbox_refused",
+            kind="post",
+            tier="system",
+        )
+
+        rows: list[dict[str, Any]] = []
+
+        class _CapturingWriter:
+            async def append_schema(self, **kwargs: Any) -> None:
+                rows.append(kwargs)
+
+        recorder = SandboxRefusalAuditor(
+            audit_writer=_CapturingWriter(), host_os="linux", environment="production"
+        )
+
+        fake = _FakePopen(stdout_frames=[])  # returncode left None -> poll() is None (still up)
+        _patch_spawn_seam_epipe(monkeypatch, fake)  # deliver_provider_key_via_fd3 raises
+
+        with structlog.testing.capture_logs() as logs, pytest.raises(QuarantineChildSpawnError):
+            await spawn_quarantine_child_io(provider_key="k", refusal_recorder=recorder)
+
+        # (a) exactly one DURABLE host-authored row; reason = the reserved constant.
+        assert len(rows) == 1, f"expected one row, got {rows!r}"
+        assert rows[0]["subject"]["reason"] == "provider_key_delivery_failed"
+        # (b) POSITIVE T0 dispatch: the REAL registered subscriber fired once (a fake
+        #     recorder or a zero-subscriber hookpoint would pass a weaker oracle).
+        assert fired_reasons == ["provider_key_delivery_failed"]
+        # (c) the #444 self-guard did NOT fire (the write succeeded, not swallowed).
+        audit_failed = [
+            e
+            for e in logs
+            if e["event"] == "security.quarantine_child.provider_key_delivery_audit_failed"
+        ]
+        assert not audit_failed, f"the #444 write failed: {audit_failed!r}"
+    finally:
+        set_registry(prior)

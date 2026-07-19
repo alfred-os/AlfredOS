@@ -20,12 +20,14 @@ sec-3 (round-4) hardening:
   full frame, or raises ``BlockingIOError`` / ``OSError``, the Supervisor
   REFUSES to spawn the plugin (raises :class:`ProviderKeyDeliveryError` with
   ``reason="provider_key_delivery_failed"``) rather than handing the plugin a
-  truncated key. The ``provider_key_delivery_failed`` reason is RESERVED in
-  the ``SANDBOX_REFUSED_REASONS`` vocabulary for a future writer of the
-  ``SANDBOX_REFUSED_FIELDS`` audit row on this genuine-delivery-failure path
-  (a #433 follow-up, tracked in ADR-0051's Follow-ups); it is not emitted by
-  any code today (CLAUDE.md hard rule #7 — no silent failure on a security
-  path, hence reserved rather than dropped, but not yet a live audit write).
+  truncated key. On the genuine-delivery-failure path with the quarantined
+  child still up (``poll() is None``), the ``provider_key_delivery_failed``
+  reason is now WRITTEN as a ``SANDBOX_REFUSED_FIELDS`` audit row by
+  ``_SubprocessChildIO._record_provider_key_delivery_failure`` via
+  ``SandboxRefusalAuditor.record_provider_key_delivery_failure`` (#444;
+  tracked in ADR-0051's Follow-ups) — CLAUDE.md hard rule #7 (no silent
+  failure on a security path) is satisfied by a live audit write, not merely
+  a reserved vocabulary entry.
 
 * **Zeroize then collect.** The key is staged in a mutable ``bytearray`` and
   overwritten with NUL bytes the instant the writev returns — BEFORE
@@ -50,10 +52,11 @@ _LENGTH_PREFIX = struct.Struct(">I")
 class ProviderKeyDeliveryError(Exception):
     """fd-3 provider-key delivery failed (partial write / EAGAIN / OSError).
 
-    ``reason`` is the closed-vocabulary refusal string RESERVED for a future
-    ``SANDBOX_REFUSED_FIELDS`` audit-row writer on this genuine-delivery-
-    failure path (a #433 follow-up, #444 — see ADR-0051's Follow-ups); no
-    code writes that row today. Deliberately rooted at :class:`Exception`
+    ``reason`` is the closed-vocabulary refusal string. On the genuine-
+    delivery-failure path with the child still up, it IS written as a
+    ``SANDBOX_REFUSED_FIELDS`` audit row by
+    ``SandboxRefusalAuditor.record_provider_key_delivery_failure`` (#444 —
+    see ADR-0051's Follow-ups). Deliberately rooted at :class:`Exception`
     (not a transport error) so the spawn path can refuse loudly and
     uniformly.
     """
