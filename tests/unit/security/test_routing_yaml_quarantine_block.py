@@ -73,3 +73,23 @@ def test_routing_yaml_max_tokens_per_extraction_is_positive_int() -> None:
     cap = quarantine["max_tokens_per_extraction"]
     assert isinstance(cap, int)
     assert cap > 0
+
+
+def test_daemon_runtime_model_config_constants_mirror_routing_yaml() -> None:
+    """#340 golive drift-guard: the host constants match the live routing.yaml block.
+
+    Until the Slice-4 routing loader lands, ``daemon_runtime`` mirrors the
+    ``[quarantine]`` ``model`` + ``max_tokens_per_extraction`` as module constants,
+    threaded to the real-LLM child via the spawn env (Task 8). Bind those constants
+    to the YAML here so the two can never silently diverge (the #444/#432 drift-guard
+    discipline — a value the child extracts against must not drift from its declared
+    config).
+    """
+    from alfred.comms_mcp.daemon_runtime import (
+        _QUARANTINE_MAX_TOKENS_PER_EXTRACTION,
+        _QUARANTINE_MODEL,
+    )
+
+    quarantine = _load_routing_yaml()["quarantine"]
+    assert quarantine["model"] == _QUARANTINE_MODEL
+    assert quarantine["max_tokens_per_extraction"] == _QUARANTINE_MAX_TOKENS_PER_EXTRACTION

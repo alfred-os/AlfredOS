@@ -38,9 +38,11 @@ none of them is constructed by the daemon yet (that is Wave 4's
   because the spawn is async, and FAIL-CLOSED: on a non-Linux / unprovisioned
   host the spawn raises :class:`QuarantineChildSpawnError`, which propagates so
   the daemon refuses to boot with a clear operator message rather than running a
-  fixture extractor in production. The 2b child runs a DETERMINISTIC ECHO loop
-  (no real LLM, no egress); the real provider client + its egress allowlist land
-  in PR-S4-11c-2c behind release-blocker #230.
+  fixture extractor in production. #340 PR2b-golive Task 8 (ADR-0050 Decision 8,
+  the posture change under sign-off) flips the spawn to ``control_fd=True`` and
+  threads the real-LLM provider config (model / budget / CA path) + the
+  ``EgressProxyConfig`` through — the child now boots with its fd-4 control channel
+  and its provider config; the per-extraction brokered-egress wiring lands in Task 9.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ from alfred.security.quarantine import QuarantinedExtractor
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge
+    from alfred.egress._config_protocols import EgressProxyConfig
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import ExtractionResult
     from alfred.security.quarantine_transport import QuarantineStagingMap, QuarantineStdioTransport
@@ -73,6 +76,18 @@ if TYPE_CHECKING:
 # test_routing_yaml_quarantine_block). Resolved at boot and delivered over fd 3
 # to the bwrap child; NEVER read from the child's own env.
 _PROVIDER_KEY_SECRET_ID = "quarantine_provider_api_key"  # noqa: S105 - broker lookup id, not a credential
+
+# The quarantined child's model + per-extraction token budget, mirrored from
+# config/routing.yaml ``[quarantine]`` (``model`` / ``max_tokens_per_extraction``).
+# The routing.yaml loader lands in Slice 4 (test_routing_yaml_quarantine_block);
+# until then these host constants ARE the runtime source of truth, threaded to the
+# real-LLM child via the spawn env (``ALFRED_QUARANTINE_MODEL`` /
+# ``ALFRED_QUARANTINE_MAX_TOKENS``) on the golive control_fd=True path. A drift-guard
+# (test_routing_yaml_quarantine_block) binds them to the live YAML so the two can
+# never silently diverge — the same "constant mirrors the YAML" contract
+# ``_PROVIDER_KEY_SECRET_ID`` follows above.
+_QUARANTINE_MODEL = "claude-haiku-4-5"
+_QUARANTINE_MAX_TOKENS_PER_EXTRACTION = 8192
 
 _log = structlog.get_logger(__name__)
 
@@ -327,6 +342,52 @@ def _resolve_provider_key(secret_broker: SecretBroker) -> str:
     raise QuarantineProviderKeyUnsetError(_PROVIDER_KEY_SECRET_ID)
 
 
+def _resolve_quarantine_model_config() -> tuple[str, int]:
+    """Return the quarantined child's ``(model, max_tokens)`` — routing.yaml ``[quarantine]``.
+
+    Mirrors ``config/routing.yaml`` ``[quarantine]`` (``model`` /
+    ``max_tokens_per_extraction``), drift-guarded against the live YAML by
+    test_routing_yaml_quarantine_block. The Slice-4 routing loader will replace these
+    module constants with a parsed value; the seam is here so that swap is local.
+
+    SYNCHRONOUS by design (no ``await``): the caller
+    (:func:`_build_comms_inbound_extractor`) resolves this BEFORE the single spawn
+    ``await`` so the fd-3 clobber window never opens on this path (mirrors
+    :func:`_resolve_provider_key`). Adding an ``await`` would reopen it; do not.
+    """
+    return _QUARANTINE_MODEL, _QUARANTINE_MAX_TOKENS_PER_EXTRACTION
+
+
+def _resolve_egress_config(egress_config: EgressProxyConfig) -> EgressProxyConfig:
+    """Validate the quarantine child's egress proxy config; refuse boot if unusable.
+
+    The go-live child brokers its pre-connected gateway socket through the L7 CONNECT
+    proxy at ``egress_config.egress_proxy_url`` (:mod:`alfred.egress.control_fd_broker`).
+    Validate it fail-closed BEFORE the spawn by REUSING the same
+    :meth:`alfred.egress.client.EgressClient.from_settings` seam ``build_router`` uses
+    — an unset/blank ``ALFRED_EGRESS_PROXY_URL`` raises
+    :class:`alfred.egress.errors.IOPlaneUnavailableError` PRE-spawn, which the daemon
+    boot path maps to the audited ``egress_plane_unavailable`` refusal (§20.2
+    fail-closed, CLAUDE.md hard rule #7). SCOPE: this pre-spawn check guards the
+    **unset/blank** case only. A non-blank but MALFORMED url (a bad ``host:port``)
+    passes here and is caught LOUD — not silent — at first extraction when
+    ``control_fd_broker._resolve_proxy_addr`` parses it (HARD #7 still holds; a child
+    that cannot broker its socket performs no extraction, so no T3 crosses). Full
+    boot/extraction parity (a shared ``host:port`` validator on this pre-spawn path)
+    is a Task-9 hardening. The built client is intentionally discarded: the quarantine child
+    egresses via ``control_fd_broker``, not ``EgressClient`` — but both read the SAME
+    ``egress_proxy_url``, so this is the correct pre-spawn precheck. Returns the
+    validated config unchanged for the caller to thread into the spawn.
+
+    SYNCHRONOUS (no ``await``): called before the single spawn ``await`` so the fd-3
+    clobber window never opens on the refuse path (mirrors :func:`_resolve_provider_key`).
+    """
+    from alfred.egress.client import EgressClient
+
+    EgressClient.from_settings(egress_config)
+    return egress_config
+
+
 async def _build_comms_inbound_extractor(
     *,
     audit_writer: AuditWriter,
@@ -334,6 +395,7 @@ async def _build_comms_inbound_extractor(
     secret_broker: SecretBroker,
     staging: QuarantineStagingMap,
     environment: str,
+    egress_config: EgressProxyConfig,
 ) -> tuple[QuarantinedExtractor, QuarantineStdioTransport]:
     """Construct a REAL :class:`QuarantinedExtractor` over a LIVE quarantined child.
 
@@ -346,24 +408,47 @@ async def _build_comms_inbound_extractor(
     single-use store the host's :class:`T3BodyRecorder` writes to, so the inline-
     over-wire content path (ADR-0029) is exercised end to end in production.
 
+    #340 PR2b-golive Task 8 (ADR-0050 Decision 8, the posture change under sign-off):
+    the spawn is now ``control_fd=True``, carrying the child its fd-4 control channel
+    plus the real-LLM provider config — ``egress_config`` (the ``EgressProxyConfig``
+    the child brokers its gateway socket through), the routing.yaml ``[quarantine]``
+    ``model`` + ``max_tokens`` (:func:`_resolve_quarantine_model_config`), and the
+    default system CA bundle. All three are non-secret, non-T3 config; the provider
+    KEY still crosses ONLY over fd 3. The per-extraction brokered-egress wiring (the
+    transport actually driving :meth:`broker_socket`) lands in Task 9 — until then
+    runtime extraction blocks, but boot + the unit cut (faked spawn) are green.
+
     FAIL-CLOSED (CLAUDE.md hard rule #7): on a non-Linux / unprovisioned host the
     spawn raises :class:`QuarantineChildSpawnError`, which propagates out of this
     builder so the daemon refuses to boot rather than silently degrading. There is
-    NO dev fixture fallback.
+    NO dev fixture fallback. An unset/blank ``egress_config`` proxy URL raises
+    :class:`alfred.egress.errors.IOPlaneUnavailableError` PRE-spawn (via
+    :func:`_resolve_egress_config`) — the boot path maps it to the audited
+    ``egress_plane_unavailable`` refusal (§20.2). (A non-blank MALFORMED proxy url is
+    caught loud at first extraction, not here — see :func:`_resolve_egress_config`;
+    boot-time ``host:port`` parity is a Task-9 hardening.)
 
-    fd-3-clobber discipline: the provider key is resolved SYNCHRONOUSLY before the
-    spawn, so the single ``await spawn_quarantine_child_io(...)`` is the only
-    await that runs before or during the spawn's dup2 window — nothing
-    interleaves in it. (Two further awaits exist in this builder, but only in the
-    ``except`` cleanup arm below, and only AFTER the spawn has returned — by which
-    point ``spawn_quarantine_child_io``'s own ``finally`` has already closed that
-    window, so they do not reopen it.)
+    fd-3-clobber discipline: the provider key + the golive provider config (model /
+    budget / egress) are all resolved SYNCHRONOUSLY before the spawn, so the single
+    ``await spawn_quarantine_child_io(...)`` is the only await that runs before or
+    during the spawn's dup2 window — nothing interleaves in it. (Two further awaits
+    exist in this builder, but only in the ``except`` cleanup arm below, and only
+    AFTER the spawn has returned — by which point ``spawn_quarantine_child_io``'s own
+    ``finally`` has already closed that window, so they do not reopen it.)
     """
     from alfred.security.quarantine_child_io import spawn_quarantine_child_io
     from alfred.security.quarantine_transport import QuarantineStdioTransport
     from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
 
     provider_key = _resolve_provider_key(secret_broker)
+    # Resolve the golive provider config SYNCHRONOUSLY (no await) BEFORE the spawn, so
+    # the fd-3 clobber window stays await-free AND an unset/blank misconfig refuses
+    # PRE-spawn (never a live child abandoned on an unset/blank egress config): the
+    # model/budget mirror routing.yaml [quarantine], and `_resolve_egress_config` raises
+    # IOPlaneUnavailableError here on an unset/blank egress proxy (§20.2 fail-closed).
+    # (A non-blank malformed proxy url is caught loud at first extraction — Task-9 parity.)
+    model, max_tokens = _resolve_quarantine_model_config()
+    resolved_egress = _resolve_egress_config(egress_config)
     # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await
     # to the fd-3-clobber window; the await below remains the only one that touches it.
     refusal_recorder = SandboxRefusalAuditor(
@@ -373,8 +458,20 @@ async def _build_comms_inbound_extractor(
     )
     # SINGLE await — the spawn owns the process-wide fd-3 clobber window and must
     # not race any other coroutine. Do not interleave awaits here.
+    #
+    # #340 PR2b-golive (ADR-0050 Decision 8, the posture change under sign-off): the
+    # live spawn now flips control_fd=True and threads the EgressProxyConfig + the
+    # real-LLM model/budget through — the child receives the fd-4 control channel + its
+    # provider config (the per-extraction brokered-egress wiring lands in Task 9). The
+    # provider KEY still crosses only over fd 3; model/max_tokens/egress are non-secret,
+    # non-T3 config. ssl_cert_file uses the spawn default (the system CA bundle).
     child_io = await spawn_quarantine_child_io(
-        provider_key=provider_key, refusal_recorder=refusal_recorder
+        provider_key=provider_key,
+        refusal_recorder=refusal_recorder,
+        control_fd=True,
+        egress_config=resolved_egress,
+        model=model,
+        max_tokens=max_tokens,
     )
     # Reap the just-spawned child if the (synchronous) transport/extractor
     # construction raises: this builder hasn't returned the transport yet, so the

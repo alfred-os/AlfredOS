@@ -140,6 +140,13 @@ _CONTROL_FD = 4
 # drives directly. Inert in production — never referenced by any live caller.
 _BROKERED_PROBE_MODULE = "alfred.security.quarantine_child._brokered_probe"
 
+# The system CA bundle the go-live quarantine child verifies TLS against (#340
+# PR2b-golive, spike-verified Debian/Ubuntu base-image location). Delivered to the
+# empty-netns child via ``SSL_CERT_FILE`` in the scrubbed env (the child has no
+# config bind); its brokered-egress transport terminates TLS against this store
+# (HARD #5 — TLS terminates INSIDE the quarantine child, never at a shared proxy).
+_DEFAULT_SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt"
+
 # child_module is a CLOSED SET, never a free string — a free module would be a
 # spawn-arbitrary-module hole (the child inherits fd 3 [+ fd 4 when control_fd
 # is set]). Only the real child or the docker probe may be spawned.
@@ -239,7 +246,12 @@ def _child_python() -> str:
     return os.environ.get(_CHILD_PYTHON_ENV, sys.executable)
 
 
-def _child_env() -> dict[str, str]:
+def _child_env(
+    *,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    ssl_cert_file: str | None = None,
+) -> dict[str, str]:
     """Build the SCRUBBED child env (allowlist only — never ``dict(os.environ)``).
 
     The quarantined child is the most adversary-facing surface in the system; it
@@ -254,6 +266,18 @@ def _child_env() -> dict[str, str]:
     wheel under ``alfred.security.quarantine_child`` and resolves off the bound
     interpreter's default site-packages path. Injecting ``/repo`` roots would also
     be pointless under bwrap (``/repo`` is not bound) and a needless surface.
+
+    **#340 PR2b-golive provider config (ADR-0050 Decision 8).** The LIVE
+    (``control_fd=True``) spawn threads the real-LLM child's non-secret, non-T3
+    provider config in here — ``model`` -> ``ALFRED_QUARANTINE_MODEL``,
+    ``max_tokens`` -> ``ALFRED_QUARANTINE_MAX_TOKENS``, ``ssl_cert_file`` ->
+    ``SSL_CERT_FILE`` (the child has no config bind). These are set via EXPLICIT
+    host-passed ``env[key] = value`` assignments — the AST scrub guard
+    (``test_comms_child_env_ast_scrub``) forbids ``dict(os.environ)``, not explicit
+    assignment of a caller value. Each key is set ONLY when its argument is
+    provided, so a DORMANT/echo (``control_fd=False``) spawn — which passes none —
+    yields the pre-golive env BYTE-FOR-BYTE (the ADR-0050 dormancy invariant;
+    ``test_child_env_live_is_dormant_plus_exactly_the_three_keys``).
     """
     env = _scrubbed_base()
     env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(
@@ -267,6 +291,14 @@ def _child_env() -> dict[str, str]:
     # interpreter the policy already binds) never set it, so the launcher never
     # widens their namespace.
     env["ALFRED_SANDBOX_BIND_INTERP_PREFIX"] = "1"
+    # Golive provider config — added ONLY on the live path (each arg non-``None``),
+    # so the dormant spawn's env is byte-identical to before (see docstring).
+    if model is not None:
+        env["ALFRED_QUARANTINE_MODEL"] = model
+    if max_tokens is not None:
+        env["ALFRED_QUARANTINE_MAX_TOKENS"] = str(max_tokens)
+    if ssl_cert_file is not None:
+        env["SSL_CERT_FILE"] = ssl_cert_file
     return env
 
 
@@ -882,6 +914,9 @@ async def spawn_quarantine_child_io(
     control_fd: bool = False,
     child_module: str = _CHILD_MODULE,
     egress_config: EgressProxyConfig | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    ssl_cert_file: str = _DEFAULT_SSL_CERT_FILE,
     refusal_recorder: SandboxRefusalRecorder | None = None,
 ) -> _SubprocessChildIO:
     """Spawn the bwrap-sandboxed quarantined-LLM child + deliver its key over fd 3.
@@ -922,6 +957,15 @@ async def spawn_quarantine_child_io(
     ``egress_config`` — a misconfigured opt-in refuses loudly rather than silently
     spawning without a broker.
 
+    **#340 PR2b-golive provider config (ADR-0050 Decision 8).** The LIVE
+    (``control_fd=True``) spawn threads the real-LLM child's provider config into
+    the scrubbed env — ``model`` / ``max_tokens`` (routing.yaml ``[quarantine]``)
+    and ``ssl_cert_file`` (default :data:`_DEFAULT_SSL_CERT_FILE`, the system CA
+    bundle). These reach :func:`_child_env` ONLY on the ``control_fd=True`` path, so
+    the DORMANT/echo spawn's env stays byte-identical to the pre-golive env (the
+    ADR-0050 dormancy invariant). They are non-secret + non-T3 (the provider KEY
+    still crosses only over fd 3); a bare ``control_fd=False`` spawn ignores them.
+
     Both a pipe read-end and a socketpair child-end normally land on some fd well
     above the ``(3, 4)`` target range (the kernel picks the lowest FREE fd; the
     dormant spawn ambiently keeps 3 and 4 occupied). If a source ever DID land on
@@ -953,6 +997,16 @@ async def spawn_quarantine_child_io(
         raise QuarantineChildSpawnError(t("security.quarantine_child.child_module_not_allowed"))
     if control_fd and egress_config is None:
         raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
+
+    # Build the scrubbed child env ONCE, up front (no ``await``, no fd op — safe
+    # anywhere). The LIVE (``control_fd=True``) spawn threads the golive provider
+    # config into it; the DORMANT/echo (``control_fd=False``) spawn passes NONE, so
+    # ``_child_env`` yields the pre-golive env byte-for-byte (ADR-0050 dormancy).
+    child_env = (
+        _child_env(model=model, max_tokens=max_tokens, ssl_cert_file=ssl_cert_file)
+        if control_fd
+        else _child_env()
+    )
 
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, True)  # noqa: FBT003 - os.set_inheritable bool is positional only
@@ -1006,7 +1060,7 @@ async def spawn_quarantine_child_io(
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=_child_env(),
+                env=child_env,
                 pass_fds=literal_targets,
             )
         except OSError as exc:

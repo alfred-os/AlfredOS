@@ -441,8 +441,11 @@ def patch_quarantine_child_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeQ
     spawned: list[_FakeQuarantineChildIO] = []
 
     async def _fake_spawn(
-        *, provider_key: str, refusal_recorder: object = None
+        *, provider_key: str, refusal_recorder: object = None, **_golive: object
     ) -> _FakeQuarantineChildIO:
+        # ``**_golive`` absorbs the #340 PR2b-golive Task-8 spawn kwargs the builder
+        # now passes (control_fd / egress_config / model / max_tokens / ssl_cert_file);
+        # this boot-wiring fake proves the seam + key flow, not the golive config.
         child = _FakeQuarantineChildIO(provider_key=provider_key)
         spawned.append(child)
         return child

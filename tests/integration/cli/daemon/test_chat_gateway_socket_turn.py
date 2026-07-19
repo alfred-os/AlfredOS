@@ -468,7 +468,7 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
                 _tiers._set_authorized_t3_nonce(nonce)
 
             async def _fake_spawn(
-                *, provider_key: str, refusal_recorder: object = None
+                *, provider_key: str, refusal_recorder: object = None, **_golive: object
             ) -> _EchoingChildDouble:
                 return _EchoingChildDouble(provider_key=provider_key)
 
