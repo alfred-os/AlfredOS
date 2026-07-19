@@ -443,8 +443,15 @@ def test_dynamic_result_sites_are_documented() -> None:
             # `json_object_unconstrained` member of `ExtractionMode` (far
             # above this point in the file) documenting that the dispatcher
             # no longer selects it at runtime (fork b) — the site itself
-            # (still `result=audit_result`) is unchanged.
-            "src/alfred/security/quarantine.py:1266",
+            # (still `result=audit_result`) is unchanged. #340 PR2b-golive
+            # Task 1 shifted it again (1266 -> 1277): the shared
+            # `EXTRACTION_MAX_RETRIES` / `BROKER_SOCKET_COUNT` constants
+            # (11 new lines, incl. comments) were hoisted in immediately
+            # after the `ExtractionMode` Literal (far above this point in
+            # the file) so the child dispatcher and the privileged host
+            # share one source of truth for the retry count — the site
+            # itself (still `result=audit_result`) is unchanged.
+            "src/alfred/security/quarantine.py:1277",
             "src/alfred/supervisor/core.py:692",  # result_label local
             # --- direct AuditEntry(...) construction path (H1) ---
             "src/alfred/audit/log.py:96",  # AuditWriter.append forwards result -> AuditEntry(...)

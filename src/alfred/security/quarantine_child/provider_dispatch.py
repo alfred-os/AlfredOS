@@ -29,7 +29,7 @@ selected at runtime) — see that module for the audit-row-continuity note.
 
 Retry contract (spec §6.3):
 
-* Up to ``_MAX_RETRIES + 1`` total attempts.
+* Up to ``EXTRACTION_MAX_RETRIES + 1`` total attempts.
 * Only :class:`pydantic.ValidationError`, :class:`json.JSONDecodeError`,
   and :class:`alfred.providers.base.ProviderMalformedToolArgumentsError`
   are retry-eligible. Every other exception propagates — silently
@@ -85,6 +85,7 @@ from alfred.providers.base import (
     ToolDefinition,
 )
 from alfred.security.quarantine import (
+    EXTRACTION_MAX_RETRIES,
     ValidatorErrorCategory,
     _build_retry_prompt,
 )
@@ -101,13 +102,6 @@ _EXTRACT_TOOL_NAME = "extract_structured_data"
 # (whose ``.default`` is the ``PydanticUndefined`` sentinel) fails loud HERE at
 # import, not deep inside an extraction (fleet review: reviewer/provider/security/devex).
 _COMPLETION_DEFAULT_MAX_TOKENS: int = int(CompletionRequest.model_fields["max_tokens"].default)
-
-# Maximum retries on validation / JSON-decode failure (spec §6.3). Total
-# attempts is ``_MAX_RETRIES + 1`` — one initial call plus this many
-# retries. Configurable per the spec via ``config/policies.yaml``
-# ``quarantine.extraction_max_retries``; the constant lives here so the
-# Slice-3 surface is stable while the policies-yaml loader lands later.
-_MAX_RETRIES = 2
 
 # Per-extraction wall-clock budget (perf-1 fix). The retry loop was firing
 # back-to-back attempts with no back-off and no upper bound — a thrashing
@@ -196,7 +190,7 @@ async def dispatch_extraction(
     * neither → ``prompt_embedded_fallback`` mode (schema embedded in
       the user prompt, parsed + validated host-side).
 
-    Up to ``_MAX_RETRIES + 1`` attempts; on exhaustion returns
+    Up to ``EXTRACTION_MAX_RETRIES + 1`` attempts; on exhaustion returns
     ``{"kind": "typed_refusal", "reason": "cannot_extract"}``.
 
     Between attempts the loop sleeps ``_BACKOFF_BASE_SECONDS * (2 ** attempt)``
@@ -250,7 +244,7 @@ async def dispatch_extraction(
     parsed_schema = _cached_parsed_schema(schema_json)
     deadline_monotonic = time.monotonic() + _MAX_TOTAL_WALL_CLOCK_SECONDS
     retry_category: ValidatorErrorCategory | None = None
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(EXTRACTION_MAX_RETRIES + 1):
         if time.monotonic() >= deadline_monotonic:
             # Per-extraction wall-clock budget breach (perf-1 fix). Short
             # circuit to cannot_extract so a thrashing provider does not
@@ -293,7 +287,7 @@ async def dispatch_extraction(
         # Exponential back-off (perf-1 fix). Skip the sleep on the
         # last attempt — there is no next try, the loop is about to
         # exit and the refusal is the next emit.
-        if attempt < _MAX_RETRIES:
+        if attempt < EXTRACTION_MAX_RETRIES:
             await asyncio.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
     # Exhaustion is a closed-domain TypedRefusal, NOT an Extracted with
     # a malformed_output mode (spec §6.7 / prov-011).
