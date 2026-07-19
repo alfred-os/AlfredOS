@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from alfred.egress.control_fd_broker import ControlFdBrokerError
 from alfred.plugins.transport import ControlResult
 from alfred.security.quarantine import ContentHandle
 from alfred.security.quarantine_transport import (
@@ -68,6 +69,13 @@ class _RecordingChildIO:
         self._ingested: dict[str, str] = {}
         self._pending_reply: bytes | None = None
         self.closed = False
+        self.brokered: list[int] = []
+
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        # Benign in-process double: records the requested count and returns that many
+        # (host, port) destinations, mirroring a successful connect-defer batch.
+        self.brokered.append(count)
+        return [("gw", 8889)] * count
 
     def write_frame(self, frame: bytes) -> None:
         length = struct.unpack(">I", frame[:4])[0]
@@ -121,6 +129,173 @@ def _make_handle() -> ContentHandle:
         source_url="comms-mcp://inbound",
         fetch_timestamp=datetime.now(UTC),
     )
+
+
+# ---------------------------------------------------------------------------
+# #340 golive Task 9: connect-defer broker-N-then-write + typed-refusal on failure.
+# ---------------------------------------------------------------------------
+
+
+def _extracted_reply_frame(text: str = "x") -> bytes:
+    return _frame(
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "kind": "extracted",
+                "data": {"text": text, "intent": "greeting"},
+                "extraction_mode": "native_constrained",
+            },
+        }
+    )
+
+
+class _OrderRecordingChildIO:
+    """A ChildIO double that records the ORDER of broker_sockets vs write_frame.
+
+    The load-bearing invariant (spec §6, connect-defer): ``dispatch`` must broker
+    all N sockets BEFORE it writes the ingest/extract frames, so every ``sendmsg``
+    enqueues into the child's fd-4 buffer ahead of the extract frame (race-free
+    drain).
+    """
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        self.order.append(f"broker:{count}")
+        return [("gw", 8889)] * count
+
+    def write_frame(self, frame: bytes) -> None:
+        self.order.append("write")
+
+    async def read_frame(self) -> bytes:
+        self.order.append("read")
+        return _extracted_reply_frame()
+
+    async def aclose(self) -> None:  # pragma: no cover - not exercised here
+        return None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_brokers_n_before_writing() -> None:
+    """``dispatch`` brokers ``BROKER_SOCKET_COUNT`` sockets BEFORE any frame write."""
+    from alfred.security.quarantine import BROKER_SOCKET_COUNT
+
+    staging = QuarantineStagingMap()
+    nonce = CapabilityGateNonce()
+    staging.stage("deadbeef", _tag(nonce, "hello there"))
+    child = _OrderRecordingChildIO()
+    transport = QuarantineStdioTransport(child_io=child, staging=staging)
+
+    await transport.dispatch(
+        "quarantine.extract",
+        {"handle_id": "deadbeef", "schema_json": "{}", "schema_version": 1},
+    )
+
+    assert child.order[0] == f"broker:{BROKER_SOCKET_COUNT}"
+    assert "write" in child.order
+    assert child.order.index(f"broker:{BROKER_SOCKET_COUNT}") < child.order.index("write")
+
+
+class _RecordingAuditor:
+    """A fake :class:`EgressBrokerAuditor` recording success/failure row calls."""
+
+    def __init__(self) -> None:
+        self.successes: list[str] = []
+        self.failures: list[tuple[str, str]] = []
+
+    async def record_broker_success(self, *, destination: str) -> None:
+        self.successes.append(destination)
+
+    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
+        self.failures.append((destination, reason))
+
+
+class _RaisingChildIO(_RecordingChildIO):
+    """A ChildIO double whose ``broker_sockets`` raises a caller-supplied error."""
+
+    def __init__(self, error: ControlFdBrokerError) -> None:
+        super().__init__()
+        self._error = error
+
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        raise self._error
+
+
+async def _dispatch_extract(transport: QuarantineStdioTransport) -> Any:
+    return await transport.dispatch(
+        "quarantine.extract",
+        {"handle_id": "deadbeef", "schema_json": "{}", "schema_version": 1},
+    )
+
+
+def _staged_transport(child: Any, *, auditor: Any = None) -> QuarantineStdioTransport:
+    staging = QuarantineStagingMap()
+    staging.stage("deadbeef", _tag(CapabilityGateNonce(), "hello there"))
+    return QuarantineStdioTransport(child_io=child, staging=staging, broker_auditor=auditor)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_broker_failure_returns_typed_refusal_not_raised() -> None:
+    """A broker ``ControlFdBrokerError`` becomes a ``provider_unavailable`` typed refusal (HARD #7).
+
+    The orchestrator NEVER sees a raw ``ControlFdBrokerError`` — ``dispatch`` returns a
+    ``ControlResult`` whose ``typed_refusal`` payload ``QuarantinedExtractor`` lifts to a graceful
+    refusal, and ``record_broker_failure`` is called ONCE with the real closed-vocab reason +
+    the error's destination.
+    """
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(ControlFdBrokerError("gateway_unreachable", destination="gw:8889"))
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert isinstance(result, ControlResult)
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert child.received == []  # broker-before-write: no ingest/extract frame was sent
+    assert auditor.failures == [("gw:8889", "gateway_unreachable")]
+    assert auditor.successes == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_broker_failure_unresolved_destination_fallback() -> None:
+    """A ``ControlFdBrokerError`` with no ``destination`` records the ``<unresolved>`` sentinel."""
+    auditor = _RecordingAuditor()
+    child = _RaisingChildIO(ControlFdBrokerError("control_fd_broker_failed"))
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert result.payload["reason"] == "provider_unavailable"
+    assert auditor.failures == [("<unresolved>", "control_fd_broker_failed")]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_broker_failure_without_auditor_still_refuses() -> None:
+    """The None-auditor path: a broker failure still yields the typed refusal (no audit call)."""
+    child = _RaisingChildIO(ControlFdBrokerError("sendmsg_failed", destination="gw:8889"))
+    transport = _staged_transport(child, auditor=None)
+
+    result = await _dispatch_extract(transport)
+
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_broker_success_records_one_success_row_per_destination() -> None:
+    """On full-batch success, ``record_broker_success`` is called once per brokered destination."""
+    from alfred.security.quarantine import BROKER_SOCKET_COUNT
+
+    auditor = _RecordingAuditor()
+    child = _RecordingChildIO()  # its broker_sockets returns count copies of ("gw", 8889)
+    transport = _staged_transport(child, auditor=auditor)
+
+    result = await _dispatch_extract(transport)
+
+    assert isinstance(result, ControlResult)
+    assert result.payload["kind"] == "extracted"
+    assert auditor.successes == ["gw:8889"] * BROKER_SOCKET_COUNT
+    assert auditor.failures == []
 
 
 # ---------------------------------------------------------------------------

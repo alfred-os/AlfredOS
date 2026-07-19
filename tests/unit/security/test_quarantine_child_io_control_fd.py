@@ -19,8 +19,8 @@ Covers, per the PR2a plan's mandatory coverage list:
 
 * the default (``control_fd=False``) spawn passes fd 3 only (dormancy);
 * an opt-in ``control_fd=True`` spawn passes fd 3 AND fd 4, and the returned
-  ``_SubprocessChildIO.broker_socket()`` delegates to
-  ``control_fd_broker.broker_connected_socket`` with the owned parent
+  ``_SubprocessChildIO.broker_sockets()`` delegates to
+  ``control_fd_broker.broker_connected_sockets`` with the owned parent
   control-end + the injected ``EgressProxyConfig``;
 * ``control_fd=True`` with no ``egress_config`` refuses loudly (misconfigured
   opt-in, not a silent no-op);
@@ -36,7 +36,7 @@ Covers, per the PR2a plan's mandatory coverage list:
 * an OS spawn failure (``Popen`` raising) on a ``control_fd=True`` spawn ALSO
   closes the owned parent control-end (L-3: the leak guard is not limited to
   the key-delivery-failure arc);
-* ``broker_socket()`` on an unconfigured ``_SubprocessChildIO``
+* ``broker_sockets()`` on an unconfigured ``_SubprocessChildIO``
   (``control_parent=None`` or ``egress_config=None``) refuses loudly — a
   fail-loud security branch (CLAUDE.md hard rule #7), never pragma'd out;
 * ``aclose`` closes the owned parent control-end.
@@ -152,8 +152,8 @@ async def test_control_fd_spawn_passes_fd_3_and_4(
 ) -> None:
     """An opt-in ``control_fd=True`` spawn passes BOTH fd 3 and fd 4.
 
-    ``broker_socket()`` on the returned IO delegates to
-    ``control_fd_broker.broker_connected_socket`` with the owned parent
+    ``broker_sockets()`` on the returned IO delegates to
+    ``control_fd_broker.broker_connected_sockets`` with the owned parent
     control-end and the injected ``egress_config``.
     """
     io = await spawn_quarantine_child_io(
@@ -164,11 +164,12 @@ async def test_control_fd_spawn_passes_fd_3_and_4(
     )
     try:
         assert _spawn_capture["pass_fds"] == (3, 4)
-        broker_mock = AsyncMock()
-        monkeypatch.setattr(qcio.control_fd_broker, "broker_connected_socket", broker_mock)
-        await io.broker_socket()
+        broker_mock = AsyncMock(return_value=[("gw", 8889)])
+        monkeypatch.setattr(qcio.control_fd_broker, "broker_connected_sockets", broker_mock)
+        await io.broker_sockets(1)
         broker_mock.assert_awaited_once()
         assert broker_mock.await_args.kwargs["proxy_config"] is not None
+        assert broker_mock.await_args.kwargs["count"] == 1
     finally:
         await io.aclose()
 
@@ -388,11 +389,11 @@ async def test_popen_oserror_closes_control_parent(monkeypatch: pytest.MonkeyPat
         captured["control_parent"].getsockname()  # closed
 
 
-async def test_broker_socket_unconfigured_raises() -> None:
-    """``broker_socket()`` on an unconfigured IO refuses loudly (fail-loud security branch)."""
+async def test_broker_sockets_unconfigured_raises() -> None:
+    """``broker_sockets()`` on an unconfigured IO refuses loudly (fail-loud security branch)."""
     io = _SubprocessChildIO(_FakePopen([]), control_parent=None, egress_config=None)
     with pytest.raises(QuarantineChildSpawnError):
-        await io.broker_socket()
+        await io.broker_sockets(1)
 
 
 @pytest.mark.skipif(

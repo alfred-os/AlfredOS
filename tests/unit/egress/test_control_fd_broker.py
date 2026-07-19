@@ -19,8 +19,9 @@ import pytest
 
 from alfred.egress.control_fd_broker import (
     ControlFdBrokerError,
-    _connect_and_send,
+    _connect_one,
     _resolve_proxy_addr,
+    _send_one,
     broker_connected_socket,
     make_control_socketpair,
     recv_passed_fd,
@@ -219,7 +220,7 @@ def test_resolve_proxy_addr_splits_host_port() -> None:
 
 
 def _accept_once(listener: socket.socket) -> None:
-    """Accept exactly one connection and let it EOF-close; used to give ``_connect_and_send``'s
+    """Accept exactly one connection and let it EOF-close; used to give ``_connect_one``'s
     ``socket.create_connection`` a real peer to connect to."""
     conn, _ = listener.accept()
     conn.recv(16)  # let the client connect; we only need the connection to exist
@@ -287,7 +288,7 @@ async def test_broker_connected_socket_returns_destination() -> None:
     The only current caller (the PR2a docker probe) ignores the return value, so nothing else
     changes. Reuses the real-listener + accept-thread harness from
     ``test_broker_connected_socket_passes_a_live_fd`` above (no stubbed executor exists in this
-    suite — the existing tests all drive ``_connect_and_send`` against a live loopback socket).
+    suite — the existing tests all drive ``_connect_one`` + ``_send_one`` against a live socket).
     """
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
@@ -345,12 +346,12 @@ async def test_broker_connected_socket_unreachable_is_loud() -> None:
     sys.platform == "win32",
     reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
 )
-def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_send_one_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fold-log H item 1 (coverage-gate MANDATORY): a ``sendmsg`` returning fewer bytes than the
     1-byte frame (e.g. 0, a short write) must raise ``short_data_send`` loud, not silently report
     success. ``socket.socket`` instances have no per-instance ``__dict__`` (same constraint noted
-    on ``test_recv_passed_fd_non_scm_rights_cmsg_is_loud`` above), so this patches the CLASS.
-    """
+    on ``test_recv_passed_fd_non_scm_rights_cmsg_is_loud`` above), so this patches the CLASS. The
+    connect + send are the SPLIT ``_connect_one`` / ``_send_one`` (golive Task 9)."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -358,6 +359,7 @@ def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -
     t = threading.Thread(target=_accept_once, args=(listener,), daemon=True)
     t.start()
     parent, child = make_control_socketpair()
+    sock = _connect_one(host, port)
 
     def _short_sendmsg(self: socket.socket, *args: object, **kwargs: object) -> int:
         return 0
@@ -365,14 +367,14 @@ def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(socket.socket, "sendmsg", _short_sendmsg)
     try:
         with pytest.raises(ControlFdBrokerError) as exc:
-            _connect_and_send(parent, host, port)
+            _send_one(parent, sock)
         assert exc.value.reason == "short_data_send"
     finally:
         parent.close()
         child.close()
         # Join BEFORE closing the listener (see the happy-path test's finally for the rationale):
-        # _connect_and_send's finally: sock.close() closed the client end, so the accept thread's
-        # recv() has returned and the thread is ending — join returns promptly.
+        # _send_one's finally: sock.close() closed the client end, so the accept thread's recv()
+        # has returned and the thread is ending — join returns promptly.
         t.join(timeout=2)
         assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
         listener.close()
@@ -382,7 +384,7 @@ def test_connect_and_send_short_write_is_loud(monkeypatch: pytest.MonkeyPatch) -
     sys.platform == "win32",
     reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
 )
-def test_connect_and_send_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_send_one_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fold-log H item 1 (coverage-gate MANDATORY): a raw ``OSError`` from ``sendmsg`` (e.g.
     ``EPIPE``) must raise ``sendmsg_failed`` loud, not propagate the raw ``OSError`` past this
     module's boundary."""
@@ -393,6 +395,7 @@ def test_connect_and_send_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatc
     t = threading.Thread(target=_accept_once, args=(listener,), daemon=True)
     t.start()
     parent, child = make_control_socketpair()
+    sock = _connect_one(host, port)
 
     def _raising_sendmsg(self: socket.socket, *args: object, **kwargs: object) -> int:
         raise OSError("simulated sendmsg failure")
@@ -400,14 +403,14 @@ def test_connect_and_send_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(socket.socket, "sendmsg", _raising_sendmsg)
     try:
         with pytest.raises(ControlFdBrokerError) as exc:
-            _connect_and_send(parent, host, port)
+            _send_one(parent, sock)
         assert exc.value.reason == "sendmsg_failed"
     finally:
         parent.close()
         child.close()
         # Join BEFORE closing the listener (see the happy-path test's finally for the rationale):
-        # _connect_and_send's finally: sock.close() closed the client end, so the accept thread's
-        # recv() has returned and the thread is ending — join returns promptly.
+        # _send_one's finally: sock.close() closed the client end, so the accept thread's recv()
+        # has returned and the thread is ending — join returns promptly.
         t.join(timeout=2)
         assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
         listener.close()

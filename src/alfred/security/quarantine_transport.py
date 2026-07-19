@@ -41,12 +41,15 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import structlog
 
+from alfred.egress.control_fd_broker import ControlFdBrokerError
 from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.plugins.transport import ControlResult
+from alfred.security.quarantine import BROKER_SOCKET_COUNT
 from alfred.security.tiers import T3, tag_t3_with_nonce
 
 if TYPE_CHECKING:
+    from alfred.egress.broker_audit import EgressBrokerAuditor
     from alfred.security.quarantine import ContentHandle
     from alfred.security.tiers import CapabilityGateNonce, TaggedContent
 
@@ -61,6 +64,20 @@ _EXTRACT_METHOD = "quarantine.extract"
 # 4-byte big-endian length prefix — peer to StdioTransport's framing
 # (``struct.pack(">I", ...)`` at stdio_transport.py:467-487,605).
 _LENGTH_HEADER_BYTES = 4
+
+# The closed-vocab :class:`alfred.security.quarantine.TypedRefusalReason` a broker
+# failure lifts to (golive spec §7/§21, HARD #7). A ``ControlFdBrokerError`` means
+# the child could not be handed a live gateway socket — the provider egress is
+# unreachable, so this maps to ``provider_unavailable`` (the SAME reason the child
+# dispatcher returns on ``ProviderUnavailableError``). The FORENSIC record of *why*
+# (the closed broker ``reason`` + destination) is the durable ``egress.broker.refused``
+# row (``record_broker_failure``); the orchestrator-visible outcome is a graceful
+# typed refusal, NEVER a raw ``ControlFdBrokerError`` (HARD #7). ``transport_failed``
+# is an audit-result value, not a ``TypedRefusalReason`` — the two are distinct.
+_BROKER_FAILURE_REFUSAL_REASON = "provider_unavailable"
+# The unresolved-destination sentinel for the failure row when a ``ControlFdBrokerError``
+# somehow carries no ``destination`` (defensive — every broker-path error stamps one).
+_UNRESOLVED_DESTINATION = "<unresolved>"
 
 
 class StagingNonceUnconfiguredError(AlfredError):
@@ -93,12 +110,17 @@ class ChildIO(Protocol):
     Abstracts the launcher-spawned subprocess pipes (PR-S4-11c-2b) so tests drive
     an in-process child double. ``write_frame`` ships one already-framed
     length-prefixed JSON-RPC request; ``read_frame`` returns the raw bytes of one
-    length-prefixed reply frame (header stripped by the caller).
+    length-prefixed reply frame (header stripped by the caller). ``broker_sockets``
+    hands the child ``count`` pre-connected gateway sockets over the fd-4 control
+    channel BEFORE the extract frame (connect-defer, #340 golive Task 9): a partial
+    connect failure sends nothing and raises :class:`ControlFdBrokerError`.
     """
 
     def write_frame(self, frame: bytes) -> None: ...
 
     async def read_frame(self) -> bytes: ...
+
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]: ...
 
     async def aclose(self) -> None: ...
 
@@ -264,9 +286,19 @@ class QuarantineStdioTransport:
     other method is a loud :class:`AlfredError` rather than a silent passthrough.
     """
 
-    def __init__(self, *, child_io: ChildIO, staging: QuarantineStagingMap) -> None:
+    def __init__(
+        self,
+        *,
+        child_io: ChildIO,
+        staging: QuarantineStagingMap,
+        broker_auditor: EgressBrokerAuditor | None = None,
+    ) -> None:
         self._child_io = child_io
         self._staging = staging
+        # OPTIONAL: golive Task 10 threads the real dormant-pre-gate auditor + declares
+        # the ``egress.broker.*`` hookpoints. Until then it is ``None`` (no audit rows).
+        # None-safe on EVERY use below — a missing auditor never blocks brokering.
+        self._broker_auditor = broker_auditor
 
     async def dispatch(self, method: str, params: dict[str, object]) -> ControlResult:
         """Dispatch ``quarantine.extract`` via the ingest-then-extract wire.
@@ -286,6 +318,24 @@ class QuarantineStdioTransport:
         # refused before the wire is touched, so a replay cannot ship a partial
         # ingest then fail.
         tagged = self._staging.drain(handle_id)
+
+        # Broker N one-shot gateway sockets up-front (spec §6, connect-defer) BEFORE the
+        # ingest/extract writes: all N ``sendmsg``s enqueue into the child's fd-4 buffer
+        # ahead of the extract frame, so the child's post-read drain is race-free. A
+        # partial connect failure sends NOTHING; the ``ControlFdBrokerError`` is caught
+        # here and converted to a typed refusal — NEVER propagated raw (HARD #7).
+        try:
+            destinations = await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)
+        except ControlFdBrokerError as exc:
+            if self._broker_auditor is not None:
+                await self._broker_auditor.record_broker_failure(
+                    destination=exc.destination or _UNRESOLVED_DESTINATION,
+                    reason=exc.reason,
+                )
+            return _broker_failure_refusal()
+        if self._broker_auditor is not None:
+            for host, port in destinations:
+                await self._broker_auditor.record_broker_success(destination=f"{host}:{port}")
 
         # Inline-over-wire (ADR-0029): ingest carries the raw T3 body; extract
         # carries only the opaque handle id + schema. Ingest goes FIRST so the
@@ -314,6 +364,22 @@ class QuarantineStdioTransport:
     async def close(self) -> None:
         """Close the injected child-IO seam (idempotent at the seam level)."""
         await self._child_io.aclose()
+
+
+def _broker_failure_refusal() -> ControlResult:
+    """The ``ControlResult`` a broker failure lifts to — a graceful typed refusal (HARD #7).
+
+    The payload is the SAME ``{"kind": "typed_refusal", "reason": ...}`` wire shape the child
+    normally sends over the wire, so :meth:`QuarantinedExtractor._extract_body` lifts it into a
+    :class:`alfred.security.quarantine.TypedRefusal` (``result="refused"``) — a legitimate
+    orchestrator outcome the caller branches on, never a raised ``ControlFdBrokerError``. The
+    durable forensic record of the broker failure is the separate ``egress.broker.refused`` audit
+    row (see :meth:`QuarantineStdioTransport.dispatch`); this outcome carries no T3-derived bytes.
+    """
+    return ControlResult(
+        method=_EXTRACT_METHOD,
+        payload={"kind": "typed_refusal", "reason": _BROKER_FAILURE_REFUSAL_REASON},
+    )
 
 
 def _decode_result_payload(raw: bytes) -> dict[str, object]:
