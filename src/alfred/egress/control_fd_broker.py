@@ -57,38 +57,82 @@ def make_control_socketpair() -> tuple[socket.socket, socket.socket]:
     return parent_end, child_end
 
 
+# One C ``int`` is the SCM_RIGHTS fd payload width; the ancillary buffer is sized for exactly one.
+_FD_ITEMSIZE = array.array("i").itemsize
+_FD_CMSG_SPACE = socket.CMSG_SPACE(_FD_ITEMSIZE)
+
+
+def _collect_scm_rights_fds(ancdata: list[tuple[int, int, bytes]]) -> array.array[int]:
+    """Extract every SCM_RIGHTS descriptor the kernel installed from a ``recvmsg`` result.
+
+    Shared by the blocking :func:`recv_passed_fd` and the non-blocking
+    :func:`recv_passed_fd_nonblocking` so both apply IDENTICAL fd extraction and — via
+    :func:`_close_all` on refusal — the identical leaked-fd-close hardening (fold-log L-2).
+    """
+    fds = array.array("i")
+    for level, typ, cmsg in ancdata:
+        if level == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
+            fds.frombytes(cmsg[: len(cmsg) - (len(cmsg) % fds.itemsize)])
+    return fds
+
+
+def _close_all(fds: array.array[int]) -> None:
+    """Close every descriptor the kernel installed before a malformed frame is refused.
+
+    A malformed frame (truncated OR not-exactly-one) must not leak a fd into this process. Which
+    of the two refusals a >1-fd frame triggers is kernel-specific (macOS/BSD sets MSG_CTRUNC on the
+    over-full 1-fd buffer; Linux instead delivers the extra fd and trips the count check), so BOTH
+    arcs close through here.
+    """
+    for fd in fds:
+        os.close(fd)
+
+
 def recv_passed_fd(control_end: socket.socket) -> tuple[bytes, int]:
     """Receive the framed data + EXACTLY ONE SCM_RIGHTS fd on ``control_end`` (loud on truncation).
 
-    Used by the docker probe (child side). A truncated ancillary payload (``MSG_CTRUNC``) or a frame
-    carrying zero or >1 fds is a loud :class:`ControlFdBrokerError` — the capability envelope is
-    "exactly one connected gateway socket per frame".
+    Used by the docker probe (child side) and the golive brokered-egress ``bind`` path. A truncated
+    ancillary payload (``MSG_CTRUNC``) or a frame carrying zero or >1 fds is a loud
+    :class:`ControlFdBrokerError` — the capability envelope is "exactly one connected gateway
+    socket per frame".
 
     fd extraction runs BEFORE the truncation check (not after) so that any fd the kernel DID manage
     to install ahead of truncating the rest gets closed before we raise — otherwise a truncated
     ancillary payload would leak that fd into this process's table (fold-log L-2).
     """
-    fds = array.array("i")
-    msg, ancdata, flags, _addr = control_end.recvmsg(4096, socket.CMSG_SPACE(fds.itemsize))
-    for level, typ, cmsg in ancdata:
-        if level == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
-            fds.frombytes(cmsg[: len(cmsg) - (len(cmsg) % fds.itemsize)])
-
-    def _refuse_and_close(reason: str) -> ControlFdBrokerError:
-        # Close every descriptor the kernel installed before we refuse — a malformed frame
-        # (truncated OR not-exactly-one) must not leak a fd into this process. Which of the two
-        # refusals a >1-fd frame triggers is kernel-specific (macOS/BSD sets MSG_CTRUNC on the
-        # over-full 1-fd buffer; Linux instead delivers the extra fd and trips the count check),
-        # so BOTH arcs must close.
-        for fd in fds:
-            os.close(fd)
-        return ControlFdBrokerError(reason)
-
+    msg, ancdata, flags, _addr = control_end.recvmsg(4096, _FD_CMSG_SPACE)
+    fds = _collect_scm_rights_fds(ancdata)
     if flags & socket.MSG_CTRUNC:
-        raise _refuse_and_close("ancillary_truncated")
+        _close_all(fds)
+        raise ControlFdBrokerError("ancillary_truncated")
     if len(fds) != 1:
-        raise _refuse_and_close("expected_exactly_one_fd")
+        _close_all(fds)
+        raise ControlFdBrokerError("expected_exactly_one_fd")
     return msg, int(fds[0])
+
+
+def recv_passed_fd_nonblocking(control_end: socket.socket) -> int | None:
+    """Non-blocking (``MSG_DONTWAIT``) sibling of :func:`recv_passed_fd` for the drain sweep.
+
+    Returns the ONE passed fd, or ``None`` on peer-close/EOF (empty frame, zero fds) — the normal
+    terminator when a caller sweeps un-consumed pre-brokered sockets (#340 PR2b-golive §6/§8).
+    Raises ``BlockingIOError`` (``EAGAIN``) when nothing is queued so the caller can stop the
+    sweep, and the SAME loud :class:`ControlFdBrokerError` as the blocking path on a malformed
+    frame (``MSG_CTRUNC`` / not-exactly-one-fd) — a truncated or mis-counted frame is a fault,
+    never a benign end-of-sweep, and must surface (HARD #7). Reuses the shared leaked-fd-close
+    hardening so a refused non-blocking recv never leaks a descriptor either.
+    """
+    msg, ancdata, flags, _addr = control_end.recvmsg(4096, _FD_CMSG_SPACE, socket.MSG_DONTWAIT)
+    fds = _collect_scm_rights_fds(ancdata)
+    if flags & socket.MSG_CTRUNC:
+        _close_all(fds)
+        raise ControlFdBrokerError("ancillary_truncated")
+    if not msg and len(fds) == 0:
+        return None  # peer closed / no more frames -> the sweep's benign terminator
+    if len(fds) != 1:
+        _close_all(fds)
+        raise ControlFdBrokerError("expected_exactly_one_fd")
+    return int(fds[0])
 
 
 def _resolve_proxy_addr(proxy_config: EgressProxyConfig) -> tuple[str, int]:
@@ -180,4 +224,5 @@ __all__ = [
     "broker_connected_socket",
     "make_control_socketpair",
     "recv_passed_fd",
+    "recv_passed_fd_nonblocking",
 ]

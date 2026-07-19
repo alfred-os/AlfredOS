@@ -459,3 +459,15 @@ async def test_complete_maps_rate_limit_error_to_provider_unavailable(
     req = CompletionRequest(messages=[Message(role="user", content="hi")])
     with pytest.raises(ProviderUnavailableError):
         await anthropic_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_aclose_delegates_to_sdk_public_close(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    """``aclose`` calls the SDK's documented public async close on the ``AsyncAnthropic`` handle
+    (which closes the underlying httpx client + its fd once dialed) — NOT the private
+    ``_client._client`` httpx handle. The brokered-egress child source (#340 PR2b-golive) awaits
+    this as the D5 sole-fd-owner teardown."""
+    await anthropic_provider.aclose()
+    anthropic_provider._client.close.assert_awaited_once()
