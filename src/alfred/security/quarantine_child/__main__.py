@@ -7,7 +7,7 @@ Exposes two JSON-RPC methods consumed by
 * ``quarantine.ingest(handle_id, context)`` — intake T3 bytes; stores
   them under ``handle_id`` for a single subsequent ``quarantine.extract``
   call.
-* ``quarantine.extract(handle_id, schema_json, schema_version, provider)``
+* ``quarantine.extract(handle_id, schema_json, schema_version, source)``
   → :data:`alfred.security.quarantine.ExtractionResult` (serialised as
   a discriminated-union JSON object).
 
@@ -46,13 +46,24 @@ import json
 import os
 import struct
 import sys
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 # Stdlib-only (import-closure-safe per ADR-0030): pins logging to stderr so the
 # child's stdout stays byte-pure for length-prefixed JSON-RPC frames. Called from
 # main() before the fd-3 read / loop (BUG-1, PR-S4-11c-2b0).
 from alfred._stdio_logging import configure_stderr_logging
 from alfred.security.quarantine_child._handshake import READY_FRAME, emit_hello
+
+if TYPE_CHECKING:
+    # TYPE-CHECK ONLY: gives ``_build_provider``'s ``-> _ProviderFactory`` annotation a
+    # name to resolve under mypy/pyright WITHOUT importing the egress-capable
+    # ``brokered_egress`` module at runtime. The real import is LAZY inside
+    # ``_build_provider`` / ``main`` (#340 PR2b rev.2 point 2), and this guarded block
+    # is nested under an ``ast.If`` — NOT a top-level statement — so the child
+    # egress-closure gate (``_module_scope_imports`` walks ``tree.body`` only) never
+    # sees it, and the runtime import-closure bound (ADR-0030) is unchanged because
+    # ``TYPE_CHECKING`` is ``False`` at runtime.
+    from alfred.security.quarantine_child.brokered_egress import _ProviderFactory
 
 # In-process content cache for the Slice-3 skeleton. The production
 # implementation (PR-S3-5) replaces this with a Redis-backed
@@ -173,11 +184,15 @@ async def handle_extract(
     :func:`provider_dispatch.dispatch_extraction`, which owns the
     capability-branched (native / JSON-object / prompt-embedded) logic.
 
-    Missing handle id → empty bytes flow forward; the dispatcher's
-    retry-exhaustion path turns that into a ``TypedRefusal(reason=
-    "cannot_extract")`` so the audit row records ``result="refused"``
-    rather than crashing the subprocess. Crashing would skip the audit
-    write, which is exactly the failure mode we are not allowed to ship.
+    Empty-content short-circuit (spec §8, #340 PR2b golive): a missing
+    handle id (or an ingest of empty bytes) pops to ``b""`` and returns a
+    ``TypedRefusal(reason="cannot_extract")`` DIRECTLY — BEFORE any
+    ``dispatch_extraction`` call — so the child never brokers a socket or
+    pays for 3 doomed provider attempts on content that cannot yield an
+    extraction. Returning (not raising) keeps the audit row at
+    ``result="refused"`` rather than crashing the subprocess and skipping
+    the audit write, which is exactly the failure mode we are not allowed
+    to ship (HARD #7).
 
     The ``schema_version`` argument is accepted-and-passed-through here;
     enforcement of the ``Literal[1]`` invariant lives on the
@@ -195,11 +210,13 @@ async def handle_extract(
     module's import-time surface stays minimal — the dispatcher pulls
     in pydantic + the provider SDK shapes, which would otherwise slow
     down every supervisor probe that imports this module just to look
-    up ``handle_ingest``. Keeping the ``httpx``/provider-client import
-    LAZY (off the module-scope graph) is also load-bearing for the
-    go-live egress gate: the live deterministic-echo loop never calls
-    ``handle_extract``, so the egress-capable import stays unreachable
-    (PR-S4-11c-2b re-pivot).
+    up ``handle_ingest``. Keeping that import LAZY (off the module-scope
+    graph) is load-bearing for the child egress-closure gate: even though
+    the live loop NOW calls ``handle_extract`` (#340 PR2b golive), the
+    egress-capable transport still lands only inside ``source.bind()`` —
+    ``provider_dispatch`` itself is egress-free, and the real Anthropic
+    client is assembled over the brokered fd, never at ``__main__`` module
+    scope (``test_quarantined_child_has_no_module_scope_egress_import``).
     """
     # Local import: see docstring rationale above.
     from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
@@ -212,6 +229,12 @@ async def handle_extract(
     # consumer boundary intent. The Redis-backed ContentStore (PR-S3-5)
     # uses GETDEL for the same reason.
     content = _content_cache.pop(handle_id, b"")
+    if not content:
+        # Empty-content short-circuit (spec §8): no bytes -> no extraction is
+        # possible, so refuse WITHOUT brokering a socket or paying for the 3
+        # doomed provider attempts dispatch_extraction would otherwise make.
+        # Same closed-vocab reason the dispatcher's exhaustion path returns.
+        return {"kind": "typed_refusal", "reason": "cannot_extract"}
     return await dispatch_extraction(
         content=content,
         schema_json=schema_json,
@@ -227,18 +250,17 @@ async def handle_extract(
 
 
 # ---------------------------------------------------------------------------
-# Wire framing + loop protocol (PR-S4-11c-2b).
+# Wire framing + loop protocol (#340 PR2b golive).
 #
-# DETERMINISTIC ECHO cut: the child runs the REAL length-prefixed JSON-RPC loop
-# over fd 0/1 — peer to the host
+# LIVE EXTRACTION: the child runs the REAL length-prefixed JSON-RPC loop over fd
+# 0/1 — peer to the host
 # :class:`alfred.security.quarantine_transport.QuarantineStdioTransport`'s
-# ``_frame`` + the 2a ``_EchoingChildDouble`` — but the extraction itself is a
-# deterministic echo (NO LLM call). PR-S4-11c-2c swaps ONLY ``_build_provider``
-# (a real Anthropic/DeepSeek client) and the extract branch (a real
-# ``dispatch_extraction`` call) for the live model. The echo is NOT a
-# host-fabricated extraction (CLAUDE.md hard rule #7): the real bwrapped
-# subprocess reads the real wire and produces this reply itself; the host never
-# synthesises an extraction on the child's behalf.
+# ``_frame`` — and the extract branch drives the REAL structured extraction
+# (``handle_extract`` -> ``dispatch_extraction`` -> the Anthropic SDK over a
+# brokered fd). This is the cutover from the prior deterministic-echo loop: the
+# real bwrapped subprocess reads the real wire, calls the real model, and frames
+# its own reply (CLAUDE.md hard rule #7: the host never synthesises an extraction
+# on the child's behalf; raw T3 reaches only this process — HARD #5).
 # ---------------------------------------------------------------------------
 
 _INGEST_METHOD = "quarantine.ingest"
@@ -260,24 +282,6 @@ class QuarantineChildProtocolError(Exception):
     """
 
 
-class _DeterministicProvider:
-    """Provider sentinel for the 2b deterministic-echo cut (NO LLM).
-
-    The fd-3 provider key is still read + scrubbed by :func:`main` before this
-    sentinel is built — the real-spawn proof asserts the key was delivered — but
-    no network client is constructed. PR-S4-11c-2c replaces this with a real
-    Anthropic/DeepSeek client built from the key.
-
-    ``__repr__`` is pinned key-free so a stray ``repr`` of the provider (e.g. in
-    a stack trace) can never leak the key the sentinel was built next to.
-    """
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "_DeterministicProvider()"
-
-
 @runtime_checkable
 class _FrameReader(Protocol):
     """Length-prefixed frame source (``asyncio.StreamReader`` satisfies it)."""
@@ -294,25 +298,39 @@ class _FrameWriter(Protocol):
     async def drain(self) -> None: ...
 
 
-def _echo_extracted_frame(context: str) -> bytes:
-    """Build the ONE length-prefixed reply frame the extract branch emits.
+def _frame_from_result(result: dict[str, Any]) -> bytes:
+    """Length-prefix a JSON-RPC ``result`` envelope for one extract reply frame.
 
-    The ``data.text`` echoes the ingested context so the host's round-trip
-    assertion proves the body crossed the wire (not a fixed replay). The shape
-    matches the 2a ``_EchoingChildDouble`` byte-for-byte: a
-    ``CommsBodyExtraction``-valid ``extracted`` payload.
+    Replaces the deleted echo-frame builder: the child now frames the REAL
+    :func:`provider_dispatch.dispatch_extraction` outcome (an ``extracted`` /
+    ``typed_refusal`` dict) rather than a synthesised echo. Peer to the host
+    transport's ``_decode_result_payload``, which reads ``.get("result")`` — the
+    host lifts ``kind`` / ``data`` / ``extraction_mode`` / ``reason`` field-by-field,
+    so a child-only ``cost_usd`` key on ``result`` rides along harmlessly.
     """
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "result": {
-                "kind": "extracted",
-                "data": {"text": context, "intent": "greeting"},
-                "extraction_mode": "native_constrained",
-            },
-        }
-    ).encode("utf-8")
+    body = json.dumps({"jsonrpc": "2.0", "result": result}).encode("utf-8")
     return struct.pack(">I", len(body)) + body
+
+
+def _pin_structlog_to_stderr() -> None:
+    """Route structlog output to stderr so no child log ever corrupts the fd-1 wire.
+
+    :func:`configure_stderr_logging` pins STDLIB ``logging`` to stderr, but structlog's
+    DEFAULT ``PrintLogger`` writes to ``sys.stdout``. The live extract path now imports
+    :mod:`brokered_egress` (whose ``drain_leftovers`` emits a structlog debug) — the
+    FIRST structlog emission on the child's live path. Left unpinned, that debug line
+    prepends the reply frame and corrupts the wire the host transport reads (the BUG-1
+    stdout-purity class; HARD #7). The pre-cutover deterministic-echo child never
+    imported structlog on the live path, so this pin is new with the golive cutover.
+
+    Lazy ``import structlog`` (called only from ``main``, never at module import): keeps
+    the child's module-scope import surface bounded (ADR-0030) and off the egress-closure
+    gate. Global structlog config is process-safe here — the child is a dedicated
+    subprocess.
+    """
+    import structlog
+
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
 
 
 async def _write_boot_ready(writer: _FrameWriter) -> None:
@@ -325,18 +343,30 @@ async def _write_boot_ready(writer: _FrameWriter) -> None:
     await writer.drain()
 
 
-async def main() -> None:  # pragma: no cover - subprocess entry; loop covered via _run_mcp_server
-    """Entry point: read provider key from fd 3, then run the MCP server.
+async def main() -> None:
+    """Entry point: read the fd-3 key, build the brokered source, run the MCP server.
 
     The fd-3 read happens HERE, not at module load time (sec-007). The variable
     is del'd after handing it to the provider builder — best-effort scrub
     (CPython does not guarantee prompt zeroing, but the explicit ``del``
     documents intent and removes the reference from the frame).
 
-    The MCP loop runs over real ``asyncio`` stdio streams (fd 0 / fd 1). The loop
-    body itself is injected-stream-testable (:func:`_run_mcp_server` takes the
-    reader/writer) so the framing + dispatch are unit-covered without a
-    subprocess; ``main`` is the thin real-stdio binding the launcher execs.
+    Boot ordering (§20.3.2, pinned by ``test_quarantine_child_boot_ordering``):
+    ``configure_stderr_logging`` -> ``_pin_structlog_to_stderr`` (structlog's default
+    PrintLogger writes to stdout — pin it to stderr before any child log can corrupt the
+    fd-1 wire) -> fd-3 read -> ``emit_hello`` (provenance FIRST,
+    before ANY refuse path, so a post-hello refuse is child-authored and the host
+    never forges a launcher ``sandbox_refused`` row) -> ``_build_provider`` (the
+    §20.2 SECONDARY refuse-boot: an empty key raises ``QuarantineChildBootError``
+    strictly AFTER ``emit_hello`` and BEFORE ``ready``) -> reconstruct the
+    inherited fd-4 control socket + build the ``BrokeredProviderSource`` -> emit
+    ``ready`` -> run the loop. A pre-``emit_hello`` fd-3 framing failure exits with
+    ZERO stdout, which the host's sec-001 gate correctly reads as a launcher EOF.
+
+    ``import socket`` is LAZY (here, not module scope): ``socket`` is egress-capable,
+    so a module-scope import would trip the child egress-closure gate
+    (``test_quarantined_child_has_no_module_scope_egress_import``); ``main()`` is not
+    module scope, so the lazy bind keeps the gate green (#340 PR2b rev.2 point 2).
 
     BUG-1 (PR-S4-11c-2b0): stdout carries length-prefixed JSON-RPC reply frames,
     so ALL logging is pinned to stderr BEFORE anything runs — before the fd-3
@@ -345,15 +375,28 @@ async def main() -> None:  # pragma: no cover - subprocess entry; loop covered v
     missing-catalog warning on a pip-installed alfred). A log byte on fd 1 would
     corrupt the wire the host transport reads.
     """
+    import socket  # LAZY — see docstring (egress-closure gate); main() is not module scope
+
+    # The inherited one-way core->child control fd (#340 PR2a; ADR-0050). The host
+    # spawns with ``control_fd=True`` (Task 8) so fd 4 is a live AF_UNIX end.
+    _control_fd = 4
+
     configure_stderr_logging()
+    _pin_structlog_to_stderr()  # structlog default is stdout — pin it before any child log
     provider_key = _read_provider_key_from_fd3()
-    emit_hello()  # provenance: proves this is a real exec'd child (#443)
+    emit_hello()  # provenance FIRST (#443): a real exec'd child; pins launcher-vs-child
     try:
-        provider = _build_provider(provider_key)
+        factory = _build_provider(provider_key)  # §20.2 secondary refuse-boot on empty key
     finally:
-        # del after handoff; in 2b the sentinel holds no key, so this is a
-        # forward-looking scrub for the 2c real-client cut.
-        del provider_key
+        del provider_key  # best-effort scrub after handoff to the frozen factory
+    # Reconstruct the inherited fd-4 control channel and build the per-attempt
+    # provider source BEFORE ``ready`` — a broken control fd refuses boot rather
+    # than letting the liveness frame lie (§20.3.2). LAZY import: brokered_egress
+    # is the egress-capable module and must stay off __main__'s module-scope graph.
+    from alfred.security.quarantine_child.brokered_egress import BrokeredProviderSource
+
+    control_end = socket.socket(fileno=_control_fd, family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    source = BrokeredProviderSource(factory, control_end)
     reader = asyncio.StreamReader()
     loop = asyncio.get_running_loop()
     await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
@@ -362,36 +405,54 @@ async def main() -> None:  # pragma: no cover - subprocess entry; loop covered v
     )
     writer = asyncio.StreamWriter(w_transport, w_protocol, reader, loop)
     await _write_boot_ready(writer)  # liveness: proves initialized + serving (#443)
-    await _run_mcp_server(provider, reader=reader, writer=writer)
+    await _run_mcp_server(source, reader=reader, writer=writer)
 
 
-def _build_provider(key: str) -> Any:
-    """Construct the provider from the fd-3 key.
+def _build_provider(key: str) -> _ProviderFactory:
+    """Build the per-child provider FACTORY from the fd-3 key + spawn-env config.
 
-    PR-S4-11c-2b: returns a :class:`_DeterministicProvider` sentinel — the key is
-    consumed (typed ``str``, so a future implementer cannot silently drop it) but
-    NO network client is built and NO LLM is contacted. PR-S4-11c-2c swaps this
-    body for a real Anthropic/DeepSeek client built from ``key``.
+    Returns a boot-cheap, frozen :class:`_ProviderFactory` — NO socket, NO network:
+    the real Anthropic SDK client is assembled per extraction attempt inside
+    ``source.bind()`` over a brokered fd, never here. This keeps the child's boot
+    path egress-free (``sbx-2026-024``) as defence-in-depth over the ``--unshare-net``
+    kernel containment.
+
+    §20.2 SECONDARY refuse-boot (HARD #7): an empty key makes
+    ``_ProviderFactory.from_key`` raise :class:`QuarantineChildBootError`, which
+    propagates out of ``main`` (``asyncio.run`` re-raises) so the child exits
+    non-zero BEFORE writing ``ready`` — a dead-LLM child must never lie live. The
+    HOST pre-spawn key check (Task 7) is the PRIMARY guard; this is defence-in-depth.
+
+    ``ALFRED_QUARANTINE_MODEL`` / ``ALFRED_QUARANTINE_MAX_TOKENS`` arrive via the
+    scrubbed spawn env (Task 8). A missing var is a supervisor-side wiring bug that
+    fails loud with ``KeyError`` at boot rather than silently defaulting the model.
     """
-    del key  # 2b: consumed-but-not-wired; 2c builds the real client from it
-    return _DeterministicProvider()
+    from alfred.security.quarantine_child.brokered_egress import _ProviderFactory
+
+    model = os.environ["ALFRED_QUARANTINE_MODEL"]
+    max_tokens = int(os.environ["ALFRED_QUARANTINE_MAX_TOKENS"])
+    return _ProviderFactory.from_key(key, model=model, max_tokens=max_tokens)
 
 
-async def _run_mcp_server(provider: Any, *, reader: _FrameReader, writer: _FrameWriter) -> None:
+async def _run_mcp_server(source: Any, *, reader: _FrameReader, writer: _FrameWriter) -> None:
     """Run the length-prefixed JSON-RPC loop over ``reader`` / ``writer``.
 
     Storeless (the in-proc ``_content_cache`` pop, no Redis): ``quarantine.ingest``
-    caches the context under ``handle_id`` and writes NO reply;
-    ``quarantine.extract`` pops it single-use and writes ONE
-    ``extracted``-kind reply frame echoing the context. An unknown method raises
+    caches the T3 context under ``handle_id`` and writes NO reply;
+    ``quarantine.extract`` pops it single-use and runs the REAL structured
+    extraction against the brokered ``source`` (:func:`handle_extract` ->
+    :func:`provider_dispatch.dispatch_extraction`), then frames the ``extracted`` /
+    ``typed_refusal`` result as ONE reply. An unknown method raises
     :class:`QuarantineChildProtocolError` (loud refusal). stdin EOF (a truncated
     or absent header) ends the loop cleanly — the host closed the pipe, so the
     child returns and :func:`main`'s ``asyncio.run`` exits 0.
 
-    ``provider`` is accepted so the 2c swap (real LLM call in the extract branch)
-    is a surgical change — the loop framing + dispatch stay identical.
+    ``source`` is the ``BrokeredProviderSource`` (typed ``Any`` for the egress-free
+    rationale that types the dispatcher's ``source`` param): it brokers ONE gateway
+    socket per retry attempt. After each extract the loop drains any pre-brokered
+    sockets an early-success retry never consumed (§6) in a ``finally`` so no fd
+    leaks on the persistent child, even if ``handle_extract`` raised.
     """
-    del provider  # 2b: the deterministic echo needs no provider; 2c calls it
     while True:
         try:
             header = await reader.readexactly(_LENGTH_HEADER_BYTES)
@@ -414,17 +475,20 @@ async def _run_mcp_server(provider: Any, *, reader: _FrameReader, writer: _Frame
             # ships ingest then extract and reads exactly one reply).
             continue
         if method == _EXTRACT_METHOD:
-            # PR-S4-11c-2c replaces this deterministic-echo body with a call to
-            # ``handle_extract(...)`` (which delegates to ``dispatch_extraction``
-            # → the real provider). Keep the loop, ``handle_extract``, and the
-            # skeleton/loop tests (test_quarantine_child_loop.py,
-            # test_quarantine_plugin_skeleton.py) in sync when that swap lands.
-            # Single-use GETDEL-equivalent pop: the context is released the moment
-            # the extract consumes it (replay against the same handle echoes "").
-            context = _content_cache.pop(str(params["handle_id"]), b"").decode(
-                "utf-8", errors="replace"
-            )
-            writer.write(_echo_extracted_frame(context))
+            try:
+                result = await handle_extract(
+                    handle_id=str(params["handle_id"]),
+                    schema_json=str(params["schema_json"]),
+                    schema_version=int(params["schema_version"]),
+                    source=source,
+                    max_tokens=int(os.environ["ALFRED_QUARANTINE_MAX_TOKENS"]),
+                )
+            finally:
+                # Sweep the (N - attempts_used) unused pre-brokered sockets an
+                # early-success retry loop never consumed (§6). In a ``finally`` so
+                # it runs even if handle_extract raised — no fd leak on the child.
+                source.drain_leftovers()
+            writer.write(_frame_from_result(result))
             await writer.drain()
             continue
         # Closed vocabulary — anything else is a loud refusal.

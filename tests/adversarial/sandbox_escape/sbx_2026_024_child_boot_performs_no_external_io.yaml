@@ -13,8 +13,9 @@ payload:
     - fd3_read_provider_key
     - emit_hello_frame
     - build_provider
+    - reconstruct_fd4_control_socket
     - emit_ready_frame
-  expected_provider_type: _DeterministicProvider
+  expected_provider_type: _ProviderFactory
 note: >-
   DEFENSE IN DEPTH, explicitly not the load-bearing guard. The
   kernel-enforced containment is the shipped bwrap policy's
@@ -23,30 +24,37 @@ note: >-
   even if the child's Python-level boot path tried to open a socket, the
   empty network namespace would refuse it at the kernel before any bytes
   left the sandbox. This entry exists because the #443 boot handshake
-  adds a NEW step to the boot sequence (_build_provider, invoked between
-  the hello and ready frames) that a future PR-S4-11c-2c "swap the
-  deterministic echo for a real Anthropic/DeepSeek client" cutover will
-  change -- pinning "boot performs no external IO" here as a Python-level
-  behavioural assertion gives that future PR an early, host-side signal
-  (this test would need conscious updating) alongside the kernel-level
-  one, rather than relying on the netns policy as the only tripwire.
+  adds a step to the boot sequence (_build_provider, invoked between the
+  hello and ready frames) that the #340 PR2b golive cutover changes --
+  pinning "boot performs no external IO" here as a Python-level
+  behavioural assertion gives that cutover an early, host-side signal
+  (this test needed conscious updating) alongside the kernel-level one,
+  rather than relying on the netns policy as the only tripwire. #340 PR2b
+  IS that conscious update: _build_provider now returns a boot-cheap
+  _ProviderFactory (frozen dataclass) instead of the deterministic-echo
+  _DeterministicProvider sentinel -- the real Anthropic client is
+  assembled per extraction attempt inside source.bind() over a brokered
+  fd, NEVER at boot. The load-bearing "no socket at boot" invariant is
+  unchanged and directly re-asserted.
 expected_outcome: neutralized
 provenance: >-
   alfred.security.quarantine_child.__main__._build_provider (called from
-  main() between emit_hello() and the asyncio-stream setup that precedes
-  _write_boot_ready()) is, in the current PR-S4-11c-2b deterministic-echo
-  cut, a pure sentinel constructor: it consumes the fd-3-delivered
-  provider key (`del key` -- typed str, so a future implementer cannot
-  silently drop it) and returns a bare _DeterministicProvider() with no
-  network client, no httpx import, and no socket call anywhere in its
-  body. test_quarantine_child_import_closure.py already pins that
-  importing the child's entry module pulls in no privileged HOST module
-  (alfred.audit / alfred.core / alfred.memory / the secret broker); this
-  entry is the sibling assertion at the BEHAVIOURAL layer, not the import
-  layer -- it exercises _build_provider directly with socket.socket
-  monkeypatched to raise, and asserts (a) no socket construction was
-  attempted and (b) the returned object is a _DeterministicProvider
-  instance, matching the payload's expected_provider_type. ingestion_path
+  main() between emit_hello() and the fd-4 control-socket reconstruction
+  that precedes _write_boot_ready()) is, after the #340 PR2b golive cut, a
+  boot-cheap factory constructor: it consumes the fd-3-delivered provider
+  key (a typed str -- an empty key is refused, not silently dropped) plus
+  the spawn-env model/max_tokens and returns a frozen _ProviderFactory
+  with no network client, no eager httpx client, and no socket call
+  anywhere in its body (the real SDK client is built per attempt inside
+  source.bind() over a brokered fd, not here). test_quarantine_child_
+  import_closure.py already pins that importing the child's entry module
+  pulls in no privileged HOST module (alfred.audit / alfred.core /
+  alfred.memory / the secret broker); this entry is the sibling assertion
+  at the BEHAVIOURAL layer, not the import layer -- it exercises
+  _build_provider directly with socket.socket monkeypatched to raise, and
+  asserts (a) no socket construction was attempted and (b) the returned
+  object is a _ProviderFactory instance, matching the payload's
+  expected_provider_type. ingestion_path
   is stdio_fd3_key_delivery (the existing #237 provider-key fd-3 framing
   member, reused per rev-004 rather than adding a new IngestionPath member
   for this entry -- the boot sequence this threat covers begins at the
@@ -59,7 +67,7 @@ provenance: >-
   FUTURE regression at the Python level before it ever reaches the kernel
   boundary, which is what "defence in depth" means here.
 references:
-  - "src/alfred/security/quarantine_child/__main__.py (_build_provider, _DeterministicProvider, main)"
+  - "src/alfred/security/quarantine_child/__main__.py (_build_provider, main)"
   - "src/alfred/security/quarantine_child/_handshake.py (emit_hello, _write_boot_ready equivalent boot-frame emission)"
   - "config/sandbox/quarantined-llm.linux.bwrap.policy (the load-bearing --unshare-net kernel containment)"
   - "tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml (the kernel-observable --unshare-net proof this entry supplements)"
