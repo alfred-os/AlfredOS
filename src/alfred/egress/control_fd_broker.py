@@ -9,10 +9,12 @@ from EgressClient (which does httpx I/O over its proxied client); the raw-socket
 sole INET-connect + sendmsg(SCM_RIGHTS) site in src/alfred.
 
 This module ships the primitives — the error type, the control socketpair constructor, the
-fd-receive helper, and the proxy-URL resolver — plus the async ``broker_connected_socket``
-orchestration: it opens the INET socket, CONNECT-handshakes it through the gateway proxy off-loop,
-and ``sendmsg``s the connected fd over the control fd. There is no live caller in #340 PR2a (the
-docker C1/C2 probe drives it directly); the per-extraction wiring lands in PR2b behind the sign-off.
+fd-receive helper, and the proxy-URL resolver — plus the async ``broker_connected_sockets``
+orchestration (connect-defer): it opens ALL ``count`` INET sockets first (CONNECT-handshaking each
+through the gateway proxy off-loop) and only then ``sendmsg``s the connected fds over the control
+fd, so a partial connect failure sends the child NOTHING. ``broker_connected_socket`` (singular) is
+the ``count=1`` pre-gate entrypoint the docker C1/C2 probe drives directly; the per-extraction batch
+wiring lands in PR2b (#340 golive Task 9) behind the sign-off.
 """
 
 from __future__ import annotations
@@ -36,13 +38,21 @@ class ControlFdBrokerError(AlfredError):
     """The core could not broker a connected socket to the quarantine child (loud refusal, HARD #7).
 
     Rooted at :class:`AlfredError` (not bare ``Exception``) with a closed-vocabulary ``reason`` so a
-    caller can attribute a ``SANDBOX_REFUSED`` audit row uniformly. PR2a has no live audited caller
-    (only the docker probe drives the broker); the audit-row WRITE lands in PR2b.
+    caller can attribute an ``egress.broker.refused`` audit row uniformly (golive spec §21). The
+    optional ``destination`` (``"host:port"``, NEVER the raw proxy URL — userinfo/basic-auth must
+    never reach a diagnostic string, mirroring :func:`_resolve_proxy_addr`) is the forensic subject
+    ADR-0040 residual (vii) needs in the signed core log; :func:`broker_connected_sockets` stamps it
+    when a batch fails so ``dispatch`` can write the failure row's ``destination`` from
+    ``exc.destination``. ``reason`` stays the audit-vocab key (the ``EGRESS_BROKER_REFUSED_REASONS``
+    drift-guard binds to it, NOT to ``destination``).
     """
 
-    def __init__(self, reason: str = "control_fd_broker_failed") -> None:
+    def __init__(
+        self, reason: str = "control_fd_broker_failed", *, destination: str | None = None
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.destination = destination
 
 
 def make_control_socketpair() -> tuple[socket.socket, socket.socket]:
@@ -161,23 +171,39 @@ def _resolve_proxy_addr(proxy_config: EgressProxyConfig) -> tuple[str, int]:
 _CONNECT_TIMEOUT_S = 10.0
 
 
-def _connect_and_send(parent_end: socket.socket, host: str, port: int) -> None:
-    """Blocking (executor-thread) body: connect, SCM_RIGHTS-pass the fd, close the core's copy.
+def _connect_one(host: str, port: int) -> socket.socket:
+    """Blocking (executor-thread) CONNECT: open ONE gateway-connected socket (no send).
 
-    The core writes ZERO application bytes to ``sock`` (HARD #5) — it only passes the descriptor.
-    The ``\\x01`` frame is the >=1 data byte an ancillary-only ``sendmsg`` over ``SOCK_STREAM``
-    requires so the kernel does not drop the fd.
+    Split out of the old ``_connect_and_send`` so :func:`broker_connected_sockets` can run the
+    CONNECT phase for the WHOLE batch before it sends any fd (connect-defer, golive spec §6): a
+    partial connect failure therefore sends NOTHING to the child. Returns the connected socket with
+    blocking restored; the caller owns its lifecycle (close after send, or close as unsent). A
+    failed connect (the common case — gateway down) is a loud ``gateway_unreachable`` refusal, never
+    a hang (``socket.create_connection`` bounds the wait at ``_CONNECT_TIMEOUT_S``).
     """
     try:
         sock = socket.create_connection((host, port), timeout=_CONNECT_TIMEOUT_S)
     except OSError as exc:
         _log.error("egress.control_fd_broker.gateway_unreachable", error_class=type(exc).__name__)
         raise ControlFdBrokerError("gateway_unreachable") from exc
+    # create_connection(timeout=) leaves O_NONBLOCK set on the returned socket; that flag rides the
+    # shared file description across the SCM_RIGHTS pass. Restore blocking so the child's recv
+    # blocks. No try/except here: settimeout(None) on a freshly-connected socket cannot raise in
+    # practice, and a defensive guard would be uncoverable dead code (breaks the 100% branch gate)
+    # — create_connection above is the only step that needs (and has) a guard.
+    sock.settimeout(None)
+    return sock
+
+
+def _send_one(parent_end: socket.socket, sock: socket.socket) -> None:
+    """Blocking (executor-thread) SEND: SCM_RIGHTS-pass ``sock`` over ``parent_end``, drop the copy.
+
+    The core writes ZERO application bytes to ``sock`` (HARD #5) — it only passes the descriptor.
+    The ``\\x01`` frame is the >=1 data byte an ancillary-only ``sendmsg`` over ``SOCK_STREAM``
+    requires so the kernel does not drop the fd. Split out of the old ``_connect_and_send`` SEND
+    half; the CONNECT is now :func:`_connect_one`.
+    """
     try:
-        # create_connection(timeout=) leaves O_NONBLOCK set on the returned socket; that flag rides
-        # the shared file description across the SCM_RIGHTS pass. Restore blocking so the child's
-        # recv blocks.
-        sock.settimeout(None)
         frame = b"\x01"
         sent = parent_end.sendmsg(
             [frame],
@@ -198,30 +224,70 @@ def _connect_and_send(parent_end: socket.socket, host: str, port: int) -> None:
         sock.close()
 
 
+async def broker_connected_sockets(
+    *, parent_end: socket.socket, proxy_config: EgressProxyConfig, count: int
+) -> list[tuple[str, int]]:
+    """Broker ``count`` connected gateway sockets to the child over ``parent_end`` (connect-defer).
+
+    Each extraction-retry attempt consumes one fresh brokered gateway socket (a consumed passed fd
+    cannot re-dial), so the host brokers ``count`` up-front (golive spec §6). CONNECT-DEFER: open
+    ALL ``count`` sockets first (:func:`_connect_one`), then ``sendmsg`` them to the child
+    (:func:`_send_one`) ONLY if every connect succeeded. A partial failure therefore sends NOTHING —
+    the child's fd-4 buffer never sees a partial batch, so there is nothing to reclaim; the
+    connected-but-unsent host sockets are closed by the ``finally``. ``sendmsg``/``recvmsg`` with
+    ``SCM_RIGHTS`` are blocking with no asyncio ancillary helper, so each connect/send runs in the
+    default executor (the ``_blocking_read_exactly`` precedent).
+
+    Fail-closed: any failure raises :class:`ControlFdBrokerError` (or an
+    :class:`IOPlaneUnavailableError` for an unset/malformed proxy) — never a hang (HARD #7). On a
+    batch failure the raised error carries ``destination = "host:port"`` (NEVER the raw proxy URL)
+    so ``dispatch`` can attribute the ``egress.broker.refused`` audit row. Returns
+    ``[(host, port)] * count`` on full success (one ``destination`` per brokered target).
+    """
+    host, port = _resolve_proxy_addr(proxy_config)  # userinfo already stripped; may raise IOPlane…
+    loop = asyncio.get_running_loop()
+    connected: list[socket.socket] = []
+    try:
+        # CONNECT phase — establish all ``count`` gateway-connected host sockets first. A failure
+        # here (gateway down) means the SEND phase never runs → the child buffer never sees a
+        # partial batch → no reclaim.
+        for _ in range(count):
+            connected.append(await loop.run_in_executor(None, _connect_one, host, port))
+        # SEND phase — only reached if EVERY connect succeeded.
+        for sock in connected:
+            await loop.run_in_executor(None, _send_one, parent_end, sock)
+    except ControlFdBrokerError as exc:
+        # Stamp the destination (never the raw URL) so the failure audit row can key on it (§21).
+        exc.destination = f"{host}:{port}"
+        raise
+    finally:
+        # Sole socket cleanup: a SENT socket's host copy is already dup'd into the child (closing it
+        # here just drops the redundant core copy — idempotent second close), and a connected-but-
+        # UNSENT socket (a mid-batch failure left it) is closed so it does not leak.
+        for sock in connected:
+            sock.close()
+    return [(host, port)] * count
+
+
 async def broker_connected_socket(
     *, parent_end: socket.socket, proxy_config: EgressProxyConfig
 ) -> tuple[str, int]:
-    """Broker ONE connected gateway socket to the child over ``parent_end`` (off-loop).
+    """Broker ONE connected gateway socket to the child (the singular pre-gate entrypoint).
 
-    ``sendmsg``/``recvmsg`` with ``SCM_RIGHTS`` are blocking with no asyncio ancillary helper, so
-    the connect+send run in the default executor (the ``_blocking_read_exactly`` precedent).
-    Fail-closed: any failure raises :class:`ControlFdBrokerError` (or
-    :class:`IOPlaneUnavailableError` for an unset proxy) — never a hang (HARD #7).
-
-    Returns the resolved ``(host, port)`` destination (already computed via
-    ``_resolve_proxy_addr``) so a caller can attribute a ``destination`` to an audit row.
-    Behavior-neutral as of #340 broker-audit pre-gate Task 3: the only current caller (the PR2a
-    docker probe) ignores this return value — the golive wiring is what consumes it.
+    Delegates to :func:`broker_connected_sockets` with ``count=1`` so the docker probe + the
+    de-2026-020 adversarial harness keep their single-socket contract while the golive
+    per-extraction path uses the batch. Returns the resolved ``(host, port)`` destination.
     """
-    host, port = _resolve_proxy_addr(proxy_config)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _connect_and_send, parent_end, host, port)
-    return host, port
+    destinations = await broker_connected_sockets(
+        parent_end=parent_end, proxy_config=proxy_config, count=1
+    )
+    return destinations[0]
 
 
 __all__ = [
     "ControlFdBrokerError",
     "broker_connected_socket",
+    "broker_connected_sockets",
     "make_control_socketpair",
     "recv_passed_fd",
     "recv_passed_fd_nonblocking",

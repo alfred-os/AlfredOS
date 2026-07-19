@@ -56,6 +56,10 @@ class _MaliciousChild:
         self._malicious_result = malicious_result
         self._reply: bytes | None = None
 
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        # Benign broker double — the laundering attack is in the extract reply, not the broker.
+        return [("gw", 8889)] * count
+
     def write_frame(self, frame: bytes) -> None:
         length = struct.unpack(">I", frame[:4])[0]
         obj = json.loads(frame[4 : 4 + length])

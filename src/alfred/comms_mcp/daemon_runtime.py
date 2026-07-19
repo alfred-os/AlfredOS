@@ -363,28 +363,33 @@ def _resolve_egress_config(egress_config: EgressProxyConfig) -> EgressProxyConfi
 
     The go-live child brokers its pre-connected gateway socket through the L7 CONNECT
     proxy at ``egress_config.egress_proxy_url`` (:mod:`alfred.egress.control_fd_broker`).
-    Validate it fail-closed BEFORE the spawn by REUSING the same
-    :meth:`alfred.egress.client.EgressClient.from_settings` seam ``build_router`` uses
-    — an unset/blank ``ALFRED_EGRESS_PROXY_URL`` raises
-    :class:`alfred.egress.errors.IOPlaneUnavailableError` PRE-spawn, which the daemon
-    boot path maps to the audited ``egress_plane_unavailable`` refusal (§20.2
-    fail-closed, CLAUDE.md hard rule #7). SCOPE: this pre-spawn check guards the
-    **unset/blank** case only. A non-blank but MALFORMED url (a bad ``host:port``)
-    passes here and is caught LOUD — not silent — at first extraction when
-    ``control_fd_broker._resolve_proxy_addr`` parses it (HARD #7 still holds; a child
-    that cannot broker its socket performs no extraction, so no T3 crosses). Full
-    boot/extraction parity (a shared ``host:port`` validator on this pre-spawn path)
-    is a Task-9 hardening. The built client is intentionally discarded: the quarantine child
-    egresses via ``control_fd_broker``, not ``EgressClient`` — but both read the SAME
-    ``egress_proxy_url``, so this is the correct pre-spawn precheck. Returns the
-    validated config unchanged for the caller to thread into the spawn.
+    Validate it fail-closed BEFORE the spawn with TWO checks, both raising
+    :class:`alfred.egress.errors.IOPlaneUnavailableError` PRE-spawn (which the daemon boot
+    path maps to the audited ``egress_plane_unavailable`` refusal, §20.2 fail-closed,
+    CLAUDE.md hard rule #7):
+
+    1. :meth:`alfred.egress.client.EgressClient.from_settings` — the same seam ``build_router``
+       uses — refuses an **unset/blank** ``ALFRED_EGRESS_PROXY_URL``.
+    2. :func:`alfred.egress.control_fd_broker._resolve_proxy_addr` — the SAME resolver the
+       per-extraction broker uses — refuses a non-blank but **MALFORMED** url (a bad
+       ``host:port``, e.g. no port). This is the Task-9 boot/extraction PARITY hardening: a
+       malformed proxy url is now caught LOUD at BOOT (never a live child abandoned on a
+       config it cannot broker through), instead of only at first extraction.
+
+    The built client is intentionally discarded: the quarantine child egresses via
+    ``control_fd_broker``, not ``EgressClient`` — but both read the SAME ``egress_proxy_url``,
+    so both checks are the correct pre-spawn prechecks. Returns the validated config unchanged
+    for the caller to thread into the spawn.
 
     SYNCHRONOUS (no ``await``): called before the single spawn ``await`` so the fd-3
     clobber window never opens on the refuse path (mirrors :func:`_resolve_provider_key`).
+    :func:`_resolve_proxy_addr` is pure ``urlsplit`` — it adds no ``await``.
     """
+    from alfred.egress import control_fd_broker
     from alfred.egress.client import EgressClient
 
-    EgressClient.from_settings(egress_config)
+    EgressClient.from_settings(egress_config)  # refuses unset/blank
+    control_fd_broker._resolve_proxy_addr(egress_config)  # refuses malformed host:port (Task-9)
     return egress_config
 
 
@@ -415,18 +420,19 @@ async def _build_comms_inbound_extractor(
     ``model`` + ``max_tokens`` (:func:`_resolve_quarantine_model_config`), and the
     default system CA bundle. All three are non-secret, non-T3 config; the provider
     KEY still crosses ONLY over fd 3. The per-extraction brokered-egress wiring (the
-    transport actually driving :meth:`broker_socket`) lands in Task 9 — until then
-    runtime extraction blocks, but boot + the unit cut (faked spawn) are green.
+    transport driving :meth:`_SubprocessChildIO.broker_sockets` before the extract
+    frame — connect-defer) lands in Task 9; the durable success/failure audit rows +
+    the ``egress.broker.*`` hookpoints are threaded in Task 10.
 
     FAIL-CLOSED (CLAUDE.md hard rule #7): on a non-Linux / unprovisioned host the
     spawn raises :class:`QuarantineChildSpawnError`, which propagates out of this
     builder so the daemon refuses to boot rather than silently degrading. There is
-    NO dev fixture fallback. An unset/blank ``egress_config`` proxy URL raises
-    :class:`alfred.egress.errors.IOPlaneUnavailableError` PRE-spawn (via
-    :func:`_resolve_egress_config`) — the boot path maps it to the audited
-    ``egress_plane_unavailable`` refusal (§20.2). (A non-blank MALFORMED proxy url is
-    caught loud at first extraction, not here — see :func:`_resolve_egress_config`;
-    boot-time ``host:port`` parity is a Task-9 hardening.)
+    NO dev fixture fallback. An unset/blank OR non-blank-but-MALFORMED ``egress_config``
+    proxy URL both raise :class:`alfred.egress.errors.IOPlaneUnavailableError` PRE-spawn
+    (via :func:`_resolve_egress_config`) — the boot path maps either to the audited
+    ``egress_plane_unavailable`` refusal (§20.2). Boot/extraction ``host:port`` parity is
+    now enforced at BOOT (Task-9 hardening): a malformed proxy url no longer waits until
+    first extraction to surface.
 
     fd-3-clobber discipline: the provider key + the golive provider config (model /
     budget / egress) are all resolved SYNCHRONOUSLY before the spawn, so the single
@@ -445,8 +451,8 @@ async def _build_comms_inbound_extractor(
     # the fd-3 clobber window stays await-free AND an unset/blank misconfig refuses
     # PRE-spawn (never a live child abandoned on an unset/blank egress config): the
     # model/budget mirror routing.yaml [quarantine], and `_resolve_egress_config` raises
-    # IOPlaneUnavailableError here on an unset/blank egress proxy (§20.2 fail-closed).
-    # (A non-blank malformed proxy url is caught loud at first extraction — Task-9 parity.)
+    # IOPlaneUnavailableError here on an unset/blank OR non-blank-but-malformed egress proxy
+    # (§20.2 fail-closed; malformed host:port now caught at BOOT — Task-9 boot/extraction parity).
     model, max_tokens = _resolve_quarantine_model_config()
     resolved_egress = _resolve_egress_config(egress_config)
     # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await

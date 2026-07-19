@@ -65,9 +65,9 @@ exported ``ANTHROPIC_API_KEY`` / ``DISCORD_BOT_TOKEN`` out of the adversary-faci
 when set, a SECOND fd — literal fd 4, peer to ``_PROVIDER_KEY_FD = 3`` — carries
 one end of an ``AF_UNIX`` socketpair (:func:`alfred.egress.control_fd_broker.
 make_control_socketpair`) into the child, so the empty-netns quarantine child can
-later receive a pre-connected gateway socket over SCM_RIGHTS
-(:func:`alfred.egress.control_fd_broker.broker_connected_socket`, called from the
-parent side via :meth:`_SubprocessChildIO.broker_socket`). Both fd-3 and fd-4
+later receive pre-connected gateway sockets over SCM_RIGHTS
+(:func:`alfred.egress.control_fd_broker.broker_connected_sockets`, called from the
+parent side via :meth:`_SubprocessChildIO.broker_sockets`). Both fd-3 and fd-4
 dup2s share the SAME synchronous zero-``await`` window described above — a
 second clobbered-selector hazard would exist for fd 4 exactly as for fd 3 if it
 were installed outside that window. The default is ``False`` and the live/echo
@@ -419,11 +419,10 @@ class _SubprocessChildIO:
     an executor thread so a wedged child never blocks the event loop, bounded by
     ``asyncio.wait_for``.
 
-    ``broker_socket`` is a CONCRETE method here only — NOT part of the
-    :class:`alfred.security.quarantine_transport.ChildIO` Protocol in PR2a (that
-    widening is deferred to PR2b, when ``QuarantineStdioTransport.dispatch``
-    actually calls it; widening now would break the existing ``ChildIO`` test
-    doubles under pyright for no live benefit). ``control_parent`` is ``None``
+    ``broker_sockets`` satisfies the widened
+    :class:`alfred.security.quarantine_transport.ChildIO` Protocol (#340 golive
+    Task 9, when ``QuarantineStdioTransport.dispatch`` brokers the batch before
+    writing the extract frame). ``control_parent`` is ``None``
     unless the spawn opted into ``control_fd=True`` (#340 PR2a, ADR-0050); when
     present, this instance OWNS it (CR-#255 single-teardown seam) — closed by
     ``aclose`` or by the spawn's own failure-handling arcs, never both.
@@ -529,20 +528,29 @@ class _SubprocessChildIO:
                 t("security.quarantine_child.read_frame_failed")
             ) from exc
 
-    async def broker_socket(self) -> None:
-        """Broker one connected gateway socket to the child (#340 PR2a: docker probe only).
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        """Broker ``count`` connected gateway sockets to the child (connect-defer, §6).
 
-        Delegates to :func:`alfred.egress.control_fd_broker.broker_connected_socket`
-        over the owned parent control-end. A fail-loud refusal (CLAUDE.md hard rule
-        #7, not pragma'd out — this IS a security branch) when the instance was
-        never given a control-end or a proxy config: the caller opted OUT of
-        ``control_fd`` at spawn time, or (defensively) constructed this instance
-        directly without one.
+        Delegates to :func:`alfred.egress.control_fd_broker.broker_connected_sockets`
+        over the owned parent control-end: it connects all ``count`` first and sends
+        them only if every connect succeeded, so a partial failure sends the child
+        NOTHING (nothing to reclaim) and raises :class:`ControlFdBrokerError` — caught
+        one layer up by :meth:`QuarantineStdioTransport.dispatch`, which records the
+        egress-failure row + converts to a typed refusal. This method is auditor-FREE:
+        the transport owns the ``EgressBrokerAuditor`` and writes the success/failure
+        rows (cleaner than threading an auditor through the child-IO seam). Returns the
+        ``(host, port)`` destinations so the transport can attribute one success row per
+        brokered target.
+
+        A fail-loud refusal (CLAUDE.md hard rule #7, not pragma'd out — this IS a
+        security branch) when the instance was never given a control-end or a proxy
+        config: the caller opted OUT of ``control_fd`` at spawn time, or (defensively)
+        constructed this instance directly without one.
         """
         if self._control_parent is None or self._egress_config is None:
             raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
-        await control_fd_broker.broker_connected_socket(
-            parent_end=self._control_parent, proxy_config=self._egress_config
+        return await control_fd_broker.broker_connected_sockets(
+            parent_end=self._control_parent, proxy_config=self._egress_config, count=count
         )
 
     async def _log_child_stderr(
@@ -953,7 +961,7 @@ async def spawn_quarantine_child_io(
     window as the fd-3 dance above (a second clobbered-selector hazard would exist
     for fd 4 exactly as for fd 3 otherwise); the parent-end is kept and handed to
     the returned :class:`_SubprocessChildIO` for a later
-    :meth:`_SubprocessChildIO.broker_socket` call. ``control_fd=True`` REQUIRES an
+    :meth:`_SubprocessChildIO.broker_sockets` call. ``control_fd=True`` REQUIRES an
     ``egress_config`` — a misconfigured opt-in refuses loudly rather than silently
     spawning without a broker.
 

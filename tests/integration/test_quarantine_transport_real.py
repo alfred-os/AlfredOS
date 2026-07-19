@@ -68,6 +68,11 @@ class _EchoingChildDouble:
         self._ingested: dict[str, str] = {}
         self._reply: bytes | None = None
 
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        # In-proc double: no real fd broker — return the requested count of destinations,
+        # mirroring a successful connect-defer batch so dispatch proceeds to write the frames.
+        return [("gw", 8889)] * count
+
     def write_frame(self, frame: bytes) -> None:
         length = struct.unpack(">I", frame[:4])[0]
         obj = json.loads(frame[4 : 4 + length])

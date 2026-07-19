@@ -219,7 +219,7 @@ async def test_brokered_fd_crosses_bwrap_and_child_cannot_self_connect(
         )
         fd_counts: list[int] = []
         for _ in range(2):  # >=2 sequential passes to the SAME still-alive child
-            await io.broker_socket()
+            await io.broker_sockets(1)  # golive Task 9: broker ONE socket per probe pass
             verdict = await _read_verdict(io)
             # C1: the child's fresh connect had NO route (empty netns). The probe sets
             # this True ONLY for ENETUNREACH — a non-route failure would NOT prove an

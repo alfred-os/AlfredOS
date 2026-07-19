@@ -77,6 +77,11 @@ class _EchoingChildDouble:
         self._reply: bytes | None = None
         self.aclose_calls = 0
 
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        # In-proc double: no real fd broker — return the requested count of destinations so
+        # dispatch's connect-defer broker-before-write proceeds to the ingest/extract frames.
+        return [("gw", 8889)] * count
+
     def write_frame(self, frame: bytes) -> None:
         length = struct.unpack(">I", frame[:4])[0]
         obj = json.loads(frame[4 : 4 + length])
@@ -761,5 +766,50 @@ async def test_build_extractor_refuses_on_blank_egress_proxy_before_spawn(
             staging=QuarantineStagingMap(),
             environment="production",
             egress_config=_EgressCfg(egress_proxy_url=""),
+        )
+    assert spawned == []
+
+
+async def test_build_extractor_refuses_on_malformed_egress_proxy_before_spawn(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-blank but MALFORMED egress proxy URL (no ``host:port``) refuses boot BEFORE the spawn.
+
+    Task-9 boot/extraction parity: ``EgressClient.from_settings`` alone accepts a non-blank url
+    that lacks a port, so a live child would previously be abandoned on a config it could not
+    broker through — the failure only surfaced at first extraction. ``_resolve_egress_config`` now
+    ALSO runs ``control_fd_broker._resolve_proxy_addr``, so a malformed url raises
+    :class:`IOPlaneUnavailableError` PRE-spawn (the SAME refuse-boot arm as the blank case).
+    """
+    from alfred.egress.errors import IOPlaneUnavailableError
+    from alfred.security.dlp import OutboundDlp
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+
+    spawned: list[object] = []
+
+    async def _fake_spawn(**kwargs: object) -> object:
+        spawned.append(kwargs)
+        raise AssertionError("spawn must not be reached on the malformed-egress-refuse path")
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+
+    with pytest.raises(IOPlaneUnavailableError):
+        await _build_comms_inbound_extractor(
+            audit_writer=MagicMock(),
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=QuarantineStagingMap(),
+            environment="production",
+            egress_config=_EgressCfg(egress_proxy_url="http://alfred-gateway"),  # no :port
         )
     assert spawned == []

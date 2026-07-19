@@ -132,6 +132,11 @@ class _ExtractionAwareChildDouble:
         self._ingested: dict[str, str] = {}
         self._reply: bytes | None = None
 
+    async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
+        # In-proc double: no real fd broker — return the requested destinations so dispatch's
+        # connect-defer broker-before-write proceeds to the frames (golive Task 9).
+        return [("gw", 8889)] * count
+
     def write_frame(self, frame: bytes) -> None:
         length = struct.unpack(">I", frame[:4])[0]
         obj = json.loads(frame[4 : 4 + length])
