@@ -362,6 +362,12 @@ def test_dynamic_result_sites_are_documented() -> None:
             # #339 PR4b-audit devex operator-sweep commit shifted the line
             # (423 -> 428) by inserting a 5-line comment above; site unchanged.
             "src/alfred/egress/relay_client.py:428",
+            # #340 broker-audit pre-gate Task 2 — EgressBrokerAuditor._write forwards
+            # its result= param; reachable values are the two closed-vocab literals
+            # its two public callers pass ("success" from record_broker_success,
+            # "refused" from record_broker_failure), both already in-domain (no
+            # migration needed).
+            "src/alfred/egress/broker_audit.py:126",
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
