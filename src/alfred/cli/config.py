@@ -204,6 +204,48 @@ def _parse_scalar(value: str) -> int | float | str:
     return value
 
 
+def _reject_action_deadline_below_floor(key: str, parsed: object) -> None:
+    """Refuse an ``action-deadline`` set that violates the quarantine timeout nesting.
+
+    ``action-deadline`` (-> ``orchestrator.action_deadline_seconds``) is the OUTER bound
+    of the quarantine timeout nesting: ``action_deadline(30) > host_read(25) >
+    child_budget(20) > SDK_read(8)`` (#340 golive §17 / §4-P1e). Writing an
+    ``action_deadline <=`` the host read-frame timeout
+    (:data:`~alfred.security.quarantine_child_io._READ_FRAME_TIMEOUT_S`) would let the
+    orchestrator tear a LIVE extraction at its deadline BEFORE the framing/child bounds
+    fire — surfacing as a misleading "action deadline exceeded" with no hint the value is
+    below the quarantine floor (devex-lens, spec §17). So a ``<= floor`` set (or a
+    non-numeric value that can't satisfy the numeric floor at all) is refused with an
+    actionable ``t()`` message naming the floor + why, rather than silently accepting a
+    nesting-inverting value.
+
+    Only ``action-deadline`` is floor-guarded — every other low-blast key returns early.
+
+    The floor is bound to the REAL ``_READ_FRAME_TIMEOUT_S`` (LAZY import: the
+    ``quarantine_child_io`` module carries an egress-adjacent import closure, so deferring
+    it keeps ``alfred --help`` light and pins the floor to the actual host read-frame
+    timeout so the two can never drift).
+    """
+    if key != "action-deadline":
+        return
+    from alfred.security.quarantine_child_io import _READ_FRAME_TIMEOUT_S
+
+    floor = _READ_FRAME_TIMEOUT_S
+    # ``_parse_scalar`` returns ``int | float | str``; only a numeric value strictly
+    # above the floor is safe. A ``str`` (non-numeric input) can never satisfy the floor,
+    # so it falls into the reject branch alongside an in-range-but-too-low number.
+    if not isinstance(parsed, int | float) or parsed <= floor:
+        typer.echo(
+            t(
+                "cli.config.set.action_deadline_below_floor",
+                value=str(parsed),
+                floor=str(floor),
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
 def _yaml_set(yaml_path: Path, dotted_key: str, value: object) -> None:
     """Set a value at ``dotted_key`` in ``yaml_path``, creating parents.
 
@@ -449,6 +491,10 @@ def config_set(
         raise typer.Exit(code=1)
 
     parsed = _parse_scalar(value)
+    # #340 golive Task 15: floor-guard action-deadline so an operator can't invert the
+    # quarantine timeout nesting (action_deadline must stay > the host read-frame floor).
+    # No-op for every other low-blast key.
+    _reject_action_deadline_below_floor(key, parsed)
     _yaml_set(_policies_yaml_path, yaml_key, parsed)
     typer.echo(
         t(

@@ -263,3 +263,39 @@ async def test_empty_key_refuses_after_hello_and_before_ready(
     with pytest.raises(QuarantineChildBootError):
         await child_main.main()
     assert order == ["hello"]  # hello fired; ready + loop never reached
+
+
+@pytest.mark.parametrize("bad_budget", ["0", "-1"])
+async def test_nonpositive_max_tokens_refuses_after_hello_and_before_ready(
+    monkeypatch: pytest.MonkeyPatch, bad_budget: str
+) -> None:
+    """§20.2 secondary refuse-boot: a <=0 ``max_tokens`` raises AFTER hello, BEFORE ready.
+
+    Drives the REAL ``_build_provider`` with a NON-empty key + a non-positive
+    ``ALFRED_QUARANTINE_MAX_TOKENS``, so the max_tokens guard (Task 15) — not the empty-key
+    guard — refuses boot. ``emit_hello`` must already have fired (so the host sees a hello
+    and treats the refuse as CHILD-authored, never forging a launcher row), and neither
+    ``_write_boot_ready`` nor the request loop may run. Because the loop is never entered,
+    :func:`dispatch_extraction` is never reached — a bad budget can NEVER launder into a
+    ``cannot_extract`` typed refusal (HARD #7). The order list therefore ends at ``["hello"]``.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(child_main, "configure_stderr_logging", lambda: None)
+    monkeypatch.setattr(child_main, "_pin_structlog_to_stderr", lambda: None)
+    monkeypatch.setattr(child_main, "_read_provider_key_from_fd3", lambda: "sk-quarantine-key")
+    monkeypatch.setattr(child_main, "emit_hello", lambda: order.append("hello"))
+
+    async def _fake_ready(writer: Any) -> None:
+        order.append("ready")
+
+    async def _fake_loop(source: Any, *, reader: Any, writer: Any) -> None:
+        order.append("loop")
+
+    monkeypatch.setattr(child_main, "_write_boot_ready", _fake_ready)
+    monkeypatch.setattr(child_main, "_run_mcp_server", _fake_loop)
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-test-model")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", bad_budget)
+
+    with pytest.raises(QuarantineChildBootError):
+        await child_main.main()
+    assert order == ["hello"]  # hello fired; ready + loop never reached

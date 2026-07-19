@@ -463,6 +463,58 @@ def test_boot_refuses_fail_closed_on_quarantine_provider_key_unset(
     assert "quarantine_provider_api_key" in result.output
 
 
+def test_boot_refuses_fail_closed_on_quarantine_max_tokens_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """A ``<= 0`` quarantine ``max_tokens`` on a comms boot refuses (exit 2), no pump, no spawn.
+
+    #340 golive Task 15 (§17 / §20.2 fail-loud): ``_build_comms_inbound_extractor``
+    resolves the quarantined child's ``(model, max_tokens)`` SYNCHRONOUSLY (pre-spawn); a
+    non-positive ``max_tokens_per_extraction`` raises ``QuarantineMaxTokensInvalidError``
+    BEFORE the bwrap child is spawned. The daemon must REFUSE fail-closed (audited, exit 2)
+    rather than thread a bad budget into the child env, where every ``CompletionRequest``
+    would fail its ``>0`` validator and the dispatch loop would LAUNDER that
+    ``ValidationError`` into a ``cannot_extract`` refusal (masking the misconfig — the HARD
+    #7 silent-fail shape). The provider key stays SET (so the earlier key resolve passes);
+    the max_tokens constant is patched to ``0`` to drive exactly this fault.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+    monkeypatch.setattr(
+        "alfred.comms_mcp.daemon_runtime._QUARANTINE_MAX_TOKENS_PER_EXTRACTION", 0
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    # The fail-closed refusal contract: exit 2, never a degraded boot.
+    assert result.exit_code == 2
+
+    # The pump was NEVER registered — the refusal happens during the comms-graph build
+    # (the pre-spawn budget resolve), BEFORE the supervisor is even constructed. In
+    # isolation ``last_instance`` is therefore None; in a full-file run a prior test's
+    # supervisor may linger on the ClassVar, so assert the isolation-robust intent (no
+    # pump task registered) either way.
+    sup = FakeSupervisor.last_instance
+    assert sup is None or sup.registered_tasks == []
+    # The refuse is PRE-spawn, so no bwrap child was ever spawned (§20.2 host primary
+    # defense fires before the single spawn await — no fd-3 clobber window).
+    assert patch_quarantine_child_spawn == []
+    # A loud daemon.boot.failed row with the EXACT reason — DISTINCT from the
+    # provider-key-unset and spawn-failed tokens (catches a wrong-arm regression).
+    rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+    assert rows
+    reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
+    assert "quarantine_max_tokens_invalid" in reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The operator-facing message names the offending budget knob.
+    assert "max_tokens_per_extraction" in result.output
+
+
 def test_boot_refuses_audited_on_comms_graph_broker_config_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
