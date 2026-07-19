@@ -219,7 +219,10 @@ async def test_broker_sockets_reports_the_first_connect_failure_only(
     try:
         with pytest.raises(ControlFdBrokerError) as exc:
             await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=3)
-        # gather preserves ARGUMENT order, so the first failing slot's error is the one raised.
+        # Exactly ONE error surfaces. WHICH one is not pinned: the executor threads race for
+        # the counter, so which gather SLOT carries which failure is nondeterministic by
+        # construction. The invariant is that the collection loop keeps one and discards the
+        # rest rather than letting a later failure mask the first.
         assert exc.value.reason in {"gateway_unreachable", "sendmsg_failed"}
         assert exc.value.delivered == 0
         assert all(sock.fileno() == -1 for sock in made)  # the lone success still closed
@@ -232,13 +235,24 @@ async def test_broker_sockets_reports_the_first_connect_failure_only(
 async def test_broker_sockets_sends_all_on_full_connect_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """All ``count`` connect → all ``count`` sendmsg'd → returns ``count`` destinations."""
+    """All ``count`` connect → all ``count`` sendmsg'd → returns ``count`` destinations.
+
+    The connected-vs-sent comparison is deliberately order-INSENSITIVE (a set, not a list).
+    Since the CONNECT phase went concurrent (A1) the executor threads finish in
+    nondeterministic order, so ``made`` records COMPLETION order while the serial SEND phase
+    walks gather's ARGUMENT order — a list equality here is a genuine flake under load, not a
+    stricter assertion. What must hold is the SET identity: every socket that connected was
+    sent, and nothing else was. SEND ordering is pinned separately by
+    ``test_send_phase_stays_serial_and_ordered``.
+    """
     made: list[socket.socket] = []
     sent: list[socket.socket] = []
+    lock = threading.Lock()
 
     def _fake_connect_one(host: str, port: int) -> socket.socket:
         sock = _fresh_inet_socket()
-        made.append(sock)
+        with lock:
+            made.append(sock)
         return sock
 
     def _spy_send_one(parent_end: socket.socket, sock: socket.socket) -> None:
@@ -250,7 +264,8 @@ async def test_broker_sockets_sends_all_on_full_connect_success(
     try:
         dests = await broker_connected_sockets(parent_end=parent, proxy_config=_Cfg(), count=3)
         assert dests == [("gw", 8889)] * 3
-        assert sent == made  # every connected socket was sent
+        assert len(sent) == len(made) == 3
+        assert set(sent) == set(made)  # every connected socket was sent, and only those
         for sock in made:
             assert sock.fileno() == -1  # finally closed the host copy of each
     finally:
