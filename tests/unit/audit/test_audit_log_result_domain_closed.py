@@ -450,8 +450,15 @@ def test_dynamic_result_sites_are_documented() -> None:
             # after the `ExtractionMode` Literal (far above this point in
             # the file) so the child dispatcher and the privileged host
             # share one source of truth for the retry count — the site
-            # itself (still `result=audit_result`) is unchanged.
-            "src/alfred/security/quarantine.py:1277",
+            # itself (still `result=audit_result`) is unchanged. #340
+            # PR2b-golive Task 17 shifted it again (1277 -> 1296): the base
+            # `ExtractionSchema` gained `model_config = ConfigDict(extra="forbid")`
+            # plus a docstring paragraph and an expanded `extraction_mode`
+            # comment (net +19 lines, all far above this point in the file) so
+            # the orchestrator-side `schema.model_validate` re-validation refuses
+            # attacker-steered extra keys — the site itself (still
+            # `result=audit_result`) is unchanged.
+            "src/alfred/security/quarantine.py:1296",
             "src/alfred/supervisor/core.py:692",  # result_label local
             # --- direct AuditEntry(...) construction path (H1) ---
             "src/alfred/audit/log.py:96",  # AuditWriter.append forwards result -> AuditEntry(...)
