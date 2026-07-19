@@ -22,12 +22,20 @@
 # `ro_binds_try` below) read-only so CPython can exec and dynamically link, and
 # NOTHING else:
 #
-#   * NO /etc bind — /etc/passwd, /etc/shadow, resolv.conf, ssh configs, the
-#     host's secrets-in-config all stay invisible. (DNS is moot for the shipped
-#     echo child: it `--unshare-net`s into an empty network namespace, so there
-#     is no resolver and no provider call to make — see the egress note below. An
-#     adversary that owns the T3 response still cannot read a host /etc/passwd to
-#     learn usernames for a follow-on attack.)
+#   * NO broad /etc bind, with ONE narrow, deliberate carve-out — see below.
+#     /etc/passwd, /etc/shadow, resolv.conf, ssh configs, the host's
+#     secrets-in-config all stay invisible; the ONLY /etc subpath bound into
+#     this sandbox is /etc/ssl/certs (the public-CA trust store, see the
+#     `ro_binds` list below), needed for the golive child's in-child TLS
+#     verify against its brokered gateway socket (#340). That path carries no
+#     host secret — it is the same public root-CA bundle every TLS client on
+#     the host reads, and it is bound READ-ONLY at the exact subpath, never a
+#     bare `/etc` bind (the #428 over-broad-bind class this repo has fixed
+#     before: a bare `/etc` bind would additionally expose /etc/passwd,
+#     /etc/shadow, resolv.conf and ssh configs — none of that rides in on this
+#     carve-out). An adversary that owns the T3 response still cannot read a
+#     host /etc/passwd, /etc/shadow, or resolv.conf to learn usernames,
+#     credentials, or the DNS posture for a follow-on attack.
 #   * NO /bin bind — on usrmerged Linux /bin is a symlink to /usr/bin, so we
 #     deliberately do NOT bind it separately; /bin/sh / /usr/bin/env are NOT
 #     reachable as exec targets from inside (process-exec containment, below).
@@ -41,6 +49,14 @@
 ro_binds = [
   ["/usr", "/usr"],
   ["/lib", "/lib"],
+  # The narrow CA carve-out (#340 golive) — see the note above. HARD, not
+  # soft: /etc/ssl/certs is not arch-variable (present on every supported
+  # Linux target), so a missing source here must fail the launch LOUD rather
+  # than silently degrade the sandbox's TLS-verify path (the schema's own
+  # `_restrict_soft_binds` validator refuses this exact path from
+  # `ro_binds_try` for the same reason). This is the ONLY /etc subpath bound
+  # anywhere in this policy.
+  ["/etc/ssl/certs", "/etc/ssl/certs"],
 ]
 
 # SOFT read-only bind (#269) — bound iff the source EXISTS, else skipped
@@ -102,7 +118,17 @@ die_with_parent = true
 # inherited descriptor (NO CLI flag — see the `policy_to_bwrap_flags` docstring +
 # #218); `keep_fds` is the validated DECLARATION that fd 3 must survive — omitting
 # it is refused at parse time (`kind_full_requires_keep_fd_3`).
-keep_fds = [3]
+#
+# fd 4 carries the SCM_RIGHTS control channel (#340 golive): the host passes a
+# broker-connected gateway socket into the sandbox over fd 4 (ancillary data on
+# a UNIX-domain socket, `egress/control_fd_broker.py`), and the golive
+# child reconstructs it and terminates TLS in-child against that socket — the
+# `ro_binds` CA carve-out above is what makes that TLS verify possible. Like fd
+# 3, fd 4 arrives over the inherited descriptor (bwrap's default fd inheritance
+# for open, non-CLOEXEC fds — no CLI flag is emitted, same as fd 3); adding it
+# to `keep_fds` is the same validated DECLARATION discipline, extended to the
+# second channel.
+keep_fds = [3, 4]
 
 # ============================================================================
 # EGRESS IS CLOSED for the shipped echo child (Spec C G7-1, #333)
