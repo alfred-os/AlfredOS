@@ -421,8 +421,11 @@ async def _build_comms_inbound_extractor(
     default system CA bundle. All three are non-secret, non-T3 config; the provider
     KEY still crosses ONLY over fd 3. The per-extraction brokered-egress wiring (the
     transport driving :meth:`_SubprocessChildIO.broker_sockets` before the extract
-    frame — connect-defer) lands in Task 9; the durable success/failure audit rows +
-    the ``egress.broker.*`` hookpoints are threaded in Task 10.
+    frame — connect-defer) landed in Task 9; Task 10 threads the durable
+    success/failure audit rows live by constructing an
+    :class:`alfred.egress.broker_audit.EgressBrokerAuditor` here and passing it to
+    the transport as ``broker_auditor=`` — the ``egress.broker.*`` hookpoints its
+    ``invoke()`` calls target are declared by :mod:`alfred.egress.hookpoints`.
 
     FAIL-CLOSED (CLAUDE.md hard rule #7): on a non-Linux / unprovisioned host the
     spawn raises :class:`QuarantineChildSpawnError`, which propagates out of this
@@ -442,6 +445,7 @@ async def _build_comms_inbound_extractor(
     AFTER the spawn has returned — by which point ``spawn_quarantine_child_io``'s own
     ``finally`` has already closed that window, so they do not reopen it.)
     """
+    from alfred.egress.broker_audit import EgressBrokerAuditor
     from alfred.security.quarantine_child_io import spawn_quarantine_child_io
     from alfred.security.quarantine_transport import QuarantineStdioTransport
     from alfred.security.sandbox_refusal_audit import SandboxRefusalAuditor
@@ -485,7 +489,18 @@ async def _build_comms_inbound_extractor(
     # leak on a post-spawn construction failure (CR #255 round-4).
     transport: QuarantineStdioTransport | None = None
     try:
-        transport = QuarantineStdioTransport(child_io=child_io, staging=staging)
+        # #340 golive Task 10: thread the pre-gate-shipped (dormant, #462)
+        # EgressBrokerAuditor onto the TRANSPORT — Task 9's design already calls
+        # record_broker_success/record_broker_failure from QuarantineStdioTransport.dispatch
+        # (None-safe; this is the flip from None to live). The auditor is NOT threaded
+        # through spawn_quarantine_child_io / _SubprocessChildIO — that would be the wrong
+        # layer (Task 9 never put it there). The egress.broker.* hookpoints its invoke()
+        # dispatches must already be declared (alfred.egress.hookpoints) or this raises
+        # HookError on first live call.
+        broker_auditor = EgressBrokerAuditor(audit_writer)
+        transport = QuarantineStdioTransport(
+            child_io=child_io, staging=staging, broker_auditor=broker_auditor
+        )
         extractor = QuarantinedExtractor(
             transport=transport,
             audit_writer=audit_writer,

@@ -83,6 +83,7 @@ def _declare_all_subsystem_hookpoints(registry: HookRegistry) -> None:
         declare_hookpoints as declare_discord,
     )
     from alfred.comms_mcp.hookpoints import declare_hookpoints as declare_comms
+    from alfred.egress.hookpoints import declare_hookpoints as declare_egress_broker
     from alfred.identity._ingest import declare_hookpoints as declare_ingest
     from alfred.identity.operator_session import (
         declare_hookpoints as declare_operator_session,
@@ -105,6 +106,7 @@ def _declare_all_subsystem_hookpoints(registry: HookRegistry) -> None:
     declare_comms(registry)
     declare_discord(registry)
     declare_supervisor(registry)
+    declare_egress_broker(registry)
 
 
 def build_boot_hook_registry(
