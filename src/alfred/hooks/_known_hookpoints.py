@@ -164,6 +164,18 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
     # module import (bottom-of-module call), mirroring
     # ``alfred.security.capability_gate.proposals``.
     "alfred.orchestrator.tool_hookpoints": ("tool.dispatch",),
+    # #340 golive Task 10 (spec §21 / rev.2 carry-forward #1): the two
+    # egress-broker audit hookpoints. Both carrier_tier=T0 (system-internal
+    # destination + reason attribution, never T3 content) + fail_closed=True
+    # (mirrors "supervisor.plugin.sandbox_refused" — a subscriber-timeout must
+    # not silently swallow the row). Registered by
+    # ``alfred.egress.hookpoints.declare_hookpoints`` at module import (bottom-
+    # of-module call) AND explicitly in ``alfred.hooks.boot`` for the real boot
+    # registry.
+    "alfred.egress.hookpoints": (
+        "egress.broker.connected",
+        "egress.broker.refused",
+    ),
 }
 
 
