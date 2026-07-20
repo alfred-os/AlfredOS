@@ -167,6 +167,48 @@ def test_a_failing_stop_does_not_mask_a_going_down_audit_failure(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+@_posix_boot_only
+def test_going_down_failure_dominates_an_in_flight_boot_failure_and_reaps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+) -> None:
+    """Boot-body failure IN FLIGHT + a going_down failure + a failing stop() (#472 review).
+
+    The companion of the test above: here a real failure is ALREADY unwinding (a late
+    ``_BootRefusedError`` from ``wait_for_shutdown``) when ``_emit_going_down`` also fails.
+    Per the pre-existing fail-loud design (the going_down emit runs in the drain finally and
+    its exception propagates), the HARD #5 going_down failure DOMINATES the boot refusal —
+    and ``supervisor.stop()`` failing on top of both must still be suppressed rather than
+    masking the going_down failure. The reap chain must complete regardless. Exercises the
+    going_down-except arm with ``boot_failure`` already set. CodeRabbit Major.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setattr(FakeSupervisor, "fail_stop", True)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.wait_for_shutdown", _async_raise(_BootRefusedError(2))
+    )
+
+    async def _failing_going_down(*_a: object, **_k: object) -> None:
+        raise RuntimeError("going_down audit failed (fake)")
+
+    monkeypatch.setattr("alfred.cli.daemon._commands._emit_going_down", _failing_going_down)
+
+    with structlog.testing.capture_logs() as logs:
+        result = CliRunner().invoke(daemon_app, ["start"])
+
+    # The going_down failure (HARD #5, in the finally) is what propagates — NOT the boot
+    # refusal it replaced, and NOT stop()'s error.
+    assert isinstance(result.exception, RuntimeError)
+    assert "going_down" in str(result.exception), (
+        f"the going_down failure did not dominate: {result.exception!r}"
+    )
+    # stop() still ran and was suppressed loud (boot_failure was non-None).
+    assert [e for e in logs if e["event"] == "daemon.shutdown.supervisor_stop_failed"]
+    # The reap chain completed despite three overlapping failures (no #255 leak).
+    assert not (tmp_path / "daemon.pid").exists()
+
+
 def test_reap_finally_skips_absent_supervisor_and_pidfile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
