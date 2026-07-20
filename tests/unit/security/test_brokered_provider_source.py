@@ -25,6 +25,7 @@ import array
 import asyncio
 import os
 import socket
+import time
 
 import anyio
 import httpx
@@ -32,13 +33,17 @@ import pytest
 
 import alfred.security.quarantine_child.brokered_egress as be
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd_nonblocking
-from alfred.providers.base import ProviderCapability
+from alfred.providers.base import ProviderCapability, ProviderUnavailableError
 from alfred.security.quarantine_child.brokered_egress import (
     BrokeredProviderSource,
     ProviderSource,
     QuarantineChildBootError,
     _ProviderFactory,
 )
+
+# Longer than any assertion here — used wherever the test is about something OTHER than
+# the wall-clock ceiling.
+_AMPLE_BUDGET_S = 60.0
 
 
 def _factory(timeout: httpx.Timeout | None = None) -> _ProviderFactory:
@@ -87,7 +92,7 @@ def test_factory_build_resolves_read_timeout(
     """``build`` threads the factory timeout (or the default) into the backend's HARD ceiling."""
     a, b = socket.socketpair()
     fd = a.detach()
-    provider, backend = _factory(factory_timeout).build(fd)
+    provider, backend = _factory(factory_timeout).build(fd, budget_seconds=_AMPLE_BUDGET_S)
     try:
         assert backend._read_timeout == expected_read  # assert the resolved socket ceiling
         assert backend.calls == 0  # not yet dialed
@@ -136,7 +141,7 @@ def test_bind_closes_fd_when_never_dialed(monkeypatch: pytest.MonkeyPatch) -> No
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
-        async with source.bind() as provider:
+        async with source.bind(budget_seconds=_AMPLE_BUDGET_S) as provider:
             assert provider.name == "anthropic"  # deliberately do NOT dial
 
     anyio.run(_drive)
@@ -166,16 +171,17 @@ def test_bind_defers_fd_close_to_client_when_dialed(monkeypatch: pytest.MonkeyPa
 
     class _FakeBackend:
         calls = 1  # DIALED
+        fd_closed = True  # ... and its aclose() closed the fd
 
     fake_provider = _FakeProvider()
     monkeypatch.setattr(
-        be._ProviderFactory, "build", lambda _self, _fd: (fake_provider, _FakeBackend())
+        be._ProviderFactory, "build", lambda _self, _fd, **_kw: (fake_provider, _FakeBackend())
     )
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
-        async with source.bind() as provider:
+        async with source.bind(budget_seconds=_AMPLE_BUDGET_S) as provider:
             assert provider.name == "anthropic"
 
     anyio.run(_drive)
@@ -193,7 +199,7 @@ def test_bind_closes_fd_when_build_raises(monkeypatch: pytest.MonkeyPatch) -> No
     victim = os.dup(keeper.fileno())
     monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
 
-    def _boom(_self: object, _fd: int) -> tuple[object, object]:
+    def _boom(_self: object, _fd: int, **_kw: object) -> tuple[object, object]:
         raise RuntimeError("build blew up before any dial")
 
     monkeypatch.setattr(be._ProviderFactory, "build", _boom)
@@ -202,7 +208,7 @@ def test_bind_closes_fd_when_build_raises(monkeypatch: pytest.MonkeyPatch) -> No
 
     async def _drive() -> None:
         with pytest.raises(RuntimeError):
-            async with source.bind():
+            async with source.bind(budget_seconds=_AMPLE_BUDGET_S):
                 pass  # never reached — build raised before yield
 
     anyio.run(_drive)
@@ -231,15 +237,16 @@ def test_bind_closes_fd_on_cancel_before_dial(monkeypatch: pytest.MonkeyPatch) -
 
     class _FakeBackend:
         calls = 0  # never dialed
+        fd_closed = False
 
     monkeypatch.setattr(
-        be._ProviderFactory, "build", lambda _self, _fd: (_FakeProvider(), _FakeBackend())
+        be._ProviderFactory, "build", lambda _self, _fd, **_kw: (_FakeProvider(), _FakeBackend())
     )
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     source = BrokeredProviderSource(_factory(), a)
 
     async def _body() -> None:
-        async with source.bind():
+        async with source.bind(budget_seconds=_AMPLE_BUDGET_S):
             await asyncio.sleep(10)  # cancelled by wait_for before any dial
 
     async def _drive() -> None:
@@ -274,16 +281,17 @@ def test_bind_reclaims_fd_when_aclose_raises_never_dialed(monkeypatch: pytest.Mo
 
     class _FakeBackend:
         calls = 0  # never dialed
+        fd_closed = False
 
     monkeypatch.setattr(
-        be._ProviderFactory, "build", lambda _self, _fd: (_FakeProvider(), _FakeBackend())
+        be._ProviderFactory, "build", lambda _self, _fd, **_kw: (_FakeProvider(), _FakeBackend())
     )
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
         with pytest.raises(RuntimeError, match="aclose blew up"):
-            async with source.bind() as provider:
+            async with source.bind(budget_seconds=_AMPLE_BUDGET_S) as provider:
                 assert provider.name == "anthropic"  # deliberately do NOT dial
 
     anyio.run(_drive)
@@ -350,5 +358,203 @@ def test_drain_does_not_swallow_malformed_frame(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(be, "recv_passed_fd_nonblocking", _fault)
     with pytest.raises(ControlFdBrokerError):
         source.drain_leftovers()
+    a.close()
+    b.close()
+
+
+# --- B1/B2: the attempt budget reaches the socket, and bind() is inside it -----------------
+
+
+def test_build_anchors_the_attempt_deadline_from_the_budget() -> None:
+    """The socket's absolute deadline comes from the REMAINING extraction budget, so the LAST
+    retry attempt gets a truncated ceiling instead of a fresh full SDK read past the 20s cap."""
+    a, b = socket.socketpair()
+    fd = a.detach()
+    before = time.monotonic()
+    provider, backend = _factory().build(fd, budget_seconds=1.0)
+    try:
+        assert before + 1.0 <= backend._deadline_at <= time.monotonic() + 1.0
+        # The per-syscall idle cap still applies UNDER the absolute deadline.
+        assert backend._read_timeout == 8.0
+    finally:
+        anyio.run(provider.aclose)
+        os.close(fd)
+        b.close()
+
+
+def test_bind_charges_control_recv_latency_to_the_attempt_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2: ``remaining_budget`` was snapshotted BEFORE ``bind()``, so a slow control-fd recv
+    escaped the cap entirely. The deadline is anchored at bind ENTRY, so recv latency is spent
+    out of the same budget rather than added on top of it."""
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())
+    recv_delay = 0.3
+
+    def _slow_recv(_ce: socket.socket) -> tuple[bytes, int]:
+        time.sleep(recv_delay)
+        return (b"\x01", victim)
+
+    monkeypatch.setattr(be, "recv_passed_fd", _slow_recv)
+    seen: list[float] = []
+    real_build = be._ProviderFactory.build
+
+    def _spy(self: be._ProviderFactory, fd: int, *, budget_seconds: float) -> object:
+        seen.append(budget_seconds)
+        return real_build(self, fd, budget_seconds=budget_seconds)
+
+    monkeypatch.setattr(be._ProviderFactory, "build", _spy)
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    source = BrokeredProviderSource(_factory(), a)
+
+    async def _drive() -> None:
+        async with source.bind(budget_seconds=2.0):
+            pass
+
+    anyio.run(_drive)
+    assert seen, "build() was never reached"
+    # The socket budget must be the REMAINDER after the recv, not the original 2.0s.
+    assert seen[0] < 2.0 - recv_delay + 0.15
+    keeper.close()
+    a.close()
+    b.close()
+
+
+def test_bind_control_recv_is_bounded_and_refuses_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B2 (the wedge): ``recv_passed_fd`` was an UNBOUNDED blocking recv inside a shielded
+    worker thread, sitting outside every ceiling in the hierarchy. A socket-count desync (the
+    child asking for socket N+1 the host never brokered) wedged the child forever: the host
+    tore its own read_frame down at 25s but never reaped, so the process stayed resident
+    holding T3. It must fail LOUD and BOUNDED instead.
+
+    ``provider_unavailable`` (not ``cannot_extract``) is the faithful reason — the child could
+    not obtain egress toward the provider. That is an infrastructure fault, and laundering it
+    as a model-output failure is exactly the err-002 / HARD #7 anti-pattern. Same adjudication
+    as the Task-9 broker-failure refusal (ADR-0052 C1).
+    """
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)  # nothing ever queued on `a`
+    source = BrokeredProviderSource(_factory(), a)
+
+    async def _drive() -> float:
+        started = time.monotonic()
+        with pytest.raises(ProviderUnavailableError):
+            async with source.bind(budget_seconds=0.3):
+                pass  # pragma: no cover - the recv refuses before the body runs
+        return time.monotonic() - started
+
+    elapsed = anyio.run(_drive)
+    assert elapsed < 3.0, f"control recv ran {elapsed:.2f}s — the bound did not apply"
+    a.close()
+    b.close()
+
+
+def test_bind_restores_blocking_mode_so_the_drain_still_sees_eagain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bind bound is applied with ``settimeout`` on the SHARED control socket. Left in
+    timeout mode, ``drain_leftovers``' ``MSG_DONTWAIT`` sweep would block-then-``TimeoutError``
+    instead of raising ``BlockingIOError`` — silently breaking its EAGAIN terminator."""
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())
+    monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    source = BrokeredProviderSource(_factory(), a)
+
+    async def _drive() -> None:
+        async with source.bind(budget_seconds=_AMPLE_BUDGET_S):
+            pass
+
+    anyio.run(_drive)
+    assert a.gettimeout() is None  # back to blocking mode
+    source.drain_leftovers()  # EAGAIN terminator intact — no raise
+    keeper.close()
+    a.close()
+    b.close()
+
+
+# --- B4: the fd reclaim tracks OWNERSHIP, not merely "did it dial" -------------------------
+
+
+def test_bind_reclaims_fd_when_aclose_raises_after_dialing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reclaim gate was ``backend.calls == 0`` — "never dialed". But its own comment
+    claimed to cover "an aclose() that raises before/without closing the fd", and a raise
+    AFTER the client dialed has ``calls > 0``: the source skipped the reclaim and the client
+    never got far enough to close it, leaking one descriptor per attempt on a persistent
+    child. The gate must ask whether the fd was actually released."""
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())
+    monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
+
+    class _FakeProvider:
+        name = "anthropic"
+
+        async def aclose(self) -> None:
+            raise RuntimeError("aclose blew up AFTER the client dialed, before closing the fd")
+
+    class _FakeBackend:
+        calls = 1  # DIALED
+        fd_closed = False  # ... but the stream's aclose never ran, so the fd is still ours
+
+    monkeypatch.setattr(
+        be._ProviderFactory, "build", lambda _self, _fd, **_kw: (_FakeProvider(), _FakeBackend())
+    )
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    source = BrokeredProviderSource(_factory(), a)
+
+    async def _drive() -> None:
+        with pytest.raises(RuntimeError, match="AFTER the client dialed"):
+            async with source.bind(budget_seconds=_AMPLE_BUDGET_S):
+                pass
+
+    anyio.run(_drive)
+    with pytest.raises(OSError):
+        os.close(victim)  # reclaimed despite calls > 0 — no leak
+    keeper.close()
+    a.close()
+    b.close()
+
+
+def test_stream_aclose_marks_the_fd_released_on_the_backend() -> None:
+    """The ownership signal is set by the real stream teardown, not asserted into existence:
+    once the client's stream closes the socket, the backend reports the fd as released so the
+    source's reclaim stands down (no double-close)."""
+    a, b = socket.socketpair()
+    backend = be.PassedFdBackend(a.detach(), read_timeout=5.0, budget_seconds=_AMPLE_BUDGET_S)
+
+    async def _drive() -> None:
+        stream = await backend.connect_tcp("ignored.invalid", 443)
+        assert backend.fd_closed is False  # dialed, still owned by the live stream
+        await stream.aclose()
+
+    anyio.run(_drive)
+    assert backend.fd_closed is True
+    b.close()
+
+
+# --- B4: max_tokens is the validated factory value, not a per-call env re-read -------------
+
+
+def test_source_exposes_the_validated_max_tokens() -> None:
+    """``_ProviderFactory.max_tokens`` was dead state: ``build()`` never read it while the real
+    per-request budget was re-read from ``os.environ`` on every extract, bypassing the
+    boot-time ``> 0`` validation gate. The source now surfaces the validated value."""
+    a, b = socket.socketpair()
+    source = BrokeredProviderSource(_factory(), a)
+    assert source.max_tokens == 8192
+    a.close()
+    b.close()
+
+
+def test_control_recv_refuses_when_the_budget_is_already_spent() -> None:
+    """An attempt whose budget expired before the descriptor arrived must refuse rather than
+    issue a zero/negative-timeout ``recvmsg`` (which would silently become non-blocking)."""
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    source = BrokeredProviderSource(_factory(), a)
+    with pytest.raises(ProviderUnavailableError, match="budget spent"):
+        source._recv_one_fd(time.monotonic() - 1.0)
+    assert a.gettimeout() is None  # refused before touching the shared socket's mode
     a.close()
     b.close()
