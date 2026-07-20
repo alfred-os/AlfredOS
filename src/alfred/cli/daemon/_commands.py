@@ -1020,6 +1020,19 @@ async def _start_async() -> None:
                     epoch=epoch,
                     broadcaster=lifecycle_broadcaster,
                 )
+        except BaseException as going_down_exc:
+            # #472 review (CR + reviewer, converged): a failing ``_emit_going_down`` is a
+            # HARD #5 fail-loud (exit 3) — a real failure now unwinding through the reap
+            # chain below. The ``boot_failure`` sentinel only tracks the boot BODY, so
+            # without this a CLEAN shutdown where going_down fails AND ``supervisor.stop()``
+            # also fails would let stop()'s error mask the audited going_down failure — the
+            # same masking class finding 3 targets, for an origin the sentinel didn't see.
+            # Record that a real failure is unwinding so the stop() arm suppresses rather
+            # than masks. The sentinel is only ever None-checked (a boolean-in-disguise), so
+            # an unconditional assignment is fine — a boot-body failure, if any, is already
+            # the exception propagating; overwriting the sentinel VALUE changes nothing.
+            boot_failure = going_down_exc
+            raise
         finally:
             # Drain the supervisor (skipped if it never constructed), reap the live
             # quarantine child, and remove the PID file on EVERY exit path — clean
@@ -1054,10 +1067,18 @@ async def _start_async() -> None:
                     try:
                         await supervisor.stop()
                     except Exception as exc:
-                        log.error(
-                            "daemon.shutdown.supervisor_stop_failed",
-                            error_class=type(exc).__name__,
-                        )
+                        # The emit is itself ``suppress``-wrapped (#472 review — security +
+                        # error lanes): this runs in a teardown ``finally``, and a raising
+                        # structlog emit would escape this ``except`` and preempt the
+                        # ``if boot_failure is None: raise`` decision — re-masking the audited
+                        # ``boot_failure`` (the exact defect finding 3 closes) or misattributing
+                        # a clean-shutdown failure. Same teardown-emit discipline as
+                        # ``_terminate_and_reap`` (quarantine_child_io.py).
+                        with suppress(Exception):
+                            log.error(
+                                "daemon.shutdown.supervisor_stop_failed",
+                                error_class=type(exc).__name__,
+                            )
                         if boot_failure is None:
                             raise
             finally:
