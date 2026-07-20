@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import os
 import socket
 from urllib.parse import urlsplit
@@ -277,7 +278,17 @@ def _send_one(parent_end: socket.socket, sock: socket.socket) -> None:
         # Restore blocking so the control socket's mode is not left mutated for the next send in
         # the batch (settimeout(None) == setblocking(True), spelled as the exact inverse of the
         # settimeout above — mirrors the child-side ``_recv_one_fd`` restore discipline).
-        parent_end.settimeout(None)
+        #
+        # BEST-EFFORT, and that is load-bearing, not laziness: when the control channel has been
+        # torn down (capability revocation closes ``parent_end``) this restore raises EBADF — and
+        # an exception raised in a ``finally`` REPLACES the exception in flight, converting the
+        # graceful ``ControlFdBrokerError`` into a raw ``OSError`` escaping the module boundary.
+        # Suppressing here therefore makes the path MORE faithful to HARD #7, not less: the real
+        # failure is already logged loud above and re-raised typed, and there is nothing to
+        # restore on a socket that is going away. Both teardown shapes raise EBADF (closed object
+        # AND fd-closed-underneath), so a ``fileno()`` guard would not cover it.
+        with contextlib.suppress(OSError):
+            parent_end.settimeout(None)
         # SCM_RIGHTS DUPLICATED the descriptor (refcount 2) — drop the core's copy immediately or
         # the child's later close sends no FIN and the core leaks one fd per broker. Safe: already
         # duplicated into the socket buffer by the time sendmsg returned. Also covers a raise
