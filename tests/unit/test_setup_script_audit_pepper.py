@@ -61,9 +61,23 @@ def test_setup_script_audit_pepper_is_idempotent() -> None:
     The bootstrap step guards with ``grep -q "^audit.hash_pepper..."`` and
     exits the seed branch when the value already exists. Rotating the
     pepper invalidates cross-row correlation per spec §8.10.
+
+    Anchored on the ``step`` MARKER, not on the first textual occurrence of
+    ``audit.hash_pepper``. The old anchor keyed on the first line mentioning the
+    string anywhere in the script, so any earlier PROSE mention — a comment in an
+    unrelated step — silently relocated the slice onto text that was never the
+    bootstrap, and the guard assertion then failed (or, worse, passed against the
+    wrong block). #340 PR2b-golive tripped exactly that when the .env credential
+    gate gained a comment contrasting itself with the pepper. The marker is
+    unambiguous and moves only when the step itself does.
     """
     content = _SETUP_SH.read_text()
-    pepper_block = _slice_around(content, "audit.hash_pepper", lines_before=2, lines_after=60)
+    marker = 'step "Bootstrapping audit.hash_pepper secret"'
+    assert marker in _SETUP_SH.read_text(), (
+        f"pepper bootstrap step marker not found ({marker!r}) — the step was renamed "
+        f"or removed; every assertion below would slice an empty block and pass vacuously"
+    )
+    pepper_block = _slice_around(content, marker, lines_before=2, lines_after=60)
     assert any(
         guard in pepper_block
         for guard in (
