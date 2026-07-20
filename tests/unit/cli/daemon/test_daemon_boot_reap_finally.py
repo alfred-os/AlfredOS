@@ -12,6 +12,7 @@ whole-file 100% gate covers them rather than pragma-ing a leak-guard.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,21 @@ from alfred.cli.daemon._boot_audit import _BootRefusedError
 
 from .conftest import FakeAuditWriter, FakeSupervisor
 
+# The three drain-finally arms below drive a FULL successful boot to reach
+# ``wait_for_shutdown``/``supervisor.stop()``, which writes the pidfile via
+# ``os.O_NOFOLLOW`` — a POSIX-only flag. On Windows the boot fails at
+# ``write_pidfile`` with ``AttributeError('module os has no attribute O_NOFOLLOW')``
+# before ever reaching the code under test. Same architectural constraint the sibling
+# ``test_tui_adapter_listener_reaped_even_when_supervisor_stop_raises`` already guards;
+# the supported Windows path is WSL2 (= Linux). A DECORATOR, never a runtime skip inside
+# a helper (a helper-internal guard can be ordered wrong). ``test_reap_finally_skips_
+# absent_supervisor_and_pidfile`` below needs NO guard — it raises at Supervisor
+# construction, before ``write_pidfile``.
+_posix_boot_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: the real daemon-boot pipeline writes the pidfile with os.O_NOFOLLOW",
+)
+
 
 def _async_raise(exc: BaseException) -> Any:
     """A ``wait_for_shutdown`` replacement that raises ``exc`` once the daemon is up."""
@@ -34,6 +50,7 @@ def _async_raise(exc: BaseException) -> Any:
     return _raiser
 
 
+@_posix_boot_only
 def test_a_failing_supervisor_stop_does_not_mask_a_boot_refusal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -69,6 +86,7 @@ def test_a_failing_supervisor_stop_does_not_mask_a_boot_refusal(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+@_posix_boot_only
 def test_a_failing_supervisor_stop_on_a_clean_shutdown_stays_visible(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -95,6 +113,7 @@ def test_a_failing_supervisor_stop_on_a_clean_shutdown_stays_visible(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+@_posix_boot_only
 def test_a_succeeding_supervisor_stop_on_a_clean_shutdown_exits_zero(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -112,6 +131,7 @@ def test_a_succeeding_supervisor_stop_on_a_clean_shutdown_exits_zero(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+@_posix_boot_only
 def test_a_failing_stop_does_not_mask_a_going_down_audit_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
