@@ -34,6 +34,7 @@ import asyncio
 import struct
 import sys
 import threading
+import time
 import types
 from typing import Any
 
@@ -708,6 +709,142 @@ async def test_terminate_and_reap_logs_loudly_when_reap_raises() -> None:
     failed = [e for e in logs if e["event"] == "security.quarantine_child.reap_failed"]
     assert len(failed) == 1  # loud, not silent
     assert failed[0]["error_class"] == "OSError"
+
+
+# Comfortably past both reap grace windows, but finite so the executor thread retires.
+_UNREAPABLE_WAIT_S = 5.0
+
+
+class _IgnoresSigterm:
+    """A child that ignores SIGTERM and only dies on SIGKILL.
+
+    Models the exact adversary case: a compromised/wedged T3 child that declines the
+    polite signal. ``wait()`` blocks until ``kill()`` has been called.
+    """
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self._dead = threading.Event()
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True  # signal delivered, deliberately ignored
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self._dead.set()
+
+    def wait(self) -> int:
+        self._dead.wait()  # blocks until kill() lands — an unbounded wait hangs here
+        return -9
+
+
+async def test_terminate_and_reap_escalates_to_sigkill_when_sigterm_is_ignored() -> None:
+    """A child ignoring SIGTERM must be SIGKILLed, not waited on forever.
+
+    The teardown was SIGTERM-only with an unbounded ``process.wait()``. A T3 child that
+    declines SIGTERM wedged the fail-closed path indefinitely: dispatch blew past
+    ``action_deadline`` AND ``record_broker_failure`` never ran, so the very failure that
+    triggered the teardown produced NO ``egress.broker.refused`` row. Escalation is what
+    bounds it.
+    """
+    proc = _IgnoresSigterm()
+    started = time.monotonic()
+
+    await child_io_mod._terminate_and_reap(proc)  # type: ignore[arg-type]
+
+    elapsed = time.monotonic() - started
+    assert proc.terminated is True  # polite signal first
+    assert proc.killed is True  # ... then escalated, because it was ignored
+    assert elapsed < child_io_mod._REAP_TOTAL_GRACE_S + 1.0, (
+        f"reap took {elapsed:.2f}s — the escalation did not bound it"
+    )
+
+
+async def test_terminate_and_reap_escalation_is_logged_loudly() -> None:
+    """The SIGTERM->SIGKILL escalation is a security-relevant event, never silent (HARD #7)."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs:
+        await child_io_mod._terminate_and_reap(_IgnoresSigterm())  # type: ignore[arg-type]
+
+    escalated = [
+        e for e in logs if e["event"] == "security.quarantine_child.reap_escalated_sigkill"
+    ]
+    assert len(escalated) == 1
+
+
+async def test_terminate_and_reap_surfaces_a_child_that_survives_sigkill() -> None:
+    """A child that outlives SIGKILL is an OS-level anomaly — loud, and still BOUNDED.
+
+    Only an uninterruptible (D-state) process reaches here, because SIGKILL cannot be
+    caught, blocked or ignored. There is nothing left to escalate to, so the contract is:
+    return anyway (never hang the fail-closed path) and say so at ERROR, leaving the
+    process to the OS rather than silently pretending it was reaped.
+    """
+    import structlog.testing
+
+    class _SurvivesSigkill:
+        """Neither signal lands within either grace window.
+
+        ``wait()`` outlives both windows but is NOT infinite: ``run_in_executor`` parks a
+        default-pool thread that cancelling ``wait_for`` cannot interrupt, and a truly
+        never-returning ``wait()`` would hang the interpreter's executor join at teardown —
+        the test would wedge the suite instead of the code under test. Sleeping past the
+        bound proves the same branch and lets the thread retire.
+        """
+
+        returncode = None
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self) -> int:
+            threading.Event().wait(timeout=_UNREAPABLE_WAIT_S)  # never set; returns False
+            return -9
+
+    started = time.monotonic()
+    with structlog.testing.capture_logs() as logs:
+        await child_io_mod._terminate_and_reap(_SurvivesSigkill())  # type: ignore[arg-type]
+    elapsed = time.monotonic() - started
+
+    assert [e for e in logs if e["event"] == "security.quarantine_child.reap_unreaped"]
+    # Still returns — an unkillable child must not wedge the caller's refusal path.
+    assert elapsed < child_io_mod._REAP_TOTAL_GRACE_S + 1.0
+
+
+async def test_terminate_and_reap_does_not_kill_a_child_that_honours_sigterm() -> None:
+    """The common path must stay a graceful SIGTERM — escalation is the exception."""
+
+    class _Polite:
+        returncode = None
+        killed = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:  # pragma: no cover - asserted never reached
+            _Polite.killed = True
+
+        def wait(self) -> int:
+            return 0  # exits promptly on SIGTERM
+
+    await child_io_mod._terminate_and_reap(_Polite())  # type: ignore[arg-type]
+    assert _Polite.killed is False  # no gratuitous SIGKILL on a well-behaved child
 
 
 async def test_terminate_and_reap_cancelled_reap_propagates() -> None:

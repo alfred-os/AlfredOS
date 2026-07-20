@@ -20,12 +20,15 @@ What is under test (ADR-0029):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import alfred.security.quarantine_transport as transport_mod
 from alfred.egress.control_fd_broker import ControlFdBrokerError
 from alfred.plugins.transport import ControlResult
 from alfred.security.quarantine import ContentHandle
@@ -205,12 +208,20 @@ class _RecordingAuditor:
     def __init__(self) -> None:
         self.successes: list[str] = []
         self.failures: list[tuple[str, str]] = []
+        self.success_ids: list[tuple[str, int]] = []
+        self.failure_ids: list[str] = []
 
-    async def record_broker_success(self, *, destination: str) -> None:
+    async def record_broker_success(
+        self, *, destination: str, extraction_id: str, socket_ordinal: int
+    ) -> None:
         self.successes.append(destination)
+        self.success_ids.append((extraction_id, socket_ordinal))
 
-    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
+    async def record_broker_failure(
+        self, *, destination: str, reason: str, extraction_id: str
+    ) -> None:
         self.failures.append((destination, reason))
+        self.failure_ids.append(extraction_id)
 
 
 class _RaisingChildIO(_RecordingChildIO):
@@ -248,6 +259,20 @@ class _CloseRaisingChildIO(_RaisingChildIO):
 
     async def aclose(self) -> None:
         raise OSError("teardown failed")
+
+
+class _HangingCloseChildIO(_RaisingChildIO):
+    """A ChildIO double whose ``aclose`` never returns — a child ignoring its teardown.
+
+    The fail-closed path's own worst case: the broker already failed, so the transport is
+    trying to revoke, and the revoke itself wedges.
+    """
+
+    async def aclose(self) -> None:
+        import asyncio
+
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable: the revoke bound must fire first")
 
 
 async def _dispatch_extract(transport: QuarantineStdioTransport) -> Any:
@@ -320,6 +345,137 @@ async def test_dispatch_broker_failure_row_precedes_the_typed_refusal() -> None:
     assert auditor.failures == [("gw:8889", "sendmsg_failed")]
 
 
+@pytest.mark.asyncio
+async def test_hanging_revoke_still_writes_the_refusal_row() -> None:
+    """A wedged teardown must NOT swallow the ``egress.broker.refused`` row.
+
+    The fail-closed path was itself unbounded: ``_refuse_broker`` -> ``_revoke_child_capability``
+    ran OUTSIDE every ceiling, and the reap underneath was SIGTERM-only with an unbounded
+    ``wait()``. A child that declines to die therefore hung dispatch past the outer
+    ``action_deadline`` AND starved ``record_broker_failure`` — no forensic row for the very
+    failure that triggered the teardown. The revoke is best-effort; the row is not.
+    """
+    auditor = _RecordingAuditor()
+    child = _HangingCloseChildIO(
+        ControlFdBrokerError("sendmsg_failed", destination="gw:8889", delivered=1)  # revoke=True
+    )
+    transport = _staged_transport(child, auditor=auditor)
+    started = time.monotonic()
+
+    result = await _dispatch_extract(transport)
+
+    elapsed = time.monotonic() - started
+    assert result.payload == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+    assert auditor.failures == [("gw:8889", "sendmsg_failed")]  # the row SURVIVED the hang
+    assert elapsed < transport_mod._BROKER_REFUSAL_TIMEOUT_S, (
+        f"refusal path took {elapsed:.2f}s — the bound did not apply"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hanging_revoke_is_logged_loudly() -> None:
+    """A revoke that outruns its bound is loud, never silent (HARD #7)."""
+    import structlog.testing
+
+    child = _HangingCloseChildIO(
+        ControlFdBrokerError("sendmsg_failed", destination="gw:8889", delivered=1)
+    )
+    transport = _staged_transport(child, auditor=_RecordingAuditor())
+
+    with structlog.testing.capture_logs() as logs:
+        await _dispatch_extract(transport)
+
+    assert [
+        e for e in logs if e["event"] == "security.quarantine_transport.revoke_deadline_exceeded"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_audit_write_timeout_is_not_laundered_into_a_typed_refusal() -> None:
+    """A ``TimeoutError`` from the AUDIT WRITE must propagate, not become a soft refusal.
+
+    ``_run_broker_preamble`` wraps ``broker_sockets`` + the N ``record_broker_success`` calls in
+    one ``asyncio.timeout``, then catches bare ``TimeoutError``. But ``EgressBrokerAuditor``
+    raises ``TimeoutError`` itself when its bounded ``append_schema`` hangs — so a FAILED,
+    NON-SKIPPABLE AUDIT WRITE was being caught by the deadline arm and converted into a graceful
+    ``provider_unavailable`` refusal. That is exactly the laundering HARD #5 forbids, and it
+    contradicts this module's own docstring ("never laundered into a soft refusal").
+
+    The two are told apart by the timeout context's ``.expired()``: only a genuinely expired
+    preamble is a deadline; anything else is the callee's own error.
+    """
+    auditor = _RaisingAuditor(TimeoutError("append_schema hung"))
+    transport = _staged_transport(_RecordingChildIO(), auditor=auditor)
+
+    with pytest.raises(TimeoutError):
+        await _dispatch_extract(transport)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatches_are_serialised_against_the_single_child() -> None:
+    """Two concurrent dispatches must NOT interleave on the one persistent child.
+
+    Nothing serialised ``dispatch`` against the single long-lived child. ``adapter_ids`` is a
+    list and ``supervise_all`` runs one runner per adapter, so the shipped Discord+TUI config
+    makes concurrent dispatch reachable in principle — today's serialisation is EMERGENT, not
+    asserted. If it ever breaks, two dispatches interleave ``write_frame``/``read_frame`` on
+    one child and the replies cross: user A's extraction returns user B's T3 content. That is
+    a cross-user T3 disclosure, so the invariant is pinned rather than assumed.
+
+    Without the lock this fails as ``assert 'body B' == 'body A'`` — the disclosure, live.
+    """
+
+    class _YieldingChildIO(_RecordingChildIO):
+        """Yields to the loop mid-dispatch — where an unserialised second dispatch cuts in.
+
+        ``_pending_reply`` is a SINGLE slot, which is a faithful model of the single
+        long-lived child: one reply channel. An interleaved second dispatch overwrites it,
+        so the first dispatch reads the second one's T3 body. Rather than raise on an empty
+        slot, this returns a sentinel so the assertion lands on the security property
+        (whose body came back) instead of on fixture mechanics.
+        """
+
+        async def read_frame(self) -> bytes:
+            await asyncio.sleep(0)  # the interleaving window
+            if self._pending_reply is None:
+                return _frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "result": {
+                            "kind": "extracted",
+                            "data": {"text": "<CROSSED>", "intent": "greeting"},
+                            "extraction_mode": "native_constrained",
+                        },
+                    }
+                )
+            return await super().read_frame()
+
+    child = _YieldingChildIO()
+    staging = QuarantineStagingMap()
+    staging.stage("A", _tag(CapabilityGateNonce(), "body A"))
+    staging.stage("B", _tag(CapabilityGateNonce(), "body B"))
+    transport = QuarantineStdioTransport(
+        child_io=child, staging=staging, broker_auditor=_RecordingAuditor()
+    )
+
+    async def _one(handle_id: str) -> str:
+        result = await transport.dispatch(
+            "quarantine.extract",
+            {"handle_id": handle_id, "schema_json": "{}", "schema_version": 1},
+        )
+        text = result.payload["data"]["text"]  # type: ignore[index,call-overload]
+        return str(text)
+
+    async with asyncio.TaskGroup() as tg:
+        task_a = tg.create_task(_one("A"))
+        task_b = tg.create_task(_one("B"))
+
+    # THE invariant: each dispatch gets back the body IT staged. Interleaved, A reads the
+    # reply B just overwrote — a cross-user T3 disclosure.
+    assert task_a.result() == "body A", "dispatch A received another user's T3 body"
+    assert task_b.result() == "body B", "dispatch B received another user's T3 body"
+
+
 # ---------------------------------------------------------------------------
 # #340 review batch A — broker transport invariants (A2/A3/A4/A5/A7).
 # ---------------------------------------------------------------------------
@@ -332,7 +488,9 @@ class _RaisingAuditor(_RecordingAuditor):
         super().__init__()
         self._error = error or RuntimeError("append_schema failed")
 
-    async def record_broker_success(self, *, destination: str) -> None:
+    async def record_broker_success(
+        self, *, destination: str, extraction_id: str, socket_ordinal: int
+    ) -> None:
         raise self._error
 
 

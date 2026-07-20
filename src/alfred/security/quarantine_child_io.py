@@ -200,6 +200,19 @@ _STDERR_TRUNCATION_MARKER = " …[truncated]"
 # rather than hanging ``aclose`` forever. Short (the child is already dead).
 _STDERR_DRAIN_TIMEOUT_S = 2.0
 
+# Grace windows for the two-stage reap in ``_terminate_and_reap``. The child is a T3
+# process whose exit is a REVOCATION, so the teardown must be bounded: the caller
+# (``_revoke_child_capability`` -> ``_refuse_broker``) still has to write the
+# ``egress.broker.refused`` row afterwards, inside the outer ``action_deadline``.
+#
+# Both windows are deliberately short. A healthy child exits on SIGTERM in microseconds;
+# 1s is ~6 orders of magnitude of headroom, and anything slower is already a wedged child
+# we would rather kill than wait for. Total worst case is therefore ~2s, which leaves the
+# refusal path's remaining budget for the audit write it exists to produce.
+_REAP_SIGTERM_GRACE_S = 1.0
+_REAP_SIGKILL_GRACE_S = 1.0
+_REAP_TOTAL_GRACE_S = _REAP_SIGTERM_GRACE_S + _REAP_SIGKILL_GRACE_S
+
 # Unicode categories stripped from child stderr before it becomes a log field.
 # ``Cc`` (C0/C1 controls) defeats forged log lines + ANSI terminal escapes; ``Cf``
 # (format chars — bidi overrides U+202E, directional isolates U+2066-2069,
@@ -772,14 +785,57 @@ class _SubprocessChildIO:
 
 
 async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
-    """SIGTERM the child and await its exit off-loop (best-effort, never raises)."""
+    """SIGTERM, then SIGKILL, the child and await its exit off-loop (best-effort, never raises).
+
+    BOUNDED, because this is the fail-closed teardown. It was SIGTERM-only with an
+    unbounded ``process.wait()``: a T3 child that simply declines SIGTERM wedged the
+    caller forever. Two things then broke at once — dispatch blew past the outer
+    ``action_deadline``, AND ``record_broker_failure`` never ran, so the very failure that
+    triggered the teardown produced NO ``egress.broker.refused`` row. A revocation path
+    that can hang is not a revocation path.
+
+    SIGKILL is the escalation the kernel guarantees: it cannot be caught, blocked or
+    ignored, so the only way past the second grace window is an uninterruptible (D-state)
+    child, which is logged loud and left to the OS.
+    """
+    loop = asyncio.get_running_loop()
     if process.returncode is None and process.poll() is None:
         with contextlib.suppress(ProcessLookupError, OSError):
             process.terminate()
-    # ``Popen.wait`` blocks — reap in an executor so the loop is not blocked.
-    loop = asyncio.get_running_loop()
+    if await _reap_within(loop, process, _REAP_SIGTERM_GRACE_S):
+        return
+    # SIGTERM ignored. Escalate — loudly, because a quarantine child declining the polite
+    # signal is security-relevant, not routine teardown noise.
+    with contextlib.suppress(Exception):
+        _log.warning(
+            "security.quarantine_child.reap_escalated_sigkill",
+            sigterm_grace_s=_REAP_SIGTERM_GRACE_S,
+        )
+    with contextlib.suppress(ProcessLookupError, OSError):
+        process.kill()
+    if await _reap_within(loop, process, _REAP_SIGKILL_GRACE_S):
+        return
+    with contextlib.suppress(Exception):
+        _log.error(
+            "security.quarantine_child.reap_unreaped",
+            total_grace_s=_REAP_TOTAL_GRACE_S,
+        )
+
+
+async def _reap_within(
+    loop: asyncio.AbstractEventLoop, process: subprocess.Popen[bytes], grace_s: float
+) -> bool:
+    """Await the child's exit for at most ``grace_s``. ``True`` == reaped.
+
+    ``Popen.wait`` blocks, so it runs in an executor. Cancelling the ``wait_for`` does NOT
+    unblock that thread — it stays parked on ``waitpid`` until the process actually dies,
+    which is precisely what the SIGKILL escalation then guarantees. Concurrent ``wait()``
+    calls across the two attempts are safe: CPython serialises them on ``_waitpid_lock``.
+    """
     try:
-        await loop.run_in_executor(None, process.wait)
+        await asyncio.wait_for(loop.run_in_executor(None, process.wait), timeout=grace_s)
+    except TimeoutError:
+        return False
     except Exception as exc:
         # Best-effort teardown (never raises), but LOUD not silent (#414, hard
         # rule #7): a reap gone wrong surfaces its error class instead of
@@ -789,6 +845,8 @@ async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
         # the ``stderr_drain_failed`` / ``read_frame_failed`` idiom.
         with contextlib.suppress(Exception):
             _log.warning("security.quarantine_child.reap_failed", error_class=type(exc).__name__)
+        return True  # errored, not hung — escalating a SIGKILL would not help
+    return True
 
 
 def _lift_above_targets(
