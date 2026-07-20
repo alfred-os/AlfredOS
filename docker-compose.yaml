@@ -148,6 +148,21 @@ services:
       ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_COMMS_ENABLED_ADAPTERS:-["alfred_tui"]}'
       ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
+      # #340 PR2b-golive: the quarantined (dual-LLM) child's provider key. The core
+      # resolves it from the broker's env layer SYNCHRONOUSLY before spawning the child
+      # and REFUSES BOOT when unset (§20.2 primary refuse-boot) — a real client on a
+      # placeholder key would be a silent dead-LLM, so the fail-loud posture is
+      # deliberate and a keyless stack is MEANT to refuse.
+      #
+      # It must nonetheless be FORWARDED here, or the refusal names a remedy the operator
+      # cannot perform: without this line no value in `.env` reaches the container, and
+      # alfred-core mounts only alfred_state_git + alfred_run, so the _PREFER_FILE
+      # secrets.toml route is closed too. The stack would then crash-loop under
+      # `restart: unless-stopped` with no reachable fix. Set it in `.env`.
+      #
+      # Crosses to the child ONLY over fd 3 (never the scrubbed spawn env) — see
+      # _child_env / fd3_key_delivery.
+      ALFRED_QUARANTINE_PROVIDER_API_KEY: ${ALFRED_QUARANTINE_PROVIDER_API_KEY:-}
       # Spec C G7-1b (#333): the SAME base URL the gateway derives its egress allowlist from
       # (threaded to alfred-gateway too). An operator override MUST reach BOTH or the core
       # would dial a host the gateway's allowlist denies — a silent egress mismatch.
