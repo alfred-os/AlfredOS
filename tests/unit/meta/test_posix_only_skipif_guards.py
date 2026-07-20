@@ -26,13 +26,27 @@ from __future__ import annotations
 
 import ast
 import importlib
+import re
 import sys
 from pathlib import Path
 from typing import Final
 
 import pytest
 
+from tests._posix_only_tests import POSIX_ONLY_TEST_FILES
+
 _TESTS_ROOT: Final = Path(__file__).resolve().parents[2]  # tests/
+
+# A CRT-file-descriptor syscall. On Windows a socket is a SOCKET handle, NOT a CRT fd, so
+# `os.dup`/`os.close` on one raises EBADF — the exact failure that made the Windows leg red
+# twice. (These calls are perfectly portable on a pipe or file fd, hence the conjunction below.)
+_CRT_FD_SYSCALL: Final = re.compile(r"os\.dup2?\(|os\.close\(")
+
+# Evidence the fd in question is socket-derived. Requiring BOTH halves is what keeps this
+# invariant free of false positives: `os.pipe()` + `os.close()` never matches.
+_SOCKET_SOURCE: Final = re.compile(
+    r"socket\.socket\(|socket\.socketpair\(|_af_unix_socketpair\(|\.detach\(\)"
+)
 
 # The only predicates a `POSIX-only:` guard may use. Both are true on Windows and
 # false on every POSIX host; `ast.unparse` normalises string quoting to single.
@@ -141,3 +155,111 @@ def test_added_guards_are_inactive_on_this_posix_host(module_name: str, test_nam
             f"{module_name}::{test_name} is being SKIPPED on {sys.platform} — "
             "the guard is over-broad, not win32-exact"
         )
+
+
+def _executable_code(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """The function's body as source, minus its docstring.
+
+    Round-tripping through ``ast.unparse`` drops comments, and dropping the leading string
+    Expr drops the docstring — so a test that merely *describes* ``SCM_RIGHTS`` in prose is
+    not mistaken for one that calls it. That distinction is the whole reason this scan is
+    trustworthy: a naive text grep over these files is ~70% false positives.
+    """
+    normalised = ast.parse(ast.unparse(fn)).body[0]
+    assert isinstance(normalised, ast.FunctionDef | ast.AsyncFunctionDef)
+    body = normalised.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return "\n".join(ast.unparse(stmt) for stmt in body)
+
+
+def _skipif_aliases(tree: ast.Module) -> frozenset[str]:
+    """Module-level names bound to a ``pytest.mark.skipif(...)`` call.
+
+    The readable per-test form is a module-level ``_posix_only = pytest.mark.skipif(...)``
+    applied as ``@_posix_only``. Without resolving the alias this scan would report every
+    such test as unguarded.
+    """
+    aliases: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        func = node.value.func
+        if isinstance(func, ast.Attribute) and func.attr == "skipif":
+            aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return frozenset(aliases)
+
+
+def _socket_fd_tests_missing_a_guard() -> list[str]:
+    """Every ``tests/unit`` test doing socket-fd interop with no win32 guard.
+
+    Scoped to ``tests/unit`` because that is exactly what the Windows leg runs
+    (``uv run pytest tests/unit -q``); ``tests/adversarial`` and ``tests/integration`` never
+    execute there. Files in ``POSIX_ONLY_TEST_FILES`` are excluded — pytest does not collect
+    them on Windows at all, so a per-test guard would be redundant.
+    """
+    ignored = {_TESTS_ROOT / rel for rel in POSIX_ONLY_TEST_FILES}
+    offenders: list[str] = []
+    for path in sorted((_TESTS_ROOT / "unit").rglob("test_*.py")):
+        if path in ignored:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        aliases = _skipif_aliases(tree)
+        module_guarded = bool(re.search(r"pytestmark[^\n]*skipif", source))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            code = _executable_code(node)
+            if not (_CRT_FD_SYSCALL.search(code) and _SOCKET_SOURCE.search(code)):
+                continue
+            decorated = any(
+                "skipif" in ast.unparse(d) or ast.unparse(d) in aliases for d in node.decorator_list
+            )
+            if not (decorated or module_guarded):
+                offenders.append(f"{path.relative_to(_TESTS_ROOT)}::{node.name}")
+    return offenders
+
+
+def test_socket_fd_interop_tests_carry_a_win32_guard() -> None:
+    """A test doing a CRT-fd syscall on a socket fd must be win32-guarded (anti-recurrence).
+
+    The Windows leg went red TWICE on the same root cause because each pass fixed only the
+    line numbers CI happened to report — and pytest reports the FIRST failure per test, so a
+    truncated list guarantees another round. This asserts the invariant over the whole lane
+    instead, so the third recurrence fails HERE, on a POSIX dev box, in milliseconds.
+
+    Deliberately narrow: it fires only when a test both builds a socket AND calls
+    ``os.dup``/``os.close``. Handing a ``detach()``ed fd to ``PassedFdBackend`` is portable
+    (production reconstitutes it via ``socket.socket(fileno=...)``, which Windows supports),
+    so those tests keep running on Windows and the assert-RAN floor keeps its signal.
+    """
+    offenders = _socket_fd_tests_missing_a_guard()
+    assert not offenders, (
+        "these tests do a CRT-fd syscall (os.dup/os.close) on a socket-derived fd but carry "
+        "no win32 guard; a SOCKET handle is not a CRT fd on Windows, so they raise EBADF on "
+        "the BLOCKING Windows unit leg. Add the module's `_posix_only` mark. Offenders: "
+        + "; ".join(offenders)
+    )
+
+
+def test_the_socket_fd_scan_actually_finds_the_guarded_population() -> None:
+    """Anti-vacuity: a scan that matches nothing would make the invariant above worthless."""
+    matched = 0
+    for path in sorted((_TESTS_ROOT / "unit").rglob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith(
+                "test_"
+            ):
+                code = _executable_code(node)
+                if _CRT_FD_SYSCALL.search(code) and _SOCKET_SOURCE.search(code):
+                    matched += 1
+    assert matched >= 15, f"the socket-fd scan matched only {matched} tests — it has gone blind"

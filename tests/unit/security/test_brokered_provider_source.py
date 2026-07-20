@@ -46,6 +46,24 @@ from alfred.security.quarantine_child.brokered_egress import (
 # the wall-clock ceiling.
 _AMPLE_BUDGET_S = 60.0
 
+# Applied to every test that performs a CRT-fd syscall on a SOCKET handle — `os.dup()` of a
+# `socket.fileno()`, or `os.close()` of a `detach()`ed fd. Windows' `socket.socketpair()` is
+# AF_INET-backed and its handles are NOT CRT file descriptors, so both raise EBADF there.
+#
+# Deliberately NARROW. Handing a detached fd to `PassedFdBackend` is portable: production
+# reconstitutes it with `socket.socket(fileno=...)`, which accepts a SOCKET handle on Windows,
+# and tears it down through the socket object. Tests that only do that (e.g.
+# `test_stream_aclose_marks_the_fd_released_on_the_backend`) keep running on Windows — the
+# Windows leg is a BLOCKING gate with an assert-RAN floor, so an over-broad guard hollows it.
+#
+# This is a DECORATOR rather than a call to `_af_unix_socketpair()` below because the guard has
+# to be order-independent: the regression that made this file red twice was `os.dup()` running
+# on line N while the helper's skip sat on line N+2, so the test died before it could skip.
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.dup()/os.close() of a socket fd (a SOCKET handle is not a CRT fd)",
+)
+
 
 def _af_unix_socketpair() -> tuple[socket.socket, socket.socket]:
     """An AF_UNIX pair for SCM_RIGHTS fd-passing — SKIPS on Windows.
@@ -148,6 +166,7 @@ def test_source_satisfies_provider_source_protocol() -> None:
 # --- bind() fd-ownership (§8 D5) ----------------------------------------------------------
 
 
+@_posix_only
 def test_bind_closes_fd_when_never_dialed(monkeypatch: pytest.MonkeyPatch) -> None:
     """No dial → the httpx client never wrapped the fd → the SOURCE closes the raw fd (no leak).
 
@@ -173,6 +192,7 @@ def test_bind_closes_fd_when_never_dialed(monkeypatch: pytest.MonkeyPatch) -> No
     b.close()
 
 
+@_posix_only
 def test_bind_defers_fd_close_to_client_when_dialed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dialed (``backend.calls > 0``) → the client is the SOLE fd owner; the source must NOT
     also close it (no double-close)."""
@@ -214,6 +234,7 @@ def test_bind_defers_fd_close_to_client_when_dialed(monkeypatch: pytest.MonkeyPa
     b.close()
 
 
+@_posix_only
 def test_bind_closes_fd_when_build_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A pre-dial build failure leaves ``backend is None`` → the source closes the fd + reraises."""
     keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -240,6 +261,7 @@ def test_bind_closes_fd_when_build_raises(monkeypatch: pytest.MonkeyPatch) -> No
     b.close()
 
 
+@_posix_only
 def test_bind_closes_fd_on_cancel_before_dial(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``wait_for``-cancel that unwinds the CM before any dial still reclaims the fd (no leak).
 
@@ -282,6 +304,7 @@ def test_bind_closes_fd_on_cancel_before_dial(monkeypatch: pytest.MonkeyPatch) -
     b.close()
 
 
+@_posix_only
 def test_bind_reclaims_fd_when_aclose_raises_never_dialed(monkeypatch: pytest.MonkeyPatch) -> None:
     """R.2.7: a raising ``aclose()`` on the never-dialed path must NOT skip the fd reclaim.
 
@@ -386,6 +409,7 @@ def test_drain_does_not_swallow_malformed_frame(monkeypatch: pytest.MonkeyPatch)
 # --- B1/B2: the attempt budget reaches the socket, and bind() is inside it -----------------
 
 
+@_posix_only
 def test_build_anchors_the_attempt_deadline_from_the_budget() -> None:
     """The socket's absolute deadline comes from the REMAINING extraction budget, so the LAST
     retry attempt gets a truncated ceiling instead of a fresh full SDK read past the 20s cap."""
@@ -403,6 +427,7 @@ def test_build_anchors_the_attempt_deadline_from_the_budget() -> None:
         b.close()
 
 
+@_posix_only
 def test_bind_charges_control_recv_latency_to_the_attempt_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -470,6 +495,7 @@ def test_bind_control_recv_is_bounded_and_refuses_loud(monkeypatch: pytest.Monke
     b.close()
 
 
+@_posix_only
 def test_bind_restores_blocking_mode_so_the_drain_still_sees_eagain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -497,6 +523,7 @@ def test_bind_restores_blocking_mode_so_the_drain_still_sees_eagain(
 # --- B4: the fd reclaim tracks OWNERSHIP, not merely "did it dial" -------------------------
 
 
+@_posix_only
 def test_bind_reclaims_fd_when_aclose_raises_after_dialing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
