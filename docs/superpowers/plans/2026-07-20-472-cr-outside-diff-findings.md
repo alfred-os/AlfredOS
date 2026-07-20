@@ -68,41 +68,48 @@ Branch: `472a-budget-and-cleanup-fixes` off `main`.
 
 Append to `tests/unit/quarantine/test_quarantined_extractor_dispatch.py`. Reuse the file's existing fixtures: `_FakeSource` (`:112`, records per-attempt `budgets`, has `capabilities()` and an async-CM `bind()`), `_fake_provider_with_capabilities` (`:96`), `_text_response` (`:163`), `_SCHEMA_JSON` (`:82`). Do **not** monkeypatch `_call_provider`: `_text_response("not json at all")` drives the real path (`_call_provider` → `_validate_response` → `json.loads` raises `JSONDecodeError` → the retry arm at `:376`), and it exercises the mode branch honestly.
 
-The oracle is `(timestamp observed at the real sleep call, delay the implementation actually requested)` — never the `min()` itself. It kills mutants the wall-clock version cannot: clamping against the wrong deadline, dropping `max(0.0, …)`, clamping only on the last attempt.
+The oracle is `(fake-clock time at the sleep call, delay the implementation actually requested)` — never the `min()` itself. A `_FakeClock` is monkeypatched over the module's `time` and **advanced by each requested sleep**, so `deadline − now` genuinely shrinks between attempts. Budget `1.25` with back-offs `0.5` then (clamped) `0.75` — all exact in IEEE-754, so **no wall-clock tolerance**. This kills both the uncapped mutant and the wrong-deadline (clamp-against-constant) mutant; a real-clock spy could not distinguish the latter (a never-advancing clock keeps `remaining ≈ constant`). Delay sequence: attempt 0 → `min(0.5, 1.25)=0.5`; attempt 1 → `min(1.0, 0.75)=0.75`; loop-top at attempt 2 refuses (remaining 0). This is the shipped test:
 
 ```python
+class _FakeClock:
+    """A monotonic clock the test drives, so elapsed time is deterministic."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
 @pytest.mark.asyncio
 async def test_backoff_never_carries_the_loop_past_the_wall_clock_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Total elapsed across retries cannot exceed the budget (#472 finding 1).
-
-    Asserted BEHAVIOURALLY, at the real sleep call site: for every back-off the
-    loop requests, (call-time + requested-delay) must land within the budget. A
-    test asserting ``min(...)`` appears in the argument would pass against a cap
-    computed from the wrong deadline.
-    """
-    import time as _time
-
+    """Total elapsed across retries cannot exceed the budget (#472 finding 1)."""
     from alfred.security.quarantine_child import provider_dispatch as pd
+
+    clock = _FakeClock()
+    monkeypatch.setattr(pd, "time", clock)  # pd uses only time.monotonic()
 
     recorded: list[tuple[float, float]] = []
     real_sleep = asyncio.sleep
 
     async def _spy_sleep(delay: float, *a: object, **kw: object) -> None:
-        recorded.append((_time.monotonic(), delay))
-        await real_sleep(0)  # yield, burn no wall clock
+        recorded.append((clock.monotonic(), delay))
+        clock.advance(delay)  # the sleep "elapses" — shrinks the remaining budget
+        await real_sleep(0)  # yield to the loop, burn no real wall clock
 
     monkeypatch.setattr(pd.asyncio, "sleep", _spy_sleep)
-    monkeypatch.setattr(pd, "_MAX_TOTAL_WALL_CLOCK_SECONDS", 0.05)
+    budget = 1.25  # in [1.0, 1.5): 2nd back-off must clamp; 1.25/0.5/0.75 are exact floats
+    monkeypatch.setattr(pd, "_MAX_TOTAL_WALL_CLOCK_SECONDS", budget)
 
     source = _FakeSource(
-        _fake_provider_with_capabilities(
-            frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
-            _text_response("not json at all"),
-        )
+        _fake_provider_with_capabilities(frozenset(), _text_response("not json at all"))
     )
-    started = _time.monotonic()
+    started = clock.monotonic()
     result = await pd.dispatch_extraction(
         content=b"irrelevant t3 body",
         schema_json=_SCHEMA_JSON,
@@ -115,9 +122,9 @@ async def test_backoff_never_carries_the_loop_past_the_wall_clock_budget(
     assert recorded, "the retry loop never slept — the test never reached the back-off"
     for t_call, delay in recorded:
         assert delay >= 0.0, f"negative back-off requested: {delay}"
-        assert (t_call + delay) - started <= pd._MAX_TOTAL_WALL_CLOCK_SECONDS, (
+        assert (t_call + delay) - started <= budget, (
             f"a {delay:.3f}s back-off at t+{t_call - started:.3f}s would carry the loop "
-            f"past the {pd._MAX_TOTAL_WALL_CLOCK_SECONDS}s ceiling"
+            f"past the {budget}s ceiling"
         )
 ```
 
@@ -129,7 +136,7 @@ Confirm `ProviderCapability` and the fixtures are importable at the top of that 
 uv run pytest tests/unit/quarantine/test_quarantined_extractor_dispatch.py -q -k backoff_never
 ```
 
-Expected: FAIL — an uncapped `0.5×2⁰=0.5s` back-off requested against a 0.05s budget overshoots. If it errors at construction instead (e.g. `AttributeError` on the source), the fixture wiring is wrong — fix the test before the implementation.
+Expected: FAIL — the 2nd back-off (uncapped `0.5×2¹=1.0s`, requested at fake t+0.5 against the 1.25s budget) lands at 1.5 > 1.25 and trips the oracle. If it errors at construction instead (e.g. `AttributeError` on the source), the fixture wiring is wrong — fix the test before the implementation.
 
 - [ ] **Step 3: Apply the fix**
 
