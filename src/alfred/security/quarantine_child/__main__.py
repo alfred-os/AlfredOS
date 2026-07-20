@@ -425,8 +425,14 @@ def _build_provider(key: str) -> _ProviderFactory:
     Task 15 budget) are the PRIMARY guards; these are defence-in-depth.
 
     ``ALFRED_QUARANTINE_MODEL`` / ``ALFRED_QUARANTINE_MAX_TOKENS`` arrive via the
-    scrubbed spawn env (Task 8). A missing var is a supervisor-side wiring bug that
-    fails loud with ``KeyError`` at boot rather than silently defaulting the model.
+    scrubbed spawn env (Task 8) — ``_child_env`` sets them from EXPLICIT host-passed
+    arguments, so they are present only on the live (``control_fd=True``) spawn. A
+    missing or non-integer var is a supervisor-side spawn-wiring bug; it refuses boot
+    with the same typed :class:`QuarantineChildBootError` as the budget guard below
+    rather than a bare ``KeyError`` / ``ValueError`` traceback. Both are security-gate
+    failures on the §20.2 refuse-boot path, so both must present as ONE loud, typed,
+    actionable shape that names the offending variable (HARD #7) — never a stdlib
+    exception the operator has to decode, and never a silent model default.
 
     The ``max_tokens > 0`` guard (Task 15, HARD #7) fires HERE — before the request loop
     that calls ``dispatch_extraction`` is ever entered — so a ``<= 0`` budget can never
@@ -439,8 +445,31 @@ def _build_provider(key: str) -> _ProviderFactory:
         _ProviderFactory,
     )
 
-    model = os.environ["ALFRED_QUARANTINE_MODEL"]
-    max_tokens = int(os.environ["ALFRED_QUARANTINE_MAX_TOKENS"])
+    # §20.2 SECONDARY refuse-boot (HARD #7): an UNSET var is a supervisor-side spawn-wiring
+    # bug (the host sets both in `_child_env` only on the control_fd=True live spawn). Refuse
+    # with the same typed error as the budget guard below so every boot-config fault presents
+    # as ONE loud, actionable shape naming the offending variable — a bare KeyError traceback
+    # makes the operator decode a stdlib exception to find a wiring bug we can name outright.
+    try:
+        model = os.environ["ALFRED_QUARANTINE_MODEL"]
+        raw_max_tokens = os.environ["ALFRED_QUARANTINE_MAX_TOKENS"]
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise QuarantineChildBootError(
+            f"{missing} is unset in the quarantine child's scrubbed spawn env — refusing to "
+            "boot a child that cannot build its provider. The host sets it in `_child_env` "
+            "only on the live (control_fd=True) spawn, so an unset value means the spawn "
+            "call omitted the golive provider config (§20.2)"
+        ) from exc
+    # A non-integer budget is the same class of spawn-wiring fault: refuse typed rather than
+    # let `int()` raise a bare ValueError out of a security gate.
+    try:
+        max_tokens = int(raw_max_tokens)
+    except ValueError as exc:
+        raise QuarantineChildBootError(
+            f"ALFRED_QUARANTINE_MAX_TOKENS must be an integer, got {raw_max_tokens!r} — "
+            "refusing to boot on an unparseable extraction budget (§20.2)"
+        ) from exc
     if max_tokens <= 0:
         # §20.2 SECONDARY refuse-boot (HARD #7): refuse LOUD at boot rather than let a
         # non-positive budget reach dispatch_extraction, where it would launder into a
