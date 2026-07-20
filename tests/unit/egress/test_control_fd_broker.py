@@ -14,10 +14,12 @@ import os
 import socket
 import sys
 import threading
+import time
 
 import pytest
 
 from alfred.egress.control_fd_broker import (
+    _SEND_TIMEOUT_S,
     ControlFdBrokerError,
     _connect_one,
     _resolve_proxy_addr,
@@ -414,6 +416,64 @@ def test_send_one_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatch) -> No
         t.join(timeout=2)
         assert not t.is_alive()  # a silent join-timeout must fail the test, not pass quietly
         listener.close()
+
+
+def test_send_one_blocked_sendmsg_is_bounded_not_indefinite() -> None:
+    """A wedged control channel must not pin an executor thread forever (#340 golive C2).
+
+    ``_send_one`` runs in the default executor, and ``run_in_executor`` futures cannot be
+    cancelled once the worker has started — so an unbounded ``sendmsg`` outlives BOTH the
+    ``_BROKER_PREAMBLE_TIMEOUT_S`` bound and the outer ``action_deadline``, leaking a
+    non-daemon thread per attempt. Structurally the same defect the child side fixed with an
+    absolute socket deadline.
+
+    The buffer is filled for real (no mocked ``sendmsg``) so this exercises the ACTUAL kernel
+    block, and the assertion is that it RETURNS — a regression re-hangs the test rather than
+    passing it. A timed-out ``sendmsg`` raises ``TimeoutError``, which is an ``OSError``
+    subclass, so it maps to the existing closed-vocabulary ``sendmsg_failed`` reason.
+    """
+    parent, child = make_control_socketpair()
+    passed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # Fill parent's send buffer with the child never reading, so the next sendmsg blocks.
+        # settimeout(0)/(None) rather than setblocking(False)/(True): same effect, FBT003-free.
+        parent.settimeout(0)
+        with pytest.raises(BlockingIOError):
+            while True:
+                parent.send(b"x" * 4096)
+        parent.settimeout(None)
+
+        started = time.monotonic()
+        with pytest.raises(ControlFdBrokerError) as exc:
+            _send_one(parent, passed)
+        elapsed = time.monotonic() - started
+
+        assert exc.value.reason == "sendmsg_failed"
+        assert elapsed < _SEND_TIMEOUT_S * 3, (
+            f"the send must be bounded by _SEND_TIMEOUT_S, took {elapsed:.2f}s"
+        )
+        # The fd was NOT delivered, and _send_one's finally still drops the core's copy.
+        assert passed.fileno() == -1, "the un-delivered socket must still be closed"
+    finally:
+        parent.close()
+        child.close()
+        passed.close()
+
+
+def test_send_timeout_is_a_total_bound_under_the_preamble() -> None:
+    """The per-syscall bound IS the whole SEND phase's bound (arithmetic, stated once).
+
+    The child side needed an absolute cumulative deadline because a slow-drip peer can reset a
+    per-syscall idle timer indefinitely. The SEND phase cannot: it makes exactly
+    ``BROKER_SOCKET_COUNT`` calls, each writing ONE byte, so worst-case thread-block time is a
+    fixed ``BROKER_SOCKET_COUNT * _SEND_TIMEOUT_S`` with no drip to extend it. This test pins
+    that product strictly under the preamble bound, so the SEND half can never be what outlives
+    it. If either constant moves, this fails.
+    """
+    from alfred.security.quarantine import BROKER_SOCKET_COUNT
+    from alfred.security.quarantine_transport import _BROKER_PREAMBLE_TIMEOUT_S
+
+    assert BROKER_SOCKET_COUNT * _SEND_TIMEOUT_S < _BROKER_PREAMBLE_TIMEOUT_S
 
 
 # --- recv_passed_fd_nonblocking (#340 PR2b-golive Task 4: the drain-sweep variant) ---------

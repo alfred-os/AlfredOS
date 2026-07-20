@@ -220,6 +220,30 @@ def _connect_one(host: str, port: int) -> socket.socket:
     return sock
 
 
+# Bounded SEND toward the child's control channel (#340 golive C2). ``sendmsg`` on a SOCK_STREAM
+# blocks when the send buffer is full, and ``_send_one`` runs in the default executor — where a
+# started worker CANNOT be cancelled. An unbounded block therefore outlives both
+# ``_BROKER_PREAMBLE_TIMEOUT_S`` and the outer ``action_deadline``, leaking a non-daemon thread
+# that no deadline can reap: exactly the ceiling-vs-idle-timeout defect the child side fixed with
+# an absolute socket deadline (``brokered_egress._next_op_timeout``).
+#
+# WHY A PER-SYSCALL BOUND SUFFICES HERE (and the child's cumulative deadline does not apply): the
+# child reads a slow-DRIP peer, where a per-syscall idle timer resets forever. The SEND phase
+# cannot drip — it makes exactly ``BROKER_SOCKET_COUNT`` calls, each writing ONE byte, so the
+# worst case is the fixed product ``BROKER_SOCKET_COUNT * _SEND_TIMEOUT_S`` (3 x 1.0 = 3.0s) with
+# nothing able to extend it. That product is pinned strictly under the 4.0s preamble bound by
+# ``test_send_timeout_is_a_total_bound_under_the_preamble``, so the per-syscall bound IS the
+# phase's total bound.
+#
+# REACHABILITY (honest): with the current wiring this cannot fire. ``parent_end`` is written by
+# NOTHING but this function, so at most BROKER_SOCKET_COUNT (3) single-byte frames are ever in
+# flight against a >=8 KiB send buffer. The guard is defense-in-depth against the buffer
+# assumption changing (a larger batch, a wider frame, or any future second writer on the control
+# channel) — the cost is four lines, and the cost of being wrong is a permanently wedged thread
+# on the golive hot path.
+_SEND_TIMEOUT_S = 1.0
+
+
 def _send_one(parent_end: socket.socket, sock: socket.socket) -> None:
     """Blocking (executor-thread) SEND: SCM_RIGHTS-pass ``sock`` over ``parent_end``, drop the copy.
 
@@ -227,9 +251,17 @@ def _send_one(parent_end: socket.socket, sock: socket.socket) -> None:
     The ``\\x01`` frame is the >=1 data byte an ancillary-only ``sendmsg`` over ``SOCK_STREAM``
     requires so the kernel does not drop the fd. Split out of the old ``_connect_and_send`` SEND
     half; the CONNECT is now :func:`_connect_one`.
+
+    The send is BOUNDED by :data:`_SEND_TIMEOUT_S` so a wedged control channel cannot pin an
+    un-cancellable executor thread. A timed-out ``sendmsg`` raises ``TimeoutError``, which IS an
+    ``OSError`` subclass, so it maps to the existing closed-vocabulary ``sendmsg_failed`` reason
+    with no audit-schema change — and the structlog line still carries ``error_class`` so the
+    timeout stays forensically distinguishable from an ``EPIPE``. A timeout queues NOTHING, so the
+    caller's ``delivered`` count (which gates capability revocation) stays exact.
     """
     try:
         frame = b"\x01"
+        parent_end.settimeout(_SEND_TIMEOUT_S)
         sent = parent_end.sendmsg(
             [frame],
             [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [sock.fileno()]))],
@@ -242,6 +274,10 @@ def _send_one(parent_end: socket.socket, sock: socket.socket) -> None:
         _log.error("egress.control_fd_broker.sendmsg_failed", error_class=type(exc).__name__)
         raise ControlFdBrokerError("sendmsg_failed") from exc
     finally:
+        # Restore blocking so the control socket's mode is not left mutated for the next send in
+        # the batch (settimeout(None) == setblocking(True), spelled as the exact inverse of the
+        # settimeout above — mirrors the child-side ``_recv_one_fd`` restore discipline).
+        parent_end.settimeout(None)
         # SCM_RIGHTS DUPLICATED the descriptor (refcount 2) — drop the core's copy immediately or
         # the child's later close sends no FIN and the core leaks one fd per broker. Safe: already
         # duplicated into the socket buffer by the time sendmsg returned. Also covers a raise
