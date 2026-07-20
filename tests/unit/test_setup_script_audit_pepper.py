@@ -73,7 +73,7 @@ def test_setup_script_audit_pepper_is_idempotent() -> None:
     """
     content = _SETUP_SH.read_text()
     marker = 'step "Bootstrapping audit.hash_pepper secret"'
-    assert marker in _SETUP_SH.read_text(), (
+    assert marker in content, (
         f"pepper bootstrap step marker not found ({marker!r}) — the step was renamed "
         f"or removed; every assertion below would slice an empty block and pass vacuously"
     )
