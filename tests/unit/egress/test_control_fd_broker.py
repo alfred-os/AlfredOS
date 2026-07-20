@@ -418,6 +418,10 @@ def test_send_one_sendmsg_oserror_is_loud(monkeypatch: pytest.MonkeyPatch) -> No
         listener.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_send_one_blocked_sendmsg_is_bounded_not_indefinite() -> None:
     """A wedged control channel must not pin an executor thread forever (#340 golive C2).
 
@@ -460,6 +464,10 @@ def test_send_one_blocked_sendmsg_is_bounded_not_indefinite() -> None:
         passed.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
 def test_send_one_on_a_torn_down_control_channel_still_raises_the_typed_error() -> None:
     """A revoked/torn-down control channel must still yield ``ControlFdBrokerError``.
 
