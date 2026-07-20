@@ -1,7 +1,14 @@
-"""Go-live gate: the quarantined-LLM child reaches its provider ONLY through the
-gateway proxy, never by re-opening the child's network (PR #231 finding-5 / #230;
-re-pivoted PR-S4-11c-2b0; egress CLOSED in Spec C G7-1 / #333; real-LLM cutover
-in #340 PR2b-golive).
+"""Spawn-topology gate + an IMPORT-TIME egress backstop for the quarantined-LLM child.
+
+(PR #231 finding-5 / #230; re-pivoted PR-S4-11c-2b0; egress CLOSED in Spec C G7-1 /
+#333; real-LLM cutover in #340 PR2b-golive.)
+
+**This module was renamed in #340 PR2b-golive.** It was
+``test_quarantined_llm_not_yet_spawned_while_egress_open.py``, a name that asserted a
+property it had stopped proving — the child IS spawned now, and its egress is closed by
+the kernel rather than by the absence of a spawn. A reader who trusted the old filename
+without opening the file would have credited this gate with the broad
+"cannot reach the network" claim. The name now describes the two invariants below.
 
 .. warning::
 
@@ -27,11 +34,23 @@ in #340 PR2b-golive).
    broad claim it was written for. The load-bearing containment for the golive
    child is elsewhere and is independently gated — the kernel ``--unshare-net``
    (``test_quarantined_llm_policy_kernel_enforced.py``, ``sbx-2026-005``) plus
-   the fd-4 SCM_RIGHTS broker being the child's only reachability. Rebuilding
-   this gate around the golive posture (e.g. asserting the child's egress
-   imports are exactly the sanctioned brokered ones, at any scope) is tracked as
-   a follow-up; it is a trust-boundary change and wants its own security review
-   rather than a quiet edit inside a sign-off-gated PR.
+   the fd-4 SCM_RIGHTS broker being the child's only reachability.
+
+   **Not covered anywhere, by this module or any other: the child's egress
+   imports at ANY scope.** A lazily imported ``httpx`` / ``openai`` / raw
+   ``socket`` on a path other than the sanctioned brokered one is invisible to
+   this gate (module scope only) AND to
+   ``tests/unit/security/test_quarantine_child_import_closure.py`` (which walks
+   the module-scope closure for PRIVILEGED-module reachability, a different
+   question). Do not read the pair as covering each other: until #340 PR2b-golive
+   that unit test deferred the egress-capability question here, while this module
+   disclaims it — a circular deferral in which neither side checked. Both
+   docstrings now say so plainly.
+
+   Rebuilding this gate around the golive posture — asserting the child's
+   egress-capable imports are exactly the sanctioned brokered ones, at any scope —
+   is tracked in **#465**. It is a trust-boundary change and wants its own
+   security review rather than a quiet edit inside a sign-off-gated PR.
 
 The shipped Linux sandbox policy ``--unshare-net``s the child into an EMPTY
 network namespace (ADR-0015 Consequences, ``config/sandbox/README.md``,

@@ -309,6 +309,39 @@ socket in its empty network namespace. The specific decisions:
   invariant test pins the inversion so a future retune cannot silently restore an
   unbounded hot-path stall.
 
+- **The `action-deadline` floor and ceiling are anchored to DIFFERENT scenarios,
+  and the record must say which.** `alfred config set action-deadline` refuses
+  outside `(29s, 50s)`. Read as one model those two bounds contradict each other,
+  and a reviewer is right to stop on it. The floor uses a **one-phase** cost for
+  `read_frame` (`preamble(4) + host_read(25) = 29`); the ceiling uses the
+  **two-phase** cost (`2 × host_read = 50`), because `read_frame` bounds the
+  header and body reads separately and each can burn `_READ_FRAME_TIMEOUT_S`.
+  Apply the ceiling's own model to the floor and you get `4 + 50 = 54 > 50` — an
+  EMPTY window, i.e. no legal value at all.
+
+  The window is not empty, because the two bounds describe two different states
+  of the system and neither model is wrong for the state it describes:
+
+  - the **floor is anchored to the healthy path**, where the 20s child budget
+    dominates. `dispatch_extraction` passes the remaining budget to
+    `BrokeredProviderSource.bind()` as an absolute deadline, so a child that is
+    answering at all answers inside a single `read_frame` phase; the second phase
+    costs approximately nothing. What the floor protects against is the
+    orchestrator tearing a *working* extraction, so one-phase is the right cost.
+  - the **ceiling is anchored to the wedged-child worst case**, where the child
+    has stopped answering and both phases can each run to their full bound. What
+    the ceiling protects is `action_deadline` remaining the *effective* cap in
+    that state, so two-phase is the right cost.
+
+  This is therefore a **records** clarification, not a defect in the shipped
+  values: at the default `action_deadline=30` the 20s child budget dominates and
+  the healthy path never approaches either bound. It is written down because the
+  inconsistency is invisible in the code — the floor and ceiling are two adjacent
+  expressions in `_reject_action_deadline_outside_window` with no statement of
+  which scenario each is sized for, and a future retune of
+  `_READ_FRAME_TIMEOUT_S` performed under a single model would silently produce
+  the empty window above.
+
 - **The SEND phase gains a per-syscall bound — defense-in-depth, not a bug fix.**
   `_send_one` now sets `_SEND_TIMEOUT_S = 1.0` around its `sendmsg`. The
   mechanism it guards is real: `sendmsg` on a `SOCK_STREAM` blocks when the send
@@ -395,7 +428,7 @@ socket in its empty network namespace. The specific decisions:
 
 - **The closed-egress adversarial gate no longer proves what it was written to
   prove, and this cutover is what hollowed it out.**
-  `tests/adversarial/sandbox_escape/test_quarantined_llm_not_yet_spawned_while_egress_open.py`
+  `tests/adversarial/sandbox_escape/test_quarantined_llm_spawn_site_and_import_time_egress_backstop.py`
   carried an explicit prediction that it "goes RED the moment 2c wires a real
   client INTO the child." **This PR is 2c, and the gate stayed green.** It stayed
   green because `_module_scope_imports` walks only `tree.body`, and every
@@ -627,7 +660,7 @@ the `egress.broker.refused` audit row.
   (per-user budgets). See the Negative consequence above for the structural spend
   bound that holds in the meantime.
 - **Rebuild the closed-egress adversarial oracle.**
-  `test_quarantined_llm_not_yet_spawned_while_egress_open.py` no longer proves
+  `test_quarantined_llm_spawn_site_and_import_time_egress_backstop.py` no longer proves
   what it was written to prove (see the Negative consequence above); this PR
   discloses that in-file and deliberately does not rewrite it. Rebuilding it
   around the golive posture is a **trust-boundary change** and needs its own

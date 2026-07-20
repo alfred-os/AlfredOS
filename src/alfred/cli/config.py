@@ -265,6 +265,17 @@ def _reject_action_deadline_outside_window(key: str, parsed: object) -> None:
     Both bounds are bound to the REAL constants (LAZY imports: both modules carry an
     egress-adjacent import closure, so deferring keeps ``alfred --help`` light AND pins the
     window to the shipped values so the guard and the runtime can never drift).
+
+    **The two bounds use DIFFERENT cost models on purpose, and the difference is not
+    visible in the two expressions below.** The floor uses a one-phase ``read_frame`` cost;
+    the ceiling uses the two-phase cost. Applying the ceiling's model to the floor gives
+    ``4 + 50 = 54 > 50`` — an EMPTY window. It is not empty because the floor is anchored to
+    the HEALTHY path (where the 20s child budget dominates and a responsive child answers
+    inside one phase) while the ceiling is anchored to the WEDGED-child worst case (where
+    both phases run to their full bound). Before retuning ``_READ_FRAME_TIMEOUT_S``, read
+    ADR-0052's "The action-deadline floor and ceiling are anchored to DIFFERENT scenarios"
+    consequence — a retune performed under a single model silently produces that empty
+    window.
     """
     if key != "action-deadline":
         return

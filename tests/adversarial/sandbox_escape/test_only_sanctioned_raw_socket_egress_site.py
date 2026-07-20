@@ -86,7 +86,7 @@ def test_sanctioned_site_actually_matches_the_conjunction() -> None:
     make the ratchet vacuously permissive — it would pass because NOTHING matches the conjunction
     any more, not because the invariant holds. Mirrors
     ``test_sanctioned_spawn_site_actually_exists`` in the sibling quarantined-LLM-spawn guard
-    (``test_quarantined_llm_not_yet_spawned_while_egress_open.py``).
+    (``test_quarantined_llm_spawn_site_and_import_time_egress_backstop.py``).
     """
     site = _SRC_ROOT / "egress" / "control_fd_broker.py"
     tree = ast.parse(site.read_text(encoding="utf-8"))
