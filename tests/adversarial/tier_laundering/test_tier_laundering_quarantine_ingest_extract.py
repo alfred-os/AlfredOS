@@ -58,10 +58,14 @@ class _NoopBrokerAuditor:
         self.successes: list[str] = []
         self.failures: list[tuple[str, str]] = []
 
-    async def record_broker_success(self, *, destination: str) -> None:
+    async def record_broker_success(
+        self, *, destination: str, extraction_id: str, socket_ordinal: int
+    ) -> None:
         self.successes.append(destination)
 
-    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
+    async def record_broker_failure(
+        self, *, destination: str, reason: str, extraction_id: str
+    ) -> None:
         self.failures.append((destination, reason))
 
 

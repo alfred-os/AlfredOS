@@ -435,12 +435,20 @@ class QuarantineStdioTransport:
         race-free. Returns a typed-refusal :class:`ControlResult` on any broker failure — a raw
         broker error NEVER reaches the orchestrator (HARD #7).
 
-        Two invariants beyond the happy path:
+        Three invariants beyond the happy path:
 
         **The whole preamble is BOUNDED** (:data:`_BROKER_PREAMBLE_TIMEOUT_S`, review item A7).
         Unbounded it sits outside the §17 timeout nesting, so a degraded gateway kills the
         extraction on the outer ``action_deadline`` before the graceful refusal + forensic row
         are ever produced.
+
+        **Only OUR deadline is treated as a deadline.** The ``except TimeoutError`` arm is gated
+        on the timeout context's ``.expired()``, because ``EgressBrokerAuditor`` raises
+        ``TimeoutError`` in its own right when its bounded ``append_schema`` hangs. Ungated,
+        this arm caught a FAILED, NON-SKIPPABLE AUDIT WRITE and returned a graceful typed
+        refusal — precisely the laundering HARD #5 forbids and the third bullet below
+        disclaims. A callee's ``TimeoutError`` revokes (the sockets are already queued) and
+        then propagates.
 
         **Any failure that could leave fds in the child REVOKES the capability** (A2/A3) by
         tearing the child down. Three arcs reach it:
