@@ -193,6 +193,57 @@ def test_rejection_message_explains_why(runner: CliRunner, policies: Path) -> No
     assert "read-frame" in result.stderr or "extraction" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "10",  # numeric, below floor
+        "29",  # exactly at the floor (rejected — the bound is strict)
+        "soon",  # non-numeric: falls into the floor branch via the isinstance guard
+        "50",  # exactly at the ceiling
+        "99",  # above the ceiling
+    ],
+)
+def test_window_refusals_fully_substitute_every_placeholder(
+    runner: CliRunner, policies: Path, value: str
+) -> None:
+    """No window refusal may leak a literal ``{value}`` / ``{floor}`` / ``{ceiling}``.
+
+    i18n-002 at the CALL SITE. :mod:`tests.unit.cli.test_i18n_key_coverage` also runs a
+    placeholder-leak guard over these two msgids, but it supplies its OWN kwargs — so it
+    proves the TEMPLATE is renderable, never that the live ``t(...)`` call passes the
+    names the template asks for. Those are different failures with the same symptom.
+
+    The gap is silent by construction: ``alfred.i18n.t`` swallows the ``KeyError`` that
+    ``str.format`` raises on a missing kwarg and returns the UNSUBSTITUTED template. So
+    renaming ``value=`` in ``_reject_action_deadline_outside_window`` ships a raw
+    ``{value}`` to the operator.
+
+    Measured honestly: TODAY that specific mutation is also caught collaterally — because
+    ``str.format`` fails all-or-nothing, a bad ``value=`` also strands ``{floor}`` and
+    ``{ceiling}``, so the sibling bound-assertions above go red too (8 of them). That
+    coverage is INCIDENTAL, not designed, and it evaporates the moment this msgstr's only
+    un-asserted placeholder is the one that breaks — e.g. a future re-phrase that drops
+    the bounds from the floor body but keeps ``{value}``. This test states the invariant
+    directly so the failure names its real cause, instead of surfacing as a confusing
+    "29 not in stderr".
+
+    Both branches are covered, including the non-numeric input that reaches the floor
+    branch through the ``isinstance`` guard rather than a numeric comparison.
+    """
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "action-deadline", value])
+
+    assert result.exit_code != 0, result.stderr
+    assert "{" not in result.stderr and "}" not in result.stderr, (
+        f"action-deadline refusal for {value!r} leaked an un-substituted placeholder -- "
+        f"the msgstr references a name the CLI call site does not pass (alfred.i18n.t "
+        f"swallows the KeyError and returns the raw template). Got: {result.stderr!r}"
+    )
+    # The refusal must still carry the operator's rejected input, not just the bounds:
+    # a silently-dropped ``value=`` would otherwise satisfy the brace check above.
+    assert value in result.stderr
+
+
 # --------------------------------------------------------------------------- #
 # Scoping — the floor-guard is action-deadline ONLY.
 # --------------------------------------------------------------------------- #
