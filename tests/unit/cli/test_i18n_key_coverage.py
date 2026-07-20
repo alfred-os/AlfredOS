@@ -186,6 +186,23 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"key": "no-such-key", "valid_keys": "web-fetch-budget, ..."},
         ("recognised", "valid keys"),
     ),
+    # #340 golive §17: the two action-deadline window refusals. These are
+    # the HIGHEST fuzzy-swap risk pair in the cli.config surface -- they
+    # share an opening clause ("alfred config set refused: action-deadline
+    # must be ...") and differ only in direction, which is exactly the
+    # shape pybabel's fuzzy matcher collapses. The fingerprints below are
+    # therefore chosen to be MUTUALLY EXCLUSIVE: "greater than"/"preamble"
+    # appear only in the floor body, "less than"/"twice" only in the
+    # ceiling body, so a swap between the siblings fails the test rather
+    # than passing on their shared prefix.
+    "cli.config.set.action_deadline_below_floor": (
+        {"value": "20", "floor": "29", "ceiling": "50"},
+        ("greater than", "preamble"),
+    ),
+    "cli.config.set.action_deadline_above_ceiling": (
+        {"value": "99", "floor": "29", "ceiling": "50"},
+        ("less than", "twice"),
+    ),
     "cli.config.get.unknown_key": (
         {"key": "no-such-key", "valid_keys": "web-fetch-budget, ..."},
         ("recognised", "valid keys"),
