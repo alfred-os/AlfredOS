@@ -413,7 +413,9 @@ async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
 
 
 @pytest.fixture
-def _boot_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> Iterator[None]:
+def _boot_env(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, egress_proxy_url_env: str
+) -> Iterator[None]:
     """Set the env the production Settings + broker + carrier boot read.
 
     ``ALFRED_ENVIRONMENT=test`` (per-test, devops-006 — NOT job-wide) is BOTH the launcher's

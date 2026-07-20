@@ -173,12 +173,17 @@ class _EchoingChildDouble:
 
 
 @pytest.fixture
-def _boot_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> None:
+def _boot_env(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, egress_proxy_url_env: str
+) -> None:
     """Set the env the production Settings + broker read.
 
-    ``router_override`` (below) means the REAL, egress-proxied ``build_router``
-    is never reached, so no ``ALFRED_EGRESS_PROXY_URL`` is needed here (unlike
-    ``test_chat_gateway_socket_turn.py``, which drives a real turn).
+    ``router_override`` (below) means the REAL, egress-proxied ``build_router`` is never
+    reached — but that no longer makes ``ALFRED_EGRESS_PROXY_URL`` unnecessary (#340
+    PR2b-golive). ``_build_comms_boot_graph`` now resolves the quarantine child's egress
+    config pre-spawn independently of the router, so the variable is required regardless
+    of the override; ``egress_proxy_url_env`` supplies it. See that fixture in
+    ``tests/integration/conftest.py`` for why an unreachable placeholder is correct.
     """
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_ENV", "test")
