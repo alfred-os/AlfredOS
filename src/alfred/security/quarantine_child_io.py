@@ -132,8 +132,10 @@ _CHILD_PYTHON_ENV = "ALFRED_QUARANTINE_CHILD_PYTHON"
 _PROVIDER_KEY_FD = 3
 
 # The literal fd the pre-connected gateway socket is brokered over (#340 PR2a,
-# ADR-0050), peer to _PROVIDER_KEY_FD = 3. Only installed when the caller opts
-# in via ``control_fd=True`` — the default-off live/echo spawn never touches it.
+# ADR-0050), peer to _PROVIDER_KEY_FD = 3. Installed only when the caller opts in
+# via ``control_fd=True``. Since #340 PR2b-golive the LIVE daemon spawn DOES opt
+# in — this fd is the real-LLM child's sole reachability. The ``control_fd=False``
+# default now serves the dormant/unit spawns, not the live one.
 _CONTROL_FD = 4
 
 # The wheel-co-located diagnostic probe entry the docker C1/C2 test (Task 4)
@@ -962,7 +964,8 @@ async def spawn_quarantine_child_io(
        refusal).
 
     **Opt-in control-fd (#340 PR2a, ADR-0050 dormancy invariant).** When
-    ``control_fd=True`` (default ``False`` — the live/echo spawn never sets it), a
+    ``control_fd=True`` — which the LIVE daemon spawn now sets as of #340
+    PR2b-golive; the ``False`` default remains for the dormant/unit spawns — a
     second AF_UNIX socketpair (:func:`make_control_socketpair`) is built; the
     child-end is dup'd onto literal fd 4 in the SAME synchronous zero-``await``
     window as the fd-3 dance above (a second clobbered-selector hazard would exist

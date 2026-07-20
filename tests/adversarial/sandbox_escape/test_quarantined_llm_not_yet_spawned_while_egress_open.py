@@ -1,52 +1,82 @@
-"""Go-live gate: the quarantined-LLM child stays egress-free; the real-LLM
-provider egress (#230) lands behind the gateway proxy, never by re-opening the
-child's network (PR #231 finding-5 / #230; re-pivoted PR-S4-11c-2b0; egress
-CLOSED for the echo child in Spec C G7-1 / #333).
+"""Go-live gate: the quarantined-LLM child reaches its provider ONLY through the
+gateway proxy, never by re-opening the child's network (PR #231 finding-5 / #230;
+re-pivoted PR-S4-11c-2b0; egress CLOSED in Spec C G7-1 / #333; real-LLM cutover
+in #340 PR2b-golive).
 
-The shipped Linux sandbox policy now ``--unshare-net``s. The deterministic-echo
-child (PR-S4-11c-2b0) runs with NO provider client and NO socket of its own, so
-it needs ZERO outbound network and runs in an EMPTY network namespace — closing
-the #230 egress hole for the component that exists today (ADR-0015 Consequences,
-``config/sandbox/README.md``, ``sbx-2026-005``, now an enforced-containment
-payload). The 2c real-LLM child (a separate follow-on, still tracked by #230)
-DOES make a provider call, but reaches the provider PROVIDER-ONLY through the
-gateway L7 CONNECT proxy (the core is connectivity-free; the gateway is the sole
-external I/O plane — Spec C), NOT by dropping ``net`` from this policy.
+.. warning::
+
+   **This gate is weaker than it was, and weaker than the rest of this docstring
+   once implied. Read this before treating it as evidence at sign-off.**
+
+   Until #340 PR2b-golive the child was a deterministic-echo stub with no
+   provider client at all, and this module's headline invariant — "the live child
+   module imports no network-egress module at module scope" — was a faithful
+   proxy for "the child cannot reach the network."
+
+   That is no longer true. The golive child DOES construct a real Anthropic
+   client and DOES call a provider. It stayed green here only because every
+   egress-capable import in ``quarantine_child/__main__.py`` is now LAZY
+   (``import socket`` inside ``main()``; ``brokered_egress`` /
+   ``provider_dispatch`` imported inside ``main()`` / ``_build_provider`` /
+   ``handle_extract``), and :func:`_module_scope_imports` only inspects
+   ``tree.body``. The pre-golive prose predicted this test "goes RED the moment
+   2c wires a real client INTO the child"; 2c landed and it did not.
+
+   What it still enforces is narrow but real: no egress-capable import may appear
+   at MODULE SCOPE in the child entry module. What it no longer enforces is the
+   broad claim it was written for. The load-bearing containment for the golive
+   child is elsewhere and is independently gated — the kernel ``--unshare-net``
+   (``test_quarantined_llm_policy_kernel_enforced.py``, ``sbx-2026-005``) plus
+   the fd-4 SCM_RIGHTS broker being the child's only reachability. Rebuilding
+   this gate around the golive posture (e.g. asserting the child's egress
+   imports are exactly the sanctioned brokered ones, at any scope) is tracked as
+   a follow-up; it is a trust-boundary change and wants its own security review
+   rather than a quiet edit inside a sign-off-gated PR.
+
+The shipped Linux sandbox policy ``--unshare-net``s the child into an EMPTY
+network namespace (ADR-0015 Consequences, ``config/sandbox/README.md``,
+``sbx-2026-005``, an enforced-containment payload). Since golive that namespace
+is MORE load-bearing, not less: the child holds a live provider key and T3
+content, and reaches the provider PROVIDER-ONLY through a gateway socket the core
+pre-connects and hands over via SCM_RIGHTS on fd 4 (the core is
+connectivity-free; the gateway is the sole external I/O plane — Spec C). Dropping
+``net`` from this policy would let that child dial out directly, past the
+chokepoint.
 
 **Re-pivot history.** Originally this gate asserted "no production path spawns
 ``alfred.quarantined-llm`` AT ALL", because every spawn of this plugin made a
 provider HTTPS call — so a live spawn == a live process consuming the then-open
 egress while holding T3 + the provider key. PR-S4-11c-2b0 broke that 1:1: it
 stood up the spawn SUBSTRATE live (``security/quarantine_child_io.py`` ->
-kind=full launcher -> bwrap) but the spawned child runs a DETERMINISTIC ECHO loop
-with NO provider client and NO network egress. Spec C G7-1 then ``--unshare-net``s
-that child, so its egress is now kernel-closed as well as import-graph-clean.
+kind=full launcher -> bwrap) while the spawned child was still a DETERMINISTIC
+ECHO loop with no provider client and no network egress. Spec C G7-1 then
+``--unshare-net``d that child. #340 PR2b-golive closed the sequence by replacing
+the echo loop with the real-LLM child — restoring the original 1:1 (a live spawn
+IS a live provider-calling process) but with the egress now kernel-closed and
+routed through the fd-4 broker, which is what makes it safe.
 (2b0 was a PRECURSOR shipping the spawn substrate; the substrate IS a live
 ``src/alfred`` spawn site, so the gate's disposition must account for it.)
 
-So the gate enforces the SHARP invariant it always meant — **the live quarantined
-child carries no network egress** — with two release-blocking invariants:
+The gate ships two release-blocking invariants:
 
 * ``test_quarantined_child_has_no_module_scope_egress_import`` — the LIVE child
   module imports no network-egress module (httpx / anthropic / openai / socket /
-  …) at module scope. This is the teeth: it stays GREEN for the 2b echo child and
-  goes RED the moment 2c wires a real client INTO the child instead of routing
-  through the gateway proxy. The kernel ``--unshare-net`` and this import-graph
-  invariant are INDEPENDENT layers — neither alone is trusted.
+  …) at module scope. This WAS the teeth. Post-golive it is the narrow residue
+  described in the warning above: the real client is imported lazily, so this
+  now only catches an import-time egress surface, not the broad "child cannot
+  reach the network" claim. The kernel ``--unshare-net`` and this import-graph
+  invariant remain INDEPENDENT layers — neither alone is trusted, and the kernel
+  layer now carries the weight.
 * ``test_only_sanctioned_quarantined_llm_spawn_site`` — the ONLY live
   launcher/quarantined-LLM spawn from ``src/alfred`` is the single sanctioned
-  no-egress substrate site (``security/quarantine_child_io.py``) plus the
-  ``--self-test`` probe. A SECOND spawn site, or a spawn driving a different
-  child, trips the gate.
+  substrate site (``security/quarantine_child_io.py``) plus the ``--self-test``
+  probe. A SECOND spawn site, or a spawn driving a different child, trips the
+  gate. This invariant is UNAFFECTED by the golive cutover — it is about spawn
+  topology, not the child's egress posture, and remains fully load-bearing.
 
 The detector (``find_live_quarantined_spawns``) is UNCHANGED — its six
-anti-false-negative proofs still hold; only the disposition of its findings is
-"only the sanctioned site, and only while the child stays egress-free".
-
-When #230 lands the 2c real-LLM child, it lands behind the gateway provider-only
-egress proxy and the import-graph invariant relaxes for the proxy-routed path.
-Until then, a network-capable child OR a second live spawn makes this gate go red
-— by design.
+anti-false-negative proofs still hold; the disposition of its findings is "only
+the sanctioned site".
 
 Why AST, not regex (PR #231 CR finding, must-fix)
 -------------------------------------------------
@@ -86,12 +116,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SRC = _REPO_ROOT / "src" / "alfred"
 _REAL_POLICY = _REPO_ROOT / "config" / "sandbox" / "quarantined-llm.linux.bwrap.policy"
 
-# SECURITY-GATE #230: Spec C G7-1 made the real policy unshare ``net`` (the 2b
-# deterministic-echo child needs no egress), so the child's egress is now kernel-
-# closed AND import-graph-clean. A NETWORK-CAPABLE quarantined-LLM spawn (the 2c
-# real-LLM child) MUST reach its provider PROVIDER-ONLY through the gateway L7
-# CONNECT proxy (never by re-opening this namespace); the import-graph invariant
-# below keeps the live child honest until that proxy-routed path lands behind #230.
+# SECURITY-GATE #230: Spec C G7-1 made the real policy unshare ``net``, so the
+# child's egress is kernel-closed. Since #340 PR2b-golive the shipped child IS the
+# network-capable real-LLM child, and it reaches its provider PROVIDER-ONLY through
+# the gateway L7 CONNECT proxy via the fd-4 SCM_RIGHTS-brokered socket — never by
+# re-opening this namespace. The kernel layer is the enforcement; the import-graph
+# invariant below is now a narrow import-time backstop (see the module warning).
 
 # The quarantined-LLM plugin id whose launcher spawn would consume the open
 # egress. A production subprocess/exec that drives the launcher with this id is
@@ -331,22 +361,27 @@ _GATE_FAILURE_HINT = (
 # PR-S4-11c-2b0 re-pivot (security-engineer adjudication), extended by Spec C G7-1:
 # the gate moved from "no live spawn AT ALL" to "no live spawn that can reach the
 # network." 2b0 stood up the quarantined-LLM spawn substrate LIVE
-# (``security/quarantine_child_io.py`` -> kind=full launcher -> bwrap); the spawned
-# child runs a DETERMINISTIC ECHO loop with NO provider client and NO network
-# egress (verified below), and G7-1 ``--unshare-net``s it so its egress is now
-# kernel-closed too. The gate allowlists EXACTLY that one sanctioned spawn site AND
-# enforces the load-bearing invariant that the child's reachable import graph
-# carries no egress-capable import — so 2c (which wires the real LLM client) trips
-# the gate RED again unless it routes provider egress through the gateway proxy
-# (#230), never by re-opening the child's network.
+# (``security/quarantine_child_io.py`` -> kind=full launcher -> bwrap). #340
+# PR2b-golive then replaced the echo child that substrate spawns with the real-LLM
+# child, whose provider egress runs over the fd-4 SCM_RIGHTS-brokered gateway
+# socket inside a ``--unshare-net`` namespace.
+#
+# THIS allowlist is unaffected by that cutover: it is about spawn TOPOLOGY — how
+# many live launcher spawn sites exist and what they drive — not about the child's
+# egress posture. Exactly one sanctioned site plus the ``--self-test`` probe; a
+# second site or a spawn driving a different child still trips the gate RED.
 _SANCTIONED_SPAWN_SITE = "security/quarantine_child_io.py"
 
 # The quarantined-LLM child entry module + the network-egress imports a real-LLM
-# child would pull in. The live echo loop (``_run_mcp_server``) imports none of
-# these at module scope. As of #340 PR1, ``provider_dispatch`` itself is
-# egress-free too — it drives an INJECTED provider and imports no httpx/SDK; the
-# egress-capable import lands in PR2's ``_build_provider`` (the real-client
-# construction), which this gate will assert against at go-live.
+# child would pull in at MODULE SCOPE.
+#
+# HISTORY, corrected: this comment used to promise that the egress-capable import
+# "lands in PR2's ``_build_provider`` … which this gate will assert against at
+# go-live." That did not happen. #340 PR2b-golive landed ``_build_provider`` with
+# the real client, but imported ``brokered_egress`` LAZILY inside it, so the
+# module-scope check never saw it and this gate stayed green through the cutover.
+# The prediction is recorded here rather than deleted because a gate that
+# quietly outlived its own stated trigger is worth leaving visible.
 # PR-S4-11c-2b0 (ADR-0030): the child moved INTO the wheel under
 # ``src/alfred/security/quarantine_child/__main__.py`` — the egress-import
 # invariant follows it to its new home.
@@ -370,11 +405,16 @@ _EGRESS_CAPABLE_MODULES: frozenset[str] = frozenset(
 def _module_scope_imports(src_text: str) -> set[str]:
     """Return every module name imported at MODULE SCOPE (not inside a function).
 
-    A lazy in-function import (the dead ``handle_extract`` -> ``provider_dispatch``
-    path) is intentionally NOT reported: it is unreachable from the live echo loop
-    (``_run_mcp_server`` never calls ``handle_extract`` in 2b), so it cannot drive
-    egress. 2c making the LLM call reachable would either add a module-scope
-    network import here OR move the dispatch onto the loop path — both surface.
+    A lazy in-function import is NOT reported. Pre-golive that was sound: the
+    only lazy egress path (``handle_extract`` -> ``provider_dispatch``) was dead
+    code the echo loop never called, so it could not drive egress.
+
+    **Since #340 PR2b-golive that reasoning no longer holds** — ``handle_extract``
+    IS on the live path, and ``main()`` lazily imports ``socket`` and
+    ``brokered_egress``. The scope restriction is therefore now a deliberate
+    narrowing of what this gate covers, not a proof of unreachability. See the
+    module docstring's warning; the golive child's containment is enforced by the
+    kernel netns + fd-4 broker, gated elsewhere.
     """
     tree = ast.parse(src_text)
     names: set[str] = set()
@@ -389,35 +429,40 @@ def _module_scope_imports(src_text: str) -> set[str]:
 def test_quarantined_child_has_no_module_scope_egress_import() -> None:
     """The LIVE quarantined-LLM child imports no network-egress module at scope.
 
-    The load-bearing invariant after the 2b0 re-pivot: the deterministic-echo
-    child has NO reachable provider/HTTP client, so a live spawn under open egress
-    (#230) cannot exfiltrate T3 + the fd-3 key over the network — there is no code
-    to do it. This goes RED the moment 2c wires a real Anthropic/DeepSeek client at
-    module scope (or otherwise makes ``provider_dispatch``/``httpx`` reachable from
-    the loop) while egress is still open — forcing #230 to land before 2c.
+    Pre-golive this stood for "the child has NO reachable provider/HTTP client",
+    which was true of the echo stub. **It does not mean that any more** — see the
+    module docstring's warning: the golive child builds a real Anthropic client
+    behind LAZY imports, so this assertion passes while the broad claim is false.
+
+    What it still buys, and why it is kept rather than deleted: a module-scope
+    egress import in the child entry module would be a fresh, un-brokered egress
+    surface reachable at import time — before ``main()``'s boot ordering, before
+    the fd-4 reconstruction, and outside the brokered path entirely. Keeping it
+    RED-on-regression is cheap and still catches that specific shape.
     """
     src = _CHILD_ENTRY_MODULE.read_text(encoding="utf-8")
     scope_imports = _module_scope_imports(src)
     egress_imports = scope_imports & _EGRESS_CAPABLE_MODULES
     assert not egress_imports, (
         "the quarantined-LLM child gained a module-scope network-egress import "
-        f"({sorted(egress_imports)}) while sandbox {_GATE_FAILURE_HINT}. The live "
-        "child must stay egress-free until #230's egress allowlist lands (2c)."
+        f"({sorted(egress_imports)}) while sandbox {_GATE_FAILURE_HINT}. Provider "
+        "egress must run through the fd-4 brokered gateway socket, constructed "
+        "inside main()/_build_provider — never opened at import time."
     )
 
 
 def test_only_sanctioned_quarantined_llm_spawn_site() -> None:
-    """The ONLY live quarantined-LLM spawn is the sanctioned no-egress substrate.
+    """The ONLY live quarantined-LLM spawn is the single sanctioned substrate.
 
     Re-pivoted for PR-S4-11c-2b0 (see ``_SANCTIONED_SPAWN_SITE``); the spawn-site
     detector is egress-state-independent, so this gate holds regardless of the
-    child's netns. The gate tolerates EXACTLY the ``security/quarantine_child_io.py``
-    spawn — the substrate that stands up the deterministic-echo child (whose
-    egress-free invariant ``test_quarantined_child_has_no_module_scope_egress_import``
-    enforces) — and the ``--self-test`` probe. ANY OTHER live launcher/quarantined-
-    LLM spawn from ``src/alfred`` trips the gate: a second spawn site, or a spawn
-    that drives a different (egress-making) child, must route the new child's
-    provider egress through the gateway proxy (#230) first. The detector
+    child's netns — and so, unlike its sibling above, it was NOT weakened by the
+    #340 golive cutover. The gate tolerates EXACTLY the
+    ``security/quarantine_child_io.py`` spawn — the substrate that stands up the
+    quarantine child — and the ``--self-test`` probe. ANY OTHER live
+    launcher/quarantined-LLM spawn from ``src/alfred`` trips the gate: a second
+    spawn site, or a spawn that drives a different child, must route that child's
+    provider egress through the gateway proxy first. The detector
     (``find_live_quarantined_spawns``) is unchanged — only the disposition of its
     findings narrows from "none allowed" to "only the sanctioned site".
     """
@@ -426,13 +471,13 @@ def test_only_sanctioned_quarantined_llm_spawn_site() -> None:
         rel = src.relative_to(_SRC).as_posix()
         for finding in find_live_quarantined_spawns(src.read_text(encoding="utf-8"), rel):
             if finding.rel_path == _SANCTIONED_SPAWN_SITE:
-                continue  # the sanctioned no-egress substrate spawn (2b0)
+                continue  # the single sanctioned quarantine-child substrate spawn
             offenders.append(f"{finding.rel_path}:{finding.lineno}")
 
     assert not offenders, (
         "A NON-sanctioned live quarantined-LLM spawn path was added while sandbox "
-        f"{_GATE_FAILURE_HINT}. Only {_SANCTIONED_SPAWN_SITE} (the deterministic-"
-        "echo substrate) is allowlisted. Offending sites:\n  " + "\n  ".join(offenders)
+        f"{_GATE_FAILURE_HINT}. Only {_SANCTIONED_SPAWN_SITE} (the quarantine-child "
+        "substrate) is allowlisted. Offending sites:\n  " + "\n  ".join(offenders)
     )
 
 
@@ -455,14 +500,15 @@ def test_sanctioned_spawn_site_actually_exists() -> None:
 
 
 def test_gate_is_anchored_to_the_closed_egress_state() -> None:
-    """Spec C G7-1 (#333): the deterministic-echo quarantine child unshares net.
+    """Spec C G7-1 (#333): the quarantine child unshares net.
 
-    The echo child needs ZERO network, so --unshare-net closes the #230 egress hole
-    NOW. The 2c real-LLM child (separate follow-on, still #230) re-opens a
-    PROVIDER-ONLY path via the gateway L7 proxy — NOT a relaxation of this gate.
-    Anchoring on the closed-egress state ties this gate's lifetime to the condition
-    it guards: if a future edit dropped ``net`` from the unshare set the assertion
-    forces a deliberate review rather than silently re-opening the child's egress.
+    Since #340 PR2b-golive this is the gate's strongest remaining teeth. The child
+    now holds a live provider key and T3 content and DOES call a provider, reaching
+    it only via the SCM_RIGHTS-brokered gateway socket on fd 4 — so the empty
+    network namespace is what makes that broker the sole route out. Anchoring on
+    the closed-egress state ties this gate's lifetime to the condition it guards:
+    dropping ``net`` from the unshare set forces a deliberate review instead of
+    silently handing the child a path past the gateway chokepoint.
     """
     body = _REAL_POLICY.read_text(encoding="utf-8")
     assert re.search(r'unshare\s*=\s*\[[^\]]*"net"', body) is not None, (

@@ -79,12 +79,14 @@ SUPPORTED_SECRETS: frozenset[str] = frozenset(
         # Slice-4 PR-S4-11c-2b: the quarantined-LLM child's provider API key,
         # delivered over fd 3 to the bwrap-sandboxed child (NEVER read from the
         # child's own env). The daemon resolves it via this id and hands it to
-        # ``spawn_quarantine_child_io``. The 2b deterministic-echo child reads +
-        # scrubs + discards it (no LLM call yet), so an UNSET key currently falls
-        # back to a documented placeholder with a loud boot warning; PR-S4-11c-2c
-        # (the real LLM client) flips unset -> refuse-boot once the child actually
-        # calls the provider. ``config/routing.yaml``'s ``[quarantine] secret_id``
-        # pins this same id (test_routing_yaml_quarantine_block).
+        # ``spawn_quarantine_child_io``. #340 PR2b-golive: the child now makes a
+        # REAL provider call, so an UNSET key is a hard REFUSE-BOOT (exit 2, a
+        # ``daemon.boot.failed`` row with ``quarantine_provider_key_unset``),
+        # resolved SYNCHRONOUSLY before the spawn. The pre-golive placeholder
+        # fallback is GONE — ``_PROVIDER_KEY_PLACEHOLDER`` was deleted deliberately
+        # (a silent dead-LLM is a must-not-regress), so there is no longer any
+        # warn-and-continue path. ``config/routing.yaml``'s ``[quarantine]
+        # secret_id`` pins this same id (test_routing_yaml_quarantine_block).
         "quarantine_provider_api_key",
     }
 )
