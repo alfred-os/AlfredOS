@@ -107,7 +107,7 @@ _GENERIC_BROKER_REFUSAL_REASON = "control_fd_broker_failed"
 # it, so both must fit within the outer deadline:
 #
 #     preamble(4) + host_read(25) = 29 < action_deadline(30)          [success path]
-#     preamble(4) + refusal(<=10) = 14 < action_deadline(30)          [refusal path]
+#     preamble(4) + refusal(<=11) = 15 < action_deadline(30)          [refusal path]
 #
 # which preserves the documented nesting ``action_deadline(30) > host_read(25) >
 # gateway_handshake(22) > child_budget(20) > sdk_read(8)`` — pinned by
@@ -136,7 +136,12 @@ _REVOKE_TIMEOUT_S = 5.0
 # ``egress.broker.refused`` row (bounded independently at
 # ``broker_audit._AUDIT_AWAIT_TIMEOUT_S``, 5s). This is the constant the nesting arithmetic
 # above cites, so the refusal leg is pinned by code rather than asserted in a comment.
-_BROKER_REFUSAL_TIMEOUT_S = 10.0
+#
+# STRICTLY GREATER than 5 + 5, so the INNER bound always wins the worst case. At exactly 10
+# the two would expire on the same tick and an anonymous outer cancel could pre-empt the
+# auditor's own specific ``egress.broker.audit_write_timeout`` error — losing the one log
+# line that says WHICH stage hung. This bound is the backstop, not the reporter.
+_BROKER_REFUSAL_TIMEOUT_S = 11.0
 
 
 class StagingNonceUnconfiguredError(AlfredError):
