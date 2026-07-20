@@ -74,35 +74,79 @@ if [[ ! -f .env ]]; then
   fi
 fi
 
-step "Validating ALFRED_DEEPSEEK_API_KEY is set"
-# Deliberately NOT `source .env`. Sourcing executes the file as bash, which
-# means `#` truncates lines silently, `$()` runs subshells, and an
-# operator-pasted line can run arbitrary commands. Instead, we extract just
-# the key we care about with a single grep + cut + tr pipeline. The tr -d
-# strips surrounding single/double quotes so an operator who wrote
-# `ALFRED_DEEPSEEK_API_KEY="sk-..."` is treated the same as the bare form.
-if [[ -f .env ]]; then
-  # `set -euo pipefail` is in effect: `grep` exits 1 when the key is absent,
-  # which would abort the script BEFORE the empty-check below can run and
-  # surface the friendly operator message. Use `|| true` so a missing key
-  # surfaces as an empty value instead of a hard abort.
-  ALFRED_DEEPSEEK_API_KEY=$(grep -E '^ALFRED_DEEPSEEK_API_KEY=' .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+step "Validating .env credentials"
+# ---------------------------------------------------------------------------
+# ONE gate for every credential the stack needs, reporting ALL problems at once.
+#
+# This used to be two checks in two places, each with its own immediate `exit 1`,
+# and the ordering made the second one DEAD on the path that matters most. A
+# stock first run is `cp .env.example .env`, which ships the literal `sk-...`
+# DeepSeek placeholder AND an empty ALFRED_QUARANTINE_PROVIDER_API_KEY. The
+# DeepSeek placeholder check exited first, so the quarantine-key warning added
+# when a keyless stack became a REFUSE-BOOT was never reached on the very run it
+# was written for: the operator fixed the DeepSeek key, re-ran, and only then
+# discovered the second required key. Accumulating means one report, one fix pass.
+#
+# Deliberately NOT `source .env`. Sourcing executes the file as bash, which means
+# `#` truncates lines silently, `$()` runs subshells, and an operator-pasted line
+# can run arbitrary commands. `read_env_var` uses a grep|cut|tr pipeline instead;
+# its `tr -d` strips surrounding quotes so `ALFRED_DEEPSEEK_API_KEY="sk-..."` is
+# treated the same as the bare form.
+#
+# A newline-delimited string, NOT a bash array: macOS ships bash 3.2, where
+# `${#arr[@]}` on an empty array trips `set -u` ("unbound variable"). The script
+# already accommodates 3.2 elsewhere (see the UID/GID export below).
+# ---------------------------------------------------------------------------
+config_problems=""
+add_config_problem() { config_problems="${config_problems}  - ${1}"$'\n'; }
+
+deepseek_key="$(read_env_var ALFRED_DEEPSEEK_API_KEY)"
+if [[ -z "$deepseek_key" ]]; then
+  add_config_problem "ALFRED_DEEPSEEK_API_KEY is empty in .env. Set a DeepSeek API key from https://platform.deepseek.com."
+elif [[ "$deepseek_key" == "sk-..." ]]; then
+  # Reject the literal placeholder shipped in .env.example. Catching it here
+  # (rather than letting it propagate to the provider call) gives operators a
+  # friendly error before the container even boots. The settings.py validator
+  # enforces the same invariant inside the app for any path that skips this script.
+  add_config_problem "ALFRED_DEEPSEEK_API_KEY is still the literal 'sk-...' placeholder from .env.example. Replace it with a real DeepSeek API key from https://platform.deepseek.com."
+fi
+
+# #340 PR2b-golive: the quarantined (dual-LLM) child now makes REAL provider calls, so
+# ALFRED_QUARANTINE_PROVIDER_API_KEY became a hard boot requirement — the core resolves
+# it pre-spawn and exits 2 with `quarantine_provider_key_unset` when unset.
+#
+# Unlike audit.hash_pepper this CANNOT be auto-seeded (only the operator has a provider
+# credential) and, unlike the Discord token, it cannot be skipped by disabling a feature:
+# it gates the whole comms boot. Catch it here rather than let `docker compose up -d`
+# crash-loop under `restart: unless-stopped`.
+#
+# alfred-core mounts no secrets.toml, so `.env` + compose env forwarding is the ONLY
+# route for this key — there is no secrets-file alternative to offer.
+quarantine_key="$(read_env_var ALFRED_QUARANTINE_PROVIDER_API_KEY)"
+if [[ -n "$quarantine_key" ]]; then
+  echo "ALFRED_QUARANTINE_PROVIDER_API_KEY is configured in .env."
+elif [[ -n "${ALFRED_QUARANTINE_PROVIDER_API_KEY:-}" ]]; then
+  # NOT a failure. `docker compose` gives the SHELL environment precedence over `.env`
+  # (verified: with `FOO=from_dotenv` in .env, `FOO=from_shell docker compose config`
+  # renders `from_shell`). This stack boots fine. The earlier text here claimed the
+  # opposite — "docker compose reads .env, so the stack will still refuse to boot" —
+  # and sent an operator whose setup was already working off to debug it. The real
+  # (and much smaller) caveat is durability, so say only that.
+  echo "NOTE: ALFRED_QUARANTINE_PROVIDER_API_KEY is set in your shell but not in .env."
+  echo "      That works — docker compose gives the shell environment precedence over"
+  echo "      .env — but only for compose commands run from a shell that exports it."
+  echo "      Add it to .env to make it durable across terminals."
 else
-  ALFRED_DEEPSEEK_API_KEY=""
+  add_config_problem "ALFRED_QUARANTINE_PROVIDER_API_KEY is unset. 'docker compose up -d' WILL REFUSE TO BOOT (exit 2, quarantine_provider_key_unset) and crash-loop. This key is the quarantined half of the dual-LLM split; it is required, not optional. Set it in .env (see .env.example) — alfred-core mounts no secrets.toml, so .env is the only route."
 fi
-if [[ -z "${ALFRED_DEEPSEEK_API_KEY:-}" ]]; then
-  warn "ALFRED_DEEPSEEK_API_KEY is empty. Edit .env and re-run."
+
+if [[ -n "$config_problems" ]]; then
+  printf 'ERROR: .env is not ready — %s\n' "fix all of the following, then re-run bin/alfred-setup.sh:" >&2
+  printf '%s' "$config_problems" >&2
+  printf 'Nothing was changed. The stack was NOT started.\n' >&2
   exit 1
 fi
-# Reject the literal placeholder shipped in .env.example. Catching it here
-# (rather than letting it propagate to the provider call) gives operators a
-# friendly error before the container even boots. The settings.py validator
-# enforces the same invariant inside the app for any path that skips this
-# script.
-if [[ "${ALFRED_DEEPSEEK_API_KEY}" == "sk-..." ]]; then
-  warn "Detected placeholder API key. Edit .env and replace 'sk-...' with a real DeepSeek API key from https://platform.deepseek.com."
-  exit 1
-fi
+echo ".env credentials OK."
 
 step "Loading the bwrap userns AppArmor profile (#290)"
 # The dual-LLM quarantine child runs under bubblewrap, which builds an
@@ -317,29 +361,10 @@ else
   fi
 fi
 
-# #340 PR2b-golive: the quarantined (dual-LLM) child now makes REAL provider calls, so
-# ALFRED_QUARANTINE_PROVIDER_API_KEY became a hard boot requirement — the core resolves
-# it pre-spawn and exits 2 with `quarantine_provider_key_unset` when unset.
-#
-# Unlike audit.hash_pepper this CANNOT be auto-seeded (only the operator has a provider
-# credential) and, unlike the Discord token, it cannot be skipped by disabling a feature:
-# it gates the whole comms boot. Warn now rather than let `docker compose up -d` crash-loop
-# under `restart: unless-stopped` — mirrors the ALFRED_DISCORD_BOT_TOKEN warn below.
-#
-# Checked against .env, not the environment: compose reads .env, and the key is delivered
-# by env forwarding (alfred-core mounts no secrets.toml, so the file route is closed).
-step "Checking quarantined-LLM provider key"
-_quarantine_key_configured() {
-  # Set and non-empty in .env (`VAR=` alone does not count — an empty value still refuses).
-  [[ -f .env ]] && grep -qE '^[[:space:]]*ALFRED_QUARANTINE_PROVIDER_API_KEY=[^[:space:]]' .env
-}
-if _quarantine_key_configured; then
-  echo "ALFRED_QUARANTINE_PROVIDER_API_KEY is configured in .env."
-elif [[ -n "${ALFRED_QUARANTINE_PROVIDER_API_KEY:-}" ]]; then
-  warn "ALFRED_QUARANTINE_PROVIDER_API_KEY is set in your shell but NOT in .env — docker compose reads .env, so the stack will still refuse to boot. Add it to .env."
-else
-  warn "ALFRED_QUARANTINE_PROVIDER_API_KEY is unset — 'docker compose up -d' WILL REFUSE TO BOOT (exit 2, quarantine_provider_key_unset) and crash-loop. This key is the quarantined half of the dual-LLM split; it is required, not optional. Add it to .env (see .env.example), then re-run 'docker compose up -d'."
-fi
+# NOTE: the quarantined-LLM provider-key check used to live here. It moved UP into the
+# "Validating .env credentials" gate near the top of this script — down here it sat
+# behind the DeepSeek placeholder check's `exit 1`, so on a stock first run (a verbatim
+# `cp .env.example .env`) it was never reached at all.
 
 # Export UID and GID so the compose `user: "${UID:-1000}:${GID:-1000}"`
 # substitution picks up the operator's real uid/gid. macOS bash 3.2
