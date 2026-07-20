@@ -112,6 +112,41 @@ def test_a_succeeding_supervisor_stop_on_a_clean_shutdown_exits_zero(
     assert not (tmp_path / "daemon.pid").exists()
 
 
+def test_a_failing_stop_does_not_mask_a_going_down_audit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+) -> None:
+    """A raising stop() must not mask a HARD #5 going_down audit failure (#472 review).
+
+    The ``boot_failure`` sentinel tracks the boot BODY, but ``_emit_going_down`` runs
+    LATER in the drain finally. On a clean shutdown where the going_down audit emit fails
+    (fail-loud, exit 3) AND ``supervisor.stop()`` also fails, stop()'s error must be
+    suppressed so the going_down failure — the primary, audited one — survives, rather than
+    being replaced by the cleanup error. CodeRabbit + the reviewer lane converged here.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setattr(FakeSupervisor, "fail_stop", True)
+
+    async def _failing_going_down(*_a: object, **_k: object) -> None:
+        raise RuntimeError("going_down audit failed (fake)")
+
+    monkeypatch.setattr("alfred.cli.daemon._commands._emit_going_down", _failing_going_down)
+
+    with structlog.testing.capture_logs() as logs:
+        result = CliRunner().invoke(daemon_app, ["start"])
+
+    # The going_down failure survived — stop()'s RuntimeError did not replace it.
+    assert isinstance(result.exception, RuntimeError)
+    assert "going_down" in str(result.exception), (
+        f"stop()'s error masked the going_down audit failure: {result.exception!r}"
+    )
+    # stop() was still attempted and its failure logged loud (then suppressed).
+    assert [e for e in logs if e["event"] == "daemon.shutdown.supervisor_stop_failed"]
+    # The reap chain still ran despite both failures (no #255 leak).
+    assert not (tmp_path / "daemon.pid").exists()
+
+
 def test_reap_finally_skips_absent_supervisor_and_pidfile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
