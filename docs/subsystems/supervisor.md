@@ -346,6 +346,8 @@ override deferred).
 | `plugin.lifecycle.quarantined` | `{"system"}` | `False` | Plugin crash trips breaker to OPEN |
 | `supervisor.plugin.sandbox_refused` | `{"system"}` | `True` | Every `SANDBOX_REFUSED_FIELDS` emit (PR-S4-6) |
 | `supervisor.plugin.sandbox_stub_used` | `{"system"}` | `True` | **Declared only — currently unpublished** (no `invoke()` call site; #447). Planned emission: launcher execs unsandboxed in dev/test with no real sandbox available (PR-S4-7) |
+| `egress.broker.connected` | `{"system"}` | `True` | Each gateway socket successfully brokered to the quarantine child over fd 4 (#340 PR2b-golive) |
+| `egress.broker.refused` | `{"system"}` | `True` | Any `ControlFdBrokerError` refusal on the broker path (#340 PR2b-golive) |
 | `supervisor.boot.mlock_unavailable` | `{"system"}` | `False` | `mlockall` unavailable at boot (PR-S4-6) |
 | `supervisor.boot.core_dumps_disabled` | `{"system"}` | `False` | `RLIMIT_CORE` set to 0 at boot (PR-S4-6) |
 
