@@ -186,15 +186,20 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"key": "no-such-key", "valid_keys": "web-fetch-budget, ..."},
         ("recognised", "valid keys"),
     ),
-    # #340 golive §17: the two action-deadline window refusals. These are
-    # the HIGHEST fuzzy-swap risk pair in the cli.config surface -- they
-    # share an opening clause ("alfred config set refused: action-deadline
-    # must be ...") and differ only in direction, which is exactly the
-    # shape pybabel's fuzzy matcher collapses. The fingerprints below are
-    # therefore chosen to be MUTUALLY EXCLUSIVE: "greater than"/"preamble"
+    # #340 golive §17: the three action-deadline refusals -- two window
+    # bounds plus the parse refusal. These are the HIGHEST fuzzy-swap risk
+    # cluster in the cli.config surface: all three share an opening clause
+    # ("alfred config set refused: action-deadline ...") AND the identical
+    # {value}/{floor}/{ceiling} placeholder set, which is exactly the shape
+    # pybabel's fuzzy matcher collapses. The identical placeholder set also
+    # means tests/unit/i18n/test_placeholder_substitution_closure.py CANNOT
+    # catch a swap among them -- a swapped body substitutes cleanly and
+    # leaks no literal {token}. These fingerprints are the only guard, so
+    # they are chosen to be MUTUALLY EXCLUSIVE: "greater than"/"preamble"
     # appear only in the floor body, "less than"/"twice" only in the
-    # ceiling body, so a swap between the siblings fails the test rather
-    # than passing on their shared prefix.
+    # ceiling body, and "is not a number"/"append a unit" only in the parse
+    # body -- so a swap between any pair fails the test rather than passing
+    # on their shared prefix.
     "cli.config.set.action_deadline_below_floor": (
         {"value": "20", "floor": "29", "ceiling": "50"},
         ("greater than", "preamble"),
@@ -202,6 +207,13 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     "cli.config.set.action_deadline_above_ceiling": (
         {"value": "99", "floor": "29", "ceiling": "50"},
         ("less than", "twice"),
+    ),
+    # "30s" is the operator mistake this body exists to correct (the msgstr
+    # ends "Do not append a unit; the value is already in seconds"), so the
+    # fixture doubles as documentation of the failure it addresses.
+    "cli.config.set.action_deadline_not_a_number": (
+        {"value": "30s", "floor": "29", "ceiling": "50"},
+        ("is not a number", "append a unit"),
     ),
     "cli.config.get.unknown_key": (
         {"key": "no-such-key", "valid_keys": "web-fetch-budget, ..."},
