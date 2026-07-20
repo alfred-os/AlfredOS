@@ -394,6 +394,50 @@ async def test_wall_clock_ceiling_timeout_is_terminal_cannot_extract(
 
 
 @pytest.mark.asyncio
+async def test_wall_clock_ceiling_timeout_is_logged_with_attempt_and_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The socket-deadline breach must be DISTINGUISHABLE from exhausted retries in the log.
+
+    Both outcomes return the identical ``cannot_extract`` refusal, and this arm emitted NO log
+    line at all — so an operator staring at a ``cannot_extract`` could not tell three rejected
+    model responses (a content problem) from one blown socket deadline (an infrastructure
+    problem). Same reason string, opposite remediation.
+
+    The refusal reason is deliberately NOT changed: a new ``TypedRefusalReason`` member is a
+    schema change and is out of scope here. The log line is what closes the gap.
+    """
+    import structlog.testing
+
+    from alfred.security.quarantine_child import provider_dispatch as pd
+
+    provider = _fake_provider_with_capabilities(
+        frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
+        _tool_use_response({"text": "hi", "intent": "greeting"}),
+    )
+
+    async def _timeout_wait_for(coro: Any, timeout: float | None = None) -> Any:
+        coro.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(pd.asyncio, "wait_for", _timeout_wait_for)
+
+    with structlog.testing.capture_logs() as logs:
+        result = await pd.dispatch_extraction(
+            content=b"hi",
+            schema_json=_SCHEMA_JSON,
+            schema_version=1,
+            source=_FakeSource(provider),
+        )
+
+    assert result["reason"] == "cannot_extract"  # unchanged closed-vocab reason
+    breach = [e for e in logs if e["event"] == "quarantine.child.extraction_deadline_exceeded"]
+    assert len(breach) == 1, "the socket-deadline breach emitted no log line"
+    assert breach[0]["attempt"] == 0  # which attempt blew it
+    assert isinstance(breach[0]["remaining_budget_s"], float)  # how much budget was left
+
+
+@pytest.mark.asyncio
 async def test_each_bind_receives_the_shrinking_remaining_budget() -> None:
     """B1: the attempt's socket deadline must come from the REMAINING extraction budget.
 
