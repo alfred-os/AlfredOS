@@ -304,11 +304,17 @@ async def broker_connected_sockets(
     Each extraction-retry attempt consumes one fresh brokered gateway socket (a consumed passed fd
     cannot re-dial), so the host brokers ``count`` up-front (golive spec §6). CONNECT-DEFER: open
     ALL ``count`` sockets first (:func:`_connect_one`), then ``sendmsg`` them to the child
-    (:func:`_send_one`) ONLY if every connect succeeded. A partial failure therefore sends NOTHING —
-    the child's fd-4 buffer never sees a partial batch, so there is nothing to reclaim; the
-    connected-but-unsent host sockets are closed by the ``finally``. ``sendmsg``/``recvmsg`` with
-    ``SCM_RIGHTS`` are blocking with no asyncio ancillary helper, so each connect/send runs in the
-    default executor (the ``_blocking_read_exactly`` precedent).
+    (:func:`_send_one`) ONLY if every connect succeeded. A partial CONNECT failure therefore sends
+    NOTHING — the child's fd-4 buffer never sees a partial batch, so there is nothing to reclaim;
+    the connected-but-unsent host sockets are closed by the ``finally``.
+
+    That "sends NOTHING" guarantee is scoped to the CONNECT phase and NEVER covered the SEND phase:
+    once SEND starts, a failure on socket *k* leaves *k-1* descriptors already queued in the child.
+    ``delivered`` on the raised :class:`ControlFdBrokerError` reports exactly that count, and the
+    caller REVOKES the child when it is non-zero — see :meth:`alfred.security.quarantine_transport.
+    QuarantineStdioTransport._run_broker_preamble`. ``sendmsg``/``recvmsg`` with ``SCM_RIGHTS`` are
+    blocking with no asyncio ancillary helper, so each connect/send runs in the default executor
+    (the ``_blocking_read_exactly`` precedent).
 
     **The CONNECT phase is CONCURRENT; the SEND phase is SERIAL.** Both halves are load-bearing and
     deliberately asymmetric (golive spec §6, ADR-0052 "Fork 2"):

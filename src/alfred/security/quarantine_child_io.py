@@ -542,10 +542,13 @@ class _SubprocessChildIO:
 
         Delegates to :func:`alfred.egress.control_fd_broker.broker_connected_sockets`
         over the owned parent control-end: it connects all ``count`` first and sends
-        them only if every connect succeeded, so a partial failure sends the child
-        NOTHING (nothing to reclaim) and raises :class:`ControlFdBrokerError` — caught
-        one layer up by :meth:`QuarantineStdioTransport.dispatch`, which records the
-        egress-failure row + converts to a typed refusal. This method is auditor-FREE:
+        them only if every connect succeeded, so a partial CONNECT failure sends the
+        child NOTHING (nothing to reclaim) and raises :class:`ControlFdBrokerError` —
+        caught one layer up by :meth:`QuarantineStdioTransport.dispatch`, which records
+        the egress-failure row + converts to a typed refusal. That "sends NOTHING"
+        guarantee covers the CONNECT phase ONLY: a SEND-phase failure leaves fds already
+        queued in the child, which ``dispatch`` handles by REVOKING the child when
+        ``ControlFdBrokerError.delivered > 0``. This method is auditor-FREE:
         the transport owns the ``EgressBrokerAuditor`` and writes the success/failure
         rows (cleaner than threading an auditor through the child-IO seam). Returns the
         ``(host, port)`` destinations so the transport can attribute one success row per
