@@ -96,6 +96,10 @@ def test_quarantine_child_boot_error_is_runtime_error() -> None:
     assert issubclass(QuarantineChildBootError, RuntimeError)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.close() of a detached socket fd (a SOCKET handle is not a CRT fd)",
+)
 @pytest.mark.parametrize(
     ("factory_timeout", "expected_read"),
     [

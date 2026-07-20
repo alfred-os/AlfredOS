@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import socket
 import ssl
+import sys
 import threading
 import time
 from unittest.mock import Mock
@@ -378,6 +379,10 @@ def _pool_of(provider: object) -> httpcore.AsyncHTTPProxy:
     return pool
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.close() of a detached socket fd (a SOCKET handle is not a CRT fd)",
+)
 def test_build_child_client_verifies_tls_against_the_system_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,6 +420,10 @@ def test_build_child_client_verifies_tls_against_the_system_store(
         b.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.close() of a detached socket fd (a SOCKET handle is not a CRT fd)",
+)
 def test_build_child_client_is_single_use_no_keepalive_no_retry() -> None:
     """Per-call, one-shot posture (spike A2 / §8): ONE connection, no keepalive, no transport
     retry. Any of these three relaxing would make the SDK re-dial a one-shot brokered socket."""
