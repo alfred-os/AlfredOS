@@ -25,6 +25,7 @@ import array
 import asyncio
 import os
 import socket
+import sys
 import time
 
 import anyio
@@ -44,6 +45,22 @@ from alfred.security.quarantine_child.brokered_egress import (
 # Longer than any assertion here — used wherever the test is about something OTHER than
 # the wall-clock ceiling.
 _AMPLE_BUDGET_S = 60.0
+
+
+def _af_unix_socketpair() -> tuple[socket.socket, socket.socket]:
+    """An AF_UNIX pair for SCM_RIGHTS fd-passing — SKIPS on Windows.
+
+    ``socket.AF_UNIX`` does not exist on Windows CPython, so every test that brokers a real
+    descriptor is POSIX-only. Guarding at the single point of creation (rather than with a
+    decorator per test) means a NEW fd-passing test is guarded for free — the failure mode
+    this file just hit was new POSIX tests landing with no win32 guard at all.
+
+    The rest of this module (factory/timeout/protocol-conformance assertions) is portable and
+    keeps running on Windows, which is why this is a helper skip and not a module-level mark.
+    """
+    if sys.platform == "win32":
+        pytest.skip("AF_UNIX SCM_RIGHTS fd-passing is POSIX-only; the Windows dev path is WSL2")
+    return socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 
 
 def _factory(timeout: httpx.Timeout | None = None) -> _ProviderFactory:
@@ -137,7 +154,7 @@ def test_bind_closes_fd_when_never_dialed(monkeypatch: pytest.MonkeyPatch) -> No
     keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     victim = os.dup(keeper.fileno())  # a real, closeable fd the source must reclaim
     monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -177,7 +194,7 @@ def test_bind_defers_fd_close_to_client_when_dialed(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         be._ProviderFactory, "build", lambda _self, _fd, **_kw: (fake_provider, _FakeBackend())
     )
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -203,7 +220,7 @@ def test_bind_closes_fd_when_build_raises(monkeypatch: pytest.MonkeyPatch) -> No
         raise RuntimeError("build blew up before any dial")
 
     monkeypatch.setattr(be._ProviderFactory, "build", _boom)
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -242,7 +259,7 @@ def test_bind_closes_fd_on_cancel_before_dial(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         be._ProviderFactory, "build", lambda _self, _fd, **_kw: (_FakeProvider(), _FakeBackend())
     )
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _body() -> None:
@@ -286,7 +303,7 @@ def test_bind_reclaims_fd_when_aclose_raises_never_dialed(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         be._ProviderFactory, "build", lambda _self, _fd, **_kw: (_FakeProvider(), _FakeBackend())
     )
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -321,7 +338,7 @@ def test_drain_sweeps_and_closes_all_leftovers(monkeypatch: pytest.MonkeyPatch) 
         real_close(fd)
 
     monkeypatch.setattr(be.os, "close", _record_close)
-    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    parent, child = _af_unix_socketpair()
     donors = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(3)]
     source = BrokeredProviderSource(_factory(), child)
     try:
@@ -340,7 +357,7 @@ def test_drain_sweeps_and_closes_all_leftovers(monkeypatch: pytest.MonkeyPatch) 
 
 def test_drain_stops_on_peer_close_eof() -> None:
     """A peer-closed control end (EOF, no queued frames) terminates the sweep cleanly."""
-    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    parent, child = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), child)
     parent.close()  # peer closed, nothing queued -> EOF terminator
     source.drain_leftovers()  # returns cleanly, no raise
@@ -349,7 +366,7 @@ def test_drain_stops_on_peer_close_eof() -> None:
 
 def test_drain_does_not_swallow_malformed_frame(monkeypatch: pytest.MonkeyPatch) -> None:
     """HARD #7: a malformed-frame fault propagates loud out of the sweep — it is NOT swallowed."""
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     def _fault(_ce: socket.socket) -> int | None:
@@ -405,7 +422,7 @@ def test_bind_charges_control_recv_latency_to_the_attempt_budget(
         return real_build(self, fd, budget_seconds=budget_seconds)
 
     monkeypatch.setattr(be._ProviderFactory, "build", _spy)
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -433,7 +450,7 @@ def test_bind_control_recv_is_bounded_and_refuses_loud(monkeypatch: pytest.Monke
     as a model-output failure is exactly the err-002 / HARD #7 anti-pattern. Same adjudication
     as the Task-9 broker-failure refusal (ADR-0052 C1).
     """
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)  # nothing ever queued on `a`
+    a, b = _af_unix_socketpair()  # nothing ever queued on `a`
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> float:
@@ -458,7 +475,7 @@ def test_bind_restores_blocking_mode_so_the_drain_still_sees_eagain(
     keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     victim = os.dup(keeper.fileno())
     monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -501,7 +518,7 @@ def test_bind_reclaims_fd_when_aclose_raises_after_dialing(
     monkeypatch.setattr(
         be._ProviderFactory, "build", lambda _self, _fd, **_kw: (_FakeProvider(), _FakeBackend())
     )
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
@@ -551,7 +568,7 @@ def test_source_exposes_the_validated_max_tokens() -> None:
 def test_control_recv_refuses_when_the_budget_is_already_spent() -> None:
     """An attempt whose budget expired before the descriptor arrived must refuse rather than
     issue a zero/negative-timeout ``recvmsg`` (which would silently become non-blocking)."""
-    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    a, b = _af_unix_socketpair()
     source = BrokeredProviderSource(_factory(), a)
     with pytest.raises(ProviderUnavailableError, match="budget spent"):
         source._recv_one_fd(time.monotonic() - 1.0)

@@ -84,7 +84,17 @@ def make_control_socketpair() -> tuple[socket.socket, socket.socket]:
 
 # One C ``int`` is the SCM_RIGHTS fd payload width; the ancillary buffer is sized for exactly one.
 _FD_ITEMSIZE = array.array("i").itemsize
-_FD_CMSG_SPACE = socket.CMSG_SPACE(_FD_ITEMSIZE)
+# ``socket.CMSG_SPACE`` is POSIX-only — Windows CPython exposes neither it nor ``recvmsg``.
+# Guarded so this MODULE stays IMPORTABLE everywhere: hoisting the call to module scope turned a
+# call-time platform dependency into an IMPORT-time one, which broke pytest COLLECTION on the
+# Windows CI leg for two dozen test modules that merely import this one transitively (most of
+# them — web_fetch, orchestrator, daemon — have nothing to do with fd passing).
+#
+# The sentinel never reaches a syscall: every consumer is a ``recvmsg`` call below, and
+# ``socket.recvmsg`` does not exist on Windows, so the platform boundary still fails LOUD at the
+# only place it is real. Import portability and runtime scope are different questions; this keeps
+# the boundary at the latter.
+_FD_CMSG_SPACE = socket.CMSG_SPACE(_FD_ITEMSIZE) if hasattr(socket, "CMSG_SPACE") else 0
 
 
 def _collect_scm_rights_fds(ancdata: list[tuple[int, int, bytes]]) -> array.array[int]:
