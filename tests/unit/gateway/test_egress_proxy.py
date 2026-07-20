@@ -637,11 +637,22 @@ async def test_deny_still_audits_and_refuses_when_metric_raises() -> None:
 # ``asyncio.IncompleteReadError.partial`` is what makes the two decidable at the read site.
 
 
-def _connect_outcome(outcome: str) -> float:
-    """Current value of ``gateway_egress_connect_total{outcome=...}`` (public collect API)."""
+def _connect_outcome(outcome: str, plane: str = "proxy") -> float:
+    """Current value of ``gateway_egress_connect_total{outcome=...,plane=...}``.
+
+    ``plane`` is part of the series contract (#340 golive) — matching on outcome ALONE would
+    silently sum the provider and adapter planes back together, which is precisely the
+    conflation the label exists to prevent, so this helper requires both. Returns 0.0 for a
+    series that has not been touched yet (prometheus_client only materialises a child on the
+    first ``.labels(...)`` call).
+    """
     for metric in GATEWAY_EGRESS_CONNECT.collect():
         for sample in metric.samples:
-            if sample.name.endswith("_total") and sample.labels.get("outcome") == outcome:
+            if (
+                sample.name.endswith("_total")
+                and sample.labels.get("outcome") == outcome
+                and sample.labels.get("plane") == plane
+            ):
                 return float(sample.value)
     return 0.0
 
@@ -701,7 +712,8 @@ async def test_partial_request_line_then_close_is_still_a_denial() -> None:
 async def test_abandoned_connect_is_counted_as_its_own_outcome() -> None:
     # Benign != invisible. The abandon still increments a DISTINCT outcome so a connect-flood
     # stays observable, and so the documented sum invariant
-    # (sum(denied_total{plane}) == connect_total{outcome="denied"}) is preserved.
+    # (sum_reason(denied_total{plane=P}) == connect_total{outcome="denied",plane=P}) is
+    # preserved — now exactly, PER PLANE, rather than only after summing the planes together.
     audit: list[tuple[str, dict[str, object]]] = []
     proxy = _proxy(audit)
     before_abandoned = _connect_outcome("abandoned")
@@ -711,6 +723,68 @@ async def test_abandoned_connect_is_counted_as_its_own_outcome() -> None:
 
     assert _connect_outcome("abandoned") == before_abandoned + 1.0
     assert _connect_outcome("denied") == before_denied, "abandon must not count as a denial"
+
+
+@pytest.mark.asyncio
+async def test_abandoned_connect_is_attributable_to_its_plane() -> None:
+    """A zero-byte flood must be distinguishable per plane — the whole point of the label.
+
+    On the PROVIDER plane an abandon storm is expected (the quarantine broker pre-connects a
+    socket per extraction retry and discards the unused ones). The identical storm on the
+    ADAPTER plane is an unauthenticated peer probing the egress listener. Before ``plane``
+    joined the label set the two shared ONE series, so the benign case masked the attack and
+    ``ops/alerts/gateway.yml``'s GatewayEgressAbandonedConnectFlood could not be written at
+    all. Distinct plane names keep this independent of test ordering on the shared default
+    registry.
+    """
+    audit: list[tuple[str, dict[str, object]]] = []
+    before_adapter = _connect_outcome("abandoned", plane="unittest_plane_adapter")
+    before_other = _connect_outcome("abandoned", plane="unittest_plane_other")
+
+    await _serve(_proxy(audit, plane="unittest_plane_adapter"), b"", _CaptureWriter())
+
+    assert _connect_outcome("abandoned", plane="unittest_plane_adapter") == before_adapter + 1.0
+    assert _connect_outcome("abandoned", plane="unittest_plane_other") == before_other, (
+        "an abandon on one plane must NOT move another plane's series"
+    )
+
+
+@pytest.mark.asyncio
+async def test_every_connect_outcome_carries_the_plane_label() -> None:
+    """All FOUR ``.labels(...)`` call sites must pass ``plane`` — not just the abandoned one.
+
+    A Counter's label set is all-or-nothing: a site that omitted ``plane`` would raise at
+    runtime inside the per-connection task rather than under-count, so this doubles as a
+    smoke test that none of the four paths blew up. Driven on a plane of its own so each
+    series is asserted absolutely (== 1.0) instead of by delta.
+    """
+    plane = "unittest_all_outcomes"
+    audit: list[tuple[str, dict[str, object]]] = []
+    ok = b"CONNECT api.anthropic.com:443 HTTP/1.1\r\n\r\n"
+
+    # allowed — full tunnel through a stub upstream.
+    await _serve(
+        _proxy(audit, upstream=(_reader_with(b""), _CaptureWriter()), plane=plane),
+        ok,
+        _CaptureWriter(),
+    )
+    # denied — destination not on the allowlist.
+    await _serve(
+        _proxy(audit, plane=plane), b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n", _CaptureWriter()
+    )
+    # abandoned — peer closed having sent zero bytes.
+    await _serve(_proxy(audit, plane=plane), b"", _CaptureWriter())
+    # error — allowlisted + resolvable, but the upstream open fails (OSError path).
+    await _serve(
+        _proxy(audit, open_error=ConnectionRefusedError("upstream down"), plane=plane),
+        ok,
+        _CaptureWriter(),
+    )
+
+    for outcome in ("allowed", "denied", "abandoned", "error"):
+        assert _connect_outcome(outcome, plane=plane) == 1.0, (
+            f"gateway_egress_connect_total{{outcome={outcome},plane={plane}}} must be labelled"
+        )
 
 
 @pytest.mark.asyncio

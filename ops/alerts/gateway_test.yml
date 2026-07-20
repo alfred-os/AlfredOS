@@ -113,15 +113,17 @@ tests:
             exp_annotations: *sec_ann
 
   # --- outage fires on a sustained connect_total error rate ---
+  # The connect_total series carries {plane} (#340 golive) — the input series mirrors the real
+  # exposition, so the alert is proven to still fire (now plane-attributably) after the label add.
   - interval: 1m
     input_series:
-      - series: 'gateway_egress_connect_total{outcome="error"}'
+      - series: 'gateway_egress_connect_total{outcome="error",plane="proxy"}'
         values: '0 1 2 3 4 5 6 7 8 9'
     alert_rule_test:
       - eval_time: 8m
         alertname: GatewayEgressOutage
         exp_alerts:
-          - exp_labels: { severity: warning, outcome: error }
+          - exp_labels: { severity: warning, outcome: error, plane: proxy }
             exp_annotations: &outage_ann
               summary: "AlfredOS gateway egress is erroring"
               description: "gateway_egress_{connect,relay}_total{outcome=error} is increasing for 5m; the egress plane is failing to complete tunnels/fetches. A sustained outage can itself suppress deny-counting, blinding the security alerts — investigate promptly."
@@ -137,3 +139,63 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, outcome: error }
             exp_annotations: *outage_ann
+
+  # --- abandoned-connect flood: fires on the ADAPTER plane, STAYS QUIET on the provider plane ---
+  # #340 golive: both planes flood identically (10/min) in the SAME evaluation, so this proves the
+  # rule discriminates by plane rather than merely by rate. The provider-plane series is the
+  # quarantine broker discarding unused pre-connected sockets (expected, must never page); the
+  # identical adapter-plane series is a port scan (must page).
+  #
+  # eval_time is 10m, NOT the 8m used by the for:2m blocks above. rate() divides the extrapolated
+  # delta by the FULL 5m range, so a 10/min ramp climbs into the threshold as the window fills:
+  # it is exactly 0.1 at t=3m (NOT > 0.1) and first exceeds it at t=4m (0.133). With for:5m the
+  # alert therefore fires at t=9m; 10m leaves a 1m margin. Series run to 11m to cover the window.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_connect_total{outcome="abandoned",plane="adapter"}'
+        values: '0 10 20 30 40 50 60 70 80 90 100 110'
+      - series: 'gateway_egress_connect_total{outcome="abandoned",plane="proxy"}'
+        values: '0 10 20 30 40 50 60 70 80 90 100 110'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayEgressAbandonedConnectFlood
+        exp_alerts:
+          - exp_labels: { severity: warning, outcome: abandoned, plane: adapter }
+            exp_annotations:
+              summary: "AlfredOS gateway is absorbing a flood of zero-byte egress connects off the provider plane"
+              description: "gateway_egress_connect_total{outcome=abandoned} rate > 0.1/s for 5m on a plane other than provider (plane=proxy). A peer that opens a CONNECT and closes having sent zero bytes is benign ON THE PROVIDER PLANE — the quarantine broker pre-connects a socket per extraction retry and discards the unused ones — so that plane is excluded by name. On the adapter plane there is no such producer: a sustained zero-byte connect rate there is an unauthenticated peer probing the egress listener (port scan / liveness sweep). Identify the source before it graduates to a real CONNECT. NOTE: 0.1/s is a conservative STARTING threshold — tune to your deployment's baseline."
+
+  # --- abandoned flood: a pre-#340 PLANE-LESS series must NOT page ---
+  # A PromQL != matcher also selects series where the label is ABSENT, so plane!="proxy" alone
+  # would match a stale plane-less scrape from a pre-golive gateway. The plane!="" arm excludes
+  # it; without that arm this block fires and the test fails.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_connect_total{outcome="abandoned"}'
+        values: '0 10 20 30 40 50 60 70 80 90 100 110'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayEgressAbandonedConnectFlood
+        exp_alerts: []
+
+  # --- abandoned flood: QUIET below the 0.1/s threshold (3/min ≈ 0.05/s) on the adapter plane ---
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_connect_total{outcome="abandoned",plane="adapter"}'
+        values: '0 3 6 9 12 15 18 21 24 27 30 33'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayEgressAbandonedConnectFlood
+        exp_alerts: []
+
+  # --- abandoned flood does NOT hijack the outage alert (outcome is disjoint) ---
+  # Sentinel: a future edit that widened GatewayEgressOutage's outcome matcher would silently
+  # merge the benign broker-discard stream into the egress-outage pager. Pin the disjointness.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_egress_connect_total{outcome="abandoned",plane="adapter"}'
+        values: '0 10 20 30 40 50 60 70 80 90 100 110'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayEgressOutage
+        exp_alerts: []
