@@ -1073,9 +1073,16 @@ def _snapshot_detail(failure: DaemonBootFailure) -> str:
     exactly what the unsubstituted `{detail}` was withholding.
 
     Falls back to ``unknown`` rather than raising: a boot refusal must never be
-    preempted by a formatting error on the refusal message itself.
+    preempted by a formatting error on the refusal message itself. The probe only ever
+    returns ``SnapshotRefInitFailedFailure`` on this arm, so the isinstance check is a
+    narrowing device (``DaemonBootFailure`` is a 20-member discriminated union), not a
+    real branch — but it fails soft rather than raising if that ever changes.
     """
-    return getattr(failure, "detail_redacted", "") or "unknown"
+    from alfred.cli.daemon._failures import SnapshotRefInitFailedFailure
+
+    if isinstance(failure, SnapshotRefInitFailedFailure):
+        return failure.detail_redacted or "unknown"
+    return "unknown"
 
 
 def _handshake_detail(failure: DaemonBootFailure) -> str:
@@ -1084,7 +1091,11 @@ def _handshake_detail(failure: DaemonBootFailure) -> str:
     ``backing_store_kind`` is a closed Literal (``postgres`` / ``state_git`` /
     ``unknown``), so it carries no operator content and is safe to echo verbatim.
     """
-    return getattr(failure, "backing_store_kind", "") or "unknown"
+    from alfred.cli.daemon._failures import CapabilityGateHandshakeFailedFailure
+
+    if isinstance(failure, CapabilityGateHandshakeFailedFailure):
+        return failure.backing_store_kind
+    return "unknown"
 
 
 def _snapshot_failure() -> DaemonBootFailure:
