@@ -44,6 +44,15 @@ alfred chat                 # start a TUI conversation
 > `restart: unless-stopped`. This is deliberate — a real client on a placeholder key
 > would be a silently dead LLM — but it means a keyless first run does not start.
 > `bin/alfred-setup.sh` warns when the key is missing; it cannot seed one for you.
+>
+> **Precisely:** the refuse-boot is gated on comms being enabled
+> (`settings.comms_enabled_adapters`). With no adapters enabled there is no
+> quarantine path, so no key is needed and the core boots fine. That is not the
+> quickstart above: `docker-compose.yaml` defaults
+> `ALFRED_COMMS_ENABLED_ADAPTERS` to `["alfred_tui"]`, so the compose stack — the
+> path this README documents — does enable comms and does require the key. If you
+> run the core outside compose with `ALFRED_COMMS_ENABLED_ADAPTERS` unset, the key
+> is genuinely optional.
 
 `docker compose up -d` now starts **`alfred-core`** as a **long-running daemon**
 (`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a

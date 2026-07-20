@@ -1,0 +1,37 @@
+# promtool test rules for ops/alerts/quarantine.yml (#340 PR2b-golive).
+#
+# NOTE: promtool matches exp_annotations too (not just exp_labels) — each firing entry's
+# exp_annotations MUST equal the alert's summary+description in quarantine.yml verbatim.
+rule_files:
+  - quarantine.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- a SINGLE revocation fires immediately (zero-baseline, for: 0m) ---
+  # The counter is flat at 0, then increments once and stays flat. A rate-threshold or
+  # a `for:` window would miss exactly this shape, which is the shape a real revocation
+  # has: one terminal event, no follow-up traffic, because the path is now down.
+  - interval: 1m
+    input_series:
+      - series: "alfred_quarantine_capability_revoked_total"
+        values: "0 0 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: QuarantineCapabilityRevoked
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "AlfredOS revoked the quarantine child's gateway capability"
+              description: "alfred_quarantine_capability_revoked_total increased: the quarantined-LLM child was torn down to revoke its SCM_RIGHTS gateway sockets after a broker failure. This is fail-closed and correct, but TERMINAL — the child is spawned once at daemon boot and there is no respawn scheduler (#455), so every subsequent extraction now returns provider_unavailable and the quarantine path stays DOWN until alfred-core is restarted. Follow docs/runbooks/quarantine-capability-revoked.md."
+
+  # --- NEGATIVE CONTROL: a never-revoked daemon stays quiet ---
+  # Without this, an always-firing rule (e.g. `> -1`) would pass the test above.
+  - interval: 1m
+    input_series:
+      - series: "alfred_quarantine_capability_revoked_total"
+        values: "0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: QuarantineCapabilityRevoked
+        exp_alerts: []

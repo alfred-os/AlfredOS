@@ -48,6 +48,7 @@ from alfred.egress.errors import IOPlaneUnavailableError
 from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.plugins.transport import ControlResult
+from alfred.security.observability import CAPABILITY_REVOKED_COUNTER
 from alfred.security.quarantine import BROKER_SOCKET_COUNT
 from alfred.security.quarantine_child_io import QuarantineChildSpawnError
 from alfred.security.tiers import T3, tag_t3_with_nonce
@@ -591,8 +592,16 @@ class QuarantineStdioTransport:
         A teardown that itself fails is logged LOUD with an explicit ``error_class`` and
         swallowed (never silent — HARD #7): it must not preempt the caller's graceful typed
         refusal, which is the orchestrator's only clean exit from this path.
+
+        The counter increments BEFORE the teardown is attempted, deliberately: a revoke
+        whose ``aclose`` raises is still a revocation, and is the case most worth alerting
+        on. Counting afterwards would skip exactly those.
         """
         _log.error("security.quarantine_transport.capability_revoked")
+        # #340 golive: the security lane conditioned shipping without a respawn scheduler
+        # (#455) on this being ALERTABLE. A structlog line is not a signal ops/ can write a
+        # rule over. See alfred.security.observability for the armed-not-yet-live caveat.
+        CAPABILITY_REVOKED_COUNTER.inc()
         try:
             async with asyncio.timeout(_REVOKE_TIMEOUT_S):
                 await self._child_io.aclose()
