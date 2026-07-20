@@ -318,6 +318,48 @@ def test_alfred_core_has_discord_token_env(compose: dict[str, Any]) -> None:
     assert "ALFRED_DISCORD_BOT_TOKEN" in env
 
 
+def test_alfred_core_has_quarantine_provider_key_env(compose: dict[str, Any]) -> None:
+    """#340 PR2b-golive: alfred-core forwards ALFRED_QUARANTINE_PROVIDER_API_KEY.
+
+    The golive boot refuses when this is unset and tells the operator to set it. Without
+    the forward the remedy is unreachable — no `.env` value would enter the container,
+    and alfred-core mounts neither a secrets.toml nor any bind-mount that could carry
+    one — so the stack would crash-loop under `restart: unless-stopped` with a refusal
+    naming a fix that cannot work. Refusing without the key is intended; refusing with no
+    reachable remedy is the bug this pins.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" in env
+
+
+def test_quarantine_provider_key_defaults_to_empty_not_required(
+    compose: dict[str, Any],
+) -> None:
+    """The forward uses the ``:-`` default so `docker compose config` stays usable.
+
+    Mirrors ALFRED_ANTHROPIC_API_KEY. A bare ``${VAR}`` (the ALFRED_DEEPSEEK_API_KEY
+    shape) makes compose WARN on every invocation for a keyless checkout; the empty
+    default keeps the refusal where it belongs — a loud, actionable AlfredOS boot
+    refusal — rather than compose-level noise before the app ever starts.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert env["ALFRED_QUARANTINE_PROVIDER_API_KEY"] == "${ALFRED_QUARANTINE_PROVIDER_API_KEY:-}"
+
+
+def test_quarantine_provider_key_never_reaches_the_gateway(compose: dict[str, Any]) -> None:
+    """ADR-0036: the quarantine provider key is a core-only secret, like the Discord token.
+
+    The gateway hosts adapters and brokers egress; it must never hold a provider
+    credential. Pinned alongside the existing no-secret-on-gateway invariant so a future
+    'just add it everywhere' edit fails loudly.
+    """
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    env = gw.get("environment", {}) or {}
+    assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" not in env
+
+
 def test_alfred_gateway_hosts_discord(compose: dict[str, Any]) -> None:
     """Spec B G6-7-8 (#309): the gateway is configured to host the Discord adapter."""
     gw = compose.get("services", {}).get("alfred-gateway", {})

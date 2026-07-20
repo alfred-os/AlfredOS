@@ -30,11 +30,20 @@ AlfredOS is hardened from day one against prompt injection, credential leakage, 
 ```sh
 git clone https://github.com/alfred-os/AlfredOS
 cd AlfredOS
+cp .env.example .env       # then set ALFRED_QUARANTINE_PROVIDER_API_KEY (see below)
 bin/alfred-setup.sh        # macOS/Linux; on Windows, run inside WSL
 docker compose up -d
 alfred user add --authorization operator --name "Your Name"   # one-time
 alfred chat                 # start a TUI conversation
 ```
+
+> **A provider key is required before the first `docker compose up -d`.**
+> `ALFRED_QUARANTINE_PROVIDER_API_KEY` in `.env` is the credential for the
+> quarantined half of the dual-LLM split, which now makes real provider calls. With
+> it unset the core exits 2 (`quarantine_provider_key_unset`) and crash-loops under
+> `restart: unless-stopped`. This is deliberate — a real client on a placeholder key
+> would be a silently dead LLM — but it means a keyless first run does not start.
+> `bin/alfred-setup.sh` warns when the key is missing; it cannot seed one for you.
 
 `docker compose up -d` now starts **`alfred-core`** as a **long-running daemon**
 (`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a
@@ -43,7 +52,8 @@ one-shot command runner. One-off subcommands still work via
 `run` overrides the service `command`. **Run `bin/alfred-setup.sh` _before_
 `docker compose up -d`**: it seeds the `audit.hash_pepper` and provisions secrets the
 daemon requires to boot. Skip it and the daemon refuse-boots and, under
-`restart: unless-stopped`, crash-loops.
+`restart: unless-stopped`, crash-loops. The script seeds what it can and warns about
+what it cannot — `ALFRED_QUARANTINE_PROVIDER_API_KEY` has to come from you.
 
 `docker compose up -d` also starts **`alfred-gateway`** — the always-up resumable front
 door that holds an `alfred chat` session across a core restart. As of this release the

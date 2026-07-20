@@ -317,6 +317,30 @@ else
   fi
 fi
 
+# #340 PR2b-golive: the quarantined (dual-LLM) child now makes REAL provider calls, so
+# ALFRED_QUARANTINE_PROVIDER_API_KEY became a hard boot requirement — the core resolves
+# it pre-spawn and exits 2 with `quarantine_provider_key_unset` when unset.
+#
+# Unlike audit.hash_pepper this CANNOT be auto-seeded (only the operator has a provider
+# credential) and, unlike the Discord token, it cannot be skipped by disabling a feature:
+# it gates the whole comms boot. Warn now rather than let `docker compose up -d` crash-loop
+# under `restart: unless-stopped` — mirrors the ALFRED_DISCORD_BOT_TOKEN warn below.
+#
+# Checked against .env, not the environment: compose reads .env, and the key is delivered
+# by env forwarding (alfred-core mounts no secrets.toml, so the file route is closed).
+step "Checking quarantined-LLM provider key"
+_quarantine_key_configured() {
+  # Set and non-empty in .env (`VAR=` alone does not count — an empty value still refuses).
+  [[ -f .env ]] && grep -qE '^[[:space:]]*ALFRED_QUARANTINE_PROVIDER_API_KEY=[^[:space:]]' .env
+}
+if _quarantine_key_configured; then
+  echo "ALFRED_QUARANTINE_PROVIDER_API_KEY is configured in .env."
+elif [[ -n "${ALFRED_QUARANTINE_PROVIDER_API_KEY:-}" ]]; then
+  warn "ALFRED_QUARANTINE_PROVIDER_API_KEY is set in your shell but NOT in .env — docker compose reads .env, so the stack will still refuse to boot. Add it to .env."
+else
+  warn "ALFRED_QUARANTINE_PROVIDER_API_KEY is unset — 'docker compose up -d' WILL REFUSE TO BOOT (exit 2, quarantine_provider_key_unset) and crash-loop. This key is the quarantined half of the dual-LLM split; it is required, not optional. Add it to .env (see .env.example), then re-run 'docker compose up -d'."
+fi
+
 # Export UID and GID so the compose `user: "${UID:-1000}:${GID:-1000}"`
 # substitution picks up the operator's real uid/gid. macOS bash 3.2
 # does NOT export UID by default, and GID is rarely exported on any
