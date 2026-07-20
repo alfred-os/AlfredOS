@@ -11,16 +11,27 @@ Per-call, no-keepalive: one brokered socket -> one client -> one request -> clos
 TLS terminates HERE (HARD #5) via the system-store verify path (``SSL_CERT_FILE``);
 the core writes zero application bytes onto the brokered socket.
 
-Wall-clock ceiling (rev.2 / prov-001): the blocking SDK ``recv`` runs in
-``anyio.to_thread.run_sync`` with ``abandon_on_cancel=False`` (the default), so it is
-un-cancellable by ``asyncio.wait_for``. The child's read budget is therefore made a
-HARD ceiling at the socket layer — ``connect_tcp`` sets ``sock.settimeout(read_timeout)``
-once (preserved across the TLS wrap by ``SSLSocket._create``), so every subsequent
-blocking ``recv``/``sendall`` raises after ``read_timeout`` seconds instead of hanging
-forever. The same timeout is injected into the httpx client so httpcore computes matching
-per-request budgets. Per-operation ``timeout`` arguments are deliberately NOT re-applied
-to the socket: the fixed connect-time ceiling must never be widened by a looser per-call
-value.
+Wall-clock ceiling (rev.2 / prov-001, corrected): the blocking SDK ``recv`` runs in
+``anyio.to_thread.run_sync`` with ``abandon_on_cancel=False`` (the default), so the
+dispatcher's ``asyncio.wait_for`` cancels and then *awaits* the shielded worker thread
+until it returns on its own. ``wait_for`` therefore cannot bound this path, and the
+socket is the only place a ceiling can live.
+
+``sock.settimeout(...)`` alone is NOT that ceiling: it is a per-syscall IDLE timeout that
+RESETS on every byte received, so a peer dripping bytes slower than the budget but faster
+than the idle window keeps the un-cancellable ``recv`` alive indefinitely. Every socket
+operation is therefore clamped against ONE **absolute deadline** anchored at the start of
+the attempt — each syscall gets ``min(read_timeout, deadline - now)`` and an expired
+deadline refuses outright. The deadline is derived from the REMAINING per-extraction
+wall-clock budget the dispatcher hands to ``BrokeredProviderSource.bind()``, so the child
+cannot reply after its 20s budget (``provider_dispatch._MAX_TOTAL_WALL_CLOCK_SECONDS``)
+even on the last retry attempt — which is what keeps it under the host's 25s
+``_READ_FRAME_TIMEOUT_S`` and its in-budget refusal from being torn away unread.
+
+The read component is also injected into the httpx client so httpcore computes matching
+per-request budgets. httpcore's per-operation ``timeout`` arguments are deliberately NOT
+re-applied to the socket: our clamp is always the tighter of the two and must never be
+widened by a looser per-call value.
 """
 
 from __future__ import annotations
@@ -28,7 +39,8 @@ from __future__ import annotations
 import os
 import socket
 import ssl
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -42,13 +54,39 @@ from httpcore import AsyncNetworkBackend, AsyncNetworkStream
 
 from alfred.egress.control_fd_broker import recv_passed_fd, recv_passed_fd_nonblocking
 from alfred.providers.anthropic_native import AnthropicProvider
-from alfred.providers.base import ProviderCapability
+from alfred.providers.base import ProviderCapability, ProviderUnavailableError
 
 _log = structlog.get_logger(__name__)
+
+# Upper bound on the fd-4 control-channel ``recvmsg`` that opens every attempt. Connect-defer
+# means the host ``sendmsg``s ALL N sockets into the child's SCM_RIGHTS queue BEFORE writing the
+# extract frame, so by the time the child binds, the descriptors are already queued and this recv
+# returns immediately. It is bounded anyway because the failure mode is a WEDGE: on a socket-count
+# desync (the child asking for socket N+1 the host never brokered) an unbounded blocking recv sits
+# in a shielded worker thread outside every ceiling in the hierarchy — the host tears its own
+# read_frame down at 25s but does not reap, leaving a T3-holding child resident forever. Clamped
+# further by the attempt deadline, so this is a ceiling, not a floor.
+_CONTROL_RECV_TIMEOUT_S = 2.0
+
+
+def _noop() -> None:
+    """Default fd-release callback — a plain function (not a branch) so the notify path stays
+    unconditional and the 100%-branch gate has nothing spurious to cover."""
 
 
 class RedialError(RuntimeError):
     """connect_tcp called a 2nd time — a re-dial the single passed fd cannot serve."""
+
+
+class InvalidAttemptBudgetError(ValueError):
+    """``budget_seconds`` was ``None`` or non-positive at ``PassedFdBackend`` construction.
+
+    HARD #7 sibling of :class:`MissingReadTimeoutError`. Without a positive attempt budget the
+    absolute deadline is unset, leaving the per-syscall idle timeout — which RESETS on every
+    byte received — as the only bound. That is not a cumulative ceiling, so a slow-drip
+    response would run unbounded inside an un-cancellable worker thread. Fail loud at build
+    time instead of at exploit time.
+    """
 
 
 class MissingReadTimeoutError(ValueError):
@@ -62,24 +100,69 @@ class MissingReadTimeoutError(ValueError):
 
 
 class _BlockingFdStream(AsyncNetworkStream):
-    """AsyncNetworkStream over ONE blocking socket, driven off-loop. The socket carries
-    the HARD read ceiling set by the backend; per-op ``timeout`` args are not re-applied."""
+    """AsyncNetworkStream over ONE blocking socket, driven off-loop.
 
-    def __init__(self, sock: socket.socket) -> None:
+    Every operation is clamped against ``deadline_at`` — an ABSOLUTE ``time.monotonic``
+    instant shared by every syscall of one extraction attempt. ``read_timeout`` remains the
+    per-syscall idle cap (a dead peer is detected long before the budget expires), but it can
+    only ever narrow the remaining budget, never extend it: the effective timeout is
+    ``min(read_timeout, deadline_at - now)``. Without the absolute term a slow-drip peer resets
+    the idle window on every byte and the un-cancellable ``recv`` runs unbounded.
+
+    ``on_fd_released`` is invoked once the socket is closed. The passed fd has exactly one
+    owner at a time (§8 D5) and this is how :meth:`BrokeredProviderSource.bind` learns the
+    httpx client actually released it — "did it dial" is not the same question, and answering
+    the wrong one leaks a descriptor whenever ``aclose()`` raises after dialing.
+    """
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        *,
+        read_timeout: float,
+        deadline_at: float,
+        on_fd_released: Callable[[], None] = _noop,
+    ) -> None:
         self._sock = sock
+        self._read_timeout = read_timeout
+        self._deadline_at = deadline_at
+        self._on_fd_released = on_fd_released
+
+    def _next_op_timeout(self) -> float:
+        """The timeout for the NEXT blocking syscall, or raise if the attempt is already over.
+
+        Raising ``TimeoutError`` (which ``socket.timeout`` aliases) keeps the shape identical
+        to a socket-level expiry, so the dispatcher's existing terminal-timeout handling maps
+        it the same way whether the deadline fired mid-syscall or between syscalls.
+        """
+        remaining = self._deadline_at - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError(
+                "quarantine child attempt deadline exceeded — refusing a further socket "
+                "operation (the per-extraction wall-clock budget is spent)"
+            )
+        return min(self._read_timeout, remaining)
 
     async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        # timeout: the ceiling is enforced once at connect_tcp (settimeout); a per-read
-        # value must not widen it, so it is intentionally not re-applied here.
+        # timeout: httpcore's per-op value can only be looser than our clamp (it is the same
+        # httpx read timeout, without the absolute-deadline term), so it is not re-applied.
         del timeout
+        self._sock.settimeout(self._next_op_timeout())
         return await anyio.to_thread.run_sync(self._sock.recv, max_bytes)
 
     async def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        del timeout  # same fixed-ceiling rationale as read()
+        del timeout  # same clamp rationale as read()
+        self._sock.settimeout(self._next_op_timeout())
         await anyio.to_thread.run_sync(self._sock.sendall, buffer)
 
     async def aclose(self) -> None:
-        await anyio.to_thread.run_sync(self._sock.close)
+        try:
+            await anyio.to_thread.run_sync(self._sock.close)
+        finally:
+            # In a ``finally``: POSIX releases the descriptor even when ``close(2)`` reports an
+            # error, so signalling release only on the happy path could make the source
+            # double-close (and clobber an unrelated reused fd).
+            self._on_fd_released()
 
     async def start_tls(
         self,
@@ -87,14 +170,23 @@ class _BlockingFdStream(AsyncNetworkStream):
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> AsyncNetworkStream:
-        del timeout  # the handshake inherits the socket's fixed ceiling (see module docstring)
+        del timeout  # the handshake is clamped by the same deadline (see module docstring)
+        self._sock.settimeout(self._next_op_timeout())
 
         def _wrap() -> socket.socket:
             return ssl_context.wrap_socket(
                 self._sock, server_hostname=server_hostname, do_handshake_on_connect=True
             )
 
-        return _BlockingFdStream(await anyio.to_thread.run_sync(_wrap))
+        # The wrapped stream carries the SAME deadline and release callback: every response
+        # byte is read through it, so a ceiling that stopped at the handshake would bound
+        # nothing, and a release signal that stopped there would lose fd ownership.
+        return _BlockingFdStream(
+            await anyio.to_thread.run_sync(_wrap),
+            read_timeout=self._read_timeout,
+            deadline_at=self._deadline_at,
+            on_fd_released=self._on_fd_released,
+        )
 
     def get_extra_info(self, info: str) -> object | None:
         if info == "ssl_object":
@@ -105,22 +197,48 @@ class _BlockingFdStream(AsyncNetworkStream):
 class PassedFdBackend(AsyncNetworkBackend):
     """httpcore backend over ONE passed fd; raises on any 2nd dial (re-dial instrument).
 
-    ``read_timeout`` is the HARD socket-level ceiling applied to the yielded stream so the
-    child's blocking, un-cancellable ``recv`` cannot outrun its wall-clock budget (prov-001).
-    A missing or non-positive ``read_timeout`` raises ``MissingReadTimeoutError`` at
-    construction rather than silently degrading to blocking-forever mode (HARD #7).
+    Two independent bounds, both mandatory (HARD #7 — neither may silently default):
+
+    * ``read_timeout`` — the per-syscall IDLE cap. Detects a dead peer quickly.
+    * ``budget_seconds`` — the attempt's remaining wall-clock budget, anchored HERE into an
+      absolute deadline every socket operation is clamped against. This is the real ceiling:
+      the idle cap resets on every byte received and so bounds nothing cumulatively.
+
+    A missing/non-positive value for either raises at construction rather than degrading to
+    an unbounded socket. ``fd_closed`` reports whether the yielded stream actually released
+    the passed descriptor — the fd-ownership signal :meth:`BrokeredProviderSource.bind` needs.
     """
 
-    def __init__(self, fd: int, *, read_timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        fd: int,
+        *,
+        read_timeout: float | None = None,
+        budget_seconds: float | None = None,
+    ) -> None:
         if read_timeout is None or read_timeout <= 0:
             raise MissingReadTimeoutError(
                 "read_timeout must be a positive number of seconds, got "
                 f"{read_timeout!r} — a missing/non-positive ceiling would leave the "
                 "child's blocking recv() unbounded (HARD #7)."
             )
+        if budget_seconds is None or budget_seconds <= 0:
+            raise InvalidAttemptBudgetError(
+                "budget_seconds must be a positive number of seconds, got "
+                f"{budget_seconds!r} — without it the absolute deadline is unset and the "
+                "per-syscall idle timeout (which resets on every byte) becomes the only "
+                "bound, i.e. no cumulative ceiling at all (HARD #7)."
+            )
         self._fd = fd
         self._read_timeout = read_timeout
+        # Anchored at construction, which is AFTER bind()'s control-fd recv — so that recv's
+        # latency is spent out of the same budget rather than added on top of it.
+        self._deadline_at = time.monotonic() + budget_seconds
         self.calls = 0
+        self.fd_closed = False
+
+    def _mark_fd_released(self) -> None:
+        self.fd_closed = True
 
     async def connect_tcp(
         self,
@@ -132,14 +250,20 @@ class PassedFdBackend(AsyncNetworkBackend):
     ) -> AsyncNetworkStream:
         # host/port/timeout/local_address/socket_options: the brokered fd is ALREADY
         # connected to the gateway proxy — dial coordinates are ignored by design, and the
-        # read ceiling comes from self._read_timeout, not httpcore's connect timeout.
+        # ceiling comes from self._read_timeout + self._deadline_at, not httpcore's timeouts.
         del host, port, timeout, local_address, socket_options
         self.calls += 1  # BEFORE touching the fd -> a re-dial is observable
         if self.calls > 1:
             raise RedialError(f"connect_tcp called {self.calls}x — one fd cannot serve a 2nd dial")
         sock = socket.socket(fileno=self._fd)
-        sock.settimeout(self._read_timeout)  # HARD ceiling on the blocking recv (prov-001)
-        return _BlockingFdStream(sock)
+        # Seed the idle cap; every subsequent operation re-clamps it against the deadline.
+        sock.settimeout(self._read_timeout)
+        return _BlockingFdStream(
+            sock,
+            read_timeout=self._read_timeout,
+            deadline_at=self._deadline_at,
+            on_fd_released=self._mark_fd_released,
+        )
 
     async def connect_unix_socket(
         self, path: str, timeout: float | None = None, socket_options: object | None = None
@@ -167,15 +291,16 @@ class _PassedFdTransport(httpx.AsyncHTTPTransport):
 
 
 def build_child_client(
-    fd: int, *, model: str, api_key: str, timeout: httpx.Timeout
+    fd: int, *, model: str, api_key: str, timeout: httpx.Timeout, budget_seconds: float
 ) -> tuple[AnthropicProvider, PassedFdBackend]:
     """Build the #339-seam AnthropicProvider over the passed fd. max_retries=0 (spike A2),
     single connection, no keepalive, no redirects (E2). TLS terminates in-child (HARD #5).
 
-    The read component of ``timeout`` becomes the backend's HARD socket ceiling AND is
-    injected into the httpx client, so the child's wall-clock budget has real teeth
-    (rev.2 / prov-001)."""
-    backend = PassedFdBackend(fd, read_timeout=timeout.read)
+    The read component of ``timeout`` becomes the backend's per-syscall idle cap AND is
+    injected into the httpx client. ``budget_seconds`` — what remains of the per-extraction
+    wall-clock budget — becomes the absolute deadline every socket operation is clamped
+    against, which is the ceiling that actually holds (rev.2 / prov-001)."""
+    backend = PassedFdBackend(fd, read_timeout=timeout.read, budget_seconds=budget_seconds)
     transport = _PassedFdTransport(backend)
     http_client = httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=timeout)
     provider = AnthropicProvider.from_settings(
@@ -222,12 +347,15 @@ class _ProviderFactory:
             )
         return cls(api_key=key, model=model, max_tokens=max_tokens, timeout=_CHILD_SDK_READ_TIMEOUT)
 
-    def build(self, fd: int) -> tuple[AnthropicProvider, PassedFdBackend]:
+    def build(self, fd: int, *, budget_seconds: float) -> tuple[AnthropicProvider, PassedFdBackend]:
+        """Assemble the per-attempt client. ``budget_seconds`` is what remains of the
+        extraction's wall-clock budget and becomes the attempt's absolute socket deadline."""
         return build_child_client(
             fd,
             model=self.model,
             api_key=self.api_key,
             timeout=self.timeout or _CHILD_SDK_READ_TIMEOUT,
+            budget_seconds=budget_seconds,
         )
 
     def __repr__(self) -> str:
@@ -246,9 +374,12 @@ class ProviderSource(Protocol):
     concrete class. ``@runtime_checkable`` lets a boot assertion confirm the method surface too.
     """
 
+    @property
+    def max_tokens(self) -> int: ...
+
     def capabilities(self) -> frozenset[ProviderCapability]: ...
 
-    def bind(self) -> AbstractAsyncContextManager[AnthropicProvider]: ...
+    def bind(self, *, budget_seconds: float) -> AbstractAsyncContextManager[AnthropicProvider]: ...
 
     def drain_leftovers(self) -> None: ...
 
@@ -269,16 +400,73 @@ class BrokeredProviderSource:
         self._factory = factory
         self._control_end = control_end
 
+    @property
+    def max_tokens(self) -> int:
+        """The boot-validated per-request token budget (``ALFRED_QUARANTINE_MAX_TOKENS``).
+
+        Surfaced off the factory so the request loop uses the value ``_build_provider``'s
+        ``> 0`` guard already vetted, instead of re-reading ``os.environ`` per extraction and
+        routing around that gate.
+        """
+        return self._factory.max_tokens
+
     def capabilities(self) -> frozenset[ProviderCapability]:
         return self._CAPS
 
+    def _recv_one_fd(self, deadline_at: float) -> tuple[bytes, int]:
+        """Receive ONE brokered descriptor, bounded by the attempt deadline (never unbounded).
+
+        The bound is applied with ``settimeout`` on the SHARED control socket and restored to
+        blocking mode in a ``finally``: left in timeout mode, ``drain_leftovers``'
+        ``MSG_DONTWAIT`` sweep would block-then-``TimeoutError`` instead of raising
+        ``BlockingIOError``, silently breaking its EAGAIN terminator.
+
+        A timeout means the host never brokered this attempt's socket, so the child has no
+        route to the provider: :class:`ProviderUnavailableError` (a terminal
+        ``provider_unavailable`` refusal), NOT the ``cannot_extract`` an unmapped
+        ``TimeoutError`` would land as. Laundering an egress fault as a model-output failure
+        is the err-002 / HARD #7 anti-pattern, and it is the same adjudication the Task-9
+        broker-failure path took (ADR-0052 C1).
+        """
+        remaining = deadline_at - time.monotonic()
+        timeout_s = min(_CONTROL_RECV_TIMEOUT_S, remaining)
+        if timeout_s <= 0.0:
+            raise ProviderUnavailableError(
+                "quarantine child: attempt budget spent before a brokered socket was received"
+            )
+        self._control_end.settimeout(timeout_s)
+        try:
+            return recv_passed_fd(self._control_end)
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                "quarantine child: no brokered socket arrived on the control channel within "
+                f"{timeout_s:.2f}s — the host did not broker this attempt's egress"
+            ) from exc
+        finally:
+            # settimeout(None) == setblocking(True), spelled as the inverse of the
+            # settimeout above so the restore is obviously symmetric (and FBT003-free).
+            self._control_end.settimeout(None)
+
     @asynccontextmanager
-    async def bind(self) -> AsyncIterator[AnthropicProvider]:
-        _data, fd = await anyio.to_thread.run_sync(recv_passed_fd, self._control_end)
+    async def bind(self, *, budget_seconds: float) -> AsyncIterator[AnthropicProvider]:
+        """Bind ONE attempt's provider over ONE brokered socket.
+
+        ``budget_seconds`` is what REMAINS of the extraction's wall-clock budget. The deadline
+        is anchored HERE, before the control recv, so every step of the attempt — receiving the
+        descriptor, the TLS handshake, the request, the response — is spent out of one budget
+        rather than each getting a fresh one.
+        """
+        deadline_at = time.monotonic() + budget_seconds
+        _data, fd = await anyio.to_thread.run_sync(self._recv_one_fd, deadline_at)
         provider: AnthropicProvider | None = None
         backend: PassedFdBackend | None = None
         try:
-            provider, backend = self._factory.build(fd)
+            # The REMAINING budget, not the original: the recv above already spent part of it.
+            # A budget exhausted by the recv raises InvalidAttemptBudgetError out of the
+            # backend ctor, and the finally below reclaims the fd (backend is still None).
+            provider, backend = self._factory.build(
+                fd, budget_seconds=deadline_at - time.monotonic()
+            )
             yield provider
         finally:
             # R.2.7: the fd reclaim below MUST run even if provider.aclose() raises — nest it in
@@ -291,14 +479,17 @@ class BrokeredProviderSource:
                 if provider is not None:
                     await provider.aclose()
             finally:
-                # §8 D5 fd ownership. Once the httpx client has DIALED (backend.calls > 0) its
-                # aclose() is the SOLE owner of the passed fd and closes it — closing it here too
-                # would double-close (and could clobber an unrelated reused fd). Before any dial
-                # (a pre-build raise, an aclose() that raises before/without closing the fd, or a
-                # wait_for-cancel that unwinds the CM before .complete() dials), the client never
-                # wrapped the fd, so the source MUST close the raw fd itself or the persistent
-                # child leaks one descriptor per un-dialed attempt (core-002/err-006).
-                if backend is None or backend.calls == 0:
+                # §8 D5 fd ownership, decided by RELEASE not by DIAL. Once the httpx client's
+                # stream has actually closed the socket (backend.fd_closed), it was the sole
+                # owner and closing here too would double-close — possibly clobbering an
+                # unrelated reused fd. In every other case the descriptor is still ours and the
+                # persistent child leaks one per attempt unless we reclaim it (core-002/err-006):
+                # a pre-build raise (backend is None), a wait_for-cancel that unwinds the CM
+                # before .complete() dials, an aclose() that raises before closing anything —
+                # and, the case the old `backend.calls == 0` gate got WRONG despite its own
+                # comment claiming otherwise, an aclose() that raises AFTER the client dialed
+                # but before its stream teardown ran.
+                if backend is None or not backend.fd_closed:
                     os.close(fd)
 
     def drain_leftovers(self) -> None:

@@ -230,9 +230,22 @@ socket in its empty network namespace. The specific decisions:
   the tool-egress relay keep their tight 10s slow-loris guard. The timeout
   nesting becomes `action_deadline(30) > host_read(25) > gateway_handshake(22) >
   child_budget(20) > SDK_read(8)`, pinned by an ordering-invariant unit test.
-  This composes with the `sock.settimeout(read)` prerequisite (which makes the
-  20s budget a real hard ceiling — the blocking SDK `recv` is otherwise
-  un-cancellable by `asyncio.wait_for`) and with connect-defer.
+  This composes with the child-side socket-deadline prerequisite and with
+  connect-defer. **Correction (fix round, batch B):** that prerequisite was first
+  recorded as `sock.settimeout(read)` alone. It is not sufficient —
+  `settimeout` is a per-syscall **idle** timeout that resets on every byte
+  received, so a slow-drip response stays unbounded under it, and
+  `asyncio.wait_for` cannot help because `anyio.to_thread.run_sync` runs the
+  blocking SDK `recv` with `abandon_on_cancel=False` (it cancels, then *awaits*
+  the shielded thread). What makes the 20s budget a real ceiling is that
+  `dispatch_extraction` passes the REMAINING budget to
+  `BrokeredProviderSource.bind()`, which anchors it as an **absolute deadline**
+  every socket operation of that attempt is clamped against
+  (`min(read_timeout, deadline - now)`, an expired deadline refusing outright).
+  The idle cap survives as the inner per-syscall dead-peer detector. Without
+  this, the worst case was `20 + 8 = 28s` — past the host's 25s
+  `_READ_FRAME_TIMEOUT_S`, so the host tore the child down and its in-budget
+  refusal was lost.
 
 - **The broker preamble is bounded at 4s and joins the nesting as a SUM term.**
   The per-extraction preamble (`broker_sockets` plus its

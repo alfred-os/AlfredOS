@@ -1,8 +1,15 @@
 """P1e (#340): the quarantine timeout hierarchy must stay monotone so a real extraction
-is not torn host-side. NOTE the constants alone do NOT bound the retry loop — golive's
-per-call ``asyncio.wait_for(remaining_budget)`` makes the budget the true ceiling; this
-guard only pins the ORDERING against silent re-inversion. See the PR2b design spec
-``docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md`` §4 P1e / §19-A3.
+is not torn host-side.
+
+NOTE the constants alone do NOT bound the retry loop, and neither does
+``asyncio.wait_for``: the SDK read runs in a shielded worker thread
+(``anyio.to_thread.run_sync``, ``abandon_on_cancel=False``), so ``wait_for`` cancels and
+then awaits it. The true ceiling is the ABSOLUTE per-attempt socket deadline
+``dispatch_extraction`` installs via ``source.bind(budget_seconds=remaining)`` — see
+``brokered_egress`` and its behavioural tests. This module pins the ARITHMETIC that
+mechanism has to satisfy, and the ORDERING, against silent re-inversion. See the PR2b
+design spec ``docs/superpowers/specs/2026-07-11-issue-340-pr2b-golive-cutover-design.md``
+§4 P1e / §19-A3 / §17.
 """
 
 from alfred.egress.broker_audit import _AUDIT_AWAIT_TIMEOUT_S
@@ -114,20 +121,27 @@ def test_broker_preamble_bound_dominates_its_own_audit_write_budget() -> None:
     assert _BROKER_PREAMBLE_TIMEOUT_S < _AUDIT_AWAIT_TIMEOUT_S * BROKER_SOCKET_COUNT
 
 
-def test_worst_case_attempts_fit_the_child_budget() -> None:
-    """§17: the SDK-read x attempt-count worst case is bounded by the 20s child budget.
+def test_worst_case_attempts_overrun_without_the_shared_socket_deadline() -> None:
+    """§17: what the child budget costs if the per-attempt socket deadline ever regresses.
 
-    rev.1 left ``3 x SDK_read(8) + backoff`` unreconciled (3 x 8 + 1.5 = 25.5 > 20). golive's
-    per-call ``asyncio.wait_for(remaining_budget)`` (provider_dispatch, Task 5) makes the 20s
-    budget a HARD ceiling BY CONSTRUCTION — a late attempt gets the truncated remaining
-    budget, never a fresh 8s — so the constants are deliberately NOT changed. This test pins
-    the two structural facts that keep that true, PLUS documents WHY the wrap is load-bearing:
+    This test previously asserted that ``asyncio.wait_for(remaining_budget)`` makes the 20s
+    budget "a HARD ceiling BY CONSTRUCTION". **That premise was false.** The SDK's blocking
+    ``recv`` runs in ``anyio.to_thread.run_sync`` with ``abandon_on_cancel=False``, so
+    ``wait_for`` cancels the task and then *awaits* the shielded worker thread until it
+    returns on its own — it cannot truncate a provider read at all.
 
-    * a SINGLE attempt's SDK read fits the budget with headroom, and
-    * the total inter-attempt backoff is a small fraction of the budget;
-    * the NAIVE "N fresh 8s attempts + backoff" sum OVERRUNS the budget — precisely why each
-      ``provider.complete()`` is wrapped in ``wait_for(remaining_budget)``. If a refactor
-      dropped that wrap, this documented overrun would silently become a real ~25s hang.
+    What holds the ceiling is at the socket layer: ``dispatch_extraction`` passes the
+    REMAINING budget to ``source.bind()``, which anchors it as an ABSOLUTE deadline that every
+    syscall of that attempt is clamped against (``brokered_egress._BlockingFdStream``). Note
+    ``sock.settimeout`` ALONE is not enough either — it is a per-syscall IDLE timeout that
+    resets on every byte received, so a slow-drip response is unbounded under it. The
+    behavioural proofs live in ``test_brokered_egress_transport.py``
+    (``test_read_deadline_is_cumulative_not_per_syscall_idle``) and
+    ``test_quarantined_extractor_dispatch.py``
+    (``test_each_bind_receives_the_shrinking_remaining_budget``).
+
+    This test pins the ARITHMETIC those mechanisms exist to satisfy, including the concrete
+    consequence of losing them.
     """
     sdk_read = _sdk_read_seconds()
     total_backoff = sum(_BACKOFF_BASE_SECONDS * (2**k) for k in range(EXTRACTION_MAX_RETRIES))
@@ -135,7 +149,27 @@ def test_worst_case_attempts_fit_the_child_budget() -> None:
     assert sdk_read < _MAX_TOTAL_WALL_CLOCK_SECONDS
     # (b) total backoff across all retries is a small fraction of the budget.
     assert total_backoff < _MAX_TOTAL_WALL_CLOCK_SECONDS
-    # (c) the naive worst case OVERRUNS — so the wait_for(remaining_budget) wrap is what
-    # actually holds the ceiling (the last attempt is truncated, not given a fresh read).
+    # (c) the naive "N fresh 8s attempts + backoff" sum OVERRUNS the child budget, which is
+    # why the last attempt must be handed the TRUNCATED remainder rather than a fresh read.
     naive_worst_case = (EXTRACTION_MAX_RETRIES + 1) * sdk_read + total_backoff
     assert naive_worst_case > _MAX_TOTAL_WALL_CLOCK_SECONDS
+    # (d) THE CONSEQUENCE, and why this is not merely an efficiency question: that same naive
+    # sum also exceeds the HOST's read-frame bound. If the shared deadline regressed, the host
+    # would tear the child down BEFORE it could emit the in-budget refusal it was busy
+    # producing — the graceful typed refusal is not merely late, it is lost, and the failure
+    # surfaces as an anonymous host-side timeout instead (HARD #7).
+    assert naive_worst_case > _READ_FRAME_TIMEOUT_S
+
+
+def test_child_budget_leaves_headroom_for_the_reply_frame() -> None:
+    """§17: the child's ceiling must clear the host's read-frame bound by a real margin.
+
+    A child that finishes AT the host's deadline still has to serialise and write its reply
+    frame. The gap between the two is the budget for that write (and for scheduler jitter on
+    a loaded box), so the two constants must not merely be ordered — they must be apart.
+    """
+    headroom = _READ_FRAME_TIMEOUT_S - _MAX_TOTAL_WALL_CLOCK_SECONDS
+    assert headroom >= 2.0, (
+        f"only {headroom}s between the child budget and the host read-frame bound — a child "
+        "that uses its full budget may not get its refusal onto the wire"
+    )
