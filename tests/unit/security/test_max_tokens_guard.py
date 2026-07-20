@@ -144,9 +144,7 @@ def test_child_build_provider_error_names_the_bad_value(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "missing", ["ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS"]
-)
+@pytest.mark.parametrize("missing", ["ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS"])
 def test_child_build_provider_refuses_unset_spawn_env(
     monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
