@@ -73,6 +73,7 @@ import json
 import time
 from typing import Any
 
+import structlog
 from pydantic import ValidationError
 
 from alfred.providers.base import (
@@ -89,6 +90,11 @@ from alfred.security.quarantine import (
     ValidatorErrorCategory,
     _build_retry_prompt,
 )
+
+# Pinned to STDERR by ``__main__._pin_structlog_to_stderr`` before any child log is
+# emitted — structlog's default is stdout, which is the fd-1 JSON-RPC wire. Same
+# module-scope pattern as ``brokered_egress``.
+_log = structlog.get_logger(__name__)
 
 # The tool name forced on the native_constrained path (spec §6.2, #339 seam).
 _EXTRACT_TOOL_NAME = "extract_structured_data"
@@ -344,6 +350,19 @@ async def dispatch_extraction(
             # remaining budget will not recover inside a shrinking one, and the
             # orchestrator's action_deadline is closing. HARD #7: a loud
             # closed-vocab refusal, never a silent hang.
+            #
+            # LOUD means logged, not merely typed. This arm and retry-exhaustion below
+            # return the IDENTICAL ``cannot_extract`` refusal, so without this line an
+            # operator cannot tell three rejected model responses (a content problem) from
+            # one blown socket deadline (an infrastructure problem) — same reason, opposite
+            # remediation. The reason string itself is deliberately unchanged: a new
+            # TypedRefusalReason member is a schema change, deferred by design.
+            _log.warning(
+                "quarantine.child.extraction_deadline_exceeded",
+                attempt=attempt,
+                remaining_budget_s=round(deadline_monotonic - time.monotonic(), 3),
+                max_attempts=EXTRACTION_MAX_RETRIES + 1,
+            )
             return {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": cost_total}
         except ProviderUnavailableError:
             # Terminal (NOT retry-eligible): a provider outage, not a
