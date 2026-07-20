@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import uuid
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import structlog
@@ -106,11 +107,16 @@ _GENERIC_BROKER_REFUSAL_REASON = "control_fd_broker_failed"
 # it, so both must fit within the outer deadline:
 #
 #     preamble(4) + host_read(25) = 29 < action_deadline(30)          [success path]
-#     preamble(4) + failure-row write(<=5) = 9 << action_deadline(30) [refusal path]
+#     preamble(4) + refusal(<=10) = 14 < action_deadline(30)          [refusal path]
 #
 # which preserves the documented nesting ``action_deadline(30) > host_read(25) >
 # gateway_handshake(22) > child_budget(20) > sdk_read(8)`` — pinned by
 # ``test_broker_preamble_bound_nests_under_the_action_deadline`` and the §17 hierarchy suite.
+#
+# The refusal leg previously read "failure-row write(<=5)" with NOTHING pinning the 5: the
+# whole fail-closed path (revoke + row) ran outside every ceiling, and the reap underneath was
+# SIGTERM-only with an unbounded ``wait()``. A child declining to die blew the action_deadline
+# AND starved ``record_broker_failure``. Every term is now a real constant, not prose.
 #
 # WHY 4s IS AMPLE: with the CONNECT phase now gathered (A1) the batch costs ONE connect RTT to a
 # co-located gateway (sub-millisecond on a docker network), N local AF_UNIX ``sendmsg`` calls
@@ -119,6 +125,18 @@ _GENERIC_BROKER_REFUSAL_REASON = "control_fd_broker_failed"
 # effective connect ceiling on the golive path — deliberate: 10s of connect latency is already a
 # dead extraction, and refusing at 4s buys the forensics.
 _BROKER_PREAMBLE_TIMEOUT_S = 4.0
+
+# Bound on the child teardown inside a revoke. Covers the two-stage reap
+# (``_REAP_TOTAL_GRACE_S``, ~2s) plus the best-effort stderr drain
+# (``_STDERR_DRAIN_TIMEOUT_S``, 2s) with ~1s of slack. Its job is to stop a wedged teardown
+# consuming the whole refusal budget and starving the audit row that follows it.
+_REVOKE_TIMEOUT_S = 5.0
+
+# Bound on the ENTIRE fail-closed refusal path: revoke (<=5) + the durable
+# ``egress.broker.refused`` row (bounded independently at
+# ``broker_audit._AUDIT_AWAIT_TIMEOUT_S``, 5s). This is the constant the nesting arithmetic
+# above cites, so the refusal leg is pinned by code rather than asserted in a comment.
+_BROKER_REFUSAL_TIMEOUT_S = 10.0
 
 
 class StagingNonceUnconfiguredError(AlfredError):
@@ -336,6 +354,16 @@ class QuarantineStdioTransport:
     ) -> None:
         self._child_io = child_io
         self._staging = staging
+        # Serialises ``dispatch`` against the ONE long-lived child. Nothing else does:
+        # ``adapter_ids`` is a list and ``supervise_all`` runs a runner per adapter, so the
+        # shipped Discord+TUI config makes concurrent dispatch reachable in principle. Today's
+        # serialisation is emergent, not guaranteed — and the failure mode is not a crash but a
+        # SILENT cross-user T3 disclosure: two dispatches interleaving write_frame/read_frame on
+        # one child cross their replies, so user A's extraction returns user B's T3 body.
+        #
+        # Constructed here rather than lazily because a Lock created outside a running loop is
+        # loop-agnostic in modern CPython, and a lazy "create on first use" would itself race.
+        self._dispatch_lock = asyncio.Lock()
         # REQUIRED (no default). An ``EgressBrokerAuditor | None = None`` default was
         # fail-OPEN: a caller that forgot the auditor silently lost every durable
         # ``egress.broker.*`` row while the broker kept handing live gateway sockets to a T3
@@ -356,6 +384,14 @@ class QuarantineStdioTransport:
             _log.error("security.quarantine_transport.unsupported_method", method=method)
             raise AlfredError(t("security.quarantine_transport.unsupported_method", method=method))
 
+        # Held across the WHOLE wire exchange — broker preamble, both writes, and the read.
+        # A narrower critical section would still let a second dispatch's frames land between
+        # this one's, which is the crossing itself.
+        async with self._dispatch_lock:
+            return await self._dispatch_locked(params)
+
+    async def _dispatch_locked(self, params: dict[str, object]) -> ControlResult:
+        """The single-child wire exchange. Caller MUST hold ``_dispatch_lock``."""
         handle_id = str(params["handle_id"])
         # Drain BEFORE writing anything to the child: a missing/consumed handle is
         # refused before the wire is touched, so a replay cannot ship a partial
@@ -426,23 +462,51 @@ class QuarantineStdioTransport:
         queue, and killing the child would turn a transient outage into a hard-down quarantine
         path.
         """
+        # Groups every ``egress.broker.*`` row this extraction writes (it becomes each row's
+        # ``trace_id``) and salts each socket's ``egress_id``. Without it the N success rows
+        # carried one identical id — all N share a destination — so an audit consumer could not
+        # tell 1 extraction x N sockets from N extractions x 1 socket and the ADR-0040 residual
+        # (vii) counts inflated N-fold. A fresh uuid rather than ``handle_id``: the handle is a
+        # capability token for the staged T3 body and does not belong in an audit row.
+        extraction_id = str(uuid.uuid4())
         try:
-            async with asyncio.timeout(_BROKER_PREAMBLE_TIMEOUT_S):
+            async with asyncio.timeout(_BROKER_PREAMBLE_TIMEOUT_S) as preamble_deadline:
                 destinations = await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)
-                for host, port in destinations:
-                    await self._broker_auditor.record_broker_success(destination=f"{host}:{port}")
+                for ordinal, (host, port) in enumerate(destinations):
+                    await self._broker_auditor.record_broker_success(
+                        destination=f"{host}:{port}",
+                        extraction_id=extraction_id,
+                        socket_ordinal=ordinal,
+                    )
         except TimeoutError:
+            if not preamble_deadline.expired():
+                # NOT our deadline — a ``TimeoutError`` raised BY the callee. The auditor
+                # raises exactly that when its own bounded ``append_schema`` hangs, so
+                # catching it here silently converted a FAILED, NON-SKIPPABLE AUDIT WRITE
+                # into a graceful typed refusal. HARD #5: a failed audit write is loud and
+                # is never laundered. Let it propagate.
+                #
+                # Revoke FIRST. A sibling ``except`` clause does not catch a re-raise from
+                # inside this handler, so the A3 arm below would be skipped — and by this
+                # point the sockets are already queued in the child. Propagating without the
+                # revoke would leave a T3 child holding live provider-reachable fds with no
+                # durable row and no teardown: the exact un-recorded, un-revoked capability
+                # grant A3 exists to prevent.
+                await self._revoke_child_capability()
+                raise
             _log.error(
                 "security.quarantine_transport.broker_preamble_deadline_exceeded",
                 timeout_s=_BROKER_PREAMBLE_TIMEOUT_S,
             )
             return await self._refuse_broker(
+                extraction_id=extraction_id,
                 destination=_UNRESOLVED_DESTINATION,
                 reason=_GENERIC_BROKER_REFUSAL_REASON,
                 revoke=True,  # conservative: we cannot know how many fds reached the child
             )
         except ControlFdBrokerError as exc:
             return await self._refuse_broker(
+                extraction_id=extraction_id,
                 destination=exc.destination or _UNRESOLVED_DESTINATION,
                 reason=exc.reason,
                 revoke=exc.delivered > 0,
@@ -457,6 +521,7 @@ class QuarantineStdioTransport:
                 error_class=type(exc).__name__,
             )
             return await self._refuse_broker(
+                extraction_id=extraction_id,
                 destination=_UNRESOLVED_DESTINATION,
                 reason=_GENERIC_BROKER_REFUSAL_REASON,
                 revoke=False,
@@ -471,16 +536,21 @@ class QuarantineStdioTransport:
             raise
         return None
 
-    async def _refuse_broker(self, *, destination: str, reason: str, revoke: bool) -> ControlResult:
+    async def _refuse_broker(
+        self, *, extraction_id: str, destination: str, reason: str, revoke: bool
+    ) -> ControlResult:
         """Revoke (if the child holds fds), persist the refusal row, return the typed refusal.
 
         Revoke-FIRST ordering is deliberate: if the durable ``egress.broker.refused`` write
         itself fails it propagates loudly (HARD #5 — audit writes are non-skippable), and the
         capability must already be revoked by then rather than left live behind a raised error.
         """
-        if revoke:
-            await self._revoke_child_capability()
-        await self._broker_auditor.record_broker_failure(destination=destination, reason=reason)
+        async with asyncio.timeout(_BROKER_REFUSAL_TIMEOUT_S):
+            if revoke:
+                await self._revoke_child_capability()
+            await self._broker_auditor.record_broker_failure(
+                destination=destination, reason=reason, extraction_id=extraction_id
+            )
         return _broker_failure_refusal()
 
     async def _revoke_child_capability(self) -> None:
@@ -505,7 +575,18 @@ class QuarantineStdioTransport:
         """
         _log.error("security.quarantine_transport.capability_revoked")
         try:
-            await self._child_io.aclose()
+            async with asyncio.timeout(_REVOKE_TIMEOUT_S):
+                await self._child_io.aclose()
+        except TimeoutError:
+            # BOUNDED because the caller still has an audit row to write. Unbounded, a child
+            # that declines to die starved ``record_broker_failure`` entirely — the refusal
+            # that triggered this teardown produced no forensic row at all. The SIGKILL
+            # escalation underneath (``_terminate_and_reap``) means reaching this is already
+            # an OS-level anomaly, so it is an ERROR, not a warning.
+            _log.error(
+                "security.quarantine_transport.revoke_deadline_exceeded",
+                timeout_s=_REVOKE_TIMEOUT_S,
+            )
         except Exception as exc:
             _log.error(
                 "security.quarantine_transport.capability_revoke_failed",
