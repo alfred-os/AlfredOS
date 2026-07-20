@@ -131,3 +131,66 @@ def test_child_build_provider_error_names_the_bad_value(
     with pytest.raises(QuarantineChildBootError) as exc_info:
         child_main._build_provider("sk-quarantine-key")
     assert "0" in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------- #
+# CHILD boundary — UNSET / unparseable spawn-env config (#340 D1).
+#
+# Regression pin for the golive CI red: the bwrap spawn probe spawned the real child
+# WITHOUT the golive provider config, and `_build_provider` raised a bare
+# `KeyError: 'ALFRED_QUARANTINE_MODEL'` out of a §20.2 refuse-boot security gate. A
+# boot-config fault must present as the SAME loud typed refusal as the sibling budget
+# guard, naming the offending variable (HARD #7).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "missing", ["ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS"]
+)
+def test_child_build_provider_refuses_unset_spawn_env(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    """An UNSET spawn-env var raises the typed boot refusal, NOT a bare ``KeyError``.
+
+    ``KeyError`` is a ``LookupError``, not a ``QuarantineChildBootError``, so
+    ``pytest.raises(QuarantineChildBootError)`` genuinely falsifies the old behaviour —
+    this test FAILS against the pre-fix ``os.environ[...]`` indexing.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-test-model")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.delenv(missing, raising=False)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("sk-quarantine-key")
+    # Actionable: the refusal names WHICH variable is unset, so the operator does not
+    # have to diff two env names to find the spawn-wiring bug.
+    assert missing in str(exc_info.value)
+
+
+def test_child_build_provider_unset_refusal_is_not_a_key_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The typed refusal REPLACES the ``KeyError`` — it does not merely wrap and re-raise it."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.delenv("ALFRED_QUARANTINE_MODEL", raising=False)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("sk-quarantine-key")
+    assert not isinstance(exc_info.value, KeyError)
+    # Cause is preserved for forensics (`raise ... from exc`) without being the raised type.
+    assert isinstance(exc_info.value.__cause__, KeyError)
+
+
+@pytest.mark.parametrize("bad", ["", "eight-thousand", "8192.5", "0x2000"])
+def test_child_build_provider_refuses_unparseable_budget(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """A non-integer budget refuses typed rather than raising a bare ``ValueError``.
+
+    Same class of spawn-wiring fault as the unset case, on the same line — an
+    unparseable budget must not escape a security gate as a stdlib exception.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-test-model")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", bad)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("sk-quarantine-key")
+    assert not isinstance(exc_info.value, ValueError)
+    assert isinstance(exc_info.value.__cause__, ValueError)

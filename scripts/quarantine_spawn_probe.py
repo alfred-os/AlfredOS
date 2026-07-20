@@ -2,9 +2,26 @@
 """bwrap dual-LLM quarantine-child spawn probe (#290 CI gate).
 
 Decisive single-question probe: does the bwrap-sandboxed quarantine child spawn
-+ complete a real ingest->extract round-trip when run under the PRODUCTION
-posture of the ``alfred-core`` image — the non-root ``alfred`` user with only
++ complete its two-frame boot handshake when run under the PRODUCTION posture of
+the ``alfred-core`` image — the non-root ``alfred`` user with only
 ``cap_add: [SETUID]`` (NOT root, NOT ``--privileged``) on x86-64 Linux?
+
+**#340 PR2b-golive.** This probe used to assert a deterministic ECHO
+(``result.data.text == context``) from the pre-golive 2b child. The golive cutover
+DELETED that echo — the child now runs a REAL structured extraction against a real
+provider over a brokered gateway socket — so the echo assertion became
+unsatisfiable and this probe was a THIRD echo-dependent artifact (the two
+integration ones were superseded in Tasks 6/14). It now spawns in the REAL golive
+posture (``control_fd=True`` + provider config + egress config) and asserts the
+``hello`` + ``ready`` boot handshake (#443) instead.
+
+That is the RIGHT success criterion for this gate and a STRICTLY STRONGER spawn
+proof than the echo was: ``spawn_quarantine_child_io`` returns only after the child
+has exec'd under bwrap, imported ``alfred``, read its fd-3 key, emitted ``hello``,
+built its provider factory, reconstructed the inherited fd-4 control channel, and
+written ``ready``. No extraction is driven, so the probe needs NO gateway and NO
+provider credential — the child performs no external IO at boot (``sbx-2026-024``),
+which is exactly why an unreachable placeholder egress URL is correct here.
 
 Originally the throwaway #288/G6-0b probe; promoted to a permanent artifact by
 #290 because it is the only proof that exercises the *production deployability*
@@ -25,14 +42,14 @@ image ENV. The launcher ro-binds that prefix into the sandbox (the opt-in
 #290 sub-causes (editable install + ld.so-cache interpreter) are fixed in the image
 itself, leaving only the userns/AppArmor variable this gate isolates.
 
-The probe drives the SAME production machinery the real-spawn test uses
-(``spawn_quarantine_child_io`` -> ``QuarantineStdioTransport`` ingest/extract),
-but with NO postgres/redis/daemon and NO audit layer — it isolates the spawn.
+The probe drives the SAME production machinery the real-spawn path uses
+(``spawn_quarantine_child_io``), but with NO postgres/redis/daemon and NO audit
+layer — it isolates the spawn.
 
 Prints exactly one machine-greppable result line and sets the exit code:
 
-* ``QUARANTINE_SPAWN_PROBE_RESULT=OK``           -> exit 0 (child spawned + echoed)
-* ``QUARANTINE_SPAWN_PROBE_RESULT=FAILED:<why>`` -> exit 1 (refused / wrong reply)
+* ``QUARANTINE_SPAWN_PROBE_RESULT=OK``           -> exit 0 (child spawned + booted)
+* ``QUARANTINE_SPAWN_PROBE_RESULT=FAILED:<why>`` -> exit 1 (refused / never booted)
 """
 
 from __future__ import annotations
@@ -41,9 +58,34 @@ import asyncio
 import os
 import sys
 import traceback
+from dataclasses import dataclass
 
-_PROBE_BODY = "g6-0b probe body — does the real bwrap child echo this back?"
 _RESULT_PREFIX = "QUARANTINE_SPAWN_PROBE_RESULT="
+
+# Provider config for the spawn env. The child indexes both at boot
+# (``_build_provider``) but makes NO provider call during the handshake, so these
+# only have to be well-formed, not real. ``max_tokens`` must be > 0 or the child's
+# §20.2 budget guard correctly refuses boot.
+_PROBE_MODEL = "claude-haiku-4-5"
+_PROBE_MAX_TOKENS = 1024
+
+# The child reconstructs fd 4 at boot but dials NOTHING until an extraction, which
+# this probe never drives (``sbx-2026-024``: no external IO at boot). An
+# unreachable-but-well-formed ``host:port`` is therefore correct — it satisfies the
+# spawn's fail-closed "control_fd=True REQUIRES an egress_config" guard without
+# implying a reachable gateway.
+_PROBE_EGRESS_PROXY_URL = "http://127.0.0.1:1"
+
+
+@dataclass(frozen=True, slots=True)
+class _ProbeEgressConfig:
+    """Minimal :class:`alfred.egress._config_protocols.EgressProxyConfig` stub.
+
+    Structural conformance only — the probe has no ``Settings``, and the spawn reads
+    exactly one attribute off this surface.
+    """
+
+    egress_proxy_url: str | None = _PROBE_EGRESS_PROXY_URL
 
 
 def _emit(result: str) -> int:
@@ -66,19 +108,24 @@ def _assert_non_root_posture() -> str | None:
     return None
 
 
-async def _run_round_trip() -> str:
-    """Spawn the real bwrap child + drive one ingest->extract round-trip.
+async def _run_boot_handshake() -> str:
+    """Spawn the real bwrap golive child + prove its two-frame boot handshake.
 
-    Returns ``"OK"`` on a verified echo, else ``"FAILED:<reason>"``.
+    Returns ``"OK"`` once the child is spawned + booted, else ``"FAILED:<reason>"``.
 
-    Drives the child-IO seam DIRECTLY with the production wire constants rather
-    than ``QuarantineStdioTransport`` — the transport's ``dispatch`` insists on a
-    nonce-tagged ``QuarantineStagingMap`` entry (T3 tagging machinery that is
-    irrelevant to the spawn question), so the probe stays at the wire layer the
-    transport itself uses (``_frame`` / ``_decode_result_payload``). What it
-    proves is identical: the bwrapped child genuinely spawned, read the wire, and
-    echoed the body back (the 2b deterministic-echo loop sets
-    ``result.data.text = context``).
+    ``spawn_quarantine_child_io`` performs the whole proof internally: it execs
+    ``bin/alfred-plugin-launcher.sh`` (``kind="full"`` -> bwrap), delivers the key over
+    fd 3, installs the control socket on fd 4, and then READS BOTH handshake frames
+    (#443) before returning — ``hello`` (provenance: a real exec'd child) and ``ready``
+    (liveness: provider factory built, fd-4 reconstructed, request loop serving). A
+    child that never exec'd, or that refused boot, surfaces as a ``read_frame`` failure
+    -> :class:`QuarantineChildSpawnError`. So a successful return IS the spawn proof;
+    there is no separate round-trip to drive.
+
+    Spawns in the REAL golive posture (``control_fd=True`` + provider/egress config),
+    because that is the only posture the shipped child supports: ``_child_env`` sets the
+    provider config ONLY on the ``control_fd=True`` path, so a bare ``control_fd=False``
+    spawn of the real child module boots a child that refuses on unset config.
     """
     # Imported here so the module loads even if the import surface changes; an
     # import error is reported as a clear FAILED reason rather than a traceback
@@ -87,66 +134,33 @@ async def _run_round_trip() -> str:
         QuarantineChildSpawnError,
         spawn_quarantine_child_io,
     )
-    from alfred.security.quarantine_transport import (
-        _EXTRACT_METHOD,
-        _INGEST_METHOD,
-        _decode_result_payload,
-        _frame,
-    )
 
     child_io = None
     try:
-        # The 2b deterministic-echo child reads + scrubs the provider key but
-        # makes NO LLM call, so a placeholder key is correct here (mirrors the
-        # real-spawn integration test). This is the REAL bwrap spawn: it execs
-        # bin/alfred-plugin-launcher.sh (kind=full -> bwrap) and delivers the key
-        # over fd 3.
-        child_io = await spawn_quarantine_child_io(provider_key="g6-0b-probe-placeholder-key")
+        # The child scrubs the key after handing it to the frozen provider factory and
+        # makes NO provider call during boot, so a placeholder key is correct here.
+        # This is the REAL bwrap spawn.
+        child_io = await spawn_quarantine_child_io(
+            provider_key="g6-0b-probe-placeholder-key",
+            control_fd=True,
+            egress_config=_ProbeEgressConfig(),
+            model=_PROBE_MODEL,
+            max_tokens=_PROBE_MAX_TOKENS,
+        )
     except QuarantineChildSpawnError as exc:
+        # The launcher refused inside bwrap, the policy was inert, the userns setup was
+        # denied, or a handshake frame never arrived — the failure this gate isolates.
         return f"FAILED:spawn_refused:{type(exc).__name__}:{exc}"
     except Exception as exc:
         return f"FAILED:spawn_raised:{type(exc).__name__}:{exc}"
 
-    handle_id = "g6-0b-probe-handle"
     try:
-        # Same wire the transport ships: ingest the body inline, then extract
-        # against the opaque handle. The bwrapped child caches the ingest body
-        # and echoes it back on extract.
-        child_io.write_frame(
-            _frame(_INGEST_METHOD, {"handle_id": handle_id, "context": _PROBE_BODY})
-        )
-        child_io.write_frame(
-            _frame(
-                _EXTRACT_METHOD,
-                {
-                    "handle_id": handle_id,
-                    "schema_json": '{"type":"object","properties":{"text":{"type":"string"}}}',
-                    "schema_version": 1,
-                },
-            )
-        )
-        raw = await child_io.read_frame()
-    except QuarantineChildSpawnError as exc:
-        # A truncated/wedged reply frame -> the child crashed mid-round-trip
-        # (the launcher refused inside bwrap, the policy was inert, the userns
-        # setup was denied, etc.).
-        return f"FAILED:round_trip_refused:{type(exc).__name__}:{exc}"
-    except Exception as exc:
-        return f"FAILED:round_trip_raised:{type(exc).__name__}:{exc}"
-    finally:
-        if child_io is not None:
-            await child_io.aclose()
-
-    try:
-        payload = _decode_result_payload(raw)
-    except Exception as exc:
-        return f"FAILED:decode_raised:{type(exc).__name__}:{exc}"
-
-    data = payload.get("data") if isinstance(payload, dict) else None
-    echoed = data.get("text") if isinstance(data, dict) else None
-    if echoed == _PROBE_BODY:
+        # Reaching here means both handshake frames were read inside the spawn.
         return "OK"
-    return f"FAILED:echo_mismatch:got={echoed!r} payload={payload!r}"
+    finally:
+        # Tear the bwrap child + control socket down even if aclose itself raises,
+        # so the probe never leaks a sandboxed process into the CI runner.
+        await child_io.aclose()
 
 
 def main() -> int:
@@ -164,7 +178,7 @@ def main() -> int:
     )
 
     try:
-        result = asyncio.run(_run_round_trip())
+        result = asyncio.run(_run_boot_handshake())
     except Exception:
         traceback.print_exc()
         result = "FAILED:probe_harness_raised"

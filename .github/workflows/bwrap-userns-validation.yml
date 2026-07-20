@@ -190,20 +190,38 @@ jobs:
             -e ALFRED_ENVIRONMENT=production \
             --entrypoint /opt/alfred-python/bin/python3 \
             alfred-core-290 -c '
-          import importlib.util, os, struct, subprocess, sys
+          import importlib.util, os, socket, struct, subprocess, sys
           os.environ["ALFRED_SANDBOX_BIND_INTERP_PREFIX"] = "1"
           _qc = importlib.util.find_spec("alfred.security.quarantine_child").origin
           os.environ["ALFRED_PLUGIN_MANIFEST_PATH"] = os.path.join(os.path.dirname(_qc), "manifest.toml")
+          # #340 PR2b-golive: the real child indexes its provider config at boot and
+          # reconstructs the inherited fd-4 control channel BEFORE writing `ready`. A
+          # diagnostic that omits either stops at its own refuse-boot and hides the very
+          # bwrap blocker (userns? bind? import?) this step exists to surface — so mirror
+          # the live spawn: golive env on fd 3's peer, plus a real fd-4 socketpair end.
+          os.environ["ALFRED_QUARANTINE_MODEL"] = "claude-haiku-4-5"
+          os.environ["ALFRED_QUARANTINE_MAX_TOKENS"] = "1024"
           os.chdir("/app")
           key = b"placeholder-key"
           r, w = os.pipe(); os.set_inheritable(r, True)
-          saved = os.dup(3)
+          parent_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+          child_end.set_inheritable(True)
+          # Save-or-None: fd 3/4 are not guaranteed open in this process, and an
+          # unguarded os.dup would raise EBADF and kill the diagnostic before it prints.
+          def _save(fd):
+              try: return os.dup(fd)
+              except OSError: return None
+          def _restore(saved, fd):
+              if saved is None: os.close(fd)
+              else: os.dup2(saved, fd); os.close(saved)
+          saved3, saved4 = _save(3), _save(4)
           try:
-              os.dup2(r, 3)
+              os.dup2(r, 3); os.dup2(child_end.fileno(), 4)
               argv = ["bin/alfred-plugin-launcher.sh", "alfred.quarantined-llm", "/opt/alfred-python/bin/python3", "-m", "alfred.security.quarantine_child"]
-              p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(3,), env=dict(os.environ))
+              p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(3, 4), env=dict(os.environ))
           finally:
-              os.dup2(saved, 3); os.close(saved); os.close(r)
+              _restore(saved3, 3); os.close(r)
+              _restore(saved4, 4); child_end.close()
           os.write(w, struct.pack(">I", len(key)) + key); os.close(w)
           out, err = p.communicate(timeout=20)
           print("[diag] child rc:", p.returncode)
