@@ -382,5 +382,14 @@ dormant mechanism this ADR shipped live. The forward-gates recorded above are no
   gateway remains the destination-allowlist enforcement point. Option B stays in reserve for when
   #358 lands.
 
+- **Decision 7's "still ships dormant" paragraph is superseded.** That paragraph states
+  `EgressBrokerAuditor` "still ships **dormant** … today it is exercised solely by its own unit
+  tests," and names golive's `broker_sockets` wiring as the auditor's only production caller. Golive
+  has now landed that caller: `QuarantineStdioTransport` holds the auditor and writes an
+  `egress.broker.connected` row per brokered destination and an `egress.broker.refused` row on every
+  failure arm, both live on the comms-inbound path. The two hookpoints are declared in
+  `alfred/egress/hookpoints.py` and registered through `alfred.hooks.boot`. The paragraph is left
+  in place as a record of the PR2a/pre-gate epoch; read it as history, not current state.
+
 The Decision 7 audit row and the Status `Proposed → Accepted` flip were shipped by the broker-audit
 pre-gate PR, **not** by golive — see the 2026-07-19 amendment at the head of this ADR.
