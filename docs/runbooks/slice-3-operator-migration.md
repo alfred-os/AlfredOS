@@ -282,7 +282,7 @@ dual-LLM split.
 ```yaml
 quarantine:
   provider: "anthropic"
-  model: "claude-haiku-3-5"
+  model: "claude-haiku-4-5"
   secret_id: "quarantine_provider_api_key"
   max_tokens_per_extraction: 8192
 ```

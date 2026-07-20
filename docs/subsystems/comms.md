@@ -400,10 +400,14 @@ tiers). To run the daemon without comms on such a host, leave
 constructs none of the quarantine graph and is unaffected.
 
 The child's provider key is resolved from the secret broker by the fixed id
-`quarantine_provider_api_key` (`config/routing.yaml [quarantine] secret_id`). When
-unset it falls back to a documented placeholder with a loud `structlog` warning —
-the 2b echo child reads, scrubs, and discards it without a provider call. `#340`
-flips the unset path to refuse-boot once the child makes a real provider call.
+`quarantine_provider_api_key` (`config/routing.yaml [quarantine] secret_id`). Since
+`#340` PR2b-golive the child makes a REAL provider call, so an unset key is a hard
+**refuse-boot**: the daemon exits 2 with a `daemon.boot.failed` row carrying
+`quarantine_provider_key_unset`, resolved synchronously before the child is
+spawned. The pre-golive placeholder-with-a-warning fallback was deleted
+deliberately — a silently dead quarantine LLM is a must-not-regress — so there is
+no warn-and-continue path. A keyless stack therefore refuses to boot by design;
+see the first-run notes for provisioning the key.
 
 **Three new refuse-boot arms guard the privileged `RealTurnOrchestratorAdapter`
 construction (`#338` PR2).** `_build_comms_boot_graph` now also builds the

@@ -38,7 +38,7 @@ audit row. A manifest with `subscriber_tier` set to any T0–T3 string raises
 ```yaml
 quarantine:
   provider: "anthropic"        # anthropic | deepseek | openai
-  model: "claude-haiku-3-5"   # fast + cheap; adequate for structured extraction
+  model: "claude-haiku-4-5"   # fast + cheap; adequate for structured extraction
   secret_id: "quarantine_provider_api_key"
 ```
 

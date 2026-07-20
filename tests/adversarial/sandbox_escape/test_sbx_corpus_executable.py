@@ -796,21 +796,28 @@ def test_sbx_2026_011_policy_ref_symlink_follow_contained(tmp_path: Path) -> Non
 def test_sbx_2026_005_outbound_network_egress_contained() -> None:
     """sbx-2026-005 is now an ENFORCED-containment vector (Spec C G7-1, #333).
 
-    The deterministic-echo child needs no egress, so the real Linux policy
-    --unshare-net's it into an empty network namespace: an outbound connection is
-    refused at the kernel. The payload flipped from ``out_of_scope=True`` to a
-    defended vector; we assert the SHIPPED policy genuinely unshares ``net`` so the
-    containment claim stays honest. The 2c real-LLM child (still #230) reaches its
-    provider only through the gateway proxy, never by re-opening this namespace.
+    The real Linux policy --unshare-net's the child into an empty network
+    namespace: an outbound connection is refused at the kernel. The payload
+    flipped from ``out_of_scope=True`` to a defended vector; we assert the SHIPPED
+    policy genuinely unshares ``net`` so the containment claim stays honest.
+
+    #340 PR2b-golive raised the stakes rather than lowering them. The child is no
+    longer the egress-free echo stub — it is the real-LLM child, holding a live
+    provider key and T3 content, and it reaches its provider ONLY through a
+    gateway socket the core pre-connects and passes in over SCM_RIGHTS (fd 4).
+    The empty netns is what makes that brokered fd the child's SOLE reachability;
+    dropping ``net`` would hand a T3-holding child a direct route past the
+    gateway chokepoint.
     """
     payload = _load("sbx-2026-005")
     assert payload.out_of_scope is False
     assert payload.expected_outcome == "refused"
     policy = read_policy_toml(_QUARANTINED_LINUX_POLICY.read_text())
     assert "net" in policy.unshare, (
-        "policy no longer unshares net — sbx-2026-005 asserts the echo child's "
-        "egress is kernel-closed (--unshare-net); a dropped 'net' silently "
-        "re-opens the child's egress (Spec C G7-1)"
+        "policy no longer unshares net — sbx-2026-005 asserts the quarantine "
+        "child's egress is kernel-closed (--unshare-net) so the SCM_RIGHTS-brokered "
+        "gateway socket is its only reachability; a dropped 'net' lets the real-LLM "
+        "child bypass the chokepoint (Spec C G7-1 / #340)"
     )
 
 

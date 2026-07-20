@@ -26,11 +26,16 @@ the shipped bytes.
 dev). CI's alfred-core image (PR-S4-0b) ships bubblewrap 0.8.0 so this runs in
 docker-in-docker. Promoted to a required status check under PR-S4-7.
 
-NB: Spec C G7-1 (#333) made the real policy ``--unshare-net`` — the shipped
-deterministic-echo child needs no egress, so it runs in an empty network
-namespace (egress kernel-closed). The 2c real-LLM child (still #230) reaches its
-provider PROVIDER-ONLY through the gateway L7 CONNECT proxy, never by re-opening
-this namespace. This test asserts the shipped policy unshares ``net`` (the
+NB: Spec C G7-1 (#333) made the real policy ``--unshare-net``, and #340
+PR2b-golive made that flag MORE load-bearing rather than less. The shipped child
+is no longer the deterministic-echo stub: it is the real-LLM child and it DOES
+call a provider. It reaches that provider PROVIDER-ONLY through a gateway socket
+the core pre-connects and hands over via SCM_RIGHTS on fd 4 — so the empty
+network namespace is precisely what forces every byte through the broker +
+gateway L7 CONNECT proxy instead of letting the child dial out itself. Dropping
+``net`` would not merely re-open a hole on an egress-free stub; it would let a
+T3-holding child with a live provider key bypass the chokepoint entirely. This
+test asserts the shipped policy unshares ``net`` (the
 kernel-observable egress containment is enforced live in the
 ``integration-privileged`` job) — see
 ``tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml``
@@ -270,13 +275,17 @@ def test_real_policy_unshare_set_matches_shipped() -> None:
     assertions below would silently weaken; this pins the production posture so
     the kernel-enforcement claims stay anchored to what AlfredOS actually ships.
     Also pins the Spec C G7-1 (#333) egress closure: the real policy MUST unshare
-    ``net`` so the echo child runs in an empty network namespace; dropping it
-    silently re-opens the child's egress.
+    ``net`` so the child runs in an empty network namespace. Since #340
+    PR2b-golive the child holds a real provider client and key, so dropping it
+    would let that child dial the network directly instead of only through the
+    SCM_RIGHTS-brokered gateway socket.
     """
     shipped = tomllib.loads(_REAL_POLICY.read_text())
     unshare = set(shipped.get("unshare", []))
     assert {"pid", "uts", "cgroup", "ipc", "net"} <= unshare
-    assert "net" in unshare, "net dropped — echo-child egress re-opened (Spec C G7-1)"
+    assert "net" in unshare, (
+        "net dropped — the real-LLM child could bypass the fd-4 broker (G7-1 / #340)"
+    )
     assert 3 in shipped.get("keep_fds", [])
 
 
@@ -345,9 +354,11 @@ def test_quarantined_llm_cannot_exec_host_bin_sh(tmp_path: Path) -> None:
 def test_launcher_invokes_bwrap_with_unshared_net(tmp_path: Path) -> None:
     """Spec C G7-1 (#333): the real policy passes --unshare-net.
 
-    The echo child needs no egress, so the launcher's emitted flag set isolates
-    the network namespace. Pinned here so a future edit that drops net isolation
-    (silently re-opening the child's egress) is forced through review.
+    The launcher's emitted flag set isolates the network namespace. Since #340
+    PR2b-golive the child DOES make provider calls, reaching the gateway only via
+    the SCM_RIGHTS-brokered fd-4 socket — so this flag is what keeps the broker
+    the child's SOLE egress path. Pinned here so a future edit that drops net
+    isolation is forced through review.
     """
     stub = tmp_path / "stub.py"
     stub.write_text(
@@ -364,7 +375,9 @@ def test_launcher_invokes_bwrap_with_unshared_net(tmp_path: Path) -> None:
 
     body = (policy_dir / "quarantined-llm.linux.bwrap.policy").read_text()
     flags = policy_to_bwrap_flags(read_policy_toml(body))
-    assert "--unshare-net" in flags, "net isolation dropped — echo-child egress re-opened (G7-1)"
+    assert "--unshare-net" in flags, (
+        "net isolation dropped — the real-LLM child could bypass the fd-4 broker (G7-1 / #340)"
+    )
     assert "--unshare-pid" in flags
     # And the chain actually runs end-to-end.
     result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
