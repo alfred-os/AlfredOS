@@ -254,10 +254,14 @@ class _RecordingBrokerAuditor:
     def __init__(self) -> None:
         self.successes: list[str] = []
 
-    async def record_broker_success(self, *, destination: str) -> None:
+    async def record_broker_success(
+        self, *, destination: str, extraction_id: str, socket_ordinal: int
+    ) -> None:
         self.successes.append(destination)
 
-    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
+    async def record_broker_failure(
+        self, *, destination: str, reason: str, extraction_id: str
+    ) -> None:
         raise AssertionError("not exercised by this test")
 
 
