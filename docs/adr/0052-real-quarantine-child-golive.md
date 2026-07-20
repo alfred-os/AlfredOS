@@ -1,6 +1,6 @@
 # ADR-0052 — Real quarantine-child go-live: the raw-T3 → real-provider cutover
 
-- **Status**: Proposed (accepted on #340 PR2b-golive merge)
+- **Status**: Accepted (on #340 PR2b-golive merge)
 - **Date**: 2026-07-19
 - **Slice**: #340 — PR2b-golive
   (`docs/superpowers/plans/2026-07-19-issue-340-pr2b-golive.md`; spec
@@ -89,20 +89,47 @@ socket in its empty network namespace. The specific decisions:
 
 - **Fork 2 — the host brokers N sockets up-front per extraction; the child
   consumes one per attempt and drains leftovers.** `dispatch_extraction`
-  retries `complete()` up to `_MAX_RETRIES+1 = 3` times (schema-validation
-  failures), each attempt needs a fresh one-shot socket, and fd-4 is strictly
-  one-way (core→child) so the child cannot request more mid-extraction.
-  `QuarantineStdioTransport.dispatch` therefore brokers all N **concurrently**
-  (`asyncio.gather`, not `N × _CONNECT_TIMEOUT_S` serial) *before* writing the
-  extract frame; the child consumes one socket per attempt and drains the
-  `(N − attempts_used)` leftovers with a **non-blocking** `MSG_DONTWAIT`
-  recv-until-EAGAIN sweep in the extract-branch `finally`. A hard-count
-  blocking drain would wedge the child on a miscount. **N = 3 is a hard ceiling
-  conditional on P1a** (`max_retries=0` on the child provider + httpcore
-  `retries=0`): with any SDK-layer re-dial the one-shot `PassedFdBackend`
-  cannot serve a second `connect_tcp` and demand balloons to 3×3; a unit test
-  pins `max_retries=0`. fd-4 stays strictly one-way — PR2a's
+  retries `complete()` up to `EXTRACTION_MAX_RETRIES + 1 = 3` times
+  (schema-validation failures; `BROKER_SOCKET_COUNT` is derived from that
+  constant, `security/quarantine.py`), each attempt needs a fresh one-shot
+  socket, and fd-4 is strictly one-way (core→child) so the child cannot request
+  more mid-extraction. `QuarantineStdioTransport.dispatch` therefore brokers all
+  N *before* writing the extract frame; the child consumes one socket per
+  attempt and drains the `(N − attempts_used)` leftovers with a **non-blocking**
+  `MSG_DONTWAIT` recv-until-EAGAIN sweep in the extract-branch `finally`. A
+  hard-count blocking drain would wedge the child on a miscount. **N = 3 is a
+  hard ceiling conditional on P1a** (`max_retries=0` on the child provider +
+  httpcore `retries=0`): with any SDK-layer re-dial the one-shot
+  `PassedFdBackend` cannot serve a second `connect_tcp` and demand balloons to
+  3×3; a unit test pins `max_retries=0`. fd-4 stays strictly one-way — PR2a's
   reverse-fd-injection closure is untouched.
+
+  **The two phases of that brokering are deliberately asymmetric — CONNECT is
+  concurrent, SEND is serial** (`broker_connected_sockets`,
+  `egress/control_fd_broker.py`). An earlier revision of this ADR ratified
+  "brokers all N concurrently (`asyncio.gather`)" flat, which described neither
+  half correctly; the shipped code is:
+
+  - **CONNECT runs under `asyncio.gather(..., return_exceptions=True)`.** A
+    serial loop costs `N × _CONNECT_TIMEOUT_S` (3 × 10 = 30s) before the extract
+    frame even dispatches — equal to the whole `action_deadline`, so a degraded
+    gateway would *guarantee* a deadline kill instead of the graceful
+    `provider_unavailable` refusal. `return_exceptions=True` is load-bearing,
+    not incidental: it lets the collection loop recover every socket that did
+    connect so the `finally` closes them all; a bare `gather` would propagate
+    the first exception while sibling futures were still resolving, orphaning
+    their sockets.
+  - **SEND stays a serial `for`.** SCM_RIGHTS **queue order is load-bearing**
+    (the child consumes one socket per retry attempt in enqueue order), and two
+    concurrent `sendmsg` calls on one control fd could interleave.
+
+  A known residual is recorded in the function docstring rather than papered
+  over: `run_in_executor` futures cannot be cancelled once the worker has
+  started, so a caller that cancels mid-CONNECT leaves in-flight `_connect_one`
+  threads to run to completion, and their sockets never reach the `finally`.
+  CPython refcounting closes them promptly, but not by this function's own
+  cleanup; the caller compensates where it matters, because a cancelled preamble
+  revokes the whole child.
 
 - **A partial fd hand-off REVOKES the child; connect-defer alone is not enough.**
   Connect-defer makes the CONNECT half all-or-nothing, but it cannot make the
@@ -120,15 +147,28 @@ socket in its empty network namespace. The specific decisions:
   case — deliberately does **not** revoke; nothing reached the child, and killing
   it would turn a transient outage into a hard-down quarantine path.
 
-  **Accepted operational consequence.** The child is spawned exactly once, at
-  daemon boot (`_build_comms_inbound_extractor`); there is **no respawn
-  scheduler**. A revoke therefore takes the quarantine path down until the daemon
-  restarts. It degrades gracefully rather than crashing — with the control parent
-  closed, `_send_one` fails immediately and every later extraction returns the
-  same `provider_unavailable` typed refusal plus its own `egress.broker.refused`
-  row — but the path stays down. This is the deliberate fail-closed trade against
-  leaving un-revoked gateway capability in a T3-holding child. A supervised
-  respawn for the quarantine child is a tracked follow-up (see References).
+  **Accepted operational consequence — a human sign-off decision item.** The
+  child is spawned exactly once, at daemon boot
+  (`_build_comms_inbound_extractor`); there is **no respawn scheduler** (#455
+  records the restart scheduler as documented-but-never-built). A revoke
+  therefore takes quarantine extraction down until the daemon restarts. It
+  degrades gracefully rather than crashing — with the control parent closed,
+  `_send_one` fails immediately and every later extraction returns the same
+  `provider_unavailable` typed refusal plus its own `egress.broker.refused` row
+  (verified by test, not asserted from design) — but the path stays down.
+
+  The uncomfortable part, stated plainly because the sign-off should turn on it:
+  **the realistic trigger for a failed `sendmsg` is the child already being
+  dead.** A live, healthy child with a drained control channel is precisely the
+  case that does *not* fail. So the common path into this teardown is the one
+  where the useful behaviour would have been *respawn*, not revoke — the revoke
+  is mostly re-killing a corpse and then declining to replace it. The teardown is
+  still correct and still fail-closed (it is the only thing that makes the
+  hand-off invariant true for the genuinely-partial case, and it must not depend
+  on correctly diagnosing *why* the send failed), but its availability cost is
+  paid disproportionately on failures where it buys no security. Accepting this
+  ADR accepts that trade until #455 lands; a supervised respawn would convert the
+  whole class into a self-healing event.
 
 - **Fork 3 — a `BrokeredProviderSource` wrapper-provider, not a bare factory.**
   `dispatch_extraction` is egress-free by contract (its docstring guarantees it
@@ -269,6 +309,34 @@ socket in its empty network namespace. The specific decisions:
   invariant test pins the inversion so a future retune cannot silently restore an
   unbounded hot-path stall.
 
+- **The SEND phase gains a per-syscall bound — defense-in-depth, not a bug fix.**
+  `_send_one` now sets `_SEND_TIMEOUT_S = 1.0` around its `sendmsg`. The
+  mechanism it guards is real: `sendmsg` on a `SOCK_STREAM` blocks when the send
+  buffer is full, `_send_one` runs in the default executor where a started worker
+  **cannot be cancelled**, so a block there would outlive both the 4s preamble
+  bound and the outer `action_deadline`, leaking a thread no deadline can reap.
+  What is **not** true — and an earlier framing of this change implied it — is
+  that this fixed a live unbounded block on the hot path. **The precondition is
+  not reachable in the current wiring**, and the record should say so:
+  `_send_one` is the only writer on `parent_end`, each call writes exactly one
+  byte, `count` is `BROKER_SOCKET_COUNT = 3`, and `SO_SNDBUF` on an AF_UNIX
+  socketpair is 8192 (macOS, measured) / 212992 (Linux default) — three bytes
+  cannot fill it. An unread fd 4 creates no pressure either, and the kernel's
+  SCM_RIGHTS in-flight limit refuses with `ETOOMANYREFS` rather than blocking.
+
+  The accurate claim is narrower and still worth having: **the SEND phase's
+  thread-blocking bound is now structural rather than contingent on the ratio of
+  `BROKER_SOCKET_COUNT` to `SO_SNDBUF`.** Today that ratio is safe by three
+  orders of magnitude; a larger batch, a wider frame, or any future second writer
+  on the control channel would erode it silently, and the failure mode is a
+  permanently wedged thread on the golive hot path. The bound is kept on that
+  basis (maintainer decision at sign-off), not on a claim that it repairs a
+  present defect. A per-syscall bound suffices here — unlike the child's
+  slow-drip read path, the SEND phase cannot drip, so the worst case is the fixed
+  product `BROKER_SOCKET_COUNT × _SEND_TIMEOUT_S` (3 × 1.0 = 3.0s), pinned
+  strictly under the 4.0s preamble bound by
+  `test_send_timeout_is_a_total_bound_under_the_preamble`.
+
 - **The echo path is DELETED, not bypassed.** `_echo_extracted_frame`,
   `_DeterministicProvider`, and the `_build_provider` sentinel return are
   removed. A surviving echo behind any residual branch/flag would let a misconfig
@@ -325,18 +393,87 @@ socket in its empty network namespace. The specific decisions:
   still bars a *direct* external socket, but this proxied path is live. Tracked
   by #358; ADR-0040 residual (iv) is amended alongside this ADR.
 
-- **The turn-level cost of the quarantine extraction is aggregated by no one
-  yet.** `dispatch_extraction` now returns a summed `cost_usd` that accrues
-  across every paid attempt and rides both the `extracted` and `typed_refusal`
-  returns (P1c). But the host consumer — `QuarantinedExtractor._extract_body`
-  (`security/quarantine.py`) — parses the frame into `Extracted`/`TypedRefusal`
-  and **drops `cost_usd`**. The natural join point is the turn record assembled
-  in `orchestrator/core.py` (the `per_turn_spent_usd` / `turn_cost_usd`
-  accumulation), which today sums only the #338 **privileged** provider cost, not
-  the quarantine extraction cost. Wiring the quarantine cost through the frame
-  lift into that turn record is a **tracked follow-up** (telemetry, not a
-  security gate) — see References. Until it lands, cost reporting under-counts a
-  turn by its quarantine-extraction spend.
+- **The closed-egress adversarial gate no longer proves what it was written to
+  prove, and this cutover is what hollowed it out.**
+  `tests/adversarial/sandbox_escape/test_quarantined_llm_not_yet_spawned_while_egress_open.py`
+  carried an explicit prediction that it "goes RED the moment 2c wires a real
+  client INTO the child." **This PR is 2c, and the gate stayed green.** It stayed
+  green because `_module_scope_imports` walks only `tree.body`, and every
+  egress-capable import in the golive child is inside a function (`import socket`
+  in `main()`; `brokered_egress` / `provider_dispatch` inside `main()` /
+  `_build_provider` / `handle_extract`). Task 6's own implementation ledger
+  records the lazy import as deliberate, annotated "egress-closure gate green" —
+  so this was not a near-miss the fleet caught later: **the cutover routed around
+  the gate, and the ledger noted the green light as a result rather than as a
+  warning.** That is the honest characterisation, and it belongs in the sign-off
+  record.
+
+  - **What it still asserts:** no egress-capable import may appear at *module
+    scope* in the child entry module, and (unaffected by the cutover) the only
+    live launcher/quarantined-LLM spawn site in `src/alfred` is the single
+    sanctioned substrate plus the `--self-test` probe. Both remain
+    release-blocking.
+  - **What it no longer proves:** the broad claim it was authored for — "the
+    child cannot reach the network." It cannot: the child now constructs a real
+    Anthropic client and calls a provider.
+  - **Where containment IS still independently gated:** the kernel
+    `--unshare-net` empty network namespace
+    (`test_quarantined_llm_policy_kernel_enforced.py`, adversarial payload
+    `sbx-2026-005`), and the fd-4 SCM_RIGHTS broker being the child's *only*
+    reachability. The kernel layer — not any userspace import-graph invariant —
+    is the enforcement-of-record, and it carries more weight after golive, not
+    less. The two layers were always intended as independent; one of them
+    weakening is exactly the case the other exists for.
+
+  This PR **discloses** the gap in an in-file `.. warning::` and deliberately
+  does **not** rewrite the oracle. Rebuilding it around the golive posture (e.g.
+  asserting the child's egress imports are exactly the sanctioned brokered ones,
+  at any scope) introduces a *new trust-boundary invariant*, and a new
+  trust-boundary invariant must not land inside a human-sign-off-gated PR under a
+  docs commit, where it would be attested without its own security review.
+  Replacing the oracle is **required follow-up work**, not optional cleanup: until
+  it lands, the import-graph layer should be read as narrow residue and given no
+  weight at sign-off.
+
+- **This real-money path is governed by no budget guard, and its cost is
+  aggregated by no one.** `dispatch_extraction` now returns a summed `cost_usd`
+  that accrues across every paid attempt and rides both the `extracted` and
+  `typed_refusal` returns (P1c). But the host consumer —
+  `QuarantinedExtractor._extract_body` (`security/quarantine.py`) — parses the
+  frame into `Extracted`/`TypedRefusal` and **drops `cost_usd` on the floor**.
+  Concretely, and unlike **every** privileged completion, the quarantine
+  extraction has:
+
+  - **no `BudgetGuard.check_and_charge`** (`budget/guard.py`) — the privileged
+    turn charges each completion at `orchestrator/core.py`; nothing charges this
+    one;
+  - **no per-user or per-task ceiling** — a per-user budget cannot decline a
+    quarantine extraction, because the spend never reaches the guard;
+  - **no cost row** — the turn record's `per_turn_spent_usd` / `turn_cost_usd`
+    sums only the #338 privileged provider cost, so reporting under-counts every
+    turn by its quarantine-extraction spend.
+
+  **The bound that DOES hold is structural, and it is why this is an accounting
+  gap rather than a runaway-spend risk.** Spend per extraction is capped by
+  construction at `max_tokens_per_extraction × (EXTRACTION_MAX_RETRIES + 1)` —
+  8192 output tokens × 3 attempts, on `claude-haiku-4-5` ($1/$5 per 1M
+  in/out). The output side is therefore ≲ $0.12 per extraction in the worst case,
+  the retry count is a hard ceiling and not operator-tunable upward at runtime,
+  and `max_tokens` is fail-loud-validated `> 0` at child boot rather than
+  defaulted. There is no unbounded loop and no path by which one extraction can
+  spend without limit. What is missing is **attribution and enforcement**, not
+  containment: the money is bounded but invisible, uncharged, and not
+  attributable to a user.
+
+  Wiring the frame-lifted `cost_usd` through into the turn record is a **tracked
+  follow-up** — telemetry plus budget enforcement, not a containment gate.
+  **Owner: `alfred-core-engineer`** (the join point is the `orchestrator/core.py`
+  turn record and `BudgetGuard`, both core-owned, not quarantine-owned), tracked
+  against [#55](https://github.com/alfred-os/AlfredOS/issues/55) (`alfred cost
+  report` / dashboards) and [#45](https://github.com/alfred-os/AlfredOS/issues/45)
+  (per-user budgets). A reviewer who considers un-guarded real spend a release
+  gate rather than a follow-up should say so at sign-off — this ADR records it as
+  a follow-up, and that disposition is itself part of what is being attested.
 
 - **A wrong-but-non-empty provider key is not caught at boot** (the `ready` =
   liveness non-claim). It surfaces as a `provider_unavailable` refusal at first
@@ -362,15 +499,48 @@ socket in its empty network namespace. The specific decisions:
   and **no** `_IMPORT_ALLOWLIST` entry. The raw-socket ratchet
   (`test_only_sanctioned_raw_socket_egress_site.py`) is not tripped — the child
   only `recvmsg`s an fd, it never does an INET-connect ∧ `sendmsg(SCM_RIGHTS)`.
-  Where a module-scope egress import is unavoidable, the closed-egress anchor
-  (`test_quarantined_llm_not_yet_spawned_while_egress_open.py`) is inverted with
-  the sbx-2026-005 precedent and the inversion justified.
 - **The canned-Anthropic integration stub validates nothing about the real
   gateway's acceptance policy** — destination allowlist, gateway-side DNS,
   refuse-literal-IP, reject-non-globally-routable, `Proxy-Authorization`/mTLS
   (the #358 residual) are all exercised only by the nightly real-key smoke
   follow-up, not by this cutover's tests. #269 (arm64 `/lib64` soft bind) is
   unchanged.
+
+## Deployment wiring (shipped in this PR)
+
+The cutover made `ALFRED_QUARANTINE_PROVIDER_API_KEY` a **hard boot requirement**
+but initially wired only the code that *reads* it — so a default
+`docker compose up` refused boot while naming a remedy the operator could not
+perform (compose forwarded no such variable; `alfred-core` has no `env_file` and
+mounts no `secrets.toml`, closing the file route too), and the stack crash-looped
+under `restart: unless-stopped`. A keyless stack still refuses to boot — that
+fail-loud posture is the point — but the remedy the refusal names now works:
+
+- `docker-compose.yaml` forwards the key using the existing
+  `ALFRED_ANTHROPIC_API_KEY:-` empty-default pattern, so a keyless checkout draws
+  no compose warning and the refusal stays an AlfredOS-level one. Three
+  `test_compose_invariants` pins cover the forward, the `:-` shape, and that the
+  key never reaches the gateway (ADR-0036 — the gateway holds no provider
+  credential).
+- `bin/alfred-setup.sh` warns when the key is absent, and distinguishes "set in
+  your shell but not `.env`" (compose reads `.env`). It cannot seed one, and
+  unlike the Discord token it cannot be sidestepped by disabling a feature — it
+  gates the whole comms boot.
+- `.env.example` promotes the key to a real entry and states the refuse-boot
+  consequence. It also drops `ALFRED_QUARANTINED_PROVIDER` /
+  `ALFRED_QUARANTINED_MODEL`, which nothing in `src/` has ever read.
+- README's quickstart adds the missing `cp .env.example .env` step.
+
+**The quarantine model id moved `claude-haiku-3-5` → `claude-haiku-4-5`**
+(`config/routing.yaml`), carried with golive because the cutover is what makes
+the id load-bearing. This also repaired a **latent mispricing**: the stale id was
+absent from `_ANTHROPIC_PRICING` (`providers/anthropic_native.py`), and unknown
+models deliberately fail *closed* onto the most expensive known tariff —
+`claude-opus-4-7` at $15/$75 per 1M vs Haiku's $1/$5, a **15× over-charge** on
+both input and output. Under the echo child nothing called a provider so nothing
+was mispriced; the first real extraction would have been. The two operator
+runbooks that quote the block (`slice-3-operator-migration.md`,
+`slice-3-quarantined-llm.md`) were updated in the same PR.
 
 ## Alternatives considered
 
@@ -446,10 +616,24 @@ the `egress.broker.refused` audit row.
 
 ### Tracked follow-ups (recorded, not filed here)
 
-- **Turn-level quarantine-cost aggregation.** Wire the frame-lifted
-  `cost_usd` (dropped today by `QuarantinedExtractor._extract_body`) into the
-  `orchestrator/core.py` turn record so the quarantine extraction cost joins the
-  #338 privileged cost in one `turn_cost_usd`. Telemetry, not a security gate.
+- **Turn-level quarantine-cost aggregation + budget enforcement.** Wire the
+  frame-lifted `cost_usd` (dropped today by
+  `QuarantinedExtractor._extract_body`) into the `orchestrator/core.py` turn
+  record and through `BudgetGuard.check_and_charge`, so the quarantine extraction
+  joins the #338 privileged cost in one `turn_cost_usd` and becomes subject to a
+  per-user ceiling. **Owner: `alfred-core-engineer`**; tracked against
+  [#55](https://github.com/alfred-os/AlfredOS/issues/55) (`alfred cost report` /
+  dashboards) and [#45](https://github.com/alfred-os/AlfredOS/issues/45)
+  (per-user budgets). See the Negative consequence above for the structural spend
+  bound that holds in the meantime.
+- **Rebuild the closed-egress adversarial oracle.**
+  `test_quarantined_llm_not_yet_spawned_while_egress_open.py` no longer proves
+  what it was written to prove (see the Negative consequence above); this PR
+  discloses that in-file and deliberately does not rewrite it. Rebuilding it
+  around the golive posture is a **trust-boundary change** and needs its own
+  security review outside a sign-off-gated PR. **Owner:
+  `alfred-security-engineer`** with `alfred-test-engineer`; not yet filed as an
+  issue — filing it is part of accepting this ADR.
 - **CLAUDE.md HARD #5 + PRD note (human-gated).** Golive makes CLAUDE.md's HARD
   #5 ("the privileged orchestrator never sees raw T3; only the quarantined LLM
   does") *fully* true — the quarantined LLM is now real. CLAUDE.md and PRD edits
@@ -460,12 +644,23 @@ the `egress.broker.refused` audit row.
   still describe the deterministic-echo child; an `alfred-docs-author` pass
   should record the live real-LLM child. Recorded per golive spec §19-E5; not
   written here.
-- **Supervised respawn for the quarantine child.** The child is spawned once at
-  daemon boot with no respawn scheduler, so the partial-hand-off revoke (and any
-  other child death) takes the quarantine path down until the daemon restarts.
+- **[#455](https://github.com/alfred-os/AlfredOS/issues/455) — supervised respawn
+  for the quarantine child.** The child is spawned once at daemon boot with no
+  respawn scheduler (#455 records `request_plugin_restart`'s docstring as claiming
+  a scheduler that was never built), so the partial-hand-off revoke — and any
+  other child death — takes the quarantine path down until the daemon restarts.
   Extractions degrade to a graceful `provider_unavailable` refusal rather than
-  crashing, so this is availability, not a security gate — but a supervised
-  respawn would turn a revoke into a self-healing event.
+  crashing, so this is availability, not a security gate. It is called out as a
+  **sign-off decision item** in the Decision section because the common trigger
+  for the revoke is a child that is *already dead*, which is precisely the case
+  respawn would handle better than teardown.
+- **[#451](https://github.com/alfred-os/AlfredOS/issues/451) /
+  [#457](https://github.com/alfred-os/AlfredOS/issues/457) — hookpoint-doc and
+  floor hygiene.** This PR adds the two `egress.broker.*` rows to
+  `docs/subsystems/supervisor.md` and raises the
+  `test_known_hookpoints_sync` floor 32 → 34, but #457's underlying gap (the
+  floor tracks well below the real manifest total) and #451's `sandbox_stub_used`
+  staleness are unchanged by golive.
 - **#358** — core→proxy `Proxy-Authorization`/mTLS (the residual (iv)
   forward-gate the live brokered caller now exercises).
 - **Nightly real-key smoke** — real Anthropic + real gateway + real key in CI
