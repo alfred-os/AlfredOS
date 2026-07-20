@@ -27,6 +27,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from alfred.egress.allowlist import exact_match
 from alfred.gateway import egress_metrics
 from alfred.gateway.egress_proxy import (
+    GATEWAY_EGRESS_CONNECT,
     EgressForwardProxy,
     resolve_egress_proxy_bind,
     resolve_egress_proxy_port,
@@ -249,14 +250,63 @@ async def test_incomplete_request_line_denied() -> None:
 
 @pytest.mark.asyncio
 async def test_oversized_request_line_denied() -> None:
-    # A request line that exceeds the bounded read cap without a terminator →
-    # LimitOverrunError → malformed (deterministic: the reader buffer overruns).
+    # A long request line that hits EOF without a terminator → IncompleteReadError carrying a
+    # LARGE partial → malformed. (This test used to claim it exercised LimitOverrunError; it
+    # never did — ``_reader_with`` builds a DEFAULT-limit (64 KiB) StreamReader, so 9 KB fits.
+    # The genuine overrun path is covered by the limit-matched test below.)
     audit: list[tuple[str, dict[str, object]]] = []
     proxy = _proxy(audit)
     writer = _CaptureWriter()
     await _serve(proxy, b"CONNECT " + b"a" * 9000, writer)
     assert b"400" in writer.buf
     assert any(f.get("reason") == "malformed_connect" for _, f in audit)
+
+
+@pytest.mark.asyncio
+async def test_request_line_overrunning_the_read_cap_denied() -> None:
+    # The REAL LimitOverrunError arm. Production builds the reader with
+    # ``limit=_REQUEST_LINE_CAP`` (``start_server(..., limit=...)``), so a request line that
+    # exceeds the cap before any terminator overruns the buffer rather than hitting EOF. The
+    # reader here is limit-matched to production so the branch is genuinely exercised.
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = _proxy(audit)
+    writer = _CaptureWriter()
+    reader = asyncio.StreamReader(limit=8192)
+    reader.feed_data(b"CONNECT " + b"a" * 20000)  # no terminator, no EOF: pure overrun
+    await asyncio.wait_for(
+        proxy._serve_connection(reader, writer),  # type: ignore[arg-type]
+        timeout=5,
+    )
+    assert b"400" in writer.buf
+    assert any(f.get("reason") == "malformed_connect" for _, f in audit)
+
+
+@pytest.mark.asyncio
+async def test_idle_peer_trips_the_handshake_timeout_and_is_denied() -> None:
+    # The slow-loris arm: a peer that connects, sends NOTHING, and holds the socket open. It
+    # must stay a DENIAL — it is exactly what the per-handshake timeout exists to reap, and it
+    # is the case the #340 C1 abandon-split must NOT swallow (an abandoned broker socket
+    # CLOSES, producing a clean zero-byte EOF; this peer does not).
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = EgressForwardProxy(
+        allowlist=_ALLOWLIST,
+        match=exact_match,
+        bind_host="127.0.0.1",
+        port=0,
+        audit=lambda event, fields: audit.append((event, fields)),
+        resolve=lambda _h: "1.1.1.1",
+        handshake_timeout_s=0.01,
+    )
+    writer = _CaptureWriter()
+    reader = asyncio.StreamReader()  # never fed, never EOF'd
+    await asyncio.wait_for(
+        proxy._serve_connection(reader, writer),  # type: ignore[arg-type]
+        timeout=5,
+    )
+    assert b"400" in writer.buf
+    assert any(f.get("reason") == "malformed_connect" for _, f in audit), (
+        "an idle peer must remain a counted denial, not a benign abandon"
+    )
 
 
 @pytest.mark.asyncio
@@ -568,3 +618,132 @@ async def test_deny_still_audits_and_refuses_when_metric_raises() -> None:
         "audit must fire before the metric"
     )
     assert b"403" in writer.buf, "refusal must be written before/independent of the metric"
+
+
+# --- Abandoned connection vs malformed handshake (#340 golive C1). ---
+#
+# The golive host brokers BROKER_SOCKET_COUNT (3) gateway-connected sockets per extraction and
+# the child consumes ONE per retry attempt, so a first-attempt success discards 2 of them
+# UNUSED — closed without ever writing a request line. Counting those as MALFORMED_CONNECT
+# denials meant two false denials per SUCCESSFUL extraction, which pins
+# ``ops/alerts/gateway.yml``'s GatewayEgressDenyRate permanently on and swamps the ADR-0040
+# residual (vii) exfiltration deny-log. The proxy must therefore separate:
+#
+#   * clean EOF with ZERO bytes read  -> benign abandon (not a denial, not alerted);
+#   * ANY partial bytes then EOF      -> still a real MALFORMED_CONNECT denial (a truncated
+#                                        handshake is a security signal and must not be
+#                                        laundered into the benign bucket).
+#
+# ``asyncio.IncompleteReadError.partial`` is what makes the two decidable at the read site.
+
+
+def _connect_outcome(outcome: str) -> float:
+    """Current value of ``gateway_egress_connect_total{outcome=...}`` (public collect API)."""
+    for metric in GATEWAY_EGRESS_CONNECT.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_total") and sample.labels.get("outcome") == outcome:
+                return float(sample.value)
+    return 0.0
+
+
+@pytest.mark.asyncio
+async def test_peer_close_before_any_request_byte_is_not_a_denial() -> None:
+    reg = CollectorRegistry()
+    denied = egress_metrics.build_denied_counter(reg)
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = _proxy(audit, plane="proxy", denied_counter=denied)
+    writer = _CaptureWriter()
+
+    await _serve(proxy, b"", writer)  # connected, then closed without a single byte
+
+    assert audit == [], "an abandoned pre-brokered socket must write NO audit row"
+    assert writer.buf == b"", "no 4xx may be written to a peer that already went away"
+    assert writer.closed, "the client writer must still be reaped"
+    # ``build_denied_counter`` pre-declares every plane/reason series at 0, so assert the VALUES
+    # stay zero rather than the absence of the lines.
+    fam = next(
+        f
+        for f in text_string_to_metric_families(generate_latest(reg).decode())
+        if f.name == "gateway_egress_denied"
+    )
+    assert [s.value for s in fam.samples if s.value] == [], (
+        "gateway_egress_denied_total must NOT move — it drives GatewayEgressDenyRate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_request_line_then_close_is_still_a_denial() -> None:
+    # The security-signal half of the split: a peer that sends SOME bytes and then closes is a
+    # truncated/slow-loris handshake, NOT the benign broker-discard. This pins that the C1 fix
+    # cannot be widened into "any IncompleteReadError is benign".
+    reg = CollectorRegistry()
+    denied = egress_metrics.build_denied_counter(reg)
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = _proxy(audit, plane="proxy", denied_counter=denied)
+    writer = _CaptureWriter()
+
+    await _serve(proxy, b"CONNECT api.anthropic.com:44", writer)
+
+    assert any(f.get("reason") == "malformed_connect" for _, f in audit)
+    assert b"400" in writer.buf
+    fam = next(
+        f
+        for f in text_string_to_metric_families(generate_latest(reg).decode())
+        if f.name == "gateway_egress_denied"
+    )
+    hit = next(
+        s for s in fam.samples if s.labels == {"plane": "proxy", "reason": "malformed_connect"}
+    )
+    assert hit.value == 1.0, "a truncated handshake must stay a counted denial"
+
+
+@pytest.mark.asyncio
+async def test_abandoned_connect_is_counted_as_its_own_outcome() -> None:
+    # Benign != invisible. The abandon still increments a DISTINCT outcome so a connect-flood
+    # stays observable, and so the documented sum invariant
+    # (sum(denied_total{plane}) == connect_total{outcome="denied"}) is preserved.
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = _proxy(audit)
+    before_abandoned = _connect_outcome("abandoned")
+    before_denied = _connect_outcome("denied")
+
+    await _serve(proxy, b"", _CaptureWriter())
+
+    assert _connect_outcome("abandoned") == before_abandoned + 1.0
+    assert _connect_outcome("denied") == before_denied, "abandon must not count as a denial"
+
+
+@pytest.mark.asyncio
+async def test_real_socket_broker_discard_produces_no_denial() -> None:
+    # End-to-end over a REAL listener + REAL TCP socket, reproducing what the golive broker
+    # actually does to an unused pre-brokered socket: connect, never write, close. The
+    # in-memory tests above assert the same thing deterministically; this one proves the
+    # premise (a discarded broker socket really does arrive as a zero-byte clean EOF).
+    import socket as _socket
+
+    free = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port = free.sockets[0].getsockname()[1]
+    free.close()
+    await free.wait_closed()
+
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = EgressForwardProxy(
+        allowlist=_ALLOWLIST,
+        match=exact_match,
+        bind_host="127.0.0.1",
+        port=port,
+        audit=lambda event, fields: audit.append((event, fields)),
+        resolve=lambda _h: "1.1.1.1",
+    )
+    shutdown = asyncio.Event()
+    serve_task = asyncio.ensure_future(proxy.serve(shutdown))
+    await asyncio.sleep(0.05)  # let serve() bind
+    try:
+        sock = _socket.create_connection(("127.0.0.1", port), timeout=5)
+        sock.close()  # exactly the broker's discard of an unused socket
+        await asyncio.sleep(0.1)  # let the connection task run to completion
+    finally:
+        shutdown.set()
+        await asyncio.wait_for(serve_task, timeout=5)
+
+    assert audit == [], f"a discarded broker socket must produce no audit row, got {audit!r}"

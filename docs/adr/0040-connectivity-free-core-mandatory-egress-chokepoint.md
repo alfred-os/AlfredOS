@@ -264,6 +264,29 @@ residual described above. **The live caller lands with #340 golive**
 dormant, and golive's `control_fd=True` flip is what drives it on the live extraction path, so
 these durable broker rows are now written in production rather than only exercised by unit tests.
 
+**Deny-log signal hygiene: abandoned connections are not denials (2026-07-20, #340 golive).**
+The broker pre-connects `BROKER_SOCKET_COUNT` (3) gateway sockets per extraction because a
+consumed passed fd cannot re-dial, and the child consumes one per retry attempt. A
+first-attempt success therefore discards the remaining sockets *unused* — closed without ever
+writing a CONNECT request line. The proxy originally classified each such close as
+`MALFORMED_CONNECT`, which put **two false denials on every successful extraction**: it pinned
+`GatewayEgressDenyRate` (`ops/alerts/gateway.yml`) permanently on and swamped the very deny-log
+this residual describes with benign noise, degrading it as an exfiltration signal.
+`EgressForwardProxy._read_connect_target` now separates the two at the read site using
+`asyncio.IncompleteReadError.partial`: a clean EOF having read **zero bytes** is an abandoned
+connection (counted under `gateway_egress_connect_total{outcome="abandoned"}`, never audited,
+never alerted), while **any** partial request line followed by EOF — and an idle peer that trips
+the per-handshake timeout — remain full `malformed_connect` denials. The split is deliberately
+keyed on zero-bytes-read so it narrows noise without weakening the truncated-handshake or
+slow-loris signal, and the documented sum invariant
+(`sum(gateway_egress_denied_total{plane})` == `gateway_egress_connect_total{outcome="denied"}`)
+is preserved. Note the *eager* N-socket broker is not itself the thing to fix here: brokering
+just-in-time instead was considered and rejected in
+[ADR-0052](0052-real-quarantine-child-golive.md) ("Reverse fd-4 to request/response…") because
+it would reopen reverse-fd-injection on a channel PR2a deliberately made one-way (core→child).
+Classifying the discards correctly at the gateway is the fix that does not trade a security
+property for log hygiene.
+
 ## Alternatives considered
 
 ### Per-plugin kernel egress cap (iptables / seccomp BPF per plugin)

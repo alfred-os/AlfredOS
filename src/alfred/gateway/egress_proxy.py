@@ -18,6 +18,10 @@ Enforcement per CONNECT (each connection is its own task):
   routable** is refused — closing the DNS-rebinding TOCTOU (sec-003);
 * the request-line read is **bounded** (a small byte cap + a per-handshake timeout),
   so a slow-loris / oversized handshake cannot pin a task;
+* a peer that closes having sent **zero bytes** is an ABANDONED connection, not a
+  denial: it is counted under its own ``outcome="abandoned"`` and never audited or
+  alerted (a partial request line then EOF, or an idle peer that trips the handshake
+  timeout, both remain real ``malformed_connect`` denials);
 * every CONNECT — allowed or denied — is audited (gateway-local structlog tier).
 
 A bind failure is **fail-closed**: the ``OSError`` propagates (B2 maps it to
@@ -314,12 +318,34 @@ class EgressForwardProxy:
     async def _read_connect_target(
         self, writer: asyncio.StreamWriter, reader: asyncio.StreamReader
     ) -> EgressDestination | None:
-        """Read + parse the bounded CONNECT request line. None => already denied."""
+        """Read + parse the bounded CONNECT request line. None => already denied OR abandoned."""
         try:
             raw = await asyncio.wait_for(
                 reader.readuntil(b"\r\n\r\n"), timeout=self._handshake_timeout_s
             )
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+        except asyncio.IncompleteReadError as exc:
+            # A peer that closed having sent NOTHING is a benign disconnect, not a malformed
+            # handshake. The golive quarantine broker pre-connects BROKER_SOCKET_COUNT sockets
+            # per extraction and the child consumes one per retry attempt, so a first-attempt
+            # success discards the rest UNUSED — counting each as a denial put two false
+            # ``malformed_connect`` rows on every SUCCESSFUL extraction, pinned
+            # ``GatewayEgressDenyRate`` permanently on, and swamped the ADR-0040 residual (vii)
+            # exfiltration deny-log (a security signal) with benign noise.
+            #
+            # ``exc.partial`` is what makes the two decidable HERE, and the split is deliberately
+            # narrow: it keys on ZERO bytes read, so a peer that sent PART of a request line and
+            # then closed (a truncated / slow-loris handshake) stays a full denial. So does a
+            # ``TimeoutError`` — a peer that holds the socket open sending nothing is the
+            # slow-loris case the handshake bound exists to reap, not an abandoned broker socket
+            # (which closes as soon as the extraction that owns it finishes).
+            if not exc.partial:
+                GATEWAY_EGRESS_CONNECT.labels(outcome="abandoned").inc()
+                _log.debug("gateway.egress.connect_abandoned", plane=self._plane)
+                self._close(writer)
+                return None
+            await self._deny(writer, 400, EgressDenyReason.MALFORMED_CONNECT, "<unread>")
+            return None
+        except (asyncio.LimitOverrunError, TimeoutError):
             await self._deny(writer, 400, EgressDenyReason.MALFORMED_CONNECT, "<unread>")
             return None
         request_line = raw.split(b"\r\n", 1)[0].decode("latin-1")
