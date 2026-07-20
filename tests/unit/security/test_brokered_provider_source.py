@@ -37,6 +37,7 @@ from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
 from alfred.providers.base import ProviderCapability, ProviderUnavailableError
 from alfred.security.quarantine_child.brokered_egress import (
     BrokeredProviderSource,
+    InvalidAttemptBudgetError,
     ProviderSource,
     QuarantineChildBootError,
     _ProviderFactory,
@@ -604,5 +605,47 @@ def test_control_recv_refuses_when_the_budget_is_already_spent() -> None:
     with pytest.raises(ProviderUnavailableError, match="budget spent"):
         source._recv_one_fd(time.monotonic() - 1.0)
     assert a.gettimeout() is None  # refused before touching the shared socket's mode
+    a.close()
+    b.close()
+
+
+@_posix_only
+def test_bind_maps_budget_exhausted_by_recv_to_provider_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget exhausted BY the recv (not before it) must surface as provider_unavailable.
+
+    Third sibling of the two budget-exhaustion maps this file already pins — budget spent
+    BEFORE the recv (``test_control_recv_refuses_when_the_budget_is_already_spent``, egress.py
+    :431) and a recv ``TimeoutError`` (``test_bind_control_recv_is_bounded_and_refuses_loud``,
+    :437) — both of which raise ``ProviderUnavailableError``. When the recv SUCCEEDS but
+    consumed the whole budget, ``PassedFdBackend.__init__`` raises ``InvalidAttemptBudgetError``
+    out of ``bind()``'s ``__aenter__``; unconverted it escapes ``dispatch_extraction`` untyped
+    and would land as ``cannot_extract`` — laundering an egress fault as a model-output failure
+    (err-002 / HARD #7, ADR-0052 C1). ``bind()`` must convert it to the SAME
+    ``ProviderUnavailableError`` as its two siblings, and still reclaim the fd (#472 finding 4).
+    """
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())
+    monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
+
+    def _budget_gone(_self: object, _fd: int, **_kw: object) -> tuple[object, object]:
+        # What the real PassedFdBackend ctor does when ``budget_seconds <= 0`` (egress.py
+        # :225-231) — the recv above consumed the attempt budget before the build.
+        raise InvalidAttemptBudgetError("budget_seconds must be positive, got -0.01")
+
+    monkeypatch.setattr(be._ProviderFactory, "build", _budget_gone)
+    a, b = _af_unix_socketpair()
+    source = BrokeredProviderSource(_factory(), a)
+
+    async def _drive() -> None:
+        with pytest.raises(ProviderUnavailableError):
+            async with source.bind(budget_seconds=_AMPLE_BUDGET_S):
+                pass  # never reached — build raised before yield
+
+    anyio.run(_drive)
+    with pytest.raises(OSError):
+        os.close(victim)  # reclaimed on the conversion path too — no leak
+    keeper.close()
     a.close()
     b.close()

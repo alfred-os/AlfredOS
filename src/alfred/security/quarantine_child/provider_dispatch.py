@@ -210,10 +210,15 @@ async def dispatch_extraction(
     purpose: that Protocol lives in ``brokered_egress.py``, whose module
     scope imports httpx/ssl/socket. Annotating against it here — even only
     for the type — would drag the egress-capable import closure onto this
-    module's graph and trip the child-import-closure gate. This module
-    stays egress-free; the real network client is built inside
-    ``source.bind()``, never here (same rationale that typed the pre-seam
-    ``provider`` as ``Any``).
+    module's graph. This module stays egress-free by DOCUMENTED INTENT; the
+    real network client is built inside ``source.bind()``, never here (same
+    rationale that typed the pre-seam ``provider`` as ``Any``). NB the
+    enforcing any-scope oracle does not yet exist (tracked in #465): the
+    module-scope ``test_quarantine_child_import_closure.py`` forbids the
+    privileged host subsystems but names NO egress module in its
+    ``_FORBIDDEN_ROOTS``, so nothing today would actually TRIP on such an
+    import — the containment is the kernel ``--unshare-net`` + the fd-4
+    SCM_RIGHTS broker, both independently gated.
 
     Selects the dispatch path from the source's capability set
     (fork b, #340):
@@ -372,6 +377,19 @@ async def dispatch_extraction(
             # Terminal (NOT retry-eligible): a provider outage, not a
             # model-output failure, so audit consumers can tell them
             # apart (err-002).
+            #
+            # LOUD, not merely typed (#472 finding 4 / HARD #7): this arm returns the same
+            # provider_unavailable refusal whether the SDK reported an outage, the host never
+            # brokered a socket, or the attempt budget was exhausted before the provider was
+            # built — three infrastructure faults with the same reason but different
+            # remediation. Without this line an operator cannot tell them from one another,
+            # nor from a model-content failure. Mirrors the extraction_deadline_exceeded arm.
+            _log.warning(
+                "quarantine.child.provider_unavailable",
+                attempt=attempt,
+                remaining_budget_s=round(deadline_monotonic - time.monotonic(), 3),
+                max_attempts=EXTRACTION_MAX_RETRIES + 1,
+            )
             return {
                 "kind": "typed_refusal",
                 "reason": "provider_unavailable",

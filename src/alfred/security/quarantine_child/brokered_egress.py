@@ -464,9 +464,23 @@ class BrokeredProviderSource:
             # The REMAINING budget, not the original: the recv above already spent part of it.
             # A budget exhausted by the recv raises InvalidAttemptBudgetError out of the
             # backend ctor, and the finally below reclaims the fd (backend is still None).
-            provider, backend = self._factory.build(
-                fd, budget_seconds=deadline_at - time.monotonic()
-            )
+            #
+            # Convert it to ProviderUnavailableError HERE (#472 finding 4). Raised out of
+            # __aenter__ it would escape dispatch_extraction UNTYPED and land as the
+            # cannot_extract an unmapped raise becomes — laundering an egress fault as a
+            # model-output failure (err-002 / HARD #7, ADR-0052 C1). This is the third
+            # sibling of the two budget-exhaustion maps in _recv_one_fd (:431 budget spent
+            # before the recv, :437 a recv TimeoutError), which BOTH raise
+            # ProviderUnavailableError — same fault, same refusal.
+            try:
+                provider, backend = self._factory.build(
+                    fd, budget_seconds=deadline_at - time.monotonic()
+                )
+            except InvalidAttemptBudgetError as exc:
+                raise ProviderUnavailableError(
+                    "quarantine child: the attempt budget was exhausted before the provider "
+                    "could be built — the control-fd recv consumed it"
+                ) from exc
             yield provider
         finally:
             # R.2.7: the fd reclaim below MUST run even if provider.aclose() raises — nest it in
