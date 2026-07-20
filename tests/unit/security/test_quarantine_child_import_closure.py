@@ -17,14 +17,29 @@ Two invariants, both load-bearing:
   ``alfred.memory`` (per-user stores), nor the secret broker. The child sees only
   the extraction schemas + ``ProviderCapability``.
 
-The ``provider_dispatch`` import is a LAZY in-function import on the dead
-``handle_extract`` path, so it is NOT on the module-scope closure the live
-deterministic-echo loop reaches. As of #340 PR1, ``provider_dispatch`` itself is
-also egress-free (it drives an INJECTED provider and imports no httpx/SDK) — the
-egress-capable import lands in PR2's ``_build_provider``. That laziness (and, at
-go-live, that import's egress-capability) is separately enforced by the go-live
-egress gate (``test_quarantined_llm_not_yet_spawned_while_egress_open.py``); here
-we assert the forbidden-privileged-module bound on the module-scope closure.
+**Scope — what this file does NOT check (#340 PR2b-golive correction).**
+
+This module asserts the FORBIDDEN-PRIVILEGED-MODULE bound on the child's
+module-scope import closure. It says nothing about the child's EGRESS
+capability, at any scope.
+
+The previous version of this docstring deferred that question to the go-live
+egress gate, then named ``test_quarantined_llm_not_yet_spawned_while_egress_open.py``
+as the thing enforcing it. That gate — since renamed to
+``test_quarantined_llm_spawn_site_and_import_time_egress_backstop.py`` — carries a
+standing warning DISCLAIMING exactly this: it inspects only ``tree.body``, so it
+catches a module-scope egress import and nothing else. Each file pointed at the
+other for a property NEITHER of them checks. The circularity is recorded here
+rather than quietly deleted because a reader who followed the old pointer would
+have concluded the property was covered.
+
+Concretely: since golive the real Anthropic client is constructed inside
+``_build_provider``, and ``socket`` / ``brokered_egress`` / ``provider_dispatch``
+are all imported in-function. A lazily imported ``httpx`` on an unsanctioned path
+would be caught by neither file. The load-bearing containment is the kernel
+``--unshare-net`` plus the fd-4 SCM_RIGHTS broker, both independently gated.
+
+Rebuilding an any-scope egress-import oracle is tracked in **#465**.
 """
 
 from __future__ import annotations

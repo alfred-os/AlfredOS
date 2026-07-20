@@ -4,7 +4,7 @@ Fails if any in-core module gains a NEW external-HTTP-egress client outside the
 baseline allowlist. The kernel block (G7-3: core on alfred_internal-only +
 internal:true) is the runtime **enforcement-of-record**; this AST guard is its
 always-on, non-root, PR-level complement (mirrors the spawn/import guard in
-tests/adversarial/sandbox_escape/test_quarantined_llm_not_yet_spawned_while_egress_open.py).
+tests/adversarial/sandbox_escape/test_quarantined_llm_spawn_site_and_import_time_egress_backstop.py).
 
 Caught (in EVERY binding form, at module scope OR function-local — the walk is
 full-tree, symmetric across both checks):
