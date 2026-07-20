@@ -44,15 +44,23 @@ _REFUSED_EVENT = "egress.broker.refused"
 _AUDIT_AWAIT_TIMEOUT_S: float = 5.0
 
 
-def _egress_id(destination: str) -> str:
-    """Deterministic, non-secret correlation id — sha256 of the bare destination.
+def _egress_id(destination: str, *, salt: str) -> str:
+    """Deterministic, non-secret per-socket id — sha256 of ``destination|salt``.
 
     Never the proxy URL, never socket bytes (HARD #5 — the broker passes a bare
-    fd; it never reads or writes application content). Deterministic so the same
-    destination always yields the same id, letting an audit-graph consumer
-    correlate rows without a lookup table.
+    fd; it never reads or writes application content).
+
+    The salt exists because the id was previously the sha256 of the destination ALONE.
+    The golive caller brokers ``BROKER_SOCKET_COUNT`` sockets per extraction, all to the
+    SAME proxy destination, so every one of those rows carried an identical id: an audit
+    consumer could not distinguish 1 extraction x N sockets from N extractions x 1 socket,
+    and the ADR-0040 residual (vii) egress counts inflated N-fold.
+
+    Rows stay correlatable because ``_write`` threads the per-extraction id into the row's
+    ``trace_id`` — a top-level ``append_schema`` parameter, not a fieldset member, so the
+    grouping costs no audit-schema change.
     """
-    return hashlib.sha256(destination.encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{destination}|{salt}".encode()).hexdigest()
 
 
 class EgressBrokerAuditor:
@@ -75,21 +83,38 @@ class EgressBrokerAuditor:
         self._audit = audit_writer
         self._timeout = audit_await_timeout_s
 
-    async def record_broker_success(self, *, destination: str) -> None:
-        """Persist the ``egress.broker.connected`` row for a brokered fd hand-off."""
+    async def record_broker_success(
+        self, *, destination: str, extraction_id: str, socket_ordinal: int
+    ) -> None:
+        """Persist the ``egress.broker.connected`` row for a brokered fd hand-off.
+
+        ``extraction_id`` groups the N rows of one extraction (it becomes the row's
+        ``trace_id``); ``socket_ordinal`` distinguishes the sockets within it. Both are
+        REQUIRED rather than defaulted: a default would silently recreate the id collision
+        this pair exists to prevent, the same fail-open reasoning that made ``broker_auditor``
+        a required constructor argument.
+        """
         await self._write(
             fields=EGRESS_BROKER_SUCCESS_FIELDS,
             schema_name="EGRESS_BROKER_SUCCESS_FIELDS",
             event=_CONNECTED_EVENT,
             result="success",
-            subject={"destination": destination, "egress_id": _egress_id(destination)},
+            subject={
+                "destination": destination,
+                "egress_id": _egress_id(destination, salt=f"{extraction_id}:{socket_ordinal}"),
+            },
+            trace_id=extraction_id,
         )
 
-    async def record_broker_failure(self, *, destination: str, reason: str) -> None:
+    async def record_broker_failure(
+        self, *, destination: str, reason: str, extraction_id: str
+    ) -> None:
         """Persist the ``egress.broker.refused`` row for a ``ControlFdBrokerError`` refusal.
 
         ``reason`` is one of :data:`alfred.audit.audit_row_schemas.EGRESS_BROKER_REFUSED_REASONS`
-        — the caller passes ``ControlFdBrokerError.reason`` verbatim.
+        — the caller passes ``ControlFdBrokerError.reason`` verbatim. One refusal row per
+        extraction, so the salt needs no ordinal; sharing ``extraction_id`` as ``trace_id``
+        lets a consumer tie the refusal to whichever ``connected`` rows preceded it.
         """
         await self._write(
             fields=EGRESS_BROKER_REFUSED_FIELDS,
@@ -99,8 +124,9 @@ class EgressBrokerAuditor:
             subject={
                 "destination": destination,
                 "reason": reason,
-                "egress_id": _egress_id(destination),
+                "egress_id": _egress_id(destination, salt=extraction_id),
             },
+            trace_id=extraction_id,
         )
 
     async def _write(
@@ -111,12 +137,17 @@ class EgressBrokerAuditor:
         event: str,
         result: str,
         subject: dict[str, Any],
+        trace_id: str | None = None,
     ) -> None:
         from alfred.hooks import SYSTEM_ONLY_TIERS
         from alfred.hooks.context import HookContext
         from alfred.hooks.invoke import invoke
 
+        # ``correlation_id`` stays PER-ROW (it identifies this write and its hook dispatch);
+        # ``trace_id`` is the per-EXTRACTION grouping key. Conflating them would either make
+        # the N rows of one extraction indistinguishable or make them ungroupable.
         correlation_id = str(uuid.uuid4())
+        row_trace_id = trace_id if trace_id is not None else correlation_id
         try:
             await asyncio.wait_for(
                 self._audit.append_schema(
@@ -130,7 +161,7 @@ class EgressBrokerAuditor:
                     result=result,
                     cost_estimate_usd=0.0,
                     cost_actual_usd=0.0,
-                    trace_id=correlation_id,
+                    trace_id=row_trace_id,
                 ),
                 timeout=self._timeout,
             )

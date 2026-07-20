@@ -367,7 +367,7 @@ def test_dynamic_result_sites_are_documented() -> None:
             # its two public callers pass ("success" from record_broker_success,
             # "refused" from record_broker_failure), both already in-domain (no
             # migration needed).
-            "src/alfred/egress/broker_audit.py:130",
+            "src/alfred/egress/broker_audit.py:161",
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped

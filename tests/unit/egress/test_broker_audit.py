@@ -72,7 +72,9 @@ async def test_success_row_signed_t0_with_destination_and_egress_id(
     _fake_invoke: list[dict[str, Any]],
 ) -> None:
     w = _RecordingAuditWriter()
-    await EgressBrokerAuditor(w).record_broker_success(destination="gateway:8889")
+    await EgressBrokerAuditor(w).record_broker_success(
+        destination="gateway:8889", extraction_id="ext-1", socket_ordinal=0
+    )
     row = w.rows[-1]
     assert row["event"] == "egress.broker.connected"
     assert row["trust_tier_of_trigger"] == "T0"
@@ -89,13 +91,66 @@ async def test_success_row_signed_t0_with_destination_and_egress_id(
     assert _fake_invoke[0]["kind"] == "post"
 
 
-async def test_egress_id_is_deterministic_sha256_of_destination(
+async def test_egress_id_is_deterministic_sha256_of_destination_and_salt(
     _fake_invoke: list[dict[str, Any]],
 ) -> None:
+    """Still a deterministic, non-secret sha256 — now over destination AND the socket salt."""
     w = _RecordingAuditWriter()
-    await EgressBrokerAuditor(w).record_broker_success(destination="gateway:8889")
-    expected = hashlib.sha256(b"gateway:8889").hexdigest()
+    await EgressBrokerAuditor(w).record_broker_success(
+        destination="gateway:8889", extraction_id="ext-1", socket_ordinal=0
+    )
+    expected = hashlib.sha256(b"gateway:8889|ext-1:0").hexdigest()
     assert w.rows[-1]["subject"]["egress_id"] == expected
+
+
+async def test_sockets_of_one_extraction_get_distinct_egress_ids(
+    _fake_invoke: list[dict[str, Any]],
+) -> None:
+    """rev-464-03: N sockets per extraction must NOT collapse to ONE egress_id.
+
+    ``dispatch`` brokers BROKER_SOCKET_COUNT sockets per extraction and wrote a
+    ``record_broker_success`` row for each. All N share one proxy destination, so the
+    sha256-of-destination id was IDENTICAL across them: an audit consumer could not tell
+    1 extraction x 3 sockets from 3 extractions x 1 socket, and the ADR-0040 residual (vii)
+    egress counts inflated 3x.
+
+    A single row carrying a socket count would need ``socket_count`` added to
+    ``EGRESS_BROKER_SUCCESS_FIELDS`` — a schema change, deliberately out of scope — so each
+    socket is salted instead.
+    """
+    w = _RecordingAuditWriter()
+    auditor = EgressBrokerAuditor(w)
+    for ordinal in range(3):
+        await auditor.record_broker_success(
+            destination="gateway:8889", extraction_id="ext-1", socket_ordinal=ordinal
+        )
+    ids = [row["subject"]["egress_id"] for row in w.rows]
+    assert len(set(ids)) == 3, "the three sockets of one extraction collided onto one egress_id"
+
+
+async def test_rows_of_one_extraction_share_a_trace_id(
+    _fake_invoke: list[dict[str, Any]],
+) -> None:
+    """The N rows must still be CORRELATABLE as one extraction after the salt.
+
+    Salting alone would only trade one ambiguity for another — 3 unrelated-looking rows. The
+    shared ``trace_id`` is what lets a consumer group them and count extractions correctly.
+    ``trace_id`` is a top-level ``append_schema`` parameter, NOT a member of the fieldset, so
+    this grouping costs no schema change.
+    """
+    w = _RecordingAuditWriter()
+    auditor = EgressBrokerAuditor(w)
+    for ordinal in range(3):
+        await auditor.record_broker_success(
+            destination="gateway:8889", extraction_id="ext-1", socket_ordinal=ordinal
+        )
+    await auditor.record_broker_success(
+        destination="gateway:8889", extraction_id="ext-2", socket_ordinal=0
+    )
+    traces = [row["trace_id"] for row in w.rows]
+    assert traces[:3] == ["ext-1"] * 3  # one extraction, three sockets
+    assert traces[3] == "ext-2"  # a different extraction is distinguishable
+    assert len({r["subject"]["egress_id"] for r in w.rows}) == 4  # all four sockets distinct
 
 
 async def test_failure_row_carries_closed_vocab_reason(
@@ -103,7 +158,7 @@ async def test_failure_row_carries_closed_vocab_reason(
 ) -> None:
     w = _RecordingAuditWriter()
     await EgressBrokerAuditor(w).record_broker_failure(
-        destination="gateway:8889", reason="gateway_unreachable"
+        destination="gateway:8889", reason="gateway_unreachable", extraction_id="ext-1"
     )
     row = w.rows[-1]
     assert row["event"] == "egress.broker.refused"
@@ -130,7 +185,7 @@ async def test_bounded_await_fails_loud_not_silent(
         pytest.raises((TimeoutError, asyncio.TimeoutError)),
     ):
         await EgressBrokerAuditor(w, audit_await_timeout_s=0.05).record_broker_success(
-            destination="gateway:8889"
+            destination="gateway:8889", extraction_id="ext-1", socket_ordinal=0
         )
     timeout_events = [e for e in captured if e["event"] == "egress.broker.audit_write_timeout"]
     assert len(timeout_events) == 1
@@ -148,7 +203,7 @@ async def test_bounded_await_applies_to_failure_row_too(
     w = _RecordingAuditWriter(hang=True)
     with pytest.raises((TimeoutError, asyncio.TimeoutError)):
         await EgressBrokerAuditor(w, audit_await_timeout_s=0.05).record_broker_failure(
-            destination="gateway:8889", reason="gateway_unreachable"
+            destination="gateway:8889", reason="gateway_unreachable", extraction_id="ext-1"
         )
     assert _fake_invoke == []
 
@@ -164,6 +219,8 @@ async def test_append_schema_failure_propagates_not_swallowed(
             raise RuntimeError("db down")
 
     with pytest.raises(RuntimeError, match="db down"):
-        await EgressBrokerAuditor(_BoomAudit()).record_broker_success(destination="gateway:8889")
+        await EgressBrokerAuditor(_BoomAudit()).record_broker_success(
+            destination="gateway:8889", extraction_id="ext-1", socket_ordinal=0
+        )
     # The hookpoint must never dispatch when the row was never persisted.
     assert _fake_invoke == []
