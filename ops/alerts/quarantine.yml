@@ -1,0 +1,28 @@
+# AlfredOS quarantine-path alerting rules (#340 PR2b-golive).
+#
+# ARMED, NOT YET LIVE. These rules are correct and promtool-verified, but the series
+# they read is registered in the CORE process and nothing scrapes the core:
+# ops/prometheus/prometheus.yml has a single job for alfred-gateway:9464, and
+# start_metrics_server is called only from `alfred gateway start`. Tracked in #470.
+# Until that lands, the detection path that works is the audit log — see
+# docs/runbooks/quarantine-capability-revoked.md.
+groups:
+  - name: alfred-quarantine
+    rules:
+      # The security lane made shipping the real-LLM quarantine child WITHOUT a respawn
+      # scheduler (#455) conditional on this alert existing.
+      #
+      # `increase(...) > 0` with `for: 0m`, not a rate threshold: a revocation is a
+      # zero-baseline event, and ONE is already terminal. The child is spawned exactly
+      # once, at daemon boot, so after a revoke every later extraction returns
+      # provider_unavailable and the quarantine path stays down until the daemon
+      # restarts. Waiting for a sustained rate would mean waiting out an outage that
+      # cannot self-heal.
+      - alert: QuarantineCapabilityRevoked
+        expr: increase(alfred_quarantine_capability_revoked_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AlfredOS revoked the quarantine child's gateway capability"
+          description: "alfred_quarantine_capability_revoked_total increased: the quarantined-LLM child was torn down to revoke its SCM_RIGHTS gateway sockets after a broker failure. This is fail-closed and correct, but TERMINAL — the child is spawned once at daemon boot and there is no respawn scheduler (#455), so every subsequent extraction now returns provider_unavailable and the quarantine path stays DOWN until alfred-core is restarted. Follow docs/runbooks/quarantine-capability-revoked.md."

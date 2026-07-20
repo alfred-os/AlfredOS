@@ -440,6 +440,20 @@ three.
 See [docs/subsystems/plugins.md](plugins.md) for the quarantined LLM
 transport and process isolation contract.
 
+**Quarantine capability revocation (#340 PR2b-golive).** A per-extraction broker
+failure tears the quarantined child down to revoke the gateway sockets it holds
+over SCM_RIGHTS. This is fail-closed and correct, but **terminal**: the child is
+spawned once at daemon boot and there is no respawn scheduler
+([#455](https://github.com/alfred-os/AlfredOS/issues/455)), so every later
+extraction returns `provider_unavailable` until `alfred-core` restarts. Signals
+are the `alfred_quarantine_capability_revoked_total` counter (alert rule
+`ops/alerts/quarantine.yml`), the
+`security.quarantine_transport.capability_revoked` structlog event, and
+`egress.broker.refused` audit rows. **The metric is not scraped yet**
+([#470](https://github.com/alfred-os/AlfredOS/issues/470)) — use the audit-log
+path. Full triage in the
+[quarantine capability-revoked runbook](../runbooks/quarantine-capability-revoked.md).
+
 ## Performance characteristics
 
 The `tag()` path is synchronous and allocation-only (one frozen Pydantic

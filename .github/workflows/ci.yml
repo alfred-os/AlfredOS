@@ -61,12 +61,17 @@ jobs:
           echo "d9900a11e3c89261e6416e3c9989858bad7b206af8b6838dfe9a5392d8ddc60d  prometheus.tar.gz" | sha256sum -c -
           tar xzf prometheus.tar.gz
           sudo mv "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
-      - name: Validate + unit-test the gateway alert rules
+      - name: Validate + unit-test the alert rules
         working-directory: ops/alerts
         run: |
           set -euo pipefail
           promtool check rules gateway.yml
           promtool test rules gateway_test.yml
+          # #340 PR2b-golive: the quarantine capability-revocation alert. Added to THIS
+          # job deliberately — a rule file promtool never runs is a paper-only gate, the
+          # exact failure mode the alert itself exists to avoid.
+          promtool check rules quarantine.yml
+          promtool test rules quarantine_test.yml
 
   python:
     name: Python (lint, types, unit)
