@@ -500,7 +500,10 @@ async def _run_mcp_server(source: Any, *, reader: _FrameReader, writer: _FrameWr
                     schema_json=str(params["schema_json"]),
                     schema_version=int(params["schema_version"]),
                     source=source,
-                    max_tokens=int(os.environ["ALFRED_QUARANTINE_MAX_TOKENS"]),
+                    # The BOOT-VALIDATED budget off the source's frozen factory — not a
+                    # per-extract os.environ re-read, which would route around
+                    # _build_provider's ``> 0`` guard (and left that validated value dead).
+                    max_tokens=source.max_tokens,
                 )
             finally:
                 # Sweep the (N - attempts_used) unused pre-brokered sockets an
