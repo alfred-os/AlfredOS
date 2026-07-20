@@ -783,6 +783,39 @@ class _SubprocessChildIO:
             with contextlib.suppress(OSError):
                 self._control_parent.close()
 
+    def abort(self) -> None:
+        """SIGKILL the child + close the control end. SYNCHRONOUS: never awaits, never raises.
+
+        The cancellation-safe half of :meth:`aclose` (#472 finding 2). ``aclose`` is the
+        graceful teardown (SIGTERM -> SIGKILL -> reap -> stderr drain -> fd close) and EVERY
+        stage awaits, so a cancel delivered mid-teardown aborts it partway. This revokes the
+        capability with the one operation the kernel guarantees and that cannot be caught,
+        blocked or ignored — usable from inside a ``CancelledError`` handler where every
+        ``await`` would immediately re-raise.
+
+        Under the shipped kind="full" policy the launcher ``exec``s bwrap
+        (``bin/alfred-plugin-launcher.sh``) with ``--unshare-pid``, so ``self._process`` IS
+        bwrap — PID 1 of the child PID namespace — and SIGKILLing it tears down the whole
+        namespace, python child included. Same PID :func:`_terminate_and_reap` already signals.
+
+        Does NOT reap. ``aclose`` sets ``_closed`` BEFORE tearing down and every caller of
+        this method is reached after ``aclose`` was entered, so a later ``aclose`` early-
+        returns without reaping. Usually harmless: the SIGKILL releases the ``waitpid`` that
+        :func:`_reap_within` left an executor thread parked on, and that thread reaps the
+        child. In the narrow case where no such thread is parked (the cancel landed before
+        the reap executor was submitted, or after it already gave up), a zombie survives — it
+        holds no fds, no memory and no capability, only a process-table entry the OS reaps at
+        daemon exit.
+
+        Residual, accepted: a ``send()`` already queued in the kernel on an established socket
+        can still complete — a microsecond window against "alive indefinitely".
+        """
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self._process.kill()
+        if self._control_parent is not None:
+            with contextlib.suppress(OSError):
+                self._control_parent.close()
+
 
 async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
     """SIGTERM, then SIGKILL, the child and await its exit off-loop (best-effort, never raises).

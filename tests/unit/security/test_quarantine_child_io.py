@@ -31,7 +31,11 @@ discipline is asserted hermetically on macOS / non-root CI:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import signal
+import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -476,10 +480,62 @@ async def test_terminate_skips_when_poll_reports_exit(
 def test_subprocess_child_io_satisfies_childio_protocol() -> None:
     # ChildIO is a @runtime_checkable Protocol, so issubclass is authoritative —
     # no hasattr fallback (which would pass on a partial impl). The transport
-    # drives _SubprocessChildIO purely through this contract.
+    # drives _SubprocessChildIO purely through this contract. Adding ``abort`` to
+    # the Protocol (#472 finding 2) makes this assertion enforce that the real IO
+    # implements it too.
     from alfred.security.quarantine_transport import ChildIO
 
     assert issubclass(_SubprocessChildIO, ChildIO)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals (SIGKILL) not on win32")
+def test_abort_sigkills_the_child() -> None:
+    """``abort()`` SIGKILLs the child. Oracle = the kernel wait status (#472 finding 2).
+
+    ``returncode == -SIGKILL`` comes from ``waitpid``; nothing in our code produces it,
+    and no internal flag (``_closed`` etc.) is consulted — the oracle is fully independent
+    of the implementation predicate.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _SubprocessChildIO(proc).abort()
+        proc.wait(timeout=5)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        proc.kill()  # no-op if already dead; never leak a 300s sleeper on assert failure
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX socketpair fd semantics not on win32")
+def test_abort_closes_the_control_parent_end() -> None:
+    """``abort()`` closes the brokered control-parent socket — the True arm of its guard.
+
+    Tests B and the transport tests all construct with ``control_parent=None``; this pins
+    the ``is not None`` branch so the module's 100% line+branch gate covers it. Oracle = the
+    kernel fd (``fileno() == -1``), independent of any internal flag.
+    """
+    parent, child = socket.socketpair()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _SubprocessChildIO(proc, control_parent=parent).abort()
+        assert parent.fileno() == -1, (
+            "the control-parent end survived abort() — capability not revoked"
+        )
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+        child.close()
+        with contextlib.suppress(OSError):
+            parent.close()
 
 
 # --- #251: stderr drain helpers ---------------------------------------------
