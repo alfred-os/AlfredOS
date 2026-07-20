@@ -59,9 +59,23 @@ tighter bound.** The gateway relay client has its own per-call
 `action_deadline_seconds`. If an operator raises `action_deadline_seconds` **above**
 the relay per-call timeout, the relay's timeout fires first and raises
 `RelayIOPlaneUnavailableError` (a generic `unexpected_error`/`fault` row) — **not**
-the enriched timeout row. Keep `action_deadline_seconds` ≤ the relay timeout, or
-raise both together. This is documented at the
-`orchestrator.action_deadline_seconds` knob in `config/policies.yaml`.
+the enriched timeout row. So raise the relay per-call timeout **together with**
+`action_deadline_seconds`, never on its own.
+
+**Do not simply lower `action_deadline_seconds` to restore the enriched row.**
+Since #340 PR2b-golive the value is bounded on BOTH sides and
+`alfred config set action-deadline` refuses anything outside `29 < value < 50`:
+
+| Bound | Value | Why |
+| --- | --- | --- |
+| Floor | `> 29` | broker preamble (4s) **+** host read-frame (25s) — they run sequentially, so a lower deadline tears a healthy extraction |
+| Ceiling | `< 50` | `2 x` host read-frame — `read_frame` bounds header and body reads separately, and only this deadline caps a wedged child |
+
+The floor (29) sits just below the relay default (30), so out of the box **30 is
+the only value that satisfies both this window and the relay interaction** — which
+is exactly why raising the deadline means raising the relay timeout too. Both
+bounds are also documented at the `orchestrator.action_deadline_seconds` knob in
+`config/policies.yaml`.
 
 ## How to inspect
 
@@ -112,7 +126,7 @@ audit-DB query today.
 | Cause | Signal | Remediation |
 | --- | --- | --- |
 | Slow origin exceeding the action deadline | `dispatch_outcome="timeout"`, `in_doubt=True`, `committed_no_response`, `fire` happened | Expected under a slow origin; if chronic, raise `action_deadline_seconds` AND the relay per-call timeout together (see the interaction section) |
-| Action deadline raised above the relay timeout | Generic `unexpected_error`/`fault` rows instead of enriched timeout rows; `RelayIOPlaneUnavailableError` in logs | Lower `action_deadline_seconds` back to ≤ the relay timeout, or raise both |
+| Action deadline raised above the relay timeout | Generic `unexpected_error`/`fault` rows instead of enriched timeout rows; `RelayIOPlaneUnavailableError` in logs | Raise the relay per-call timeout to match. Do NOT lower `action_deadline_seconds` below 30 — the CLI refuses anything ≤ 29 (see the interaction section) |
 | Correlated DB stress at deadline time | `ledger_state="read_unavailable"`, `web_fetch.timeout.ledger_read_failed` log | Investigate Postgres health; the in-doubt fact is preserved conservatively |
 | A stray bare `TimeoutError` from an unexpected code path | `dispatch_outcome="unexpected_timeout"` + `orchestrator.tool_dispatch.unexpected_timeout` warning | A latent bug — investigate the warning; not the normal web.fetch path |
 
