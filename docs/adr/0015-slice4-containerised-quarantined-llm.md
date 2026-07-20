@@ -10,6 +10,8 @@ Proposed
 
 **G6-7-8 annotation (#309):** the gateway now hosts a production Discord bwrap child in addition to the quarantine child already covered here; both children are launched by the same launcher / bwrap machinery this ADR containerised.
 
+**Amended by:** [ADR-0052](0052-real-quarantine-child-golive.md) — #340 PR2b-golive: the child this ADR containerised is **no longer a deterministic-echo loop**. It now performs real provider extraction over a brokered gateway socket. Every "the shipped child is still the echo loop" statement below is superseded — see the "PR2b-golive amendment" section at the end. Status stays **Proposed** (the `Proposed → Accepted` graduation flip is human-gated; this is a factual amendment only).
+
 ## Context
 
 Slice 3 ships the quarantined LLM as an MCP stdio subprocess under the
@@ -161,8 +163,47 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
 > child network namespace. The `#230` deferral in the Negative consequences above
 > (the provider-only path + unset-provider-key boot guard) stands intact until 2c.
 
+## PR2b-golive amendment (2026-07-19)
+
+[ADR-0052](0052-real-quarantine-child-golive.md) makes the subprocess this ADR
+containerised **real**. This ADR's body describes the Slice-4 epoch, in which the
+sandboxed child was a deterministic-echo loop with no provider client; that is no
+longer the shipped posture, and the present-tense statements to that effect above
+are superseded rather than deleted (they remain accurate as a record of their own
+epoch).
+
+Specifically superseded:
+
+- **"The shipped child is still the deterministic-echo loop"** (the PR-S4-11c-2b
+  note) and **"the deterministic-echo child needs no egress"** (the Spec C G7-1
+  Negative-consequences amendment). The child now constructs a real Anthropic
+  client and calls `provider.complete()` on raw T3 content.
+- **"The 2c real-LLM quarantine-child egress deferred in this ADR (#230/#340) is
+  NOT closed by G7-4 and remains open"** (the Spec C G7-4 note). 2c has now
+  landed. That note's forward-looking prediction held exactly: the real-LLM child
+  reaches its provider through the gateway L7 CONNECT proxy and does **not**
+  re-open the child network namespace.
+
+What is **unchanged**, and is the reason the cutover is safe:
+
+- The Linux policy still `--unshare-net`s the child into an **empty network
+  namespace**. The child cannot open its own socket. Its only reachability is a
+  socket the trusted core pre-connects and hands in over fd 4 via SCM_RIGHTS
+  ([ADR-0050](0050-quarantine-child-scm-rights-reachability-broker.md)). Kernel
+  isolation — not any userspace control — remains the enforcement-of-record, and
+  it carries **more** weight after golive, not less.
+- The sandbox boundary, launcher machinery, and `kind=full` posture this ADR
+  established are untouched. The two policy deltas golive adds are a narrow
+  read-only `/etc/ssl/certs` CA bind (so in-child TLS can verify a real
+  certificate) and `keep_fds = [3]` → `[3, 4]`, both recorded in ADR-0052 and
+  [ADR-0037](0037-production-quarantine-sandbox-boundary.md).
+
+Status is unchanged (**Proposed**) — this is a factual amendment, and the
+`Proposed → Accepted` graduation flip remains human-gated.
+
 ## References
 
 - [PRD §5](../../PRD.md#5-architecture-overview) — hybrid-isolation invariant (line 117).
+- [ADR-0052](0052-real-quarantine-child-golive.md) — the real-LLM go-live that supersedes this ADR's echo-child prose.
 - [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Slice-3 hybrid-isolation decision.
 - [Spec §5.7](../superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md#57-co-merged-slice-4-containerisation-adr-commitment--prd-5-amendment) — co-merged commitment rationale.
