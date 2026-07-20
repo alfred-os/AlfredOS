@@ -460,6 +460,32 @@ def test_send_one_blocked_sendmsg_is_bounded_not_indefinite() -> None:
         passed.close()
 
 
+def test_send_one_on_a_torn_down_control_channel_still_raises_the_typed_error() -> None:
+    """A revoked/torn-down control channel must still yield ``ControlFdBrokerError``.
+
+    Regression for a bug introduced by the C2 timeout guard itself: the
+    ``settimeout(None)`` restore in ``_send_one``'s ``finally`` raises ``EBADF`` when
+    ``parent_end`` has been torn down (capability revocation closes it), and an exception
+    raised in a ``finally`` REPLACES the exception in flight. That turned the graceful typed
+    refusal into a raw ``OSError`` escaping the module boundary — precisely what this module's
+    closed-vocabulary error contract exists to prevent (HARD #7).
+
+    Both teardown shapes raise ``EBADF`` — a closed socket OBJECT (``fileno() == -1``) and an
+    fd closed out from under a live object (``fileno()`` still valid) — so a ``fileno()`` guard
+    would not be enough; the restore has to be best-effort.
+    """
+    parent, child = make_control_socketpair()
+    passed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    child.close()
+    parent.close()  # the capability revocation shape
+    try:
+        with pytest.raises(ControlFdBrokerError) as exc:
+            _send_one(parent, passed)
+        assert exc.value.reason == "sendmsg_failed"
+    finally:
+        passed.close()
+
+
 def test_send_timeout_is_a_total_bound_under_the_preamble() -> None:
     """The per-syscall bound IS the whole SEND phase's bound (arithmetic, stated once).
 
