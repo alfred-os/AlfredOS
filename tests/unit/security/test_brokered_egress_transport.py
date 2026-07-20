@@ -24,6 +24,7 @@ import time
 from unittest.mock import Mock
 
 import anyio
+import certifi
 import httpcore
 import httpx
 import pytest
@@ -377,13 +378,22 @@ def _pool_of(provider: object) -> httpcore.AsyncHTTPProxy:
     return pool
 
 
-def test_build_child_client_verifies_tls_against_the_system_store() -> None:
+def test_build_child_client_verifies_tls_against_the_system_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """HARD #5: TLS terminates IN the child, fully verified. The prior version of this test
     asserted only ``provider.name`` and ``backend.calls == 0`` — a flip to
     ``ssl._create_unverified_context()`` would have passed green under a test named to forbid
     it. ``ssl.create_default_context()`` yields CERT_REQUIRED + check_hostname and honours
     ``SSL_CERT_FILE``; this pins that, it does not change it.
+
+    ``SSL_CERT_FILE`` is pinned to a known bundle rather than trusted to the runner's default,
+    because that is the mechanism production actually uses (the host exports it against the
+    bwrap-bound ``/etc/ssl/certs``) *and* because ``get_ca_certs()`` reports anchors only for a
+    CA *file*: under a hashed CApath directory — the usual Linux layout — OpenSSL resolves
+    lazily and returns ``[]`` while verifying correctly, which reds this assertion off macOS.
     """
+    monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
     a, b = socket.socketpair()
     provider, backend = build_child_client(
         a.detach(),
@@ -394,9 +404,10 @@ def test_build_child_client_verifies_tls_against_the_system_store() -> None:
     )
     try:
         ctx = _pool_of(provider)._ssl_context
+        assert ctx is not None, "no SSL context at all — the child would speak plaintext"
         assert ctx.verify_mode is ssl.CERT_REQUIRED  # never CERT_NONE
         assert ctx.check_hostname is True  # never a hostname-blind context
-        assert ctx.get_ca_certs(), "no CA loaded — verification would fail closed, not verify"
+        assert ctx.get_ca_certs(), "no trust anchors — the child could not verify anyone"
     finally:
         anyio.run(provider.aclose)
         assert backend.calls == 0  # never dialed, so the client never owned the fd
