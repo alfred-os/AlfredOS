@@ -482,8 +482,14 @@ class QuarantineStdioTransport:
         # (vii) counts inflated N-fold. A fresh uuid rather than ``handle_id``: the handle is a
         # capability token for the staged T3 body and does not belong in an audit row.
         extraction_id = str(uuid.uuid4())
+        # Bound OUTSIDE the try so the ``except`` arm can never reach an unbound name. With
+        # ``async with ... as preamble_deadline`` the binding happens on ``__aenter__``, so a
+        # raise from the enter itself would turn the handler's ``.expired()`` check into a
+        # NameError — on the security path, masking the real fault. (pyright flags this;
+        # mypy does not.)
+        preamble_deadline = asyncio.timeout(_BROKER_PREAMBLE_TIMEOUT_S)
         try:
-            async with asyncio.timeout(_BROKER_PREAMBLE_TIMEOUT_S) as preamble_deadline:
+            async with preamble_deadline:
                 destinations = await self._child_io.broker_sockets(BROKER_SOCKET_COUNT)
                 for ordinal, (host, port) in enumerate(destinations):
                     await self._broker_auditor.record_broker_success(
