@@ -64,6 +64,13 @@ POSIX_ONLY_TEST_FILES: Final[tuple[str, ...]] = (
     "unit/identity/test_replay_on_different_machine.py",
     "unit/policies/test_watcher_first_tick_immediate.py",
     "unit/quarantine/test_quarantine_child_stdout_pure.py",
+    # #340 PR2b-golive: the SCM_RIGHTS fd-broker batch. 7 of its 8 tests construct an
+    # AF_UNIX socketpair and broker real descriptors over it (the 8th already skips
+    # off-Linux), so nothing meaningful runs on Windows. Its sibling
+    # ``test_brokered_provider_source.py`` is MIXED and therefore NOT listed — its
+    # fd-passing tests skip via the ``_af_unix_socketpair`` helper while its portable
+    # factory/timeout/protocol assertions keep running here.
+    "unit/security/test_quarantine_child_io_broker.py",
 )
 
 
