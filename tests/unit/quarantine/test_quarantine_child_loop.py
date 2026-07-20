@@ -94,8 +94,9 @@ class _FakeSource:
     counter proves the drain fired exactly once per extract, per §6.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_tokens: int = 8192) -> None:
         self.drain_calls = 0
+        self.max_tokens = max_tokens
 
     def drain_leftovers(self) -> None:
         self.drain_calls += 1
@@ -142,7 +143,7 @@ async def test_ingest_then_extract_frames_dispatch_result(monkeypatch: pytest.Mo
 
     reply = _decode_reply(writer.joined())
     assert reply["result"] == _CANNED_RESULT
-    # The real T3 bytes flowed through to the dispatcher, and max_tokens came from env.
+    # The real T3 bytes flowed through, and max_tokens came from the VALIDATED factory.
     assert captured["content"] == b"hello over the wire"
     assert captured["source"] is source
     assert captured["max_tokens"] == 8192
@@ -287,3 +288,28 @@ async def test_write_boot_ready_emits_ready_frame_via_writer() -> None:
     await quarantine_child._write_boot_ready(writer)
     assert b"".join(writer.chunks) == READY_FRAME
     assert writer.drain_calls == 1
+
+
+async def test_extract_uses_the_validated_factory_budget_not_the_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4: the loop re-read ``ALFRED_QUARANTINE_MAX_TOKENS`` from ``os.environ`` on EVERY
+    extract, bypassing the boot-time ``> 0`` validation gate in ``_build_provider`` — the
+    factory's validated value was dead state. A mutated env must no longer reach the request.
+    """
+    captured: dict[str, Any] = {}
+    _fake_dispatch_returning_canned(monkeypatch, captured)
+    # Anything the env says is irrelevant now — including a value the boot guard would refuse.
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "-1")
+    source = _FakeSource(max_tokens=4096)
+    reader = _FakeReader(
+        _frame("quarantine.ingest", {"handle_id": "h1", "context": "hello"})
+        + _frame(
+            "quarantine.extract", {"handle_id": "h1", "schema_json": "{}", "schema_version": 1}
+        )
+    )
+    writer = _FakeWriter()
+
+    await quarantine_child._run_mcp_server(source, reader=reader, writer=writer)
+
+    assert captured["max_tokens"] == 4096  # the validated factory value, not the env
