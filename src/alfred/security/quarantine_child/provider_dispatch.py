@@ -131,8 +131,10 @@ _MAX_TOTAL_WALL_CLOCK_SECONDS: float = 20.0
 
 # Exponential back-off base. Sleep between attempt N and N+1 is
 # ``_BACKOFF_BASE_SECONDS * (2 ** attempt)`` — 0.5s after attempt 0,
-# 1.0s after attempt 1. Keeps the loop inside the wall-clock budget
-# while giving a thrashing provider time to recover.
+# 1.0s after attempt 1 — but CLAMPED at the call site to the remaining
+# wall-clock budget (#472 finding 1), so the back-off itself can never
+# carry the loop past the ceiling; it only fills time a thrashing provider
+# is given to recover WITHIN that budget.
 _BACKOFF_BASE_SECONDS: float = 0.5
 
 
@@ -225,15 +227,17 @@ async def dispatch_extraction(
     ``{"kind": "typed_refusal", "reason": "cannot_extract", ...}``.
 
     Between attempts the loop sleeps ``_BACKOFF_BASE_SECONDS * (2 ** attempt)``
-    seconds (perf-1 fix: the prior loop fired back-to-back). Total
-    wall-clock per extraction is capped at
-    :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`. Three mechanisms hold that cap,
+    seconds (perf-1 fix: the prior loop fired back-to-back), CLAMPED to the
+    remaining budget (#472 finding 1) so the back-off can never itself overrun
+    the cap. Total wall-clock per extraction is capped at
+    :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`. Four mechanisms hold that cap,
     only the third of which can stop a blocking provider read: the loop-top
     check short-circuits an already-breached budget; each call is wrapped in
-    ``asyncio.wait_for(remaining)``; and — load-bearing — the REMAINING budget
-    is passed to ``source.bind()``, which anchors it as an absolute socket
-    deadline clamping every syscall of that attempt. The ``wait_for`` cannot do
-    that job alone because the SDK's blocking ``recv`` runs in a shielded
+    ``asyncio.wait_for(remaining)``; the REMAINING budget is passed to
+    ``source.bind()``, which anchors it as an absolute socket deadline clamping
+    every syscall of that attempt (load-bearing); and the inter-attempt back-off
+    is clamped to that same remaining budget. The ``wait_for`` cannot do the
+    socket job alone because the SDK's blocking ``recv`` runs in a shielded
     worker thread it can only cancel-then-await. A ``TimeoutError`` from either
     is TERMINAL ``cannot_extract`` — not retry-eligible (a call that blew the
     budget will not recover inside a shrinking one; HARD #7 forbids a silent
@@ -391,7 +395,22 @@ async def dispatch_extraction(
         # last attempt — there is no next try, the loop is about to
         # exit and the refusal is the next emit.
         if attempt < EXTRACTION_MAX_RETRIES:
-            await asyncio.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
+            # CLAMPED to the remaining budget (#472 finding 1). Uncapped, the sleep is
+            # computed from ``attempt`` alone and can carry the loop PAST
+            # ``deadline_monotonic`` — the loop head then refuses, but only after the
+            # overrun has already happened. A ceiling a back-off can overrun is not a
+            # ceiling. ``max(0.0, ...)`` normalises an already-breached budget to an
+            # explicit zero-sleep yield rather than leaning on ``asyncio.sleep``'s
+            # negative-delay short-circuit; the loop head converts it to
+            # ``cannot_extract`` on the next pass.
+            await asyncio.sleep(
+                max(
+                    0.0,
+                    min(
+                        _BACKOFF_BASE_SECONDS * (2**attempt), deadline_monotonic - time.monotonic()
+                    ),
+                )
+            )
     # Exhaustion is a closed-domain TypedRefusal, NOT an Extracted with
     # a malformed_output mode (spec §6.7 / prov-011).
     return {"kind": "typed_refusal", "reason": "cannot_extract", "cost_usd": cost_total}

@@ -59,6 +59,7 @@ Security invariants pinned here:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
@@ -900,3 +901,88 @@ async def test_dispatch_threads_max_tokens_on_prompt_embedded_fallback() -> None
     )
     assert result["kind"] == "extracted"
     assert provider.complete.call_args.args[0].max_tokens == 4096
+
+
+# ---------------------------------------------------------------------------
+# #472 finding 1 — the retry back-off is clamped to the remaining budget.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A monotonic clock the test drives, so elapsed time is deterministic.
+
+    ``monotonic()`` returns the current fake time; the spy sleep advances it by
+    exactly the delay the loop requested — modelling "the sleep elapsed". This is
+    what lets the oracle distinguish a clamp against the REMAINING budget (correct,
+    shrinks each attempt) from one against the constant budget (a plausible mutant
+    that never shrinks): with a real never-advancing clock the two are identical.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
+@pytest.mark.asyncio
+async def test_backoff_never_carries_the_loop_past_the_wall_clock_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Total elapsed across retries cannot exceed the budget (#472 finding 1).
+
+    Asserted BEHAVIOURALLY on a fake clock the test advances by each requested
+    sleep: for every back-off, ``(clock-at-request + requested-delay)`` must land
+    within the budget. The oracle is the pair ``(fake time observed at the call,
+    delay the implementation requested)`` — it never reuses the ``min(...)``
+    predicate, and because the clock advances it kills BOTH the uncapped mutant
+    and a clamp computed against the wrong (constant, non-shrinking) deadline.
+    Deterministic: no wall-clock tolerance.
+    """
+    from alfred.security.quarantine_child import provider_dispatch as pd
+
+    clock = _FakeClock()
+    monkeypatch.setattr(pd, "time", clock)  # pd uses only time.monotonic()
+
+    recorded: list[tuple[float, float]] = []
+    real_sleep = asyncio.sleep
+
+    async def _spy_sleep(delay: float, *args: object, **kwargs: object) -> None:
+        recorded.append((clock.monotonic(), delay))
+        clock.advance(delay)  # the sleep "elapses" — shrinks the remaining budget
+        await real_sleep(0)  # yield to the loop, burn no real wall clock
+
+    monkeypatch.setattr(pd.asyncio, "sleep", _spy_sleep)
+    # Budget in [1.0, 1.5): the first back-off (0.5) fits, the second (uncapped 1.0)
+    # must be clamped to the remaining 0.75 or it overruns. A wrong-deadline mutant
+    # (clamp against the constant budget) requests the full 1.0 for the second and is
+    # caught. 1.25 / 0.5 / 0.75 are all exact in binary float, so the oracle needs
+    # no epsilon — the clock is fake and deterministic.
+    budget = 1.25
+    monkeypatch.setattr(pd, "_MAX_TOTAL_WALL_CLOCK_SECONDS", budget)
+
+    # Empty capabilities → prompt_embedded_fallback: "not json at all" fails
+    # json.loads inside _validate_response → JSONDecodeError → the retry arm.
+    source = _FakeSource(
+        _fake_provider_with_capabilities(frozenset(), _text_response("not json at all"))
+    )
+    started = clock.monotonic()
+    result = await pd.dispatch_extraction(
+        content=b"irrelevant t3 body",
+        schema_json=_SCHEMA_JSON,
+        schema_version=1,
+        source=source,
+    )
+
+    assert result["kind"] == "typed_refusal"
+    assert result["reason"] == "cannot_extract"
+    assert recorded, "the retry loop never slept — the test never reached the back-off"
+    for t_call, delay in recorded:
+        assert delay >= 0.0, f"negative back-off requested: {delay}"
+        assert (t_call + delay) - started <= budget, (
+            f"a {delay:.3f}s back-off at t+{t_call - started:.3f}s would carry the loop "
+            f"past the {budget}s ceiling"
+        )
