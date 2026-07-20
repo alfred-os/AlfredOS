@@ -201,3 +201,24 @@ def test_read_state_git_head_sha_oserror(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     monkeypatch.setattr(subprocess, "run", _raise)
     assert _commands.read_state_git_head_sha(tmp_path) == _commands._STATE_GIT_HEAD_UNKNOWN
+
+
+def test_snapshot_detail_falls_back_when_the_failure_is_another_member() -> None:
+    """The ``isinstance`` narrowing in ``_snapshot_detail`` is documented as a device rather
+    than a real branch — the probe only ever hands it a ``SnapshotRefInitFailedFailure``. But
+    it deliberately fails SOFT (``"unknown"``) instead of raising, because a boot refusal must
+    never be preempted by a formatting error on the refusal message itself. Pin the soft arm so
+    that guarantee survives the union growing a 21st member.
+    """
+    from alfred.cli.daemon._failures import CapabilityGateHandshakeFailedFailure
+
+    other = CapabilityGateHandshakeFailedFailure(backing_store_kind="postgres")
+    assert _commands._snapshot_detail(other) == "unknown"
+
+
+def test_handshake_detail_falls_back_when_the_failure_is_another_member() -> None:
+    """Twin of the above for ``_handshake_detail`` — same soft-fail contract, opposite member."""
+    from alfred.cli.daemon._failures import SnapshotRefInitFailedFailure
+
+    other = SnapshotRefInitFailedFailure(detail_redacted="FileNotFoundError")
+    assert _commands._handshake_detail(other) == "unknown"
