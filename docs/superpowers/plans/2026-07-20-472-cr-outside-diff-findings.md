@@ -44,21 +44,25 @@ This plan was reviewed pre-execution by three lanes (test-engineer, core-enginee
 
 ---
 
-# PR-A — findings 1, 4, 3 (three small fixes)
+## PR-A — findings 1, 4, 3 (three small fixes)
 
 Branch: `472a-budget-and-cleanup-fixes` off `main`.
 
 ### Task A1: Cap the retry backoff at the remaining budget (finding 1, Major)
 
 **Files:**
+
 - Modify: `src/alfred/security/quarantine_child/provider_dispatch.py:390-394` (the fix), `:132-136` and `:227-231` (correct now-true comments)
 - Test: `tests/unit/quarantine/test_quarantined_extractor_dispatch.py` (extend — this is where the real dispatch fixtures live)
 
 **Interfaces:**
+
 - Consumes: `_MAX_TOTAL_WALL_CLOCK_SECONDS` (20.0), `_BACKOFF_BASE_SECONDS` (0.5), `EXTRACTION_MAX_RETRIES` (2), `deadline_monotonic` (local at `:296`). Both constants are module-global lookups inside the loop, so monkeypatching them bites.
 - Produces: behaviour change only.
 
 **Why real, and its true severity.** The backoff sleep at `:394` is computed from `attempt` alone, never clamped to `deadline_monotonic`. An attempt finishing at t=19.9s sleeps 1.0s → return at t=20.9s. Three comments claim the budget is a ceiling (`:136` "Keeps the loop inside the wall-clock budget"; `:227-231` "Total wall-clock ... capped ... Three mechanisms hold that cap"). Worst-case overrun is **≤1.0s** (max backoff is `0.5 × 2¹` after attempt 1), so `child_budget(21) < gateway_handshake(22)` — the ADR-0052 nesting invariant was **never actually violated**. Real, worth fixing, **not a live incident**; the PR body must say so rather than imply a breach.
+
+> **Implementation note (supersedes the sketch below).** The shipped test replaces the real-clock sleep-spy sketched here with a **deterministic `_FakeClock` advanced by each requested sleep** — so `deadline − now` genuinely shrinks between attempts, killing both the uncapped and the wrong-deadline (clamp-against-constant) mutants with **zero wall-clock tolerance** (budget 1.25 / back-offs 0.5, 0.75 are exact in IEEE-754). CodeRabbit flagged the real-clock sketch as flake-prone; the fake clock resolves it. Separately, the `--cov-report=... --cov-branch` commands in this plan are for **local inspection**; the CI gate that *enforces* the 100% threshold is `coverage report --fail-under=100` (add `--cov-fail-under=100` to reproduce enforcement locally).
 
 - [ ] **Step 1: Write the failing test — deterministic sleep-spy oracle**
 
@@ -124,6 +128,7 @@ Confirm `ProviderCapability` and the fixtures are importable at the top of that 
 ```bash
 uv run pytest tests/unit/quarantine/test_quarantined_extractor_dispatch.py -q -k backoff_never
 ```
+
 Expected: FAIL — an uncapped `0.5×2⁰=0.5s` back-off requested against a 0.05s budget overshoots. If it errors at construction instead (e.g. `AttributeError` on the source), the fixture wiring is wrong — fix the test before the implementation.
 
 - [ ] **Step 3: Apply the fix**
@@ -180,11 +185,13 @@ git commit -m "fix(security): #472 cap extraction back-off at the remaining budg
 ### Task A2: Type budget exhaustion in `bind()` as `provider_unavailable` (finding 4, Minor)
 
 **Files:**
+
 - Modify: `src/alfred/security/quarantine_child/brokered_egress.py:463-469`
 - Modify: `src/alfred/security/quarantine_child/provider_dispatch.py:367-375` (add the missing loud log to the existing `ProviderUnavailableError` arm), `:207-214` (correct the false gate claim)
 - Test: `tests/unit/quarantine/test_quarantined_extractor_dispatch.py` (or `test_brokered_provider_source.py` for the unit-level `bind()` assertion — put the end-to-end split test with the dispatch tests)
 
 **Interfaces:**
+
 - Consumes: `InvalidAttemptBudgetError` (`brokered_egress.py:81`), `ProviderUnavailableError` (already imported, `brokered_egress.py:57`), `PassedFdBackend.__init__`'s budget guard (`:225-231`).
 - Produces: `bind()` raises `ProviderUnavailableError` (not the raw `InvalidAttemptBudgetError`) when the control-fd recv exhausts the attempt budget before the backend is built. Downstream `provider_dispatch` already has a terminal `except ProviderUnavailableError` arm → `provider_unavailable`.
 
@@ -255,6 +262,7 @@ uv run pytest tests/unit/quarantine tests/unit/security -q -k "budget_exhausted 
 uv run pytest tests/unit --cov=alfred.security.quarantine_child.brokered_egress \
   --cov=alfred.security.quarantine_child.provider_dispatch --cov-report=term-missing --cov-branch -q
 ```
+
 Revert Step 3, confirm FAIL, re-apply. Confirm no fd leak on the new arm.
 
 - [ ] **Step 7: Commit**
@@ -271,10 +279,12 @@ git commit -m "fix(security): #472 map attempt-budget exhaustion to provider_una
 ### Task A3: Sentinel-guarded `supervisor.stop()` cleanup (finding 3, Major)
 
 **Files:**
+
 - Modify: `src/alfred/cli/daemon/_commands.py` — add an `except BaseException` sentinel on the outer boot `try` (around `:989-1028`), and the conditional-re-raise around `supervisor.stop()` (`:1027-1028`)
 - Test: `tests/unit/cli/daemon/test_daemon_boot_reap_finally.py` (the real harness — `CliRunner().invoke(daemon_app, ["start"])`, `boot_success_env`, `tmp_path/"daemon.pid"`)
 
 **Interfaces:**
+
 - Consumes: `suppress` (already imported, `:34`), `log` (structlog, `:187`), `_BootRefusedError`. Note `_commands.py:1116` converts `_BootRefusedError` → `typer.Exit(refused.code)` *outside* this try/finally, so the sentinel here captures it as it unwinds.
 - Produces: new structlog event `daemon.shutdown.supervisor_stop_failed`.
 
@@ -371,6 +381,7 @@ uv run pytest tests/unit \
   --cov-report=term-missing --cov-branch -q
 make check; echo "EXIT=$?"   # last; never pipe through tail
 ```
+
 macOS integration flake under load is known — verify suspects in isolation, trust Linux CI.
 
 - [ ] **Step 3: Open PR-A.** Body states: the three findings and where fixed; that finding 4 is fixed in `bind()` → `ProviderUnavailableError` (rejecting both the issue's `provider_dispatch` catch and a `TimeoutError` mapping, with the err-002 rationale); the corrected false comment at `provider_dispatch.py:207-214`; the loud-log addition closing a pre-existing gap on the `ProviderUnavailableError` arm; the ≤1.0s / no-actual-breach severity calibration for finding 1; the clean-shutdown-stays-visible decision for finding 3; and the deferred three-sibling `suppress` silence as a separate follow-up.
@@ -379,7 +390,7 @@ macOS integration flake under load is known — verify suspects in isolation, tr
 
 ---
 
-# PR-B — finding 2, cancellation-safe revoke (Major)
+## PR-B — finding 2, cancellation-safe revoke (Major)
 
 Branch: `472b-cancellation-safe-revoke` off `main` (after PR-A merges, or in parallel — no file overlap).
 
@@ -396,6 +407,7 @@ Branch: `472b-cancellation-safe-revoke` off `main` (after PR-A merges, or in par
 - [ ] **Step 1: Write failing tests B, B2** (both `@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")` decorators)
 
 Test B — `abort()` kills, oracle = the kernel:
+
 ```python
 def test_abort_sigkills_the_child() -> None:
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"],
@@ -409,6 +421,7 @@ def test_abort_sigkills_the_child() -> None:
 ```
 
 Test B2 — the `control_parent is not None` branch (required for 100% branch; both B and C construct with `control_parent=None`). Mirror the real-socketpair harness at `tests/unit/security/test_quarantine_child_io_broker.py:349`:
+
 ```python
 def test_abort_closes_the_control_parent_end() -> None:
     parent, _child = socket.socketpair()
@@ -419,6 +432,7 @@ def test_abort_closes_the_control_parent_end() -> None:
     finally:
         proc.kill(); proc.wait(timeout=5)
 ```
+
 Oracle is the kernel fd (`fileno() == -1`), independent of any internal flag.
 
 - [ ] **Step 2: Run, verify FAIL** (`AttributeError: abort`).
@@ -482,12 +496,14 @@ git commit -m "feat(security): #472 add synchronous _SubprocessChildIO.abort() f
   Integration sites use the real `_SubprocessChildIO` — no change. Re-grep `class _.*ChildIO` and any `ChildIO` Protocol claim before finalising.
 
 - [ ] **Step 3: Add a structural guard** so the list cannot silently rot. Parametrise over every double:
+
 ```python
 @pytest.mark.parametrize("double", [_RecordingChildIO, _RaisingChildIO, _CloseRaisingChildIO,
     _HangingCloseChildIO, _StallingChildIO, _OrderRecordingChildIO, _ContentHandleReturningChildIO])
 def test_every_childio_double_satisfies_the_protocol(double: type) -> None:
     assert issubclass(double, ChildIO)
 ```
+
 (and the equivalents in the other test files, or a shared helper). `issubclass` on a `runtime_checkable` Protocol checks method presence — this is the gate mypy/pyright do not provide for tests.
 
 - [ ] **Step 4: `mypy --strict src` + `pyright src` + full transport/metric/broker-wiring suites green.** Commit.
@@ -499,6 +515,7 @@ def test_every_childio_double_satisfies_the_protocol(double: type) -> None:
 - [ ] **Step 1: Write failing tests A, C, D**
 
 Test A — transport completes the kill on cancel (cross-platform, spy oracle; both halves load-bearing):
+
 ```python
 class _CancelDuringCloseChildIO(_RecordingChildIO):
     def __init__(self) -> None:
@@ -524,6 +541,7 @@ async def test_cancel_mid_teardown_kills_child_and_propagates() -> None:
 ```
 
 Test C — the finding end to end, mutation-proofed, deterministic barrier (no `sleep(0.05)` race):
+
 ```python
 class _BarrierSubprocessChildIO(_SubprocessChildIO):
     def __init__(self, proc): super().__init__(proc); self.entered = asyncio.Event()
@@ -552,6 +570,7 @@ async def test_cancel_mid_real_teardown_sigkills_the_child(monkeypatch) -> None:
     finally:
         proc.kill(); proc.wait(timeout=5)
 ```
+
 `SIG_IGN` + `_REAP_SIGTERM_GRACE_S=30.0` together prove `abort()` is the *only* thing that could have killed it (a plain sleeper dies to the SIGTERM `_terminate_and_reap` sends; the built-in escalation can't run in the cancel window). Do not drop either. A comment: two threads call `proc.wait()` (test + parked executor) — safe, CPython serialises on `_waitpid_lock`; the executor thread outlives the test.
 
 Test D — the abort-raises branch (100% branch): a double whose `abort()` raises `OSError`. Assert `capability_abort_failed` in `capture_logs()` **and** `CancelledError` still propagates.
@@ -626,6 +645,7 @@ Test D — the abort-raises branch (100% branch): a double whose `abort()` raise
                     error_class=type(exc).__name__,
                 )
 ```
+
 `CAPABILITY_REVOKED_COUNTER.inc()` at `:604` stays before the `try`.
 
 - [ ] **Step 4: Run, verify PASS.**
@@ -636,6 +656,7 @@ Test D — the abort-raises branch (100% branch): a double whose `abort()` raise
 uv run pytest tests/unit/security/test_quarantine_transport.py -q -k "hanging or deadline"
 uv run pytest tests/unit/security/test_quarantine_revocation_metric.py -q
 ```
+
 `test_hanging_revoke_is_logged_loudly` / `test_hanging_revoke_still_writes_the_refusal_row` must pass. **Also** add `child.aborted` to whichever of these drives the timeout arm (arch H4 — the arm now aborts and today no test observes that). If either fails on `revoke_deadline_exceeded` reachability, the TRAP was sprung — check `async with` is inside the `try`.
 
 - [ ] **Step 6: Mutation-check A and C**, commit.
@@ -663,10 +684,12 @@ uv run pytest tests/unit/security/test_quarantine_revocation_metric.py -q
 ### Task B7: PR-B gates + PR
 
 - [ ] Full gates as PR-A Task A4 Step 2, plus the transport/child-io/revocation-metric per-module 100% gates:
+
 ```bash
 uv run pytest tests/unit --cov=alfred.security.quarantine_transport \
   --cov=alfred.security.quarantine_child_io --cov-report=term-missing --cov-branch -q
 ```
+
 - [ ] Open PR-B. Body states: the cancellation-safety argument (delivery-count → synchronous kill); the TRAP mechanism (case (c) reaches the arm — not an absolute); the `ProviderUnavailableError`-style laddering N/A here; the accepted residuals; that no gateway twin exists (`GatewayAdapterStdioTransport` is not a `ChildIO` implementer — one line so a reviewer needn't ask); the folded-in `TimeoutError`-arm abort (same responsibility) and its test; and that `close()` (`:625-627`) is left untouched because the daemon `finally` reaps separately (state why, don't leave the sibling unmentioned).
 - [ ] Review: full `/review-pr` fleet (security always) + UAT, both CodeRabbit channels incl. the review BODY, resolve every thread, `gh pr merge --rebase`.
 
