@@ -141,6 +141,18 @@ def _bcp47_to_gettext(tag: str) -> str:
     return tag.replace("-", "_").split(".")[0]
 
 
+def active_babel_locale() -> str:
+    """Return the ACTIVE language as a Babel-compatible locale identifier.
+
+    Babel's ``Locale.parse`` wants the underscore form (``en_US``) and raises
+    ``ValueError`` on the BCP-47 hyphen form (``en-US``) that :func:`set_language` and
+    ``users.language`` carry. Callers formatting numbers/dates for operator output need
+    the converted tag, so expose the same normalizer :func:`_load` already uses rather
+    than each call site re-deriving it (and getting it wrong).
+    """
+    return _bcp47_to_gettext(_active_lang.get())
+
+
 def _load(lang: str) -> gettext.NullTranslations:
     if lang in _translators:
         return _translators[lang]

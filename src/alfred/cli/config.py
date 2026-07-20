@@ -44,6 +44,7 @@ from typing import Annotated, Final
 
 import typer
 import yaml
+from babel import UnknownLocaleError
 
 from alfred.cli._state_git import StateGitProposalClient, queue_proposal_or_exit
 from alfred.cli._validators import validate_quarantined_provider
@@ -204,42 +205,90 @@ def _parse_scalar(value: str) -> int | float | str:
     return value
 
 
-def _reject_action_deadline_below_floor(key: str, parsed: object) -> None:
+def _format_seconds(value: float) -> str:
+    """Render a seconds value for operator output in the ACTIVE locale.
+
+    Python's ``str(float)`` is doubly wrong here: it renders ``25.0`` where operators
+    expect ``25``, and it hard-codes a ``.`` decimal separator, so a comma-decimal locale
+    (de, fr, es …) sees a number it would never type back. ``format_decimal`` fixes both —
+    its default pattern drops trailing zeros AND uses the locale's separator.
+
+    Falls back to English on an unparseable tag rather than raising: a malformed
+    ``users.language`` must not turn a config refusal into a traceback.
+    """
+    from babel.numbers import format_decimal
+
+    from alfred.i18n import active_babel_locale
+
+    try:
+        return format_decimal(value, locale=active_babel_locale())
+    except (ValueError, UnknownLocaleError):
+        return format_decimal(value, locale="en")
+
+
+def _reject_action_deadline_outside_window(key: str, parsed: object) -> None:
     """Refuse an ``action-deadline`` set that violates the quarantine timeout nesting.
 
-    ``action-deadline`` (-> ``orchestrator.action_deadline_seconds``) is the OUTER bound
-    of the quarantine timeout nesting: ``action_deadline(30) > host_read(25) >
-    child_budget(20) > SDK_read(8)`` (#340 golive §17 / §4-P1e). Writing an
-    ``action_deadline <=`` the host read-frame timeout
-    (:data:`~alfred.security.quarantine_child_io._READ_FRAME_TIMEOUT_S`) would let the
-    orchestrator tear a LIVE extraction at its deadline BEFORE the framing/child bounds
-    fire — surfacing as a misleading "action deadline exceeded" with no hint the value is
-    below the quarantine floor (devex-lens, spec §17). So a ``<= floor`` set (or a
-    non-numeric value that can't satisfy the numeric floor at all) is refused with an
-    actionable ``t()`` message naming the floor + why, rather than silently accepting a
-    nesting-inverting value.
+    ``action-deadline`` (-> ``orchestrator.action_deadline_seconds``) is the OUTER bound of
+    the quarantine timeout nesting (#340 golive §17 / §4-P1e). It is bounded on BOTH sides,
+    and the two bounds fail in opposite directions:
 
-    Only ``action-deadline`` is floor-guarded — every other low-blast key returns early.
+    **FLOOR — ``action_deadline > preamble + host_read`` (4 + 25 = 29).** The per-extraction
+    broker preamble (:data:`~alfred.security.quarantine_transport._BROKER_PREAMBLE_TIMEOUT_S`)
+    is SEQUENTIAL with the host read-frame bound, not nested inside it, so a live extraction
+    can legitimately occupy their SUM. A deadline at or below that sum lets the orchestrator
+    tear a healthy in-flight extraction before the framing/child bounds fire — surfacing as a
+    misleading "action deadline exceeded" with no hint the value is below the quarantine
+    floor (devex-lens, spec §17).
 
-    The floor is bound to the REAL ``_READ_FRAME_TIMEOUT_S`` (LAZY import: the
-    ``quarantine_child_io`` module carries an egress-adjacent import closure, so deferring
-    it keeps ``alfred --help`` light and pins the floor to the actual host read-frame
-    timeout so the two can never drift).
+    NOTE the floor is the SUM, not ``host_read`` alone: binding it to ``host_read`` (25)
+    admits values in ``(25, 29]`` that still tear a live extraction on the success path,
+    because the preamble runs before the read even starts.
+
+    **CEILING — ``action_deadline < 2 x host_read`` (50).** ``read_frame`` bounds the header
+    and body reads SEPARATELY, each at ``_READ_FRAME_TIMEOUT_S``, so a wedged child has a
+    theoretical ``2 x 25 = 50s`` per-frame ceiling that ONLY the outer
+    ``asyncio.timeout(action_deadline_seconds)`` wrap caps. At or above 50 that wrap stops
+    being the effective ceiling and a wedged child can hang the full per-frame bound — the
+    exact inversion ``test_action_deadline_dominates_the_two_phase_read_frame_bound`` pins
+    for the DEFAULT. That test pins only the default constant, so before this guard an
+    operator ``config set action-deadline 50`` silently inverted the very invariant the
+    sibling test protects.
+
+    Only ``action-deadline`` is window-guarded — every other low-blast key returns early.
+
+    Both bounds are bound to the REAL constants (LAZY imports: both modules carry an
+    egress-adjacent import closure, so deferring keeps ``alfred --help`` light AND pins the
+    window to the shipped values so the guard and the runtime can never drift).
     """
     if key != "action-deadline":
         return
     from alfred.security.quarantine_child_io import _READ_FRAME_TIMEOUT_S
+    from alfred.security.quarantine_transport import _BROKER_PREAMBLE_TIMEOUT_S
 
-    floor = _READ_FRAME_TIMEOUT_S
-    # ``_parse_scalar`` returns ``int | float | str``; only a numeric value strictly
-    # above the floor is safe. A ``str`` (non-numeric input) can never satisfy the floor,
-    # so it falls into the reject branch alongside an in-range-but-too-low number.
+    floor = _BROKER_PREAMBLE_TIMEOUT_S + _READ_FRAME_TIMEOUT_S
+    ceiling = 2 * _READ_FRAME_TIMEOUT_S
+    # ``_parse_scalar`` returns ``int | float | str``; only a numeric value strictly INSIDE
+    # the window is safe. A ``str`` (non-numeric input) can never satisfy a numeric bound,
+    # so it falls into the floor-reject branch alongside an in-range-but-too-low number.
     if not isinstance(parsed, int | float) or parsed <= floor:
         typer.echo(
             t(
                 "cli.config.set.action_deadline_below_floor",
                 value=str(parsed),
-                floor=str(floor),
+                floor=_format_seconds(floor),
+                ceiling=_format_seconds(ceiling),
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if parsed >= ceiling:
+        typer.echo(
+            t(
+                "cli.config.set.action_deadline_above_ceiling",
+                value=_format_seconds(float(parsed)),
+                floor=_format_seconds(floor),
+                ceiling=_format_seconds(ceiling),
             ),
             err=True,
         )
@@ -491,10 +540,11 @@ def config_set(
         raise typer.Exit(code=1)
 
     parsed = _parse_scalar(value)
-    # #340 golive Task 15: floor-guard action-deadline so an operator can't invert the
-    # quarantine timeout nesting (action_deadline must stay > the host read-frame floor).
+    # #340 golive: window-guard action-deadline so an operator can't invert the quarantine
+    # timeout nesting from EITHER side — it must stay above the sequential
+    # preamble+host_read floor and below the two-phase read_frame ceiling.
     # No-op for every other low-blast key.
-    _reject_action_deadline_below_floor(key, parsed)
+    _reject_action_deadline_outside_window(key, parsed)
     _yaml_set(_policies_yaml_path, yaml_key, parsed)
     typer.echo(
         t(

@@ -204,10 +204,21 @@ msgstr ""
 msgid "cli.config.set.action_deadline_below_floor"
 msgstr ""
 "alfred config set refused: action-deadline must be greater than {floor}s "
-"— the quarantine host read-frame timeout. A value at or below the floor "
-"(got {value}) inverts the extraction timeout nesting, tearing a live "
-"extraction at the orchestrator deadline before the framing and child "
-"bounds fire. Set a value above {floor}s and rerun."
+"— the quarantine broker preamble plus the host read-frame timeout, which "
+"run one after the other. A value at or below the floor (got {value}) "
+"inverts the extraction timeout nesting, tearing a live extraction at the "
+"orchestrator deadline before the framing and child bounds fire. Set a "
+"value above {floor}s and below {ceiling}s, then rerun."
+
+#: src/alfred/cli/config.py:279
+msgid "cli.config.set.action_deadline_above_ceiling"
+msgstr ""
+"alfred config set refused: action-deadline must be less than {ceiling}s — "
+"twice the quarantine host read-frame timeout, because read_frame bounds "
+"the header and body reads separately. At or above that (got {value}) the "
+"orchestrator deadline stops being the effective ceiling and a wedged "
+"quarantine child can hang for the full per-frame bound. Set a value above "
+"{floor}s and below {ceiling}s, then rerun."
 
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.

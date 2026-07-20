@@ -66,11 +66,23 @@ orchestrator:
   # Per-action deadline in seconds (spec §10.5).
   # asyncio.timeout wraps the entire handle_user_message turn.
   # Configurable here; default 30s matches spec §10.5.
+  #
+  # LEGAL WINDOW (#340 PR2b-golive): 29 < action_deadline_seconds < 50, enforced by
+  # `alfred config set action-deadline`, which refuses anything outside it.
+  #   * FLOOR 29 = broker preamble (4s) + host read-frame (25s). Those two run one
+  #     after the other on an extraction, so a deadline at or below their SUM tears a
+  #     HEALTHY in-flight extraction before the framing/child bounds fire.
+  #   * CEILING 50 = 2 x host read-frame. read_frame bounds the header and body reads
+  #     SEPARATELY, so only this deadline caps a wedged quarantine child's per-frame
+  #     cost; at or above 50 it stops being the effective ceiling.
+  #
   # NOTE: raising this above the gateway relay's per-call timeout (default 30s,
   # _DEFAULT_PER_CALL_TIMEOUT in src/alfred/egress/relay_client.py) means the
   # relay's own asyncio.timeout fires FIRST on a slow web.fetch — losing the
-  # enriched in_doubt/ledger_state timeout audit row (#347 blocker 2). Keep this
-  # <= the relay timeout, or raise both together. See
+  # enriched in_doubt/ledger_state timeout audit row (#347 blocker 2). Since the
+  # window's floor (29) is just below the relay default (30), the two constraints
+  # leave 30 as the only value satisfying both out of the box: to go higher, raise
+  # the relay per-call timeout TOGETHER with this knob. See
   # docs/subsystems/security.md ("Only fires when the action deadline is the
   # tighter bound").
   action_deadline_seconds: 30
