@@ -672,11 +672,17 @@ the `egress.broker.refused` audit row.
   does") *fully* true — the quarantined LLM is now real. CLAUDE.md and PRD edits
   are human-gated; a human-gated follow-up should update HARD #5's note and the
   PRD to reflect the live cutover. Not edited by this ADR.
-- **Hub deep-docs golive note (human/docs-author follow-up).** The
-  `docs/subsystems/quarantine.md` and `docs/subsystems/security.md` deep-docs
-  still describe the deterministic-echo child; an `alfred-docs-author` pass
-  should record the live real-LLM child. Recorded per golive spec §19-E5; not
-  written here.
+- **Hub deep-docs golive note (human/docs-author follow-up).** An
+  `alfred-docs-author` pass should record the live real-LLM child in the
+  `docs/subsystems/quarantine.md` and `docs/subsystems/security.md` deep-docs.
+  Recorded per golive spec §19-E5; not written here.
+  <br>*Correction (fix round):* an earlier draft of this bullet asserted those
+  two deep-docs "still describe the deterministic-echo child". They do not —
+  verified, zero occurrences in either file — so the pass is **additive**
+  (record the cutover), not **corrective** (retire stale echo prose). The stale
+  echo prose that did exist lived in `docs/subsystems/comms.md`, and was
+  retired in this PR. Kept as a follow-up rather than deleted, because neither
+  deep-doc yet records the live child.
 - **[#455](https://github.com/alfred-os/AlfredOS/issues/455) — supervised respawn
   for the quarantine child.** The child is spawned once at daemon boot with no
   respawn scheduler (#455 records `request_plugin_restart`'s docstring as claiming
