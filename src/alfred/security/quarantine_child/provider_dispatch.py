@@ -52,8 +52,9 @@ Retry contract (spec §6.3):
   rvw-1 / AI-5 fix, replacing the prior :func:`_build_extraction_prompt`
   free-form retry path).
 
-Retry back-off (perf-1 fix): the loop sleeps
-``0.5 * (2 ** attempt)`` seconds between retries (exponential back-off)
+Retry back-off (perf-1 fix): the loop sleeps ``0.5 * (2 ** attempt)``
+seconds between retries (exponential back-off), CLAMPED to the remaining
+budget (#472 finding 1) so a late back-off cannot itself overrun the ceiling,
 and caps total wall-clock at :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`.
 A budget breach short-circuits to ``cannot_extract`` so the dispatcher
 does not block forever on a thrashing provider.
@@ -378,12 +379,17 @@ async def dispatch_extraction(
             # model-output failure, so audit consumers can tell them
             # apart (err-002).
             #
-            # LOUD, not merely typed (#472 finding 4 / HARD #7): this arm returns the same
-            # provider_unavailable refusal whether the SDK reported an outage, the host never
-            # brokered a socket, or the attempt budget was exhausted before the provider was
-            # built — three infrastructure faults with the same reason but different
-            # remediation. Without this line an operator cannot tell them from one another,
-            # nor from a model-content failure. Mirrors the extraction_deadline_exceeded arm.
+            # LOUD, not merely typed (#472 finding 4 / HARD #7): all three infrastructure
+            # faults behind this arm — an SDK outage, an un-brokered socket, or an attempt
+            # budget exhausted in bind() — collapse onto the SAME provider_unavailable
+            # reason. Without a loud line they are indistinguishable from a model-content
+            # failure (cannot_extract), whose remediation is the opposite. This line
+            # separates the infra-fault CLASS from the content-fault class; remaining_budget_s
+            # near zero further hints at the budget-exhaustion sub-case. It does NOT
+            # discriminate the three sub-faults from one another — the only signal that would
+            # (the exception message) is deliberately NOT logged: an SDK-origin
+            # ProviderUnavailableError can echo request fragments carrying the T3 prompt, a
+            # T3-leak the security review flagged. Mirrors the extraction_deadline_exceeded arm.
             _log.warning(
                 "quarantine.child.provider_unavailable",
                 attempt=attempt,

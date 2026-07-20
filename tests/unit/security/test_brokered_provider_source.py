@@ -639,9 +639,12 @@ def test_bind_maps_budget_exhausted_by_recv_to_provider_unavailable(
     source = BrokeredProviderSource(_factory(), a)
 
     async def _drive() -> None:
-        with pytest.raises(ProviderUnavailableError):
+        with pytest.raises(ProviderUnavailableError) as excinfo:
             async with source.bind(budget_seconds=_AMPLE_BUDGET_S):
                 pass  # never reached — build raised before yield
+        # The original InvalidAttemptBudgetError is preserved as the cause (the ``from exc``
+        # on the conversion) so the forensic detail is not lost — dropping it would slip past.
+        assert isinstance(excinfo.value.__cause__, InvalidAttemptBudgetError)
 
     anyio.run(_drive)
     with pytest.raises(OSError):

@@ -709,6 +709,41 @@ async def test_provider_unavailable_maps_to_typed_refusal() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_budget_exhausted_in_bind_maps_to_provider_unavailable_end_to_end() -> None:
+    """A bind-origin ProviderUnavailableError surfaces as a typed refusal, not an escape.
+
+    #472 finding 4 (end-to-end): when ``bind()`` raises ``ProviderUnavailableError`` from
+    ``__aenter__`` (its converted budget-exhaustion path — see
+    ``test_bind_maps_budget_exhausted_by_recv_to_provider_unavailable`` in
+    test_brokered_provider_source.py), ``dispatch_extraction`` must catch it and return the
+    ``provider_unavailable`` typed refusal — NOT let it escape untyped, which is the very
+    hole the conversion closes. Complements the SDK-origin case above.
+    """
+
+    class _BindRaisesUnavailable:
+        """A source whose per-attempt bind raises on enter (budget exhausted in bind())."""
+
+        def capabilities(self) -> frozenset[ProviderCapability]:
+            return frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION})
+
+        @contextlib.asynccontextmanager
+        async def bind(self, *, budget_seconds: float) -> AsyncIterator[Any]:
+            del budget_seconds
+            raise ProviderUnavailableError("attempt budget exhausted before build")
+            yield  # pragma: no cover — unreachable; makes this an async generator
+
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
+
+    result = await dispatch_extraction(
+        content=b"hello",
+        schema_json=_SCHEMA_JSON,
+        schema_version=1,
+        source=_BindRaisesUnavailable(),
+    )
+    assert result == {"kind": "typed_refusal", "reason": "provider_unavailable", "cost_usd": 0.0}
+
+
 # ---------------------------------------------------------------------------
 # Retry-prompt builder — closed-vocab consolidation (sec-001 / rvw-1 / AI-5).
 # ---------------------------------------------------------------------------
