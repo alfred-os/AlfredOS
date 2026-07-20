@@ -274,13 +274,22 @@ writing a CONNECT request line. The proxy originally classified each such close 
 this residual describes with benign noise, degrading it as an exfiltration signal.
 `EgressForwardProxy._read_connect_target` now separates the two at the read site using
 `asyncio.IncompleteReadError.partial`: a clean EOF having read **zero bytes** is an abandoned
-connection (counted under `gateway_egress_connect_total{outcome="abandoned"}`, never audited,
-never alerted), while **any** partial request line followed by EOF — and an idle peer that trips
+connection (counted under `gateway_egress_connect_total{outcome="abandoned",plane=…}`, never
+audited), while **any** partial request line followed by EOF — and an idle peer that trips
 the per-handshake timeout — remain full `malformed_connect` denials. The split is deliberately
 keyed on zero-bytes-read so it narrows noise without weakening the truncated-handshake or
 slow-loris signal, and the documented sum invariant
 (`sum(gateway_egress_denied_total{plane})` == `gateway_egress_connect_total{outcome="denied"}`)
-is preserved. Note the *eager* N-socket broker is not itself the thing to fix here: brokering
+is preserved — now **per plane**, since the outcome counter carries `plane` too (strictly
+stronger than the plane-less form this ADR originally described).
+
+Abandoned connects *are* alerted, but only off the provider plane. `plane` was added to
+`gateway_egress_connect_total`'s label set precisely because the reclassification made a benign
+provider-plane flood (our own discarded broker sockets) indistinguishable from the same flood on
+the adapter plane (an unauthenticated peer probing the listener). `GatewayEgressAbandonedConnectFlood`
+(`ops/alerts/gateway.yml`) excludes `plane="proxy"` by name. The log line stays at `debug`
+deliberately: raising it would recreate in the log stream the exact deny-storm the
+reclassification removed, re-burying this residual's exfiltration signal. Note the *eager* N-socket broker is not itself the thing to fix here: brokering
 just-in-time instead was considered and rejected in
 [ADR-0052](0052-real-quarantine-child-golive.md) ("Reverse fd-4 to request/response…") because
 it would reopen reverse-fd-injection on a channel PR2a deliberately made one-way (core→child).
