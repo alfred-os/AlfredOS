@@ -685,6 +685,8 @@ async def test_provider_unavailable_maps_to_typed_refusal() -> None:
     dispatcher no longer imports ``httpx``; the neutral seam error is
     what it now catches.
     """
+    import structlog.testing
+
     from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = _fake_provider_with_capabilities(
@@ -692,11 +694,19 @@ async def test_provider_unavailable_maps_to_typed_refusal() -> None:
     )
     provider.complete = AsyncMock(side_effect=ProviderUnavailableError("down"))
     src = _FakeSource(provider)
-    result = await dispatch_extraction(
-        content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, source=src
-    )
+    with structlog.testing.capture_logs() as logs:
+        result = await dispatch_extraction(
+            content=b"hello", schema_json=_SCHEMA_JSON, schema_version=1, source=src
+        )
     assert result == {"kind": "typed_refusal", "reason": "provider_unavailable", "cost_usd": 0.0}
     assert src.binds == 1
+    # LOUD, not merely typed (#472 finding 4 / HARD #7): the arm returns the same
+    # provider_unavailable reason for an SDK outage, an un-brokered socket, and a budget
+    # exhausted in bind() — the log is the only thing that tells them apart.
+    assert [e for e in logs if e["event"] == "quarantine.child.provider_unavailable"], (
+        "provider_unavailable was returned without a loud log — an operator cannot "
+        "distinguish the three infrastructure faults that share this reason"
+    )
 
 
 # ---------------------------------------------------------------------------
