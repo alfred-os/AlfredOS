@@ -127,6 +127,7 @@ class _FakeSource:
     def __init__(self, provider: Any) -> None:
         self._provider = provider
         self.binds = 0
+        self.budgets: list[float] = []
 
     def capabilities(self) -> frozenset[ProviderCapability]:
         caps = self._provider.capabilities()
@@ -134,8 +135,12 @@ class _FakeSource:
         return caps
 
     @contextlib.asynccontextmanager
-    async def bind(self) -> AsyncIterator[Any]:
+    async def bind(self, *, budget_seconds: float) -> AsyncIterator[Any]:
         self.binds += 1
+        # The dispatcher must hand every attempt the REMAINING extraction budget — that value
+        # becomes the attempt's absolute socket deadline, which is the only thing that can stop
+        # the child's blocking, un-cancellable recv (see brokered_egress).
+        self.budgets.append(budget_seconds)
         yield self._provider
 
     def drain_leftovers(self) -> None:  # pragma: no cover - dispatcher never calls it
@@ -386,6 +391,46 @@ async def test_wall_clock_ceiling_timeout_is_terminal_cannot_extract(
     # The remaining wall-clock budget was passed as the per-call timeout.
     assert captured_timeouts and captured_timeouts[0] is not None
     assert 0 < captured_timeouts[0] <= pd._MAX_TOTAL_WALL_CLOCK_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_each_bind_receives_the_shrinking_remaining_budget() -> None:
+    """B1: the attempt's socket deadline must come from the REMAINING extraction budget.
+
+    ``asyncio.wait_for`` alone cannot hold the ceiling — ``anyio.to_thread.run_sync`` runs the
+    blocking SDK ``recv`` with ``abandon_on_cancel=False``, so ``wait_for`` cancels and then
+    *awaits* the shielded thread. The only real bound is the socket deadline the source
+    installs, and it is only a ceiling if the dispatcher hands each attempt what is LEFT of
+    the 20s budget rather than a fresh full read. Pins: the first budget is (near) the full
+    cap, and every later attempt's is strictly smaller.
+    """
+    from alfred.security.quarantine_child import provider_dispatch as pd
+
+    provider = AsyncMock()
+    provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
+    # Two unparseable responses then a good one -> 3 attempts, 3 binds, 3 budgets.
+    provider.complete = AsyncMock(
+        side_effect=[
+            _text_response("not json"),
+            _text_response("still not json"),
+            _text_response('{"title": "hello"}'),
+        ]
+    )
+    src = _FakeSource(provider)
+
+    result = await pd.dispatch_extraction(
+        content=b'{"title": "hello"}',
+        schema_json='{"type":"object","properties":{"title":{"type":"string"}}}',
+        schema_version=1,
+        source=src,
+    )
+    assert result["kind"] == "extracted"
+    assert len(src.budgets) == 3
+    assert src.budgets[0] == pytest.approx(pd._MAX_TOTAL_WALL_CLOCK_SECONDS, abs=0.5)
+    # Strictly shrinking: the back-off between attempts is charged to the same budget, so the
+    # last attempt can never be handed a fresh full-length ceiling.
+    assert src.budgets[0] > src.budgets[1] > src.budgets[2]
+    assert src.budgets[-1] < pd._MAX_TOTAL_WALL_CLOCK_SECONDS
 
 
 # ---------------------------------------------------------------------------

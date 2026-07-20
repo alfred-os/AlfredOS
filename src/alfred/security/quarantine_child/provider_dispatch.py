@@ -111,11 +111,16 @@ _COMPLETION_DEFAULT_MAX_TOKENS: int = int(CompletionRequest.model_fields["max_to
 # action_deadline (30s) — monotone per P1e (#340); the prior 30s was EQUAL to
 # action_deadline (the "well under" claim was wrong, surviving only because the
 # echo child replies instantly). The loop-top check alone is NOT a hard ceiling
-# (a single provider.complete() could outrun it), so dispatch_extraction wraps
-# each per-attempt call in asyncio.wait_for(remaining_budget) — the REMAINING
-# budget, so N attempts share one wall-clock ceiling, not N of them (#340 PR2b
-# Task 5). The 8s socket-level SDK read (brokered_egress._CHILD_SDK_READ_TIMEOUT,
-# Task 3) is the inner ceiling <= this budget.
+# (a single provider.complete() could outrun it) — and neither is the
+# asyncio.wait_for wrap: the SDK's blocking recv runs in a shielded worker thread
+# (anyio to_thread.run_sync, abandon_on_cancel=False), so wait_for cancels and
+# then AWAITS it. What makes this budget a real ceiling is that
+# dispatch_extraction hands the REMAINING budget to source.bind(), which anchors
+# it as an ABSOLUTE socket deadline clamping every syscall of that attempt
+# (brokered_egress). N attempts therefore share one wall-clock ceiling, not N of
+# them (#340 PR2b Task 5). The 8s SDK read
+# (brokered_egress._CHILD_SDK_READ_TIMEOUT, Task 3) is the per-syscall IDLE cap
+# under it — on its own it resets per byte and bounds nothing cumulatively.
 _MAX_TOTAL_WALL_CLOCK_SECONDS: float = 20.0
 
 # Exponential back-off base. Sleep between attempt N and N+1 is
@@ -216,12 +221,17 @@ async def dispatch_extraction(
     Between attempts the loop sleeps ``_BACKOFF_BASE_SECONDS * (2 ** attempt)``
     seconds (perf-1 fix: the prior loop fired back-to-back). Total
     wall-clock per extraction is capped at
-    :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`: the loop-top check short-circuits
-    a breached budget, and each per-attempt call is wrapped in
-    ``asyncio.wait_for(remaining_budget)`` so a single slow call cannot
-    outrun the cap. A wait_for ``TimeoutError`` is TERMINAL
-    ``cannot_extract`` — not retry-eligible (a call that blew the budget
-    will not recover inside a shrinking one; HARD #7 forbids a silent hang).
+    :data:`_MAX_TOTAL_WALL_CLOCK_SECONDS`. Three mechanisms hold that cap,
+    only the third of which can stop a blocking provider read: the loop-top
+    check short-circuits an already-breached budget; each call is wrapped in
+    ``asyncio.wait_for(remaining)``; and — load-bearing — the REMAINING budget
+    is passed to ``source.bind()``, which anchors it as an absolute socket
+    deadline clamping every syscall of that attempt. The ``wait_for`` cannot do
+    that job alone because the SDK's blocking ``recv`` runs in a shielded
+    worker thread it can only cancel-then-await. A ``TimeoutError`` from either
+    is TERMINAL ``cannot_extract`` — not retry-eligible (a call that blew the
+    budget will not recover inside a shrinking one; HARD #7 forbids a silent
+    hang).
 
     :class:`ValidationError`, :class:`json.JSONDecodeError`, and
     :class:`ProviderMalformedToolArgumentsError` (an empty/malformed
@@ -292,12 +302,19 @@ async def dispatch_extraction(
         try:
             # Bind a FRESH provider off the source for THIS attempt: the host
             # brokers one gateway socket per attempt and a bound provider
-            # cannot re-dial its single socket (RedialError). The call is
-            # wrapped in asyncio.wait_for(remaining_budget) so
-            # _MAX_TOTAL_WALL_CLOCK_SECONDS is a HARD per-call ceiling via the
-            # REMAINING budget — the loop-top check alone is not one. The 8s
-            # socket-level SDK read (Task 3) is the inner ceiling.
-            async with source.bind() as provider:
+            # cannot re-dial its single socket (RedialError).
+            #
+            # The REMAINING budget is handed to bind() because that is what
+            # actually enforces the ceiling. asyncio.wait_for cannot: the SDK's
+            # blocking recv runs in anyio.to_thread.run_sync with
+            # abandon_on_cancel=False, so wait_for cancels and then AWAITS the
+            # shielded thread. bind() turns this budget into an absolute socket
+            # deadline every syscall of the attempt is clamped against, so a
+            # late attempt is truncated rather than handed a fresh 8s read (which
+            # would let the child reply at ~28s, past the host's 25s read_frame,
+            # losing the in-budget refusal entirely). wait_for stays as the
+            # in-loop belt for the non-blocking portions of the call.
+            async with source.bind(budget_seconds=remaining_budget) as provider:
                 raw_response, call_cost = await asyncio.wait_for(
                     _call_provider(
                         prompt=prompt,
@@ -306,7 +323,10 @@ async def dispatch_extraction(
                         extraction_mode=extraction_mode,
                         max_tokens=max_tokens,
                     ),
-                    timeout=remaining_budget,
+                    # Re-measured AFTER bind(): the control-fd recv inside it is
+                    # charged to the same budget, so a stale pre-bind snapshot
+                    # would hand the call more time than the extraction has left.
+                    timeout=deadline_monotonic - time.monotonic(),
                 )
             # The call returned, so it was paid for — count it before
             # validation, which may still reject the response and retry.
