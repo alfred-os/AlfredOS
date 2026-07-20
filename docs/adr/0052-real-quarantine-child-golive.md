@@ -287,6 +287,18 @@ socket in its empty network namespace. The specific decisions:
   `_READ_FRAME_TIMEOUT_S`, so the host tore the child down and its in-budget
   refusal was lost.
 
+  **Correction (2026-07-20, #472 finding 1):** one budget term was still
+  unclamped — the inter-attempt exponential back-off (`_BACKOFF_BASE_SECONDS *
+  2**attempt`) was computed from the attempt index alone, not against the
+  remaining budget, so a back-off starting late could carry the loop past the
+  20s ceiling by up to the largest back-off (`0.5 × 2¹ = 1.0s`). The nesting
+  invariant was **never actually violated** (worst case `child_budget ≤ 21s <
+  gateway_handshake 22s`), so this was a latent margin erosion, not a live
+  incident — but "a ceiling a back-off can overrun is not a ceiling." The
+  back-off is now `min(back-off, deadline − now)`, making the 20s a true
+  ceiling across every path. See `provider_dispatch.py` and
+  `test_backoff_never_carries_the_loop_past_the_wall_clock_budget`.
+
 - **The broker preamble is bounded at 4s and joins the nesting as a SUM term.**
   The per-extraction preamble (`broker_sockets` plus its
   `egress.broker.connected` rows) was the one term bounded by nothing. Unbounded
