@@ -356,8 +356,10 @@ the gateway-only `alfred_discord_egress` volume (never reachable from the
 connectivity-free core). A thin in-child TCP→unix byte-splice shim lets
 `discord.py`'s `Client(proxy=...)` work unmodified. The gateway proxy's
 Discord-only allowlist (`discord.com`, `*.discord.gg`) is defense-in-depth on top of
-the kernel enforcement-of-record. This closes the **Discord half** of `#230`;
-the 2c real-LLM quarantine-child egress remains deferred to `#230/#340`. See
+the kernel enforcement-of-record. This closes the **Discord half** of `#230`. The
+quarantine-child half is no longer deferred: `#340` PR2b-golive gives the real
+extraction child provider reachability WITHOUT relaxing its empty netns, by passing
+it a pre-connected gateway socket over SCM_RIGHTS (ADR-0050 / ADR-0052). See
 [ADR-0043](../adr/0043-discord-adapter-egress-l7-proxy-netns-bridge.md),
 [ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md), and
 [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md).
@@ -371,19 +373,24 @@ The daemon's inbound quarantined extraction is **live in production**. When
 spawned via `spawn_quarantine_child_io` — the ADR-0027 fixture extractor is gone
 (see the ADR-0027 PR-S4-11c-2b amendment). The boot-minted authorised T3 nonce
 drives a real `T3BodyRecorder` that tags the inbound body `TaggedContent[T3]` and
-stages it for the inline-over-wire content path (ADR-0029). The 2b child still runs
-a **deterministic-echo loop** — no real LLM, no network egress in the quarantined
-child — so the open-egress gap (`#230`, above) still contains nothing that can use
-it; the real quarantined-LLM child lands in `#340`.
+stages it for the inline-over-wire content path (ADR-0029). Since `#340` PR2b-golive
+the child runs a **real provider extraction** — the deterministic-echo loop it ran
+through 2b is deleted (see [ADR-0052](../adr/0052-real-quarantine-child-golive.md)).
+The child keeps its empty network namespace: its provider call leaves over a
+pre-connected gateway socket passed in by the SCM_RIGHTS reachability broker
+([ADR-0050](../adr/0050-quarantine-child-scm-rights-reachability-broker.md)), with
+TLS terminating inside the child, so the quarantined half never gains general
+egress of its own.
 
 **The PRIVILEGED side now runs a real LLM turn.** `#338` PR2 / [ADR-0049](../adr/0049-real-privileged-turn-comms-inbound.md)
 retired the earlier "the real LLM lands in PR-S4-11c-2c" plan: `_build_comms_boot_graph`
 now wires `RealTurnOrchestratorAdapter` (`src/alfred/comms_mcp/real_turn_adapter.py`) as
 the `_OrchestratorLike` implementation, which gate-checks the T3→T2 downgrade
 (`downgrade_to_orchestrator`) and calls the real `Orchestrator.handle_user_message` —
-a genuine privileged-provider round trip, egress tools deferred. This is distinct from,
-and does not change, the quarantined child's own real-LLM graduation (`#340`), which
-the paragraph above still governs.
+a genuine privileged-provider round trip, egress tools deferred. This is distinct from
+the quarantined child's own real-LLM graduation (`#340` PR2b-golive, ADR-0052), which
+landed separately and is governed by the paragraph above — both halves of the dual-LLM
+split now call real providers, each on its own side of the trust boundary.
 
 **Fail-closed dev-host behaviour — operators read this before enabling a comms
 adapter.** The quarantined child is `[sandbox] kind = "full"` (bwrap), so a daemon
