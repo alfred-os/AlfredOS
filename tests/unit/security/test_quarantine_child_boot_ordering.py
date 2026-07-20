@@ -103,6 +103,22 @@ def _patch_stdio_seam(monkeypatch: pytest.MonkeyPatch, loop: asyncio.AbstractEve
     monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
 
 
+# The fd-4 reconstruction step these two tests drive calls ``socket.AF_UNIX`` inside
+# ``__main__``, which CPython does not define on Windows. The dependency is INDIRECT — it
+# lives in the code under test, not in the test body — which is why the repo's direct-use
+# scanner (a test that builds a socket AND calls os.dup/os.close) does not flag this module
+# and why a static pass classified it as portable. Guard it explicitly rather than widen the
+# scanner: SCM_RIGHTS fd passing has no Win32 equivalent, and the launcher REFUSES
+# ``kind:full`` on Windows in production (``windows_stub_in_production``, ADR-0015), so there
+# is no native-Windows path for this boot sequence to be correct on. Real Windows containment
+# is #230.
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: fd-4 reconstruction uses socket.AF_UNIX (absent on Windows CPython)",
+)
+
+
+@_posix_only
 async def test_boot_fires_hello_build_fd4_ready_in_runtime_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -177,6 +193,7 @@ async def test_fd3_framing_refuse_precedes_hello_with_zero_stdout(
     assert hello_fired == []  # zero stdout before ready — a launcher-attributed EOF
 
 
+@_posix_only
 async def test_fd4_reconstruction_failure_refuses_after_hello_and_before_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
