@@ -444,11 +444,13 @@ def test_boot_refuses_fail_closed_on_quarantine_provider_key_unset(
     # The fail-closed refusal contract: exit 2, never a degraded boot.
     assert result.exit_code == 2
 
-    sup = FakeSupervisor.last_instance
-    assert sup is not None
     # The pump was NEVER registered — the refusal happens during the comms-graph
     # build (the pre-spawn key resolve), BEFORE supervisor.start / the spawn loop.
-    assert sup.registered_tasks == []
+    # In isolation ``last_instance`` is therefore None; in a full-file run a prior
+    # test's supervisor may linger on the ClassVar, so assert the isolation-robust
+    # intent (no pump task registered) either way.
+    sup = FakeSupervisor.last_instance
+    assert sup is None or sup.registered_tasks == []
     # The refuse is PRE-spawn, so no bwrap child was ever spawned (the §20.2 host
     # primary defense fires before the single spawn await — no fd-3 clobber window).
     assert patch_quarantine_child_spawn == []

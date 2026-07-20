@@ -34,10 +34,24 @@ from prometheus_client import REGISTRY
 _METRIC: Final[str] = "alfred_quarantine_capability_revoked_total"
 
 
-def _sample() -> float:
-    """Current counter value, or 0.0 before the first increment."""
-    value = REGISTRY.get_sample_value(_METRIC)
-    return 0.0 if value is None else value
+def _sample() -> float | None:
+    """Current counter value, or ``None`` when the metric is ABSENT from the registry.
+
+    Deliberately does NOT coalesce a missing metric to ``0.0``. A counter that was
+    never registered and a counter sitting at zero are the two states these tests
+    exist to tell apart, and collapsing them makes every assertion below unfalsifiable.
+    """
+    return REGISTRY.get_sample_value(_METRIC)
+
+
+def _require_sample() -> float:
+    """The counter's value, failing loudly if it is not on the default registry."""
+    value = _sample()
+    assert value is not None, (
+        f"{_METRIC} is absent from the default registry — nothing scrapeable exists, "
+        f"so the ops/alerts/quarantine.yml rule could never fire"
+    )
+    return value
 
 
 def test_the_counter_is_registered_at_import() -> None:
@@ -49,7 +63,15 @@ def test_the_counter_is_registered_at_import() -> None:
     from alfred.security import observability
 
     assert observability.CAPABILITY_REVOKED_COUNTER is not None
-    assert _sample() >= 0.0, "counter is not registered on the default registry"
+    # The load-bearing half: the Counter object existing proves nothing about it being
+    # SCRAPEABLE. One built against a private registry (or renamed) is invisible to
+    # Prometheus and to the alert rule. ``get_sample_value`` returns None for an
+    # unregistered name and 0.0 for a registered-but-never-incremented one, so this
+    # distinguishes exactly the regression the test is here to catch.
+    assert _sample() is not None, (
+        f"{_METRIC} is not registered on the DEFAULT registry — the counter exists as "
+        f"an object but nothing scrapes it, so the alert rule is dead"
+    )
 
 
 def test_the_counter_carries_no_labels() -> None:
@@ -85,9 +107,9 @@ async def test_revoking_the_child_capability_increments_the_counter() -> None:
     transport = object.__new__(QuarantineStdioTransport)
     transport._child_io = _ChildIO()  # type: ignore[attr-defined]
 
-    before = _sample()
+    before = _require_sample()
     await transport._revoke_child_capability()
-    after = _sample()
+    after = _require_sample()
 
     assert closed == [True], "the revoke must actually tear the child down"
     assert after == before + 1.0, (
@@ -113,9 +135,9 @@ async def test_a_failing_teardown_still_counts_the_revocation() -> None:
     transport = object.__new__(QuarantineStdioTransport)
     transport._child_io = _ExplodingChildIO()  # type: ignore[attr-defined]
 
-    before = _sample()
+    before = _require_sample()
     await transport._revoke_child_capability()  # must not raise
-    assert _sample() == before + 1.0, (
+    assert _require_sample() == before + 1.0, (
         "a revocation whose teardown failed was not counted — the counter must be "
         "incremented BEFORE the teardown is attempted"
     )
