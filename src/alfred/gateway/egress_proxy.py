@@ -19,9 +19,13 @@ Enforcement per CONNECT (each connection is its own task):
 * the request-line read is **bounded** (a small byte cap + a per-handshake timeout),
   so a slow-loris / oversized handshake cannot pin a task;
 * a peer that closes having sent **zero bytes** is an ABANDONED connection, not a
-  denial: it is counted under its own ``outcome="abandoned"`` and never audited or
-  alerted (a partial request line then EOF, or an idle peer that trips the handshake
-  timeout, both remain real ``malformed_connect`` denials);
+  denial: it is counted under its own ``outcome="abandoned"`` and never audited (a
+  partial request line then EOF, or an idle peer that trips the handshake timeout,
+  both remain real ``malformed_connect`` denials). It is not silent, though: the
+  counter carries ``{plane}``, and a sustained abandon rate on any plane OTHER than
+  the provider plane — where it is a port scan rather than the quarantine broker
+  discarding its unused pre-connected sockets — pages via
+  ``ops/alerts/gateway.yml``'s GatewayEgressAbandonedConnectFlood;
 * every CONNECT — allowed or denied — is audited (gateway-local structlog tier).
 
 A bind failure is **fail-closed**: the ``OSError`` propagates (B2 maps it to
@@ -98,10 +102,18 @@ _SPLICE_CHUNK: Final[int] = 65536
 
 # Provisional metric (G7-5 owns the canonical egress metric/alert set). Default
 # registry so the existing gateway /metrics exposition serves it automatically.
+#
+# ``plane`` is part of the series contract (#340 golive). ONE module-level counter is shared
+# by every EgressForwardProxy instance, and the SAME class serves both the provider plane
+# (``plane="proxy"``) and the Discord/adapter plane (``plane="adapter"``) — planes whose
+# baselines for ``outcome="abandoned"`` are OPPOSITE (see ``_read_connect_target``): expected
+# on the provider plane, a port scan on any other. Without ``plane`` the two are one
+# indistinguishable series. ``ops/alerts/gateway.yml``'s GatewayEgressAbandonedConnectFlood
+# selects on it, and it makes the ``outcome="error"`` outage alert plane-attributable too.
 GATEWAY_EGRESS_CONNECT: Final[Counter] = Counter(
     "gateway_egress_connect_total",
-    "Gateway L7 CONNECT forward-proxy outcomes (provisional; G7-5 finalises).",
-    ["outcome"],
+    "Gateway L7 CONNECT forward-proxy outcomes by plane (provisional; G7-5 finalises).",
+    ["outcome", "plane"],
 )
 
 _AuditSink = Callable[[str, dict[str, object]], None]
@@ -309,7 +321,7 @@ class EgressForwardProxy:
         except asyncio.CancelledError:
             raise
         except OSError as exc:  # DNS / upstream open / splice I/O error — loud, bounded, counted
-            GATEWAY_EGRESS_CONNECT.labels(outcome="error").inc()
+            GATEWAY_EGRESS_CONNECT.labels(outcome="error", plane=self._plane).inc()
             _log.warning(
                 "gateway.egress.connection_error", destination=destination_label, error=repr(exc)
             )
@@ -339,7 +351,17 @@ class EgressForwardProxy:
             # slow-loris case the handshake bound exists to reap, not an abandoned broker socket
             # (which closes as soon as the extraction that owns it finishes).
             if not exc.partial:
-                GATEWAY_EGRESS_CONNECT.labels(outcome="abandoned").inc()
+                GATEWAY_EGRESS_CONNECT.labels(outcome="abandoned", plane=self._plane).inc()
+                # DEBUG is deliberate, and the ``plane`` label above is what makes it safe.
+                # On the PROVIDER plane this path fires once per unused pre-brokered socket —
+                # i.e. on every SUCCESSFUL extraction — so raising this to info/warning would
+                # recreate in the LOG stream the exact benign flood the abandon-split just
+                # removed from the deny counters, burying the ADR-0040 residual (vii)
+                # exfiltration deny-log it exists to protect. The observable channel is the
+                # METRIC plus ``ops/alerts/gateway.yml``'s GatewayEgressAbandonedConnectFlood,
+                # which pages on a sustained abandon rate on any NON-provider plane (where the
+                # same zero-byte flood is a port scan, not a broker discard). The log line
+                # stays a debug-time breadcrumb.
                 _log.debug("gateway.egress.connect_abandoned", plane=self._plane)
                 self._close(writer)
                 return None
@@ -394,7 +416,7 @@ class EgressForwardProxy:
         try:
             client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await client_writer.drain()
-            GATEWAY_EGRESS_CONNECT.labels(outcome="allowed").inc()
+            GATEWAY_EGRESS_CONNECT.labels(outcome="allowed", plane=self._plane).inc()
             # Field-allowlisted audit ({destination} only — the resolved IP is gateway-internal
             # and deliberately NOT logged, keeping the row to the CONNECT authority).
             self._audit(EGRESS_CONNECT_ALLOWED_EVENT, {"destination": f"{host}:{port}"})
@@ -430,7 +452,7 @@ class EgressForwardProxy:
         reason: EgressDenyReason,
         destination: str,
     ) -> None:
-        GATEWAY_EGRESS_CONNECT.labels(outcome="denied").inc()
+        GATEWAY_EGRESS_CONNECT.labels(outcome="denied", plane=self._plane).inc()
         # The writer is reaped in the finally even if the audit sink raises (the fail-loud
         # payload-blindness guard) — a refusal must never leak the client socket.
         try:
