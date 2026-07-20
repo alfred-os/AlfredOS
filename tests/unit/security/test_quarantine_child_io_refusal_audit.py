@@ -48,7 +48,7 @@ class _CapturingRecorder:
 
 
 def _exited_fake(stderr: bytes):
-    # Reuse the existing _FakePopen convention (test_quarantine_child_io.py:106):
+    # Reuse the existing _FakePopen convention (test_quarantine_child_io.py:107):
     # empty stdout_frames -> read_frame hits EOF; preset returncode so the drain's
     # ``poll() is not None`` gate fires; stderr carries the refusal JSON.
     from tests.unit.security.test_quarantine_child_io import _FakePopen
@@ -226,7 +226,7 @@ async def test_cancelled_error_from_delivery_audit_still_reaps_child(
     it is rooted at ``BaseException``, not ``Exception``, and is deliberately let
     through rather than demoted to a log line. The ``try/finally`` wrapped around the
     write in ``_record_fast_launcher_refusal``'s ``poll() is None`` arm
-    (``quarantine_child_io.py:865-869``) is the ONLY thing standing between that escape
+    (``quarantine_child_io.py:976-979``) is the ONLY thing standing between that escape
     and a leaked bwrap child: this test proves the ``finally: await child_io.aclose()``
     still runs even when the write raises something the guard cannot catch.
 
@@ -295,7 +295,7 @@ async def test_record_failure_does_not_mask_refusal() -> None:
 
     Test-guidance override (the brief's ``caplog``-based version is a dead
     param — structlog events do not land in ``caplog.records`` in this repo,
-    see ``test_quarantine_child_io.py:643-647``): use
+    see ``test_quarantine_child_io.py:644-648``): use
     ``structlog.testing.capture_logs`` and assert BOTH that the primary
     ``QuarantineChildSpawnError`` still propagates AND that the guard logs
     ``refusal_record_failed`` loudly (CLAUDE.md hard rule #7 — no silent

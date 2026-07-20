@@ -152,7 +152,7 @@ async def test_control_fd_broker_failure_is_durably_audited(
 
         audit_writer = _CapturingAuditWriter()
         await EgressBrokerAuditor(audit_writer).record_broker_failure(  # type: ignore[arg-type]
-            destination=destination, reason=exc_info.value.reason
+            destination=destination, reason=exc_info.value.reason, extraction_id="ext-1"
         )
     finally:
         parent.close()
@@ -200,7 +200,7 @@ async def test_broker_failure_audit_write_failure_propagates_not_swallowed(
 
     with pytest.raises(RuntimeError, match="audit store unavailable"):
         await EgressBrokerAuditor(_BoomAuditWriter()).record_broker_failure(  # type: ignore[arg-type]
-            destination="gateway:8889", reason=boom_reason
+            destination="gateway:8889", reason=boom_reason, extraction_id="ext-1"
         )
 
     # The fail-closed hookpoint must never dispatch when the row was never
