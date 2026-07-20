@@ -445,10 +445,21 @@ async def _start_async() -> None:
         config_path=settings.policies_path,
     )
     if failure_b is not None or snapshot_ref is None:
+        snapshot_boot_failure = failure_b if failure_b is not None else _snapshot_failure()
         await _refuse_boot(
             audit,
-            failure_b if failure_b is not None else _snapshot_failure(),
-            t("daemon.boot.snapshot_ref_init_failed"),
+            snapshot_boot_failure,
+            # UAT (#340 golive): the refusal rendered a literal `{detail}` because no
+            # kwargs were passed and ``t`` returns the RAW template when ``str.format``
+            # raises KeyError. It also named `config/policies.yaml` while the daemon
+            # actually reads ``settings.policies_path`` (default /etc/alfred/policies.yaml)
+            # — a right-problem/wrong-location message that sent operators to inspect a
+            # file the daemon never opened. Both the reason and the REAL path now render.
+            t(
+                "daemon.boot.snapshot_ref_init_failed",
+                detail=_snapshot_detail(snapshot_boot_failure),
+                path=str(settings.policies_path),
+            ),
             boot_id=boot_id,
             environment_source=source,
         )
@@ -462,7 +473,14 @@ async def _start_async() -> None:
         await _refuse_boot(
             audit,
             failure_c,
-            t("daemon.boot.capability_gate_handshake_failed"),
+            # Sibling of the snapshot-ref leak above (same missing-kwarg cause). The
+            # handshake failure carries the backing store it could not reach, which is
+            # the only detail this probe knows — and the one that tells the operator
+            # whether to look at Postgres or at state.git.
+            t(
+                "daemon.boot.capability_gate_handshake_failed",
+                detail=_handshake_detail(failure_c),
+            ),
             boot_id=boot_id,
             environment_source=source,
         )
@@ -1044,6 +1062,29 @@ def _current_pid() -> int:
     import os
 
     return os.getpid()
+
+
+def _snapshot_detail(failure: DaemonBootFailure) -> str:
+    """Render the snapshot-ref refusal's ``{detail}`` — the redacted exception class.
+
+    ``detail_redacted`` is an exception QUALNAME only, never the message (§5.6 forbids
+    echoing a file fragment). ``FileNotFoundError`` / ``PermissionError`` /
+    ``ScannerError`` each tell the operator a genuinely different next step, which is
+    exactly what the unsubstituted `{detail}` was withholding.
+
+    Falls back to ``unknown`` rather than raising: a boot refusal must never be
+    preempted by a formatting error on the refusal message itself.
+    """
+    return getattr(failure, "detail_redacted", "") or "unknown"
+
+
+def _handshake_detail(failure: DaemonBootFailure) -> str:
+    """Render the capability-gate refusal's ``{detail}`` — the backing store it dialled.
+
+    ``backing_store_kind`` is a closed Literal (``postgres`` / ``state_git`` /
+    ``unknown``), so it carries no operator content and is safe to echo verbatim.
+    """
+    return getattr(failure, "backing_store_kind", "") or "unknown"
 
 
 def _snapshot_failure() -> DaemonBootFailure:
