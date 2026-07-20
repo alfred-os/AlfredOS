@@ -845,6 +845,13 @@ async def _start_async() -> None:
     # actually came up (a refusing boot also runs the finally — invariant 3).
     # Declared HERE, before the try, so the finally can never NameError on it.
     ready_emitted = False
+    # #472 finding 3: capture whatever failure is unwinding the boot so the drain
+    # ``finally`` can tell "a real failure is in flight" (suppress a cleanup error so it
+    # cannot mask the audited one) from "clean shutdown" (a cleanup error is the ONLY
+    # signal — surface it). A dedicated sentinel, not ``sys.exc_info()``: ``_start_async``
+    # can be awaited from inside a caller's own ``except`` block, and ``exc_info`` would
+    # then read a FOREIGN exception.
+    boot_failure: BaseException | None = None
     try:
         supervisor = Supervisor(
             session_scope=session_scope,
@@ -987,6 +994,13 @@ async def _start_async() -> None:
         ready_emitted = True
 
         await wait_for_shutdown(supervisor)
+    except BaseException as exc:
+        # #472 finding 3: remember what is unwinding so the drain finally can protect it
+        # from a masking cleanup error. Re-raise unchanged — this only records, it does not
+        # handle. ``BaseException`` so a boot-time ``KeyboardInterrupt`` / ``SystemExit`` is
+        # recorded too and still propagates.
+        boot_failure = exc
+        raise
     finally:
         # Spec A G1 (#237): record the planned drain BEFORE the teardown, but
         # ONLY if the daemon actually came up (``ready_emitted``). The finally
@@ -1025,7 +1039,27 @@ async def _start_async() -> None:
                 # ``stop()`` would race a closing transport and lose the frame. Keep
                 # the broadcast strictly before this call.
                 if supervisor is not None:
-                    await supervisor.stop()
+                    # #472 finding 3: this cleanup runs while a real failure may already be
+                    # in flight — e.g. a ``_BootRefusedError`` the daemon has ALREADY
+                    # audited. Letting ``stop()`` raise here would REPLACE it, so the
+                    # operator gets the wrong reason/exit code for the failure that actually
+                    # happened. But on a CLEAN shutdown ``stop()`` raising is the ONLY signal
+                    # (a breaker-persistence failure re-raised by core err-002, or an
+                    # unwritable shutdown audit) — so suppress ONLY while unwinding a real
+                    # failure, and re-raise otherwise. ``except Exception`` not
+                    # ``BaseException``: ``core.stop()`` deliberately re-raises
+                    # ``SystemExit``/``KeyboardInterrupt`` so an operator Ctrl-C on a hung
+                    # shutdown is honoured. The failure is never hidden — it is logged with
+                    # its error class right here (HARD #7).
+                    try:
+                        await supervisor.stop()
+                    except Exception as exc:
+                        log.error(
+                            "daemon.shutdown.supervisor_stop_failed",
+                            error_class=type(exc).__name__,
+                        )
+                        if boot_failure is None:
+                            raise
             finally:
                 if comms_graph is not None:
                     with suppress(Exception):
