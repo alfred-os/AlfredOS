@@ -255,6 +255,11 @@ def _reject_action_deadline_outside_window(key: str, parsed: object) -> None:
     operator ``config set action-deadline 50`` silently inverted the very invariant the
     sibling test protects.
 
+    **TYPE errors are diagnosed separately.** A non-numeric value reaches the guard as a
+    ``str`` and can never satisfy a numeric bound, but reporting it as a floor violation
+    tells the operator to raise a value they never typed as a number. It gets its own
+    ``action_deadline_not_a_number`` message, which still names the window.
+
     Only ``action-deadline`` is window-guarded — every other low-blast key returns early.
 
     Both bounds are bound to the REAL constants (LAZY imports: both modules carry an
@@ -268,14 +273,31 @@ def _reject_action_deadline_outside_window(key: str, parsed: object) -> None:
 
     floor = _BROKER_PREAMBLE_TIMEOUT_S + _READ_FRAME_TIMEOUT_S
     ceiling = 2 * _READ_FRAME_TIMEOUT_S
-    # ``_parse_scalar`` returns ``int | float | str``; only a numeric value strictly INSIDE
-    # the window is safe. A ``str`` (non-numeric input) can never satisfy a numeric bound,
-    # so it falls into the floor-reject branch alongside an in-range-but-too-low number.
-    if not isinstance(parsed, int | float) or parsed <= floor:
+    # ``_parse_scalar`` returns ``int | float | str``. A ``str`` reaching here means
+    # NEITHER ``int()`` nor ``float()`` accepted the operator's input — a TYPE error, not a
+    # bounds violation. It used to fall through into the floor branch, so a typo'd ``3O``
+    # (letter O) was told it was "at or below the floor (got 3O)" and handed the whole
+    # timeout-nesting rationale for a constraint it never violated. Diagnose the real
+    # fault and keep the window in the message so the operator knows what to retype.
+    if not isinstance(parsed, int | float):
+        typer.echo(
+            t(
+                "cli.config.set.action_deadline_not_a_number",
+                value=str(parsed),
+                floor=_format_seconds(floor),
+                ceiling=_format_seconds(ceiling),
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if parsed <= floor:
         typer.echo(
             t(
                 "cli.config.set.action_deadline_below_floor",
-                value=str(parsed),
+                # Locale-formatted, matching the ceiling branch: ``str(parsed)`` rendered
+                # a rejected ``10.0`` with the bare float tail the bounds deliberately
+                # dropped, so one command echoed the operator's own input two ways.
+                value=_format_seconds(float(parsed)),
                 floor=_format_seconds(floor),
                 ceiling=_format_seconds(ceiling),
             ),
@@ -444,11 +466,17 @@ config_app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
-@config_app.command("set", help=t("cli.config.set.help.short"))
+# The key list is GENERATED from the closed sets rather than retyped in the catalog:
+# CLAUDE.md points operators at this help for the authoritative key set, and a hand-kept
+# list had already drifted to 2 of 6 keys. ``_valid_keys_csv`` is import-cheap (pure dict
+# key sort) — unlike the window bounds, which stay hardcoded in the msgstr because
+# resolving them needs the lazily-imported quarantine constants and their egress-adjacent
+# import closure. ``test_config_set_help_surface`` pins those bounds to the real values.
+@config_app.command("set", help=t("cli.config.set.help.short", keys=_valid_keys_csv()))
 def config_set(
     key: Annotated[
         str,
-        typer.Argument(help=t("cli.config.set.arg.key")),
+        typer.Argument(help=t("cli.config.set.arg.key", keys=_valid_keys_csv())),
     ],
     value: Annotated[
         str,

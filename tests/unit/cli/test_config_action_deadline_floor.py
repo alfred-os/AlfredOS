@@ -184,6 +184,100 @@ def test_action_deadline_nonnumeric_is_rejected(runner: CliRunner, policies: Pat
     assert "action_deadline_seconds" not in policies.read_text()
 
 
+# --------------------------------------------------------------------------- #
+# Type errors get their OWN message — a typo is not a bounds violation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", ["abc", "3O", "soon", "30s", ""])
+def test_nonnumeric_action_deadline_is_told_it_is_not_a_number(
+    runner: CliRunner, policies: Path, value: str
+) -> None:
+    """A non-numeric value is a TYPE error, and must not be reported as a floor violation.
+
+    ``_parse_scalar`` returns the raw ``str`` when neither ``int()`` nor ``float()``
+    accepts it, and the window guard's ``isinstance`` check then routes it into the FLOOR
+    branch. The operator who fat-fingers ``3O`` (letter O) for ``30`` was therefore told
+    the value is "at or below the floor (got 3O)" and handed a paragraph of timeout-nesting
+    prose about sequential preamble and read-frame bounds — an explanation of a constraint
+    they did not violate, which actively obstructs finding the real problem (a typo).
+
+    The remedy for a type error is "type a number"; the remedy for a floor violation is
+    "pick a bigger number". Different problems, different messages.
+    """
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "action-deadline", value])
+
+    assert result.exit_code != 0, result.stderr
+    assert "action_deadline_seconds" not in policies.read_text()
+    # Names the real fault…
+    assert "not a number" in result.stderr, (
+        f"non-numeric {value!r} was not told it is not a number. Got: {result.stderr!r}"
+    )
+    # …and does NOT mis-attribute it to the floor/nesting constraint.
+    assert "floor" not in result.stderr.lower(), (
+        f"non-numeric {value!r} was mis-reported as a floor violation. Got: {result.stderr!r}"
+    )
+    assert "read-frame" not in result.stderr, (
+        f"non-numeric {value!r} got timeout-nesting prose it does not need. Got: {result.stderr!r}"
+    )
+
+
+def test_the_type_error_still_states_the_accepted_window(runner: CliRunner, policies: Path) -> None:
+    """Naming the fault is not enough — the operator still needs the band to retype into.
+
+    Dropping the bounds would trade one unhelpful message for another.
+    """
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "action-deadline", "abc"])
+    assert str(int(_FLOOR)) in result.stderr
+    assert str(int(_CEILING)) in result.stderr
+    assert "{" not in result.stderr and "}" not in result.stderr
+
+
+def test_numeric_below_floor_still_gets_the_floor_message(
+    runner: CliRunner, policies: Path
+) -> None:
+    """Negative control for the split above: a real floor violation keeps its own message.
+
+    Without this, deleting the floor branch entirely would still pass the type-error tests.
+    """
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "action-deadline", "10"])
+    assert result.exit_code != 0
+    assert "not a number" not in result.stderr
+    assert "read-frame" in result.stderr or "extraction" in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Floor / ceiling render their rejected value the SAME way.
+# --------------------------------------------------------------------------- #
+
+
+def test_floor_and_ceiling_render_the_rejected_value_symmetrically(
+    runner: CliRunner, policies: Path
+) -> None:
+    """Both branches locale-format the rejected value; neither leaks ``str(float)``.
+
+    The floor branch echoed ``str(parsed)`` raw while the ceiling branch ran the value
+    through ``_format_seconds``. So ``config set action-deadline 10.0`` reported ``10.0``
+    at the floor but ``99`` at the ceiling — the same operator input rendered two ways by
+    the same command, and the floor path re-introduced the exact ``.0`` tail
+    ``test_bounds_render_without_a_bare_float_tail`` removed from the BOUNDS.
+    """
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        below = runner.invoke(config_app, ["set", "action-deadline", "10.0"])
+        above = runner.invoke(config_app, ["set", "action-deadline", "99.0"])
+
+    assert below.exit_code != 0 and above.exit_code != 0
+    assert "10.0" not in below.stderr, (
+        f"floor branch leaked a bare float tail for the rejected value: {below.stderr!r}"
+    )
+    assert "99.0" not in above.stderr
+    assert "10" in below.stderr
+    assert "99" in above.stderr
+
+
 def test_rejection_message_explains_why(runner: CliRunner, policies: Path) -> None:
     """The rejection names the quarantine-read-frame reason, not just a bare bound."""
     with patch("alfred.cli.config._policies_yaml_path", policies):
