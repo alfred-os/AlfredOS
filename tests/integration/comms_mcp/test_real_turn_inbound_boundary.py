@@ -509,6 +509,13 @@ async def _boot_stack(
     monkeypatch.setenv(
         "ALFRED_QUARANTINE_PROVIDER_API_KEY", "not-a-real-secret-quarantine-placeholder"
     )
+    # #340 PR2b-golive: the boot graph also resolves the quarantine child's EGRESS config
+    # pre-spawn, which is fail-closed on an unset/blank value. Set inline (not via the
+    # shared ``egress_proxy_url_env`` fixture the sibling ``_boot_env`` fixtures use)
+    # because this is a plain asynccontextmanager helper, not a pytest fixture, so it
+    # cannot request one — same value, same rationale: unreachable by construction, and
+    # nothing here dials it (the child is doubled and the router overridden).
+    monkeypatch.setenv("ALFRED_EGRESS_PROXY_URL", "http://proxy.invalid:3128")
     monkeypatch.setenv("ALFRED_AUDIT.HASH_PEPPER", _AUDIT_HASH_PEPPER)
 
     settings = Settings()  # type: ignore[no-untyped-call]  # env-driven; mirrors daemon boot
