@@ -8,6 +8,8 @@ the default registry (the duplicate-name-loud property + the gateway process dep
 
 from __future__ import annotations
 
+from typing import Final
+
 from prometheus_client import CollectorRegistry
 from prometheus_client.registry import Collector
 
@@ -26,7 +28,7 @@ from alfred.plugins._observability import (
 from alfred.security.observability import CAPABILITY_REVOKED_COUNTER
 from alfred.supervisor.observability import ACTION_DURATION_HISTOGRAM
 
-CORE_OWNED_COLLECTORS: tuple[Collector, ...] = (
+CORE_OWNED_COLLECTORS: Final[tuple[Collector, ...]] = (
     CAPABILITY_REVOKED_COUNTER,
     INBOUND_DISPATCH_HISTOGRAM,
     QUARANTINED_EXTRACT_HISTOGRAM,

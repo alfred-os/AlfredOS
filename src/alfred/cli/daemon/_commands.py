@@ -417,11 +417,11 @@ async def _start_async() -> None:
 
     # #470 (mirrors the gateway's G6-0 pre-relay call site,
     # cli/gateway/_commands.py:288-291): stand up the core Prometheus exposition now
-    # that config is resolved, well before the Supervisor is constructed (~:856) so
-    # this call stays OUT of the #472 cancellation-safe teardown `finally`
-    # (~:1020-1075), which only tracks the Supervisor's lifecycle. Loud-and-continue
-    # on a bind failure (observability must never drop a data plane) — see
-    # _start_core_metrics_server's docstring for which families read 0 from t=0.
+    # that config is resolved, well before the `Supervisor(...)` construction so this
+    # call stays OUT of the #472 cancellation-safe teardown `finally`, which only
+    # tracks the Supervisor's lifecycle. Loud-and-continue on a bind failure
+    # (observability must never drop a data plane) — see _start_core_metrics_server's
+    # docstring for which families read 0 from t=0.
     _start_core_metrics_server()
 
     # The conflict audit (if any) goes out BEFORE the probes so the row is
