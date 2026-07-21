@@ -38,7 +38,7 @@
 - Modify `.github/workflows/ci.yml` — promtool-test `core.yml`; extend the "no silently-dead alerts" cross-check to core `alfred_*` rules.
 - Reframe caveats: `src/alfred/security/observability.py`, `ops/alerts/quarantine.yml`, `docs/runbooks/quarantine-capability-revoked.md`, `docs/subsystems/security.md`.
 - Create `docs/runbooks/observability-stack.md`; modify `README.md`.
-- Create `docs/adr/0040-...` amendment (edit ADR-0040 residual panel + a new decision note).
+- Modify `docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md` — the **third-party-services** arm of #470's amendment only; PR1 already landed the Decision-1 class-line + residual (viii) (Task 7).
 - Tests: `tests/unit/test_compose_invariants.py` (extend), `tests/integration/test_prometheus_scrapes_core.py` (testcontainers).
 
 ---
@@ -135,7 +135,7 @@ scrape_configs:
       - targets: ["alfred-core:9465"]   # literal — Prometheus can't env-expand static targets (rev.1 arch-001/rev-004)
 ```
 
-> **Port contract (rev.1):** the `9465` here is a **literal** and must equal PR1's `ALFRED_CORE_METRICS_PORT` default. Prometheus `static_configs` cannot read `${...}`, so an operator overriding the daemon's port MUST also edit this line — the same constraint the gateway's hardcoded `9464` already carries. Document this in `observability-stack.md` (Task 6 Step 3).
+> **Port contract — 9465 is FIXED for the bundled stack (rev.1; rev.2 disambiguation; spec §5.5):** the `9465` here is a **literal** and must equal PR1's `ALFRED_CORE_METRICS_PORT` default. Prometheus `static_configs` cannot read `${...}`. Rather than leave two places that must be edited in lockstep, the decision is: **`ALFRED_CORE_METRICS_PORT` is a bind-port seam, not a supported operator knob** — the same status the gateway's `ALFRED_GATEWAY_METRICS_PORT` has against its likewise-hardcoded `alfred-gateway:9464`. Overriding it in compose without editing this line silently breaks scraping and nothing validates it. `observability-stack.md` (Task 6 Step 3) must document it as **fixed**, NOT as a tunable. Making it genuinely tunable is a design change (render the scrape config from the resolved value + startup validation + a non-default-port test), not a config change.
 
 - [ ] **Step 2: Create `ops/alerts/core.yml`** (target-down + counter-absent — spec §5.5/§6.1)
 
@@ -229,7 +229,7 @@ Run: `uv run pytest tests/unit/test_ops_scaffold.py -q` — Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add ops/prometheus/prometheus.yml ops/alerts/core.yml ops/alerts/core_test.yml .github/workflows/ci.yml
+git add ops/prometheus/prometheus.yml ops/alerts/core.yml ops/alerts/core_test.yml .github/workflows/ci.yml tests/unit/test_ops_scaffold.py
 git commit -m "feat(ops): #470 scrape alfred-core + core up/absent alerts with promtool tests"
 ```
 
@@ -314,6 +314,29 @@ fi
 GF_SECURITY_ADMIN_PASSWORD=
 ```
 
+**Never a literal default in compose** (rev.2 security fold): the compose value's `:-` arm stays
+**empty**. Compose substitutes a placeholder like `${GF_SECURITY_ADMIN_PASSWORD:-<generated>}`
+*verbatim*, so any non-empty literal default would start Grafana with a predictable, repo-published
+admin credential on a plain `docker compose up` that skipped the setup script. Empty fails closed —
+Grafana refuses to start without an admin password rather than accepting a guessable one.
+
+- [ ] **Step 4b: Regression-test the seed guard (rev.2 — REQUIRED)**
+
+The guard's failure mode is a *silent weak credential*, so it needs its own test, not just the
+compose-string invariant. Drive `bin/alfred-setup.sh`'s seeding against a temp `.env` (extract the
+seed into a function or invoke the script with a `--dry-run`/`ALFRED_SETUP_ENV_FILE` seam if that
+is cleaner than shelling the whole script) and assert all three cases:
+
+- an existing **empty** `GF_SECURITY_ADMIN_PASSWORD=` line is **replaced** with a generated value
+  (the `cp .env.example .env` first-run shape — the case an "append if absent" guard misses);
+- an existing **non-empty** value is **preserved byte-for-byte** (re-running setup must never
+  rotate an operator's password out from under a running Grafana);
+- the resulting `.env` contains **exactly one** `GF_SECURITY_ADMIN_PASSWORD=` key in every case
+  (no duplicate-key append, whose last-wins semantics are shell-dependent).
+
+Run: `uv run pytest tests/unit/test_setup_script_env_seed.py -q` (or the existing setup-script test
+module, if one already covers the `audit.hash_pepper` seed — extend it rather than duplicating).
+
 - [ ] **Step 5: Run to verify they pass** — `uv run pytest tests/unit/test_compose_invariants.py -q` → PASS.
 
 - [ ] **Step 6: Commit**
@@ -392,11 +415,29 @@ def prometheus_with_stub_core():
     with Network() as net:
         # (1) stub core /metrics, aliased EXACTLY as the scrape target expects
         stub_body = "# TYPE alfred_quarantine_capability_revoked_total counter\nalfred_quarantine_capability_revoked_total 0\n"
+        # rev.2: the stub MUST RUN A PERSISTENT SERVER. The earlier draft's command only
+        # *imported* http.server and exited, so the alias resolved to a dead container and
+        # `up{job="alfred-core"}` was 0 — the test would have proven nothing. Bind 0.0.0.0
+        # (not 127.0.0.1) or Prometheus cannot reach it across the container network, and
+        # keep serve_forever() alive for the whole fixture.
+        stub_script = (
+            "import http.server\n"
+            f"BODY = {stub_body!r}.encode()\n"
+            "class H(http.server.BaseHTTPRequestHandler):\n"
+            "    def do_GET(self):\n"
+            "        if self.path != '/metrics':\n"
+            "            self.send_error(404); return\n"
+            "        self.send_response(200)\n"
+            "        self.send_header('Content-Type', 'text/plain; version=0.0.4')\n"
+            "        self.send_header('Content-Length', str(len(BODY)))\n"
+            "        self.end_headers()\n"
+            "        self.wfile.write(BODY)\n"
+            "    def log_message(self, *a): pass\n"
+            "http.server.HTTPServer(('0.0.0.0', 9465), H).serve_forever()\n"
+        )
         stub = (DockerContainer("python:3.14-slim")
                 .with_network(net).with_kwargs(network_aliases=["alfred-core"])
-                .with_command(f"python -c \"import http.server,functools;h=functools.partial(http.server.SimpleHTTPRequestHandler);"
-                              f"import http.server as s;\\n"))  # simplest: serve a static /metrics on :9465 (see note)
-        # NOTE: implement the stub as a tiny script that answers GET /metrics with stub_body on :9465.
+                .with_command(["python", "-c", stub_script]))
         prom = (DockerContainer("prom/prometheus:v3.5.0")
                 .with_network(net)
                 .with_exposed_ports(9090)
@@ -411,12 +452,17 @@ def test_prometheus_loads_config_and_rule_is_live(prometheus_with_stub_core):
     base = prometheus_with_stub_core
     rules = httpx.get(f"{base}/api/v1/rules").json()
     names = {r["name"] for g in rules["data"]["groups"] for r in g["rules"]}
-    assert "QuarantineCapabilityRevoked" in names       # rules actually loaded (ops/alerts mounted)
+    # rev.2: assert THIS PR's new core rules, not only the pre-existing quarantine rule —
+    # `core.yml` is the file this task adds to `rule_files`, so a typo'd rule_files entry
+    # must fail here. QuarantineCapabilityRevoked is kept as the #470 raison d'etre (and as
+    # proof `quarantine.yml` reached the mount too).
+    assert {"AlfredCoreMetricsDown", "AlfredQuarantineCounterAbsent"} <= names
+    assert "QuarantineCapabilityRevoked" in names
     up = httpx.get(f"{base}/api/v1/query", params={"query": 'up{job="alfred-core"}'}).json()
     assert up["data"]["result"][0]["value"][1] == "1"   # the alfred-core alias was scraped
 ```
 
-(Implement the stub container's `/metrics` responder however is cleanest in-repo — the load-bearing invariants are the `alfred-core` alias + the two ro mounts, not the stub's language.)
+(Implement the stub container's `/metrics` responder however is cleanest in-repo — the load-bearing invariants are the `alfred-core` alias, a **long-lived** listener on `0.0.0.0:9465` answering `GET /metrics` with the exposition body, and the two ro mounts. Not the stub's language: a one-shot command that exits is the failure this test exists to catch, so it must not be the test's own bug.)
 
 - [ ] **Step 2: Run it** — `uv run pytest tests/integration/test_prometheus_scrapes_core.py -q` → PASS (a typo'd scrape target would fail here instead of shipping green).
 
@@ -449,7 +495,7 @@ git commit -m "test(ops): #470 end-to-end proof Prometheus scrapes core and the 
 - [ ] **Step 5: Markdown lint** — `npx markdownlint-cli2@0.22.1 "docs/**/*.md" "README.md"` → 0 errors. Commit:
 
 ```bash
-git add src/alfred/security/observability.py ops/alerts/quarantine.yml docs/runbooks README.md
+git add src/alfred/security/observability.py ops/alerts/quarantine.yml docs/runbooks docs/subsystems/security.md README.md
 git commit -m "docs(observability): #470 reframe armed-not-live caveats + operator stack doc"
 ```
 
@@ -461,13 +507,21 @@ git commit -m "docs(observability): #470 reframe armed-not-live caveats + operat
 
 - Modify: `docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md`
 
-- [ ] **Step 1: Add an `Amended: 2026-07-21 (#470)` line** and a **new residual `(viii)`** in ADR-0040's residual panel (the panel currently runs (i)–(vii); confirm the next free numeral at implementation) recording: (a) the inbound-`/metrics`-listener-vs-external-socket interpretation of Decision 1; (b) the two new internal-only third-party services + a Prometheus TSDB attached to the connectivity-free stack; (c) the accepted residual — core `/metrics` is unauthenticated plaintext HTTP readable by any `alfred_internal` peer, carrying only bounded operational aggregates (no T3/PII/secret), kept true by the PR1 leak-guard + value-boundedness invariant.
+> **Already landed in PR1 — do NOT re-land (rev.2 fold of arch-001).** Two of the three facts go live
+> the moment PR1 merges, so PR1 amended ADR-0040 with them directly: the **Decision-1 class-line**
+> (an inbound listener on `alfred_internal` is not the "external socket" the invariant forbids) and
+> **residual (viii)** (the core `/metrics` is unauthenticated plaintext HTTP readable by any
+> `alfred_internal` peer, bounded by the curated registry + leak-guard, with the §5.2
+> value-boundedness residual recorded as an explicit edge). PR2 owns only the third fact. Read
+> ADR-0040 before editing; extend, do not duplicate.
+
+- [ ] **Step 1: Add an `Amended: 2026-07-21 (#470 PR2)` line** recording the remaining fact: the **two new internal-only third-party services (Prometheus + Grafana) + the Prometheus TSDB** attached to the connectivity-free stack (CLAUDE.md's "no new datastore or third-party service without an ADR"; PRD §7.5/§9 pre-name the tools but not their post-Spec-C stack-attachment). Cover: both join `alfred_internal` only (zero egress — `test_only_gateway_on_external` stays intact), the TSDB holds operational aggregates only (the same bounded set residual (viii) describes) and is not a system-of-record datastore, and Grafana's data-source proxy is the reason it is never given an external bridge. Then **update the PR1 `Amended: 2026-07-21` entry's "deferred to PR2" sentence** to point at this one instead of promising it.
 
 - [ ] **Step 2: Markdown lint** the ADR; confirm ADR cross-links resolve. Commit:
 
 ```bash
 git add docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md
-git commit -m "docs(adr): #470 amend ADR-0040 with the inbound-metrics decision + unauth-disclosure residual"
+git commit -m "docs(adr): #470 amend ADR-0040 with the bundled observability stack attachment"
 ```
 
 ---
@@ -488,7 +542,7 @@ git commit -m "docs(adr): #470 amend ADR-0040 with the inbound-metrics decision 
 
 ## Self-Review
 
-**Spec coverage (§6 + §7):** §6.1 Prometheus + rules → Tasks 1+2; §6.2 Grafana default-on + `:-` password + access → Tasks 3+4+8; §6.3 compose-invariant tests → Tasks 1+3; §6.4 caveat reframe → Task 6; §6.5 operator doc + README + (human-gated) CLAUDE.md flag → Task 6 (+ the CLAUDE.md entry stays a flagged human-gated follow-up, NOT applied); §7 ADR amendment → Task 7; §9 e2e scrape test + promtool + OrbStack smoke → Tasks 2+5+8.
+**Spec coverage (§6 + §7):** §6.1 Prometheus + rules → Tasks 1+2; §6.2 Grafana default-on + `:-` password + access → Tasks 3+4+8; §6.3 compose-invariant tests → Tasks 1+3; §6.4 caveat reframe → Task 6; §6.5 operator doc + README + (human-gated) CLAUDE.md flag → Task 6 (+ the CLAUDE.md entry stays a flagged human-gated follow-up, NOT applied); §7 ADR amendment → Task 7 (PR2's third-party-services arm only; the Decision-1 class-line + residual (viii) landed in PR1); §9 e2e scrape test + promtool + OrbStack smoke → Tasks 2+5+8.
 
 **Type/name consistency:** the scrape target `alfred-core:9465` matches PR1's `ALFRED_CORE_METRICS_PORT` default; `core.yml`/`core_test.yml` names align; `alfred_prom_data`/`alfred_grafana_data` volumes declared once and mounted once.
 
@@ -504,3 +558,24 @@ git commit -m "docs(adr): #470 amend ADR-0040 with the inbound-metrics decision 
 **Medium** — `absent()` alert now has promtool positive+negative controls (Task 2 Step 3); Grafana password seed guards on present-AND-non-empty and replaces in place, since `cp .env.example .env` makes the key present-but-empty (Task 3 Step 4, sec-004/devops-004); port contract reconciled — the scrape target is a literal 9465, an override must be mirrored (Task 2 note + PR1 Task 6 note); the 4th runbook target ("Detecting it today / Both work without Prometheus") added to the reframe (Task 6 Step 2, docs-002).
 **Low** — Grafana dashboards mount is a dedicated `ops/grafana/dashboards/` subdir (not all of ops/grafana, which holds provisioning/) + `git mv gateway.json` into it (Task 3/4, devops-006); ADR amendment carries a concrete date `2026-07-21` + residual `(viii)` (Task 7, docs-004).
 **Verified sound (no change):** compose blocks valid + internal-only, `:-` empty password boots on Grafana 11, `prom/prometheus` ships wget for `/-/healthy`, promtool `up==0` schema valid, `#470` opens no egress.
+
+## rev.2 fold log (PR #480 review — documentation wave)
+
+Applied to this plan while PR1 was in review, so PR2 does not inherit known-bad steps:
+
+- **Port contract disambiguated** — `ALFRED_CORE_METRICS_PORT` is declared a bind-port seam, NOT an
+  operator knob; 9465 is fixed for the bundled stack. Compose comment, spec §5.5, and both plans now
+  state it identically (Task 2 Step 1 note).
+- **Task 5 stub container made persistent** — the drafted `python -c` command only *imported*
+  `http.server` and exited, so the `alfred-core` alias resolved to a dead container and
+  `up{job="alfred-core"}` would have been 0. Replaced with a long-lived `HTTPServer` on
+  `0.0.0.0:9465` answering `GET /metrics`.
+- **Task 5 rule assertion refreshed** — asserts this PR's new `AlfredCoreMetricsDown` /
+  `AlfredQuarantineCounterAbsent` rules (keeping `QuarantineCapabilityRevoked` and the `up` query).
+- **Two `git add` omissions fixed** — Task 2 Step 6 += `tests/unit/test_ops_scaffold.py`; Task 6
+  Step 5 += `docs/subsystems/security.md`.
+- **Grafana credential hardened** — the `:-` arm stays empty (a literal default would be substituted
+  verbatim into a predictable admin password) + a REQUIRED seed-guard regression test (Task 3 Step 4b:
+  empty replaced, non-empty preserved, no duplicate key).
+- **Task 7 de-double-claimed** — PR1 landed the ADR-0040 Decision-1 class-line + residual (viii);
+  Task 7 now owns only the third-party-services arm.

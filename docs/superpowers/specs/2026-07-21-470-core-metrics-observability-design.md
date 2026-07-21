@@ -1,6 +1,11 @@
 # #470 — core `/metrics` scrapeable + bundled observability stack (design)
 
-**Status:** DRAFT rev.1 (2026-07-21) — pending requester review before `writing-plans`. On branch
+**Status:** rev.2 (2026-07-21) — rev.1 reviewed and planned; **rev.2** folds the PR #480 (PR1) review
+wave: the value-boundedness claim corrected to what the leak-guard actually proves (§5.2), the
+`ALFRED_CORE_METRICS_PORT` contract declared fixed (§5.5/§6.1), the Grafana password default
+corrected from a literal placeholder to empty-fail-closed (§6.2), the shim-vs-delete outcome recorded
+(§5.1), and the ADR-0040 amendment split PR1/PR2 by when each fact goes live (§7 — the PR1 half is
+**landed**). On branch
 `470-core-metrics-observability-design` off main `1f94bfef`. rev.1 folds a **9-lane coordinated
 plan-review** (architect / reviewer / test / security / devops / core / docs / i18n / devex +
 coordinator): 0 Critical, no design-killers; the load-bearing security + core decisions were
@@ -64,7 +69,8 @@ explicitly (§10); it is the reason #479 is a scheduled fast-follow, not optiona
 
 ## 3. Verified current-state anchors (confirmed vs tree `1f94bfef`, 2026-07-21)
 
-- **No core `/metrics`.** `start_metrics_server` (`src/alfred/gateway/metrics_server.py:44`) is
+- **No core `/metrics`.** `start_metrics_server` (then `src/alfred/gateway/metrics_server.py:44` —
+  PR1 promoted it to `src/alfred/observability/metrics_server.py` and deleted the gateway module) is
   called only from `alfred gateway start` (`src/alfred/cli/gateway/_commands.py:290`). The daemon
   (`alfred daemon start`) serves nothing.
 - **No Prometheus in compose.** `docker-compose.yaml` services are postgres, redis, core, gateway.
@@ -112,6 +118,11 @@ Promote out of `alfred/gateway/` into a neutral shared module `alfred/observabil
   `None` → default registry, preserving gateway behaviour). Also promote `_fetch_metrics_text(host,
   port) -> str` here as a public helper (**rev.1 fold of core-004**: the core healthcheck is its
   *third* consumer — DRY-reuse the `http.client` loopback GET, do not re-mirror it).
+The old `src/alfred/gateway/metrics_server.py` is **deleted, not left as a re-export shim** (rev.2):
+`resolve_metrics_port` took **no** arguments pre-#470, so re-exporting the new two-argument resolver
+under the old path would have been a *breaking* change wearing a back-compat label — every importer
+had to be migrated anyway.
+
 - Gateway call sites update to pass their env-var/default: `cli/gateway/_egress.py` (×1),
   `cli/gateway/_commands.py` (×2 — the `start_metrics_server(resolve_metrics_port())` at :290 and
   the healthcheck resolve at :546).
@@ -183,13 +194,34 @@ leak**):
 | `alfred_outbound_dlp_scan_seconds` | `outcome` | closed `{allowed,refused}` |
 | `alfred_inbound_scanner_scan_seconds` | `outcome` | closed `{clean,canary_trip}` |
 
-**Value-boundedness invariant (rev.1 fold of sec-002).** The leak-guard (§5.3) is a CI-time *schema*
-ratchet, not a runtime *value* redactor. Its safety therefore rests on an explicit invariant that
-must be stated in-doc and enforced by the label audit: **no core-owned metric attaches a free-text
-or otherwise-unbounded label value** — every label is `none`, a closed enum, or a fixed-cardinality
-bucket. `plugin_id` (manifest-declared, human-gated-at-install, allowlist-bounded) is the widest and
-is scrape-safe. Adding a metric with a free-text label is a security regression the leak-guard's
-label-key pin (§5.3) forces into explicit review.
+**Value-boundedness invariant (rev.1 fold of sec-002; rev.2 correction).** The leak-guard (§5.3) is
+a CI-time *schema* ratchet, not a runtime *value* redactor. Its safety therefore rests on an
+explicit invariant that must be stated in-doc and upheld by the label audit: **no core-owned metric
+attaches a free-text or otherwise-unbounded label value** — every label is `none`, a closed enum, or
+a fixed-cardinality bucket. `plugin_id` (manifest-declared, human-gated-at-install, allowlist-bounded)
+is the widest and is scrape-safe.
+
+**What the guard proves, precisely.** The leak-guard pins two things and nothing more: the exact set
+of exposed family **base names**, and the exact set of **declared label keys** per family. From that
+it follows that a re-introduced `gateway_*` bleed fails CI, a *new* label key (`labels=["user_id"]`)
+fails CI, and a family added to or dropped from `CORE_OWNED_COLLECTORS` without review fails CI. A
+label-key pin **cannot** decide value-boundedness: it says nothing about what strings a call site
+passes into an already-approved key.
+
+**Residual (rev.2, un-closed by this design).** Two of the four label-emitting call sites feed labels
+from **un-normalized locals**: `src/alfred/plugins/stdio_transport.py:474` (`outcome` on
+`alfred_plugin_spawn_seconds`) and `:708` (`outcome` / `method_shape` on
+`alfred_stdio_transport_dispatch_seconds`). Every value they pass today is a source literal (verified
+against the tree) — so the invariant *holds* at the exposed surface — but there is no mechanism
+keeping it true: a future `outcome = f"error:{exc}"` would ship an unbounded, potentially
+content-bearing label value under an already-approved key with the leak-guard green. Contrast
+`alfred.supervisor.observability.record_action_duration`, which normalises `action_outcome` /
+`breaker_state` into their closed domains (with an `unknown` fallback) *inside the recorder*, so no
+caller can widen them. **Normalization belongs at the recorder, not the call site** — closing this
+residual means giving the two `stdio_transport` families the same closed-domain fallback (and
+`bucket_plugin_id` already demonstrates the pattern for the `plugin_id` key). Out of scope for #470
+(no metric or label changes, §11); until it lands, value-boundedness is a **reviewed property of the
+call sites**, not a CI-enforced one.
 
 ### 5.3 Leak-guard ratchet test — BLOCKING (the DLP-equivalent for this surface)
 
@@ -244,7 +276,22 @@ catalog keys (mirroring `gateway.healthcheck.*`: key-as-msgid + kwargs, no f-str
 ### 5.5 Port pin + minimal compose wiring (in PR1)
 
 New `ALFRED_CORE_METRICS_PORT` (default **9465** — distinct from the gateway's 9464 for scrape-config
-clarity; compose-internal, **never host-published**). PR1's compose touch (rev.1 fold of rev-001):
+clarity; compose-internal, **never host-published**).
+
+**Port contract — 9465 is FIXED for the bundled stack (rev.2, resolving the two-place-edit trap).**
+Prometheus cannot env-expand a `static_configs` target, so the bundled scrape config carries the
+literal `alfred-core:9465`. Rather than leave two places that must be edited in lockstep, the
+decision is: **`ALFRED_CORE_METRICS_PORT` is a bind-port seam, not a supported operator knob.** It
+exists so the daemon and `alfred daemon healthcheck` resolve the same port from one place, and so a
+test can bind an ephemeral port — exactly the status of the gateway's `ALFRED_GATEWAY_METRICS_PORT`
+against its likewise-hardcoded `alfred-gateway:9464`. Overriding it in `docker-compose.yaml` without
+also editing `ops/prometheus/prometheus.yml` silently breaks scraping, and no validation catches
+that; do not document it as a tunable. If a future need makes the port genuinely operator-tunable,
+the rendered scrape config must be generated from the resolved value with a startup validation and a
+non-default-port test — a design change, not a config change. `docker-compose.yaml`, this spec, and
+both plans state this identically.
+
+PR1's compose touch (rev.1 fold of rev-001):
 add the `ALFRED_CORE_METRICS_PORT` env + the `healthcheck:` block (`["CMD","alfred","daemon","healthcheck"]`)
 to the `alfred-core` service, and a compose-invariant test that no service host-publishes the core
 metrics container port (mirror `test_egress_proxy_port_never_host_published`). This closes the
@@ -268,8 +315,8 @@ egress-incapable" pin (§6.3).
   shell/curl — use each image's own probe path (Prometheus `/-/healthy`, Grafana `/api/health`) via
   its own binary, or omit the healthcheck; **do not ship a broken curl-based healthcheck.** Pin the
   exact probe command in PR2.
-- `ops/prometheus/prometheus.yml` gains the `alfred-core → ["alfred-core:${ALFRED_CORE_METRICS_PORT}"]`
-  scrape job and `quarantine.yml` in `rule_files`.
+- `ops/prometheus/prometheus.yml` gains the `alfred-core → ["alfred-core:9465"]` scrape job — a
+  **literal**, per the port contract below — and `quarantine.yml` in `rule_files`.
 - **New alert rules live in a named `rule_file`, not inline** (rev.1 fold of arch-004/devops-003/test-002):
   add `up{job="alfred-core"} == 0` (target-down) and `absent(alfred_quarantine_capability_revoked_total)`
   to a rule file (e.g. extend `quarantine.yml` or a new `core.yml`), with **promtool unit tests**
@@ -294,11 +341,22 @@ open-item** (§10) — *never* resolved by giving Grafana an egress bridge. (Thi
 devops-001/devex-002/003 cluster: a default dashboard the operator can actually see.)
 
 - `image: grafana/grafana:<pin exact tag in PR2>`; `networks: [alfred_internal]`.
-- **Password (rev.1 fold of devops-001 — the High that empirically aborts default `up`):**
-  `GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-<generated>}` using `:-` (**never** `:?`
-  — Compose evaluates `${VAR:?}` before profile/onerror filtering and aborts every `docker compose`
-  invocation). `bin/alfred-setup.sh` generates a random admin password into `.env` on first run
-  (mirroring the `audit.hash_pepper` seed); `.env.example` carries a placeholder.
+- **Password (rev.1 fold of devops-001 — the High that empirically aborts default `up`; rev.2
+  security correction):** `GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-}` using `:-`
+  (**never** `:?` — Compose evaluates `${VAR:?}` before profile/onerror filtering and aborts every
+  `docker compose` invocation). The default arm is **empty**, never a literal placeholder: Compose
+  substitutes the placeholder *verbatim*, so a `:-<generated>`-style default would start Grafana with
+  a predictable, repo-published admin credential on any `docker compose up` that skipped the setup
+  script. Empty fails closed instead — Grafana refuses to start without an admin password rather than
+  accepting a guessable one.
+  `bin/alfred-setup.sh` generates a random admin password into `.env` on first run (mirroring the
+  `audit.hash_pepper` seed) and `.env.example` ships the key **present but empty**. Because first-run
+  does `cp .env.example .env`, the seed guard must key on **present-and-non-empty** and *replace* the
+  empty line in place — an "append if absent" guard never fires and leaves the password empty.
+  **Required regression test** (the guard is easy to get subtly wrong and its failure mode is a
+  silent weak credential): cover all three cases against a temp `.env` — an existing *empty* value is
+  replaced with a generated one, an existing *non-empty* value is preserved unchanged, and no
+  duplicate `GF_SECURITY_ADMIN_PASSWORD=` key is ever produced.
 - Hardening (defense-in-depth on top of zero egress): `GF_ANALYTICS_REPORTING_ENABLED=false`,
   `GF_ANALYTICS_CHECK_FOR_UPDATES=false`, `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false`,
   `GF_AUTH_ANONYMOUS_ENABLED=false`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_INSTALL_PLUGINS=""`,
@@ -352,25 +410,38 @@ security runbook.
 ## 7. ADR-0040 amendment (this work — rev.1 fold of arch-002)
 
 Add an **ADR-0040 amendment** (reviewer-gated; ADRs are *not* human-gated like PRD/CLAUDE.md)
-recording #470's own invariant-touching decisions, which future work will cite:
+recording #470's own invariant-touching decisions, which future work will cite. **Split across the
+two PRs by when each fact goes live (rev.2 fold of arch-001)** — an amendment that lands entirely in
+PR2 would leave `main` carrying a new listener class whose only rationale is a draft spec, for the
+whole PR1→PR2 interval:
+
+**Lands in PR1 (both facts are true the moment PR1 merges) — DONE:**
 
 - The **inbound-listener-vs-external-socket** interpretation of Decision 1 (§4) — that an inbound
   `/metrics` listener on `alfred_internal` is not the "external socket" the invariant forbids.
+  Landed as a class-line paragraph under ADR-0040 Decision 1.
+- The new **accepted residual**: the core `/metrics` is unauthenticated plaintext HTTP readable by
+  any `alfred_internal` peer; per the §5.2 label audit it carries only bounded operational aggregates
+  (no T3/PII/secret). Landed as ADR-0040 residual **(viii)**, carrying the §5.2 value-boundedness
+  residual as an explicit edge.
+
+**Deferred to PR2 (only true once PR2 introduces the services):**
+
 - The **two new third-party services + a Prometheus TSDB** attached to the connectivity-free stack
   (the CLAUDE.md "no new datastore/third-party service without an ADR" line; PRD §7.5/§9 pre-name the
-  tools but not their post-Spec-C stack-attachment).
-- The new **accepted residual**: the core `/metrics` is unauthenticated plaintext HTTP readable by
-  any `alfred_internal` peer; per the §5.2 label audit + value-boundedness invariant it carries only
-  operational aggregates (no T3/PII/secret). Add it to ADR-0040's residual panel. (A dedicated
-  ADR-0054 is the alternative if the amendment grows too large; the amendment is preferred — the
-  residual panel already accretes here.)
+  tools but not their post-Spec-C stack-attachment). PR1 attaches no third-party service.
+
+(A dedicated ADR-0054 is the alternative if the amendment grows too large; the amendment is preferred
+— the residual panel already accretes here.)
 
 ### Security conditions summary (folded from the security lanes)
 
 1. Curated registry (§5.2) — closes the `GatewayCoreUnavailable` false-page; bounds the surface.
 2. Two-sided, oracle-independent leak-guard (§5.3) — BLOCKING; lands + green in PR1 before any scrape;
    100%-coverage-gated (test-006).
-3. Value-boundedness invariant (§5.2) — no free-text/unbounded labels; enforced by the label-key pin.
+3. Value-boundedness invariant (§5.2) — no free-text/unbounded labels. **The label-key pin does not
+   enforce this** (it pins keys, not values); it is a reviewed property of the call sites, with the
+   two un-normalized `stdio_transport` sites recorded as an open residual in §5.2.
 4. Core healthcheck probing `/metrics` (§5.4) — makes loud-and-continue non-silent (HARD rule 7),
    scoped to metrics-endpoint liveness.
 5. Counter (and all ten families) exposed at 0 from t=0 (§5.4) + `up==0` + `absent()` alerts (§6.1).
@@ -444,7 +515,9 @@ gateway. Webhook/Slack HTTPS POST (SMTP can't route through an HTTPS proxy).
 - 9-lane review findings: `~/.cache/alfred-os/review-plan/2026-07-21-470-core-metrics-observability-design/`.
 - `docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md` (Decision 1; residual panel —
   the §7 amendment target); `docs/adr/0042-connectivity-free-core-cutover.md` (macOS/OrbStack host-port loss).
-- `src/alfred/gateway/metrics_server.py`, `src/alfred/security/observability.py` (`:47` def) +
+- `src/alfred/observability/metrics_server.py` (PR1's promotion target; the former
+  `src/alfred/gateway/metrics_server.py` was deleted, not shimmed — see §5.1),
+  `src/alfred/security/observability.py` (`:47` def) +
   `src/alfred/security/quarantine_transport.py:623` (`.inc()`), `src/alfred/comms_mcp/observability.py`,
   `src/alfred/supervisor/observability.py`, `src/alfred/plugins/_observability.py`,
   `src/alfred/cli/daemon/_comms_boot.py:62`, `src/alfred/cli/gateway/_commands.py` (`_fetch_metrics_text`).

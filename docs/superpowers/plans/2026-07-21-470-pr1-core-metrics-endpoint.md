@@ -30,7 +30,7 @@
 - Create `src/alfred/observability/__init__.py` — package marker; re-exports the public seam.
 - Create `src/alfred/observability/metrics_server.py` — `resolve_metrics_port(env_var, default)`, `start_metrics_server(port, registry=None)`, `fetch_metrics_text(host, port)` (promoted from gateway).
 - Create `src/alfred/observability/core_metrics.py` — `CORE_OWNED_COLLECTORS`, `build_core_registry()`.
-- Modify `src/alfred/gateway/metrics_server.py` → thin shim re-exporting from `alfred.observability.metrics_server` (keeps `alfred.gateway.metrics_server` import paths alive) OR delete + update imports (Task 1 picks the shim).
+- **Delete** `src/alfred/gateway/metrics_server.py` and repoint every importer at `alfred.observability.metrics_server`. (rev.1 review: Task 1 originally *picked the shim* — a thin re-export "keeping `alfred.gateway.metrics_server` import paths alive". **Struck**: pre-#470 `resolve_metrics_port` took NO arguments, so re-exporting the new two-argument resolver under the old path is a breaking change wearing a back-compat label. Every importer had to be migrated regardless, leaving the shim with zero consumers.)
 - Modify `src/alfred/cli/gateway/_commands.py` (metrics-start :288-290, healthcheck resolve :546, `_fetch_metrics_text` :492) + `src/alfred/cli/gateway/_egress.py` (:23, :39) — call the promoted helpers with the gateway env-var/default.
 - Modify `src/alfred/cli/daemon/_commands.py` — start the metrics server in `_start_async` before the Supervisor; import `core_metrics` at boot.
 - Modify `src/alfred/cli/daemon/__init__.py` — register the `healthcheck` command.
@@ -46,7 +46,7 @@
 **Files:**
 
 - Create: `src/alfred/observability/__init__.py`, `src/alfred/observability/metrics_server.py`
-- Modify: `src/alfred/gateway/metrics_server.py`, `src/alfred/cli/gateway/_commands.py`, `src/alfred/cli/gateway/_egress.py`
+- Delete: `src/alfred/gateway/metrics_server.py` — Modify: `src/alfred/cli/gateway/_commands.py`, `src/alfred/cli/gateway/_egress.py`
 - Test: `tests/unit/observability/test_metrics_server.py`
 
 **Interfaces:**
@@ -157,15 +157,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Update the gateway to consume the promoted module**
 
-Replace `src/alfred/gateway/metrics_server.py` body with a re-export shim (keeps existing `alfred.gateway.metrics_server` imports working):
-
-```python
-"""Back-compat shim — the exposition moved to alfred.observability.metrics_server (#470)."""
-from alfred.observability.metrics_server import (
-    fetch_metrics_text, resolve_metrics_port, start_metrics_server,
-)
-__all__ = ["fetch_metrics_text", "resolve_metrics_port", "start_metrics_server"]
-```
+**Delete** `src/alfred/gateway/metrics_server.py` (`git rm`) — do **not** leave a re-export shim. (rev.1 review, struck: the plan originally replaced the body with a `"""Back-compat shim"""` re-export. It is not back-compatible — the pre-#470 `resolve_metrics_port` took no arguments, so any surviving `alfred.gateway.metrics_server` importer would break on the new two-argument signature anyway. Step 6 below migrates every importer, which leaves the shim with no consumers.)
 
 Update gateway call sites to pass the gateway env-var/default:
 
@@ -187,7 +179,8 @@ Expected: PASS (no behavior change for the gateway).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/alfred/observability src/alfred/gateway/metrics_server.py src/alfred/cli/gateway tests/unit/observability/test_metrics_server.py
+git add src/alfred/observability src/alfred/cli/gateway tests/unit/gateway tests/unit/cli/gateway tests/unit/observability/test_metrics_server.py
+git rm src/alfred/gateway/metrics_server.py tests/unit/gateway/test_metrics_server.py
 git commit -m "refactor(observability): #470 promote metrics exposition to shared module"
 ```
 
@@ -604,12 +597,19 @@ git commit -m "feat(daemon): #470 add daemon healthcheck probing the core metric
 
 ## Task 6: Compose wiring — core metrics port env + healthcheck + never-published pin
 
-> **Port-contract note (rev.1 arch-001/rev-004):** `ALFRED_CORE_METRICS_PORT` sets the *daemon bind*
-> port (default 9465), mirroring the gateway's `ALFRED_GATEWAY_METRICS_PORT`. **Prometheus cannot
-> env-expand a `static_configs` target**, so PR2's scrape target is the literal `alfred-core:9465`.
-> An operator who overrides the port MUST mirror it in `ops/prometheus/prometheus.yml` — exactly the
-> gateway's existing constraint (`alfred-gateway:9464` is likewise hardcoded). Document this in the
-> observability runbook (PR2 Task 6). The port is effectively fixed at 9465 for the bundled stack.
+> **Port contract — 9465 is FIXED for the bundled stack (rev.1 arch-001/rev-004; rev.2 disambiguation;
+> spec §5.5).** `ALFRED_CORE_METRICS_PORT` sets the *daemon bind* port (default 9465), mirroring the
+> gateway's `ALFRED_GATEWAY_METRICS_PORT`. **Prometheus cannot env-expand a `static_configs` target**,
+> so PR2's scrape target is the literal `alfred-core:9465`. Rather than leave two places that must be
+> edited in lockstep, the decision is: **the env var is a bind-port seam, not a supported operator
+> knob** — it exists so the daemon and `alfred daemon healthcheck` resolve one port from one place,
+> and so a test can bind an ephemeral port. That is exactly the status of the gateway's
+> `ALFRED_GATEWAY_METRICS_PORT` against its likewise-hardcoded `alfred-gateway:9464`. Overriding it in
+> compose without also editing `ops/prometheus/prometheus.yml` silently breaks scraping and nothing
+> validates it; do **not** document it as a tunable. Making it genuinely tunable would require
+> generating the scrape config from the resolved value with startup validation plus a non-default-port
+> test — a design change, not a config change. The compose comment, the spec, and both plans state
+> this identically.
 
 **Files:**
 
@@ -714,3 +714,16 @@ Run: `make check` — Expected: lint/format/type/test clean (mechanical bar), un
 **High** — i18n pybabel path/domain (Task 5 Step 4 → `-d locale -D alfred`); coverage-gate is a CI `coverage report --fail-under=100` step not a config toggle + `make check` doesn't run it (Task 3 Step 3 / Task 7 Step 3, #474); signature-change breaks existing gateway tests (Task 1 Step 6 grep+update).
 **Medium** — port contract PR1↔PR2 (Task 6 note: scrape target is literal 9465); boot-seam anchor precision + `_start_async` placement (Task 4 Step 3); boot-test isolation via autouse fixture (Task 4 Step 5); bind-failure branch test (add in Task 1 — the `start_metrics_server` OSError arm — to hit 100%).
 **Low** — adversarial rationale corrected: PR1 imports, doesn't edit `security/observability.py` (Task 7 Step 2); counter-at-zero wording accurate for labeled families (Task 4 docstring, core-006); `_egress.py` host arg (Task 1 Step 5); distinct `daemon.healthcheck.bad_port` message (Task 5, i18n-004); imports consolidated (no mid-file re-import, rev-008); trio render-assertion + brace-free wording (i18n-002/003, addressed in Task 5 Step 4 Expected).
+
+## rev.2 fold log (PR #480 review — documentation wave)
+
+- **Task 1 shim decision reversed** — `src/alfred/gateway/metrics_server.py` is **deleted**, not
+  shimmed. The "back-compat" re-export was not back-compatible: pre-#470 `resolve_metrics_port` took
+  no arguments, so every importer had to migrate to the two-argument form anyway, leaving the shim
+  with zero consumers.
+- **Task 6 port contract disambiguated** — `ALFRED_CORE_METRICS_PORT` is a bind-port seam, not an
+  operator knob; 9465 is fixed for the bundled stack (matching the gateway's hardcoded 9464
+  precedent). Stated identically in `docker-compose.yaml`, the spec §5.5, and the PR2 plan.
+- **ADR-0040 amended in PR1, not deferred** — the Decision-1 inbound-listener class-line and residual
+  **(viii)** (unauthenticated plaintext `/metrics` readable by any `alfred_internal` peer) are both
+  true at PR1 merge, so they land here; only the third-party-services arm waits for PR2.
