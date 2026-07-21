@@ -510,6 +510,27 @@ def test_abort_sigkills_the_child() -> None:
         proc.kill()  # no-op if already dead; never leak a 300s sleeper on assert failure
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals (SIGKILL) not on win32")
+def test_abort_is_idempotent_and_never_raises() -> None:
+    """``abort()`` honours its "never raises" contract — twice, and on an already-dead child."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        cio = _SubprocessChildIO(proc)
+        cio.abort()
+        proc.wait(timeout=5)  # already dead
+        cio.abort()  # second call, on a reaped child — must not raise (ProcessLookupError)
+        cio.abort()  # third for good measure
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX socketpair fd semantics not on win32")
 def test_abort_closes_the_control_parent_end() -> None:
     """``abort()`` closes the brokered control-parent socket — the True arm of its guard.
