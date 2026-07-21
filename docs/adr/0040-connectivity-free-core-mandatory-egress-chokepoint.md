@@ -21,6 +21,13 @@
   broker path: residual (iv)'s confused-deputy gap now has a live caller (until #358), and the
   `EgressBrokerAuditor` recorded as dormant in the 2026-07-19 amendment above is now driven on the
   live extraction path. See residuals (iv) and (vii) below.
+- **Amended**: 2026-07-21 ([#470](https://github.com/alfred-os/AlfredOS/issues/470) PR1) — Decision 1
+  gains the **inbound-listener class-line** (an inbound listener on `alfred_internal` is not the
+  "external socket" the invariant forbids), and the residual panel gains **(viii)**: the core
+  `/metrics` exposition is unauthenticated plaintext HTTP readable by any `alfred_internal` peer.
+  Both facts go live when PR1 merges. #470's third ADR arm — the two new internal-only third-party
+  services (Prometheus + Grafana) and the Prometheus TSDB attached to the connectivity-free stack —
+  is **deferred to PR2**, which is what introduces them.
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
@@ -52,6 +59,18 @@ the design, the two-layer enforcement model, and the honest residuals accepted a
 gateway joins both `alfred_internal` and `alfred_external` and is the only service with
 external-network access. No process inside the core can open an external socket — the
 kernel enforces this without application-level cooperation.
+
+**Class-line: an inbound listener on `alfred_internal` is not an "external socket"
+(2026-07-21, #470).** The invariant governs *outbound* reachability — the whole two-layer
+model (§2) is about a core process being able to reach a destination off the stack. A TCP
+listener that only *accepts* connections from peers already on the kernel-isolated
+`alfred_internal` network creates no route out and cannot break `internal: true`. The core
+has always bound inbound listeners on that network (the `comms-tui.sock` the gateway dials);
+`alfred daemon start` now also binds a Prometheus `/metrics` exposition there
+(`prometheus_client.start_http_server`, which is listen-only). Adding such a listener trips
+no `tests/unit/test_compose_invariants.py` ratchet and needs no new egress grant. What it
+*does* create is a read surface — see residual (viii). Opening an **outbound** socket from
+core code remains forbidden regardless of who initiated the flow.
 
 ### 2. Two independent enforcement layers; kernel is enforcement-of-record
 
@@ -295,6 +314,41 @@ just-in-time instead was considered and rejected in
 it would reopen reverse-fd-injection on a channel PR2a deliberately made one-way (core→child).
 Classifying the discards correctly at the gateway is the fix that does not trade a security
 property for log hygiene.
+
+**(viii) The core `/metrics` exposition is unauthenticated plaintext HTTP, readable by any
+`alfred_internal` peer (2026-07-21, #470).** `alfred daemon start` binds a Prometheus
+exposition (default `9465`, `ALFRED_CORE_METRICS_PORT`) via
+`alfred.observability.metrics_server.start_metrics_server`, which uses
+`prometheus_client.start_http_server` — it binds `0.0.0.0` inside the container, speaks
+cleartext HTTP, and performs **no** client authentication. Any process that can reach the
+core on `alfred_internal` — Postgres, Redis, Qdrant, the gateway, a compromised in-core
+plugin — can scrape it. This is the same class already recorded for the gateway's own
+`:9464` exposition and for residual (iv)'s "authenticated by network membership alone", now
+extended to a *read* surface on the core rather than a proxied *write* surface on the
+gateway. The port is compose-internal and never host-published
+(`test_core_metrics_port_never_host_published`), so the reachable set is bounded by
+`alfred_internal` membership.
+
+What bounds the disclosure is **content**, not access control: the endpoint serves a
+**curated** `CollectorRegistry` built from the single `CORE_OWNED_COLLECTORS` source of truth
+(`src/alfred/observability/core_metrics.py`), not the process default registry, and a
+BLOCKING leak-guard (`tests/unit/observability/test_core_registry_surface.py`) pins the exact
+family and label-**key** set. Every core-owned label is absent, a closed enum, or a
+fixed-cardinality non-reversible bucket (`user_id_bucket` is SHA-256 mod-256; `plugin_id` is
+allowlist-bucketed), so the exposition carries operational aggregates only — no T3 content,
+no PII, no secret. Accepted on that basis. The residual has two live edges: (a) *timing and
+volume* are still inferable by any internal peer (turn rates, revoke counts, DLP-refusal
+rates), and (b) the leak-guard is a CI-time **schema** ratchet — it pins label keys, and
+cannot decide that a future label *value* stays bounded (see the spec's value-boundedness
+invariant, `docs/superpowers/specs/2026-07-21-470-core-metrics-observability-design.md` §5.2).
+Authenticating the scrape shares the same fix-shape as residual (iv) (per-caller
+authentication on `alfred_internal`, #358); it is not separately tracked today.
+
+*Scope of this amendment:* the third arm of #470's ADR work — recording the two new
+internal-only third-party services (Prometheus + Grafana) and the Prometheus TSDB attached
+to the connectivity-free stack, per CLAUDE.md's "no new datastore or third-party service
+without an ADR" — lands with **PR2**, which is what introduces them. Nothing in PR1 attaches
+a third-party service.
 
 ## Alternatives considered
 
