@@ -777,3 +777,39 @@ def test_discord_egress_allowlist_env_gateway_only(compose: dict[str, Any]) -> N
         "alfred-core must NOT carry ALFRED_DISCORD_EGRESS_ALLOWLIST — "
         "Discord allowlist enforcement is gateway-only (devops-001 / G7-4)."
     )
+
+
+# ---------------------------------------------------------------------------
+# #470 Task 6: core metrics port env + healthcheck, never host-published.
+# Mirrors the gateway's existing ALFRED_GATEWAY_METRICS_PORT / healthcheck pair
+# (test_alfred_gateway_has_healthcheck, test_alfred_gateway_publishes_no_host_port).
+# ---------------------------------------------------------------------------
+
+_CORE_METRICS_PORT = 9465
+
+
+def test_core_metrics_port_never_host_published(compose: dict[str, Any]) -> None:
+    """Defense-in-depth across ALL services (mirrors the egress-proxy/relay-port guards):
+    the core metrics port must stay compose-internal — Prometheus scrapes it over
+    alfred_internal, never via a host-published mapping."""
+    for name, svc in (compose.get("services", {}) or {}).items():
+        for mapping in svc.get("ports", []) or []:
+            assert _container_port(mapping) != str(_CORE_METRICS_PORT), (
+                f"{name} host-publishes the core metrics port {_CORE_METRICS_PORT}; it must stay "
+                "compose-internal (#470)."
+            )
+
+
+def test_alfred_core_has_metrics_healthcheck(compose: dict[str, Any]) -> None:
+    """alfred-core must probe `alfred daemon healthcheck` (mirrors the gateway's
+    `alfred gateway healthcheck` pin in test_alfred_gateway_has_healthcheck)."""
+    core = compose["services"]["alfred-core"]
+    assert core.get("healthcheck", {}).get("test") == ["CMD", "alfred", "daemon", "healthcheck"]
+
+
+def test_alfred_core_sets_core_metrics_port(compose: dict[str, Any]) -> None:
+    """alfred-core must forward ALFRED_CORE_METRICS_PORT with the ${VAR:-9465} default
+    chain — the daemon boot metrics seam (resolve_metrics_port) falls back to 9465
+    absent the env var, so the compose default must agree (#470)."""
+    env = compose["services"]["alfred-core"].get("environment", {}) or {}
+    assert env.get("ALFRED_CORE_METRICS_PORT") == "${ALFRED_CORE_METRICS_PORT:-9465}"

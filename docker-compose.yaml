@@ -197,6 +197,13 @@ services:
       # urllib.parse.urlsplit; the scheme is informational (raw asyncio TCP, not HTTP).
       # UNSET => relay client reports a configuration error at first call.
       ALFRED_EGRESS_RELAY_URL: ${ALFRED_EGRESS_RELAY_URL:-http://alfred-gateway:8890}
+      # #470: the daemon's /metrics server bind port (resolve_metrics_port falls back to
+      # 9465 absent this var — mirrors the gateway's ALFRED_GATEWAY_METRICS_PORT). Prometheus
+      # cannot env-expand a static_configs target, so PR2's scrape target hardcodes
+      # alfred-core:9465 — an operator override here must be mirrored in
+      # ops/prometheus/prometheus.yml (documented in the observability runbook).
+      # Compose-internal only — NEVER host-published (test_core_metrics_port_never_host_published).
+      ALFRED_CORE_METRICS_PORT: ${ALFRED_CORE_METRICS_PORT:-9465}
     # state.git lives on this volume and is the source of truth for
     # reviewer-gated proposals + plugin grants (spec §11.1). NOT mounted in
     # alfred-discord — the comms adapter has no business writing grants.
@@ -207,6 +214,17 @@ services:
       - alfred_run:/home/alfred/.run
     networks:
       - alfred_internal
+    # #470: probes the daemon's /metrics HTTP endpoint on 127.0.0.1:$ALFRED_CORE_METRICS_PORT
+    # (src/alfred/cli/daemon/_healthcheck.py) — liveness of the metrics exposition only, not
+    # full data-plane readiness (spec §5.4); mirrors the gateway's `alfred gateway healthcheck`
+    # pin below. start_period gives the daemon boot sequence (DB migration check, quarantine
+    # child spawn, metrics server bind) room before the first probe counts against `retries`.
+    healthcheck:
+      test: ["CMD", "alfred", "daemon", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # Spec B (#288) — the always-up resumable gateway, deployed as its own service.
   # Reuses the alfred-core image (one Dockerfile) and runs `alfred gateway start`. It is
