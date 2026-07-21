@@ -198,10 +198,14 @@ services:
       # UNSET => relay client reports a configuration error at first call.
       ALFRED_EGRESS_RELAY_URL: ${ALFRED_EGRESS_RELAY_URL:-http://alfred-gateway:8890}
       # #470: the daemon's /metrics server bind port (resolve_metrics_port falls back to
-      # 9465 absent this var — mirrors the gateway's ALFRED_GATEWAY_METRICS_PORT). Prometheus
-      # cannot env-expand a static_configs target, so PR2's scrape target hardcodes
-      # alfred-core:9465 — an operator override here must be mirrored in
-      # ops/prometheus/prometheus.yml (documented in the observability runbook).
+      # 9465 absent this var — mirrors the gateway's ALFRED_GATEWAY_METRICS_PORT). This is a
+      # bind-port SEAM, not an operator knob: it exists so the daemon and `alfred daemon
+      # healthcheck` resolve one port from one place. Treat 9465 as FIXED — Prometheus cannot
+      # env-expand a static_configs target, so the scrape config targets alfred-core:9465
+      # literally (exactly as it already hardcodes alfred-gateway:9464), and overriding this
+      # without editing ops/prometheus/prometheus.yml silently breaks scraping with nothing to
+      # catch it. The alfred-core scrape job and an operator runbook covering it land with
+      # #470 PR2, which adds the bundled Prometheus/Grafana services.
       # Compose-internal only — NEVER host-published (test_core_metrics_port_never_host_published).
       ALFRED_CORE_METRICS_PORT: ${ALFRED_CORE_METRICS_PORT:-9465}
     # state.git lives on this volume and is the source of truth for
