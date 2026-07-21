@@ -30,11 +30,15 @@ def _stub_core_metrics_server() -> None:
 
 
 def test_boot_serves_curated_registry_on_core_port(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    # A DISTINCT value from the 9465 default (final-review required fix): if the seam
+    # ignored the env var entirely and always resolved to the default, this test would
+    # still have passed against 9465 — asserting a value equal to the default is a
+    # vacuous oracle (the seam not doing its job wouldn't fail it).
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9999")
     with patch.object(cmd, "start_metrics_server", return_value=True) as m:
         cmd._start_core_metrics_server()  # the extracted monkeypatchable seam
     (port,), kwargs = m.call_args
-    assert port == 9465
+    assert port == 9999
     assert kwargs["registry"] is not None  # curated, not the default registry
 
 
