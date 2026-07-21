@@ -679,6 +679,26 @@ jobs:
           uv run coverage report \
             --include='src/alfred/orchestrator/tool_dispatch.py' \
             --fail-under=100
+      - name: Observability leak-guard 100% line+branch coverage (unit)
+        # #470 Task 3: src/alfred/observability/ backs the core /metrics leak-guard
+        # (tests/unit/observability/test_core_registry_surface.py's
+        # test_no_leak_no_stale_family / test_declared_label_keys_bounded) — the
+        # DLP-equivalent control for this new outbound-shaped disclosure surface
+        # (CLAUDE.md HARD rule 4 analog). ``core_metrics.py`` pins the exact ten
+        # collectors the core /metrics exposes (CORE_OWNED_COLLECTORS,
+        # build_core_registry); ``metrics_server.py`` is the exposition-server +
+        # loopback-fetch plumbing. Both are pure / registry-construction code fully
+        # exercised by the unit tier (no Postgres, no root) — no combined-job twin
+        # needed (mirrors the First-party bootstrap-grants / Quarantine transport
+        # unit-only gates above). An un-exercised branch here could ship a silently
+        # widened exposed family/label surface. #474: `make check` does NOT run
+        # this gate — verify locally with the explicit `coverage report` invocation.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/observability/*.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/observability/*' \
+            --fail-under=100 \
+            --show-missing
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
