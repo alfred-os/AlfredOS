@@ -106,27 +106,76 @@ class _FakeResponse:
 class _FakeConnection:
     """Stand-in for ``http.client.HTTPConnection`` — records the request, returns fixture bytes."""
 
-    last_request: tuple[str, str] | None = None
-    closed: bool = False
-
     def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.last_request: tuple[str, str] | None = None
+        self.closed: bool = False
 
     def request(self, method: str, path: str) -> None:
-        _FakeConnection.last_request = (method, path)
+        self.last_request = (method, path)
 
     def getresponse(self) -> _FakeResponse:
         return _FakeResponse(b"gateway_egress_inflight 1.0\n")
 
     def close(self) -> None:
-        _FakeConnection.closed = True
+        self.closed = True
 
 
 def test_fetch_metrics_text_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(http.client, "HTTPConnection", _FakeConnection)
+    created: list[_FakeConnection] = []
+
+    def _factory(host: str, port: int, timeout: float | None = None) -> _FakeConnection:
+        conn = _FakeConnection(host, port, timeout)
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr(http.client, "HTTPConnection", _factory)
     text = fetch_metrics_text("127.0.0.1", 9465)
     assert text == "gateway_egress_inflight 1.0\n"
-    assert _FakeConnection.last_request == ("GET", "/metrics")
-    assert _FakeConnection.closed is True
+    assert len(created) == 1
+    assert created[0].last_request == ("GET", "/metrics")
+    assert created[0].closed is True
+
+
+class _FakeConnectionBadStatusLine:
+    """A responder on the metrics port that isn't speaking HTTP at all.
+
+    ``getresponse`` raises ``http.client.HTTPException`` (e.g. a real ``BadStatusLine``) —
+    NOT an ``OSError`` subclass — so this exercises the re-raise-as-``OSError`` branch that
+    keeps every ``fetch_metrics_text`` consumer's single ``except OSError`` catch surface
+    honest (#470 final-review required fix).
+    """
+
+    def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
+        self.closed = False
+
+    def request(self, method: str, path: str) -> None:
+        pass
+
+    def getresponse(self) -> _FakeResponse:
+        raise http.client.BadStatusLine("not an HTTP response")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_fetch_metrics_text_reraises_http_exception_as_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[_FakeConnectionBadStatusLine] = []
+
+    def _factory(
+        host: str, port: int, timeout: float | None = None
+    ) -> _FakeConnectionBadStatusLine:
+        conn = _FakeConnectionBadStatusLine(host, port, timeout)
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr(http.client, "HTTPConnection", _factory)
+    with pytest.raises(OSError) as exc_info:
+        fetch_metrics_text("127.0.0.1", 9465)
+    assert isinstance(exc_info.value.__cause__, http.client.HTTPException)
+    assert len(created) == 1
+    assert created[0].closed is True  # the `finally` still closes the connection
