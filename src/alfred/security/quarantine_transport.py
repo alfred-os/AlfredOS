@@ -638,10 +638,13 @@ class QuarantineStdioTransport:
         except TimeoutError:
             # BOUNDED because the caller still has an audit row to write. Unbounded, a child
             # that declines to die starved ``record_broker_failure`` entirely — the refusal
-            # that triggered this teardown produced no forensic row at all. The 5s bound cut
-            # ``aclose`` short and nothing else would then kill the child, so finish the kill
-            # synchronously (#472 finding 2). Kill BEFORE logging — the invariant is the kill,
-            # not the line; the emit is ``suppress``-wrapped so an emit failure cannot escape.
+            # that triggered this teardown produced no forensic row at all. By the time this
+            # 5s bound fires, ``_terminate_and_reap`` (bounded at ~2s total grace) has ALREADY
+            # SIGKILLed the child, so ``aclose`` must have hung in a LATER stage (e.g. a wedged
+            # stderr drain) BEFORE its own control-end close. So ``abort()`` here is an
+            # idempotent re-kill plus — the load-bearing part — a GUARANTEED control-end close
+            # (#472 finding 2). Kill BEFORE logging; the emit is ``suppress``-wrapped so an
+            # emit failure cannot escape.
             self._abort_child_now()
             with suppress(Exception):
                 _log.error(
@@ -661,9 +664,14 @@ class QuarantineStdioTransport:
                 _log.error("security.quarantine_transport.revoke_cancelled")
             raise
         except Exception as exc:
-            # No ``_abort_child_now`` here: ``aclose`` runs ``_terminate_and_reap`` FIRST and
-            # that never raises, so any exception escaping ``aclose`` is from a LATER stage —
-            # the reap provably already ran.
+            # Defense-in-depth (#472 review — CodeRabbit + security + error lanes converged).
+            # The PRODUCTION seam's ``aclose`` runs ``_terminate_and_reap`` FIRST — it SIGKILLs
+            # and never raises a plain ``Exception`` — so for it the child is already dead here.
+            # But ``ChildIO`` is a Protocol: a conforming impl could raise from ``aclose``
+            # BEFORE killing. Rather than couple the "never leave a live T3 child" guarantee to
+            # one impl's stage ordering, complete the kill idempotently (``abort()`` re-killing
+            # a dead child is a no-op). Kill BEFORE logging; the emit is ``suppress``-wrapped.
+            self._abort_child_now()
             with suppress(Exception):
                 _log.error(
                     "security.quarantine_transport.capability_revoke_failed",

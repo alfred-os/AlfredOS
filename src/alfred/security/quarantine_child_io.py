@@ -779,6 +779,15 @@ class _SubprocessChildIO:
         if stderr is not None and not self._stderr_reader_orphaned:
             with contextlib.suppress(OSError):
                 stderr.close()
+        self._close_control_end()
+
+    def _close_control_end(self) -> None:
+        """Close the brokered control-parent socket, suppressing a benign ``OSError``.
+
+        Shared by :meth:`aclose` and :meth:`abort` (DRY — the control end is closed on both
+        the graceful and the last-resort teardown). ``OSError`` is suppressed because a
+        double-close / already-closed fd is not a failure worth propagating out of teardown.
+        """
         if self._control_parent is not None:
             with contextlib.suppress(OSError):
                 self._control_parent.close()
@@ -793,28 +802,38 @@ class _SubprocessChildIO:
         blocked or ignored — usable from inside a ``CancelledError`` handler where every
         ``await`` would immediately re-raise.
 
-        Under the shipped kind="full" policy the launcher ``exec``s bwrap
-        (``bin/alfred-plugin-launcher.sh``) with ``--unshare-pid``, so ``self._process`` IS
-        bwrap — PID 1 of the child PID namespace — and SIGKILLing it tears down the whole
-        namespace, python child included. Same PID :func:`_terminate_and_reap` already signals.
+        **What SIGKILL to ``self._process`` actually tears down.** ``self._process`` is the
+        host-side bwrap **monitor** (the launcher ``exec``s bwrap, ``bin/alfred-plugin-
+        launcher.sh``). Under the shipped kind="full" policy that bwrap runs with BOTH
+        ``--unshare-pid`` AND ``--die-with-parent`` (``sandbox_policy.py``;
+        ``config/sandbox/quarantined-llm.linux.bwrap.policy``). SIGKILLing the monitor
+        triggers ``--die-with-parent`` on the sandboxed child, which is PID 1 of the
+        ``--unshare-pid`` namespace — and killing PID 1 of a PID namespace tears down the
+        whole namespace, python child included. Same pid :func:`_terminate_and_reap` signals.
+
+        Never raises: ``Popen.kill()`` is wrapped in ``suppress(ProcessLookupError, OSError)``
+        (an already-exited or already-reaped child is a no-op, not a failure) and the control
+        close is likewise suppressed. A genuine same-user kill cannot ``EPERM``, so the
+        suppressed set is effectively "already dead" — an accepted, documented residual rather
+        than a hidden failure (there is no post-kill re-verification here, unlike
+        :func:`_terminate_and_reap`'s reap check; the caller's `capability_abort_failed`
+        guard covers a seam that is malformed rather than merely already-dead).
 
         Does NOT reap. ``aclose`` sets ``_closed`` BEFORE tearing down and every caller of
         this method is reached after ``aclose`` was entered, so a later ``aclose`` early-
         returns without reaping. Usually harmless: the SIGKILL releases the ``waitpid`` that
         :func:`_reap_within` left an executor thread parked on, and that thread reaps the
-        child. In the narrow case where no such thread is parked (the cancel landed before
-        the reap executor was submitted, or after it already gave up), a zombie survives — it
-        holds no fds, no memory and no capability, only a process-table entry the OS reaps at
-        daemon exit.
+        child. A zombie survives only in the narrow case where no such thread was ever parked
+        (the cancel landed before :func:`_reap_within` submitted its first ``waitpid``
+        executor) — it holds no fds, no memory and no capability, only a process-table entry
+        the OS reaps at daemon exit.
 
         Residual, accepted: a ``send()`` already queued in the kernel on an established socket
         can still complete — a microsecond window against "alive indefinitely".
         """
         with contextlib.suppress(ProcessLookupError, OSError):
             self._process.kill()
-        if self._control_parent is not None:
-            with contextlib.suppress(OSError):
-                self._control_parent.close()
+        self._close_control_end()
 
 
 async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
