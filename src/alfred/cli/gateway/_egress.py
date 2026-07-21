@@ -17,7 +17,11 @@ import typer
 from prometheus_client.metrics_core import Metric
 from prometheus_client.parser import text_string_to_metric_families
 
-from alfred.cli.gateway._commands import _HEALTHCHECK_HOST
+from alfred.cli.gateway._commands import (
+    _GATEWAY_METRICS_DEFAULT_PORT,
+    _GATEWAY_METRICS_PORT_ENV,
+    _HEALTHCHECK_HOST,
+)
 from alfred.egress.relay_protocol import EgressRelayDenyReason
 from alfred.gateway.egress_audit import EgressDenyReason
 from alfred.gateway.metrics_server import resolve_metrics_port
@@ -37,7 +41,7 @@ def egress_status() -> None:
     """Render the per-plane egress state; raise ``typer.Exit(2)`` on metrics unavailable."""
     port: int | str = "unset"
     try:
-        port = resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)
+        port = resolve_metrics_port(_GATEWAY_METRICS_PORT_ENV, _GATEWAY_METRICS_DEFAULT_PORT)
         metrics_text = fetch_metrics_text(_HEALTHCHECK_HOST, port)
         # Parse INSIDE the try: a malformed /metrics exposition raises ValueError, which
         # must exit 2 ("never a traceback", hard rule #7 / the module docstring), NOT
