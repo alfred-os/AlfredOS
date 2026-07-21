@@ -52,6 +52,24 @@ def test_healthcheck_registered() -> None:
     assert "healthcheck" in result.stdout
 
 
+def test_cli_invocation_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercises the actual Typer dispatch (`daemon_app` → `healthcheck()` wrapper →
+    `healthcheck_daemon()`), not just the function body directly — the thin wrapper
+    registered in `alfred.cli.daemon.__init__` is otherwise never invoked by a test."""
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="# ok\n"):
+        result = CliRunner().invoke(daemon_app, ["healthcheck"])
+    assert result.exit_code == 0
+
+
+def test_cli_invocation_unhealthy_is_not_a_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", side_effect=OSError("refused")):
+        result = CliRunner().invoke(daemon_app, ["healthcheck"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_healthy_when_metrics_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
     with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="# ok\n"):
