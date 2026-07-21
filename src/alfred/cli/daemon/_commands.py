@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -426,29 +427,64 @@ def _start_core_metrics_server(boot_id: str) -> None:
 
 
 async def _start_core_metrics_server_bounded(boot_id: str) -> None:
-    """Run the metrics-exposition seam off the event loop under a hard deadline (perf-001).
+    """Run the metrics seam on an UNJOINED daemon thread under a hard deadline (perf-001).
 
     ``start_http_server`` does ``getaddrinfo`` + ``bind`` + ``listen`` with no timeout of its
     own. Called inline it runs ON the boot's event-loop thread, so a stalled resolver or a
     wedged socket layer would hang the daemon boot INDEFINITELY — the seam's loud-and-continue
-    posture covers ``OSError``, not a hang. Offloading to a worker thread and bounding the wait
-    restores "observability never blocks the data plane" for the hang case too.
+    posture covers ``OSError``, not a hang.
+
+    Offloading alone does NOT fix that, and the obvious spelling is a trap:
+    ``asyncio.wait_for(asyncio.to_thread(...))`` bounds only the WAIT. ``to_thread`` runs on
+    the loop's DEFAULT executor, and ``asyncio.run`` closes by calling
+    ``loop.shutdown_default_executor()``, which JOINS exactly the thread the timeout just
+    walked away from — so the boot logs its timeout on schedule and then wedges on loop
+    teardown instead. That converts a startup hang into an EXIT hang: strictly worse, because
+    the daemon now looks healthy right up to the moment shutdown never completes.
+
+    So the bind runs on a plain ``threading.Thread(daemon=True)``:
+
+    * asyncio never learns about it, so no executor shutdown can join it;
+    * ``daemon=True`` means the interpreter does not join it at exit either.
+
+    Completion comes back over ``loop.call_soon_threadsafe`` rather than a joinable handle,
+    which keeps the loop free while the deadline runs. That callback is ``suppress``-ed:
+    on the timeout path the loop is long closed by the time a late-unwedging bind reports
+    back, and ``call_soon_threadsafe`` on a closed loop raises ``RuntimeError`` — which,
+    unhandled in a bare thread, would print a spurious traceback at some arbitrary later
+    moment. The result is already accounted for (the timeout warning went out), so dropping
+    it is correct, not a swallowed error.
 
     The call site is kept where it is (after config resolution, before ``Supervisor(...)``)
     rather than hoisted out of ``asyncio.run`` the way the gateway does it: the gateway starts
     its exposition before its own ``asyncio.run`` because it has no pre-loop config phase to
     respect, whereas moving this one out would have to duplicate the environment-load /
-    refuse-boot sequence that must run FIRST.
+    refuse-boot sequence that must run FIRST — and, being pre-loop, would still need a bound
+    of its own to avoid re-introducing the boot hang.
 
-    On timeout the worker thread is NOT killable — it stays parked on the syscall and the boot
-    proceeds without a confirmed exposition. That is the intended trade: a leaked parked thread
-    is strictly better than a daemon that never boots.
+    On timeout the parked thread is NOT killable — it stays on the syscall and the boot
+    proceeds without a confirmed exposition. That is the intended trade, and it is bounded to
+    ONE such thread per boot: a single leaked parked thread is strictly better than a daemon
+    that never boots (or never exits).
     """
+    loop = asyncio.get_running_loop()
+    finished = asyncio.Event()
+
+    def _bind_then_signal() -> None:
+        try:
+            _start_core_metrics_server(boot_id)
+        finally:
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(finished.set)
+
+    threading.Thread(
+        target=_bind_then_signal,
+        name="alfred-core-metrics-bind",
+        daemon=True,
+    ).start()
+
     try:
-        await asyncio.wait_for(
-            asyncio.to_thread(_start_core_metrics_server, boot_id),
-            timeout=_CORE_METRICS_START_TIMEOUT_S,
-        )
+        await asyncio.wait_for(finished.wait(), timeout=_CORE_METRICS_START_TIMEOUT_S)
     except TimeoutError:
         log.warning(
             "daemon.boot.metrics_start_timeout",

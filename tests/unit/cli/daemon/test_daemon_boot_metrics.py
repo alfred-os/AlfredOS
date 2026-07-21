@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,6 +37,20 @@ from alfred.observability.core_metrics import CORE_OWNED_COLLECTORS
 from .conftest import FakeAuditWriter
 
 _BOOT_ID = "boot-id-fixture"
+
+# The deadline the wedged-bind tests actually assert on: how long the WHOLE
+# ``asyncio.run(...)`` (boot + loop teardown) may take while a bind is parked.
+# Generous against CI jitter yet far below the ceiling below, so the two can
+# never be confused for each other.
+_RETURN_DEADLINE_S = 2.0
+
+# Safety net inside every wedge fake: each blocks on an ``Event`` that the test
+# releases in a ``finally``, but it also self-releases after this ceiling so a
+# regression can never park a suite thread forever. It must sit well ABOVE
+# ``_RETURN_DEADLINE_S`` — a regression that re-couples the bind to loop
+# teardown then shows up as a deadline breach (a clean assertion failure)
+# rather than as a hung run.
+_WEDGE_CEILING_S = 10.0
 
 
 @pytest.fixture(autouse=True)
@@ -141,29 +157,80 @@ def test_seam_emits_no_failure_warning_on_success(monkeypatch: pytest.MonkeyPatc
 
 
 def test_bounded_wrapper_gives_up_on_a_wedged_bind(monkeypatch: pytest.MonkeyPatch) -> None:
-    """perf-001: a hung ``bind``/``getaddrinfo`` costs the boot a deadline, not forever.
+    """perf-001: a wedged ``bind``/``getaddrinfo`` costs the boot a deadline, not forever.
 
     ``start_http_server`` has no timeout of its own; called inline on the boot's event-loop
-    thread a stalled resolver would wedge the daemon indefinitely. The wrapper offloads it
-    and bounds the wait, so the boot continues with a loud warning.
+    thread a stalled resolver would wedge the daemon indefinitely. The wrapper runs it on a
+    thread nobody joins and bounds the wait, so the boot continues with a loud warning.
+
+    The oracle is the WALL CLOCK across the whole ``asyncio.run(...)``, not just the warning.
+    Asserting only "the timeout was logged" passes against an implementation that logs the
+    warning on time and then wedges on loop TEARDOWN — which is exactly what
+    ``asyncio.wait_for(asyncio.to_thread(...))`` does, because ``asyncio.run`` closes by
+    calling ``loop.shutdown_default_executor()``, which JOINS the very thread the timeout
+    walked away from. Timing out the *wait* is not the invariant; returning is.
     """
     monkeypatch.setattr(cmd, "_CORE_METRICS_START_TIMEOUT_S", 0.05)
-    started = asyncio.Event()
+    entered = threading.Event()
+    release = threading.Event()
 
     def _wedged(_boot_id: str) -> None:
-        started.set()
-        # Longer than the deadline, short enough not to slow the suite meaningfully.
-        import time
-
-        time.sleep(1.0)
+        entered.set()
+        release.wait(_WEDGE_CEILING_S)
 
     monkeypatch.setattr(cmd, "_start_core_metrics_server", _wedged)
-    with structlog.testing.capture_logs() as logs:
-        asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))  # must return, not hang
-    assert started.is_set()
+    try:
+        started_at = time.monotonic()
+        with structlog.testing.capture_logs() as logs:
+            asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))  # must return, not hang
+        elapsed = time.monotonic() - started_at
+    finally:
+        # Unpark the fake unconditionally so a failing assertion cannot leave a live
+        # thread behind for the rest of the session.
+        release.set()
+    assert entered.wait(_RETURN_DEADLINE_S), "the seam never ran off-loop"
+    assert elapsed < _RETURN_DEADLINE_S, (
+        f"asyncio.run took {elapsed:.2f}s with the bind wedged — the deadline only stops "
+        "the WAIT; the bind must also be off any executor asyncio joins at teardown"
+    )
     timeouts = [e for e in logs if e["event"] == "daemon.boot.metrics_start_timeout"]
     assert len(timeouts) == 1, f"expected one loud timeout warning, got {logs!r}"
     assert timeouts[0]["boot_id"] == _BOOT_ID
+
+
+def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completion signal is fire-and-forget across an already-CLOSED loop.
+
+    Walking away from the bind means the loop it would report back to is gone by the time it
+    unwedges (if it ever does). ``call_soon_threadsafe`` on a closed loop raises
+    ``RuntimeError``, and unhandled in a bare thread that surfaces as a spurious traceback on
+    the operator's console minutes after a boot that already logged its timeout and moved on.
+    """
+    monkeypatch.setattr(cmd, "_CORE_METRICS_START_TIMEOUT_S", 0.05)
+    release = threading.Event()
+    thread_errors: list[object] = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+
+    def _wedged(_boot_id: str) -> None:
+        release.wait(_WEDGE_CEILING_S)
+
+    monkeypatch.setattr(cmd, "_start_core_metrics_server", _wedged)
+    before = {t.ident for t in threading.enumerate()}
+    try:
+        asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))
+        # Identify the worker while it is still parked — after the release it may be gone.
+        worker = next(
+            t
+            for t in threading.enumerate()
+            if t.name == "alfred-core-metrics-bind" and t.ident not in before
+        )
+    finally:
+        release.set()  # the loop is now closed: its completion signal has no home
+    worker.join(_RETURN_DEADLINE_S)
+    assert not worker.is_alive(), "the unparked bind thread never finished"
+    assert not thread_errors, f"the late completion signal escaped its thread: {thread_errors!r}"
 
 
 def test_bounded_wrapper_forwards_the_boot_id_on_the_happy_path(
@@ -200,4 +267,49 @@ def test_malformed_port_does_not_crash_the_daemon_boot(
     assert result.exit_code == 0, result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert m.call_args is None, "a malformed port must never reach start_metrics_server"
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS"), "boot did not complete"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: os.O_NOFOLLOW / os.getuid pidfile locking",
+)
+def test_a_wedged_bind_never_delays_the_boot_or_its_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+) -> None:
+    """perf-001 at the BOOT level — the whole ``asyncio.run`` returns with the bind parked.
+
+    The seam-scoped wedge test above proves the wrapper itself returns; this proves the
+    property survives at the only altitude that matters to an operator: ``alfred daemon
+    start``, whose ``asyncio.run(_start_async())`` also has to CLOSE its loop. Anything that
+    leaves the parked bind on a pool asyncio joins during close (the default executor)
+    converts a startup hang into an EXIT hang — strictly worse, since the boot then looks
+    healthy right up until shutdown never completes.
+
+    The boot must still complete normally: exit 0, a ``DAEMON_BOOT_FIELDS`` row, and the
+    exposition simply absent (loud-and-continue).
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setattr(cmd, "_CORE_METRICS_START_TIMEOUT_S", 0.05)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _wedged_bind(_port: int, registry: object | None = None) -> bool:
+        entered.set()
+        release.wait(_WEDGE_CEILING_S)
+        return True
+
+    monkeypatch.setattr(cmd, "start_metrics_server", _wedged_bind)
+    try:
+        started_at = time.monotonic()
+        result = CliRunner().invoke(daemon_app, ["start"])
+        elapsed = time.monotonic() - started_at
+    finally:
+        release.set()
+    assert entered.wait(_RETURN_DEADLINE_S), "the bind never ran"
+    assert elapsed < _RETURN_DEADLINE_S, (
+        f"alfred daemon start took {elapsed:.2f}s with the metrics bind wedged"
+    )
+    assert result.exit_code == 0, result.output
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS"), "boot did not complete"
