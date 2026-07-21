@@ -28,6 +28,7 @@ from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
 from alfred.cli.daemon._healthcheck import healthcheck_daemon
+from alfred.observability.metrics_server import CORE_METRICS_DEFAULT_PORT
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +77,22 @@ def test_healthy_when_metrics_reachable(monkeypatch: pytest.MonkeyPatch) -> None
         healthcheck_daemon()  # no raise == exit 0
 
 
+def test_probes_the_shared_default_port_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rev-001 / sec-003: with NO env set, the probe dials the same default the boot binds.
+
+    Every other test in this module ``setenv``s the port, so the DEFAULT half of the
+    (env var, default) pair was never exercised here — and the boot seam and the probe used
+    to re-declare that pair independently. If they drift, the healthcheck goes permanently
+    red and the only mechanism that surfaces a metrics bind failure dies with it. The port
+    is read off the ACTUAL call, not asserted against a re-typed literal.
+    """
+    monkeypatch.delenv("ALFRED_CORE_METRICS_PORT", raising=False)
+    with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="# ok\n") as fetch:
+        healthcheck_daemon()
+    assert fetch.call_args.args == (CORE_METRICS_DEFAULT_PORT,)
+    assert CORE_METRICS_DEFAULT_PORT == 9465  # the value compose + the runbook publish
+
+
 def test_unhealthy_when_metrics_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
     echoed = _capture_echo(monkeypatch)
@@ -100,6 +117,44 @@ def test_unhealthy_on_bad_port(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exc_info.value.exit_code == 1
     assert len(echoed) == 1
     assert echoed[0] != "daemon.healthcheck.bad_port"
+
+
+@pytest.mark.parametrize("bad_value", ["70000", "notaport"])
+def test_bad_port_message_carries_the_actionable_detail(
+    monkeypatch: pytest.MonkeyPatch, bad_value: str
+) -> None:
+    """dx-001: the refusal must name the env var, the accepted range AND the operator's value.
+
+    ``resolve_metrics_port`` already composes exactly that sentence; the message previously
+    threw it away and echoed a generic "is invalid" line, so an operator was told something
+    was wrong but not what they had typed or what would be accepted. Both refusal arms
+    (out-of-range and non-integer) are checked — the non-integer arm used to surface a bare
+    ``int()`` message naming neither.
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", bad_value)
+    echoed = _capture_echo(monkeypatch)
+    with pytest.raises(typer.Exit):
+        healthcheck_daemon()
+    message = echoed[0]
+    assert "ALFRED_CORE_METRICS_PORT" in message
+    assert "1..65535" in message
+    assert bad_value in message
+    # i18n-003: the placeholder must have been SUBSTITUTED, not echoed literally.
+    assert "{detail}" not in message
+
+
+def test_bad_port_detail_is_length_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator-supplied env value reaches the terminal — bounded, so it cannot BE the message.
+
+    The value is operator config (T1), not untrusted content, but a pathological
+    multi-kilobyte ``ALFRED_CORE_METRICS_PORT`` must not scroll the actionable remediation
+    off the screen.
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "z" * 5000)
+    echoed = _capture_echo(monkeypatch)
+    with pytest.raises(typer.Exit):
+        healthcheck_daemon()
+    assert len(echoed[0]) < 1000
 
 
 def test_bad_port_and_unreachable_messages_are_distinct(monkeypatch: pytest.MonkeyPatch) -> None:

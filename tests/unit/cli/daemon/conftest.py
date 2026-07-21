@@ -41,7 +41,7 @@ def _stub_core_metrics_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import alfred.cli.daemon._commands as cmd
 
-    monkeypatch.setattr(cmd, "_start_core_metrics_server", lambda: None)
+    monkeypatch.setattr(cmd, "_start_core_metrics_server", lambda _boot_id: None)
 
 
 class FakeAuditWriter:

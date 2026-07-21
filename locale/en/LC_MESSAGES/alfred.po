@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-21 20:23+0100\n"
+"POT-Creation-Date: 2026-07-21 23:12+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1002,7 +1002,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:372
+#: src/alfred/cli/daemon/_commands.py:382
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -1010,7 +1010,7 @@ msgstr ""
 " `alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:375
+#: src/alfred/cli/daemon/_commands.py:385
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -1019,7 +1019,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:453
+#: src/alfred/cli/daemon/_commands.py:518
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -1027,7 +1027,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:464
+#: src/alfred/cli/daemon/_commands.py:529
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1036,7 +1036,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:488
+#: src/alfred/cli/daemon/_commands.py:553
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1049,7 +1049,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:510
+#: src/alfred/cli/daemon/_commands.py:575
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1061,7 +1061,7 @@ msgstr ""
 " and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:553
+#: src/alfred/cli/daemon/_commands.py:618
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1071,7 +1071,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:579
+#: src/alfred/cli/daemon/_commands.py:644
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "A mandatory first-party capability grant is not live after boot (the DLP-"
@@ -1082,7 +1082,7 @@ msgstr ""
 "failed — then re-run `alfred daemon start` (or `docker compose up -d` on "
 "the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:607
+#: src/alfred/cli/daemon/_commands.py:672
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1093,7 +1093,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:679
+#: src/alfred/cli/daemon/_commands.py:744
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1102,7 +1102,7 @@ msgstr ""
 "daemon start` (or `docker compose up -d` on the compose stack). Multi-"
 "adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:750
+#: src/alfred/cli/daemon/_commands.py:815
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1113,7 +1113,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:766
+#: src/alfred/cli/daemon/_commands.py:831
 msgid "daemon.boot.quarantine_provider_key_unset"
 msgstr ""
 "Cannot start: the quarantined LLM's provider key "
@@ -1125,7 +1125,7 @@ msgstr ""
 "key: alfred-core mounts no secrets.toml, so `.env` plus the compose env "
 "forwarding is the ONLY way in."
 
-#: src/alfred/cli/daemon/_commands.py:783
+#: src/alfred/cli/daemon/_commands.py:848
 msgid "daemon.boot.quarantine_max_tokens_invalid"
 msgstr ""
 "Cannot start: the quarantined LLM's per-extraction token budget "
@@ -1141,7 +1141,7 @@ msgstr ""
 " value in BOTH, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:800
+#: src/alfred/cli/daemon/_commands.py:865
 #: src/alfred/cli/daemon/_comms_boot.py:1039
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
@@ -1151,7 +1151,7 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:823
+#: src/alfred/cli/daemon/_commands.py:888
 msgid "daemon.boot.egress_plane_unavailable"
 msgstr ""
 "Cannot start: the egress proxy setting (ALFRED_EGRESS_PROXY_URL) is "
@@ -1164,7 +1164,7 @@ msgstr ""
 "default http://alfred-gateway:8889), and re-run `alfred daemon start` (or"
 " `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:843
+#: src/alfred/cli/daemon/_commands.py:908
 msgid "daemon.boot.router_secret_missing"
 msgstr ""
 "Cannot start: the primary provider secret (`deepseek_api_key`) could not "
@@ -1172,7 +1172,7 @@ msgstr ""
 "variable for that key and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:862
+#: src/alfred/cli/daemon/_commands.py:927
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
@@ -1182,38 +1182,38 @@ msgstr ""
 "operator, then re-run `alfred daemon start` (or `docker compose up -d` on"
 " the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1015
+#: src/alfred/cli/daemon/_commands.py:1080
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1213
+#: src/alfred/cli/daemon/_commands.py:1278
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1216
-#: src/alfred/cli/daemon/_commands.py:1221
+#: src/alfred/cli/daemon/_commands.py:1281
+#: src/alfred/cli/daemon/_commands.py:1286
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1223
+#: src/alfred/cli/daemon/_commands.py:1288
 #: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1238
+#: src/alfred/cli/daemon/_commands.py:1303
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1241
+#: src/alfred/cli/daemon/_commands.py:1306
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1249
+#: src/alfred/cli/daemon/_commands.py:1314
 #: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
@@ -1222,25 +1222,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1303
-#: src/alfred/cli/daemon/_commands.py:1310
-#: src/alfred/cli/daemon/_commands.py:1321
+#: src/alfred/cli/daemon/_commands.py:1368
+#: src/alfred/cli/daemon/_commands.py:1375
+#: src/alfred/cli/daemon/_commands.py:1386
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1325
+#: src/alfred/cli/daemon/_commands.py:1390
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1327
+#: src/alfred/cli/daemon/_commands.py:1392
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1332
+#: src/alfred/cli/daemon/_commands.py:1397
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1341
+#: src/alfred/cli/daemon/_commands.py:1406
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
@@ -1301,13 +1301,14 @@ msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
 "connect."
 
-#: src/alfred/cli/daemon/_healthcheck.py:52
+#: src/alfred/cli/daemon/_healthcheck.py:65
 msgid "daemon.healthcheck.bad_port"
 msgstr ""
-"ALFRED_CORE_METRICS_PORT is invalid; cannot probe the core metrics "
-"endpoint."
+"Cannot probe the core metrics endpoint — {detail}. Fix the value in your "
+"environment (or unset it to use the default port 9465) and restart the "
+"container."
 
-#: src/alfred/cli/daemon/_healthcheck.py:58
+#: src/alfred/cli/daemon/_healthcheck.py:71
 msgid "daemon.healthcheck.metrics_unreachable"
 msgstr ""
 "Core metrics endpoint unreachable on port {port}; the data plane may "
@@ -1493,68 +1494,68 @@ msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:539
-#: src/alfred/cli/gateway/_commands.py:545
+#: src/alfred/cli/gateway/_commands.py:538
+#: src/alfred/cli/gateway/_commands.py:544
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:549
+#: src/alfred/cli/gateway/_commands.py:548
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
 "unhealthy. The core daemon is not draining buffered input — check it is "
 "reachable and restart it if wedged."
 
-#: src/alfred/cli/gateway/_egress.py:53
+#: src/alfred/cli/gateway/_egress.py:51
 msgid "gateway.egress.unreachable"
 msgstr ""
 "Egress metrics unavailable on port {port} — the gateway may not be "
 "running, or this command must run inside the gateway container: docker "
 "compose exec alfred-gateway alfred gateway egress"
 
-#: src/alfred/cli/gateway/_egress.py:97
+#: src/alfred/cli/gateway/_egress.py:95
 msgid "gateway.egress.reachable"
 msgstr "up"
 
-#: src/alfred/cli/gateway/_egress.py:98
+#: src/alfred/cli/gateway/_egress.py:96
 msgid "gateway.egress.inflight_label"
 msgstr "in-flight:"
 
-#: src/alfred/cli/gateway/_egress.py:101
+#: src/alfred/cli/gateway/_egress.py:99
 msgid "gateway.egress.denies_label"
 msgstr "denials:"
 
-#: src/alfred/cli/gateway/_egress.py:115
+#: src/alfred/cli/gateway/_egress.py:113
 msgid "gateway.egress.denies_unavailable"
 msgstr "deny counter unavailable"
 
-#: src/alfred/cli/gateway/_egress.py:118
+#: src/alfred/cli/gateway/_egress.py:116
 msgid "gateway.egress.no_denials"
 msgstr "no denials"
 
-#: src/alfred/cli/gateway/_egress.py:150 src/alfred/cli/gateway/_egress.py:155
+#: src/alfred/cli/gateway/_egress.py:148 src/alfred/cli/gateway/_egress.py:153
 msgid "gateway.egress.plane.adapter"
 msgstr "adapter"
 
-#: src/alfred/cli/gateway/_egress.py:150
+#: src/alfred/cli/gateway/_egress.py:148
 msgid "gateway.egress.not_configured"
 msgstr "not configured (no adapter up)"
 
-#: src/alfred/cli/gateway/_egress.py:155
+#: src/alfred/cli/gateway/_egress.py:153
 msgid "gateway.egress.adapter_down"
 msgstr "configured, not serving"
 
-#: src/alfred/cli/gateway/_egress.py:168
+#: src/alfred/cli/gateway/_egress.py:166
 msgid "gateway.egress.allowlist_label"
 msgstr "allowlist:"
 
-#: src/alfred/cli/gateway/_egress.py:177
+#: src/alfred/cli/gateway/_egress.py:175
 msgid "gateway.egress.allowlist_empty"
 msgstr "(empty)"
 
-#: src/alfred/cli/gateway/_egress.py:181
+#: src/alfred/cli/gateway/_egress.py:179
 msgid "gateway.egress.allowlist_unresolved"
 msgstr "(unresolved — check gateway config)"
 

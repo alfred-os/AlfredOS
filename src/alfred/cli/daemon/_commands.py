@@ -149,7 +149,12 @@ from alfred.i18n import t
 # audited (exit 2) instead of crashing uncaught (#368 anti-pattern).
 from alfred.identity.errors import IdentityResolutionError
 from alfred.observability.core_metrics import build_core_registry
-from alfred.observability.metrics_server import resolve_metrics_port, start_metrics_server
+from alfred.observability.metrics_server import (
+    CORE_METRICS_DEFAULT_PORT,
+    CORE_METRICS_PORT_ENV,
+    resolve_metrics_port,
+    start_metrics_server,
+)
 from alfred.plugins.errors import ManifestError
 
 # PR-S4-11c-2b: the comms-graph build spawns the live bwrap quarantined child;
@@ -195,6 +200,11 @@ _STATE_GIT_HEAD_UNKNOWN: Final[str] = "unknown"
 # A no-op operator id for the PR-S4-1 stub resolver. PR-S4-5 ships the real
 # session-file + Postgres binding.
 _STUB_OPERATOR_ID: Final[str] = "_daemon_boot"
+
+# perf-001 (#470): the hard deadline on the core /metrics exposition bind. Generous enough
+# that no healthy `bind()`/`listen()` on loopback ever trips it, short enough that a stalled
+# resolver / wedged socket layer costs the boot seconds rather than wedging it forever.
+_CORE_METRICS_START_TIMEOUT_S: Final[float] = 5.0
 
 
 class _StubOperatorResolver:
@@ -375,7 +385,7 @@ def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
     return t("daemon.boot.environment_not_set")
 
 
-def _start_core_metrics_server() -> None:
+def _start_core_metrics_server(boot_id: str) -> None:
     """Serve the core /metrics over the curated registry (loud-and-continue). Monkeypatchable seam.
 
     Importing ``alfred.observability.core_metrics`` registers the ten core families on the
@@ -386,11 +396,65 @@ def _start_core_metrics_server() -> None:
     thread binding a real socket — invisible to the #472 teardown ``finally``, which only tracks
     the Supervisor's lifecycle. Tests stub this seam (see ``tests/unit/cli/daemon/conftest.py``)
     so per-test boots don't leak threads/sockets.
+
+    EVERY failure here is loud-and-continue, and the "continue" half is load-bearing: nothing
+    in the data plane depends on /metrics, so a misconfigured or unbindable metrics port must
+    never take the daemon down. Two distinct arms (err-001 / err-002):
+
+    * a malformed ``ALFRED_CORE_METRICS_PORT`` raises ``ValueError`` out of
+      :func:`resolve_metrics_port`. ``start_daemon`` only catches ``_BootRefusedError``, so
+      an uncaught ``ValueError`` here would crash the WHOLE boot with a raw traceback on an
+      operator's bad ``.env`` line — the exact opposite of this seam's contract. Caught, logged
+      LOUD, and the exposition is skipped.
+    * a bind failure (``start_metrics_server`` returning ``False`` after its own
+      ``metrics.bind_failed``) gets a SECOND, boot-scoped warning carrying ``boot_id`` — the
+      module-level event cannot know it, and every other boot-path event is ``boot_id``-tagged,
+      so a bind failure would otherwise be the one boot event an operator cannot correlate.
     """
-    start_metrics_server(
-        resolve_metrics_port("ALFRED_CORE_METRICS_PORT", 9465),
-        registry=build_core_registry(),
-    )
+    try:
+        port = resolve_metrics_port(CORE_METRICS_PORT_ENV, CORE_METRICS_DEFAULT_PORT)
+    except ValueError as exc:
+        log.warning(
+            "daemon.boot.metrics_bad_port",
+            boot_id=boot_id,
+            env_var=CORE_METRICS_PORT_ENV,
+            error=repr(exc),
+        )
+        return
+    if not start_metrics_server(port, registry=build_core_registry()):
+        log.warning("daemon.boot.metrics_bind_failed", boot_id=boot_id, port=port)
+
+
+async def _start_core_metrics_server_bounded(boot_id: str) -> None:
+    """Run the metrics-exposition seam off the event loop under a hard deadline (perf-001).
+
+    ``start_http_server`` does ``getaddrinfo`` + ``bind`` + ``listen`` with no timeout of its
+    own. Called inline it runs ON the boot's event-loop thread, so a stalled resolver or a
+    wedged socket layer would hang the daemon boot INDEFINITELY — the seam's loud-and-continue
+    posture covers ``OSError``, not a hang. Offloading to a worker thread and bounding the wait
+    restores "observability never blocks the data plane" for the hang case too.
+
+    The call site is kept where it is (after config resolution, before ``Supervisor(...)``)
+    rather than hoisted out of ``asyncio.run`` the way the gateway does it: the gateway starts
+    its exposition before its own ``asyncio.run`` because it has no pre-loop config phase to
+    respect, whereas moving this one out would have to duplicate the environment-load /
+    refuse-boot sequence that must run FIRST.
+
+    On timeout the worker thread is NOT killable — it stays parked on the syscall and the boot
+    proceeds without a confirmed exposition. That is the intended trade: a leaked parked thread
+    is strictly better than a daemon that never boots.
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_start_core_metrics_server, boot_id),
+            timeout=_CORE_METRICS_START_TIMEOUT_S,
+        )
+    except TimeoutError:
+        log.warning(
+            "daemon.boot.metrics_start_timeout",
+            boot_id=boot_id,
+            timeout_s=_CORE_METRICS_START_TIMEOUT_S,
+        )
 
 
 async def _start_async() -> None:
@@ -421,8 +485,9 @@ async def _start_async() -> None:
     # call stays OUT of the #472 cancellation-safe teardown `finally`, which only
     # tracks the Supervisor's lifecycle. Loud-and-continue on a bind failure
     # (observability must never drop a data plane) — see _start_core_metrics_server's
-    # docstring for which families read 0 from t=0.
-    _start_core_metrics_server()
+    # docstring for which families read 0 from t=0, and _start_core_metrics_server_bounded's
+    # for why the bind runs off-loop under a deadline.
+    await _start_core_metrics_server_bounded(boot_id)
 
     # The conflict audit (if any) goes out BEFORE the probes so the row is
     # present even if a later probe refuses.
