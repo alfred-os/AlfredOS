@@ -284,7 +284,7 @@ def start_gateway() -> None:
     # G6-0: stand up the Prometheus exposition before the relay so a scrape can read
     # gateway_* series. Loud-and-continue on a bind failure; the healthcheck surfaces
     # a degraded endpoint.
-    from alfred.gateway.metrics_server import resolve_metrics_port, start_metrics_server
+    from alfred.observability.metrics_server import resolve_metrics_port, start_metrics_server
 
     start_metrics_server(
         resolve_metrics_port(_GATEWAY_METRICS_PORT_ENV, _GATEWAY_METRICS_DEFAULT_PORT)
@@ -484,7 +484,6 @@ def status_gateway() -> None:
     )
 
 
-_HEALTHCHECK_HOST: Final[str] = "127.0.0.1"
 _BREAKER_METRIC: Final[str] = "gateway_circuit_breaker_open"
 _EXIT_UNHEALTHY: Final[int] = 1
 
@@ -539,7 +538,7 @@ def healthcheck_gateway() -> None:
         typer.echo(t("gateway.healthcheck.unreachable", port="unset"))
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
     try:
-        metrics_text = fetch_metrics_text(_HEALTHCHECK_HOST, port)
+        metrics_text = fetch_metrics_text(port)
     except OSError as exc:
         log.warning("gateway.healthcheck.unreachable", port=port, error=repr(exc))
         typer.echo(t("gateway.healthcheck.unreachable", port=port))

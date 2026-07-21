@@ -15,7 +15,10 @@ import pytest
 import structlog.testing
 from prometheus_client import CollectorRegistry
 
+from alfred.observability import metrics_server as metrics_server_module
 from alfred.observability.metrics_server import (
+    CORE_METRICS_DEFAULT_PORT,
+    CORE_METRICS_PORT_ENV,
     fetch_metrics_text,
     resolve_metrics_port,
     start_metrics_server,
@@ -52,6 +55,40 @@ def test_resolve_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "0")
     with pytest.raises(ValueError):
         resolve_metrics_port("ALFRED_CORE_METRICS_PORT", 9465)
+
+
+@pytest.mark.parametrize("bad", ["notaport", "70000"])
+def test_resolve_refusal_names_env_range_and_value(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """dx-001: BOTH refusal arms must be actionable on their own.
+
+    ``alfred daemon healthcheck`` quotes this text verbatim to the operator, so the
+    non-integer arm (which used to surface a bare ``int()`` message naming neither the
+    variable nor the range) has to carry the same three facts as the range arm: which env
+    var, what is accepted, and what the operator actually set.
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", bad)
+    with pytest.raises(ValueError) as exc_info:
+        resolve_metrics_port("ALFRED_CORE_METRICS_PORT", 9465)
+    message = str(exc_info.value)
+    assert "ALFRED_CORE_METRICS_PORT" in message
+    assert "1..65535" in message
+    assert bad in message
+
+
+def test_core_port_pair_is_the_single_source_of_truth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rev-001 / sec-003: the (env var, default) pair the boot seam binds and the healthcheck
+    probes is ONE constant pair, exported here and imported by both.
+
+    A drift between them would leave the exposition on one port and the probe on another —
+    the healthcheck would go permanently red, killing the only mechanism that surfaces a
+    metrics bind failure. The DEFAULT is exercised explicitly (env deleted, not set) because
+    every other consumer test pins the port via the env and so never proves the fallback.
+    """
+    assert CORE_METRICS_PORT_ENV == "ALFRED_CORE_METRICS_PORT"
+    monkeypatch.delenv(CORE_METRICS_PORT_ENV, raising=False)
+    assert resolve_metrics_port(CORE_METRICS_PORT_ENV, CORE_METRICS_DEFAULT_PORT) == 9465
 
 
 # ── start_metrics_server ──────────────────────────────────────────────────────
@@ -96,15 +133,19 @@ def test_start_loud_and_continue_on_bind_failure(monkeypatch: pytest.MonkeyPatch
 
 
 class _FakeResponse:
-    def __init__(self, body: bytes) -> None:
+    def __init__(self, body: bytes, status: int = 200) -> None:
         self._body = body
+        self.status = status
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amt: int | None = None) -> bytes:
+        return self._body if amt is None else self._body[:amt]
 
 
 class _FakeConnection:
     """Stand-in for ``http.client.HTTPConnection`` — records the request, returns fixture bytes."""
+
+    body: bytes = b"gateway_egress_inflight 1.0\n"
+    status: int = 200
 
     def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
         self.host = host
@@ -117,26 +158,92 @@ class _FakeConnection:
         self.last_request = (method, path)
 
     def getresponse(self) -> _FakeResponse:
-        return _FakeResponse(b"gateway_egress_inflight 1.0\n")
+        return _FakeResponse(self.body, self.status)
 
     def close(self) -> None:
         self.closed = True
 
 
-def test_fetch_metrics_text_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_fake_conn(
+    monkeypatch: pytest.MonkeyPatch, *, body: bytes | None = None, status: int = 200
+) -> list[_FakeConnection]:
+    """Patch ``http.client.HTTPConnection`` with a recording fake; return the created list."""
     created: list[_FakeConnection] = []
 
     def _factory(host: str, port: int, timeout: float | None = None) -> _FakeConnection:
         conn = _FakeConnection(host, port, timeout)
+        if body is not None:
+            conn.body = body
+        conn.status = status
         created.append(conn)
         return conn
 
     monkeypatch.setattr(http.client, "HTTPConnection", _factory)
-    text = fetch_metrics_text("127.0.0.1", 9465)
+    return created
+
+
+def test_fetch_metrics_text_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _install_fake_conn(monkeypatch)
+    text = fetch_metrics_text(9465)
     assert text == "gateway_egress_inflight 1.0\n"
     assert len(created) == 1
     assert created[0].last_request == ("GET", "/metrics")
     assert created[0].closed is True
+
+
+def test_fetch_metrics_text_always_dials_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sec-001: the destination host is structural, not a caller-supplied parameter.
+
+    The signature is the guarantee — ``fetch_metrics_text`` takes a port and nothing else, so
+    no call site (in a module the connectivity-free core imports at boot, and which the
+    in-core HTTP-egress AST ratchet exempts because it uses ``http.client``) can express a
+    non-loopback destination. This pins BOTH halves: the dialled host, and the fact that
+    passing a host is a ``TypeError`` rather than a silently-honoured redirection.
+    """
+    created = _install_fake_conn(monkeypatch)
+    fetch_metrics_text(9465)
+    assert created[0].host == "127.0.0.1"
+    with pytest.raises(TypeError):
+        fetch_metrics_text("evil.example.com", 9465)  # type: ignore[arg-type, call-arg]
+
+
+@pytest.mark.parametrize("status", [404, 500, 301, 204])
+def test_fetch_metrics_text_non_200_is_an_oserror(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """CR-A: a non-200 body is NOT an exposition.
+
+    Before this check the healthcheck read a 404 (wrong path / a non-metrics HTTP server
+    squatting on the port) or a 500 (wedged handler) as HEALTHY — i.e. it could not fail for
+    the very case it exists to catch. The refusal must be an ``OSError`` so each consumer's
+    single ``except OSError`` still covers it, and the connection must still be closed.
+    """
+    created = _install_fake_conn(monkeypatch, body=b"<html>not metrics</html>", status=status)
+    with pytest.raises(OSError, match=f"HTTP {status}"):
+        fetch_metrics_text(9465)
+    assert created[0].closed is True
+
+
+def test_fetch_metrics_text_rejects_oversized_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sec-005: an unbounded ``.read()`` lets whatever answers stream the probe out of memory.
+
+    Over-cap fails LOUD (an ``OSError``, like every other fetch failure) rather than silently
+    truncating into a half-parsed exposition, which would read as a plausible-but-wrong scrape.
+    """
+    oversize = b"x" * (metrics_server_module._MAX_METRICS_BYTES + 1)
+    created = _install_fake_conn(monkeypatch, body=oversize)
+    with pytest.raises(OSError, match="exceeded"):
+        fetch_metrics_text(9465)
+    assert created[0].closed is True
+
+
+def test_fetch_metrics_text_accepts_body_exactly_at_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary is inclusive: a body of exactly the cap is served, not refused."""
+    at_cap = b"a" * metrics_server_module._MAX_METRICS_BYTES
+    _install_fake_conn(monkeypatch, body=at_cap)
+    assert fetch_metrics_text(9465) == at_cap.decode()
 
 
 class _FakeConnectionBadStatusLine:
@@ -175,7 +282,7 @@ def test_fetch_metrics_text_reraises_http_exception_as_oserror(
 
     monkeypatch.setattr(http.client, "HTTPConnection", _factory)
     with pytest.raises(OSError) as exc_info:
-        fetch_metrics_text("127.0.0.1", 9465)
+        fetch_metrics_text(9465)
     assert isinstance(exc_info.value.__cause__, http.client.HTTPException)
     assert len(created) == 1
     assert created[0].closed is True  # the `finally` still closes the connection

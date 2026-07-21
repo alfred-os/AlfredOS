@@ -20,13 +20,11 @@ from prometheus_client.parser import text_string_to_metric_families
 from alfred.cli.gateway._commands import (
     _GATEWAY_METRICS_DEFAULT_PORT,
     _GATEWAY_METRICS_PORT_ENV,
-    _HEALTHCHECK_HOST,
 )
 from alfred.egress.relay_protocol import EgressRelayDenyReason
 from alfred.gateway.egress_audit import EgressDenyReason
-from alfred.gateway.metrics_server import resolve_metrics_port
 from alfred.i18n import t
-from alfred.observability.metrics_server import fetch_metrics_text
+from alfred.observability.metrics_server import fetch_metrics_text, resolve_metrics_port
 
 log = structlog.get_logger(__name__)
 
@@ -42,7 +40,7 @@ def egress_status() -> None:
     port: int | str = "unset"
     try:
         port = resolve_metrics_port(_GATEWAY_METRICS_PORT_ENV, _GATEWAY_METRICS_DEFAULT_PORT)
-        metrics_text = fetch_metrics_text(_HEALTHCHECK_HOST, port)
+        metrics_text = fetch_metrics_text(port)
         # Parse INSIDE the try: a malformed /metrics exposition raises ValueError, which
         # must exit 2 ("never a traceback", hard rule #7 / the module docstring), NOT
         # escape. Reason-drift ValueErrors from _render_* below stay fail-loud (those are
