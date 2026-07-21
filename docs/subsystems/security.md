@@ -459,12 +459,14 @@ The teardown is cancellation-safe (#472 finding 2): a cancel arriving mid-teardo
 completes the SIGKILL synchronously — so a cancel can never leave a T3-holding child
 alive with brokered sockets — and then re-raises so structured concurrency is
 preserved. Two further structlog events flag the non-clean paths:
-`security.quarantine_transport.revoke_cancelled` (a revoke cancelled mid-teardown —
-the daemon was shutting down *while* a T3 child was being killed) and
-`security.quarantine_transport.capability_abort_failed` (the synchronous last-resort
-kill itself raised — an OS-level anomaly). A SIGKILLed child that is not reaped
-leaves a short-lived **zombie** (holds no fds, memory or capability; the OS reaps it
-at daemon exit) — see the runbook.
+`security.quarantine_transport.revoke_cancelled` (a revoke cancelled mid-teardown, any
+cancellation source) and `security.quarantine_transport.capability_abort_failed` (the
+synchronous last-resort kill's guard fired — since `abort()` suppresses the benign
+`ProcessLookupError`/`OSError`, this signals a **malformed child-IO seam**, a code/wiring
+bug, not an OS hiccup, and the child's liveness is then unknown — the runbook has the
+manual-containment step). A SIGKILLed child that is not reaped leaves a short-lived
+**zombie** (holds no fds, memory or capability; the OS reaps it at daemon exit) — see the
+runbook.
 
 ## Performance characteristics
 
