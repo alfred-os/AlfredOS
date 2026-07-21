@@ -148,6 +148,8 @@ from alfred.i18n import t
 # comms-enabled boot with no (or a corrupt multi-operator) seeded identity refuses
 # audited (exit 2) instead of crashing uncaught (#368 anti-pattern).
 from alfred.identity.errors import IdentityResolutionError
+from alfred.observability.core_metrics import build_core_registry
+from alfred.observability.metrics_server import resolve_metrics_port, start_metrics_server
 from alfred.plugins.errors import ManifestError
 
 # PR-S4-11c-2b: the comms-graph build spawns the live bwrap quarantined child;
@@ -373,6 +375,24 @@ def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
     return t("daemon.boot.environment_not_set")
 
 
+def _start_core_metrics_server() -> None:
+    """Serve the core /metrics over the curated registry (loud-and-continue). Monkeypatchable seam.
+
+    Importing ``alfred.observability.core_metrics`` registers the ten core families on the
+    default registry as a side effect; the five UNLABELED families (incl.
+    ``alfred_quarantine_capability_revoked_total``) read 0 from t=0, while the five LABELED
+    families expose their family metadata immediately but materialize no child series until the
+    first ``.labels(...)`` call (rev.1 core-006). ``start_http_server`` spawns a detached daemon
+    thread binding a real socket — invisible to the #472 teardown ``finally``, which only tracks
+    the Supervisor's lifecycle. Tests stub this seam (see ``tests/unit/cli/daemon/conftest.py``)
+    so per-test boots don't leak threads/sockets.
+    """
+    start_metrics_server(
+        resolve_metrics_port("ALFRED_CORE_METRICS_PORT", 9465),
+        registry=build_core_registry(),
+    )
+
+
 async def _start_async() -> None:
     boot_id = str(uuid.uuid4())
     # sec-001: build the AuditWriter BEFORE the environment check so the
@@ -394,6 +414,15 @@ async def _start_async() -> None:
             boot_id=boot_id,
             environment_source=exc.load_result.source.value,
         )
+
+    # #470 (mirrors the gateway's G6-0 pre-relay call site,
+    # cli/gateway/_commands.py:288-291): stand up the core Prometheus exposition now
+    # that config is resolved, well before the Supervisor is constructed (~:856) so
+    # this call stays OUT of the #472 cancellation-safe teardown `finally`
+    # (~:1020-1075), which only tracks the Supervisor's lifecycle. Loud-and-continue
+    # on a bind failure (observability must never drop a data plane) — see
+    # _start_core_metrics_server's docstring for which families read 0 from t=0.
+    _start_core_metrics_server()
 
     # The conflict audit (if any) goes out BEFORE the probes so the row is
     # present even if a later probe refuses.
