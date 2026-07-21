@@ -1,11 +1,15 @@
 # #470 — core `/metrics` scrapeable + bundled observability stack (design)
 
-**Status:** rev.2 (2026-07-21) — rev.1 reviewed and planned; **rev.2** folds the PR #480 (PR1) review
+**Status:** rev.3 (2026-07-21) — rev.1 reviewed and planned; **rev.2** folds the PR #480 (PR1) review
 wave: the value-boundedness claim corrected to what the leak-guard actually proves (§5.2), the
 `ALFRED_CORE_METRICS_PORT` contract declared fixed (§5.5/§6.1), the Grafana password default
-corrected from a literal placeholder to empty-fail-closed (§6.2), the shim-vs-delete outcome recorded
+corrected from a literal placeholder to an empty `:-` arm (§6.2), the shim-vs-delete outcome recorded
 (§5.1), and the ADR-0040 amendment split PR1/PR2 by when each fact goes live (§7 — the PR1 half is
-**landed**). On branch
+**landed**). **rev.3** folds the PR #480 CodeRabbit cloud review — see §14: the Grafana
+"empty fails closed" claim is empirically false and is replaced by an entrypoint preflight guard
+(§6.2a), the promoted fetch-helper name/signature is aligned to the shipped
+`fetch_metrics_text(port)` (§5.1), and the dashboards mount is aligned to the dedicated
+`ops/grafana/dashboards` subdir (§6.2). On branch
 `470-core-metrics-observability-design` off main `1f94bfef`. rev.1 folds a **9-lane coordinated
 plan-review** (architect / reviewer / test / security / devops / core / docs / i18n / devex +
 coordinator): 0 Critical, no design-killers; the load-bearing security + core decisions were
@@ -115,9 +119,17 @@ Promote out of `alfred/gateway/` into a neutral shared module `alfred/observabil
   gateway keeps `ALFRED_GATEWAY_METRICS_PORT`, core reads `ALFRED_CORE_METRICS_PORT`) and
   `start_metrics_server(port: int, registry: CollectorRegistry | None = None) -> bool` (**rev.1 fold
   of core-003**: `start_metrics_server` gains the `registry` param, not just `resolve_metrics_port`;
-  `None` → default registry, preserving gateway behaviour). Also promote `_fetch_metrics_text(host,
-  port) -> str` here as a public helper (**rev.1 fold of core-004**: the core healthcheck is its
-  *third* consumer — DRY-reuse the `http.client` loopback GET, do not re-mirror it).
+  `None` → default registry, preserving gateway behaviour). Also promote the gateway's private
+  `_fetch_metrics_text` here as the public helper **`fetch_metrics_text(port: int) -> str`**
+  (**rev.1 fold of core-004**: the core healthcheck is its *third* consumer — DRY-reuse the
+  `http.client` loopback GET, do not re-mirror it).
+  **rev.3 (PR #480 CR):** the promoted helper takes **`port` only** — the destination host is the
+  module constant `_LOOPBACK_HOST = "127.0.0.1"`, deliberately *not* a parameter, so the no-SSRF
+  property is structural rather than a per-call-site convention (the sec-001 fold applied during PR1
+  implementation). Earlier drafts of this section and of the PR1 plan wrote `_fetch_metrics_text(host,
+  port)`; the shipped signature in `src/alfred/observability/metrics_server.py` is
+  `fetch_metrics_text(port)`, and every consumer (`cli/daemon/_healthcheck.py`,
+  `cli/gateway/_commands.py`, `cli/gateway/_egress.py`) calls it that way.
 The old `src/alfred/gateway/metrics_server.py` is **deleted, not left as a re-export shim** (rev.2):
 `resolve_metrics_port` took **no** arguments pre-#470, so re-exporting the new two-argument resolver
 under the old path would have been a *breaking* change wearing a back-compat label — every importer
@@ -262,7 +274,7 @@ after first use (this is why §5.2 imports all four modules; the earlier "import
 `security.observability`" was the core-002 bug).
 
 **Healthcheck (rev.1 fold of core-004 + devex-004 + i18n-001):** add `alfred daemon healthcheck`,
-DRY-reusing the promoted `_fetch_metrics_text` to probe `127.0.0.1:$ALFRED_CORE_METRICS_PORT/metrics`
+DRY-reusing the promoted `fetch_metrics_text(port)` to probe `127.0.0.1:$ALFRED_CORE_METRICS_PORT/metrics`
 over loopback; exit 0/1, never a traceback (mirrors `healthcheck_gateway`). **Scope it explicitly as
 *metrics-endpoint liveness*, not full data-plane readiness** (devex-004): a metrics-bind failure →
 `unhealthy` with a **distinct operator message** (`daemon.healthcheck.metrics_unreachable`) that
@@ -347,8 +359,18 @@ devops-001/devex-002/003 cluster: a default dashboard the operator can actually 
   `docker compose` invocation). The default arm is **empty**, never a literal placeholder: Compose
   substitutes the placeholder *verbatim*, so a `:-<generated>`-style default would start Grafana with
   a predictable, repo-published admin credential on any `docker compose up` that skipped the setup
-  script. Empty fails closed instead — Grafana refuses to start without an admin password rather than
-  accepting a guessable one.
+  script.
+  **rev.3 (PR #480 CR, Major/security — the rev.2 claim was empirically FALSE):** "empty fails
+  closed" is not how Grafana behaves. Verified against `grafana/grafana:11.6.0` on 2026-07-21:
+  Grafana's env-override loop applies an env value only `if len(envValue) > 0`, so an **empty**
+  `GF_SECURITY_ADMIN_PASSWORD` is *ignored* and `conf/defaults.ini`'s `admin_password = admin` wins.
+  The container starts, `/api/health` answers 200, and `curl -u admin:admin /api/org` returns **200**.
+  So the `:-` empty arm alone leaves an operator who runs `docker compose up` *without* running
+  `bin/alfred-setup.sh` with a Grafana on the best-known default credential in existence. The `:-`
+  form still **must** stay (see the constraint above — `:?` aborts every `docker compose` invocation,
+  including `down`/`ps`/`config`, because Compose interpolates before profile filtering), and the
+  setup-script seed still stays; what was missing is a **third, fail-closed layer inside the service
+  itself** — see §6.2a.
   `bin/alfred-setup.sh` generates a random admin password into `.env` on first run (mirroring the
   `audit.hash_pepper` seed) and `.env.example` ships the key **present but empty**. Because first-run
   does `cp .env.example .env`, the seed guard must key on **present-and-non-empty** and *replace* the
@@ -361,13 +383,54 @@ devops-001/devex-002/003 cluster: a default dashboard the operator can actually 
   `GF_ANALYTICS_CHECK_FOR_UPDATES=false`, `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false`,
   `GF_AUTH_ANONYMOUS_ENABLED=false`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_INSTALL_PLUGINS=""`,
   `GF_SNAPSHOTS_EXTERNAL_ENABLED=false`, `GF_SECURITY_DISABLE_GRAVATAR=true`.
-- Volumes: `alfred_grafana_data:/var/lib/grafana`; provisioning (datasource → `http://alfred-prometheus:9090`;
-  dashboards over `ops/grafana/*.json`) mounted read-only.
+- Volumes (**rev.3 (PR #480 CR)** — aligned to the plan's devops-006 layout; this bullet still
+  described mounting all of `ops/grafana`, which would nest `provisioning/` *inside* the dashboards
+  provider path and make Grafana try to load its own provisioning YAML as dashboard JSON):
+  `alfred_grafana_data:/var/lib/grafana`; `./ops/grafana/provisioning:/etc/grafana/provisioning:ro`
+  (datasource → `http://alfred-prometheus:9090`); and a **dedicated dashboards subdir**
+  `./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro` — `ops/grafana/dashboards/*.json`, never
+  `ops/grafana/*.json`. The pre-existing `ops/grafana/gateway.json` is `git mv`-ed into that subdir
+  so the narrower mount still serves it.
 - **Host access (documented in §6.5, zero egress on every platform):** Linux → `ports:
   ["127.0.0.1:3000:3000"]` (works on internal-only per the postgres precedent); OrbStack →
   `alfred-grafana.<project>.orb.local` (inbound unified-bridge path, distinct from the broken
   outbound port-forward — **PR2 smoke-task verifies it empirically**, §9); Docker Desktop →
   documented ambassador-tunnel container.
+
+### 6.2a Grafana credential fail-closed layer (rev.3 — PR #480 CR Major/security)
+
+The credential story is **three layers**, and only the third holds when the operator skips setup:
+
+1. `.env.example` ships the key present-but-empty; `bin/alfred-setup.sh` seeds a random value with a
+   present-and-non-empty grep-guard that *replaces* the empty line (§6.2).
+2. Compose reads it with `:-` (never `:?`), so no `docker compose` verb aborts.
+3. **A service-level preflight guard that refuses to start Grafana on a guessable credential.**
+
+Layer 3 is a shell preflight in front of the image's `/run.sh` entrypoint: if
+`GF_SECURITY_ADMIN_PASSWORD` is unset, empty, or the literal `admin`, print an actionable refusal to
+stderr and `exit 78` (`EX_CONFIG`) instead of `exec`-ing Grafana. It is expressed inline in
+`docker-compose.yaml`'s `entrypoint:` so there is no extra file to keep in sync and no image rebuild.
+
+**Why this and not `:?`.** `${VAR:?}` makes *Compose* fail, and Compose interpolates the whole file
+before any profile/service filtering — so `docker compose down`, `ps`, `config`, `logs`, and
+`up alfred-core` all abort on an unrelated missing Grafana password. That is a stack-wide denial of
+service to punish one optional service's misconfiguration. The entrypoint guard fails **exactly one
+container**, at container start, with a message the operator actually reads in
+`docker compose logs alfred-grafana`; every other service comes up normally. A future reader tempted
+to "simplify" this back to `:?` should read this paragraph and the constraint in §6.2 first.
+
+**Empirically verified 2026-07-21** against `grafana/grafana:11.6.0` (all three arms, real containers):
+
+- empty password, no guard → container **starts**, `/api/health` 200, `admin:admin` → **200** (the
+  hazard);
+- empty password, guard → `docker compose config` clean; container exits **78** with the refusal on
+  stderr; sibling services unaffected;
+- real password, guard → Grafana boots normally, `/api/health` 200, `admin:admin` → **401**, real
+  credential → 200.
+
+The refusal is terminal in practice: changing `.env` requires `docker compose up -d` to recreate the
+container anyway, so `restart: unless-stopped` re-running the guard is a loud repeat of the same
+message, not a self-heal path.
 
 ### 6.3 Compose-invariant tests
 
@@ -377,6 +440,12 @@ devops-001/devex-002/003 cluster: a default dashboard the operator can actually 
   binds `127.0.0.1`, never `0.0.0.0`; `alfred-core` defines a `healthcheck`; Prometheus command
   contains neither `--web.enable-admin-api` nor `--web.enable-lifecycle`; `GF_SECURITY_ADMIN_PASSWORD`
   uses `:-` (not `:?`) and is env-sourced.
+- **rev.3:** the §6.2a guard needs *both* a compose-shape assertion **and** a real-execution test. A
+  lexical assertion over the `entrypoint:` string cannot decide whether Grafana actually refuses —
+  that is a runtime fact about a third-party binary. The runtime test's non-vacuity control is the
+  `admin:admin` → 401 arm on the *pass* path: it proves the assertion is about Grafana's real auth
+  state, not about our own predicate. The runtime test must read the entrypoint **out of
+  `docker-compose.yaml`**, never re-declare it, or the two drift and the shipped guard goes untested.
 
 ### 6.4 Caveat reframe (rev.1 rewrite — folds docs-003/docs-004/sec-003)
 
@@ -520,7 +589,8 @@ gateway. Webhook/Slack HTTPS POST (SMTP can't route through an HTTPS proxy).
   `src/alfred/security/observability.py` (`:47` def) +
   `src/alfred/security/quarantine_transport.py:623` (`.inc()`), `src/alfred/comms_mcp/observability.py`,
   `src/alfred/supervisor/observability.py`, `src/alfred/plugins/_observability.py`,
-  `src/alfred/cli/daemon/_comms_boot.py:62`, `src/alfred/cli/gateway/_commands.py` (`_fetch_metrics_text`).
+  `src/alfred/cli/daemon/_comms_boot.py:62`, `src/alfred/cli/gateway/_commands.py` (whose private
+  `_fetch_metrics_text` PR1 replaced with the promoted `fetch_metrics_text(port)`).
 - `ops/prometheus/prometheus.yml`, `ops/alerts/quarantine.yml`, `ops/alerts/gateway.yml`
   (`GatewayCoreUnavailable`, no `{job}` selector), `ops/grafana/gateway.json`,
   `docs/runbooks/quarantine-capability-revoked.md`.
@@ -544,3 +614,25 @@ t() + pybabel) · **test-004** (§5.3 parsed-family-name assertion).
 Low: image-tag pins (§6.1/§6.2) · `ALFRED_CORE_METRICS_PORT` default 9465 (§5.5) · orb.local concrete
 command (§9) · **sec-001** §3 `.inc()` line-cite fix.
 Confirmed gap: **arch-005** (§2/§10 interim pull-only residual). No standing disputes.
+
+## 14. rev.3 fold log (PR #480 CodeRabbit cloud review)
+
+- **Major/security — §6.2/§6.2a Grafana credential.** The rev.2 claim "empty fails closed — Grafana
+  refuses to start without an admin password" was **falsified empirically** against
+  `grafana/grafana:11.6.0`: an empty `GF_SECURITY_ADMIN_PASSWORD` is ignored by Grafana's
+  env-override loop, `defaults.ini`'s `admin_password = admin` applies, and `admin:admin` authenticates
+  (200). Added the §6.2a three-layer model whose third layer is an entrypoint preflight guard
+  (`exit 78`, actionable stderr) plus a §6.3 test obligation (compose-shape assertion **and** a
+  real-execution test with the `admin:admin`→401 non-vacuity control). `:-` stays; `:?` is
+  re-documented as *not* the answer, with the reason, so it is not "fixed" back.
+- **Minor/correctness — §5.1/§5.4/§12 fetch-helper name.** The design named the promoted helper
+  `_fetch_metrics_text(host, port)`; the shipped surface is `fetch_metrics_text(port)` with the host
+  pinned to the module constant `_LOOPBACK_HOST` (sec-001, structural no-SSRF). Aligned all three
+  mentions and recorded why the host is not a parameter.
+- **Major/correctness — §6.2 dashboards mount.** The Volumes bullet still said "dashboards over
+  `ops/grafana/*.json`", contradicting the plan's devops-006 decision; mounting all of `ops/grafana`
+  nests `provisioning/` under the dashboards provider path. Aligned to the dedicated
+  `./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro` subdir + the `gateway.json` `git mv`.
+- **Plan-side (same review wave), recorded here for traceability:** the PR2 plan's Task 5 fixed
+  `time.sleep(3)` was replaced with bounded readiness polling, and its two `httpx.get` probes gained
+  explicit timeouts. See that plan's rev.3 fold log.

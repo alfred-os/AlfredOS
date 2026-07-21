@@ -727,3 +727,16 @@ Run: `make check` — Expected: lint/format/type/test clean (mechanical bar), un
 - **ADR-0040 amended in PR1, not deferred** — the Decision-1 inbound-listener class-line and residual
   **(viii)** (unauthenticated plaintext `/metrics` readable by any `alfred_internal` peer) are both
   true at PR1 merge, so they land here; only the third-party-services arm waits for PR2.
+
+## rev.3 fold log (PR #480 CodeRabbit cloud review)
+
+- **Shipped fetch-helper signature supersedes this plan's `(host, port)` steps.** Tasks 1 and 3 above
+  specify `fetch_metrics_text(host: str, port: int)` and call sites passing `_HEALTHCHECK_HOST`. The
+  implementation folded a security finding (sec-001) during execution: the destination host is now
+  the module constant `_LOOPBACK_HOST = "127.0.0.1"` inside
+  `src/alfred/observability/metrics_server.py`, **not** a parameter, so the no-SSRF property is
+  structural rather than a convention every call site must remember. The shipped surface is
+  **`fetch_metrics_text(port: int) -> str`**, and `cli/daemon/_healthcheck.py`,
+  `cli/gateway/_commands.py`, and `cli/gateway/_egress.py` all call it with the port alone. The steps
+  are left as executed for the record; read this entry before quoting their signature. The design doc
+  (`…-470-core-metrics-observability-design.md` §5.1/§14) has been corrected in place.
