@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **rev.1 (2026-07-21)** — folds the 8-lane plan-review (no PR2 Critical). Fixed: the e2e testcontainers
+> fixture (network alias + `ops/alerts` mount), the no-silently-dead-alerts cross-check location
+> (`tests/unit/test_ops_scaffold.py`, not ci.yml), the Grafana password seed guard (present-and-non-empty),
+> the caveat-reframe completeness (`docs/subsystems/security.md` + the 4th runbook target), and the
+> `absent()` promtool control. See the §fold-log at the end.
+
 **Goal:** Bundle an internal-only Prometheus (scraping the core `/metrics` PR1 exposes) + a default-on internal-only Grafana into the compose stack, wire the `quarantine.yml` rules + new `up==0`/`absent()` rules with promtool tests, reframe the "armed, not live" caveats, ship an operator observability doc, and record #470's own ADR-0040 amendment.
 
 **Architecture:** Two new `alfred_internal`-only services (zero external egress — `test_only_gateway_on_external` stays intact); Prometheus evaluates the promtool-tested rule files against the live core scrape target (satisfying the "alertable" precondition); Grafana is dashboards-only, zero-egress, hardened, reached per-platform without egress (Linux loopback / OrbStack `*.orb.local` / Docker-Desktop tunnel).
@@ -27,10 +33,10 @@
 - Modify `ops/prometheus/prometheus.yml` — `alfred-core` scrape job; `rule_files` += `quarantine.yml`, `core.yml`.
 - Create `ops/alerts/core.yml` — `up{job="alfred-core"} == 0`, `absent(alfred_quarantine_capability_revoked_total)`.
 - Create `ops/alerts/core_test.yml` — promtool unit tests (positive + negative controls).
-- Create `ops/grafana/provisioning/datasources/prometheus.yml`, `ops/grafana/provisioning/dashboards/dashboards.yml`; a core/quarantine dashboard JSON under `ops/grafana/`.
+- Create `ops/grafana/provisioning/datasources/prometheus.yml`, `ops/grafana/provisioning/dashboards/dashboards.yml`, `ops/grafana/dashboards/quarantine.json`; `git mv ops/grafana/gateway.json ops/grafana/dashboards/`.
 - Modify `bin/alfred-setup.sh` — generate `GF_SECURITY_ADMIN_PASSWORD` into `.env`; `.env.example` placeholder.
 - Modify `.github/workflows/ci.yml` — promtool-test `core.yml`; extend the "no silently-dead alerts" cross-check to core `alfred_*` rules.
-- Reframe caveats: `src/alfred/security/observability.py`, `ops/alerts/quarantine.yml`, `docs/runbooks/quarantine-capability-revoked.md`.
+- Reframe caveats: `src/alfred/security/observability.py`, `ops/alerts/quarantine.yml`, `docs/runbooks/quarantine-capability-revoked.md`, `docs/subsystems/security.md`.
 - Create `docs/runbooks/observability-stack.md`; modify `README.md`.
 - Create `docs/adr/0040-...` amendment (edit ADR-0040 residual panel + a new decision note).
 - Tests: `tests/unit/test_compose_invariants.py` (extend), `tests/integration/test_prometheus_scrapes_core.py` (testcontainers).
@@ -126,8 +132,10 @@ scrape_configs:
       - targets: ["alfred-gateway:9464"]
   - job_name: alfred-core
     static_configs:
-      - targets: ["alfred-core:9465"]
+      - targets: ["alfred-core:9465"]   # literal — Prometheus can't env-expand static targets (rev.1 arch-001/rev-004)
 ```
+
+> **Port contract (rev.1):** the `9465` here is a **literal** and must equal PR1's `ALFRED_CORE_METRICS_PORT` default. Prometheus `static_configs` cannot read `${...}`, so an operator overriding the daemon's port MUST also edit this line — the same constraint the gateway's hardcoded `9464` already carries. Document this in `observability-stack.md` (Task 6 Step 3).
 
 - [ ] **Step 2: Create `ops/alerts/core.yml`** (target-down + counter-absent — spec §5.5/§6.1)
 
@@ -176,6 +184,25 @@ tests:
       - eval_time: 3m
         alertname: AlfredCoreMetricsDown
         exp_alerts: []
+  # rev.1 (devops-002/rev-005/sec-003/test-004): the security-relevant absent() rule also needs controls.
+  - interval: 1m       # positive: the counter series is ABSENT ⇒ AlfredQuarantineCounterAbsent fires
+    input_series:
+      - series: 'up{job="alfred-core"}'   # some series exists, but NOT the counter
+        values: "1x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AlfredQuarantineCounterAbsent
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: "quarantine capability-revoke counter series is absent", description: "The counter is not registered/exposed — the QuarantineCapabilityRevoked alert cannot fire. Expected present at 0 from daemon boot (#470)."}
+  - interval: 1m       # negative: counter present at 0 ⇒ no AlfredQuarantineCounterAbsent
+    input_series:
+      - series: 'alfred_quarantine_capability_revoked_total'
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AlfredQuarantineCounterAbsent
+        exp_alerts: []
 ```
 
 - [ ] **Step 4: Run promtool locally**
@@ -183,7 +210,21 @@ tests:
 Run: `promtool check rules ops/alerts/core.yml && promtool test rules ops/alerts/core_test.yml`
 Expected: `SUCCESS`.
 
-- [ ] **Step 5: Wire CI** — add `core.yml` to the promtool step in `ci.yml` and **extend the "no silently-dead alerts" cross-check** so it validates the core `alfred_*` alert series exist in the core scrape surface (currently gateway-only). Show the exact `ci.yml` diff.
+- [ ] **Step 5: Wire CI + extend the no-silently-dead-alerts cross-check (rev.1 devops-001/test-003/rev-007)**
+
+Add `core.yml` to the promtool step in `ci.yml`. Then extend the **no-silently-dead-alerts cross-check — which is a pytest test, `tests/unit/test_ops_scaffold.py` (currently hardcoded to `gateway_*`), NOT a ci.yml step.** It asserts every alert rule references a metric the code actually exposes. The extension must add the core `alfred_*` alerts and cross-reference them against `CORE_OWNED_COLLECTORS` (PR1) so a renamed/removed core metric fails loud. Write the test change concretely (parametrize over both rule files; resolve `alfred_quarantine_capability_revoked_total`/`up` against the core surface):
+
+```python
+# tests/unit/test_ops_scaffold.py (extend the existing gateway-only assertion)
+def test_core_alerts_reference_real_core_metrics():
+    from alfred.observability.core_metrics import CORE_OWNED_COLLECTORS
+    core_names = {c._name for c in CORE_OWNED_COLLECTORS}  # base names; _total-stripped forms
+    # parse ops/alerts/core.yml exprs, extract metric refs, assert each is a known core metric
+    # (or the built-in `up`), else the rule is silently dead. See the gateway sibling for the parser.
+    ...
+```
+
+Run: `uv run pytest tests/unit/test_ops_scaffold.py -q` — Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -238,7 +279,7 @@ def test_grafana_publishes_only_loopback(compose):
     volumes:
       - alfred_grafana_data:/var/lib/grafana
       - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./ops/grafana:/var/lib/grafana/dashboards:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro   # rev.1 devops-006: dedicated subdir, NOT all of ops/grafana (which contains provisioning/)
     ports:
       - "127.0.0.1:3000:3000"   # loopback (Linux); OrbStack via *.orb.local; DD via tunnel
     networks:
@@ -249,10 +290,27 @@ def test_grafana_publishes_only_loopback(compose):
 
 Add `alfred_grafana_data:` to top-level `volumes:`.
 
-- [ ] **Step 4: Generate the password in `bin/alfred-setup.sh`** (mirror the `audit.hash_pepper` seed): if `GF_SECURITY_ADMIN_PASSWORD` is absent from `.env`, append a random one (e.g. `openssl rand -hex 24`). Add a placeholder line to `.env.example`:
+- [ ] **Step 4: Seed the password in `bin/alfred-setup.sh` — guard on PRESENT-AND-NON-EMPTY, not absent (rev.1 devops-004/sec-004)**
+
+`.env.example` carries `GF_SECURITY_ADMIN_PASSWORD=` (empty), and first-run does `cp .env.example .env`, so the key is **present but empty** — an "if absent, append" guard would never fire and Grafana would boot with an empty admin password (sec-004). Mirror the `audit.hash_pepper` seed's **present-and-non-empty** grep-guard and **replace** the empty line in place rather than append:
 
 ```bash
-# Grafana admin password — auto-generated by bin/alfred-setup.sh on first run.
+# in bin/alfred-setup.sh — seed a Grafana admin password if unset OR empty
+if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
+  pw="$(openssl rand -hex 24)"
+  # replace an existing empty line, else append
+  if grep -qE '^GF_SECURITY_ADMIN_PASSWORD=' .env; then
+    sed -i.bak "s|^GF_SECURITY_ADMIN_PASSWORD=.*|GF_SECURITY_ADMIN_PASSWORD=${pw}|" .env && rm -f .env.bak
+  else
+    printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$pw" >> .env
+  fi
+fi
+```
+
+`.env.example` placeholder line:
+
+```bash
+# Grafana admin password — auto-generated by bin/alfred-setup.sh on first run (never commit a real value).
 GF_SECURITY_ADMIN_PASSWORD=
 ```
 
@@ -271,7 +329,7 @@ git commit -m "feat(compose): #470 bundle default-on internal-only Grafana (:- p
 
 **Files:**
 
-- Create: `ops/grafana/provisioning/datasources/prometheus.yml`, `ops/grafana/provisioning/dashboards/dashboards.yml`, `ops/grafana/quarantine.json`
+- Create: `ops/grafana/provisioning/datasources/prometheus.yml`, `ops/grafana/provisioning/dashboards/dashboards.yml`, `ops/grafana/dashboards/quarantine.json`
 
 - [ ] **Step 1: Datasource provision**
 
@@ -297,9 +355,9 @@ providers:
     options: {path: /var/lib/grafana/dashboards}
 ```
 
-- [ ] **Step 3: Add a core/quarantine dashboard** `ops/grafana/quarantine.json` with panels for `alfred_quarantine_capability_revoked_total`, `up{job="alfred-core"}`, and the comms/supervisor histograms (a minimal starter; the existing `gateway.json` covers gateway series).
+- [ ] **Step 3: Add a core/quarantine dashboard** `ops/grafana/dashboards/quarantine.json` with panels for `alfred_quarantine_capability_revoked_total`, `up{job="alfred-core"}`, and the comms/supervisor histograms (a minimal starter). **Also move the existing `ops/grafana/gateway.json` into `ops/grafana/dashboards/`** (`git mv ops/grafana/gateway.json ops/grafana/dashboards/`) so the dashboards-only mount (`./ops/grafana/dashboards`, Task 3 rev.1 devops-006) actually serves it.
 
-- [ ] **Step 4: Validate JSON** — `python -c "import json;json.load(open('ops/grafana/quarantine.json'))"`. Commit:
+- [ ] **Step 4: Validate JSON** — `python -c "import json;json.load(open('ops/grafana/dashboards/quarantine.json'))"`. Commit:
 
 ```bash
 git add ops/grafana
@@ -314,21 +372,51 @@ git commit -m "feat(ops): #470 Grafana datasource + dashboard provisioning for c
 
 - Create: `tests/integration/test_prometheus_scrapes_core.py`
 
-- [ ] **Step 1: Write the test** (testcontainers — spec §9/devops-002): boot a Prometheus container with the repo `prometheus.yml` + a stub target exposing `alfred_quarantine_capability_revoked_total`, then assert `up{job="alfred-core"} == 1` and that the `QuarantineCapabilityRevoked` rule is present in `/api/v1/rules`. Skip on no-docker.
+- [ ] **Step 1: Write the fixture + test (rev.1 test-002/devops-003/rev-006 — the two load-bearing details spelled out)**
+
+The fixture is the anti-paper-gate's whole point; two details are non-negotiable or it proves nothing: **(1)** the stub `/metrics` container MUST be network-aliased **exactly `alfred-core`** on port **9465** (the literal scrape target), and **(2)** the Prometheus container MUST mount **both** the repo `prometheus.yml` **and** `ops/alerts/` (else Prometheus loads zero rules and the `/api/v1/rules` assertion is vacuous). Use a shared testcontainers network.
 
 ```python
-# tests/integration/test_prometheus_scrapes_core.py (shape)
+# tests/integration/test_prometheus_scrapes_core.py
+import time
 import pytest, httpx
+from pathlib import Path
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.network import Network
+
 pytestmark = pytest.mark.integration
+_REPO = Path(__file__).resolve().parents[2]
+
+@pytest.fixture
+def prometheus_with_stub_core():
+    with Network() as net:
+        # (1) stub core /metrics, aliased EXACTLY as the scrape target expects
+        stub_body = "# TYPE alfred_quarantine_capability_revoked_total counter\nalfred_quarantine_capability_revoked_total 0\n"
+        stub = (DockerContainer("python:3.14-slim")
+                .with_network(net).with_kwargs(network_aliases=["alfred-core"])
+                .with_command(f"python -c \"import http.server,functools;h=functools.partial(http.server.SimpleHTTPRequestHandler);"
+                              f"import http.server as s;\\n"))  # simplest: serve a static /metrics on :9465 (see note)
+        # NOTE: implement the stub as a tiny script that answers GET /metrics with stub_body on :9465.
+        prom = (DockerContainer("prom/prometheus:v3.5.0")
+                .with_network(net)
+                .with_exposed_ports(9090)
+                .with_volume_mapping(str(_REPO / "ops/prometheus/prometheus.yml"), "/etc/prometheus/prometheus.yml", "ro")
+                .with_volume_mapping(str(_REPO / "ops/alerts"), "/etc/prometheus/alerts", "ro"))
+        with stub, prom:
+            base = f"http://{prom.get_container_host_ip()}:{prom.get_exposed_port(9090)}"
+            time.sleep(3)  # allow one scrape interval
+            yield base
 
 def test_prometheus_loads_config_and_rule_is_live(prometheus_with_stub_core):
-    base = prometheus_with_stub_core  # fixture: Prometheus + a stub /metrics on the alfred-core alias
+    base = prometheus_with_stub_core
     rules = httpx.get(f"{base}/api/v1/rules").json()
     names = {r["name"] for g in rules["data"]["groups"] for r in g["rules"]}
-    assert "QuarantineCapabilityRevoked" in names
+    assert "QuarantineCapabilityRevoked" in names       # rules actually loaded (ops/alerts mounted)
     up = httpx.get(f"{base}/api/v1/query", params={"query": 'up{job="alfred-core"}'}).json()
-    assert up["data"]["result"][0]["value"][1] == "1"
+    assert up["data"]["result"][0]["value"][1] == "1"   # the alfred-core alias was scraped
 ```
+
+(Implement the stub container's `/metrics` responder however is cleanest in-repo — the load-bearing invariants are the `alfred-core` alias + the two ro mounts, not the stub's language.)
 
 - [ ] **Step 2: Run it** — `uv run pytest tests/integration/test_prometheus_scrapes_core.py -q` → PASS (a typo'd scrape target would fail here instead of shipping green).
 
@@ -345,12 +433,14 @@ git commit -m "test(ops): #470 end-to-end proof Prometheus scrapes core and the 
 
 **Files:**
 
-- Modify: `src/alfred/security/observability.py`, `ops/alerts/quarantine.yml`, `docs/runbooks/quarantine-capability-revoked.md`, `README.md`
+- Modify: `src/alfred/security/observability.py`, `ops/alerts/quarantine.yml`, `docs/runbooks/quarantine-capability-revoked.md`, `docs/subsystems/security.md`, `README.md`
 - Create: `docs/runbooks/observability-stack.md`
 
-- [ ] **Step 1: Drop the "armed, not live" blocks** in `observability.py` (the `.. warning::`), `quarantine.yml` (the `ARMED, NOT YET LIVE` header). Editing `security/observability.py` triggers the adversarial suite (Task 8).
+- [ ] **Step 0: Enumerate ALL "#470 not scraped" references first (rev.1 docs-001)** — a naïve list misses some. Run `grep -rn "#470\|not scraped\|nothing scrapes\|armed" docs/ ops/ src/alfred/security/observability.py` and reframe every hit. Known targets include the three below **plus `docs/subsystems/security.md:452-453`** ("The metric is not scraped yet ([#470]) — use the audit-log path"), which the first draft missed.
 
-- [ ] **Step 2: Reframe the runbook** (spec §6.4 — corrected rationale): remove the `⚠ Read first: the alert cannot fire yet` block, the `Related`-`#470` entry, and the `un-scrapeable, #470` parenthetical inside the audit section; rewrite the audit-path framing as **"the metric is the sole durable signal for the cancel-path revoke class (#472 writes no `egress.broker.refused` row); the audit-log path is the additive cross-check for the other revoke classes."** Do NOT say "keep the audit path because complementary" (inverted).
+- [ ] **Step 1: Drop the "armed, not live" blocks** in `observability.py` (the `.. warning::`), `quarantine.yml` (the `ARMED, NOT YET LIVE` header), and the `docs/subsystems/security.md:452-453` "not scraped yet" claim. Editing `security/observability.py` triggers the adversarial suite (Task 8).
+
+- [ ] **Step 2: Reframe the runbook** (spec §6.4 — corrected rationale): remove **all four** falsified fragments — the `⚠ Read first: the alert cannot fire yet` block, the `Related`-`#470` entry, the `un-scrapeable, #470` parenthetical inside the audit section, **and the "Detecting it today / Both work without Prometheus" framing** (rev.1 docs-002); rewrite the audit-path framing as **"the metric is the sole durable signal for the cancel-path revoke class (#472 writes no `egress.broker.refused` row); the audit-log path is the additive cross-check for the other revoke classes."** Do NOT say "keep the audit path because complementary" (inverted).
 
 - [ ] **Step 3: Write `docs/runbooks/observability-stack.md`** — per-platform Grafana access (Linux `http://127.0.0.1:3000`; OrbStack `http://alfred-grafana.<project>.orb.local`; Docker-Desktop tunnel), Prometheus access, what the bundled dashboards show, and the `GF_SECURITY_ADMIN_PASSWORD` first-run note.
 
@@ -371,7 +461,7 @@ git commit -m "docs(observability): #470 reframe armed-not-live caveats + operat
 
 - Modify: `docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md`
 
-- [ ] **Step 1: Add an `Amended: 2026-07-XX (#470)` line** and a residual-panel entry recording: (a) the inbound-`/metrics`-listener-vs-external-socket interpretation of Decision 1; (b) the two new internal-only third-party services + a Prometheus TSDB attached to the connectivity-free stack; (c) the accepted residual — core `/metrics` is unauthenticated plaintext HTTP readable by any `alfred_internal` peer, carrying only bounded operational aggregates (no T3/PII/secret), kept true by the PR1 leak-guard + value-boundedness invariant.
+- [ ] **Step 1: Add an `Amended: 2026-07-21 (#470)` line** and a **new residual `(viii)`** in ADR-0040's residual panel (the panel currently runs (i)–(vii); confirm the next free numeral at implementation) recording: (a) the inbound-`/metrics`-listener-vs-external-socket interpretation of Decision 1; (b) the two new internal-only third-party services + a Prometheus TSDB attached to the connectivity-free stack; (c) the accepted residual — core `/metrics` is unauthenticated plaintext HTTP readable by any `alfred_internal` peer, carrying only bounded operational aggregates (no T3/PII/secret), kept true by the PR1 leak-guard + value-boundedness invariant.
 
 - [ ] **Step 2: Markdown lint** the ADR; confirm ADR cross-links resolve. Commit:
 
@@ -405,3 +495,12 @@ git commit -m "docs(adr): #470 amend ADR-0040 with the inbound-metrics decision 
 **Placeholders:** image tags say "pin the exact current tag at implementation" (a deliberate instruction, not a TBD); the dashboard JSON + `ci.yml` diff + testcontainers fixture are described by role for the implementer's tree.
 
 **Human-gated guard:** the CLAUDE.md `alfred daemon healthcheck` command-table entry and any PRD §4/§7.5 clarification are flagged (§6.5, spec §10/§11) and NOT edited by this plan.
+
+---
+
+## rev.1 fold log (8-lane plan-review)
+
+**High** — e2e testcontainers fixture spelled out: the stub MUST be aliased `alfred-core:9465` and Prometheus MUST mount BOTH `prometheus.yml` and `ops/alerts/` (Task 5, else zero rules / vacuous assertion); the no-silently-dead-alerts cross-check is `tests/unit/test_ops_scaffold.py` (a pytest test, gateway-hardcoded), NOT a ci.yml diff — concrete core extension added (Task 2 Step 5); `docs/subsystems/security.md:452-453` added to the caveat reframe (Task 6 Step 0/1).
+**Medium** — `absent()` alert now has promtool positive+negative controls (Task 2 Step 3); Grafana password seed guards on present-AND-non-empty and replaces in place, since `cp .env.example .env` makes the key present-but-empty (Task 3 Step 4, sec-004/devops-004); port contract reconciled — the scrape target is a literal 9465, an override must be mirrored (Task 2 note + PR1 Task 6 note); the 4th runbook target ("Detecting it today / Both work without Prometheus") added to the reframe (Task 6 Step 2, docs-002).
+**Low** — Grafana dashboards mount is a dedicated `ops/grafana/dashboards/` subdir (not all of ops/grafana, which holds provisioning/) + `git mv gateway.json` into it (Task 3/4, devops-006); ADR amendment carries a concrete date `2026-07-21` + residual `(viii)` (Task 7, docs-004).
+**Verified sound (no change):** compose blocks valid + internal-only, `:-` empty password boots on Grafana 11, `prom/prometheus` ships wget for `/-/healthy`, promtool `up==0` schema valid, `#470` opens no egress.

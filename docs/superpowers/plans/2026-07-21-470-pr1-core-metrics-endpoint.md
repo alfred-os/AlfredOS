@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **rev.1 (2026-07-21)** — folds an 8-lane plan-review (1 Critical, empirically reproduced ×4). The
+> Critical was the leak-guard test (Task 3) failing at t=0; fixed here (parser strips `_total`,
+> `_created` siblings filtered, label keys asserted from *declared* names). See the §fold-log at the end.
+
 **Goal:** Serve the core's Prometheus `/metrics` from `alfred daemon start` over a curated, leak-guarded registry on a compose-internal never-host-published port, with a `daemon healthcheck` + compose healthcheck that make a bind failure non-silent.
 
 **Architecture:** Promote the gateway's metrics-exposition helpers into a neutral `alfred/observability/` module; the daemon serves a dedicated `CollectorRegistry` built from a single `CORE_OWNED_COLLECTORS` source of truth (10 families across 4 modules) so it exposes exactly the core-owned series and none of the stale `gateway_*` families the default registry accretes; a two-sided, oracle-independent leak-guard test pins the exposed surface; a `daemon healthcheck` subcommand + a compose `healthcheck:` block surface a loud-and-continue bind failure.
@@ -168,9 +172,14 @@ Update gateway call sites to pass the gateway env-var/default:
 - `src/alfred/cli/gateway/_commands.py:290` → `start_metrics_server(resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464))`
 - `src/alfred/cli/gateway/_commands.py:546` → `port = resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)`
 - `src/alfred/cli/gateway/_egress.py:39` → `port = resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)`
-- Replace the local `_fetch_metrics_text(port)` in `cli/gateway/_commands.py` with `fetch_metrics_text(_HEALTHCHECK_HOST, port)` (import from `alfred.observability.metrics_server`); update its callers (`_commands.py:553`, `_egress.py` import).
+- Replace the local `_fetch_metrics_text(port)` in `cli/gateway/_commands.py` with `fetch_metrics_text(_HEALTHCHECK_HOST, port)` (import from `alfred.observability.metrics_server`); update its callers (`_commands.py:553`; and `_egress.py:40` — which currently calls `_fetch_metrics_text(port)` and **must now pass the host**: `fetch_metrics_text(_HEALTHCHECK_HOST, port)`, importing `_HEALTHCHECK_HOST` too).
 
-- [ ] **Step 6: Run the gateway test suite to verify the refactor holds**
+- [ ] **Step 6: Find and update the existing tests the signature change breaks (rev.1 core-002)**
+
+The 0-arg→2-arg `resolve_metrics_port` and the `_fetch_metrics_text`→`fetch_metrics_text(host, port)` rename break existing gateway tests. Find and update every caller:
+
+Run: `grep -rn "resolve_metrics_port(\|_fetch_metrics_text\b\|fetch_metrics_text(" tests/ src/`
+Update each to the new signatures (pass `"ALFRED_GATEWAY_METRICS_PORT", 9464` / a host). Then:
 
 Run: `uv run pytest tests/unit/gateway -q && uv run pytest tests/unit/cli/gateway -q`
 Expected: PASS (no behavior change for the gateway).
@@ -206,7 +215,7 @@ from alfred.observability.core_metrics import build_core_registry, CORE_OWNED_CO
 def test_build_core_registry_serves_the_capability_counter():
     reg = build_core_registry()
     families = {f.name for f in text_string_to_metric_families(generate_latest(reg).decode())}
-    assert "alfred_quarantine_capability_revoked_total" in families
+    assert "alfred_quarantine_capability_revoked" in families  # parser strips the Counter's _total
 
 def test_ten_core_collectors():
     assert len(CORE_OWNED_COLLECTORS) == 10
@@ -288,73 +297,81 @@ git commit -m "feat(observability): #470 curated core CollectorRegistry from one
 
 - Consumes: `build_core_registry`, `CORE_OWNED_COLLECTORS` from Task 2.
 
-- [ ] **Step 1: Write the failing two-sided leak-guard**
+- [ ] **Step 1: Write the two-sided leak-guard — three `prometheus_client` gotchas the review reproduced**
 
-The expected set is an **independently-authored literal** (NOT derived from `CORE_OWNED_COLLECTORS` — that would be a tautological oracle). Assert on parsed family BASE names (the parser strips `_bucket`/`_sum`/`_count`/`_created`) + label keys.
+The expected set is an **independently-authored literal** (NOT derived from `CORE_OWNED_COLLECTORS` — that would be a tautological oracle). The rev.1 review (sec/rev/test/core all ran it) found the naïve version RED at t=0 for three reasons that MUST be handled — and the fix is to make the literal correct, **NEVER** to weaken `==` to a subset or drop the label pin (that would silently defeat the DLP-equivalent):
+
+1. **The parser strips a Counter's `_total`** — `text_string_to_metric_families` yields `alfred_quarantine_capability_revoked` (not `..._total`) and `alfred_comms_handler_failures` (not `..._total`). Author `_EXPECTED_FAMILIES` in the parser's naming.
+2. **`_created` series are separate families** (no `PROMETHEUS_DISABLE_CREATED_SERIES` in this repo) — filter names ending `_created`.
+3. **Labeled families expose NO label keys at t=0** (a child only materializes on first `.labels(...)`). So enforce the value-boundedness label pin from each collector's **declared** label names (`_labelnames`), NOT from emitted samples.
 
 ```python
 # append to tests/unit/observability/test_core_registry_surface.py
-from prometheus_client import generate_latest
-from prometheus_client.parser import text_string_to_metric_families
-from alfred.observability.core_metrics import build_core_registry, CORE_OWNED_COLLECTORS
+# (imports consolidated at the top of the file with Task 2's — no mid-file re-import)
 
-# Reviewed allowlist — hand-authored (spec §5.2). Adding a metric is a deliberate edit here.
-_EXPECTED: dict[str, frozenset[str]] = {
-    "alfred_quarantine_capability_revoked_total": frozenset(),
-    "alfred_comms_inbound_dispatch_seconds": frozenset(),
-    "alfred_comms_quarantined_extract_seconds": frozenset(),
-    "alfred_comms_burst_limiter_wait_seconds": frozenset(),
-    "alfred_comms_handler_failures_total": frozenset(),
+# Reviewed allowlist in the PARSER's naming (counters WITHOUT _total; _created filtered).
+# Author these to match the actual exposition (Step 2 freezes them); a human reviews this literal.
+_EXPECTED_FAMILIES: frozenset[str] = frozenset({
+    "alfred_quarantine_capability_revoked",        # Counter — parser strips _total
+    "alfred_comms_inbound_dispatch_seconds",
+    "alfred_comms_quarantined_extract_seconds",
+    "alfred_comms_burst_limiter_wait_seconds",
+    "alfred_comms_handler_failures",               # Counter — parser strips _total
+    "alfred_orchestrator_action_duration_seconds",
+    "alfred_stdio_transport_dispatch_seconds",
+    "alfred_plugin_spawn_seconds",
+    "alfred_outbound_dlp_scan_seconds",
+    "alfred_inbound_scanner_scan_seconds",
+})
+
+# Declared label names, keyed on the collector's stored base name (`_name`). Present at t=0
+# even with zero children — this is the value-boundedness invariant's enforcement (spec §5.2).
+_EXPECTED_DECLARED_LABELS: dict[str, frozenset[str]] = {
     "alfred_orchestrator_action_duration_seconds": frozenset({"user_id_bucket", "action_outcome", "breaker_state"}),
     "alfred_stdio_transport_dispatch_seconds": frozenset({"plugin_id", "method_shape", "outcome"}),
     "alfred_plugin_spawn_seconds": frozenset({"plugin_id", "outcome"}),
     "alfred_outbound_dlp_scan_seconds": frozenset({"outcome"}),
     "alfred_inbound_scanner_scan_seconds": frozenset({"outcome"}),
+    # every other core family declares NO labels (defaults to frozenset()).
 }
 
-def _exposed() -> dict[str, frozenset[str]]:
+def _exposed_family_names() -> set[str]:
     text = generate_latest(build_core_registry()).decode()
-    out: dict[str, frozenset[str]] = {}
-    for fam in text_string_to_metric_families(text):
-        keys: set[str] = set()
-        for s in fam.samples:
-            keys.update(k for k in s.labels if k != "le")
-        out[fam.name] = frozenset(keys)
-    return out
+    return {f.name for f in text_string_to_metric_families(text) if not f.name.endswith("_created")}
 
 def test_no_leak_no_stale_family():
-    exposed = _exposed()
-    assert set(exposed) == set(_EXPECTED), (
-        f"extra={set(exposed) - set(_EXPECTED)} missing={set(_EXPECTED) - set(exposed)}"
+    exposed = _exposed_family_names()
+    assert exposed == set(_EXPECTED_FAMILIES), (
+        f"extra={exposed - set(_EXPECTED_FAMILIES)} missing={set(_EXPECTED_FAMILIES) - exposed}"
     )
     assert not any(n.startswith("gateway_") for n in exposed), "gateway_* leaked onto core /metrics"
 
-def test_label_keys_match_reviewed_allowlist():
-    exposed = _exposed()
-    for name, keys in _EXPECTED.items():
-        assert exposed[name] == keys, f"{name} labels {exposed[name]} != reviewed {keys}"
-
-def test_source_of_truth_matches_reviewed_literal():
-    # Independent cross-check: CORE_OWNED_COLLECTORS must not drift from the reviewed literal.
-    names = set()
+def test_declared_label_keys_bounded():
+    # Read declared label names off the collector objects (robust at t=0 with no children).
     for c in CORE_OWNED_COLLECTORS:
-        text = generate_latest(_single_registry(c)).decode()
-        names.update(f.name for f in text_string_to_metric_families(text))
-    assert names == set(_EXPECTED)
+        declared = frozenset(c._labelnames)  # prometheus_client stores the declared labels here
+        expected = _EXPECTED_DECLARED_LABELS.get(c._name, frozenset())
+        assert declared == expected, f"{c._name} declares labels {declared} != reviewed {expected}"
 
-def _single_registry(collector):
-    from prometheus_client import CollectorRegistry
-    r = CollectorRegistry(); r.register(collector); return r
+def test_source_of_truth_count_matches_reviewed_literal():
+    # A collector added to CORE_OWNED_COLLECTORS without updating the reviewed literal fails here.
+    assert len(CORE_OWNED_COLLECTORS) == len(_EXPECTED_FAMILIES)
 ```
 
-- [ ] **Step 2: Run to verify it passes (Task 2's builder already satisfies it)**
+- [ ] **Step 2: Run; freeze `_EXPECTED_FAMILIES` to the actual parser output; verify green**
 
 Run: `uv run pytest tests/unit/observability/test_core_registry_surface.py -q`
-Expected: PASS. (If a family is missing, `CORE_OWNED_COLLECTORS` is short — the core-002 bug is caught here.)
+Expected: PASS. If `test_no_leak_no_stale_family` is red, read the `extra=`/`missing=` diff and correct the **literal** to the parser's naming (the three gotchas above) — a human reviews the frozen literal. **Do NOT** relax `==` to subset or delete `test_declared_label_keys_bounded`; that defeats the control (rev.1 Critical). A red here from a short `CORE_OWNED_COLLECTORS` is the core-002 bug, caught as intended.
 
-- [ ] **Step 3: Add the 100% coverage gate for `src/alfred/observability/`**
+- [ ] **Step 3: Wire the 100% coverage gate for `src/alfred/observability/` (a CI step, not a config toggle)**
 
-Add `src/alfred/observability/` to the per-module `--fail-under=100` coverage set (mirror an existing security-module entry in the coverage config / `Makefile` / CI). Show the exact added line in the diff.
+The per-module 100% gates are **hardcoded `coverage report` invocations in CI**, not a config one-liner (rev.1: rev-003/test-005; and #474 — `make check` does NOT run them). Mirror an existing security-module gate: add to the CI coverage job
+
+```bash
+uv run coverage report --include='src/alfred/observability/*' --fail-under=100 --show-missing
+```
+
+Note in the PR description that `make check` does not exercise this gate (#474); verify locally with the explicit command in Step 4, not via `make check`.
 
 - [ ] **Step 4: Verify coverage**
 
@@ -412,9 +429,11 @@ from alfred.observability.metrics_server import resolve_metrics_port, start_metr
 def _start_core_metrics_server() -> None:
     """Serve the core /metrics over the curated registry (loud-and-continue). Monkeypatchable seam.
 
-    Importing core_metrics registers all ten core families at 0 from t=0. start_http_server spawns a
-    detached daemon thread binding a real socket — invisible to the #472 teardown, but tests stub
-    this seam so per-test boots don't leak threads/sockets.
+    Importing core_metrics registers the ten core families on the default registry; the unlabeled
+    ones (incl. alfred_quarantine_capability_revoked) read 0 from t=0, and the labeled ones expose
+    their family metadata immediately (child series materialize on first .labels(...) — rev.1
+    core-006). start_http_server spawns a detached daemon thread binding a real socket — invisible
+    to the #472 teardown, but tests stub this seam so per-test boots don't leak threads/sockets.
     """
     start_metrics_server(
         resolve_metrics_port("ALFRED_CORE_METRICS_PORT", 9465),
@@ -422,16 +441,27 @@ def _start_core_metrics_server() -> None:
     )
 ```
 
-In `_start_async`, add `_start_core_metrics_server()` near the top of the boot body — **before** the `Supervisor(...)` construction — mirroring the gateway's pre-relay call site (`cli/gateway/_commands.py:288-290`).
+In `_start_async`, call `_start_core_metrics_server()` **early in the boot body, before the `Supervisor(...)` construction** (it is built ~`_commands.py:856`; place the call in the same pre-flight region where the boot resolves its config, mirroring the gateway's pre-relay call site `cli/gateway/_commands.py:288-290`). Placing it before Supervisor keeps it out of the #472 teardown `finally` (`~:1020-1075`).
 
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `uv run pytest tests/unit/cli/daemon/test_daemon_boot_metrics.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Guard the existing boot-wiring tests against the real socket**
+- [ ] **Step 5: Isolate the existing boot-wiring tests from the real socket (rev.1 core-004/test-006)**
 
-Confirm the daemon boot-body tests monkeypatch `_start_core_metrics_server` (or `start_metrics_server`) so they never bind a real port. Run the daemon boot test module:
+Every existing test that drives `_start_async` would now call the real `_start_core_metrics_server` → bind port 9465 → leak a detached thread across the many per-process boots. Add an **autouse fixture** in `tests/unit/cli/daemon/conftest.py` that stubs the seam for every daemon boot test that does not assert on it:
+
+```python
+# tests/unit/cli/daemon/conftest.py
+import pytest
+@pytest.fixture(autouse=True)
+def _stub_core_metrics_server(monkeypatch):
+    import alfred.cli.daemon._commands as cmd
+    monkeypatch.setattr(cmd, "_start_core_metrics_server", lambda: None)
+```
+
+(The dedicated `test_daemon_boot_metrics.py` from Steps 1-4 patches `start_metrics_server` directly, so it still exercises the seam.) Then:
 
 Run: `uv run pytest tests/unit/cli/daemon -q`
 Expected: PASS, no `EADDRINUSE`/thread-leak warnings.
@@ -521,7 +551,7 @@ def healthcheck_daemon() -> None:
         port = resolve_metrics_port("ALFRED_CORE_METRICS_PORT", 9465)
     except ValueError as exc:
         log.warning("daemon.healthcheck.bad_port", error=repr(exc))
-        typer.echo(t("daemon.healthcheck.metrics_unreachable", port="unset"))
+        typer.echo(t("daemon.healthcheck.bad_port"))  # distinct config-error message (i18n-004)
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
     try:
         fetch_metrics_text(_HOST, port)
@@ -540,12 +570,23 @@ def healthcheck() -> None:
     healthcheck_daemon()
 ```
 
-- [ ] **Step 4: Add the i18n catalog keys**
+- [ ] **Step 4: Add the i18n catalog keys + run the drift-gate (rev.1 i18n-001/003/004)**
 
-Add to the English catalog source: `daemon.help.healthcheck` ("Probe the core /metrics endpoint; exit non-zero if unreachable.") and `daemon.healthcheck.metrics_unreachable` ("Core metrics endpoint unreachable on port {port}; the data plane may still be serving."). Then run the drift-gate:
+Add three keys to the catalog at `locale/en/LC_MESSAGES/alfred.po` (the repo's canonical catalog, domain `alfred` — NOT `src/alfred/i18n/locales`):
 
-Run: `pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins && pybabel update --no-fuzzy-matching -i /tmp/alfred.pot -d src/alfred/i18n/locales && pybabel compile -d src/alfred/i18n/locales`
-Expected: no fuzzy/missing entries; msgstrs brace-free.
+- `daemon.help.healthcheck` → "Probe the core /metrics endpoint; exit non-zero if unreachable."
+- `daemon.healthcheck.metrics_unreachable` → "Core metrics endpoint unreachable on port {port}; the data plane may still be serving." (keeps the `{port}` placeholder — the msgstr is NOT brace-free; `t()` does `raw.format(**vars)`.)
+- `daemon.healthcheck.bad_port` → "ALFRED_CORE_METRICS_PORT is invalid; cannot probe the core metrics endpoint." (distinct message for the config-error branch — i18n-004.)
+
+Run the drift-gate (correct path + domain):
+
+```bash
+pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins \
+  && pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching \
+  && pybabel compile -d locale -D alfred
+```
+
+Expected: no fuzzy/missing entries; the `metrics_unreachable` msgstr retains its `{port}` placeholder and every `{...}` is a valid `str.format` field.
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -562,6 +603,13 @@ git commit -m "feat(daemon): #470 add daemon healthcheck probing the core metric
 ---
 
 ## Task 6: Compose wiring — core metrics port env + healthcheck + never-published pin
+
+> **Port-contract note (rev.1 arch-001/rev-004):** `ALFRED_CORE_METRICS_PORT` sets the *daemon bind*
+> port (default 9465), mirroring the gateway's `ALFRED_GATEWAY_METRICS_PORT`. **Prometheus cannot
+> env-expand a `static_configs` target**, so PR2's scrape target is the literal `alfred-core:9465`.
+> An operator who overrides the port MUST mirror it in `ops/prometheus/prometheus.yml` — exactly the
+> gateway's existing constraint (`alfred-gateway:9464` is likewise hardcoded). Document this in the
+> observability runbook (PR2 Task 6). The port is effectively fixed at 9465 for the bundled stack.
 
 **Files:**
 
@@ -630,15 +678,19 @@ git commit -m "feat(compose): #470 wire core metrics port + healthcheck (never h
 Run: `uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pyright src/`
 Expected: clean.
 
-- [ ] **Step 2: Run the adversarial suite (PR1 edits `src/alfred/security/observability.py` in Task 3's coverage config + imports it)**
+- [ ] **Step 2: Run the adversarial suite (defense-in-depth)**
+
+PR1 **imports from** `src/alfred/security/observability.py` (the `CAPABILITY_REVOKED_COUNTER`) and reshapes the security-relevant `/metrics` surface, but does **not edit** that file (the edit is PR2 Task 6) — so the HARD "changed `src/alfred/security/`" trigger fires in PR2, not strictly here (rev.1 arch-003/test-007). Run it here anyway as a safety net for the surface change:
 
 Run: `uv run pytest tests/adversarial -q`
 Expected: PASS (release-blocking).
 
-- [ ] **Step 3: Confirm `make check` and the per-module coverage gates**
+- [ ] **Step 3: Confirm the gates — run the observability coverage gate EXPLICITLY (not via `make check`)**
 
-Run: `make check`
-Expected: clean, incl. the new `src/alfred/observability/` 100% gate.
+Run: `uv run coverage report --include='src/alfred/observability/*' --fail-under=100 --show-missing`
+Expected: 100%. **`make check` does NOT run the per-module coverage gates (#474)** — do not rely on it for this; the CI job (Task 3 Step 3) and this explicit command are the real gate.
+
+Run: `make check` — Expected: lint/format/type/test clean (mechanical bar), understanding it does not exercise the coverage gate above.
 
 - [ ] **Step 4: No commit unless a fix was needed** (fixups per the in-branch-fixes convention).
 
@@ -653,3 +705,12 @@ Expected: clean, incl. the new `src/alfred/observability/` 100% gate.
 **Placeholders:** none — every code step shows code; the coverage-config line and i18n catalog file are named by their role (the implementer's tree has one). Image/port literals are concrete (9465).
 
 **Boundary note:** PR2 (Prometheus/Grafana services, scrape job, rules, docs, caveat reframe) + the ADR-0040 amendment are a **separate plan** (`2026-07-21-470-pr2-observability-bundle.md`, to be written) — PR1 leaves the endpoint scrapeable + its failure observable, standing on its own.
+
+---
+
+## rev.1 fold log (8-lane plan-review)
+
+**Critical** `[×4 reproduced]` — Task 3 leak-guard failed at t=0 (`_total` strip / `_created` siblings / no-labels-at-t=0): rewrote Task 3 Step 1-2 (parser-named `_EXPECTED_FAMILIES`, `_created` filter, declared-`_labelnames` label pin, anti-weakening note) + fixed Task 2's smoke assertion.
+**High** — i18n pybabel path/domain (Task 5 Step 4 → `-d locale -D alfred`); coverage-gate is a CI `coverage report --fail-under=100` step not a config toggle + `make check` doesn't run it (Task 3 Step 3 / Task 7 Step 3, #474); signature-change breaks existing gateway tests (Task 1 Step 6 grep+update).
+**Medium** — port contract PR1↔PR2 (Task 6 note: scrape target is literal 9465); boot-seam anchor precision + `_start_async` placement (Task 4 Step 3); boot-test isolation via autouse fixture (Task 4 Step 5); bind-failure branch test (add in Task 1 — the `start_metrics_server` OSError arm — to hit 100%).
+**Low** — adversarial rationale corrected: PR1 imports, doesn't edit `security/observability.py` (Task 7 Step 2); counter-at-zero wording accurate for labeled families (Task 4 docstring, core-006); `_egress.py` host arg (Task 1 Step 5); distinct `daemon.healthcheck.bad_port` message (Task 5, i18n-004); imports consolidated (no mid-file re-import, rev-008); trio render-assertion + brace-free wording (i18n-002/003, addressed in Task 5 Step 4 Expected).
