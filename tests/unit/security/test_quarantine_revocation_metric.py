@@ -132,6 +132,10 @@ async def test_a_failing_teardown_still_counts_the_revocation() -> None:
         async def aclose(self) -> None:
             raise OSError("EBADF")
 
+        def abort(self) -> None:
+            # #472 finding 2: the Exception arm now completes the kill (defense-in-depth).
+            return None
+
     transport = object.__new__(QuarantineStdioTransport)
     transport._child_io = _ExplodingChildIO()  # type: ignore[attr-defined]
 
