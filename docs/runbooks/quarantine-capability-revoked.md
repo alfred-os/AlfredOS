@@ -11,6 +11,14 @@
 > `ops/alerts/quarantine.yml`); structlog event
 > `security.quarantine_transport.capability_revoked`; audit rows
 > `egress.broker.refused`.
+>
+> **[2026-07-21 — #472 finding 2]** The teardown is now cancellation-safe. Two extra
+> structlog events flag the non-clean teardown paths:
+> `security.quarantine_transport.revoke_cancelled` (the revoke was cancelled
+> mid-teardown — the daemon was shutting down *while* a T3 child was being killed; the
+> SIGKILL was completed synchronously anyway, then the cancel re-raised) and
+> `security.quarantine_transport.capability_abort_failed` (the synchronous last-resort
+> kill itself raised — an OS-level anomaly worth investigating).
 
 ## ⚠ Read first: the alert cannot fire yet
 
@@ -101,6 +109,14 @@ degraded gateway, not a revoked capability.
 4. **If it revokes again immediately**, stop restarting. A revoke loop means the
    trigger is still live; go back to step 2. Restarting into a broken gateway
    burns a child spawn per attempt and adds nothing to the audit trail.
+
+5. **A lingering bwrap `<defunct>` (zombie) PID after a `revoke_cancelled`.** When a
+   revoke is cancelled mid-teardown (a shutdown racing an in-flight revoke), the child
+   is SIGKILLed but may not be reaped, leaving a short-lived zombie. It holds **no**
+   fds, memory or capability — only a process-table entry — and the OS reaps it when
+   `alfred-core` exits. No action: it is harmless and clears on the next core restart
+   (which you are doing anyway per step 3). Do **not** treat a defunct child PID as a
+   live capability leak.
 
 ## What NOT to do
 

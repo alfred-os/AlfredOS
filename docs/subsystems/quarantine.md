@@ -249,6 +249,15 @@ it via `alfred.security.sandbox_refusal_audit.SandboxRefusalAuditor`
 transient `child_stderr` field above: an exec'd T3 child cannot forge a
 `sandbox_refused` audit row.
 
+The cancellation-safe teardown (`_SubprocessChildIO.abort()`, #472 finding 2)
+skips the stderr drain entirely — it SIGKILLs the child and closes the control end
+synchronously, with no `await` and no `_log_child_stderr` call. That is deliberate:
+`abort()` runs where every `await` would immediately re-raise (inside a
+`CancelledError` handler), so the diagnostic drain is traded for a guaranteed
+revoke. A later `aclose` (the daemon's exit-path teardown) would normally drain,
+but `aclose` sets `_closed` before it runs and every `abort()` caller is reached
+after `aclose` was entered, so the drain is simply forgone on this path.
+
 ## Internal model
 
 ### Quarantined-LLM plugin shape
