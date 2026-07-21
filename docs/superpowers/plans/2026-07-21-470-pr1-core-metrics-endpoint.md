@@ -29,7 +29,7 @@
 
 - Create `src/alfred/observability/__init__.py` — package marker; re-exports the public seam.
 - Create `src/alfred/observability/metrics_server.py` — `resolve_metrics_port(env_var, default)`, `start_metrics_server(port, registry=None)`, `fetch_metrics_text(host, port)` (promoted from gateway).
-- Create `src/alfred/observability/core_metrics.py` — `CORE_OWNED_COLLECTORS`, `CORE_METRIC_BASE_NAMES`, `build_core_registry()`.
+- Create `src/alfred/observability/core_metrics.py` — `CORE_OWNED_COLLECTORS`, `build_core_registry()`.
 - Modify `src/alfred/gateway/metrics_server.py` → thin shim re-exporting from `alfred.observability.metrics_server` (keeps `alfred.gateway.metrics_server` import paths alive) OR delete + update imports (Task 1 picks the shim).
 - Modify `src/alfred/cli/gateway/_commands.py` (metrics-start :288-290, healthcheck resolve :546, `_fetch_metrics_text` :492) + `src/alfred/cli/gateway/_egress.py` (:23, :39) — call the promoted helpers with the gateway env-var/default.
 - Modify `src/alfred/cli/daemon/_commands.py` — start the metrics server in `_start_async` before the Supervisor; import `core_metrics` at boot.
@@ -202,7 +202,7 @@ git commit -m "refactor(observability): #470 promote metrics exposition to share
 
 **Interfaces:**
 
-- Produces: `CORE_OWNED_COLLECTORS: tuple[Collector, ...]` (10 collectors); `CORE_METRIC_BASE_NAMES: frozenset[str]`; `build_core_registry() -> CollectorRegistry`.
+- Produces: `CORE_OWNED_COLLECTORS: tuple[Collector, ...]` (10 collectors); `build_core_registry() -> CollectorRegistry`. (rev.1 review: the earlier `CORE_METRIC_BASE_NAMES` export was vestigial — no consumer, incl. Task 3's leak-guard — struck.)
 
 - [ ] **Step 1: Write the failing test**
 
