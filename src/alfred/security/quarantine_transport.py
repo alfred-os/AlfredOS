@@ -189,6 +189,14 @@ class ChildIO(Protocol):
 
     async def aclose(self) -> None: ...
 
+    def abort(self) -> None:
+        """SYNCHRONOUS last-resort revoke (#472 finding 2): SIGKILL the child + close the
+        control end, never awaiting and never raising. Usable from inside a
+        ``CancelledError`` handler where every ``await`` would immediately re-raise.
+        The cancellation-safe half of :meth:`aclose`.
+        """
+        ...
+
 
 class QuarantineStagingMap:
     """Host-side single-use staging store: ``handle.id -> TaggedContent[T3]``.

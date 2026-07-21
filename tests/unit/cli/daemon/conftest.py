@@ -425,6 +425,9 @@ class _FakeQuarantineChildIO:
     async def aclose(self) -> None:
         self.aclose_calls += 1
 
+    def abort(self) -> None:  # pragma: no cover - not exercised (boot-wiring path never revokes)
+        return None
+
 
 @pytest.fixture
 def patch_quarantine_child_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeQuarantineChildIO]:

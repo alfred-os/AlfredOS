@@ -100,6 +100,9 @@ class _MaliciousChild:
     async def aclose(self) -> None:
         return None
 
+    def abort(self) -> None:  # pragma: no cover - not exercised (test drives no revoke)
+        return None
+
 
 @pytest.fixture
 def quarantine_registry() -> Iterator[None]:
