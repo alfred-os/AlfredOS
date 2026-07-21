@@ -286,7 +286,9 @@ def start_gateway() -> None:
     # a degraded endpoint.
     from alfred.gateway.metrics_server import resolve_metrics_port, start_metrics_server
 
-    start_metrics_server(resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464))
+    start_metrics_server(
+        resolve_metrics_port(_GATEWAY_METRICS_PORT_ENV, _GATEWAY_METRICS_DEFAULT_PORT)
+    )
 
     async def _main() -> None:
         shutdown_event = asyncio.Event()
@@ -486,6 +488,13 @@ _HEALTHCHECK_HOST: Final[str] = "127.0.0.1"
 _BREAKER_METRIC: Final[str] = "gateway_circuit_breaker_open"
 _EXIT_UNHEALTHY: Final[int] = 1
 
+# The env var + fallback port for the gateway's Prometheus exposition (G6-0). Single
+# source of truth for every `resolve_metrics_port(...)` call site in this module and
+# in `_egress.py` (which imports these two constants rather than repeating the literal
+# pair — DRY finding from the #470 PR1 Task 1 review).
+_GATEWAY_METRICS_PORT_ENV: Final[str] = "ALFRED_GATEWAY_METRICS_PORT"
+_GATEWAY_METRICS_DEFAULT_PORT: Final[int] = 9464
+
 
 def _breaker_latched(metrics_text: str) -> bool:
     """True iff a gateway_circuit_breaker_open SAMPLE reports >= 1.
@@ -523,7 +532,7 @@ def healthcheck_gateway() -> None:
     from alfred.observability.metrics_server import fetch_metrics_text, resolve_metrics_port
 
     try:
-        port = resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)
+        port = resolve_metrics_port(_GATEWAY_METRICS_PORT_ENV, _GATEWAY_METRICS_DEFAULT_PORT)
     except ValueError as exc:
         # Malformed ALFRED_GATEWAY_METRICS_PORT — can't probe; report unhealthy, not a traceback.
         log.warning("gateway.healthcheck.unreachable", port="unset", error=repr(exc))
