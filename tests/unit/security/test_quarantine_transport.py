@@ -470,7 +470,7 @@ async def test_cancel_mid_teardown_kills_the_child_and_propagates() -> None:
         await child.in_aclose.wait()  # deterministic injection point — no sleep race
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)  # a swallowed cancel fails fast, not hangs CI
     assert child.aborted, "the cancel arm did not complete the kill"
     assert not [
         e for e in logs if e["event"] == "security.quarantine_transport.capability_abort_failed"
@@ -546,12 +546,45 @@ async def test_cancel_mid_real_teardown_sigkills_the_child(monkeypatch: pytest.M
         await child.entered.wait()  # deterministic — same shape as test A
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)  # a swallowed cancel fails fast, not hangs CI
         proc.wait(timeout=5)
         assert proc.returncode == -signal.SIGKILL
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+class _AcloseRaisesChildIO(_RecordingChildIO):
+    """``aclose`` raises a plain (non-timeout, non-cancel) Exception mid-teardown."""
+
+    async def aclose(self) -> None:
+        raise OSError("aclose blew up after — or, for a hostile seam, BEFORE — the reap")
+
+
+@pytest.mark.asyncio
+async def test_revoke_failure_arm_also_completes_the_kill() -> None:
+    """The ``except Exception`` arm completes the kill too — defense-in-depth (#472 review).
+
+    The production seam's ``aclose`` reaps before it can raise a plain Exception, so the child
+    is already dead on this arm. But ``ChildIO`` is a Protocol; a conforming impl could raise
+    BEFORE killing. So the arm calls ``_abort_child_now`` idempotently rather than couple the
+    "never leave a live T3 child" guarantee to one impl's stage ordering (CodeRabbit + security
+    + error lanes converged). The failure is still logged loud and the revoke never raises.
+    """
+    import structlog.testing
+
+    child = _AcloseRaisesChildIO()
+    transport = _staged_transport(child, auditor=_RecordingAuditor())
+    with structlog.testing.capture_logs() as logs:
+        await transport._revoke_child_capability()  # must not raise
+    assert child.aborted, "the revoke_failed arm did not complete the kill"
+    assert [
+        e for e in logs if e["event"] == "security.quarantine_transport.capability_revoke_failed"
+    ]
+    # abort() succeeded on a real double → the guard arm must NOT have fired.
+    assert not [
+        e for e in logs if e["event"] == "security.quarantine_transport.capability_abort_failed"
+    ]
 
 
 @pytest.mark.asyncio

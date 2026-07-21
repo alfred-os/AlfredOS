@@ -531,6 +531,47 @@ def test_abort_is_idempotent_and_never_raises() -> None:
         proc.wait(timeout=5)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX signals/socket fd semantics not on win32"
+)
+def test_abort_suppresses_a_raising_kill_and_a_raising_control_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``abort()`` never raises even when BOTH suppressed operations raise (#472 / CodeRabbit).
+
+    Exercises the exception PATHS of the two ``contextlib.suppress`` blocks (not just the
+    happy no-raise path): ``Popen.kill()`` raising ``ProcessLookupError`` (a child reaped by a
+    racing waiter) and the control-parent ``close()`` raising ``OSError`` (a double-close). The
+    "never raises" contract must hold through both, since ``abort()`` runs inside a
+    ``CancelledError`` handler where an escaping exception would replace the cancel.
+    """
+
+    class _RaisingCloseControlEnd:
+        """A control-parent stand-in whose ``close()`` raises — exercises the OSError suppress."""
+
+        def close(self) -> None:
+            raise OSError("bad file descriptor (double close)")
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+
+        def _kill_raises() -> None:
+            raise ProcessLookupError("no such process (racing reaper)")
+
+        monkeypatch.setattr(proc, "kill", _kill_raises)
+        cio = _SubprocessChildIO(proc, control_parent=_RaisingCloseControlEnd())  # type: ignore[arg-type]
+        cio.abort()  # both suppressed → must return without raising
+    finally:
+        monkeypatch.undo()  # restore the real kill so the finally can actually reap
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX socketpair fd semantics not on win32")
 def test_abort_closes_the_control_parent_end() -> None:
     """``abort()`` closes the brokered control-parent socket — the True arm of its guard.
