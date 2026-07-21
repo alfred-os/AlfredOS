@@ -23,7 +23,6 @@ LAZILY inside :func:`start_gateway`, so ``alfred --help`` never pulls the relay 
 from __future__ import annotations
 
 import asyncio
-import http.client
 import os
 import stat
 from collections.abc import Iterator
@@ -287,7 +286,7 @@ def start_gateway() -> None:
     # a degraded endpoint.
     from alfred.gateway.metrics_server import resolve_metrics_port, start_metrics_server
 
-    start_metrics_server(resolve_metrics_port())
+    start_metrics_server(resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464))
 
     async def _main() -> None:
         shutdown_event = asyncio.Event()
@@ -484,27 +483,8 @@ def status_gateway() -> None:
 
 
 _HEALTHCHECK_HOST: Final[str] = "127.0.0.1"
-_HEALTHCHECK_TIMEOUT_S: Final[float] = 2.0
 _BREAKER_METRIC: Final[str] = "gateway_circuit_breaker_open"
 _EXIT_UNHEALTHY: Final[int] = 1
-
-
-def _fetch_metrics_text(port: int) -> str:
-    """GET the gateway /metrics exposition text over loopback.
-
-    Uses ``http.client`` against a FIXED loopback host (no dynamic-URL / SSRF surface).
-    Raises ``OSError`` (e.g. ConnectionRefusedError / TimeoutError) when the endpoint is
-    unreachable — i.e. the gateway is not serving.
-    """
-    conn = http.client.HTTPConnection(_HEALTHCHECK_HOST, port, timeout=_HEALTHCHECK_TIMEOUT_S)
-    try:
-        conn.request("GET", "/metrics")
-        body: bytes = conn.getresponse().read()
-    finally:
-        conn.close()
-    # Lossless-safe decode: a non-UTF-8 body must not raise UnicodeDecodeError (a
-    # ValueError, not OSError) and escape the healthcheck's "never a traceback" contract.
-    return body.decode("utf-8", errors="replace")
 
 
 def _breaker_latched(metrics_text: str) -> bool:
@@ -540,17 +520,17 @@ def healthcheck_gateway() -> None:
     HEALTHY (only wedged-past-breaker is unhealthy). Exits 0 (healthy) or 1
     (unhealthy); never raises a traceback.
     """
-    from alfred.gateway.metrics_server import resolve_metrics_port
+    from alfred.observability.metrics_server import fetch_metrics_text, resolve_metrics_port
 
     try:
-        port = resolve_metrics_port()
+        port = resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)
     except ValueError as exc:
         # Malformed ALFRED_GATEWAY_METRICS_PORT — can't probe; report unhealthy, not a traceback.
         log.warning("gateway.healthcheck.unreachable", port="unset", error=repr(exc))
         typer.echo(t("gateway.healthcheck.unreachable", port="unset"))
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
     try:
-        metrics_text = _fetch_metrics_text(port)
+        metrics_text = fetch_metrics_text(_HEALTHCHECK_HOST, port)
     except OSError as exc:
         log.warning("gateway.healthcheck.unreachable", port=port, error=repr(exc))
         typer.echo(t("gateway.healthcheck.unreachable", port=port))
