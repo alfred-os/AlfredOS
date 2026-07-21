@@ -8,6 +8,12 @@
 > the caveat-reframe completeness (`docs/subsystems/security.md` + the 4th runbook target), and the
 > `absent()` promtool control. See the §fold-log at the end.
 
+> **rev.3 (2026-07-21)** — folds the PR #480 CodeRabbit cloud review. Load-bearing correction: the
+> rev.2 "an empty `GF_SECURITY_ADMIN_PASSWORD` fails closed" claim is **empirically false** (Grafana
+> ignores the empty value and falls back to `admin:admin`), so Task 3 gains an `entrypoint:` preflight
+> guard + a real-execution test; Task 5's fixed `sleep(3)` becomes bounded readiness polling and its
+> probes gain explicit timeouts. See the rev.3 fold log at the end.
+
 **Goal:** Bundle an internal-only Prometheus (scraping the core `/metrics` PR1 exposes) + a default-on internal-only Grafana into the compose stack, wire the `quarantine.yml` rules + new `up==0`/`absent()` rules with promtool tests, reframe the "armed, not live" caveats, ship an operator observability doc, and record #470's own ADR-0040 amendment.
 
 **Architecture:** Two new `alfred_internal`-only services (zero external egress — `test_only_gateway_on_external` stays intact); Prometheus evaluates the promtool-tested rule files against the live core scrape target (satisfying the "alertable" precondition); Grafana is dashboards-only, zero-egress, hardened, reached per-platform without egress (Linux loopback / OrbStack `*.orb.local` / Docker-Desktop tunnel).
@@ -19,11 +25,11 @@
 - **Depends on PR1** (`2026-07-21-470-pr1-core-metrics-endpoint.md`): the core `/metrics` endpoint, `ALFRED_CORE_METRICS_PORT` (default 9465), and the core compose healthcheck must already exist.
 - **Connectivity-free core:** every new service joins `alfred_internal` ONLY — never `alfred_external`. No new external egress (that is #479).
 - **No `--web.enable-admin-api` / `--web.enable-lifecycle` / `remote_write`** on Prometheus. Config + rules mounted read-only.
-- **`GF_SECURITY_ADMIN_PASSWORD` uses `:-`, never `:?`** (Compose evaluates `${VAR:?}` before profile/onerror filtering → aborts every `docker compose` invocation). Setup-script-generated into `.env`.
+- **`GF_SECURITY_ADMIN_PASSWORD` uses `:-`, never `:?`** (Compose evaluates `${VAR:?}` before profile/onerror filtering → aborts every `docker compose` invocation). Setup-script-generated into `.env`. **rev.3:** `:-` alone is not fail-closed — Grafana ignores an empty env value and falls back to `admin:admin`, so the service also carries an `entrypoint:` preflight guard that refuses to start on an unset/empty/`admin` password (Task 3, spec §6.2a).
 - **Grafana default-on** (PRD §4 MVP criterion 9 "the default dashboard shows…"); profile-gating is deferred as a human-gated PRD-interpretation item — never resolved via an egress bridge.
 - **Editing PRD.md / CLAUDE.md is human-gated** — the CLAUDE.md `alfred daemon healthcheck` command-table entry is flagged as a follow-up, not applied here.
 - **Conventional Commits:** literal `#470` after the colon in every subject.
-- Spec: `docs/superpowers/specs/2026-07-21-470-core-metrics-observability-design.md` (rev.1). Implements §6 + §7 (the ADR amendment). §13 fold-log overrides where sections conflict.
+- Spec: `docs/superpowers/specs/2026-07-21-470-core-metrics-observability-design.md` (rev.3). Implements §6 + §6.2a + §7 (the ADR amendment). The §13/§14 fold-logs override where sections conflict.
 
 ---
 
@@ -39,7 +45,7 @@
 - Reframe caveats: `src/alfred/security/observability.py`, `ops/alerts/quarantine.yml`, `docs/runbooks/quarantine-capability-revoked.md`, `docs/subsystems/security.md`.
 - Create `docs/runbooks/observability-stack.md`; modify `README.md`.
 - Modify `docs/adr/0040-connectivity-free-core-mandatory-egress-chokepoint.md` — the **third-party-services** arm of #470's amendment only; PR1 already landed the Decision-1 class-line + residual (viii) (Task 7).
-- Tests: `tests/unit/test_compose_invariants.py` (extend), `tests/integration/test_prometheus_scrapes_core.py` (testcontainers).
+- Tests: `tests/unit/test_compose_invariants.py` (extend), `tests/integration/test_prometheus_scrapes_core.py` (testcontainers), `tests/integration/test_grafana_password_fail_closed.py` (rev.3 — the entrypoint guard's real-execution proof).
 
 ---
 
@@ -255,6 +261,17 @@ def test_grafana_publishes_only_loopback(compose):
     for m in compose["services"]["alfred-grafana"].get("ports", []) or []:
         s = m if isinstance(m, str) else f"{m.get('published','')}"
         assert "127.0.0.1" in s and not s.startswith("0.0.0.0"), "Grafana must bind loopback only"
+
+# rev.3 (PR #480 CR): the `:-` arm alone does NOT fail closed — Grafana ignores an empty env value
+# and falls back to defaults.ini `admin_password = admin`. Pin the preflight guard's SHAPE here;
+# its RUNTIME behaviour is proven by tests/integration/test_grafana_password_fail_closed.py
+# (a lexical assertion cannot decide what a third-party binary does).
+def test_grafana_entrypoint_guards_the_admin_password(compose):
+    ep = compose["services"]["alfred-grafana"].get("entrypoint")
+    joined = " ".join(ep) if isinstance(ep, list) else str(ep or "")
+    assert "GF_SECURITY_ADMIN_PASSWORD" in joined, "entrypoint must preflight the admin password"
+    assert "exit 78" in joined, "the guard must refuse (EX_CONFIG), not warn"
+    assert "exec /run.sh" in joined, "the pass path must hand off to Grafana's real entrypoint"
 ```
 
 - [ ] **Step 2: Run to verify they fail** — `uv run pytest tests/unit/test_compose_invariants.py -q -k grafana` → FAIL.
@@ -276,6 +293,19 @@ def test_grafana_publishes_only_loopback(compose):
       GF_SECURITY_DISABLE_GRAVATAR: "true"
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-}   # :- NEVER :? ; setup-script fills .env
+    # rev.3 (PR #480 CR, Major/security): layer 3 — refuse to START on a guessable credential.
+    # `$$` so Compose does not interpolate; the guard runs INSIDE the container, at start.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -z "$${GF_SECURITY_ADMIN_PASSWORD}" ] || [ "$${GF_SECURITY_ADMIN_PASSWORD}" = "admin" ]; then
+          echo "FATAL: GF_SECURITY_ADMIN_PASSWORD is unset, empty, or the well-known default 'admin'." >&2
+          echo "Grafana refuses to start rather than serve dashboards on a guessable credential." >&2
+          echo "Fix: run bin/alfred-setup.sh (seeds a random value into .env), then 'docker compose up -d alfred-grafana'." >&2
+          exit 78
+        fi
+        exec /run.sh
     volumes:
       - alfred_grafana_data:/var/lib/grafana
       - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -317,8 +347,29 @@ GF_SECURITY_ADMIN_PASSWORD=
 **Never a literal default in compose** (rev.2 security fold): the compose value's `:-` arm stays
 **empty**. Compose substitutes a placeholder like `${GF_SECURITY_ADMIN_PASSWORD:-<generated>}`
 *verbatim*, so any non-empty literal default would start Grafana with a predictable, repo-published
-admin credential on a plain `docker compose up` that skipped the setup script. Empty fails closed —
-Grafana refuses to start without an admin password rather than accepting a guessable one.
+admin credential on a plain `docker compose up` that skipped the setup script.
+
+> **rev.3 (PR #480 CR, Major/security) — "empty fails closed" was FALSE; do not rely on it.**
+> The rev.2 text claimed an empty value made Grafana refuse to start. Verified against
+> `grafana/grafana:11.6.0` on 2026-07-21: Grafana's env-override loop applies an env value only when
+> it is non-empty, so an **empty** `GF_SECURITY_ADMIN_PASSWORD` is *ignored* and
+> `conf/defaults.ini`'s `admin_password = admin` wins — the container starts, `/api/health` answers
+> 200, and `curl -u admin:admin /api/org` returns **200**. An operator who runs `docker compose up`
+> without ever running `bin/alfred-setup.sh` therefore gets a Grafana on `admin:admin`.
+> The fix is the **`entrypoint:` preflight guard in Step 3** (layer 3), not a change to the `:-`.
+
+**Why not `${GF_SECURITY_ADMIN_PASSWORD:?}` — read before "fixing" this back.** `:?` makes *Compose*
+fail, and Compose interpolates the entire file before any profile/service filtering, so a missing
+Grafana password aborts `docker compose down`, `ps`, `config`, `logs`, and even
+`up alfred-core` — a stack-wide denial of service to punish one optional service's misconfiguration
+(this is the Global Constraint at the top of this plan). The entrypoint guard fails **exactly one
+container**, at container start, with an actionable message in `docker compose logs alfred-grafana`,
+while every sibling service comes up normally. Keep `:-`; keep the setup-script seed; keep the guard.
+
+**Credential design = three layers** (spec §6.2a): (1) `.env.example` present-but-empty +
+`bin/alfred-setup.sh` present-and-non-empty seed; (2) compose reads it with `:-`, so no
+`docker compose` verb aborts; (3) the entrypoint preflight refuses to start Grafana when the value is
+unset, empty, or the literal `admin`. Only layer 3 holds for the operator who skipped setup.
 
 - [ ] **Step 4b: Regression-test the seed guard (rev.2 — REQUIRED)**
 
@@ -337,13 +388,54 @@ is cleaner than shelling the whole script) and assert all three cases:
 Run: `uv run pytest tests/unit/test_setup_script_env_seed.py -q` (or the existing setup-script test
 module, if one already covers the `audit.hash_pepper` seed — extend it rather than duplicating).
 
+- [ ] **Step 4c: Prove the entrypoint guard actually fails closed (rev.3 — REQUIRED)**
+
+`test_grafana_entrypoint_guards_the_admin_password` (Step 1) is **lexical**: it asserts the compose
+string mentions the env var and an exit code. It cannot decide what Grafana does — that is a runtime
+fact about a third-party binary, and the false rev.2 claim is exactly what happens when a runtime
+fact is asserted from a doc. Add a real-execution test:
+
+```python
+# tests/integration/test_grafana_password_fail_closed.py
+#
+# Reads the ENTRYPOINT OUT OF docker-compose.yaml — never re-declares it, or the shipped guard
+# and the tested guard drift and this test goes vacuous.
+pytestmark = pytest.mark.integration
+
+def test_empty_admin_password_refuses_to_start(grafana_entrypoint_from_compose):
+    """No password (the skipped-setup operator) => the container exits non-zero, loudly."""
+    # run grafana/grafana:<pinned> with the compose entrypoint and GF_SECURITY_ADMIN_PASSWORD=""
+    # assert: exit code == 78, and the refusal text is on stderr (actionable: names alfred-setup.sh)
+
+def test_literal_admin_password_refuses_to_start(grafana_entrypoint_from_compose):
+    """The well-known default is refused explicitly, not just the empty string."""
+
+def test_real_password_boots_and_rejects_admin_admin(grafana_entrypoint_from_compose):
+    """NON-VACUITY CONTROL — the arm that proves this suite is about Grafana's real auth state.
+
+    With a seeded password the container boots (/api/health 200), `admin:admin` is REJECTED (401),
+    and the seeded credential is accepted (200). Without this arm the two refusal tests would still
+    pass against a guard that refuses everything, and against a Grafana that authenticates nothing.
+    """
+```
+
+Run: `uv run pytest tests/integration/test_grafana_password_fail_closed.py -q` → PASS.
+
+> **Expected values, measured 2026-07-21 on `grafana/grafana:11.6.0` (real containers, all three
+> arms).** Guard absent + empty password: container starts, `/api/health` 200, `admin:admin` → **200**
+> (the hazard this task closes). Guard present + empty or `admin`: `docker compose config` clean,
+> container exits **78**, refusal on stderr, sibling services unaffected. Guard present + real
+> password: boots, `/api/health` 200, `admin:admin` → **401**, real credential → **200**. If the
+> pinned Grafana tag changes, re-measure before trusting these numbers.
+
 - [ ] **Step 5: Run to verify they pass** — `uv run pytest tests/unit/test_compose_invariants.py -q` → PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add docker-compose.yaml bin/alfred-setup.sh .env.example tests/unit/test_compose_invariants.py
-git commit -m "feat(compose): #470 bundle default-on internal-only Grafana (:- password)"
+git add docker-compose.yaml bin/alfred-setup.sh .env.example \
+        tests/unit/test_compose_invariants.py tests/integration/test_grafana_password_fail_closed.py
+git commit -m "feat(compose): #470 bundle default-on internal-only Grafana (:- password + fail-closed guard)"
 ```
 
 ---
@@ -410,6 +502,45 @@ from testcontainers.core.network import Network
 pytestmark = pytest.mark.integration
 _REPO = Path(__file__).resolve().parents[2]
 
+# rev.3 (PR #480 CR): every probe carries an explicit timeout. httpx's default is 5s, but relying on
+# a library default in a test that talks to a container is how a wedged Prometheus hangs the suite
+# instead of failing it.
+_PROBE_TIMEOUT_S = 5.0
+_READY_DEADLINE_S = 60.0
+_POLL_INTERVAL_S = 0.25
+
+
+def _wait_for_first_scrape(base: str) -> None:
+    """Block until Prometheus has COMPLETED one scrape attempt of the alfred-core target.
+
+    rev.3 (PR #480 CR): replaces a fixed `time.sleep(3)`, which is flaky under CI load (image pull,
+    cold container start) and wasteful when the stack is fast.
+
+    The gate is `health != "unknown"` — i.e. a scrape ATTEMPT finished — deliberately NOT `up == 1`.
+    Waiting on `up == 1` would move the test's own oracle into the fixture: a genuinely dead stub
+    would time out here with a fixture error instead of failing the assertion that exists to catch
+    it. With this gate, a dead stub yields health="down"/up=0 and the TEST fails, loudly and
+    specifically.
+    """
+    deadline = time.monotonic() + _READY_DEADLINE_S
+    last = "no probe completed"
+    while time.monotonic() < deadline:
+        try:
+            data = httpx.get(f"{base}/api/v1/targets", timeout=_PROBE_TIMEOUT_S).json()
+            active = data["data"]["activeTargets"]
+            core = [t for t in active if t["labels"].get("job") == "alfred-core"]
+            if core and core[0]["health"] != "unknown":
+                return
+            last = repr([(t["labels"].get("job"), t["health"]) for t in active])
+        except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+            last = repr(exc)
+        time.sleep(_POLL_INTERVAL_S)
+    raise AssertionError(
+        f"Prometheus did not complete a scrape of job=alfred-core within {_READY_DEADLINE_S}s; "
+        f"last observation: {last}"
+    )
+
+
 @pytest.fixture
 def prometheus_with_stub_core():
     with Network() as net:
@@ -445,12 +576,12 @@ def prometheus_with_stub_core():
                 .with_volume_mapping(str(_REPO / "ops/alerts"), "/etc/prometheus/alerts", "ro"))
         with stub, prom:
             base = f"http://{prom.get_container_host_ip()}:{prom.get_exposed_port(9090)}"
-            time.sleep(3)  # allow one scrape interval
+            _wait_for_first_scrape(base)   # rev.3: bounded readiness poll, not a fixed sleep
             yield base
 
 def test_prometheus_loads_config_and_rule_is_live(prometheus_with_stub_core):
     base = prometheus_with_stub_core
-    rules = httpx.get(f"{base}/api/v1/rules").json()
+    rules = httpx.get(f"{base}/api/v1/rules", timeout=_PROBE_TIMEOUT_S).json()
     names = {r["name"] for g in rules["data"]["groups"] for r in g["rules"]}
     # rev.2: assert THIS PR's new core rules, not only the pre-existing quarantine rule —
     # `core.yml` is the file this task adds to `rule_files`, so a typo'd rule_files entry
@@ -458,7 +589,11 @@ def test_prometheus_loads_config_and_rule_is_live(prometheus_with_stub_core):
     # proof `quarantine.yml` reached the mount too).
     assert {"AlfredCoreMetricsDown", "AlfredQuarantineCounterAbsent"} <= names
     assert "QuarantineCapabilityRevoked" in names
-    up = httpx.get(f"{base}/api/v1/query", params={"query": 'up{job="alfred-core"}'}).json()
+    up = httpx.get(
+        f"{base}/api/v1/query",
+        params={"query": 'up{job="alfred-core"}'},
+        timeout=_PROBE_TIMEOUT_S,
+    ).json()
     assert up["data"]["result"][0]["value"][1] == "1"   # the alfred-core alias was scraped
 ```
 
@@ -488,7 +623,7 @@ git commit -m "test(ops): #470 end-to-end proof Prometheus scrapes core and the 
 
 - [ ] **Step 2: Reframe the runbook** (spec §6.4 — corrected rationale): remove **all four** falsified fragments — the `⚠ Read first: the alert cannot fire yet` block, the `Related`-`#470` entry, the `un-scrapeable, #470` parenthetical inside the audit section, **and the "Detecting it today / Both work without Prometheus" framing** (rev.1 docs-002); rewrite the audit-path framing as **"the metric is the sole durable signal for the cancel-path revoke class (#472 writes no `egress.broker.refused` row); the audit-log path is the additive cross-check for the other revoke classes."** Do NOT say "keep the audit path because complementary" (inverted).
 
-- [ ] **Step 3: Write `docs/runbooks/observability-stack.md`** — per-platform Grafana access (Linux `http://127.0.0.1:3000`; OrbStack `http://alfred-grafana.<project>.orb.local`; Docker-Desktop tunnel), Prometheus access, what the bundled dashboards show, and the `GF_SECURITY_ADMIN_PASSWORD` first-run note.
+- [ ] **Step 3: Write `docs/runbooks/observability-stack.md`** — per-platform Grafana access (Linux `http://127.0.0.1:3000`; OrbStack `http://alfred-grafana.<project>.orb.local`; Docker-Desktop tunnel), Prometheus access, what the bundled dashboards show, and the `GF_SECURITY_ADMIN_PASSWORD` first-run note. **rev.3:** include a named troubleshooting entry for the fail-closed guard — *"`alfred-grafana` exits 78 / restarts with `FATAL: GF_SECURITY_ADMIN_PASSWORD is unset, empty, or the well-known default`"* → the stack was started without `bin/alfred-setup.sh`; run it (or set the key in `.env` by hand), then `docker compose up -d alfred-grafana`. State plainly that the rest of the stack is unaffected by this refusal, and that Grafana deliberately will **not** start on `admin:admin`.
 
 - [ ] **Step 4: Update `README.md`** quickstart — Prometheus/Grafana are now default services; link the observability runbook.
 
@@ -538,11 +673,13 @@ git commit -m "docs(adr): #470 amend ADR-0040 with the bundled observability sta
 
 - [ ] **Step 5: `docker compose up -d` smoke** — the stack boots (default `up`, no `:?` abort); `alfred-core` healthy; Prometheus scrapes `up{job="alfred-core"}==1`; Grafana reachable per platform.
 
+- [ ] **Step 6: Fail-closed credential smoke (rev.3)** — with `GF_SECURITY_ADMIN_PASSWORD` blanked in `.env`, `docker compose up -d` must still bring up **every other service** (no `:?`-style abort on `up`, `ps`, `logs`, or `down`) while `alfred-grafana` exits 78 with the refusal in `docker compose logs alfred-grafana`. Restore the seeded value, `docker compose up -d alfred-grafana`, and confirm Grafana serves and rejects `admin:admin` (401).
+
 ---
 
 ## Self-Review
 
-**Spec coverage (§6 + §7):** §6.1 Prometheus + rules → Tasks 1+2; §6.2 Grafana default-on + `:-` password + access → Tasks 3+4+8; §6.3 compose-invariant tests → Tasks 1+3; §6.4 caveat reframe → Task 6; §6.5 operator doc + README + (human-gated) CLAUDE.md flag → Task 6 (+ the CLAUDE.md entry stays a flagged human-gated follow-up, NOT applied); §7 ADR amendment → Task 7 (PR2's third-party-services arm only; the Decision-1 class-line + residual (viii) landed in PR1); §9 e2e scrape test + promtool + OrbStack smoke → Tasks 2+5+8.
+**Spec coverage (§6 + §7):** §6.1 Prometheus + rules → Tasks 1+2; §6.2 Grafana default-on + `:-` password + access → Tasks 3+4+8; §6.2a credential fail-closed layer → Task 3 Steps 1/3/4c + Task 6 Step 3 + Task 8 Step 6; §6.3 compose-invariant tests → Tasks 1+3; §6.4 caveat reframe → Task 6; §6.5 operator doc + README + (human-gated) CLAUDE.md flag → Task 6 (+ the CLAUDE.md entry stays a flagged human-gated follow-up, NOT applied); §7 ADR amendment → Task 7 (PR2's third-party-services arm only; the Decision-1 class-line + residual (viii) landed in PR1); §9 e2e scrape test + promtool + OrbStack smoke → Tasks 2+5+8.
 
 **Type/name consistency:** the scrape target `alfred-core:9465` matches PR1's `ALFRED_CORE_METRICS_PORT` default; `core.yml`/`core_test.yml` names align; `alfred_prom_data`/`alfred_grafana_data` volumes declared once and mounted once.
 
@@ -579,3 +716,28 @@ Applied to this plan while PR1 was in review, so PR2 does not inherit known-bad 
   empty replaced, non-empty preserved, no duplicate key).
 - **Task 7 de-double-claimed** — PR1 landed the ADR-0040 Decision-1 class-line + residual (viii);
   Task 7 now owns only the third-party-services arm.
+
+## rev.3 fold log (PR #480 CodeRabbit cloud review — documentation wave 3)
+
+- **Major/security — Grafana admin credential (Task 3).** The rev.2 rationale ended with a claim that
+  an empty `GF_SECURITY_ADMIN_PASSWORD` "fails closed". Measured against `grafana/grafana:11.6.0` on
+  2026-07-21, that is **false**: the empty env value is ignored, `defaults.ini`'s
+  `admin_password = admin` applies, the container starts, and `admin:admin` authenticates (200). The
+  residual CR pointed at is real — an operator who skips `bin/alfred-setup.sh` gets a Grafana on the
+  best-known credential in existence. Added a **third layer**: an `entrypoint:` preflight guard that
+  refuses (exit 78, actionable stderr) when the password is unset, empty, or the literal `admin`,
+  plus a compose-shape invariant (Step 1) and a REQUIRED real-execution test with an
+  `admin:admin`→401 non-vacuity control (Step 4c), an operator troubleshooting entry (Task 6 Step 3),
+  and a fail-closed smoke (Task 8 Step 6). `:-` and the setup-script seed are unchanged, and the
+  reason `:?` is **not** the fix (Compose interpolates before profile filtering → every
+  `docker compose` verb aborts) is now recorded next to the guard so it is not "fixed" back.
+- **Major/stability — Task 5 fixed sleep.** `time.sleep(3)` before probing replaced with
+  `_wait_for_first_scrape()`: bounded polling (0.25s interval, 60s deadline) on
+  `/api/v1/targets` until the alfred-core target's `health != "unknown"`. Gating on a *completed
+  scrape attempt* rather than on `up == 1` keeps the test's oracle in the test — a dead stub fails
+  the assertion, not the fixture.
+- **Minor/stability — Task 5 HTTP timeouts.** All probes (`/api/v1/targets`, `/api/v1/rules`,
+  `/api/v1/query`) now pass an explicit `timeout=_PROBE_TIMEOUT_S`; no reliance on library defaults.
+- **Spec-side (same wave):** fetch-helper name/signature aligned to the shipped
+  `fetch_metrics_text(port)`, and the Grafana dashboards mount aligned to the dedicated
+  `ops/grafana/dashboards` subdir this plan already used (devops-006). See the spec's §14.
