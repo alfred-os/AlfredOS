@@ -20,8 +20,16 @@ NOT forbidden: ``import socket`` (unix-domain sockets are pervasive in-core) and
 Accepted static-analysis limitations (the G7-3 kernel block, not this lint, is the
 enforcement-of-record, so these are conscious gaps, not oversights): a DYNAMIC import
 (``importlib.import_module("requests")`` — and ``importlib`` is already used in-core) and
-other stdlib HTTP transports (``urllib.request``, ``http.client`` — the latter is already
-imported by the gateway CLI) are out of scope here; the netns/network split catches them.
+other stdlib HTTP transports (``urllib.request``, ``http.client``) are out of scope here; the
+netns/network split catches them.
+
+``http.client`` specifically (#470): it is imported by ``alfred/observability/metrics_server.py``
+— which the daemon boot path imports, so it is now *core* code, not merely the gateway CLI's.
+The module's own ``sec-001`` construction constraint is what bounds it: the destination host is
+a module CONSTANT (``127.0.0.1``), never a parameter, so no caller can express a non-loopback
+destination and the exemption cannot be widened into an SSRF seam by a future call site. That
+is a property of that module, not of this lint — a NEW in-core ``http.client`` user with a
+caller-supplied host would pass this guard.
 """
 
 from __future__ import annotations

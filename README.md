@@ -69,7 +69,19 @@ door that holds an `alfred chat` session across a core restart. As of this relea
 gateway **links to the core**: the daemon binds `comms-tui.sock` on the shared
 `alfred_run` volume and the gateway dials it (its compose-internal
 `alfred-gateway:9464/metrics` `gateway_core_link_up` gauge reads `1` once both are up;
-see `ops/prometheus/prometheus.yml`). Note: the `alfred_run` volume inherits ownership
+see `ops/prometheus/prometheus.yml`).
+
+`alfred-core` serves its own Prometheus endpoint at **`alfred-core:9465/metrics`** — the
+core-owned series (quarantine capability revocations, comms dispatch, supervisor action
+durations, plugin/DLP scan timings). Like the gateway's, it is **compose-internal and never
+host-published**: a Prometheus scrapes it over the kernel-isolated `alfred_internal` network,
+and there is no host port to curl. The bind port comes from `ALFRED_CORE_METRICS_PORT`
+(default `9465`), which exists so the daemon and `alfred daemon healthcheck` resolve one port
+from one place — treat it as fixed, since the bundled scrape config targets `alfred-core:9465`
+literally (Prometheus cannot expand env vars in a scrape target). To check the endpoint from
+the host: `docker compose exec alfred-core alfred daemon healthcheck` (also wired as the
+service's container healthcheck, so `docker compose ps` shows `unhealthy` if the metrics bind
+failed). Note: the `alfred_run` volume inherits ownership
 from the image on **first** creation; if you are upgrading an older deployment that
 already has an `alfred_run` volume with the wrong owner, run
 `docker compose down && docker volume rm <project>_alfred_run` before `up -d` so it is
