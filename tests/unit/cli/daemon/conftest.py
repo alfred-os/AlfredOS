@@ -17,6 +17,33 @@ from typing import Any, ClassVar
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _stub_core_metrics_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the #470 core-metrics boot seam for every daemon-boot test.
+
+    ``_start_core_metrics_server`` (called early in ``_start_async``, before the
+    Supervisor) calls ``start_metrics_server``, which binds a REAL socket and
+    spawns a detached ``threading.Thread`` (``prometheus_client.start_http_server``)
+    — nothing in this package's many per-test boots tears that down, so without this
+    stub every test that drives ``_start_async`` would bind port 9465 (or whatever
+    ``ALFRED_CORE_METRICS_PORT`` resolves to) and leak a thread, and the SECOND such
+    test in a process would hit ``EADDRINUSE``. Autouse so every existing + future
+    boot test in this package is isolated without opting in individually.
+
+    ``tests/unit/cli/daemon/test_daemon_boot_metrics.py`` (the dedicated seam test)
+    needs the OPPOSITE: it calls the real ``_start_core_metrics_server`` body
+    directly and asserts on the (mocked) ``start_metrics_server`` call it makes.
+    Stubbing the seam here would make that call a no-op and the dedicated test
+    could never observe it. That module overrides this fixture by defining its own
+    ``_stub_core_metrics_server`` (same name, module-local — pytest fixture
+    resolution prefers the closer definition), so this conftest stub never applies
+    there.
+    """
+    import alfred.cli.daemon._commands as cmd
+
+    monkeypatch.setattr(cmd, "_start_core_metrics_server", lambda: None)
+
+
 class FakeAuditWriter:
     """Records every ``append_schema`` call for assertion."""
 
