@@ -17,11 +17,12 @@ fires on.
 
 .. warning::
 
-   The counter lives in the CORE, and nothing scrapes the core yet:
-   ``ops/prometheus/prometheus.yml`` has a single job for ``alfred-gateway:9464``,
-   and only ``alfred gateway start`` calls ``start_metrics_server``. The alert rule
-   is therefore ARMED BUT NOT YET LIVE. Tracked in #470. Until it lands, the
-   runbook's audit-log query is the detection path that actually works.
+   The counter lives in the CORE. #470 PR1 makes the daemon boot SERVE it — the core
+   now starts its own exposition on ``ALFRED_CORE_METRICS_PORT`` (9465) over the
+   curated registry — but nothing SCRAPES it yet: ``ops/prometheus/prometheus.yml``
+   still has a single job for ``alfred-gateway:9464``. The alert rule is therefore
+   still ARMED BUT NOT YET LIVE until #470 PR2 adds the core scrape job. Until then,
+   the runbook's audit-log query is the detection path that actually works.
 """
 
 from __future__ import annotations
