@@ -177,6 +177,13 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.help.start",
     "daemon.help.stop",
     "daemon.status.help",
+    # Daemon healthcheck probe (#470): `alfred daemon healthcheck` CLI help text + the two
+    # distinct exit-1 refusal arms (bad-port config fault vs unreachable-endpoint probe
+    # fault — i18n-004 deliberately keeps these as separate catalog keys, not one shared
+    # message).
+    "daemon.help.healthcheck",
+    "daemon.healthcheck.bad_port",
+    "daemon.healthcheck.metrics_unreachable",
     # Sandbox refusal reasons (6 + PR-S4-6 launcher/handshake additions).
     "supervisor.sandbox.refused.policy_ref_missing",
     "supervisor.sandbox.refused.policy_ref_os_mismatch",

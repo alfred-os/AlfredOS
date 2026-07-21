@@ -102,6 +102,13 @@ def status() -> None:
     status_daemon()
 
 
+@daemon_app.command("healthcheck", help=t("daemon.help.healthcheck"))
+def healthcheck() -> None:
+    from alfred.cli.daemon._healthcheck import healthcheck_daemon
+
+    healthcheck_daemon()
+
+
 # Module-import-time declaration — mirrors alfred.identity._ingest's
 # bottom-of-module declare_hookpoints() call so a plain import wires the
 # hookpoints. The sync test's importlib.import_module("alfred.cli.daemon")
