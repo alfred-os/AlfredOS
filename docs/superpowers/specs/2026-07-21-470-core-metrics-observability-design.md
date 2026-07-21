@@ -362,8 +362,9 @@ devops-001/devex-002/003 cluster: a default dashboard the operator can actually 
   script.
   **rev.3 (PR #480 CR, Major/security — the rev.2 claim was empirically FALSE):** "empty fails
   closed" is not how Grafana behaves. Verified against `grafana/grafana:11.6.0` on 2026-07-21:
-  Grafana's env-override loop applies an env value only `if len(envValue) > 0`, so an **empty**
+  Grafana's env-override applies a value only when it is non-empty, so an **empty**
   `GF_SECURITY_ADMIN_PASSWORD` is *ignored* and `conf/defaults.ini`'s `admin_password = admin` wins.
+  (The observed behaviour is what was measured; the override rule is the inference that explains it.)
   The container starts, `/api/health` answers 200, and `curl -u admin:admin /api/org` returns **200**.
   So the `:-` empty arm alone leaves an operator who runs `docker compose up` *without* running
   `bin/alfred-setup.sh` with a Grafana on the best-known default credential in existence. The `:-`
