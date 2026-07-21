@@ -14,11 +14,15 @@
 >
 > **[2026-07-21 — #472 finding 2]** The teardown is now cancellation-safe. Two extra
 > structlog events flag the non-clean teardown paths:
-> `security.quarantine_transport.revoke_cancelled` (the revoke was cancelled
-> mid-teardown — the daemon was shutting down *while* a T3 child was being killed; the
-> SIGKILL was completed synchronously anyway, then the cancel re-raised) and
+> `security.quarantine_transport.revoke_cancelled` (the revoke was **cancelled
+> mid-teardown** — any cancellation source: a daemon-stop force-cancel, a `TaskGroup`
+> sibling failure, or an outer `action_deadline`; the SIGKILL was completed
+> synchronously anyway, then the cancel re-raised) and
 > `security.quarantine_transport.capability_abort_failed` (the synchronous last-resort
-> kill itself raised — an OS-level anomaly worth investigating).
+> kill's guard fired — because `abort()` **suppresses** `ProcessLookupError`/`OSError`,
+> reaching this means the child-IO **seam itself is malformed** (a code/wiring bug, e.g.
+> an `AttributeError`), **not** a mere OS hiccup; the child's liveness is then **unknown**
+> — see the `capability_abort_failed` triage step below).
 
 ## ⚠ Read first: the alert cannot fire yet
 
@@ -65,11 +69,22 @@ Nothing recovers this except restarting `alfred-core`.
 Both work without Prometheus.
 
 ```sh
-# Audit rows — the durable signal. A revoke always accompanies a broker failure row.
+# Audit rows — the durable signal on the COMMON path. A broker-failure revoke writes a row.
 alfred audit log --since 1h | grep egress.broker.refused
 
 # Or the structlog event in the core's container logs.
 docker compose logs alfred-core | grep security.quarantine_transport.capability_revoked
+```
+
+**Caveat — a cancel-path revoke writes NO `egress.broker.refused` row.** When the revoke
+is cancelled mid-teardown (#472 finding 2), it re-raises the cancel *before* the caller
+reaches `record_broker_failure`, so the durable audit row is forgone — the child is still
+SIGKILLed, but the audit-only detection above misses it. Also grep the structlog events
+(the metric is still un-scrapeable, #470):
+
+```sh
+docker compose logs alfred-core | grep -E \
+  'security.quarantine_transport.(capability_revoked|revoke_cancelled|capability_abort_failed)'
 ```
 
 A run of `egress.broker.refused` rows with **no** interleaved successes is the
@@ -115,8 +130,29 @@ degraded gateway, not a revoked capability.
    is SIGKILLed but may not be reaped, leaving a short-lived zombie. It holds **no**
    fds, memory or capability — only a process-table entry — and the OS reaps it when
    `alfred-core` exits. No action: it is harmless and clears on the next core restart
-   (which you are doing anyway per step 3). Do **not** treat a defunct child PID as a
-   live capability leak.
+   (which you are doing anyway per step 3). Do **not** treat a **`<defunct>`** child PID
+   as a live capability leak — the `<defunct>` marker is the discriminator.
+
+6. **`capability_abort_failed` — the dangerous case: a `ps` child that is NOT
+   `<defunct>`.** This event means the synchronous last-resort kill's guard fired, which
+   (because `abort()` suppresses the benign `ProcessLookupError`/`OSError`) indicates a
+   **code/wiring bug in the child-IO seam**, not an OS hiccup — so the child's liveness is
+   **unknown** and it may still be running with brokered gateway sockets. Contain it
+   manually:
+
+   ```sh
+   # Find the quarantined-child bwrap under alfred-core. A RUNNING entry (state R/S, no
+   # <defunct>) after this event is the live-child case; a <defunct> entry is the harmless
+   # zombie of step 5.
+   docker compose exec alfred-core ps -eo pid,stat,cmd | grep -E 'bwrap|quarantine_child'
+   # If a non-defunct child is present, kill it explicitly, then restart to re-establish
+   # guaranteed containment:
+   docker compose exec alfred-core kill -9 <pid>
+   docker compose up -d alfred-core
+   ```
+
+   Then file the seam bug — `capability_abort_failed` firing in production is a defect in
+   the `ChildIO` implementation, not an operational event.
 
 ## What NOT to do
 
