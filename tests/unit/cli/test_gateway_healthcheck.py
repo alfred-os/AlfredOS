@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-from alfred.cli.gateway import _commands, gateway_app
+from alfred.cli.gateway import gateway_app
 
 
 @pytest.fixture(autouse=True)
@@ -15,12 +15,16 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_fetch(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
-    def _fake_fetch(port: int) -> str:
+    def _fake_fetch(host: str, port: int) -> str:
         if text is None:
             raise OSError("connection refused")
         return text
 
-    monkeypatch.setattr(_commands, "_fetch_metrics_text", _fake_fetch)
+    # healthcheck_gateway imports fetch_metrics_text LAZILY (inside the function body,
+    # same perf-001 rationale as start_gateway's lazy metrics_server import below), so
+    # the patch target is the SOURCE module, not `_commands` — a module-attribute patch
+    # on `_commands` would never be seen by the function-local import.
+    monkeypatch.setattr("alfred.observability.metrics_server.fetch_metrics_text", _fake_fetch)
 
 
 def test_healthcheck_registered() -> None:
@@ -102,7 +106,7 @@ def test_start_honors_dial_adapter_id_env(monkeypatch: pytest.MonkeyPatch) -> No
     # at the source — not on `_commands` — to exercise the real start body.
     monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
     monkeypatch.setattr("alfred.gateway.metrics_server.start_metrics_server", lambda port: True)
-    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda: 9464)
+    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda *_a: 9464)
     monkeypatch.setenv("ALFRED_GATEWAY_DIAL_ADAPTER_ID", "alfred_tui")
     CliRunner().invoke(gateway_app, ["start"])
     assert captured.get("dial_adapter_id") == "alfred_tui"
@@ -121,7 +125,7 @@ def test_start_defaults_dial_adapter_id_to_tui(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
     monkeypatch.setattr("alfred.gateway.metrics_server.start_metrics_server", lambda port: True)
-    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda: 9464)
+    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda *_a: 9464)
     monkeypatch.delenv("ALFRED_GATEWAY_DIAL_ADAPTER_ID", raising=False)
     CliRunner().invoke(gateway_app, ["start"])
     assert captured.get("dial_adapter_id") == "tui"
@@ -149,7 +153,7 @@ def test_start_coalesces_empty_dial_adapter_id_env_to_tui(monkeypatch: pytest.Mo
 
     monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
     monkeypatch.setattr("alfred.gateway.metrics_server.start_metrics_server", lambda port: True)
-    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda: 9464)
+    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda *_a: 9464)
     monkeypatch.setenv("ALFRED_GATEWAY_DIAL_ADAPTER_ID", "")
     CliRunner().invoke(gateway_app, ["start"])
     assert captured.get("dial_adapter_id") == "tui"

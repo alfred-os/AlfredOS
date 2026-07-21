@@ -1,40 +1,49 @@
-"""Unit tests for the gateway Prometheus HTTP exposition wrapper (G6-0)."""
+"""Unit tests for the gateway's back-compat Prometheus exposition shim (G6-0 / #470).
+
+The exposition logic itself was promoted to ``alfred.observability.metrics_server``
+(and is fully covered there — see ``tests/unit/observability/test_metrics_server.py``).
+These tests confirm the shim re-exports the SAME callables and that the gateway's own
+env-var/default continue to work through it — no behavior change for existing callers.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from alfred.gateway import metrics_server
+from alfred.observability import metrics_server as observability_metrics_server
 
 
 def test_resolve_port_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ALFRED_GATEWAY_METRICS_PORT", raising=False)
-    assert metrics_server.resolve_metrics_port() == 9464
+    assert metrics_server.resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464) == 9464
 
 
 def test_resolve_port_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "9999")
-    assert metrics_server.resolve_metrics_port() == 9999
+    assert metrics_server.resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464) == 9999
 
 
 def test_resolve_port_rejects_nonint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "notaport")
     with pytest.raises(ValueError):
-        metrics_server.resolve_metrics_port()
+        metrics_server.resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)
 
 
 def test_resolve_port_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "99999")
     with pytest.raises(ValueError):
-        metrics_server.resolve_metrics_port()
+        metrics_server.resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)
     monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "0")
     with pytest.raises(ValueError):
-        metrics_server.resolve_metrics_port()
+        metrics_server.resolve_metrics_port("ALFRED_GATEWAY_METRICS_PORT", 9464)
 
 
 def test_start_calls_prometheus_and_returns_true(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
-    monkeypatch.setattr(metrics_server, "start_http_server", lambda port: calls.append(port))
+    monkeypatch.setattr(
+        observability_metrics_server, "start_http_server", lambda port: calls.append(port)
+    )
     assert metrics_server.start_metrics_server(9464) is True
     assert calls == [9464]
 
@@ -43,7 +52,7 @@ def test_start_loud_and_continue_on_bind_failure(monkeypatch: pytest.MonkeyPatch
     def _boom(port: int) -> None:
         raise OSError("address in use")
 
-    monkeypatch.setattr(metrics_server, "start_http_server", _boom)
+    monkeypatch.setattr(observability_metrics_server, "start_http_server", _boom)
     assert metrics_server.start_metrics_server(9464) is False  # loud-and-continue, no raise
 
 
