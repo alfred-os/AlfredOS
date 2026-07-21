@@ -53,12 +53,19 @@ def start_metrics_server(port: int, registry: CollectorRegistry | None = None) -
 def fetch_metrics_text(host: str, port: int) -> str:
     """GET the /metrics exposition over loopback via http.client (fixed host — no SSRF surface).
 
-    Raises OSError when unreachable. Lossless-safe decode so a non-UTF-8 body never raises.
+    Raises OSError when unreachable. ``http.client.HTTPException`` (e.g. ``BadStatusLine`` /
+    ``IncompleteRead`` from a non-HTTP responder squatting on the metrics port) is NOT an
+    ``OSError`` subclass, so it is re-raised (chained) as one here — every consumer's
+    ``except OSError`` (the daemon healthcheck, the gateway healthcheck, `alfred gateway
+    egress`) stays the single catch surface, honouring their "never a raw traceback" contract.
+    Lossless-safe decode so a non-UTF-8 body never raises.
     """
     conn = http.client.HTTPConnection(host, port, timeout=_FETCH_TIMEOUT_S)
     try:
         conn.request("GET", "/metrics")
         body: bytes = conn.getresponse().read()
+    except http.client.HTTPException as exc:
+        raise OSError(f"malformed HTTP response from metrics endpoint: {exc!r}") from exc
     finally:
         conn.close()
     return body.decode("utf-8", errors="replace")
