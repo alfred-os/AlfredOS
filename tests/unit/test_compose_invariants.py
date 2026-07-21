@@ -788,10 +788,28 @@ def test_discord_egress_allowlist_env_gateway_only(compose: dict[str, Any]) -> N
 _CORE_METRICS_PORT = 9465
 
 
+def test_alfred_core_publishes_no_host_port(compose: dict[str, Any]) -> None:
+    """CR-B: alfred-core publishes NO host ports at all — the strong form of the guard.
+
+    Pinning only the literal 9465 leaves a hole: ``ALFRED_CORE_METRICS_PORT`` is
+    operator-overridable, so a compose that published ``${ALFRED_CORE_METRICS_PORT}`` (or any
+    other port the core happens to be listening on) would sail past a literal-9465 check while
+    exposing the unauthenticated /metrics surface to the host. The core is connectivity-free
+    and has no inbound host-facing plane at all (ADR-0040), so "no ports key" is both the
+    accurate invariant and the one an override cannot evade. Mirrors
+    ``test_alfred_gateway_publishes_no_host_port``.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    assert not (core.get("ports") or []), (
+        "alfred-core must publish no host port — /metrics is compose-internal only (#470)."
+    )
+
+
 def test_core_metrics_port_never_host_published(compose: dict[str, Any]) -> None:
     """Defense-in-depth across ALL services (mirrors the egress-proxy/relay-port guards):
     the core metrics port must stay compose-internal — Prometheus scrapes it over
-    alfred_internal, never via a host-published mapping."""
+    alfred_internal, never via a host-published mapping. Retained ALONGSIDE the
+    alfred-core-specific guard above, which cannot speak for the other services."""
     for name, svc in (compose.get("services", {}) or {}).items():
         for mapping in svc.get("ports", []) or []:
             assert _container_port(mapping) != str(_CORE_METRICS_PORT), (
