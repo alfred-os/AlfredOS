@@ -502,9 +502,11 @@ from testcontainers.core.network import Network
 pytestmark = pytest.mark.integration
 _REPO = Path(__file__).resolve().parents[2]
 
-# rev.3 (PR #480 CR): every probe carries an explicit timeout. httpx's default is 5s, but relying on
-# a library default in a test that talks to a container is how a wedged Prometheus hangs the suite
-# instead of failing it.
+# rev.3 (PR #480 CR): every probe carries an explicit timeout. Precision on the CR wording — httpx
+# 0.28.1 already defaults to Timeout(5.0), so these calls could NOT "hang indefinitely" (that is the
+# `requests` failure mode, not httpx's). Explicit is still right: the value is now visible next to
+# the readiness deadline it interacts with, and a library-default change or a Client(timeout=None)
+# can no longer alter this test's behaviour silently.
 _PROBE_TIMEOUT_S = 5.0
 _READY_DEADLINE_S = 60.0
 _POLL_INTERVAL_S = 0.25
@@ -736,8 +738,13 @@ Applied to this plan while PR1 was in review, so PR2 does not inherit known-bad 
   `/api/v1/targets` until the alfred-core target's `health != "unknown"`. Gating on a *completed
   scrape attempt* rather than on `up == 1` keeps the test's oracle in the test — a dead stub fails
   the assertion, not the fixture.
-- **Minor/stability — Task 5 HTTP timeouts.** All probes (`/api/v1/targets`, `/api/v1/rules`,
-  `/api/v1/query`) now pass an explicit `timeout=_PROBE_TIMEOUT_S`; no reliance on library defaults.
+- **Minor/stability — Task 5 HTTP timeouts (applied, with one correction to the finding).** All
+  probes (`/api/v1/targets`, `/api/v1/rules`, `/api/v1/query`) now pass an explicit
+  `timeout=_PROBE_TIMEOUT_S`. The finding's premise — "can hang indefinitely" — is **not accurate for
+  httpx**: 0.28.1 (the pinned version) defaults to `Timeout(5.0)` on every operation, verified in the
+  repo venv. The change is kept anyway because the value belongs next to the readiness deadline it
+  interacts with, and an explicit timeout cannot be changed out from under the test by a library
+  default or a differently-configured client.
 - **Spec-side (same wave):** fetch-helper name/signature aligned to the shipped
   `fetch_metrics_text(port)`, and the Grafana dashboards mount aligned to the dedicated
   `ops/grafana/dashboards` subdir this plan already used (devops-006). See the spec's §14.
