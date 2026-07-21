@@ -168,6 +168,9 @@ class _AcloseOnlyChildIO:
     async def aclose(self) -> None:
         self.aclose_calls += 1
 
+    def abort(self) -> None:  # pragma: no cover - not exercised (never reaches revoke)
+        return None
+
 
 async def test_auditor_is_threaded_into_transport(
     monkeypatch: pytest.MonkeyPatch,
@@ -282,6 +285,9 @@ class _FakeBrokeringChildIO:
         return self._reply
 
     async def aclose(self) -> None:  # pragma: no cover - not exercised here
+        return None
+
+    def abort(self) -> None:  # pragma: no cover - not exercised (never reaches revoke)
         return None
 
 

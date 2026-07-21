@@ -33,6 +33,7 @@ from alfred.egress.control_fd_broker import ControlFdBrokerError
 from alfred.plugins.transport import ControlResult
 from alfred.security.quarantine import ContentHandle
 from alfred.security.quarantine_transport import (
+    ChildIO,
     QuarantineStagingMap,
     QuarantineStdioTransport,
     StagingHandleNotConfiguredError,
@@ -73,6 +74,12 @@ class _RecordingChildIO:
         self._pending_reply: bytes | None = None
         self.closed = False
         self.brokered: list[int] = []
+        self.aborted = False
+
+    def abort(self) -> None:
+        # #472 finding 2: the synchronous last-resort revoke. Subclasses that need to
+        # observe it inherit this; the cancel/timeout arms call it via _abort_child_now.
+        self.aborted = True
 
     async def broker_sockets(self, count: int) -> list[tuple[str, int]]:
         # Benign in-process double: records the requested count and returns that many
@@ -178,6 +185,9 @@ class _OrderRecordingChildIO:
     async def aclose(self) -> None:  # pragma: no cover - not exercised here
         return None
 
+    def abort(self) -> None:  # pragma: no cover - not exercised here (never reaches revoke)
+        return None
+
 
 @pytest.mark.asyncio
 async def test_dispatch_brokers_n_before_writing() -> None:
@@ -273,6 +283,31 @@ class _HangingCloseChildIO(_RaisingChildIO):
 
         await asyncio.sleep(3600)
         raise AssertionError("unreachable: the revoke bound must fire first")
+
+
+@pytest.mark.parametrize(
+    "double",
+    [
+        _RecordingChildIO,
+        _ContentHandleReturningChildIO,
+        _OrderRecordingChildIO,
+        _RaisingChildIO,
+        _StallingChildIO,
+        _CloseRaisingChildIO,
+        _HangingCloseChildIO,
+    ],
+)
+def test_every_transport_childio_double_satisfies_the_protocol(double: type) -> None:
+    """Every ChildIO double in this module implements the FULL Protocol — incl. ``abort``.
+
+    #472 finding 2 review (core lane): neither ``mypy``/``pyright`` (they don't type-check
+    ``tests/``) nor the one ``issubclass`` site in test_quarantine_child_io.py enforces that
+    these doubles keep pace with the Protocol. Without this guard, a double missing the new
+    ``abort`` method would take ``_abort_child_now``'s ``capability_abort_failed`` arm and a
+    revoke test could pass while proving nothing (the negative log-assertions in the arm tests
+    are the companion protection). ``@runtime_checkable`` ``issubclass`` checks method presence.
+    """
+    assert issubclass(double, ChildIO)
 
 
 async def _dispatch_extract(transport: QuarantineStdioTransport) -> Any:
