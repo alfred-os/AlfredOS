@@ -454,6 +454,18 @@ are the `alfred_quarantine_capability_revoked_total` counter (alert rule
 path. Full triage in the
 [quarantine capability-revoked runbook](../runbooks/quarantine-capability-revoked.md).
 
+The teardown is cancellation-safe (#472 finding 2): a cancel arriving mid-teardown
+(daemon-stop force-cancel, a `TaskGroup` sibling failure, an outer `action_deadline`)
+completes the SIGKILL synchronously — so a cancel can never leave a T3-holding child
+alive with brokered sockets — and then re-raises so structured concurrency is
+preserved. Two further structlog events flag the non-clean paths:
+`security.quarantine_transport.revoke_cancelled` (a revoke cancelled mid-teardown —
+the daemon was shutting down *while* a T3 child was being killed) and
+`security.quarantine_transport.capability_abort_failed` (the synchronous last-resort
+kill itself raised — an OS-level anomaly). A SIGKILLed child that is not reaped
+leaves a short-lived **zombie** (holds no fds, memory or capability; the OS reaps it
+at daemon exit) — see the runbook.
+
 ## Performance characteristics
 
 The `tag()` path is synchronous and allocation-only (one frozen Pydantic

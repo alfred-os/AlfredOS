@@ -170,6 +170,32 @@ socket in its empty network namespace. The specific decisions:
   ADR accepts that trade until #455 lands; a supervised respawn would convert the
   whole class into a self-healing event.
 
+  **Amendment (2026-07-21, #472 finding 2) — the teardown is cancellation-safe.**
+  The revoke's `await self._child_io.aclose()` runs on the daemon's task graph, so a
+  cancel can arrive mid-teardown (a daemon-stop force-cancel, a `TaskGroup` sibling
+  failure, an outer `action_deadline`). As first shipped, that cancel aborted the
+  revoke and could leave a T3-holding child **alive** with brokered gateway sockets —
+  the exact state the revoke exists to prevent. The fix: on `CancelledError` the
+  teardown completes the SIGKILL **synchronously** (`_SubprocessChildIO.abort()` →
+  `Popen.kill()` + close the control end, no `await`, so it holds even when a
+  re-delivered cancel makes every `await` re-raise), then **re-raises** the cancel so
+  structured concurrency is preserved (the supervisor's `await self._run_task` sees
+  the task end cancelled; an enclosing `TaskGroup`/`asyncio.timeout` is not poisoned).
+  Here structured-concurrency correctness outranks the graceful typed refusal: the
+  cancel propagates and no typed refusal is produced. The `asyncio.timeout` bound
+  arm now also completes the kill synchronously (the 5s bound cut `aclose` short and
+  nothing else would then kill the child).
+
+  **Accepted residuals:** (i) a SIGKILLed child that is not reaped leaves a
+  short-lived **zombie** — it holds no fds, memory or capability, only a
+  process-table entry the OS reaps at daemon exit (usually the parked `_reap_within`
+  `waitpid` reaps it as the SIGKILL lands; a zombie survives only when no reap
+  executor was parked); (ii) a `send()` already queued in the kernel on an
+  established socket can complete — a microsecond window against "alive
+  indefinitely". Two new structlog events flag the non-clean paths:
+  `security.quarantine_transport.revoke_cancelled` and
+  `security.quarantine_transport.capability_abort_failed`.
+
 - **Fork 3 — a `BrokeredProviderSource` wrapper-provider, not a bare factory.**
   `dispatch_extraction` is egress-free by contract (its docstring guarantees it
   imports no SDK/httpx), so the per-call socket must not come from a factory the
