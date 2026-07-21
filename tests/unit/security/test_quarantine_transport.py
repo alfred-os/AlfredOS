@@ -22,16 +22,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import struct
+import subprocess
+import sys
 import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import alfred.security.quarantine_child_io as child_io_mod
 import alfred.security.quarantine_transport as transport_mod
 from alfred.egress.control_fd_broker import ControlFdBrokerError
 from alfred.plugins.transport import ControlResult
 from alfred.security.quarantine import ContentHandle
+from alfred.security.quarantine_child_io import _SubprocessChildIO
 from alfred.security.quarantine_transport import (
     ChildIO,
     QuarantineStagingMap,
@@ -423,6 +428,130 @@ async def test_hanging_revoke_is_logged_loudly() -> None:
     assert [
         e for e in logs if e["event"] == "security.quarantine_transport.revoke_deadline_exceeded"
     ]
+    # #472 finding 2: the timeout arm now also completes the kill synchronously — the 5s
+    # bound cut ``aclose`` short and nothing else would have killed the child.
+    assert child.aborted, "the timeout arm did not complete the kill (abort not called)"
+    # The INNER 5s bound (_REVOKE_TIMEOUT_S) wins over the OUTER 11s _refuse_broker timeout,
+    # so this is a TimeoutError, NOT a cancel — ``revoke_cancelled`` must NOT fire (else the
+    # outer refusal-deadline would be misattributed as a cancellation). #472 review (M4/M2).
+    assert not [
+        e for e in logs if e["event"] == "security.quarantine_transport.revoke_cancelled"
+    ], "the outer refusal-deadline was misattributed as a cancel"
+
+
+class _CancelDuringCloseChildIO(_RecordingChildIO):
+    """Parks inside ``aclose`` so an external cancel lands mid-teardown, deterministically."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_aclose = asyncio.Event()
+
+    async def aclose(self) -> None:
+        self.in_aclose.set()
+        await asyncio.sleep(3600)  # never returns; the cancel lands here
+
+
+@pytest.mark.asyncio
+async def test_cancel_mid_teardown_kills_the_child_and_propagates() -> None:
+    """A cancel mid-teardown must complete the kill AND still propagate (#472 finding 2).
+
+    Cross-platform, spy oracle. Both halves are load-bearing: ``pytest.raises`` is the
+    anti-swallow oracle (swallowing a cancel breaks structured concurrency), ``child.aborted``
+    the anti-leak one (a T3 child left alive holding brokered sockets is the state the revoke
+    exists to prevent). The negative log-assertion ensures a double MISSING ``abort`` could not
+    have made this pass via the ``capability_abort_failed`` arm.
+    """
+    import structlog.testing
+
+    child = _CancelDuringCloseChildIO()
+    transport = _staged_transport(child, auditor=_RecordingAuditor())
+    with structlog.testing.capture_logs() as logs:
+        task = asyncio.create_task(transport._revoke_child_capability())
+        await child.in_aclose.wait()  # deterministic injection point — no sleep race
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert child.aborted, "the cancel arm did not complete the kill"
+    assert not [
+        e for e in logs if e["event"] == "security.quarantine_transport.capability_abort_failed"
+    ], "abort() was missing/broken on the double — this test proved nothing"
+
+
+@pytest.mark.asyncio
+async def test_abort_that_raises_is_loud_and_does_not_preempt_the_reraise() -> None:
+    """``_abort_child_now`` guards a raising ``abort`` — loud, and the cancel still propagates.
+
+    ``ChildIO.abort`` is contracted never to raise, but this runs inside a ``CancelledError``
+    handler on a trust boundary: an exception here would REPLACE the CancelledError and
+    silently break propagation. Pins the guard arm (#472 finding 2).
+    """
+    import structlog.testing
+
+    class _AbortRaisesChildIO(_CancelDuringCloseChildIO):
+        def abort(self) -> None:
+            raise OSError("EBADF from a malformed seam")
+
+    child = _AbortRaisesChildIO()
+    transport = _staged_transport(child, auditor=_RecordingAuditor())
+    with structlog.testing.capture_logs() as logs:
+        task = asyncio.create_task(transport._revoke_child_capability())
+        await child.in_aclose.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task  # the abort's OSError must NOT replace the CancelledError
+    assert [
+        e for e in logs if e["event"] == "security.quarantine_transport.capability_abort_failed"
+    ], "a raising abort() was swallowed silently (HARD #7)"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals (SIGKILL) not on win32")
+@pytest.mark.asyncio
+async def test_cancel_mid_real_teardown_sigkills_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The finding end-to-end against a REAL subprocess — oracle = the kernel wait status.
+
+    Mutation-proofed: ``SIG_IGN`` on SIGTERM means only SIGKILL can kill the child (a plain
+    sleeper would die to the SIGTERM ``_terminate_and_reap`` sends, passing against unfixed
+    code); ``_REAP_SIGTERM_GRACE_S=30`` means the built-in SIGKILL escalation provably cannot
+    have run in the cancel window, so ``abort()`` is the ONLY thing that could have killed it.
+    Deterministic barrier (an Event), not a sleep race. ``pytest.raises`` disambiguates the arm.
+    """
+    monkeypatch.setattr(child_io_mod, "_REAP_SIGTERM_GRACE_S", 30.0)
+
+    class _BarrierSubprocessChildIO(_SubprocessChildIO):
+        def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+            super().__init__(proc)
+            self.entered = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.entered.set()
+            await super().aclose()  # real SIGTERM / real reap
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('up', flush=True); time.sleep(300)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        proc.stdout.readline()  # barrier: the SIGTERM handler is installed
+        child = _BarrierSubprocessChildIO(proc)
+        transport = _staged_transport(child, auditor=_RecordingAuditor())
+        task = asyncio.create_task(transport._revoke_child_capability())
+        await child.entered.wait()  # deterministic — same shape as test A
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proc.wait(timeout=5)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 @pytest.mark.asyncio

@@ -39,6 +39,7 @@ import asyncio
 import json
 import struct
 import uuid
+from contextlib import suppress
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import structlog
@@ -597,37 +598,95 @@ class QuarantineStdioTransport:
         restarted. That is the correct fail-closed trade against leaving un-revoked gateway
         capability in a T3-holding child.
 
-        A teardown that itself fails is logged LOUD with an explicit ``error_class`` and
-        swallowed (never silent — HARD #7): it must not preempt the caller's graceful typed
-        refusal, which is the orchestrator's only clean exit from this path.
+        A teardown that itself FAILS (``aclose`` raises) is logged LOUD with an explicit
+        ``error_class`` and swallowed (never silent — HARD #7): it must not preempt the
+        caller's graceful typed refusal, which is the orchestrator's only clean exit.
+
+        A teardown that is CANCELLED (a daemon-stop force-cancel, a TaskGroup sibling
+        failure, an outer ``action_deadline``) is different (#472 finding 2): it completes
+        the kill SYNCHRONOUSLY via :meth:`_abort_child_now` and then RE-RAISES the cancel.
+        A T3 child left alive holding brokered gateway sockets is the exact state this method
+        prevents, so the kill must finish; but swallowing the cancel would break structured
+        concurrency (the supervisor's ``await self._run_task`` never sees the task end
+        cancelled; an enclosing ``TaskGroup`` waits on us; an outer ``asyncio.timeout`` never
+        ``uncancel``s). So here structured-concurrency correctness outranks the graceful
+        typed refusal — the cancel propagates, no typed refusal is produced.
 
         The counter increments BEFORE the teardown is attempted, deliberately: a revoke
-        whose ``aclose`` raises is still a revocation, and is the case most worth alerting
-        on. Counting afterwards would skip exactly those.
+        whose ``aclose`` raises (or is cancelled) is still a revocation, and is the case most
+        worth alerting on. Counting afterwards would skip exactly those.
         """
         _log.error("security.quarantine_transport.capability_revoked")
         # #340 golive: the security lane conditioned shipping without a respawn scheduler
         # (#455) on this being ALERTABLE. A structlog line is not a signal ops/ can write a
         # rule over. See alfred.security.observability for the armed-not-yet-live caveat.
         CAPABILITY_REVOKED_COUNTER.inc()
+        # The ``async with asyncio.timeout`` MUST stay INSIDE this ``try``. ``asyncio.timeout``
+        # implements its bound by cancelling the inner task; ``Timeout.__aexit__`` converts
+        # that CancelledError to TimeoutError ONLY when the timeout expired AND
+        # ``task.uncancel()`` returns to the count snapshotted at ``__aenter__`` (verified on
+        # CPython 3.14). So: bound-expiry alone -> the TimeoutError arm; an EXTERNAL cancel
+        # also outstanding -> no conversion, the CancelledError arm fires and re-raises (which
+        # is correct — a real cancel is pending). ``__aenter__`` snapshots ``cancelling()`` as
+        # a baseline, which is why the bound still converts correctly even when this method is
+        # re-entered from inside an already-cancelled scope (``_run_broker_preamble``'s
+        # ``except BaseException``). Inverting (``try`` inside the ``async with``) would put
+        # ``__aexit__`` outside every arm and make ``revoke_deadline_exceeded`` unreachable.
         try:
             async with asyncio.timeout(_REVOKE_TIMEOUT_S):
                 await self._child_io.aclose()
         except TimeoutError:
             # BOUNDED because the caller still has an audit row to write. Unbounded, a child
             # that declines to die starved ``record_broker_failure`` entirely — the refusal
-            # that triggered this teardown produced no forensic row at all. The SIGKILL
-            # escalation underneath (``_terminate_and_reap``) means reaching this is already
-            # an OS-level anomaly, so it is an ERROR, not a warning.
-            _log.error(
-                "security.quarantine_transport.revoke_deadline_exceeded",
-                timeout_s=_REVOKE_TIMEOUT_S,
-            )
+            # that triggered this teardown produced no forensic row at all. The 5s bound cut
+            # ``aclose`` short and nothing else would then kill the child, so finish the kill
+            # synchronously (#472 finding 2). Kill BEFORE logging — the invariant is the kill,
+            # not the line; the emit is ``suppress``-wrapped so an emit failure cannot escape.
+            self._abort_child_now()
+            with suppress(Exception):
+                _log.error(
+                    "security.quarantine_transport.revoke_deadline_exceeded",
+                    timeout_s=_REVOKE_TIMEOUT_S,
+                )
+        except asyncio.CancelledError:
+            # A cancel MID-teardown would otherwise abort the revoke and leave a T3 child
+            # ALIVE holding brokered gateway sockets — the state this method prevents.
+            # ``except Exception`` below does NOT catch this (CancelledError is BaseException
+            # since 3.8). Complete the kill SYNCHRONOUSLY so the invariant does not depend on
+            # the cancellation-delivery count (a re-delivered cancel makes every ``await``
+            # re-raise, but ``Popen.kill()`` cannot be pre-empted), THEN re-raise. Kill first,
+            # log suppressed — an emit failure must not preempt either the kill or the re-raise.
+            self._abort_child_now()
+            with suppress(Exception):
+                _log.error("security.quarantine_transport.revoke_cancelled")
+            raise
         except Exception as exc:
-            _log.error(
-                "security.quarantine_transport.capability_revoke_failed",
-                error_class=type(exc).__name__,
-            )
+            # No ``_abort_child_now`` here: ``aclose`` runs ``_terminate_and_reap`` FIRST and
+            # that never raises, so any exception escaping ``aclose`` is from a LATER stage —
+            # the reap provably already ran.
+            with suppress(Exception):
+                _log.error(
+                    "security.quarantine_transport.capability_revoke_failed",
+                    error_class=type(exc).__name__,
+                )
+
+    def _abort_child_now(self) -> None:
+        """Synchronous last-resort kill. Never awaits, never raises, never preempts a re-raise.
+
+        :meth:`ChildIO.abort` is contracted never to raise, but this runs inside a
+        ``CancelledError`` handler on a trust-boundary path: an ``AttributeError`` from a
+        malformed seam, or any bug in an implementation, would REPLACE the CancelledError and
+        silently break cancellation propagation. So the call is guarded and the failure is
+        loud (HARD #7) rather than either silent or exception-swapping.
+        """
+        try:
+            self._child_io.abort()
+        except Exception as exc:
+            with suppress(Exception):
+                _log.error(
+                    "security.quarantine_transport.capability_abort_failed",
+                    error_class=type(exc).__name__,
+                )
 
     async def close(self) -> None:
         """Close the injected child-IO seam (idempotent at the seam level)."""
