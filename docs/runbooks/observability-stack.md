@@ -153,8 +153,10 @@ Two dashboards are provisioned (`ops/grafana/dashboards/*.json`, loaded via
   other nine — eight latency histograms spanning comms dispatch, quarantined extraction,
   the burst limiter, orchestrator actions, plugin dispatch, and DLP/content scanning, plus
   the `alfred_comms_handler_failures_total` counter — are registered, scraped, and
-  queryable in Prometheus/Grafana Explore today, but have no dashboard panel yet. A
-  follow-up will build those out; until then, query them directly.
+  queryable in Prometheus/Grafana Explore today, but have no dashboard panel yet.
+  [#484](https://github.com/alfred-os/AlfredOS/issues/484) tracks building those panels out
+  (it needs the metric-name resolver extended for histogram `_bucket`/`_count`/`_sum`
+  suffixes first); until then, query them directly.
 
 ## Fixed-port contract
 
