@@ -16,15 +16,16 @@ revocation being *alertable*. Before this module it was a structlog line only, w
 nothing in ``ops/`` can express a rule over — so an operator's first signal was comms
 quietly failing to do anything.
 
-.. warning::
-
-   **Armed, not yet live.** This counter is registered in the CORE process, and
-   nothing scrapes the core: ``ops/prometheus/prometheus.yml`` defines a single job
-   for ``alfred-gateway:9464``, and ``start_metrics_server`` is called only from
-   ``alfred gateway start``. The rule in ``ops/alerts/quarantine.yml`` is correct and
-   promtool-verified, and begins firing the moment a core scrape target exists —
-   tracked in #470. The detection path that works TODAY is the audit log; see
-   ``docs/runbooks/quarantine-capability-revoked.md``.
+So the revoke increments a counter the alert rule in ``ops/alerts/quarantine.yml``
+fires on. The counter is registered in the CORE process; ``alfred daemon start``
+serves it on ``ALFRED_CORE_METRICS_PORT`` (9465), and the bundled
+``ops/prometheus/prometheus.yml`` scrapes that endpoint alongside the gateway job
+(#470), so the rule evaluates against a live, queryable series. It is also the
+*sole durable signal* for a cancel-path revoke
+(:meth:`~alfred.security.quarantine_transport.QuarantineStdioTransport._revoke_child_capability`):
+that path writes no ``egress.broker.refused`` audit row, so nothing else observes
+it. See ``docs/runbooks/quarantine-capability-revoked.md`` for triage and
+``docs/runbooks/observability-stack.md`` for reaching Prometheus/Grafana.
 
 Module-level construction mirrors :mod:`alfred.comms_mcp.observability` and
 :mod:`alfred.supervisor.observability`: the :class:`~prometheus_client.Counter`

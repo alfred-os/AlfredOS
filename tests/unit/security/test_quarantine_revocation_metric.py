@@ -15,14 +15,12 @@ operator who does not know it happened experiences it as comms silently rotting.
 So the revoke increments a counter the alert rule in ``ops/alerts/quarantine.yml``
 fires on.
 
-.. warning::
-
-   The counter lives in the CORE. #470 PR1 makes the daemon boot SERVE it — the core
-   now starts its own exposition on ``ALFRED_CORE_METRICS_PORT`` (9465) over the
-   curated registry — but nothing SCRAPES it yet: ``ops/prometheus/prometheus.yml``
-   still has a single job for ``alfred-gateway:9464``. The alert rule is therefore
-   still ARMED BUT NOT YET LIVE until #470 PR2 adds the core scrape job. Until then,
-   the runbook's audit-log query is the detection path that actually works.
+The counter lives in the CORE. #470 PR1 made the daemon boot SERVE it over
+``ALFRED_CORE_METRICS_PORT`` (9465), and #470 PR2 added the core job to
+``ops/prometheus/prometheus.yml``, so the alert now evaluates against a live,
+scraped series rather than a promtool fixture. These tests guard the
+registration half of that chain — the scrape config itself is covered by
+``tests/integration/test_prometheus_scrapes_core.py``.
 """
 
 from __future__ import annotations
@@ -70,8 +68,10 @@ def test_the_counter_is_registered_at_import() -> None:
     # unregistered name and 0.0 for a registered-but-never-incremented one, so this
     # distinguishes exactly the regression the test is here to catch.
     assert _sample() is not None, (
-        f"{_METRIC} is not registered on the DEFAULT registry — the counter exists as "
-        f"an object but nothing scrapes it, so the alert rule is dead"
+        f"{_METRIC} is not registered on the DEFAULT registry — the bundled "
+        f"Prometheus scrapes exactly that registry (ops/prometheus/prometheus.yml, "
+        f"#470 PR2), so an unregistered counter is invisible to it and the "
+        f"QuarantineCapabilityRevoked alert has nothing to evaluate"
     )
 
 
