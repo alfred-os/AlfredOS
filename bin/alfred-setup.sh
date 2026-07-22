@@ -93,6 +93,11 @@ if [[ ! -f .env ]]; then
     warn ".env.example not found; create .env manually."
   fi
 fi
+# Lock .env to owner-only on EVERY run — it holds the Grafana admin password (and other
+# credentials) and must never be world-readable, whether freshly created, pre-existing, or
+# ALREADY-seeded. Unconditional + before the seed write, so there is no disclosure window and
+# an already-seeded but world-readable .env still gets locked (#470 security review).
+[[ -f .env ]] && chmod 600 .env
 
 step "Seeding Grafana admin password"
 # #470 PR2 Task 3 (rev.4 devops-003/devops-004/sec-004/sec-005): guard on
@@ -111,10 +116,7 @@ step "Seeding Grafana admin password"
 # optional: the docker-compose.yaml entrypoint preflight guard is the
 # fail-closed backstop for any weak/empty result regardless of a lost race.
 if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
-  # Lock .env to owner-only BEFORE writing the secret — there must be no window in which
-  # the seeded credential is world-readable (#470 security review: no write-then-chmod
-  # disclosure race). Covers a just-created .env AND a pre-existing one.
-  [[ -f .env ]] && chmod 600 .env
+  # (.env is already 0600 from the unconditional lock above, before this write.)
   # Graceful openssl preflight — a bare `openssl rand` under `set -euo
   # pipefail` aborts opaquely on a host without openssl. Shares its message
   # with the audit.hash_pepper bootstrap below via openssl_missing_message.
