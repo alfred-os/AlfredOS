@@ -72,7 +72,10 @@
 ```python
 # tests/unit/test_compose_invariants.py (append)
 def test_observability_services_internal_only(compose):
-    for name in ("alfred-prometheus", "alfred-grafana"):
+    # rev.4.1 (dependency-order fix found in execution): Grafana lands in Task 3, so scope this to
+    # Prometheus ONLY here — else this test is red between Task 1 and Task 3. Task 3 Step 3 extends the
+    # tuple to ("alfred-prometheus", "alfred-grafana").
+    for name in ("alfred-prometheus",):
         nets = _service_networks(compose, name)
         assert nets == {"alfred_internal"}, f"{name} must join alfred_internal ONLY; got {sorted(nets)}"
 
@@ -339,6 +342,11 @@ git commit -m "feat(ops): #470 scrape alfred-core + core up/absent alerts with p
 - Test: `tests/unit/test_compose_invariants.py`
 
 - [ ] **Step 1: Write the failing invariant tests**
+
+> **rev.4.1 (dependency-order fix found in execution):** ALSO extend the existing
+> `test_observability_services_internal_only` (Task 1 scoped it to `("alfred-prometheus",)` only) to
+> `("alfred-prometheus", "alfred-grafana")` — do this in Step 3 **alongside** adding the service, so it
+> flips green exactly when Grafana lands and never sits red.
 
 ```python
 # tests/unit/test_compose_invariants.py (append)
