@@ -128,7 +128,14 @@ def test_unhealthy_when_not_gateway_exposition(monkeypatch: pytest.MonkeyPatch, 
     identity, not on the breaker parse.
     """
     _patch_fetch(monkeypatch, body)
-    assert CliRunner().invoke(gateway_app, ["healthcheck"]).exit_code == 1
+    result = CliRunner().invoke(gateway_app, ["healthcheck"])
+    assert result.exit_code == 1
+    # Exit 1 is shared by the unreachable and breaker arms too — assert the identity arm's OWN
+    # diagnostic actually rendered. Key on prose unique to this message ("own exposition"): it
+    # distinguishes it from the other two arms AND proves `t()` resolved (the raw catalog key
+    # `gateway.healthcheck.not_gateway_exposition` has no such phrase). A raw-key-absence check
+    # would be vacuous here — structlog writes the event key to stdout regardless.
+    assert "own exposition" in result.stdout
 
 
 def test_real_gateway_registry_exposition_satisfies_the_identity_predicate() -> None:
