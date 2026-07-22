@@ -1,0 +1,31 @@
+# AlfredOS core alerting rules (#470 PR2 Task 2).
+#
+# Two rules close the "who watches the watchers" gap for the core /metrics endpoint:
+# - AlfredCoreMetricsDown: the scrape target itself going dark. Without this, every
+#   other core-owned alert (incl. QuarantineCapabilityRevoked in quarantine.yml) goes
+#   silently blind the moment alfred-core stops answering /metrics — an absent series
+#   evaluates to no result, not a firing alert, so a target-down condition needs its
+#   own explicit rule.
+# - AlfredQuarantineCounterAbsent: the specific series QuarantineCapabilityRevoked
+#   depends on. The counter is registered (and reads 0) from daemon boot (#470), so
+#   its absence means the exposition itself is broken (a rename, an import ordering
+#   bug, a registry regression) — a distinct failure mode from the target being
+#   unscraped, and the reason QuarantineCapabilityRevoked was made release-conditional
+#   on this alert existing (#472 CR review, #455).
+groups:
+  - name: alfred-core
+    rules:
+      - alert: AlfredCoreMetricsDown
+        expr: up{job="alfred-core"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "alfred-core /metrics is unscraped"
+          description: "Prometheus cannot scrape alfred-core:9465 — the quarantine capability-revoke alert is blind. Check `alfred daemon healthcheck` in the alfred-core container."
+      - alert: AlfredQuarantineCounterAbsent
+        expr: absent(alfred_quarantine_capability_revoked_total)
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "quarantine capability-revoke counter series is absent"
+          description: "The counter is not registered/exposed — the QuarantineCapabilityRevoked alert cannot fire. Expected present at 0 from daemon boot (#470)."

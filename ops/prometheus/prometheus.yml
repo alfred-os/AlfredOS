@@ -1,16 +1,27 @@
-# AlfredOS Prometheus scrape config (Spec B G6-0, #288).
-# The gateway exposes /metrics on ALFRED_GATEWAY_METRICS_PORT (default 9464) on the
-# compose-internal network (no host port). This is a config scaffold — there is no
-# Prometheus service in docker-compose.yaml yet; point an external/added Prometheus at
-# this file or merge the job into an existing scrape config.
+# AlfredOS Prometheus scrape config (Spec B G6-0, #288; core scrape #470 PR2 Task 2).
+# Consumed by the bundled, compose-internal `alfred-prometheus` service
+# (docker-compose.yaml), which mounts this file read-only at
+# /etc/prometheus/prometheus.yml. The gateway exposes /metrics on
+# ALFRED_GATEWAY_METRICS_PORT (default 9464); the core exposes /metrics on
+# ALFRED_CORE_METRICS_PORT (default 9465). Both stay on the compose-internal network
+# (no host port) — Prometheus reaches them over alfred_internal.
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
 rule_files:
   - /etc/prometheus/alerts/gateway.yml
+  - /etc/prometheus/alerts/quarantine.yml
+  - /etc/prometheus/alerts/core.yml
 
 scrape_configs:
   - job_name: alfred-gateway
     static_configs:
       - targets: ["alfred-gateway:9464"]
+  - job_name: alfred-core
+    static_configs:
+      # literal — Prometheus static_configs cannot env-expand ${ALFRED_CORE_METRICS_PORT};
+      # this must equal compose's ALFRED_CORE_METRICS_PORT default exactly (rev.1 arch-001/
+      # rev-004; the fixed-port rationale is in docker-compose.yaml next to the env line).
+      # test_scrape_target_ports_match_compose_defaults (rev.4 arch-002) pins the lockstep.
+      - targets: ["alfred-core:9465"]

@@ -870,3 +870,31 @@ def test_prometheus_config_has_no_remote_write():
     cfg = yaml.safe_load((COMPOSE_PATH.parent / "ops/prometheus/prometheus.yml").read_text())
     assert "remote_write" not in cfg, "Prometheus must not remote_write (would be external egress)"
     assert "remote_read" not in cfg, "Prometheus must not remote_read"
+
+
+# ---------------------------------------------------------------------------
+# #470 PR2 Task 2 (rev.4 arch-002): the literal `alfred-core:9465` / `alfred-gateway:9464`
+# scrape targets in ops/prometheus/prometheus.yml are static_configs — Prometheus cannot
+# env-expand them — so they must be hand-kept in lockstep with the compose
+# ALFRED_*_METRICS_PORT `${VAR:-default}` chains. Task 5's e2e catches prometheus.yml
+# drifting FROM 9465; nothing previously caught the compose default drifting FROM
+# prometheus.yml (the other direction). Reuses the `_compose_default` helper already
+# defined above (G7-2c) rather than a second ad hoc regex.
+# ---------------------------------------------------------------------------
+
+
+def test_scrape_target_ports_match_compose_defaults(compose: dict[str, Any]) -> None:
+    prom = yaml.safe_load((COMPOSE_PATH.parent / "ops/prometheus/prometheus.yml").read_text())
+    targets = {
+        sc["job_name"]: sc["static_configs"][0]["targets"][0] for sc in prom["scrape_configs"]
+    }
+    core_env = compose["services"]["alfred-core"].get("environment", {}) or {}
+    core_port = _compose_default(str(core_env.get("ALFRED_CORE_METRICS_PORT", "")))
+    assert targets["alfred-core"] == f"alfred-core:{core_port}", (
+        f"prometheus.yml's alfred-core scrape target {targets['alfred-core']!r} must match "
+        f"compose's ALFRED_CORE_METRICS_PORT default ({core_port!r}); a Prometheus "
+        "static_configs target cannot env-expand, so a compose default bump silently "
+        "blinds the scrape unless this file is edited in lockstep."
+    )
+    # gateway pair is likewise hardcoded — pin it too so a future bump is caught.
+    assert targets["alfred-gateway"].endswith(":9464")

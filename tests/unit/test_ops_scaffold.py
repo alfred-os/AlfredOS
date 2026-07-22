@@ -197,3 +197,37 @@ def test_egress_panels_present() -> None:
     exprs = {t.get("expr") for p in dash["panels"] for t in p.get("targets", [])}
     assert "gateway_egress_inflight" in exprs
     assert "rate(gateway_egress_denied_total[5m])" in exprs
+
+
+# ---------------------------------------------------------------------------
+# #470 PR2 Task 2 (rev.4 test-005/rev-004/sec-003/devops-007): the sibling
+# no-silently-dead-alerts cross-check for ops/alerts/core.yml. This does NOT reuse
+# the gateway_* regex / AST-scan-of-src/alfred/gateway/ machinery above: core.yml
+# references exposition names resolved against alfred.observability.core_metrics'
+# CORE_OWNED_COLLECTORS tuple, not source-scanned Counter()/Gauge()/Histogram() call
+# sites, and prometheus_client's Counter strips the "_total" suffix from `._name` —
+# so the known-name set must re-append "_total" rather than mutually strip both
+# sides (a tautological oracle that would pass a wrong name).
+# ---------------------------------------------------------------------------
+
+
+def test_core_alerts_reference_real_core_metrics() -> None:
+    from alfred.observability.core_metrics import CORE_OWNED_COLLECTORS
+
+    # _name is _total-STRIPPED; re-append _total so both exposition forms are known.
+    base = {c._name for c in CORE_OWNED_COLLECTORS}
+    known = base | {n + "_total" for n in base} | {"up"}  # explicit builtin allowlist
+    exprs = " ".join(
+        r["expr"]
+        for g in yaml.safe_load((OPS / "alerts" / "core.yml").read_text())["groups"]
+        for r in g["rules"]
+    )
+    refs = set(re.findall(r"\balfred_[a-z0-9_]*\b", exprs)) | (
+        {"up"} if re.search(r"\bup\b", exprs) else set()
+    )
+    unknown = refs - known
+    assert not unknown, f"core.yml references metrics no core collector exposes: {sorted(unknown)}"
+    # Oracle-independence: also assert the EXPECTED set as an independent literal, so a
+    # mis-derived `known` cannot pass a mutated rule. MUTATION-CHECK: a rule referencing
+    # `alfred_quarantine_capability_revoked_typo` MUST fail this test.
+    assert refs >= {"alfred_quarantine_capability_revoked_total", "up"}
