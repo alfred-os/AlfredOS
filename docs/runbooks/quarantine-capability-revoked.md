@@ -99,11 +99,14 @@ degraded gateway, not a revoked capability.
      'security.quarantine_transport.(capability_revoked|revoke_cancelled|capability_abort_failed)'
    ```
 
-   - **If you see `revoke_cancelled`:** the trigger is the *cancellation*, not a broker
-     failure — look at what was cancelling around that timestamp (a daemon-stop
-     force-cancel, a `TaskGroup` sibling failure, or the outer `action-deadline` firing),
-     not at the audit log. Correlate against `docker compose logs alfred-core` around the
-     same timestamp for the daemon-shutdown / `TaskGroup` / `action-deadline` context.
+   - **If you see `revoke_cancelled`:** cancellation *interrupted the teardown* — but that
+     alone does NOT prove cancellation *initiated* the revoke. A broker/transport failure may
+     have started the revocation before a daemon-stop force-cancel, a `TaskGroup` sibling
+     failure, or the outer `action-deadline` firing cancelled its teardown. Correlate BOTH:
+     (a) what was cancelling around that timestamp (`docker compose logs alfred-core` for the
+     daemon-shutdown / `TaskGroup` / `action-deadline` context), AND (b) any preceding
+     `egress.broker.refused` / transport error that may be the original cause — the cancel
+     path just means no audit row was written for that revoke.
    - **If you see `capability_revoked` with no `revoke_cancelled`** (a normal,
      non-cancelled revoke — or you want the trigger's fuller context): the revoke is a
      *response*; the first `egress.broker.refused` row before it names the cause.
