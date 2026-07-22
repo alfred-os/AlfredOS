@@ -72,6 +72,11 @@ jobs:
           # exact failure mode the alert itself exists to avoid.
           promtool check rules quarantine.yml
           promtool test rules quarantine_test.yml
+          # #470 PR2 Task 2: the core /metrics up/absent alerts. Both check AND test —
+          # check-only would ship green while the positive/negative controls for the
+          # absent()/up==0 rules never run (same paper-only-gate risk as above).
+          promtool check rules core.yml
+          promtool test rules core_test.yml
 
   python:
     name: Python (lint, types, unit)

@@ -1,0 +1,46 @@
+# promtool test rules for ops/alerts/core.yml (#470 PR2 Task 2).
+#
+# NOTE: promtool matches exp_annotations too (not just exp_labels) — each firing entry's
+# exp_annotations MUST equal the alert's summary+description in core.yml verbatim (mirrors
+# the same note in quarantine_test.yml).
+rule_files:
+  - core.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="alfred-core"}'
+        values: "0x5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AlfredCoreMetricsDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: alfred-core}
+            exp_annotations: {summary: "alfred-core /metrics is unscraped", description: "Prometheus cannot scrape alfred-core:9465 — the quarantine capability-revoke alert is blind. Check `alfred daemon healthcheck` in the alfred-core container."}
+  - interval: 1m       # negative control: target up ⇒ no alert
+    input_series:
+      - series: 'up{job="alfred-core"}'
+        values: "1x5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AlfredCoreMetricsDown
+        exp_alerts: []
+  # rev.1 (devops-002/rev-005/sec-003/test-004): the security-relevant absent() rule also needs controls.
+  - interval: 1m       # positive: the counter series is ABSENT ⇒ AlfredQuarantineCounterAbsent fires
+    input_series:
+      - series: 'up{job="alfred-core"}'   # some series exists, but NOT the counter
+        values: "1x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AlfredQuarantineCounterAbsent
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: "quarantine capability-revoke counter series is absent", description: "The counter is not registered/exposed — the QuarantineCapabilityRevoked alert cannot fire. Expected present at 0 from daemon boot (#470)."}
+  - interval: 1m       # negative: counter present at 0 ⇒ no AlfredQuarantineCounterAbsent
+    input_series:
+      - series: 'alfred_quarantine_capability_revoked_total'
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AlfredQuarantineCounterAbsent
+        exp_alerts: []
