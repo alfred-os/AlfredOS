@@ -38,6 +38,25 @@ require_cmd() {
   fi
 }
 
+# `openssl_missing_message WHAT` prints an actionable, per-distro install hint when a
+# step that needs `openssl rand` finds openssl absent from PATH. Shared by both
+# openssl-gated secret-seeding steps below (the Grafana admin password seed and the
+# audit.hash_pepper bootstrap) so the guidance — and any future distro addition —
+# lives in exactly one place instead of drifting between two near-identical heredocs.
+openssl_missing_message() {
+  local what="$1"
+  cat >&2 <<EOF_NO_OPENSSL
+ERROR: openssl is required to ${what} but is not on PATH.
+       Install it for your distro and re-run this script (the run is
+       idempotent — an already-configured secret is left alone):
+         Debian/Ubuntu:   sudo apt-get install -y openssl
+         Fedora/RHEL:     sudo dnf install -y openssl
+         Arch:            sudo pacman -S openssl
+         Alpine:          sudo apk add openssl
+         macOS (brew):    brew install openssl
+EOF_NO_OPENSSL
+}
+
 # `read_env_var KEY` greps a value out of `.env` without `source`-ing
 # the file. Sourcing executes the file as bash, which means `#`
 # truncates lines silently and `$()` runs subshells — a pasted line
@@ -92,10 +111,10 @@ step "Seeding Grafana admin password"
 # fail-closed backstop for any weak/empty result regardless of a lost race.
 if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
   # Graceful openssl preflight — a bare `openssl rand` under `set -euo
-  # pipefail` aborts opaquely on a host without openssl. Mirrors the
-  # audit.hash_pepper bootstrap's message.
+  # pipefail` aborts opaquely on a host without openssl. Shares its message
+  # with the audit.hash_pepper bootstrap below via openssl_missing_message.
   if ! command -v openssl >/dev/null 2>&1; then
-    echo "ERROR: openssl is required to generate GF_SECURITY_ADMIN_PASSWORD. Install openssl and re-run." >&2
+    openssl_missing_message "generate GF_SECURITY_ADMIN_PASSWORD"
     exit 1
   fi
   pw="$(openssl rand -hex 24)"
@@ -347,16 +366,7 @@ _pepper_bootstrap() {
     return 0
   fi
   if ! command -v openssl >/dev/null 2>&1; then
-    cat >&2 <<EOF_NO_OPENSSL
-ERROR: openssl is required to bootstrap audit.hash_pepper but is not on PATH.
-       Install it for your distro and re-run this script (the run is
-       idempotent — already-configured pepper is left alone):
-         Debian/Ubuntu:   sudo apt-get install -y openssl
-         Fedora/RHEL:     sudo dnf install -y openssl
-         Arch:            sudo pacman -S openssl
-         Alpine:          sudo apk add openssl
-         macOS (brew):    brew install openssl
-EOF_NO_OPENSSL
+    openssl_missing_message "bootstrap audit.hash_pepper"
     return 1
   fi
   pepper_value="$(openssl rand -hex 32)"

@@ -384,6 +384,7 @@ services:
         if [ -z "$${GF_SECURITY_ADMIN_PASSWORD}" ] || [ "$${GF_SECURITY_ADMIN_PASSWORD}" = "admin" ]; then
           echo "FATAL: GF_SECURITY_ADMIN_PASSWORD is unset, empty, or the well-known default 'admin'." >&2
           echo "Grafana refuses to start rather than serve dashboards on a guessable credential." >&2
+          echo "The rest of the stack is unaffected; only alfred-grafana refuses to start." >&2
           echo "Fix: run bin/alfred-setup.sh (seeds a random value into .env), then 'docker compose up -d alfred-grafana'." >&2
           exit 78
         fi

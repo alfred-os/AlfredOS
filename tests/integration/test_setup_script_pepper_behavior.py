@@ -44,6 +44,24 @@ pytestmark = [pytest.mark.integration]
 
 
 _SETUP_SH = Path("bin/alfred-setup.sh")
+_FUNC_START = "openssl_missing_message() {"
+
+
+def _openssl_missing_message_func() -> str:
+    """Slice the shared ``openssl_missing_message`` helper out of the real script.
+
+    #470 M5: the pepper bootstrap's openssl-missing branch now calls this shared
+    helper (also used by the Grafana admin-password seed) instead of printing its
+    own inline heredoc. The helper is defined near the script's other top-level
+    helpers, OUTSIDE the ``_bootstrap_block()`` slice below (which starts at the
+    "Bootstrapping audit.hash_pepper secret" step, well after it) — so the prelude
+    must prepend it explicitly or the sliced script fails with a bash "command not
+    found" instead of exercising the real per-distro guidance.
+    """
+    content = _SETUP_SH.read_text()
+    start = content.index(_FUNC_START)
+    end = content.index("\n}\n", start) + len("\n}\n")
+    return content[start:end]
 
 
 def _bootstrap_block() -> str:
@@ -87,7 +105,10 @@ def _run_bootstrap_in_tmpdir(
     # Prelude defines the variables the bootstrap block expects from
     # the surrounding script (secrets_file from "Priming secrets bind-
     # mount"; step helper as a no-op shim).
-    prelude = f'secrets_file="{target_file}"\nstep() {{ echo "==> $*"; }}\n'
+    prelude = (
+        f'secrets_file="{target_file}"\nstep() {{ echo "==> $*"; }}\n'
+        + _openssl_missing_message_func()
+    )
     script = prelude + bootstrap
     env = os.environ.copy()
     env["HOME"] = str(tmpdir)
