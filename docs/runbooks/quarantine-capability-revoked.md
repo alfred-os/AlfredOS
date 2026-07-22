@@ -52,7 +52,7 @@ Nothing recovers this except restarting `alfred-core`.
 
 ## Detecting it today
 
-**`alfred_quarantine_capability_revoked_total` is the sole durable signal for the
+**`alfred_quarantine_capability_revoked_total` is the sole metrics signal for the
 cancel-path revoke class.** When a revoke is cancelled mid-teardown (#472 finding 2),
 the cancel re-raises *before* the caller reaches `record_broker_failure`, so no
 `egress.broker.refused` audit row is written — the child is still SIGKILLed, but the

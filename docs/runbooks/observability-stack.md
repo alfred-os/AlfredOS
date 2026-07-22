@@ -171,7 +171,7 @@ catch the mismatch. Leave it at its default.
 ## Related
 
 - [Quarantine capability-revoked runbook](quarantine-capability-revoked.md) — the primary
-  consumer of this stack today; the counter is the sole durable signal for a cancel-path
+  consumer of this stack today; the counter is the sole metrics signal for a cancel-path
   revoke.
 - [docs/subsystems/security.md](../subsystems/security.md) — the quarantine transport and
   its signals.

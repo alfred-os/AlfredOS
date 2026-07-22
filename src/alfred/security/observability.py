@@ -21,7 +21,7 @@ fires on. The counter is registered in the CORE process; ``alfred daemon start``
 serves it on ``ALFRED_CORE_METRICS_PORT`` (9465), and the bundled
 ``ops/prometheus/prometheus.yml`` scrapes that endpoint alongside the gateway job
 (#470), so the rule evaluates against a live, queryable series. It is also the
-*sole durable signal* for a cancel-path revoke
+*sole metrics signal* for a cancel-path revoke
 (:meth:`~alfred.security.quarantine_transport.QuarantineStdioTransport._revoke_child_capability`):
 that path writes no ``egress.broker.refused`` audit row, so nothing else observes
 it. See ``docs/runbooks/quarantine-capability-revoked.md`` for triage and

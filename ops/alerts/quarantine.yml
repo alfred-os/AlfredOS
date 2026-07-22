@@ -3,7 +3,7 @@
 # LIVE. The series this rule reads is registered in the CORE process and scraped by
 # the bundled ops/prometheus/prometheus.yml alfred-core job (#470 PR2), so the rule
 # evaluates against a real, firing series, not just a promtool fixture. It is the
-# sole durable signal for a cancel-path revoke, which writes no
+# sole metrics signal for a cancel-path revoke, which writes no
 # egress.broker.refused audit row — see docs/runbooks/quarantine-capability-revoked.md
 # for full triage (the audit-log path is an additive cross-check for the other
 # revoke classes).
