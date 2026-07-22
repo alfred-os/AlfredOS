@@ -86,12 +86,31 @@ degraded gateway, not a revoked capability.
 
 ## Triage
 
-1. **Confirm the revoke, and find what triggered it.** The revoke is a *response*;
-   the first `egress.broker.refused` row before it names the cause.
+1. **Confirm the revoke, and find what triggered it — check the structlog signal FIRST.**
+   As "Detecting it today" above explains, a **cancel-path** revoke (`revoke_cancelled`)
+   re-raises *before* the caller reaches `record_broker_failure`, so it writes **no**
+   `egress.broker.refused` row — starting with the audit-row lookup on a cancel-path
+   incident finds nothing and wastes the first triage step.
 
    ```sh
-   alfred audit log --since 24h | grep -E 'egress\.broker\.(refused|connected)' | head -40
+   # First: does the core log show a cancel-path revoke? These structlog events cover
+   # EVERY revoke path, including the cancel-path one the audit row below misses.
+   docker compose logs alfred-core | grep -E \
+     'security.quarantine_transport.(capability_revoked|revoke_cancelled|capability_abort_failed)'
    ```
+
+   - **If you see `revoke_cancelled`:** the trigger is the *cancellation*, not a broker
+     failure — look at what was cancelling around that timestamp (a daemon-stop
+     force-cancel, a `TaskGroup` sibling failure, or the outer `action-deadline` firing),
+     not at the audit log. Correlate against `docker compose logs alfred-core` around the
+     same timestamp for the daemon-shutdown / `TaskGroup` / `action-deadline` context.
+   - **If you see `capability_revoked` with no `revoke_cancelled`** (a normal,
+     non-cancelled revoke — or you want the trigger's fuller context): the revoke is a
+     *response*; the first `egress.broker.refused` row before it names the cause.
+
+     ```sh
+     alfred audit log --since 24h | grep -E 'egress\.broker\.(refused|connected)' | head -40
+     ```
 
 2. **Check the gateway.** The overwhelmingly likely trigger is the gateway L7
    CONNECT proxy being unreachable or refusing.

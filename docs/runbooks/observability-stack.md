@@ -32,18 +32,34 @@ Grafana's `3000` is bound to the host loopback only (`127.0.0.1:3000:3000` in
 - **Docker Desktop (macOS/Windows, non-OrbStack):** the host-published-port loss that
   affects `alfred-postgres:5432` (see the README note above) affects `alfred-grafana:3000`
   the same way — `internal: true` is the reason, not anything Grafana-specific. There is no
-  bundled ambassador container; bridge one yourself with any relay image attached to both
-  a normal (non-internal) network and `alfred_internal`, for example:
+  bundled ambassador container, and the workaround below is a deliberate, **operator-approved
+  security exception**, not a shipped part of the stack — read the caveat before running it.
+
+  **This is an exception to the connectivity-free posture (ADR-0040), not an extension of
+  it.** `alpine/socat` deliberately dual-homes: it joins both the default (non-internal)
+  bridge network *and* `alfred_internal`, bridging the two networks ADR-0040 Decision 1 keeps
+  apart everywhere else in the stack. Nothing else in `docker-compose.yaml` does this — every
+  other `alfred_internal` member has exactly one network membership (or, for the gateway,
+  membership in both `alfred_internal` and the deliberately-audited `alfred_external`). Only
+  run this if you have accepted that trade-off for your own workstation; it is why the
+  loopback path (Linux) and OrbStack (macOS) are called out above as the paths that need no
+  exception at all — prefer OrbStack over this tunnel when you have the choice.
+
+  Pin the image by digest, not a floating tag — `alpine/socat:latest` can change underneath
+  you between runs. The digest below was verified 2026-07-22; re-verify (or re-pin) before
+  trusting it on a later date:
 
   ```sh
   docker network ls | grep alfred_internal   # confirm the actual network name for your project
   docker run -d --name alfred-grafana-tunnel -p 127.0.0.1:3000:3000 \
-    alpine/socat TCP-LISTEN:3000,fork,reuseaddr TCP:alfred-grafana:3000
+    alpine/socat@sha256:4e625a62c9ea40ccbce93b9a4fcc6b41740a9f308389c216f34c88ce3abb275b \
+    TCP-LISTEN:3000,fork,reuseaddr TCP:alfred-grafana:3000
   docker network connect <the-alfred_internal-network-name> alfred-grafana-tunnel
   ```
 
-  Remove it with `docker rm -f alfred-grafana-tunnel` when done. Switching to OrbStack
-  avoids the workaround entirely.
+  Remove it with `docker rm -f alfred-grafana-tunnel` when done — don't leave a dual-homed
+  bridge container running longer than the debugging session needs. Switching to OrbStack
+  avoids the exception entirely.
 
 ### First login
 
