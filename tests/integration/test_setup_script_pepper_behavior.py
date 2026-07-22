@@ -40,6 +40,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._setup_script_helpers import slice_shell_function
+
 pytestmark = [pytest.mark.integration]
 
 
@@ -58,10 +60,7 @@ def _openssl_missing_message_func() -> str:
     must prepend it explicitly or the sliced script fails with a bash "command not
     found" instead of exercising the real per-distro guidance.
     """
-    content = _SETUP_SH.read_text()
-    start = content.index(_FUNC_START)
-    end = content.index("\n}\n", start) + len("\n}\n")
-    return content[start:end]
+    return slice_shell_function(_SETUP_SH, _FUNC_START)
 
 
 def _bootstrap_block() -> str:

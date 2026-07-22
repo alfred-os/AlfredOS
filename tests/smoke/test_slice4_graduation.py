@@ -79,21 +79,23 @@ def compose_stack() -> Iterator[None]:
     # bin/alfred-setup.sh does for an operator.
     env = {**os.environ, "GF_SECURITY_ADMIN_PASSWORD": secrets.token_hex(24)}
 
-    up = subprocess.run(
-        ["docker", "compose", "up", "-d", "--wait"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=HARD_BUDGET_SECONDS,
-        env=env,
-    )
+    # The `up` call is INSIDE the try so `finally: down -v` still tears down even when
+    # `up --wait` raises TimeoutExpired (a crash-looping service that hangs to the budget)
+    # after partially creating containers/networks — a leak must not persist across smoke runs.
     try:
+        up = subprocess.run(
+            ["docker", "compose", "up", "-d", "--wait"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=HARD_BUDGET_SECONDS,
+            env=env,
+        )
         if up.returncode != 0:
             # docker-unavailable and opt-in-off were already ruled out above, and the
             # Grafana password is now seeded — a non-zero return here is a REAL stack-boot
             # failure, not an environment-unavailability skip. Fail loud (the #245
             # assert-RAN discipline): skipping would false-green the graduation smoke.
-            # Inside the try so `finally: down -v` still tears down a partial boot.
             pytest.fail(
                 f"docker compose up --wait failed with docker available, "
                 f"{_OPT_IN_ENV}=1, and GF_SECURITY_ADMIN_PASSWORD seeded: {up.stderr[-800:]}"
