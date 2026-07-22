@@ -910,7 +910,9 @@ def test_grafana_publishes_only_loopback(compose: dict[str, Any]) -> None:
     # non-vacuity: a future switch to `expose:` (no host mapping) must not silently pass this test.
     assert ports, "alfred-grafana must publish at least one port mapping"
     for m in ports:
-        s = m if isinstance(m, str) else f"{m.get('published', '')}"
+        # Include host_ip so a long-syntax {host_ip: 0.0.0.0, published: 3000} bind-all is
+        # caught, not just the port number (CR: dict-form entries ignored the bind address).
+        s = m if isinstance(m, str) else f"{m.get('host_ip', '')}:{m.get('published', '')}"
         # ruff flags "0.0.0.0" as S104 (possible bind-all), but this is a STRING comparison
         # against a compose port mapping's text, not a bind-address construction — nothing
         # here binds a socket.

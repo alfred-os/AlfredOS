@@ -450,7 +450,7 @@ are the `alfred_quarantine_capability_revoked_total` counter (alert rule
 `ops/alerts/quarantine.yml`, scraped by the bundled Prometheus per
 [the observability stack runbook](../runbooks/observability-stack.md)), the
 `security.quarantine_transport.capability_revoked` structlog event, and
-`egress.broker.refused` audit rows. The metric is the **sole durable signal**
+`egress.broker.refused` audit rows. The metric is the **sole metrics signal**
 for a cancel-path revoke — that path writes no audit row; the audit-log path is
 an **additive** cross-check for every other revoke class. Full triage in the
 [quarantine capability-revoked runbook](../runbooks/quarantine-capability-revoked.md).

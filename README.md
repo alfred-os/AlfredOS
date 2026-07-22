@@ -88,8 +88,9 @@ already has an `alfred_run` volume with the wrong owner, run
 re-created owned by the `alfred` user.
 
 `docker compose up -d` also starts **`alfred-prometheus`** and **`alfred-grafana`** —
-default-on, internal-only services that scrape `alfred-core:9465` and `alfred-gateway:9464`
-and give you a dashboard, so the `QuarantineCapabilityRevoked` alert (and every other
+default-on, internal-only services. `alfred-prometheus` scrapes `alfred-core:9465` and
+`alfred-gateway:9464`; `alfred-grafana` queries Prometheus through its server-side datasource
+proxy and gives you a dashboard, so the `QuarantineCapabilityRevoked` alert (and every other
 core/gateway series) is queryable, not just defined. Reach Grafana at
 `http://127.0.0.1:3000` (Linux) or see the per-platform notes in the
 [observability stack runbook](docs/runbooks/observability-stack.md) for OrbStack/Docker

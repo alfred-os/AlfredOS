@@ -127,6 +127,10 @@ if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
   echo "Seeded GF_SECURITY_ADMIN_PASSWORD into .env."
 fi
 
+# Restrict .env to owner-only — it now holds the seeded Grafana secret (and any other
+# credentials). Applied every run so an already-existing .env gets locked down too.
+[ -f .env ] && chmod 600 .env
+
 step "Validating .env credentials"
 # ---------------------------------------------------------------------------
 # ONE gate for every credential the stack needs, reporting ALL problems at once.
