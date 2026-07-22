@@ -25,9 +25,35 @@
   gains the **inbound-listener class-line** (an inbound listener on `alfred_internal` is not the
   "external socket" the invariant forbids), and the residual panel gains **(viii)**: the core
   `/metrics` exposition is unauthenticated plaintext HTTP readable by any `alfred_internal` peer.
-  Both facts go live when PR1 merges. #470's third ADR arm — the two new internal-only third-party
-  services (Prometheus + Grafana) and the Prometheus TSDB attached to the connectivity-free stack —
-  is **deferred to PR2**, which is what introduces them.
+  Both facts went live when PR1 merged. #470's third ADR arm — the two new internal-only
+  third-party services (Prometheus + Grafana) and the Prometheus TSDB attached to the
+  connectivity-free stack — landed with **PR2**; see the 2026-07-22 entry below.
+- **Amended**: 2026-07-22 ([#470](https://github.com/alfred-os/AlfredOS/issues/470) PR2) — #470's
+  third ADR arm lands: the bundled observability stack attaches **two new internal-only
+  third-party services** — Prometheus (`alfred-prometheus`, `prom/prometheus`) and Grafana
+  (`alfred-grafana`, `grafana/grafana`) — plus the **Prometheus TSDB** (`alfred_prom_data`
+  volume) to the connectivity-free stack, satisfying CLAUDE.md's "no new datastore or
+  third-party service without an ADR" (PRD §7.5/§9 pre-name the tools but not their
+  post-Spec-C stack-attachment). Both services join `alfred_internal` **only** — neither is
+  added to `alfred_external`, so `test_only_gateway_on_external`'s generic any-new-service guard
+  (`tests/unit/test_compose_invariants.py`) stays intact and the gateway remains the sole
+  external-egress plane (Decision 1); zero egress from either service. The Prometheus TSDB
+  holds the same bounded operational-aggregate set residual (viii) describes (turn/scrape
+  counters, revoke counts, DLP-refusal rates — no T3 content, no PII, no secret), scraped off
+  **both** exposition endpoints per `ops/prometheus/prometheus.yml`'s two scrape jobs: the
+  core's curated `CORE_OWNED_COLLECTORS` registry (residual (viii)) and the gateway's own
+  `/metrics` exposition (`gateway_*` series such as `gateway_core_link_up`, surfaced in
+  `ops/grafana/dashboards/gateway.json`), bounded by a separate mechanism —
+  `test_gateway_exposition_has_no_per_user_labels` — rather than the core's curated-registry
+  ratchet. Both sources carry operational aggregates only; the TSDB is not a system-of-record
+  datastore alongside Postgres/Redis/Qdrant — it is a 15-day-retention cache of that same
+  bounded content, disposable and rebuildable from source. Grafana's sole datasource is Prometheus,
+  provisioned `access: proxy` (`ops/grafana/provisioning/datasources/`) — the query is proxied
+  **server-side**, inside the Grafana pod, to `http://alfred-prometheus:9090` over
+  `alfred_internal`, never issued client-side from an operator's browser. That server-side-proxy
+  shape is precisely why Grafana is never given an `alfred_external` bridge of its own: an
+  operator's browser reaches Grafana's loopback-published port, and Grafana reaches Prometheus,
+  both without a hop leaving `alfred_internal`.
 - **Slice**: Spec C — G7-5 closeout
   (`docs/superpowers/specs/2026-06-25-spec-c-egress-control-plane-design.md`)
 - **Relates to**: [ADR-0041](0041-web-fetch-fused-fetch-extract-contract.md) (web.fetch
@@ -344,11 +370,12 @@ invariant, `docs/superpowers/specs/2026-07-21-470-core-metrics-observability-des
 Authenticating the scrape shares the same fix-shape as residual (iv) (per-caller
 authentication on `alfred_internal`, #358); it is not separately tracked today.
 
-*Scope of this amendment:* the third arm of #470's ADR work — recording the two new
-internal-only third-party services (Prometheus + Grafana) and the Prometheus TSDB attached
-to the connectivity-free stack, per CLAUDE.md's "no new datastore or third-party service
-without an ADR" — lands with **PR2**, which is what introduces them. Nothing in PR1 attaches
-a third-party service.
+*Scope of this amendment:* residual (viii) above records PR1's fact only — the core `/metrics`
+exposition itself. Nothing in PR1 attaches a third-party service. The third arm of #470's ADR
+work — recording the two new internal-only third-party services (Prometheus + Grafana) and the
+Prometheus TSDB attached to the connectivity-free stack, per CLAUDE.md's "no new datastore or
+third-party service without an ADR" — landed with **PR2**; see the **Amended: 2026-07-22
+(#470 PR2)** entry in the header above.
 
 ## Alternatives considered
 
