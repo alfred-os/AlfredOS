@@ -942,5 +942,12 @@ def test_scrape_target_ports_match_compose_defaults(compose: dict[str, Any]) -> 
         "static_configs target cannot env-expand, so a compose default bump silently "
         "blinds the scrape unless this file is edited in lockstep."
     )
-    # gateway pair is likewise hardcoded — pin it too so a future bump is caught.
-    assert targets["alfred-gateway"].endswith(":9464")
+    # gateway pair is likewise hardcoded — pin it symmetrically with the core arm above
+    # (resolve the compose default, don't hand-assert a literal) so a future
+    # ALFRED_GATEWAY_METRICS_PORT bump is caught the same way a core port bump is.
+    gateway_env = compose["services"]["alfred-gateway"].get("environment", {}) or {}
+    gateway_port = _compose_default(str(gateway_env.get("ALFRED_GATEWAY_METRICS_PORT", "")))
+    assert targets["alfred-gateway"] == f"alfred-gateway:{gateway_port}", (
+        f"prometheus.yml's alfred-gateway scrape target {targets['alfred-gateway']!r} must "
+        f"match compose's ALFRED_GATEWAY_METRICS_PORT default ({gateway_port!r})."
+    )

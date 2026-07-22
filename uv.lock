@@ -128,6 +128,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "docker" },
     { name = "hypothesis" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -170,6 +171,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "docker", specifier = ">=7.1.0" },
     { name = "hypothesis", specifier = ">=6.155.6" },
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "pre-commit", specifier = ">=4.6.0" },

@@ -88,6 +88,12 @@ dev = [
   "pytest-benchmark>=5.2.3",    # PR-C: micro-benches for the hooks dispatch perf gate
   "pytest-cov>=7.1.0",
   "testcontainers[postgres,redis]>=4.14.2",
+  # #470: tests/integration/test_grafana_password_fail_closed.py imports `docker`
+  # (docker-py) directly for the two immediately-exiting refusal arms (testcontainers'
+  # DockerContainer helper assumes a long-lived container). Previously only a transitive
+  # dep of testcontainers — declare it explicitly so the floor is pinned and a future
+  # testcontainers bump that drops/relocates it doesn't silently break this suite.
+  "docker>=7.1.0",
   "hypothesis>=6.155.6",      # property-based testing per docs/python-conventions.md
   "mypy>=2.1.0",
   "pyright>=1.1.410",       # secondary type-checker per ADR-0007
