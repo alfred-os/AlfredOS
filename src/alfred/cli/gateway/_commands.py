@@ -487,6 +487,14 @@ def status_gateway() -> None:
 _BREAKER_METRIC: Final[str] = "gateway_circuit_breaker_open"
 _EXIT_UNHEALTHY: Final[int] = 1
 
+# The gateway's own exposition families are all named ``gateway_…`` (see
+# ``alfred.gateway.metrics``, which registers them on the default registry at import). The
+# healthcheck uses this to tell the gateway's OWN /metrics apart from any other HTTP server
+# answering 200 on the same port — a squatter, prose, or the CORE's ``alfred_`` exposition on
+# a mis-set ``ALFRED_GATEWAY_METRICS_PORT`` used to read HEALTHY (the same false-healthy class
+# #482/P4 closed for the daemon; shared predicate, different prefix).
+_GATEWAY_METRIC_FAMILY_PREFIX: Final[str] = "gateway_"
+
 # The env var + fallback port for the gateway's Prometheus exposition (G6-0). Single
 # source of truth for every `resolve_metrics_port(...)` call site in this module and
 # in `_egress.py` (which imports these two constants rather than repeating the literal
@@ -523,12 +531,18 @@ def _breaker_latched(metrics_text: str) -> bool:
 def healthcheck_gateway() -> None:
     """Two-tier Docker healthcheck (G6-0).
 
-    Liveness: the /metrics endpoint is reachable. Readiness: the ReplayBuffer
-    back-pressure breaker is NOT latched. A core-down gateway that is buffering is
-    HEALTHY (only wedged-past-breaker is unhealthy). Exits 0 (healthy) or 1
-    (unhealthy); never raises a traceback.
+    Liveness has two parts: the /metrics endpoint is reachable AND what answered is the
+    gateway's OWN exposition (a 200 from a squatter, prose, or the core's ``alfred_``
+    exposition on a mis-set port is NOT liveness — same false-healthy class #482/P4 closed for
+    the daemon). Readiness: the ReplayBuffer back-pressure breaker is NOT latched. A core-down
+    gateway that is buffering is HEALTHY (only wedged-past-breaker is unhealthy). Exits 0
+    (healthy) or 1 (unhealthy); never raises a traceback.
     """
-    from alfred.observability.metrics_server import fetch_metrics_text, resolve_metrics_port
+    from alfred.observability.metrics_server import (
+        declares_metric_family,
+        fetch_metrics_text,
+        resolve_metrics_port,
+    )
 
     try:
         port = resolve_metrics_port(_GATEWAY_METRICS_PORT_ENV, _GATEWAY_METRICS_DEFAULT_PORT)
@@ -543,6 +557,15 @@ def healthcheck_gateway() -> None:
         log.warning("gateway.healthcheck.unreachable", port=port, error=repr(exc))
         typer.echo(t("gateway.healthcheck.unreachable", port=port))
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
+    if not declares_metric_family(metrics_text, _GATEWAY_METRIC_FAMILY_PREFIX):
+        # Something answered 200 but it is not the gateway's exposition. Fail closed with a
+        # distinct message: the remedy (check what is bound to the port) differs from the
+        # unreachable arm (check the bind) and the breaker arm (core back-pressure).
+        log.warning(
+            "gateway.healthcheck.not_gateway_exposition", port=port, body_len=len(metrics_text)
+        )
+        typer.echo(t("gateway.healthcheck.not_gateway_exposition", port=port))
+        raise typer.Exit(code=_EXIT_UNHEALTHY)
     if _breaker_latched(metrics_text):
         log.warning("gateway.healthcheck.breaker_open")
         typer.echo(t("gateway.healthcheck.breaker_open"))

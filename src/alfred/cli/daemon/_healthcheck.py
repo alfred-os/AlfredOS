@@ -85,7 +85,10 @@ def healthcheck_daemon() -> None:
         typer.echo(t("daemon.healthcheck.metrics_unreachable", port=port))
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
     if not declares_metric_family(exposition, CORE_METRIC_FAMILY_PREFIX):
-        log.warning("daemon.healthcheck.not_core_exposition", port=port)
+        # No exception drives this arm (a well-formed 200 that is simply the wrong service), so
+        # there is no cause to chain. Carry ``body_len`` — never the untrusted body itself — so
+        # the identity refusal is as diagnosable as the sibling arms that log ``error=``.
+        log.warning("daemon.healthcheck.not_core_exposition", port=port, body_len=len(exposition))
         typer.echo(t("daemon.healthcheck.not_core_exposition", port=port))
         raise typer.Exit(code=_EXIT_UNHEALTHY)
     typer.echo(t("daemon.healthcheck.healthy", port=port))
