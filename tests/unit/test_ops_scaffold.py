@@ -216,8 +216,12 @@ def _known_core_metric_names() -> set[str]:
     reuses it verbatim instead of re-deriving a second (possibly divergent) copy."""
     from alfred.observability.core_metrics import CORE_OWNED_COLLECTORS
 
-    # _name is _total-STRIPPED; re-append _total so both exposition forms are known.
-    base = {c._name for c in CORE_OWNED_COLLECTORS}
+    # Public prometheus_client API rather than the private `._name` attribute:
+    # `.describe()` yields each collector's Metric descriptor(s), whose `.name` is the
+    # same _total-STRIPPED base `._name` exposes (verified against every CORE_OWNED_COLLECTORS
+    # entry — Counter/Histogram both yield exactly one descriptor matching `._name`).
+    # Re-append _total so both exposition forms are known.
+    base = {name for c in CORE_OWNED_COLLECTORS for name in (m.name for m in c.describe())}
     return base | {n + "_total" for n in base} | {"up"}  # explicit builtin allowlist
 
 

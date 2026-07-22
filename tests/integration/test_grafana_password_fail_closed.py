@@ -88,6 +88,7 @@ from typing import Any
 
 import httpx
 import pytest
+import yaml
 from testcontainers.core.container import DockerContainer
 
 import docker
@@ -95,9 +96,12 @@ import docker
 pytestmark = pytest.mark.integration
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-# Keep in lockstep with docker-compose.yaml's `image: grafana/grafana:11.6.0` pin —
-# a drift here would silently test a DIFFERENT image than the one that ships.
-_GRAFANA_IMAGE = "grafana/grafana:11.6.0"
+# Resolved from docker-compose.yaml's `alfred-grafana.image` rather than hardcoded here —
+# a hand-copied literal would silently drift from the pinned tag docker-compose.yaml
+# actually ships, and this suite's whole point is proving what the SHIPPED image does.
+_GRAFANA_IMAGE = yaml.safe_load((_REPO_ROOT / "docker-compose.yaml").read_text())["services"][
+    "alfred-grafana"
+]["image"]
 _REFUSAL_EXIT_CODE = 78
 _HEALTH_TIMEOUT_S = 90.0
 
