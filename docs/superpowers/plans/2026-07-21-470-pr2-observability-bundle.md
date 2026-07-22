@@ -533,9 +533,17 @@ fact is asserted from a doc. Add a real-execution test:
 # through `sh -ec` outside compose and `$$` expands to the shell PID — the guard becomes "never empty",
 # the empty-password refusal arm CANNOT fire, and the non-vacuity control validates NOTHING while
 # reporting green. Do NOT hand-de-escape the guard string either (that drifts the tested guard from the
-# shipped one). Instead resolve the real entrypoint from `docker compose config` (which performs the
-# `$$`->`$` interpolation), e.g. `yaml.safe_load(subprocess.check_output(["docker","compose","config"]))`
-# -> services["alfred-grafana"]["entrypoint"], and assert it byte-equals what you execute.
+# shipped one).
+#
+# rev.4.2 (VERIFIED IN EXECUTION — Docker 29.4.0 / Compose v5.1.2): `docker compose config` does NOT
+# resolve `$$`->`$` on current Compose — its output still carries `$$`, so extracting the entrypoint
+# from it is ALSO vacuous (independently confirmed on real containers). The mechanism that works:
+# `docker compose create` the (never-started) alfred-grafana container, then
+# `docker inspect --format '{{json .Config.Entrypoint}}' <cid>` — that carries the truly-resolved
+# single-`$` entrypoint the container will actually run. Execute exactly that string. MUTATION-TEST it:
+# with a broken guard the container boots real Grafana and hangs, so `container.wait(timeout=...)` raises
+# and the refusal arms fail RED — that is the non-vacuity proof. Tear the created container down
+# (`docker compose down -v --remove-orphans`) in a `finally`.
 pytestmark = pytest.mark.integration
 
 def test_empty_admin_password_refuses_to_start(grafana_entrypoint_from_compose):
