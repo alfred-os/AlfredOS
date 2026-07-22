@@ -67,7 +67,7 @@ overlaps #469 (first-run experience).
 *this alert existing*." #470 makes the rule evaluate against a live, firing, queryable series
 (Prometheus `/alerts` UI + API). **Interim residual (rev.1 fold of the confirmed coverage gap
 arch-005):** until #479 ships *push/notification* — and until an operator actually has a path to
-reach Prometheus (§6.5) — a *firing-but-unrouted* alert on the **sole durable signal** for the #472
+reach Prometheus (§6.5) — a *firing-but-unrouted* alert on the **sole metrics signal** for the #472
 cancel-path revoke of an already-live child is weaker than "alertable" fully implies. Record this
 explicitly (§10); it is the reason #479 is a scheduled fast-follow, not optional.
 
@@ -84,7 +84,7 @@ explicitly (§10); it is the reason #479 is a scheduled fast-follow, not optiona
   `src/alfred/security/observability.py:47` and `.inc()`-ed at
   `src/alfred/security/quarantine_transport.py:623` (rev.1 fold of **sec-001** line-cite fix) before
   teardown on every revoke path — **including the cancel-path revoke (#472) that writes no
-  `egress.broker.refused` audit row.** So the metric is the *only* durable signal for that revoke
+  `egress.broker.refused` audit row.** So the metric is the *only* metrics signal for that revoke
   class: landing #470 is security-additive, not merely ops hygiene.
 - **The core has no container healthcheck.** Only postgres/redis/gateway define one. **Nothing has
   `depends_on: alfred-core: condition: service_healthy`** — so a core-unhealthy state is observable
@@ -460,7 +460,7 @@ and update them all, not just one block:
   audit section, and the "Detecting it today / Both work without Prometheus" framing.
 
 **Corrected rationale (sec-003/docs-004 — same defect, two lenses):** do **not** say "keep the audit
-path because it is complementary." Say: **the metric is now the *sole durable signal* for the
+path because it is complementary." Say: **the metric is now the *sole metrics signal* for the
 cancel-path revoke class (#472 writes no `egress.broker.refused` row on that path); the audit-log
 detection path remains as an *additive* cross-check for the other revoke classes.** Retain the
 audit-path guidance under that corrected framing; do not propagate the inverted rationale into the
