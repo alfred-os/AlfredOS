@@ -24,20 +24,6 @@
 > an `AttributeError`), **not** a mere OS hiccup; the child's liveness is then **unknown**
 > — see the `capability_abort_failed` triage step below).
 
-## ⚠ Read first: the alert cannot fire yet
-
-`alfred_quarantine_capability_revoked_total` is registered in the **core**
-process, and nothing scrapes the core — `ops/prometheus/prometheus.yml` has a
-single job for `alfred-gateway:9464`, and `start_metrics_server` is called only
-from `alfred gateway start`. The rule is correct and promtool-verified in CI, and
-it starts firing the moment a core scrape target exists. **Tracked in
-[#470](https://github.com/alfred-os/AlfredOS/issues/470).**
-
-Until then, **use the audit-log detection path in "Detecting it today" below.**
-This caveat is written down rather than glossed because an alert nobody can
-receive is worse than a known gap: it invites the assumption that silence means
-health.
-
 ## What it means
 
 `QuarantineStdioTransport._revoke_child_capability` ran. The transport killed the
@@ -66,23 +52,30 @@ Nothing recovers this except restarting `alfred-core`.
 
 ## Detecting it today
 
-Both work without Prometheus.
+**`alfred_quarantine_capability_revoked_total` is the sole durable signal for the
+cancel-path revoke class.** When a revoke is cancelled mid-teardown (#472 finding 2),
+the cancel re-raises *before* the caller reaches `record_broker_failure`, so no
+`egress.broker.refused` audit row is written — the child is still SIGKILLed, but the
+audit-log path below never sees it. The counter increments before teardown on every
+revoke path, cancelled or not, so for this class it is the only signal there is.
+
+The bundled Prometheus scrapes the core and the `QuarantineCapabilityRevoked` rule
+(`ops/alerts/quarantine.yml`) evaluates against that live series — see the
+[observability stack runbook](observability-stack.md) for the Grafana **Core /
+Quarantine** dashboard and direct Prometheus access.
+
+**The audit-log and structlog paths are an additive cross-check for every other
+revoke class** — a non-cancelled revoke writes both a metric increment and an
+`egress.broker.refused` audit row, and the audit/structlog paths additionally carry
+the trigger's context, which the metric (label-free by the §8.2 identity invariant)
+does not.
 
 ```sh
-# Audit rows — the durable signal on the COMMON path. A broker-failure revoke writes a row.
+# Audit rows — corroborates the metric on every NON-cancel-path revoke.
 alfred audit log --since 1h | grep egress.broker.refused
 
-# Or the structlog event in the core's container logs.
-docker compose logs alfred-core | grep security.quarantine_transport.capability_revoked
-```
-
-**Caveat — a cancel-path revoke writes NO `egress.broker.refused` row.** When the revoke
-is cancelled mid-teardown (#472 finding 2), it re-raises the cancel *before* the caller
-reaches `record_broker_failure`, so the durable audit row is forgone — the child is still
-SIGKILLed, but the audit-only detection above misses it. Also grep the structlog events
-(the metric is still un-scrapeable, #470):
-
-```sh
+# The structlog event in the core's container logs covers ALL revoke paths,
+# including the cancel-path one the audit row above misses.
 docker compose logs alfred-core | grep -E \
   'security.quarantine_transport.(capability_revoked|revoke_cancelled|capability_abort_failed)'
 ```
@@ -168,8 +161,6 @@ degraded gateway, not a revoked capability.
 - [#455](https://github.com/alfred-os/AlfredOS/issues/455) — the missing respawn
   scheduler. Implementing it turns this from an outage into a blip, and is the
   fast-follow the security lane conditioned this alert on.
-- [#470](https://github.com/alfred-os/AlfredOS/issues/470) — core metrics are
-  never scraped; the alert above is armed but not live.
 - [#466](https://github.com/alfred-os/AlfredOS/issues/466) — fault-injection
   coverage for the revocation race.
 - [#461](https://github.com/alfred-os/AlfredOS/issues/461) — unbounded audit-write

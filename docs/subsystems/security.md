@@ -447,11 +447,12 @@ spawned once at daemon boot and there is no respawn scheduler
 ([#455](https://github.com/alfred-os/AlfredOS/issues/455)), so every later
 extraction returns `provider_unavailable` until `alfred-core` restarts. Signals
 are the `alfred_quarantine_capability_revoked_total` counter (alert rule
-`ops/alerts/quarantine.yml`), the
+`ops/alerts/quarantine.yml`, scraped by the bundled Prometheus per
+[the observability stack runbook](../runbooks/observability-stack.md)), the
 `security.quarantine_transport.capability_revoked` structlog event, and
-`egress.broker.refused` audit rows. **The metric is not scraped yet**
-([#470](https://github.com/alfred-os/AlfredOS/issues/470)) — use the audit-log
-path. Full triage in the
+`egress.broker.refused` audit rows. The metric is the **sole durable signal**
+for a cancel-path revoke — that path writes no audit row; the audit-log path is
+an **additive** cross-check for every other revoke class. Full triage in the
 [quarantine capability-revoked runbook](../runbooks/quarantine-capability-revoked.md).
 
 The teardown is cancellation-safe (#472 finding 2): a cancel arriving mid-teardown
