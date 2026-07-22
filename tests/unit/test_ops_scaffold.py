@@ -123,7 +123,7 @@ def test_gateway_alerts_present_and_reference_real_metrics() -> None:
 
 
 def test_gateway_dashboard_parses_and_references_real_metrics() -> None:
-    dash = json.loads((OPS / "grafana" / "gateway.json").read_text())
+    dash = json.loads((OPS / "grafana" / "dashboards" / "gateway.json").read_text())
     assert dash.get("title")
     assert len(dash.get("panels", [])) >= 1
     known = _known_metric_bases()
@@ -193,7 +193,7 @@ def test_alert_reason_labels_are_real_enum_values() -> None:
 
 
 def test_egress_panels_present() -> None:
-    dash = json.loads((OPS / "grafana" / "gateway.json").read_text())
+    dash = json.loads((OPS / "grafana" / "dashboards" / "gateway.json").read_text())
     exprs = {t.get("expr") for p in dash["panels"] for t in p.get("targets", [])}
     assert "gateway_egress_inflight" in exprs
     assert "rate(gateway_egress_denied_total[5m])" in exprs
@@ -211,23 +211,83 @@ def test_egress_panels_present() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_core_alerts_reference_real_core_metrics() -> None:
+def _known_core_metric_names() -> set[str]:
+    """The Task 2 Step 5 resolver, factored out so Task 4's dashboard test-002
+    reuses it verbatim instead of re-deriving a second (possibly divergent) copy."""
     from alfred.observability.core_metrics import CORE_OWNED_COLLECTORS
 
     # _name is _total-STRIPPED; re-append _total so both exposition forms are known.
     base = {c._name for c in CORE_OWNED_COLLECTORS}
-    known = base | {n + "_total" for n in base} | {"up"}  # explicit builtin allowlist
+    return base | {n + "_total" for n in base} | {"up"}  # explicit builtin allowlist
+
+
+def _alfred_metric_refs(text: str) -> set[str]:
+    """Every ``alfred_*`` identifier (plus builtin ``up``) referenced in ``text``."""
+    return set(re.findall(r"\balfred_[a-z0-9_]*\b", text)) | (
+        {"up"} if re.search(r"\bup\b", text) else set()
+    )
+
+
+def test_core_alerts_reference_real_core_metrics() -> None:
+    known = _known_core_metric_names()
     exprs = " ".join(
         r["expr"]
         for g in yaml.safe_load((OPS / "alerts" / "core.yml").read_text())["groups"]
         for r in g["rules"]
     )
-    refs = set(re.findall(r"\balfred_[a-z0-9_]*\b", exprs)) | (
-        {"up"} if re.search(r"\bup\b", exprs) else set()
-    )
+    refs = _alfred_metric_refs(exprs)
     unknown = refs - known
     assert not unknown, f"core.yml references metrics no core collector exposes: {sorted(unknown)}"
     # Oracle-independence: also assert the EXPECTED set as an independent literal, so a
     # mis-derived `known` cannot pass a mutated rule. MUTATION-CHECK: a rule referencing
     # `alfred_quarantine_capability_revoked_typo` MUST fail this test.
     assert refs >= {"alfred_quarantine_capability_revoked_total", "up"}
+
+
+# ---------------------------------------------------------------------------
+# #470 PR2 Task 4 (rev.4 test-002/test-006): Grafana dashboard + provisioning
+# validity. Task 4 otherwise ships quarantine.json and both provisioning YAMLs
+# with zero assertion — a panel querying a renamed/nonexistent alfred_* metric,
+# or a datasource/provider typo, would ship silently green (Task 5's e2e is
+# Prometheus-only and never loads Grafana).
+# ---------------------------------------------------------------------------
+
+
+def test_core_dashboard_references_real_core_metrics() -> None:
+    # test-002: mirrors the gateway sibling (test_gateway_dashboard_parses_and_
+    # references_real_metrics above) but resolves against CORE_OWNED_COLLECTORS
+    # via the shared _known_core_metric_names() helper, not the gateway_* AST scan.
+    dash = json.loads((OPS / "grafana" / "dashboards" / "quarantine.json").read_text())
+    assert dash.get("title")
+    assert len(dash.get("panels", [])) >= 1
+    known = _known_core_metric_names()
+    for panel in dash["panels"]:
+        for target in panel.get("targets", []):
+            refs = _alfred_metric_refs(target.get("expr", ""))
+            unknown = refs - known
+            assert refs <= known, f"panel {panel.get('title')} references unknown: {unknown}"
+    # Oracle-independence, same rationale as test_core_alerts_reference_real_core_metrics.
+    all_refs: set[str] = set()
+    for panel in dash["panels"]:
+        for target in panel.get("targets", []):
+            all_refs |= _alfred_metric_refs(target.get("expr", ""))
+    assert all_refs >= {"alfred_quarantine_capability_revoked_total", "up"}
+
+
+def test_grafana_provisioning_targets_are_correct() -> None:
+    # test-006: a typo in either provisioning YAML yields a silently dead
+    # datasource / unloaded dashboards — nothing else in the ops/ scaffold
+    # cross-checks these against the compose service bind / mount target.
+    datasource_cfg = yaml.safe_load(
+        (OPS / "grafana" / "provisioning" / "datasources" / "prometheus.yml").read_text()
+    )
+    datasources = datasource_cfg["datasources"]
+    assert len(datasources) == 1
+    assert datasources[0]["url"] == "http://alfred-prometheus:9090"
+
+    dashboard_cfg = yaml.safe_load(
+        (OPS / "grafana" / "provisioning" / "dashboards" / "dashboards.yml").read_text()
+    )
+    providers = dashboard_cfg["providers"]
+    assert len(providers) == 1
+    assert providers[0]["options"]["path"] == "/var/lib/grafana/dashboards"

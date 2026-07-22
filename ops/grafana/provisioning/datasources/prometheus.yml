@@ -1,0 +1,14 @@
+# AlfredOS Grafana datasource provisioning (#470 PR2 Task 4).
+#
+# Points the bundled Grafana at the bundled Prometheus over the compose-internal
+# network (alfred_internal). `url` MUST match alfred-prometheus's service name +
+# --web.listen-address port in docker-compose.yaml — a typo here is a silently
+# dead datasource (test_grafana_provisioning_targets_are_correct in
+# tests/unit/test_ops_scaffold.py cross-checks it).
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://alfred-prometheus:9090
+    isDefault: true
