@@ -11,19 +11,40 @@ test-engineer flagged the duplication across
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
 def slice_shell_function(setup_sh: Path, func_start: str) -> str:
-    """Return a top-level shell function's source (from its ``name() {`` opening
-    line through the matching ``\\n}\\n``) sliced out of ``setup_sh``.
+    """Return a top-level shell function's source, sliced out of ``setup_sh``.
 
-    Anchored on the opening line so a moved/renamed function raises ``ValueError``
-    here rather than silently returning a stale copy — the caller must prepend the
-    result to a sliced block that calls the function, or the reconstructed script
-    would fail with a bash "command not found" instead of exercising the real code.
+    ``func_start`` is the function's declaration line (``name() {``); it must appear at
+    column 0. The closing ``}`` is located by a **heredoc-aware brace-depth scan** — not the
+    first ``\\n}\\n`` — so a ``}`` line inside a heredoc, or a nested ``{ … }`` group, cannot
+    truncate the slice (#470 CR: structurally safe). Anchoring on the declaration line means a
+    moved/renamed function raises ``ValueError`` here rather than silently returning a stale
+    copy; the caller prepends the result to a sliced call-site block.
     """
-    content = setup_sh.read_text()
-    start = content.index(func_start)
-    end = content.index("\n}\n", start) + len("\n}\n")
-    return content[start:end]
+    lines = setup_sh.read_text().splitlines(keepends=True)
+    anchor = func_start.rstrip("\n")
+    start = next((i for i, ln in enumerate(lines) if ln.rstrip("\n") == anchor), None)
+    if start is None:
+        raise ValueError(f"{func_start!r} not found as a top-level declaration line")
+
+    heredoc_delim: str | None = None
+    depth = 0
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if heredoc_delim is not None:
+            # Inside a heredoc everything is literal, including ``}`` lines; only the
+            # delimiter (optionally indented, for ``<<-``) ends it.
+            if line.strip() == heredoc_delim:
+                heredoc_delim = None
+            continue
+        opened = re.search(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?", line)
+        if opened:
+            heredoc_delim = opened.group(1)
+        depth += line.count("{") - line.count("}")
+        if depth == 0:
+            return "".join(lines[start : i + 1])
+    raise ValueError(f"{func_start!r} never closes (unbalanced braces)")
