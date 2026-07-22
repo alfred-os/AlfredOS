@@ -51,6 +51,23 @@ _MAX_METRICS_BYTES: Final[int] = 8 * 1024 * 1024
 CORE_METRICS_PORT_ENV: Final[str] = "ALFRED_CORE_METRICS_PORT"
 CORE_METRICS_DEFAULT_PORT: Final[int] = 9465
 
+# Every core-owned collector is named ``alfred_…`` (the leak-guard in
+# tests/unit/observability/test_core_registry_surface.py derives that population from the
+# source tree). A probe uses it to tell "MY exposition" apart from "some other HTTP server
+# answering 200 on this port" — a 200 from a squatter, or from the GATEWAY's ``gateway_*``
+# exposition on a mis-set port, used to read as HEALTHY (uat-p4). Declared HERE, next to the
+# port pair, rather than in ``core_metrics`` (which is the collector source of truth) because
+# ``_healthcheck.py`` must stay cheap to import: ``core_metrics`` pulls the comms/plugins/
+# security/supervisor observability graph in, and the probe runs every 15s. The two are
+# pinned together by a test that asserts the REAL curated registry's exposition satisfies
+# :func:`declares_metric_family` with this prefix.
+CORE_METRIC_FAMILY_PREFIX: Final[str] = "alfred_"
+
+# A Prometheus exposition declares each family on a ``# HELP <name> …`` / ``# TYPE <name> …``
+# line before its samples. ``prometheus_client`` always emits BOTH for every registered
+# collector, so matching either is sufficient and neither is load-bearing alone.
+_FAMILY_DECLARATIONS: Final[tuple[str, ...]] = ("# HELP ", "# TYPE ")
+
 
 def resolve_metrics_port(env_var: str, default: int) -> int:
     """Resolve a metrics port from ``env_var`` (default ``default``).
@@ -127,9 +144,43 @@ def fetch_metrics_text(port: int) -> str:
     return body.decode("utf-8", errors="replace")
 
 
+def declares_metric_family(exposition: str, family_prefix: str) -> bool:
+    """True when ``exposition`` declares at least one metric family named ``family_prefix*``.
+
+    A pure predicate over already-fetched text — the transport question ("did anything
+    answer?") is :func:`fetch_metrics_text`'s; this is the identity question ("is what
+    answered MY exposition?"). Split because the gateway and the core scrape the same shape
+    over the same helper but own DIFFERENT family prefixes.
+
+    Deliberately weaker than a full parse. It asserts only the one property every valid
+    exposition of this service has and no impostor does: a ``# HELP``/``# TYPE`` declaration
+    line for a family carrying the service's prefix. That is not brittle, because:
+
+    * every core collector is registered at import time (see
+      :mod:`alfred.observability.core_metrics`), so the declaration lines are present from
+      t=0 even when every counter still reads 0 — an "empty but valid" exposition still
+      passes, which a sample-counting check would wrongly fail;
+    * it does not pin family NAMES, cardinality, label sets or ordering, so adding, renaming
+      or removing a core metric cannot break the probe;
+    * it does not depend on ``prometheus_client``'s escaping, HELP text or trailing ``# EOF``.
+
+    What it rejects is exactly the uat-p4 class: a 200 carrying prose, an empty body, or
+    another service's exposition (e.g. ``gateway_*``) on the probed port.
+    """
+    for line in exposition.splitlines():
+        for declaration in _FAMILY_DECLARATIONS:
+            if line.startswith(declaration) and line[len(declaration) :].lstrip().startswith(
+                family_prefix
+            ):
+                return True
+    return False
+
+
 __all__ = [
     "CORE_METRICS_DEFAULT_PORT",
     "CORE_METRICS_PORT_ENV",
+    "CORE_METRIC_FAMILY_PREFIX",
+    "declares_metric_family",
     "fetch_metrics_text",
     "resolve_metrics_port",
     "start_metrics_server",

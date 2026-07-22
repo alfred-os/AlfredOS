@@ -17,8 +17,10 @@ from prometheus_client import CollectorRegistry
 
 from alfred.observability import metrics_server as metrics_server_module
 from alfred.observability.metrics_server import (
+    CORE_METRIC_FAMILY_PREFIX,
     CORE_METRICS_DEFAULT_PORT,
     CORE_METRICS_PORT_ENV,
+    declares_metric_family,
     fetch_metrics_text,
     resolve_metrics_port,
     start_metrics_server,
@@ -286,3 +288,53 @@ def test_fetch_metrics_text_reraises_http_exception_as_oserror(
     assert isinstance(exc_info.value.__cause__, http.client.HTTPException)
     assert len(created) == 1
     assert created[0].closed is True  # the `finally` still closes the connection
+
+
+# ── declares_metric_family (#482 P4 — the /metrics identity predicate) ─────────
+
+
+@pytest.mark.parametrize(
+    "exposition",
+    [
+        "# HELP alfred_x help\n# TYPE alfred_x counter\nalfred_x 0.0\n",
+        "# TYPE alfred_x counter\nalfred_x 0.0\n",  # # TYPE alone is sufficient
+        "# HELP alfred_x help\n",  # # HELP alone is sufficient
+        "# HELP   alfred_x help\n",  # tolerant of extra whitespace after the declaration
+        "some preamble\n# TYPE alfred_y gauge\nalfred_y 1\n",  # not required to be the first line
+    ],
+)
+def test_declares_metric_family_accepts_a_declared_alfred_family(exposition: str) -> None:
+    assert declares_metric_family(exposition, CORE_METRIC_FAMILY_PREFIX) is True
+
+
+@pytest.mark.parametrize(
+    "exposition",
+    [
+        "",  # empty body (uat-p4)
+        "hello world\n",  # prose 200 (uat-p4)
+        # the GATEWAY's exposition on a mis-set port (uat-p4)
+        "# HELP gateway_up 1\n# TYPE gateway_up gauge\ngateway_up 1\n",
+        "alfred_x 0.0\n",  # a bare sample line with no HELP/TYPE declaration does not count
+        "#HELP alfred_x help\n",  # a malformed declaration (no space) is not a declaration
+        "# HELP notalfred_x help\n",  # a family that only contains, not starts with, the prefix
+    ],
+)
+def test_declares_metric_family_rejects_a_non_core_exposition(exposition: str) -> None:
+    assert declares_metric_family(exposition, CORE_METRIC_FAMILY_PREFIX) is False
+
+
+def test_real_curated_registry_exposition_satisfies_the_predicate() -> None:
+    """Pin the predicate to the ACTUAL core exposition, not a hand-written stand-in.
+
+    The docstring promises the prefix constant and ``declares_metric_family`` are "pinned
+    together by a test that asserts the REAL curated registry's exposition satisfies the
+    predicate". Without this, the constant could drift from what the curated registry actually
+    emits and the probe would call a live core UNHEALTHY. Derived independently of the
+    predicate (via ``generate_latest``), so it is not a tautological oracle.
+    """
+    from prometheus_client import generate_latest
+
+    from alfred.observability.core_metrics import build_core_registry
+
+    exposition = generate_latest(build_core_registry()).decode()
+    assert declares_metric_family(exposition, CORE_METRIC_FAMILY_PREFIX) is True

@@ -8,11 +8,14 @@ failure visible (CLAUDE.md hard rule 7) without wedging the stack. Mirrors
 narrower: no breaker-latch tier (the daemon has no equivalent back-pressure breaker gauge),
 so this is single-tier liveness only.
 
-Two distinct exit-1 branches (i18n-004): a bad ``ALFRED_CORE_METRICS_PORT`` value is a
-CONFIG error (the port could never have been probed), while an unreachable endpoint is a
-PROBE failure (the port is well-formed but the exposition did not answer) — the operator
-copy for each is deliberately different, so `t()` is called against two SEPARATE catalog
-keys rather than a single shared message.
+Three distinct exit-1 branches (i18n-004): a bad ``ALFRED_CORE_METRICS_PORT`` value is a
+CONFIG error (the port could never have been probed), an unreachable endpoint is a PROBE
+failure (the port is well-formed but nothing usable answered), and a 200 that is not this
+service's exposition is an IDENTITY failure (something answered, but it is not the core's
+/metrics) — the operator copy for each is deliberately different, so `t()` is called against
+three SEPARATE catalog keys rather than one shared message. The healthy arm echoes a line
+too (uat-p1): the README tells a human to run this by hand, and a silent exit 0 is
+indistinguishable from a broken command without inspecting ``$?``.
 """
 
 from __future__ import annotations
@@ -24,8 +27,10 @@ import typer
 
 from alfred.i18n import t
 from alfred.observability.metrics_server import (
+    CORE_METRIC_FAMILY_PREFIX,
     CORE_METRICS_DEFAULT_PORT,
     CORE_METRICS_PORT_ENV,
+    declares_metric_family,
     fetch_metrics_text,
     resolve_metrics_port,
 )
@@ -44,18 +49,27 @@ _DETAIL_MAX_CHARS: Final[int] = 200
 def healthcheck_daemon() -> None:
     """Probe the core's /metrics exposition. Exit 0 healthy / 1 unhealthy; never a traceback.
 
-    Two typed refusal arms, each with its OWN operator message (i18n-004):
+    Three typed refusal arms, each with its OWN operator message (i18n-004):
 
     * A malformed ``ALFRED_CORE_METRICS_PORT`` (``ValueError`` from
       :func:`resolve_metrics_port`) is a config fault — the probe never had a port to dial.
     * An unreachable endpoint (``OSError`` from :func:`fetch_metrics_text`) is a live-probe
-      fault — the port resolved fine but no VALID exposition came back: a bind failure, a
+      fault — the port resolved fine but no VALID response came back: a bind failure, a
       not-yet-started server, a torn socket, a non-HTTP responder, or (CR-A) an HTTP answer
-      that is not a ``200`` exposition, e.g. a 404 from something else squatting on the port
-      or a 500 from a wedged handler. Those last two used to read as HEALTHY, which made this
-      probe unable to fail for a whole class of the condition it exists to catch. This stays
-      DELIBERATELY observational-only in scope: the data plane may still be serving fine even
-      while /metrics is down.
+      that is not a ``200``, e.g. a 404 from something else squatting on the port or a 500
+      from a wedged handler.
+    * A ``200`` whose body is not this service's exposition is an identity fault (uat-p4).
+      A transport-level probe cannot see the difference between the core's /metrics and any
+      other 200 on the same port — UAT confirmed prose, an empty body and the GATEWAY's
+      ``gateway_*`` exposition all read as HEALTHY, which is exactly the dead-metrics class
+      #470 exists to eliminate. :func:`declares_metric_family` closes that: healthy now means
+      "a Prometheus exposition declaring an ``alfred_`` family answered", not "something
+      answered 200".
+
+    Healthy echoes one line naming the port (uat-p1) — a hand-run probe must be legible
+    without checking ``$?``; Docker discards healthcheck stdout, so the container probe is
+    unaffected. Failure stays DELIBERATELY observational-only in scope: the data plane may
+    still be serving fine even while /metrics is down.
     """
     try:
         port = resolve_metrics_port(CORE_METRICS_PORT_ENV, CORE_METRICS_DEFAULT_PORT)
@@ -65,11 +79,16 @@ def healthcheck_daemon() -> None:
         typer.echo(t("daemon.healthcheck.bad_port", detail=detail))
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
     try:
-        fetch_metrics_text(port)
+        exposition = fetch_metrics_text(port)
     except OSError as exc:
         log.warning("daemon.healthcheck.metrics_unreachable", port=port, error=repr(exc))
         typer.echo(t("daemon.healthcheck.metrics_unreachable", port=port))
         raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
+    if not declares_metric_family(exposition, CORE_METRIC_FAMILY_PREFIX):
+        log.warning("daemon.healthcheck.not_core_exposition", port=port)
+        typer.echo(t("daemon.healthcheck.not_core_exposition", port=port))
+        raise typer.Exit(code=_EXIT_UNHEALTHY)
+    typer.echo(t("daemon.healthcheck.healthy", port=port))
 
 
 __all__ = ["healthcheck_daemon"]
