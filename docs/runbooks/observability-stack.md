@@ -25,7 +25,10 @@ Grafana's `3000` is bound to the host loopback only (`127.0.0.1:3000:3000` in
   which is a different mechanism from the host-published-port path that fails for
   `internal: true` containers on plain Docker Desktop and (separately) on OrbStack itself
   for `alfred-postgres`'s `5432`. If `*.orb.local` does not resolve for you, fall back to
-  the loopback URL or the tunnel below — either always works.
+  the loopback URL or the tunnel below — either always works. *Verified 2026-07-22 on OrbStack
+  (project `alfredos`): `http://alfred-grafana.alfredos.orb.local` returned the Grafana login
+  (HTTP 200) and `http://alfred-prometheus.alfredos.orb.local:9090/-/healthy` answered
+  "Prometheus Server is Healthy." — reached with no second external bridge.*
 - **Docker Desktop (macOS/Windows, non-OrbStack):** the host-published-port loss that
   affects `alfred-postgres:5432` (see the README note above) affects `alfred-grafana:3000`
   the same way — `internal: true` is the reason, not anything Grafana-specific. There is no
