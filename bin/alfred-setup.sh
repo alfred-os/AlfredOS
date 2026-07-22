@@ -74,6 +74,40 @@ if [[ ! -f .env ]]; then
   fi
 fi
 
+step "Seeding Grafana admin password"
+# #470 PR2 Task 3 (rev.4 devops-003/devops-004/sec-004/sec-005): guard on
+# PRESENT-AND-NON-EMPTY, not absent. .env.example ships
+# GF_SECURITY_ADMIN_PASSWORD= (empty), and the step above does
+# `cp .env.example .env` on first run, so the key is PRESENT but EMPTY — an
+# "if absent, append" guard would never fire and Grafana would boot with an
+# empty admin password (sec-004). Placement is load-bearing: AFTER
+# `cp .env.example .env` creates the file, BEFORE the credential-validation
+# gate below, so a stock first run seeds in one pass.
+#
+# This seed is genuinely different from the audit.hash_pepper bootstrap
+# further down (.env, not secrets.toml; present-and-non-empty, not
+# present-only; in-place `sed`, not append) — mirroring that seed literally
+# would reproduce the wrong guard shape here. A concurrency lock is
+# optional: the docker-compose.yaml entrypoint preflight guard is the
+# fail-closed backstop for any weak/empty result regardless of a lost race.
+if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
+  # Graceful openssl preflight — a bare `openssl rand` under `set -euo
+  # pipefail` aborts opaquely on a host without openssl. Mirrors the
+  # audit.hash_pepper bootstrap's message.
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "ERROR: openssl is required to generate GF_SECURITY_ADMIN_PASSWORD. Install openssl and re-run." >&2
+    exit 1
+  fi
+  pw="$(openssl rand -hex 24)"
+  # Replace an existing empty line (the cp .env.example .env shape), else append.
+  if grep -qE '^GF_SECURITY_ADMIN_PASSWORD=' .env; then
+    sed -i.bak "s|^GF_SECURITY_ADMIN_PASSWORD=.*|GF_SECURITY_ADMIN_PASSWORD=${pw}|" .env && rm -f .env.bak
+  else
+    printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$pw" >> .env
+  fi
+  echo "Seeded GF_SECURITY_ADMIN_PASSWORD into .env."
+fi
+
 step "Validating .env credentials"
 # ---------------------------------------------------------------------------
 # ONE gate for every credential the stack needs, reporting ALL problems at once.
