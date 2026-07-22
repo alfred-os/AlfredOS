@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import time
 import uuid
@@ -72,15 +73,29 @@ def compose_stack() -> Iterator[None]:
     if not docker_available():
         pytest.skip("docker unavailable — graduation smoke skipped cleanly")
 
+    # #470: alfred-grafana's compose entrypoint fail-closes (exit 78) on an unset/
+    # guessable GF_SECURITY_ADMIN_PASSWORD (docker-compose.yaml). Seed a non-guessable
+    # value for this subprocess's `docker compose up` so Grafana boots — mirrors what
+    # bin/alfred-setup.sh does for an operator.
+    env = {**os.environ, "GF_SECURITY_ADMIN_PASSWORD": secrets.token_hex(24)}
+
     up = subprocess.run(
         ["docker", "compose", "up", "-d", "--wait"],
         capture_output=True,
         text=True,
         check=False,
         timeout=HARD_BUDGET_SECONDS,
+        env=env,
     )
     if up.returncode != 0:
-        pytest.skip(f"docker compose up failed (no buildable stack here): {up.stderr[-400:]}")
+        # docker-unavailable and opt-in-off were already ruled out above, and the
+        # Grafana password is now seeded — a non-zero return here is a REAL stack-boot
+        # failure, not an environment-unavailability skip. Fail loud (the #245
+        # assert-RAN discipline): skipping would false-green the graduation smoke.
+        pytest.fail(
+            f"docker compose up --wait failed with docker available, "
+            f"{_OPT_IN_ENV}=1, and GF_SECURITY_ADMIN_PASSWORD seeded: {up.stderr[-800:]}"
+        )
     try:
         yield
     finally:

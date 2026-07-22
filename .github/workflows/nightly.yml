@@ -66,6 +66,14 @@ jobs:
           else
             echo "::notice::apparmor_parser absent — skipping profile load (security_opt is a no-op on this host)."
           fi
+      - name: Seed Grafana admin password (#470)
+        if: steps.check.outputs.has_e2e == 'true'
+        # docker-compose.yaml's alfred-grafana entrypoint fail-closes (exit 78) on an
+        # unset/guessable GF_SECURITY_ADMIN_PASSWORD. A bare `docker compose up -d --wait`
+        # with no value set crash-loops Grafana under `restart: unless-stopped`, which
+        # would fail this boot step (or worse, only false-green a downstream skip). Seed a
+        # non-guessable per-run value — mirrors what bin/alfred-setup.sh does for an operator.
+        run: echo "GF_SECURITY_ADMIN_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
       - name: Boot stack
         if: steps.check.outputs.has_e2e == 'true'
         run: docker compose up -d --wait

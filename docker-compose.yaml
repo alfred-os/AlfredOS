@@ -396,8 +396,20 @@ services:
       - "127.0.0.1:3000:3000"   # loopback (Linux); OrbStack via *.orb.local; DD via tunnel
     networks:
       - alfred_internal
+    # devops-001/perf-001: liveness probe on Grafana's own /api/health endpoint (the image
+    # ships `wget`). Without this, a wedged-but-still-running Grafana process (e.g. stuck
+    # behind the fail-closed entrypoint guard's `exec` or a dashboard-provisioning hang)
+    # never surfaces as unhealthy — `docker compose up --wait` and the graduation smoke
+    # would both report the stack ready while the dashboards are unreachable.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
-      - alfred-prometheus
+      alfred-prometheus:
+        condition: service_healthy
 
 networks:
   # Spec C / G7 (epic #333, ADR-0042): the connectivity-free-core split. alfred_internal is
