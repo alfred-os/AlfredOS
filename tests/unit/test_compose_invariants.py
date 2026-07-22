@@ -906,7 +906,10 @@ def test_grafana_password_uses_soft_default_not_required(compose: dict[str, Any]
 
 
 def test_grafana_publishes_only_loopback(compose: dict[str, Any]) -> None:
-    for m in compose["services"]["alfred-grafana"].get("ports", []) or []:
+    ports = compose["services"]["alfred-grafana"].get("ports", []) or []
+    # non-vacuity: a future switch to `expose:` (no host mapping) must not silently pass this test.
+    assert ports, "alfred-grafana must publish at least one port mapping"
+    for m in ports:
         s = m if isinstance(m, str) else f"{m.get('published', '')}"
         # ruff flags "0.0.0.0" as S104 (possible bind-all), but this is a STRING comparison
         # against a compose port mapping's text, not a bind-address construction — nothing

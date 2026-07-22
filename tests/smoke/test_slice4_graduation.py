@@ -87,16 +87,17 @@ def compose_stack() -> Iterator[None]:
         timeout=HARD_BUDGET_SECONDS,
         env=env,
     )
-    if up.returncode != 0:
-        # docker-unavailable and opt-in-off were already ruled out above, and the
-        # Grafana password is now seeded — a non-zero return here is a REAL stack-boot
-        # failure, not an environment-unavailability skip. Fail loud (the #245
-        # assert-RAN discipline): skipping would false-green the graduation smoke.
-        pytest.fail(
-            f"docker compose up --wait failed with docker available, "
-            f"{_OPT_IN_ENV}=1, and GF_SECURITY_ADMIN_PASSWORD seeded: {up.stderr[-800:]}"
-        )
     try:
+        if up.returncode != 0:
+            # docker-unavailable and opt-in-off were already ruled out above, and the
+            # Grafana password is now seeded — a non-zero return here is a REAL stack-boot
+            # failure, not an environment-unavailability skip. Fail loud (the #245
+            # assert-RAN discipline): skipping would false-green the graduation smoke.
+            # Inside the try so `finally: down -v` still tears down a partial boot.
+            pytest.fail(
+                f"docker compose up --wait failed with docker available, "
+                f"{_OPT_IN_ENV}=1, and GF_SECURITY_ADMIN_PASSWORD seeded: {up.stderr[-800:]}"
+            )
         yield
     finally:
         subprocess.run(

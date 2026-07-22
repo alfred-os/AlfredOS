@@ -51,11 +51,15 @@ Grafana's `3000` is bound to the host loopback only (`127.0.0.1:3000:3000` in
 
   ```sh
   docker network ls | grep alfred_internal   # confirm the actual network name for your project
-  docker run -d --name alfred-grafana-tunnel -p 127.0.0.1:3000:3000 \
+  # Host port 3001, NOT 3000: alfred-grafana already binds 127.0.0.1:3000, so reusing it
+  # would fail with "port is already allocated". Reach the tunnel at http://127.0.0.1:3001.
+  docker run -d --name alfred-grafana-tunnel -p 127.0.0.1:3001:3000 \
     alpine/socat@sha256:4e625a62c9ea40ccbce93b9a4fcc6b41740a9f308389c216f34c88ce3abb275b \
     TCP-LISTEN:3000,fork,reuseaddr TCP:alfred-grafana:3000
   docker network connect <the-alfred_internal-network-name> alfred-grafana-tunnel
   ```
+
+  Then open <http://127.0.0.1:3001>.
 
   Remove it with `docker rm -f alfred-grafana-tunnel` when done — don't leave a dual-homed
   bridge container running longer than the debugging session needs. Switching to OrbStack
@@ -63,7 +67,9 @@ Grafana's `3000` is bound to the host loopback only (`127.0.0.1:3000:3000` in
 
 ### First login
 
-Username `admin`; password is `GF_SECURITY_ADMIN_PASSWORD` from your `.env` (see below).
+Username `admin` (the default; override it with `GF_SECURITY_ADMIN_USER` in `.env` — the
+compose `${GF_SECURITY_ADMIN_USER:-admin}` honours it); password is `GF_SECURITY_ADMIN_PASSWORD`
+from your `.env` (see below).
 `GF_USERS_ALLOW_SIGN_UP` and anonymous auth are both off — there is no self-service
 account creation.
 
