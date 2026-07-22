@@ -102,7 +102,7 @@ def _run_seed(
         # test_setup_script_audit_pepper.py's stub_openssl fixture.
         stub_bin = tmp_path / "stub_bin"
         stub_bin.mkdir(exist_ok=True)
-        for tool in ("bash", "sh", "grep", "sed", "printf", "rm", "cat"):
+        for tool in ("bash", "sh", "grep", "sed", "printf", "rm", "cat", "chmod"):
             tool_path = shutil.which(tool)
             if tool_path is None:
                 continue

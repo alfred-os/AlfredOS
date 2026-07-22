@@ -87,6 +87,7 @@ step "Ensuring .env exists"
 if [[ ! -f .env ]]; then
   if [[ -f .env.example ]]; then
     cp .env.example .env
+    chmod 600 .env   # owner-only from creation — it will hold seeded/edited credentials
     echo "Created .env from .env.example. Edit it before running 'docker compose up'."
   else
     warn ".env.example not found; create .env manually."
@@ -110,6 +111,10 @@ step "Seeding Grafana admin password"
 # optional: the docker-compose.yaml entrypoint preflight guard is the
 # fail-closed backstop for any weak/empty result regardless of a lost race.
 if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
+  # Lock .env to owner-only BEFORE writing the secret — there must be no window in which
+  # the seeded credential is world-readable (#470 security review: no write-then-chmod
+  # disclosure race). Covers a just-created .env AND a pre-existing one.
+  [[ -f .env ]] && chmod 600 .env
   # Graceful openssl preflight — a bare `openssl rand` under `set -euo
   # pipefail` aborts opaquely on a host without openssl. Shares its message
   # with the audit.hash_pepper bootstrap below via openssl_missing_message.
@@ -118,18 +123,15 @@ if ! grep -qE '^GF_SECURITY_ADMIN_PASSWORD=.+' .env; then
     exit 1
   fi
   pw="$(openssl rand -hex 24)"
-  # Replace an existing empty line (the cp .env.example .env shape), else append.
+  # Write under `umask 077` so sed's backup/temp files are also owner-only (the in-place
+  # .env keeps its 600 mode). Replace an existing empty line (the cp shape), else append.
   if grep -qE '^GF_SECURITY_ADMIN_PASSWORD=' .env; then
-    sed -i.bak "s|^GF_SECURITY_ADMIN_PASSWORD=.*|GF_SECURITY_ADMIN_PASSWORD=${pw}|" .env && rm -f .env.bak
+    ( umask 077 && sed -i.bak "s|^GF_SECURITY_ADMIN_PASSWORD=.*|GF_SECURITY_ADMIN_PASSWORD=${pw}|" .env ) && rm -f .env.bak
   else
-    printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$pw" >> .env
+    ( umask 077 && printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$pw" >> .env )
   fi
   echo "Seeded GF_SECURITY_ADMIN_PASSWORD into .env."
 fi
-
-# Restrict .env to owner-only — it now holds the seeded Grafana secret (and any other
-# credentials). Applied every run so an already-existing .env gets locked down too.
-[ -f .env ] && chmod 600 .env
 
 step "Validating .env credentials"
 # ---------------------------------------------------------------------------
