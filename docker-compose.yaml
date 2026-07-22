@@ -315,6 +315,35 @@ services:
       retries: 3
       start_period: 10s
 
+  # #470 PR2 Task 1: bundled internal-only Prometheus. Scrapes alfred-gateway (:9464) and
+  # alfred-core (:9465) over alfred_internal only — it never joins alfred_external, so it
+  # has no route to the internet even though nothing in its own config asks for one
+  # (test_observability_services_internal_only is the compose-level guard; internal:true
+  # on the network is the kernel-level backstop). No --web.enable-admin-api /
+  # --web.enable-lifecycle: those flags let an unauthenticated caller on the compose
+  # network wipe the TSDB or force a config reload, which the built-in scrape-only
+  # surface has no legitimate use for here (test_prometheus_has_no_admin_or_lifecycle_api).
+  # No host port published — operators reach it via `alfred` CLI / Grafana, not directly.
+  alfred-prometheus:
+    image: prom/prometheus:v3.13.1
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.listen-address=0.0.0.0:9090"
+    volumes:
+      - alfred_prom_data:/prometheus
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/alerts:/etc/prometheus/alerts:ro
+    networks:
+      - alfred_internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
 networks:
   # Spec C / G7 (epic #333, ADR-0042): the connectivity-free-core split. alfred_internal is
   # kernel-isolated (internal: true — no route to the internet); the core + datastores live
@@ -335,3 +364,6 @@ volumes:
   # G7-4: gateway-only Discord adapter egress socket dir. Mounted on alfred-gateway ONLY.
   # The connectivity-free core never mounts this volume (devops-001 / Spec C invariant).
   alfred_discord_egress:
+  # #470 PR2 Task 1: Prometheus TSDB data — 15d retention (command's
+  # --storage.tsdb.retention.time), so this volume grows bounded, not unbounded.
+  alfred_prom_data:

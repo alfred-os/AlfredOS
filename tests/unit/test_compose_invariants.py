@@ -831,3 +831,42 @@ def test_alfred_core_sets_core_metrics_port(compose: dict[str, Any]) -> None:
     absent the env var, so the compose default must agree (#470)."""
     env = compose["services"]["alfred-core"].get("environment", {}) or {}
     assert env.get("ALFRED_CORE_METRICS_PORT") == "${ALFRED_CORE_METRICS_PORT:-9465}"
+
+
+# ---------------------------------------------------------------------------
+# #470 PR2 Task 1: bundle an internal-only Prometheus into the compose stack.
+# Mirrors the connectivity-free-core invariants above — the observability
+# services must never reach alfred_external, and Prometheus must not expose
+# an admin/lifecycle surface an unauthenticated caller could use to reload
+# config or wipe the TSDB.
+# ---------------------------------------------------------------------------
+
+
+def test_observability_services_internal_only(compose):
+    # Grafana lands in Task 3 — this task ships Prometheus only, so the check is scoped to it here;
+    # Task 3 extends this tuple to include "alfred-grafana" when the service is added.
+    for name in ("alfred-prometheus",):
+        nets = _service_networks(compose, name)
+        assert nets == {"alfred_internal"}, (
+            f"{name} must join alfred_internal ONLY; got {sorted(nets)}"
+        )
+
+
+def test_prometheus_has_no_admin_or_lifecycle_api(compose):
+    cmd = compose["services"]["alfred-prometheus"].get("command", []) or []
+    joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+    assert "--web.enable-admin-api" not in joined
+    assert "--web.enable-lifecycle" not in joined
+
+
+# rev.4 (sec-001): the "no remote_write" hardening invariant (plan line 27, spec §6.1) is
+# enumerated but the command-flag test above only checks the compose `command:` array —
+# remote_write/remote_read are BLOCKS in ops/prometheus/prometheus.yml, unchecked, which is
+# this repo's paper-only-gate pattern (enumerated invariant, no guard). internal:true is the
+# kernel-level backstop (egress can't reach a public host), so this is defense-in-depth, but
+# the guard must exist. Assert over the PARSED config file. (yaml + Path are already imported
+# at module scope above — no need to re-import locally.)
+def test_prometheus_config_has_no_remote_write():
+    cfg = yaml.safe_load((COMPOSE_PATH.parent / "ops/prometheus/prometheus.yml").read_text())
+    assert "remote_write" not in cfg, "Prometheus must not remote_write (would be external egress)"
+    assert "remote_read" not in cfg, "Prometheus must not remote_read"
