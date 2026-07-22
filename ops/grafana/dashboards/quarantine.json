@@ -1,0 +1,10 @@
+{
+  "title": "AlfredOS Core / Quarantine",
+  "uid": "alfred-core-quarantine",
+  "schemaVersion": 39,
+  "tags": ["alfred", "core", "quarantine"],
+  "panels": [
+    {"id": 1, "title": "Core /metrics scrape up", "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}, "targets": [{"expr": "up{job=\"alfred-core\"}"}]},
+    {"id": 2, "title": "Quarantine capability revocations (total)", "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}, "targets": [{"expr": "alfred_quarantine_capability_revoked_total"}]}
+  ]
+}

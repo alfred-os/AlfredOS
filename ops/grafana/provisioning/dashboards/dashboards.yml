@@ -1,0 +1,12 @@
+# AlfredOS Grafana dashboard-provider provisioning (#470 PR2 Task 4).
+#
+# `options.path` MUST match the dashboards-only compose mount target
+# (./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro, Task 3 rev.1
+# devops-006) — a typo here silently leaves the dashboards directory unloaded
+# (test_grafana_provisioning_targets_are_correct in
+# tests/unit/test_ops_scaffold.py cross-checks it).
+apiVersion: 1
+providers:
+  - name: alfred
+    type: file
+    options: {path: /var/lib/grafana/dashboards}
