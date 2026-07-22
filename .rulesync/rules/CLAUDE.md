@@ -103,6 +103,7 @@ or `--help` will simply not list them; do not assume them present.
 | All quality gates | Slice 1 | `make check` (lint + format + type + test) |
 | Local stack up | Slice 1 | `docker compose up -d` |
 | TUI conversation | Slice 1 | `alfred chat` (dials the running gateway) |
+| Daemon (core runtime) | Slice 4 | `alfred daemon start` · `stop` · `status` · `healthcheck` — `healthcheck` probes the core `/metrics` endpoint on `ALFRED_CORE_METRICS_PORT` (default 9465, compose-internal, never host-published); it backs the `alfred-core` container healthcheck |
 | Gateway (comms front door) | Slice 4 | `alfred gateway start` · `status` · `adapters` · `healthcheck` |
 | Gateway egress state | Spec C | `alfred gateway egress` — reports inflight counts, deny-reason breakdown, and static allowlists per egress plane (proxy / relay / adapter); exit 2 on metrics unavailable |
 | Status snapshot | Slice 1 | `alfred status` |
