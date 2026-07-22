@@ -843,9 +843,10 @@ def test_alfred_core_sets_core_metrics_port(compose: dict[str, Any]) -> None:
 
 
 def test_observability_services_internal_only(compose):
-    # Grafana lands in Task 3 — this task ships Prometheus only, so the check is scoped to it here;
-    # Task 3 extends this tuple to include "alfred-grafana" when the service is added.
-    for name in ("alfred-prometheus",):
+    # Task 3 (#470 PR2): Grafana landed alongside Prometheus — both must stay off
+    # alfred_external so neither has a route to the internet, even though nothing in
+    # either's own config asks for one.
+    for name in ("alfred-prometheus", "alfred-grafana"):
         nets = _service_networks(compose, name)
         assert nets == {"alfred_internal"}, (
             f"{name} must join alfred_internal ONLY; got {sorted(nets)}"
@@ -881,6 +882,51 @@ def test_prometheus_config_has_no_remote_write():
 # prometheus.yml (the other direction). Reuses the `_compose_default` helper already
 # defined above (G7-2c) rather than a second ad hoc regex.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# #470 PR2 Task 3: bundle the default-on, internal-only Grafana service. The
+# admin credential is guarded by three layers (spec §6.2a): (1) `.env.example`
+# present-but-empty + bin/alfred-setup.sh present-and-non-empty seed; (2)
+# compose reads it with `:-` so no `docker compose` verb aborts; (3) the
+# entrypoint preflight refuses to start Grafana when the value is unset,
+# empty, or the literal `admin`. Only layer 3 holds for the operator who
+# skipped setup — its RUNTIME behaviour is proven by the real-execution suite
+# at tests/integration/test_grafana_password_fail_closed.py, not here (a
+# lexical assertion cannot decide what a third-party binary does).
+# ---------------------------------------------------------------------------
+
+
+def test_grafana_password_uses_soft_default_not_required(compose: dict[str, Any]) -> None:
+    env = compose["services"]["alfred-grafana"].get("environment", {}) or {}
+    val = str(env.get("GF_SECURITY_ADMIN_PASSWORD", ""))
+    assert val.startswith("${GF_SECURITY_ADMIN_PASSWORD:-"), (
+        "must use :- (never :?) or it aborts default `up`"
+    )
+
+
+def test_grafana_publishes_only_loopback(compose: dict[str, Any]) -> None:
+    for m in compose["services"]["alfred-grafana"].get("ports", []) or []:
+        s = m if isinstance(m, str) else f"{m.get('published', '')}"
+        # ruff flags "0.0.0.0" as S104 (possible bind-all), but this is a STRING comparison
+        # against a compose port mapping's text, not a bind-address construction — nothing
+        # here binds a socket.
+        assert "127.0.0.1" in s and not s.startswith("0.0.0.0"), (  # noqa: S104
+            "Grafana must bind loopback only"
+        )
+
+
+# rev.3 (PR #480 CR): the `:-` arm alone does NOT fail closed — Grafana ignores an empty env
+# value and falls back to defaults.ini `admin_password = admin`. Pin the preflight guard's
+# SHAPE here; its RUNTIME behaviour is proven by
+# tests/integration/test_grafana_password_fail_closed.py (a lexical assertion cannot decide
+# what a third-party binary does).
+def test_grafana_entrypoint_guards_the_admin_password(compose: dict[str, Any]) -> None:
+    ep = compose["services"]["alfred-grafana"].get("entrypoint")
+    joined = " ".join(ep) if isinstance(ep, list) else str(ep or "")
+    assert "GF_SECURITY_ADMIN_PASSWORD" in joined, "entrypoint must preflight the admin password"
+    assert "exit 78" in joined, "the guard must refuse (EX_CONFIG), not warn"
+    assert "exec /run.sh" in joined, "the pass path must hand off to Grafana's real entrypoint"
 
 
 def test_scrape_target_ports_match_compose_defaults(compose: dict[str, Any]) -> None:

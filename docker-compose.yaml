@@ -344,6 +344,61 @@ services:
       timeout: 5s
       retries: 3
 
+  # #470 PR2 Task 3: bundled internal-only Grafana. Credential design = three layers
+  # (spec §6.2a): (1) .env.example ships GF_SECURITY_ADMIN_PASSWORD present-but-empty and
+  # bin/alfred-setup.sh seeds it present-and-non-empty; (2) the `:-` default chain below means
+  # no `docker compose` verb (down/ps/config/logs/up alfred-core, ...) ever aborts on a missing
+  # value — `${VAR:?}` would, and Compose interpolates the WHOLE file before any service
+  # filtering, so that would be a stack-wide DoS to punish one optional service's
+  # misconfiguration; (3) the entrypoint preflight below refuses to START Grafana (exit 78) when
+  # the resolved value is unset, empty, or the literal 'admin' — verified against
+  # grafana/grafana:11.6.0 on 2026-07-21 that an EMPTY env value does NOT fail closed on its own
+  # (Grafana's env-override loop only applies non-empty values, so defaults.ini's
+  # `admin_password = admin` silently wins without this guard). Only layer 3 holds for an
+  # operator who skipped bin/alfred-setup.sh entirely. Never put a non-empty literal in the `:-`
+  # fallback here — Compose substitutes it verbatim, which would ship a predictable,
+  # repo-published admin credential on a plain `docker compose up`.
+  alfred-grafana:
+    image: grafana/grafana:11.6.0   # pinned; re-measure all 3 fail-closed arms in
+                                     # tests/integration/test_grafana_password_fail_closed.py
+                                     # before bumping (the guard's `exec /run.sh` couples to
+                                     # this tag's canonical entrypoint).
+    restart: unless-stopped
+    environment:
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-}   # :- NEVER :? ; setup-script fills .env
+    # rev.3 (PR #480 CR, Major/security): layer 3 — refuse to START on a guessable credential.
+    # `$$` so Compose does not interpolate; the guard runs INSIDE the container, at start.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -z "$${GF_SECURITY_ADMIN_PASSWORD}" ] || [ "$${GF_SECURITY_ADMIN_PASSWORD}" = "admin" ]; then
+          echo "FATAL: GF_SECURITY_ADMIN_PASSWORD is unset, empty, or the well-known default 'admin'." >&2
+          echo "Grafana refuses to start rather than serve dashboards on a guessable credential." >&2
+          echo "Fix: run bin/alfred-setup.sh (seeds a random value into .env), then 'docker compose up -d alfred-grafana'." >&2
+          exit 78
+        fi
+        exec /run.sh
+    volumes:
+      - alfred_grafana_data:/var/lib/grafana
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro   # rev.1 devops-006: dedicated subdir, NOT all of ops/grafana (which contains provisioning/)
+    ports:
+      - "127.0.0.1:3000:3000"   # loopback (Linux); OrbStack via *.orb.local; DD via tunnel
+    networks:
+      - alfred_internal
+    depends_on:
+      - alfred-prometheus
+
 networks:
   # Spec C / G7 (epic #333, ADR-0042): the connectivity-free-core split. alfred_internal is
   # kernel-isolated (internal: true — no route to the internet); the core + datastores live
@@ -367,3 +422,6 @@ volumes:
   # #470 PR2 Task 1: Prometheus TSDB data — 15d retention (command's
   # --storage.tsdb.retention.time), so this volume grows bounded, not unbounded.
   alfred_prom_data:
+  # #470 PR2 Task 3: Grafana's own state (sqlite db, plugin cache, session data) —
+  # NOT dashboards/provisioning, which are read-only bind mounts from ops/grafana/.
+  alfred_grafana_data:
