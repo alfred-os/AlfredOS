@@ -33,6 +33,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -123,7 +124,17 @@ def _run_seed(
 
 @pytest.fixture
 def bash_available() -> str:
-    """Skip when bash is not on PATH (very rare CI matrix gap)."""
+    """Resolve a usable bash for the real-execution seed tests; skip when unavailable.
+
+    On native Windows the supported setup path is ``bin/alfred-setup.ps1``, not the
+    bash ``bin/alfred-setup.sh`` these tests exercise — and bare ``bash`` resolves to
+    the WSL launcher (``System32\\bash.exe``), which has no distro on the CI runner and
+    a Unix ``PATH`` that does not translate. So skip the real-execution seed tests on
+    win32 (the static marker/slice tests above still run; real ``.sh`` coverage stays on
+    the mac/linux legs). #246 Phase B / #245 discipline.
+    """
+    if sys.platform == "win32":
+        pytest.skip("bin/alfred-setup.sh is the mac/linux/WSL path; Windows uses alfred-setup.ps1")
     path = shutil.which("bash")
     if path is None:
         pytest.skip("bash not on PATH")
