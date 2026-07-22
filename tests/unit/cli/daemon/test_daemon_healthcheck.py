@@ -30,6 +30,12 @@ from alfred.cli.daemon import daemon_app
 from alfred.cli.daemon._healthcheck import healthcheck_daemon
 from alfred.observability.metrics_server import CORE_METRICS_DEFAULT_PORT
 
+# A minimal but VALID core exposition: a `# HELP`/`# TYPE` declaration for an ``alfred_``
+# family. Since #482 P4, "healthy" means the body actually IS the core's exposition, not
+# merely that something answered 200 — so the reachable-endpoint tests must serve this, not a
+# bare "# ok" comment (which the identity check now correctly rejects as not-core-exposition).
+_VALID_CORE_EXPOSITION = "# HELP alfred_x help\n# TYPE alfred_x counter\nalfred_x 0.0\n"
+
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,7 +64,10 @@ def test_cli_invocation_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
     `healthcheck_daemon()`), not just the function body directly — the thin wrapper
     registered in `alfred.cli.daemon.__init__` is otherwise never invoked by a test."""
     monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
-    with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="# ok\n"):
+    with patch(
+        "alfred.cli.daemon._healthcheck.fetch_metrics_text",
+        return_value=_VALID_CORE_EXPOSITION,
+    ):
         result = CliRunner().invoke(daemon_app, ["healthcheck"])
     assert result.exit_code == 0
 
@@ -73,7 +82,10 @@ def test_cli_invocation_unhealthy_is_not_a_traceback(monkeypatch: pytest.MonkeyP
 
 def test_healthy_when_metrics_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
-    with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="# ok\n"):
+    with patch(
+        "alfred.cli.daemon._healthcheck.fetch_metrics_text",
+        return_value=_VALID_CORE_EXPOSITION,
+    ):
         healthcheck_daemon()  # no raise == exit 0
 
 
@@ -87,7 +99,10 @@ def test_probes_the_shared_default_port_when_env_unset(monkeypatch: pytest.Monke
     is read off the ACTUAL call, not asserted against a re-typed literal.
     """
     monkeypatch.delenv("ALFRED_CORE_METRICS_PORT", raising=False)
-    with patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="# ok\n") as fetch:
+    with patch(
+        "alfred.cli.daemon._healthcheck.fetch_metrics_text",
+        return_value=_VALID_CORE_EXPOSITION,
+    ) as fetch:
         healthcheck_daemon()
     assert fetch.call_args.args == (CORE_METRICS_DEFAULT_PORT,)
     assert CORE_METRICS_DEFAULT_PORT == 9465  # the value compose + the runbook publish
@@ -179,3 +194,107 @@ def test_bad_port_and_unreachable_messages_are_distinct(monkeypatch: pytest.Monk
     assert bad_port_echoed != unreachable_echoed
     assert bad_port_echoed[0].strip() != ""
     assert unreachable_echoed[0].strip() != ""
+
+
+def test_healthy_arm_echoes_one_legible_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#482 P1: a hand-run probe must say something on success, not exit 0 silently.
+
+    The README tells an operator to run this by hand; a blank line is indistinguishable from a
+    broken command without inspecting ``$?``. The line must resolve from the catalog (not the
+    raw dotted key) and name the port.
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    echoed = _capture_echo(monkeypatch)
+    with patch(
+        "alfred.cli.daemon._healthcheck.fetch_metrics_text",
+        return_value=_VALID_CORE_EXPOSITION,
+    ):
+        healthcheck_daemon()  # exit 0
+    assert len(echoed) == 1
+    assert echoed[0] != "daemon.healthcheck.healthy"  # catalog resolved, not the raw key
+    assert "9465" in echoed[0]
+
+
+def test_unhealthy_when_200_is_not_core_exposition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#482 P4: a 200 whose body is not the core's exposition is the false-healthy #470 targets.
+
+    UAT confirmed prose, an empty body, and the gateway's ``gateway_*`` exposition on a mis-set
+    port all read as HEALTHY. The identity arm turns each into a distinct exit-1 refusal with its
+    own catalog message — resolved, not the raw key, and naming the port.
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    non_core_bodies = (
+        "hello world\n",  # prose
+        "",  # empty
+        "# HELP gateway_up 1\n# TYPE gateway_up gauge\ngateway_up 1\n",  # the gateway's exposition
+    )
+    for body in non_core_bodies:
+        echoed = _capture_echo(monkeypatch)
+        with (
+            patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value=body),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            healthcheck_daemon()
+        assert exc_info.value.exit_code == 1
+        assert len(echoed) == 1
+        assert echoed[0] != "daemon.healthcheck.not_core_exposition"
+        assert "9465" in echoed[0]
+
+
+def test_not_core_exposition_message_is_distinct_from_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """i18n-004: the identity refusal must not reuse the unreachable (transport) copy.
+
+    "nothing answered" and "the wrong thing answered" are different faults with different
+    remedies (check the bind vs check what is bound to the port).
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    unreachable = _capture_echo(monkeypatch)
+    with (
+        patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", side_effect=OSError("refused")),
+        pytest.raises(typer.Exit),
+    ):
+        healthcheck_daemon()
+
+    identity = _capture_echo(monkeypatch)
+    with (
+        patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", return_value="not exposition\n"),
+        pytest.raises(typer.Exit),
+    ):
+        healthcheck_daemon()
+
+    assert unreachable[0].strip() and identity[0].strip()
+    assert unreachable[0] != identity[0]
+
+
+def test_unreachable_message_points_at_an_actionable_next_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#482 P2: the unreachable copy must tell the operator what to DO, not only what may be true.
+
+    In the spirit of the bad-port message, it names a command to run and the boot warning to
+    look for, while keeping the "data plane may still be serving" reassurance.
+    """
+    monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
+    echoed = _capture_echo(monkeypatch)
+    with (
+        patch("alfred.cli.daemon._healthcheck.fetch_metrics_text", side_effect=OSError("refused")),
+        pytest.raises(typer.Exit),
+    ):
+        healthcheck_daemon()
+    message = echoed[0]
+    assert "alfred daemon status" in message
+    assert "metrics_bind_failed" in message or "metrics_bad_port" in message
+
+
+def test_help_names_the_port_env_and_default() -> None:
+    """#482 P3: `alfred daemon healthcheck --help` must surface the port knob and its default.
+
+    Those are the two things an operator needs to point the probe at the right endpoint; the
+    help used to mention neither.
+    """
+    result = CliRunner().invoke(daemon_app, ["healthcheck", "--help"])
+    assert result.exit_code == 0
+    assert "ALFRED_CORE_METRICS_PORT" in result.stdout
+    assert "9465" in result.stdout
