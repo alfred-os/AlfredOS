@@ -233,6 +233,37 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
     assert not thread_errors, f"the late completion signal escaped its thread: {thread_errors!r}"
 
 
+def test_bind_thread_converts_an_unexpected_seam_error_to_a_structured_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected seam error becomes a loud, boot-correlated event, not a raw traceback.
+
+    ``_start_core_metrics_server`` handles its OWN expected faults (bad port, bind failure) and
+    returns; anything still escaping runs on a bare daemon thread, where an unhandled exception
+    would print a raw, ``boot_id``-less traceback via ``threading.excepthook`` — breaking the
+    seam's "every failure is a structured, loud-and-continue, boot-correlated event" contract.
+    The bind wrapper converts it to that shape while STILL signalling completion, so the boot
+    neither wedges on the deadline nor spews an uncorrelated traceback.
+    """
+
+    def _boom(_boot_id: str) -> None:
+        raise RuntimeError("unexpected seam failure")
+
+    monkeypatch.setattr(cmd, "_start_core_metrics_server", _boom)
+    started_at = time.monotonic()
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))  # must NOT raise
+    elapsed = time.monotonic() - started_at
+
+    # It completed via the finally-signal, not the deadline: fast return AND no timeout event.
+    assert elapsed < _RETURN_DEADLINE_S
+    assert not [e for e in logs if e["event"] == "daemon.boot.metrics_start_timeout"]
+    unexpected = [e for e in logs if e["event"] == "daemon.boot.metrics_start_unexpected_error"]
+    assert len(unexpected) == 1, f"expected one loud unexpected-error warning, got {logs!r}"
+    assert unexpected[0]["boot_id"] == _BOOT_ID
+    assert "unexpected seam failure" in unexpected[0]["error"]
+
+
 def test_bounded_wrapper_forwards_the_boot_id_on_the_happy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

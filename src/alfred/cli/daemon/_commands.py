@@ -473,6 +473,18 @@ async def _start_core_metrics_server_bounded(boot_id: str) -> None:
     def _bind_then_signal() -> None:
         try:
             _start_core_metrics_server(boot_id)
+        except Exception as exc:
+            # The seam handles its OWN expected faults (bad port, bind failure) and returns.
+            # Anything still escaping here is unexpected — but this runs on a bare daemon
+            # thread, where an unhandled exception prints a raw, boot_id-less traceback via
+            # threading.excepthook, breaking the seam's "every failure is a structured,
+            # loud-and-continue, boot-correlated event" contract. Convert it to that shape;
+            # the finally still signals completion, so the deadline wait never wedges.
+            log.warning(
+                "daemon.boot.metrics_start_unexpected_error",
+                boot_id=boot_id,
+                error=repr(exc),
+            )
         finally:
             with suppress(RuntimeError):
                 loop.call_soon_threadsafe(finished.set)
