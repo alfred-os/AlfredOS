@@ -18,7 +18,9 @@
 > sound; every High/Medium is **test fidelity** — tests that prove the security guards are themselves
 > wrong, vacuous, or uncommitted. Load-bearing corrections: (1) the rev.3 Grafana fail-closed test read
 > the entrypoint via `yaml.safe_load`, which keeps compose's `$$` escape intact → run outside compose
-> the guard expands `$$`→PID and proves nothing (Task 3 Step 4c now extracts via `docker compose config`);
+> the guard expands `$$`→PID and proves nothing (Task 3 Step 4c now extracts the resolved entrypoint via
+> `docker compose create` + `docker inspect` — `docker compose config` was tried first but rev.4.2 below
+> found it ALSO keeps `$$` intact on current Compose, so it was superseded before implementation);
 > (2) Task 4's `git mv gateway.json` orphans two live `test_ops_scaffold.py` tests → `make check` reddens
 > at Task 8 (now rewritten in-step); (3) Task 2 Step 5's `...` cross-check resolver is under-specified AND
 > wrong (`_name` is `_total`-stripped) → now spelled out; (4) the Grafana seed regression test was never
@@ -859,7 +861,7 @@ git commit -m "docs(observability): #470 reframe armed-not-live caveats + operat
 > value-boundedness residual recorded as an explicit edge). PR2 owns only the third fact. Read
 > ADR-0040 before editing; extend, do not duplicate.
 
-- [ ] **Step 1: Add an `Amended: 2026-07-21 (#470 PR2)` line** recording the remaining fact: the **two new internal-only third-party services (Prometheus + Grafana) + the Prometheus TSDB** attached to the connectivity-free stack (CLAUDE.md's "no new datastore or third-party service without an ADR"; PRD §7.5/§9 pre-name the tools but not their post-Spec-C stack-attachment). Cover: both join `alfred_internal` only (zero egress — `test_only_gateway_on_external` stays intact), the TSDB holds operational aggregates only (the same bounded set residual (viii) describes) and is not a system-of-record datastore, and Grafana's data-source proxy is the reason it is never given an external bridge. Then **update BOTH of PR1's "deferred to PR2" promissory sentences (rev.4 docs-002 — there are TWO, not one):** (1) the PR1 `Amended: 2026-07-21` entry's "deferred to PR2" sentence (ADR-0040 lines ~28-30), and (2) the `*Scope of this amendment:*` note at the end of residual (viii) (ADR-0040 lines ~347-351: "… lands with PR2, which is what introduces them. Nothing in PR1 attaches a third-party service."). Past-tense both / point them at the new `Amended (#470 PR2)` entry — otherwise a durable ADR ships stale promissory text *after* the PR2 that lands the third arm, plus an ambiguous second "where the amendment lives" pointer.
+- [ ] **Step 1: Add an `Amended: 2026-07-21 (#470 PR2)` line** recording the remaining fact: the **two new internal-only third-party services (Prometheus + Grafana) + the Prometheus TSDB** attached to the connectivity-free stack. CLAUDE.md's actual rule is narrower than "no new datastore or third-party service" — it reads only "Do not introduce new datastores without an ADR" (no third-party-service clause). The Prometheus TSDB IS a new datastore, so that rule applies directly and is the ADR's justification; treat "also record the two new third-party services" as this ADR's own deliberate extension of that discipline, not as a verbatim CLAUDE.md quote (PRD §7.5/§9 pre-name the tools but not their post-Spec-C stack-attachment). Cover: both join `alfred_internal` only (zero egress — `test_only_gateway_on_external` stays intact), the TSDB holds operational aggregates only (the same bounded set residual (viii) describes) and is not a system-of-record datastore, and Grafana's data-source proxy is the reason it is never given an external bridge. Then **update BOTH of PR1's "deferred to PR2" promissory sentences (rev.4 docs-002 — there are TWO, not one):** (1) the PR1 `Amended: 2026-07-21` entry's "deferred to PR2" sentence (ADR-0040 lines ~28-30), and (2) the `*Scope of this amendment:*` note at the end of residual (viii) (ADR-0040 lines ~347-351: "… lands with PR2, which is what introduces them. Nothing in PR1 attaches a third-party service."). Past-tense both / point them at the new `Amended (#470 PR2)` entry — otherwise a durable ADR ships stale promissory text *after* the PR2 that lands the third arm, plus an ambiguous second "where the amendment lives" pointer.
 
 - [ ] **Step 2: Markdown lint** the ADR; confirm ADR cross-links resolve. Commit:
 
@@ -888,7 +890,7 @@ git commit -m "docs(adr): #470 amend ADR-0040 with the bundled observability sta
 
 ## Self-Review
 
-**Spec coverage (§6 + §7):** §6.1 Prometheus + rules → Tasks 1+2; §6.2 Grafana default-on + `:-` password + access → Tasks 3+4+8; §6.2a credential fail-closed layer → Task 3 Steps 1/3/4c + Task 6 Step 3 + Task 8 Step 6; §6.3 compose-invariant tests → Tasks 1+3; §6.4 caveat reframe → Task 6; §6.5 operator doc + README + (human-gated) CLAUDE.md flag → Task 6 (+ the CLAUDE.md entry stays a flagged human-gated follow-up, NOT applied); §7 ADR amendment → Task 7 (PR2's third-party-services arm only; the Decision-1 class-line + residual (viii) landed in PR1); §9 e2e scrape test + promtool + OrbStack smoke → Tasks 2+5+8.
+**Spec coverage (§6 + §7):** §6.1 Prometheus + rules → Tasks 1+2; §6.2 Grafana default-on + `:-` password + access → Tasks 3+4+8; §6.2a credential fail-closed layer → Task 3 Steps 1/3/4c + Task 6 Step 3 + Task 8 Step 6; §6.3 compose-invariant tests → Tasks 1+3; §6.4 caveat reframe → Task 6; §6.5 operator doc + README → Task 6 (the `alfred daemon healthcheck` CLAUDE.md command-table row **already landed in PR1/#481** — see the rev.4 note below; PR2 leaves CLAUDE.md untouched); §7 ADR amendment → Task 7 (PR2's third-party-services arm only; the Decision-1 class-line + residual (viii) landed in PR1); §9 e2e scrape test + promtool + OrbStack smoke → Tasks 2+5+8.
 
 **Type/name consistency:** the scrape target `alfred-core:9465` matches PR1's `ALFRED_CORE_METRICS_PORT` default; `core.yml`/`core_test.yml` names align; `alfred_prom_data`/`alfred_grafana_data` volumes declared once and mounted once.
 
@@ -970,8 +972,13 @@ internal telemetry, and the ADR PR1/PR2 de-double-claim all hold. Every fix belo
 
 - **`$$` extraction bug in the fail-closed test [test-004 + devops-001, CORROBORATED]** — Task 3 Step 4c.
   `yaml.safe_load` keeps compose's `$$` escape; run outside compose, `$$`→PID and the guard proves nothing.
-  Fixed: extract the interpolated entrypoint via `docker compose config`, assert byte-equality; never run
-  the raw YAML string through a bare shell, never hand-de-escape the guard.
+  Fixed as first drafted here: extract the interpolated entrypoint via `docker compose config`, assert
+  byte-equality; never run the raw YAML string through a bare shell, never hand-de-escape the guard.
+  **Superseded before implementation by rev.4.2 (below):** `docker compose config` was measured in
+  execution to ALSO keep `$$` intact on current Compose (Docker 29.4.0 / Compose v5.1.2) — vacuous for
+  the same reason. The mechanism that actually shipped is `docker compose create` (never-started
+  container) + `docker inspect --format '{{json .Config.Entrypoint}}'`, which reads Compose's own
+  resolved, single-`$` `Entrypoint` field. See the rev.4.2 note further down for the full rationale.
 - **`git mv gateway.json` orphans two live tests [rev-001 + test-001, CORROBORATED]** — Task 4 Step 3.
   `test_ops_scaffold.py:126,196` read the old path → `make check` reddens at Task 8. Fixed: rewrite both
   refs in the same step, run pytest before commit, widen Step 4's `git add`.
