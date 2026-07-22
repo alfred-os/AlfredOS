@@ -40,6 +40,7 @@ import pytest
 _SETUP_SH = Path("bin/alfred-setup.sh")
 _BLOCK_START = 'step "Seeding Grafana admin password"'
 _BLOCK_END = 'step "Validating .env credentials"'
+_FUNC_START = "openssl_missing_message() {"
 
 
 def _seed_block() -> str:
@@ -56,6 +57,24 @@ def _seed_block() -> str:
     return content[start:end]
 
 
+def _openssl_missing_message_func() -> str:
+    """Slice the shared ``openssl_missing_message`` helper out of the real script.
+
+    #470 M5: the seed block's openssl-missing branch now calls this shared helper
+    (also used by the audit.hash_pepper bootstrap further down) instead of printing
+    its own inline message. The helper is defined OUTSIDE the ``_seed_block()``
+    slice (it lives near the script's other top-level helpers, before "Checking
+    prerequisites"), so ``_run_seed`` must prepend it explicitly or the sliced
+    script would fail with a bash "command not found" instead of exercising the
+    real per-distro guidance. Anchored on the function's opening line so a
+    moved/renamed helper fails loud here rather than silently running a stale copy.
+    """
+    content = _SETUP_SH.read_text()
+    start = content.index(_FUNC_START)
+    end = content.index("\n}\n", start) + len("\n}\n")
+    return content[start:end]
+
+
 def _run_seed(
     tmp_path: Path,
     env_text: str,
@@ -69,7 +88,12 @@ def _run_seed(
     block needs.
     """
     (tmp_path / ".env").write_text(env_text)
-    script = "set -euo pipefail\nstep() { :; }\n" + _seed_block()
+    script = (
+        "set -euo pipefail\nstep() { :; }\n"
+        + _openssl_missing_message_func()
+        + "\n"
+        + _seed_block()
+    )
     path = "/usr/bin:/bin:/usr/sbin:/sbin"
     if stub_openssl:
         # Symlink only a safe whitelist into a private bin dir and point PATH at it
@@ -121,6 +145,9 @@ def test_the_seed_markers_still_match_the_script() -> None:
     block = _seed_block()
     assert "GF_SECURITY_ADMIN_PASSWORD" in block
     assert "openssl rand -hex 24" in block
+    func = _openssl_missing_message_func()
+    assert "openssl_missing_message() {" in func
+    assert func.rstrip().endswith("}")
 
 
 def test_existing_empty_line_is_replaced_with_a_generated_value(
@@ -190,11 +217,24 @@ def test_openssl_missing_fails_loud_with_an_actionable_error(
     Exercises the graceful `command -v openssl` preflight (rev.4 devops-003/sec-005)
     added alongside the seed itself — a bare `openssl rand` under `set -euo
     pipefail` would otherwise abort opaquely.
+
+    #470 M5: a bare "openssl" substring passed even against a "command not found"
+    shell error (which itself contains the word "openssl" in the failing command's
+    NAME) — that would not have caught a regression back to an unhelpful one-liner.
+    Assert the ACTIONABLE per-distro content the shared ``openssl_missing_message``
+    helper prints (mirrors the audit.hash_pepper bootstrap's message): an install
+    verb plus at least one concrete package manager, so the error tells an operator
+    what to actually run rather than just naming the missing tool.
     """
     result = _run_seed(tmp_path, "GF_SECURITY_ADMIN_PASSWORD=\n", stub_openssl=True)
     assert result.returncode != 0, (
         f"openssl-missing path returned 0:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert "openssl" in result.stderr.lower(), (
-        f"openssl-missing error not on stderr: {result.stderr!r}"
+    stderr_lower = result.stderr.lower()
+    assert "openssl" in stderr_lower, f"openssl-missing error not on stderr: {result.stderr!r}"
+    assert "install" in stderr_lower, (
+        f"openssl-missing error is not actionable (no install verb): {result.stderr!r}"
+    )
+    assert any(mgr in stderr_lower for mgr in ("apt", "dnf", "pacman", "apk", "brew")), (
+        f"openssl-missing error names no concrete package manager: {result.stderr!r}"
     )
