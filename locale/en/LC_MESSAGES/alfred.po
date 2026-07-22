@@ -1315,20 +1315,20 @@ msgstr ""
 msgid "daemon.healthcheck.metrics_unreachable"
 msgstr ""
 "Core metrics endpoint unreachable on port {port}; the data plane may "
-"still be serving. To find the cause, run `alfred daemon status` (it shows"
-" the last boot event) or check `docker compose logs alfred-core` for a "
+"still be serving. Check `docker compose logs alfred-core` for a "
 "`daemon.boot.metrics_bind_failed` or `daemon.boot.metrics_bad_port` "
-"warning."
+"warning; `alfred daemon status` confirms whether the daemon itself is "
+"running."
 
-#: src/alfred/cli/daemon/_healthcheck.py:89
+#: src/alfred/cli/daemon/_healthcheck.py:94
 msgid "daemon.healthcheck.not_core_exposition"
 msgstr ""
 "Something is serving port {port}, but its response is not the core's "
 "/metrics exposition (no `alfred_` metric family was declared). Check that"
-" ALFRED_CORE_METRICS_PORT points at alfred-core and that nothing else is "
-"bound to that port."
+" ALFRED_CORE_METRICS_PORT matches the port alfred-core binds and that "
+"nothing else is bound to it."
 
-#: src/alfred/cli/daemon/_healthcheck.py:91
+#: src/alfred/cli/daemon/_healthcheck.py:96
 msgid "daemon.healthcheck.healthy"
 msgstr "Core metrics endpoint healthy on port {port}."
 
@@ -1512,14 +1512,22 @@ msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:538
-#: src/alfred/cli/gateway/_commands.py:544
+#: src/alfred/cli/gateway/_commands.py:552
+#: src/alfred/cli/gateway/_commands.py:558
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:548
+#: src/alfred/cli/gateway/_commands.py:567
+msgid "gateway.healthcheck.not_gateway_exposition"
+msgstr ""
+"Something is serving the gateway metrics port {port}, but its response is"
+" not the gateway's own exposition (no `gateway_` metric family was "
+"declared). Check that ALFRED_GATEWAY_METRICS_PORT matches the port the "
+"gateway binds and that nothing else is bound to it."
+
+#: src/alfred/cli/gateway/_commands.py:571
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
