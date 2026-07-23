@@ -14,7 +14,17 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "AlfredOS contributors" }]
 dependencies = [
   "pydantic>=2.13.4",
-  "pydantic-settings>=2.14.1",
+  # #469/ADR-0053: capped <2.15 — the environment resolver's precedence chain
+  # (ALFRED_ENVIRONMENT env var > /etc/alfred/environment > .env) depends on
+  # pydantic-settings' `_Without`-marker source-composition internals, which
+  # are documented as 2.14.x-internal and not covered by semver. Widen the
+  # cap only after re-verifying that internal against the target minor.
+  "pydantic-settings>=2.14.2,<2.15",
+  # python-dotenv loads .env for the Settings environment resolver (#469);
+  # promoted from a transitive pydantic-settings dep to an explicit direct
+  # dependency so its version is pinned by our own floor, not whatever
+  # pydantic-settings happens to require.
+  "python-dotenv>=1.2.2",
   "sqlalchemy[asyncio]>=2.0.51",
   "asyncpg>=0.31.0",
   "alembic>=1.18.4",
