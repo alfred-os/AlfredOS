@@ -37,7 +37,7 @@ KEY (not a rendered sentence) on stderr per the launcher's bare-key
 convention; the supervisor renders the localised audit row.
 
 Note (sec-007 carve-out): ``--read-environment`` resolves the environment
-through :func:`alfred.config._environment_loader.load_environment`, which is
+through :func:`alfred.config._environment_loader.resolve_environment`, which is
 the single sanctioned reader of ``ALFRED_ENVIRONMENT`` /
 ``/etc/alfred/environment``. The ``ALFRED_ETC_ENV_FILE`` override read below
 is a non-secret test hook (the env-read AST guard only bans
@@ -63,7 +63,7 @@ configure_stderr_logging()
 
 from alfred.config._environment_loader import (  # noqa: E402 - after stderr-logging pin (BUG-1)
     EnvironmentSource,
-    load_environment,
+    resolve_environment,
 )
 from alfred.plugins.errors import (  # noqa: E402 - after stderr-logging pin (BUG-1)
     ManifestError,
@@ -240,7 +240,7 @@ def _cmd_read_sandbox(args: argparse.Namespace) -> int:
 def _cmd_read_environment() -> int:
     etc_override = os.environ.get("ALFRED_ETC_ENV_FILE")
     etc_path = Path(etc_override) if etc_override else None
-    result = load_environment(etc_path=etc_path)
+    result = resolve_environment(etc_path=etc_path)
     if result.value is not None:
         print(result.value)
         return 0
