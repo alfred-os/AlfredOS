@@ -145,9 +145,14 @@ return settings, result                      # NON-OPTIONAL tuple; conflict audi
   dropped the defensive `except SettingsError` arm (err-02/reviewer-02: a placeholder
   `deepseek_api_key` would escape as a raw, un-audited traceback). Instead of
   *re-labeling* that as `environment_not_set`, we mint a **new** daemon boot-failure
-  reason (`SettingsInvalidFailure` / `settings_invalid`) with its own audited row + its
-  own `t()` message surfacing the pydantic detail. sec-001 audit-before-refuse holds;
-  the failure is correctly labeled.
+  reason (`SettingsInvalidFailure` / `settings_invalid`) with its own audited row + a
+  CURATED `t()` message — **CR6 (fleet review on PR #491): the shipped
+  `_bootstrap_settings_message` never surfaces raw pydantic detail or `str(exc)`**
+  (a `database_url` DSN password can be embedded in either); it renders either the
+  generic `daemon.boot.settings_invalid` catalog string, or — when pydantic's `loc`
+  safely names the offending FIELD PATH (never the invalid value) — the
+  `daemon.boot.settings_invalid_field` variant naming just that field. sec-001
+  audit-before-refuse holds; the failure is correctly labeled.
 - **Return shape (arch-003/sec-p2/reviewer-06):** keep the **non-optional
   `tuple[Settings, EnvironmentLoadResult]`**. Do NOT "attach `result` to the instance"
   (that re-opens the real arch-002 *no-PrivateAttr-smuggling* decision, and leaves the
@@ -209,9 +214,18 @@ Full **adversarial suite** runs (environment is security-load-bearing). Load-bea
    treated as absent + audited, never a raw traceback. At all three `.env`-reading sites.
 5. **Escape-hatch hermeticity (Theme A):** chdir-isolate the **release-blocking**
    `tests/adversarial/comms/test_launch_target_override_refusal.py` (add `.env` isolation to
-   its unset/staging/unknown cases); add a **positive gateway downgrade oracle**
-   (`/etc`=production + `.env`=development + override injected → still refused, because
-   source≠DOTENV) and a `manifest_reader` os.environ-beats-`.env` precedence test.
+   its unset/staging/unknown cases); add TWO separate gateway oracles — **CR5 (fleet review
+   on PR #491): the original single "positive gateway downgrade oracle" conflated two
+   distinct properties into one test**, so split them:
+   - **Source-floor oracle:** `/etc` ABSENT + `.env`=development + override injected → still
+     refused, because the resolved source is `DOTENV` (untrusted for this gate) — there is
+     no `/etc` value here for anything to take precedence over.
+   - **Precedence oracle (its own, separate test):** `/etc`=production + `.env`=development +
+     override injected → still refused, because `/etc` (the higher-precedence source)
+     resolves `production` — outside the `{development,test}` allowlist — so `.env`'s
+     `development` never gets a chance to matter, trusted source or not.
+
+   Also add a `manifest_reader` os.environ-beats-`.env` precedence test.
 6. **Exclusion airtight:** pydantic cannot populate `environment` from `.env` (guards the
    `_Without`/alias regression); `.env`-only UNRECOGNISED + whitespace-symmetry cases.
 7. **Positive Blocker-1:** `.env`=`production` only, os.environ cleared, no `/etc` → **boots**

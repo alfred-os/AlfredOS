@@ -159,6 +159,54 @@ def test_settings_invalid_message_never_leaks_exception_detail(
     )
 
 
+def test_settings_invalid_names_offending_field_without_leaking_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M2 (fleet review): the ``settings_invalid`` message names the offending FIELD
+    (pydantic's ``loc``) when a REAL chained ``ValidationError`` is available — never
+    the invalid VALUE itself.
+
+    Unlike the sibling no-leak test above (which monkeypatches ``Settings`` away
+    entirely and so never exercises the ``__cause__`` chain), this drives the REAL
+    ``Settings()`` construction with a malformed ``database_url`` whose raw value
+    embeds a fabricated secret — proving the field NAME reaches output while the
+    VALUE never does.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+        tmp_path / "absent",
+    )
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    fake_secret = "SUPERSECRETPW2"  # noqa: S105 -- fabricated leak marker, not a real credential
+    monkeypatch.setenv("ALFRED_DATABASE_URL", f"not-a-valid-dsn-with-{fake_secret}")
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert fake_secret not in result.output, (
+        f"the fake secret leaked into the operator-facing refusal output: {result.output!r}"
+    )
+    assert "database_url" in result.output, (
+        f"the offending field name did not reach output: {result.output!r}"
+    )
+    assert appended, "no audit row emitted before exit (sec-001 violated)"
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "settings_invalid"
+
+
 def test_placeholder_api_key_settings_error_shows_curated_hint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -251,6 +299,16 @@ def test_environment_not_set_exits_3_when_audit_unwritable(
     """sec-003: an audit-write failure during refusal quarantines with exit 3."""
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    # H2 (fleet review): hermetic against a real repo-root .env — matches every
+    # sibling test in this file (see the comment on
+    # ``test_environment_not_set_refuses_and_audits`` above). Without this, a
+    # developer/CI checkout with a real .env at the repo root (shipping an
+    # uncommented ``ALFRED_ENVIRONMENT=production`` per .env.example) reads a
+    # valid value from it and this test silently exercises the
+    # ``settings_invalid`` path instead of ``environment_not_set`` — and STILL
+    # passed, because it only asserted ``exit_code == 3`` (both refusal paths
+    # quarantine identically on an unwritable audit write).
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "alfred.config._environment_loader._DEFAULT_ETC_PATH",
         tmp_path / "absent",
@@ -269,6 +327,14 @@ def test_environment_not_set_exits_3_when_audit_unwritable(
     runner = CliRunner()
     result = runner.invoke(daemon_app, ["start"])
     assert result.exit_code == 3
+    # H2: pin the FAILURE PATH, not just the exit code — the attempted (but
+    # unwritable) audit row must be for environment_not_set, proving this test
+    # exercises the intended refusal rather than silently passing via
+    # settings_invalid on an unresolved-environment host with a real .env.
+    _, kwargs = _BrokenWriter.append_schema.call_args
+    subject = kwargs["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "environment_not_set"
 
 
 def test_environment_unrecognised_echoes_typo_and_refuses(
@@ -305,6 +371,86 @@ def test_environment_unrecognised_echoes_typo_and_refuses(
     assert t("daemon.boot.environment_unrecognised", value="staging") in result.output
     assert "staging" in result.output
     # The failed audit row still records the canonical failure_reason.
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "environment_not_set"
+    assert subject["environment_source"] == "unrecognised"
+
+
+def test_environment_unrecognised_etc_sourced_typo_renders_correct_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M3 (fleet review): an ``/etc``-sourced typo renders the SAME curated message.
+
+    ``/etc/alfred/environment`` holds a BARE value (no ``ALFRED_ENVIRONMENT=``
+    prefix) — the message must echo the offending value without asserting a
+    ``KEY=value`` shape, which would misrepresent the file format for this source
+    (only the env-var case was pinned before this test).
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.chdir(tmp_path)
+    etc_file = tmp_path / "environment"
+    etc_file.write_text("staging\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+        etc_file,
+    )
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert t("daemon.boot.environment_unrecognised", value="staging") in result.output
+    assert "staging" in result.output
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "environment_not_set"
+    assert subject["environment_source"] == "unrecognised"
+
+
+def test_environment_unrecognised_dotenv_sourced_typo_renders_correct_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M3 (fleet review): a ``.env``-sourced typo (env var + ``/etc`` both unset)
+    ALSO renders the non-``KEY=value`` message — ``.env`` holds ``ALFRED_ENVIRONMENT=
+    <value>`` (a real ``KEY=value`` line), but the resolver hands the daemon only the
+    stripped raw value, same as every other source, so the rendered message must not
+    assume any one source's on-disk shape.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+        tmp_path / "absent",
+    )
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=staging\n", encoding="utf-8")
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert t("daemon.boot.environment_unrecognised", value="staging") in result.output
+    assert "staging" in result.output
     subject = appended[0]["subject"]
     assert isinstance(subject, dict)
     assert subject["failure_reason"] == "environment_not_set"

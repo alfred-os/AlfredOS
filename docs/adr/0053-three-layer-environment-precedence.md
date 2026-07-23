@@ -62,13 +62,20 @@ os.environ["ALFRED_ENVIRONMENT"]  >  /etc/alfred/environment  >  .env
   env-var-vs-`/etc` conflict audit, or (see §3) unlock a permissive
   escape hatch.
 
-pydantic-settings' native order is `os.environ > .env` (it never consults
-`/etc`); letting `Settings` resolve `environment` independently would
-therefore yield `os.environ > .env > /etc` — an app-writable `.env` could
-silently outrank a root-owned `/etc`. Only `os.environ > /etc > .env` keeps
-the root-owned file above the app-writable one, so `Settings` **delegates**
-the field to a single external resolver instead of resolving it itself (see
-§4).
+pydantic-settings' NATIVE precedence considers only the two sources it has
+built-in support for: `os.environ > .env`. It has no notion of
+`/etc/alfred/environment` at all, so it never consults `/etc` under any
+composition — this is not a documented gap in some `/etc` support pydantic
+ships, it is simply outside what the library knows how to source a field
+from. The comparison that matters is what happens if `/etc` were bolted on
+the most straightforward way — as a naive additional lowest-priority
+source layered under pydantic's own two: that HYPOTHETICAL composition
+would yield `os.environ > .env > /etc`, and an app-writable `.env` could
+then silently outrank a root-owned `/etc`. Only `os.environ > /etc > .env`
+keeps the root-owned file above the app-writable one, so `Settings`
+**delegates** the field to a single external resolver (see §4) that
+implements that exact order directly, rather than composing pydantic's
+native two sources with `/etc` bolted on beneath them.
 
 The one and only implementation of this chain is
 `resolve_environment()` in `src/alfred/config/_environment_loader.py`. It

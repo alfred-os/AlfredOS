@@ -8,9 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import structlog.testing
 from pydantic_settings import DotEnvSettingsSource, EnvSettingsSource, SecretsSettingsSource
 
-from alfred.config._environment_loader import EnvironmentSource
+from alfred.config._environment_loader import EnvironmentLoadResult, EnvironmentSource
 from alfred.config.settings import Settings, SettingsError, _Without
 
 
@@ -295,6 +296,60 @@ class TestSettingsDelegatesEnvironmentResolution:
 
         assert settings.environment == "test"
         assert settings.environment_load_result is None
+
+    def test_environment_load_result_divergence_logs_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M4 (fleet review): a resolver/validated-field divergence logs, not silences.
+
+        The loader and the Literal field validate against the same value set, so this
+        "cannot happen today" per the wrap validator's own docstring — proving it
+        requires a fake :func:`resolve_environment` whose ``.value`` differs between
+        the injection read and the post-validation comparison read (a real
+        :class:`~alfred.config._environment_loader.EnvironmentLoadResult` is frozen and
+        cannot do this). Before this fix the mismatch silently left
+        ``environment_load_result`` at ``None`` with no signal the two had diverged;
+        now it logs a structlog warning naming BOTH values (never silently skips).
+        """
+        monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+
+        class _FlakyResult:
+            """Duck-types EnvironmentLoadResult with a ``.value`` that changes on
+            each read. The wrap validator reads ``.value`` THREE times: twice
+            during injection (the ``is not None`` guard, then the dict-assignment
+            itself) and once more during the post-validation comparison — so the
+            first TWO reads must agree (``"development"``, injected into the
+            field) and only the THIRD (the comparison) must diverge
+            (``"test"``)."""
+
+            def __init__(self) -> None:
+                self._reads = 0
+
+            @property
+            def value(self) -> str:
+                self._reads += 1
+                return "development" if self._reads <= 2 else "test"
+
+            source = EnvironmentSource.ENV_VAR
+
+        fake_result = _FlakyResult()
+
+        def _fake_resolve_environment(**_kwargs: object) -> EnvironmentLoadResult:
+            return fake_result  # type: ignore[return-value]
+
+        monkeypatch.setattr("alfred.config.settings.resolve_environment", _fake_resolve_environment)
+
+        with structlog.testing.capture_logs() as logs:
+            settings = Settings()
+
+        assert settings.environment == "development"
+        assert settings.environment_load_result is None
+        warnings = [
+            entry for entry in logs if entry["event"] == "settings.environment_load_result_diverged"
+        ]
+        assert len(warnings) == 1, logs
+        assert warnings[0]["resolved_value"] == "test"
+        assert warnings[0]["validated_value"] == "development"
 
 
 class TestWithoutSourceIdentity:

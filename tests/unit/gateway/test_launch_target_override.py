@@ -247,3 +247,35 @@ def test_etc_dev_unlocks_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     target = _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE, etc_path=etc_path)
 
     assert target == (_PROBE_PLUGIN_ID, _PROBE_MODULE)
+
+
+# --- (g) M1 (fleet review, PR #491): the gateway path skips the blocking .env read
+# --- entirely rather than read-then-discard it — resolve_environment must be called
+# --- with consult_dotenv=False.
+
+
+def test_resolve_environment_called_with_consult_dotenv_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The override gate opts OUT of the ``.env`` layer at the call site.
+
+    ``_OVERRIDE_TRUSTED_SOURCES`` already discards any DOTENV-sourced result outright
+    (case (f) above), so reading ``.env`` on every ``spawn_and_handshake`` (an ``async``
+    call, on the event loop) was pure waste with no behavior difference — never a
+    behavior change, just removing a redundant blocking file read.
+    """
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _fake_resolve_environment(**kwargs: object) -> EnvironmentLoadResult:
+        captured_kwargs.append(kwargs)
+        return EnvironmentLoadResult(value="test", source=EnvironmentSource.ENV_VAR)
+
+    monkeypatch.setattr(
+        "alfred.gateway.adapter_child_factory.resolve_environment",
+        _fake_resolve_environment,
+    )
+
+    _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE)
+
+    assert len(captured_kwargs) == 1, captured_kwargs
+    assert captured_kwargs[0]["consult_dotenv"] is False

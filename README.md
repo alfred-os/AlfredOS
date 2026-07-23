@@ -230,7 +230,39 @@ copy it to `.env` and edit. The Slice-3 trust-boundary section documents the
 plugin-launcher, capability-gate, and supervisor knobs (sandbox policy
 directory, plugin UID, perf-gate force-run, redis maxmemory, state-git path).
 
+### Environment resolution (`ALFRED_ENVIRONMENT`)
+
+`ALFRED_ENVIRONMENT` is a mandatory, closed-vocabulary setting
+(`development` / `production` / `test`) — `alfred daemon start` refuses to
+boot without a recognised value. It resolves via a three-layer precedence,
+highest wins:
+
+1. The `ALFRED_ENVIRONMENT` process environment variable (exported in your
+   shell, or set by `docker compose` / `systemd`).
+2. `/etc/alfred/environment` — a root-owned system file holding a bare value
+   (no `KEY=` prefix).
+3. Your `.env` file — lowest precedence, gap-fill only: it supplies a value
+   only when neither of the above is set, and it can never unlock the
+   gateway's dev/test-only launch-target-override escape hatch even when its
+   value is otherwise valid.
+
+`.env.example` ships `ALFRED_ENVIRONMENT=production` uncommented — copy it to
+`.env` as-is, or export the env var, or write `/etc/alfred/environment`, to
+satisfy this. See [ADR-0053](docs/adr/0053-three-layer-environment-precedence.md)
+for the full precedence chain, the fail-closed behaviour on an unreadable
+`/etc`, and why a `.env`-sourced value can never unlock that escape hatch.
+
+**Distinct from `ALFRED_ENV` below.** The two names look alike but gate
+unrelated decisions: `ALFRED_ENVIRONMENT` (this section) is the closed triple
+gating boot and the launch-target override; `ALFRED_ENV` (next section) is a
+free-form dev/production selector gating which capability-gate implementation
+gets constructed. Setting one does not set the other — `.env.example` comments
+both to keep them from being confused for one another.
+
 ### Gate selection
+
+Distinct from `ALFRED_ENVIRONMENT` above — this section's `ALFRED_ENV` gates
+the capability-gate implementation, not boot or the launch-target override.
 
 The capability gate has two implementations: `RealGate` (Postgres-backed)
 and `DevGate` (fail-open stubs, development-only). Selection is effectively

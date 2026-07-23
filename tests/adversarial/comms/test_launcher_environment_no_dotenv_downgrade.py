@@ -108,6 +108,7 @@ def test_read_environment_ignores_cwd_dotenv_only_source(
         text=True,
         env=_manifest_reader_cli_env({"ALFRED_ETC_ENV_FILE": str(tmp_path / "absent")}),
         check=False,
+        timeout=_LAUNCHER_TIMEOUT_S,
     )
 
     assert "development" not in result.stdout

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import structlog.testing
 
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
@@ -149,6 +150,26 @@ def test_directory_at_etc_path_is_fail_closed(
     result = resolve_environment(etc_path=etc_dir, dotenv_path=tmp_path / ".env")
     assert result.value is None
     assert result.source is EnvironmentSource.UNREADABLE
+
+
+def test_unreadable_etc_logs_breadcrumb(  # H5 (fleet review)
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A present-but-unreadable ``/etc`` logs a structlog breadcrumb (path +
+    exception class, never file contents) at the point of failure — not only via
+    whichever caller happens to audit ``EnvironmentSource.UNREADABLE`` downstream.
+    """
+    etc_dir = tmp_path / "environment"
+    etc_dir.mkdir()
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    with structlog.testing.capture_logs() as logs:
+        result = resolve_environment(etc_path=etc_dir, dotenv_path=tmp_path / ".env")
+
+    assert result.source is EnvironmentSource.UNREADABLE
+    breadcrumbs = [entry for entry in logs if entry["event"] == "environment_loader.etc_unreadable"]
+    assert len(breadcrumbs) == 1, logs
+    assert breadcrumbs[0]["path"] == str(etc_dir)
+    assert breadcrumbs[0]["error_class"] == "IsADirectoryError"
 
 
 def test_generic_os_error_at_etc_path_is_fail_closed(
@@ -348,6 +369,36 @@ def test_non_utf8_dotenv_is_absent_not_crash(
     result = _r(tmp_path)
     assert result.value is None
     assert result.source is EnvironmentSource.NONE
+
+
+def test_unreadable_dotenv_logs_breadcrumb_not_silent(  # H5 (fleet review)
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A present-but-unreadable ``.env`` is still treated as absent (unchanged), but
+    now names the path + exception class in a structlog breadcrumb — before this fix
+    an unreadable/undecodable ``.env`` was silently indistinguishable from a genuinely
+    absent one anywhere in the logs (``_read_etc``'s sibling failure at least surfaces
+    via the caller's audited ``environment_source_unreadable`` reason; ``_read_dotenv``'s
+    never did).
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    dotenv_path = tmp_path / ".env"
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise PermissionError("perm")
+
+    monkeypatch.setattr("alfred.config._environment_loader.dotenv_values", _boom, raising=False)
+    with structlog.testing.capture_logs() as logs:
+        result = resolve_environment(etc_path=tmp_path / "no-such-etc", dotenv_path=dotenv_path)
+
+    assert result.value is None
+    assert result.source is EnvironmentSource.NONE
+    breadcrumbs = [
+        entry for entry in logs if entry["event"] == "environment_loader.dotenv_unreadable"
+    ]
+    assert len(breadcrumbs) == 1, logs
+    assert breadcrumbs[0]["path"] == str(dotenv_path)
+    assert breadcrumbs[0]["error_class"] == "PermissionError"
 
 
 # --- neither set ---

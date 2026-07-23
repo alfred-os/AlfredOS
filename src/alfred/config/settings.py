@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import structlog
 from pydantic import (
     Field,
     ModelWrapValidatorHandler,
@@ -29,6 +30,8 @@ from pydantic_settings import (
 )
 
 from alfred.config._environment_loader import EnvironmentLoadResult, resolve_environment
+
+log = structlog.get_logger(__name__)
 
 # The literal placeholder shipped in .env.example. Rejected in both the setup
 # script (bin/alfred-setup.sh) and the Settings validator below so an operator
@@ -137,7 +140,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Deployment classification (PRD §7.1, ADR-0053 #174/#469). Mandatory,
+    # Deployment classification (ADR-0053 #174/#469 — owns the three-layer
+    # precedence algorithm below; M5 fleet review: no PRD section covers
+    # environment resolution, which is exactly why ADR-0053 exists — this
+    # comment previously cited "PRD §7.1" for the mechanism, itself a
+    # swap-in for an earlier "spec §7.3" that was ALSO wrong). Mandatory,
     # three-layer: env var ALFRED_ENVIRONMENT wins; /etc/alfred/environment is
     # the fallback; .env is the lowest gap-fill layer; disagreement between the
     # env var and /etc is audited by the daemon CLI and the env-var value
@@ -395,7 +402,13 @@ class Settings(BaseSettings):
         Literal field both validate against the same value set, so they cannot
         disagree today, but the check keeps the private attribute provably in sync
         with what was actually validated rather than trusting the pre-validation value
-        blindly.
+        blindly. M4 (fleet review): a divergence — which "cannot happen today" per the
+        above — no longer silently leaves the private attribute at ``None``; it logs a
+        structlog warning naming both values first, so a FUTURE change that breaks the
+        invariant (e.g. a field_validator added to ``environment`` that coerces the
+        string) surfaces loudly in the daemon's own logs instead of just quietly
+        losing the audit trail (``environment_load_result`` reads ``None``, matching
+        the loader-bypassed case, with no signal that they are actually different).
         """
         result: EnvironmentLoadResult | None = None
         if isinstance(data, dict) and "environment" not in data:
@@ -403,8 +416,15 @@ class Settings(BaseSettings):
             if result.value is not None:
                 data = {**data, "environment": result.value}
         instance = handler(data)
-        if result is not None and result.value == instance.environment:
-            instance._environment_load_result = result
+        if result is not None:
+            if result.value == instance.environment:
+                instance._environment_load_result = result
+            else:
+                log.warning(
+                    "settings.environment_load_result_diverged",
+                    resolved_value=result.value,
+                    validated_value=instance.environment,
+                )
         return instance
 
     @property

@@ -1,4 +1,8 @@
-"""Verify Settings.environment is mandatory per spec §7.3 (#174 PR-S4-1)."""
+"""Verify Settings.environment is mandatory (ADR-0053, #174 PR-S4-1 / #469 Blocker 1).
+
+M5 (fleet review, PR #491): "spec §7.3" was a stale citation — no PRD section covers
+environment resolution, which is exactly why ADR-0053 exists.
+"""
 
 from __future__ import annotations
 
