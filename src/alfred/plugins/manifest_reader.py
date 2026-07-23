@@ -240,7 +240,24 @@ def _cmd_read_sandbox(args: argparse.Namespace) -> int:
 def _cmd_read_environment() -> int:
     etc_override = os.environ.get("ALFRED_ETC_ENV_FILE")
     etc_path = Path(etc_override) if etc_override else None
-    result = resolve_environment(etc_path=etc_path)
+    # sec-001 (#469 Blocker 1, Critical): resolve TRUSTED-SOURCES-ONLY (env var
+    # + /etc), never `.env`. This helper's stdout is the launcher's sole
+    # signal for IS_PRODUCTION (bin/alfred-plugin-launcher.sh), which gates
+    # the bwrap sandbox refusals + the dev escape hatch + the FAKE_UNAME
+    # keystone. `resolve_environment`'s in-process callers (Settings) can
+    # express a trust floor by checking EnvironmentLoadResult.source (see the
+    # gateway launch-target override, dcfcc441) — but THIS interface is a bare
+    # stdout string consumed by bash; it carries the resolved VALUE but not
+    # the SOURCE that produced it, so a source-conditioned check is
+    # unexpressable here. Source-EXCLUSION (`consult_dotenv=False`) is the
+    # equivalent recourse: a CWD `.env` — writable by anything with CWD
+    # access, unlike root-owned `/etc/alfred/environment` — can never resolve
+    # a value this helper will hand to the launcher. On the `.env`-only path
+    # (env var + /etc both unset) this now falls through to NONE instead of
+    # silently downgrading to whatever `.env` claims, and the existing
+    # NONE/UNRECOGNISED handling below refuses exactly as it already did for
+    # a genuinely unresolved environment.
+    result = resolve_environment(etc_path=etc_path, consult_dotenv=False)
     if result.value is not None:
         print(result.value)
         return 0
