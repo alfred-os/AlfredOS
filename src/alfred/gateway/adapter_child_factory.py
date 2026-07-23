@@ -66,7 +66,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
-from alfred.config._environment_loader import load_environment
+from alfred.config._environment_loader import resolve_environment
 from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
@@ -134,7 +134,7 @@ def _resolve_launch_target(
       if present, else raise the SAME closed-static-map :class:`GatewayAdapterSpawnError`.
       The environment is NOT read on this path (no override means no gate to apply).
     * ``override_map is not None`` (an override was injected) — read the active
-      environment via :func:`load_environment`. Only in ``{"development", "test"}`` is
+      environment via :func:`resolve_environment`. Only in ``{"development", "test"}`` is
       the override honored: if ``adapter_id`` is in the override map, return its probe
       target; if it is not, FALL THROUGH to the production default (the override only
       redirects ids it names). Outside that allowlist (incl. ``production``,
@@ -144,7 +144,7 @@ def _resolve_launch_target(
     if override_map is None:
         return _production_launch_target(adapter_id)
 
-    environment = load_environment().value
+    environment = resolve_environment().value
     if environment not in _OVERRIDE_ALLOWED_ENVIRONMENTS:
         # FAIL-CLOSED: an override was injected but the environment is not allowlisted.
         # The message is CONTENT-FREE — built from a ``t()`` callsite with kwargs (not

@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 from pydantic import Field, PostgresDsn, PrivateAttr, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from alfred.config._environment_loader import EnvironmentLoadResult, load_environment
+from alfred.config._environment_loader import EnvironmentLoadResult, resolve_environment
 
 # The literal placeholder shipped in .env.example. Rejected in both the setup
 # script (bin/alfred-setup.sh) and the Settings validator below so an operator
@@ -43,7 +43,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 # ``extra="ignore"`` drops any stash key from the raw input dict before the
 # ``mode='after'`` validator runs, so the ``mode='before'`` validator cannot
 # hand the result over through the model. Threading it through a ContextVar
-# lets the single ``load_environment()`` call in ``_resolve_environment`` be
+# lets the single ``resolve_environment()`` call in ``_resolve_environment`` be
 # read by ``_capture_environment_load_result`` without a second disk read —
 # closing the within-construction TOCTOU window where a mid-construction
 # change to ALFRED_ENVIRONMENT / /etc/alfred/environment could make the
@@ -292,7 +292,7 @@ class Settings(BaseSettings):
         # value only when it is otherwise absent. The single result is
         # threaded to the after-validator via the ContextVar — no second
         # disk read, no TOCTOU window.
-        loaded = load_environment()
+        loaded = resolve_environment()
         _ENVIRONMENT_LOAD_RESULT.set(loaded)
         if "environment" not in data:
             if loaded.value is not None:
@@ -314,7 +314,7 @@ class Settings(BaseSettings):
 
         ``mode='before'`` cannot set a :class:`PrivateAttr` (the instance
         does not exist yet); ``mode='after'`` reads the ContextVar the
-        ``before`` validator populated from its single ``load_environment()``
+        ``before`` validator populated from its single ``resolve_environment()``
         call. No second disk read — the audited result provably matches the
         value chosen above (reviewer / core-eng-pr222-2 TOCTOU fix). The
         ContextVar is ``None`` when ``environment`` was passed explicitly

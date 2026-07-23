@@ -128,7 +128,7 @@ from alfred.comms_mcp.daemon_runtime import (
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
     EnvironmentSource,
-    load_environment,
+    resolve_environment,
 )
 
 # #338 PR2 (FOLD-2): ``_build_comms_boot_graph`` is the first boot caller of
@@ -343,7 +343,7 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult | None]:
     and returns the validated settings plus the load result for the conflict
     audit.
     """
-    loaded = load_environment()
+    loaded = resolve_environment()
     if loaded.value is None:
         # Refusal happens via the async _refuse_boot — but this helper is
         # sync (it precedes Settings construction). Surface a typed signal
