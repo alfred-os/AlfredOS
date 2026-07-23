@@ -119,9 +119,10 @@ A known, **latent** gap follows from the divergence: an operator who sets
 `ALFRED_ENV` left unset) gets a correctly-`production` `Settings.environment`
 but does **not** trip the sec-S3-003 in-memory-store refusal, because
 `ALFRED_ENV` — read independently — still defaults to "development" when
-unset. Reconciling the two variables is filed as a follow-up (out of scope
-here — see Scope below); this ADR's job is to document the divergence
-honestly rather than claim a single-resolver guarantee it does not provide.
+unset. Reconciling the two variables is issue
+[#489](https://github.com/alfred-os/AlfredOS/issues/489) (out of scope here
+— see Scope below); this ADR's job is to document the divergence honestly
+rather than claim a single-resolver guarantee it does not provide.
 
 ### 3. `.env` lowest, closed by construction, plus two independent trust floors
 
@@ -300,7 +301,25 @@ not the precedence chain itself. This ADR owns the precedence decision
   env var by the time `_scrubbed_base()` reads it. Not fixed here: the
   mechanism fix (teaching `_scrubbed_base()` to forward the daemon's resolved
   value rather than re-reading `os.environ`) is out of scope for this ADR —
-  filed as a follow-up.
+  filed as issue [#486](https://github.com/alfred-os/AlfredOS/issues/486).
+- **The launcher and the daemon report DIFFERENT refusal reasons for the
+  IDENTICAL condition — a present-but-unreadable `/etc` (final-review
+  M-5).** The daemon boot gate distinguishes this precisely:
+  `_load_settings_or_die` raises `_EnvironmentSourceUnreadableError` on
+  `EnvironmentSource.UNREADABLE`, and `_start_async` audits a distinct
+  `environment_source_unreadable` failure reason with
+  `environment_source="unreadable"`. The launcher's pre-launch helper does
+  not: `manifest_reader._cmd_read_environment` branches only on
+  `result.value is not None` and `result.source is
+  EnvironmentSource.UNRECOGNISED`, so an `UNREADABLE` result falls through to
+  the SAME bare `daemon.boot.environment_not_set` key a fully-absent
+  environment would produce — the launcher's stdout/stderr interface cannot
+  distinguish "no source claims a value" from "the highest source exists but
+  this process cannot read it." `EnvironmentSource.UNREADABLE` is new in this
+  branch (§5); the asymmetry is a direct consequence of adding it only to the
+  in-process `EnvironmentLoadResult` without teaching the launcher's bare-key
+  vocabulary the same distinction. Filed as issue
+  [#487](https://github.com/alfred-os/AlfredOS/issues/487).
 - **Two `.env` parsers for one file.** The resolver reads `environment`
   out of `.env` via `python-dotenv`'s `dotenv_values(..., interpolate=False)`;
   pydantic-settings' own dotenv source (still active for every *other*
@@ -315,7 +334,8 @@ not the precedence chain itself. This ADR owns the precedence decision
   `ALFRED_ENVIRONMENT` line itself is malformed, it reads as absent — the
   operator sees an `environment_not_set` refusal rather than a
   parse-error-specific one. Documented and pinned by test; a friendlier
-  message is a follow-up, not a hand-rolled `.env` parser.
+  message is issue [#490](https://github.com/alfred-os/AlfredOS/issues/490),
+  not a hand-rolled `.env` parser.
 - **`_Without`'s internal-API dependency** on pydantic-settings 2.14.x's
   per-source state protocol (§6) is mitigated by forwarding it faithfully,
   capping the version, and a regression test — but it remains a dependency
@@ -329,7 +349,18 @@ not the precedence chain itself. This ADR owns the precedence decision
   from the escape hatch regardless of which file it is.
 - **The `ALFRED_ENV`/`ALFRED_ENVIRONMENT` divergence** (§2) remains
   unresolved by this ADR; the latent sec-S3-003 gap it describes is a
-  known, filed follow-up, not a defect introduced here.
+  known, pre-existing condition, not a defect introduced here — filed as
+  issue [#489](https://github.com/alfred-os/AlfredOS/issues/489).
+- **`settings.py` is not whole-file coverage-gated.** The CI per-module
+  coverage gate added alongside this ADR (`_environment_loader.py` at 100%)
+  deliberately does NOT extend to `settings.py` as a whole file — it carries
+  one pre-existing uncovered line (the `comms_enabled_adapters` traversal-
+  containment branch, dated 2026-06-11, unrelated to environment
+  resolution) that would red the gate on day one. Filed as issue
+  [#488](https://github.com/alfred-os/AlfredOS/issues/488) rather than
+  closed here, since closing it means either adding a test for that
+  unrelated branch or accepting a narrower gate deliberately — a decision
+  for its own PR.
 
 ## Alternatives considered
 
@@ -348,7 +379,8 @@ not the precedence chain itself. This ADR owns the precedence decision
   Rejected for this ADR: the two variables are semantically distinct
   (closed triple vs. free-form dev/production selector) and used by
   independently-evolved security gates; reconciling them is a larger,
-  separate change with its own review, filed as a follow-up rather than
+  separate change with its own review — issue
+  [#489](https://github.com/alfred-os/AlfredOS/issues/489) — rather than
   folded into a precedence fix.
 
 ## Scope
@@ -360,15 +392,23 @@ independent escape-hatch trust floors, the `err-01`/`err-03` fail-closed
 and silently-dropped-line behaviors, `EnvironmentSource.DOTENV`/`UNREADABLE`,
 the short-circuit-on-typo semantics, and the `pydantic-settings<2.15` cap.
 
-**Out of scope (follow-ups):** reconciling `ALFRED_ENV` and
-`ALFRED_ENVIRONMENT` (including the latent sec-S3-003 gap in §2); a
-friendlier operator-facing message for a malformed `.env` line (err-03); a
-broader settings-factory DIP consolidation (its own future ADR, not
-pre-reserved a number here); teaching `alfred.plugins._comms_child_env
-._scrubbed_base()` to forward the daemon's own *resolved* `environment`
-value into a sandboxed plugin's child env instead of re-reading
-`os.environ["ALFRED_ENVIRONMENT"]` (the bare-host-only plugin-spawn gap in
-Consequences → Negative/residuals, final-review I-4).
+**Out of scope (follow-ups, each filed as its own issue):** reconciling
+`ALFRED_ENV` and `ALFRED_ENVIRONMENT`, including the latent sec-S3-003 gap
+in §2 — [#489](https://github.com/alfred-os/AlfredOS/issues/489); a
+friendlier operator-facing message for a malformed `.env` line (err-03) —
+[#490](https://github.com/alfred-os/AlfredOS/issues/490); a broader
+settings-factory DIP consolidation — the pre-existing
+[#351](https://github.com/alfred-os/AlfredOS/issues/351), not a new ADR-0054
+issue; teaching `alfred.plugins._comms_child_env._scrubbed_base()` to
+forward the daemon's own *resolved* `environment` value into a sandboxed
+plugin's child env instead of re-reading `os.environ["ALFRED_ENVIRONMENT"]`
+(the bare-host-only plugin-spawn gap in Consequences → Negative/residuals,
+final-review I-4) — [#486](https://github.com/alfred-os/AlfredOS/issues/486);
+teaching the launcher's bare-key vocabulary to distinguish an unreadable
+`/etc` from a fully-absent one (final-review M-5) —
+[#487](https://github.com/alfred-os/AlfredOS/issues/487); extending the
+per-module coverage gate to `settings.py` as a whole file —
+[#488](https://github.com/alfred-os/AlfredOS/issues/488).
 
 ## References
 
@@ -398,7 +438,18 @@ Consequences → Negative/residuals, final-review I-4).
   version-constraint policy (the `<2.15` cap exception).
 - Issue [#351](https://github.com/alfred-os/AlfredOS/issues/351) —
   config-as-interface DIP (`docs/python-conventions.md:176`); this ADR's
-  multi-process composition-root reasoning is consistent with it.
+  multi-process composition-root reasoning is consistent with it, and it is
+  the pre-existing issue the settings-factory/DIP consolidation follow-up
+  (Scope → Out of scope) points at rather than a new ADR-0054 number.
+- Follow-up issues filed against this ADR's residuals (final-review M-5):
+  [#486](https://github.com/alfred-os/AlfredOS/issues/486) (bare-host
+  plugin-spawn gap, I-4), [#487](https://github.com/alfred-os/AlfredOS/issues/487)
+  (launcher/daemon refusal-reason asymmetry for an unreadable `/etc`),
+  [#488](https://github.com/alfred-os/AlfredOS/issues/488) (`settings.py`
+  not whole-file coverage-gated), [#489](https://github.com/alfred-os/AlfredOS/issues/489)
+  (`ALFRED_ENV`/`ALFRED_ENVIRONMENT` reconciliation, §2), and
+  [#490](https://github.com/alfred-os/AlfredOS/issues/490) (malformed
+  `.env` line silently dropped, err-03).
 - `tests/unit/cli/daemon/test_environment_loader.py`,
   `tests/unit/cli/daemon/test_probe_environment_not_set.py`,
   `tests/unit/config/test_settings_environment_mandatory.py`,
