@@ -704,6 +704,35 @@ jobs:
             --include='src/alfred/observability/*' \
             --fail-under=100 \
             --show-missing
+      - name: Environment resolver trust-boundary 100% line+branch coverage (unit)
+        # #469 Blocker 1 Task 8 (ADR-0053): ``_environment_loader.py`` is the new
+        # security-load-bearing module — the three-layer ``ALFRED_ENVIRONMENT`` env
+        # var > ``/etc/alfred/environment`` > ``.env`` precedence resolver, including
+        # the [D3] short-circuit-on-typo'd-higher-source refusal (never silently
+        # fall through to a valid lower source), the [err-01] fail-closed
+        # UNREADABLE-``/etc`` handling, and the ``consult_dotenv=False`` escape-hatch
+        # a caller (the launcher, [D1]) uses so a CWD ``.env`` can never unlock a
+        # fail-closed gate. An un-exercised branch here is an un-proven precedence
+        # or fail-closed decision at exactly the boundary this module exists to
+        # guard. Pure file-only ops (no Postgres, no network) fully exercised by the
+        # unit tier (``tests/unit/cli/daemon/test_environment_loader.py`` +
+        # ``tests/unit/config/``) — no combined-job twin needed (mirrors the
+        # Observability leak-guard / First-party bootstrap-grants unit-only gates
+        # above). Deliberately does NOT gate ``src/alfred/config/settings.py`` as a
+        # whole file: it carries one PRE-EXISTING uncovered line (the
+        # ``comms_enabled_adapters`` traversal-containment branch, unrelated to
+        # environment resolution, predating this branch) that would red this gate on
+        # day one — the env-resolution surface settings.py DOES add (``_Without``,
+        # ``_environment_keys``, the ``mode="wrap"`` ``_resolve_environment``
+        # validator) is proven at 100% by the same unit run; verify locally with
+        # ``coverage report --include='src/alfred/config/settings.py'
+        # --show-missing`` (the only reported gap must be the pre-existing line).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/config/_environment_loader.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/config/_environment_loader.py' \
+            --fail-under=100 \
+            --show-missing
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
