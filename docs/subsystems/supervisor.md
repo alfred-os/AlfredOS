@@ -371,11 +371,17 @@ file into bwrap flags. This keeps the trust-tier-tagging surface in Python
 the load (`reason="sandbox_block_missing"`). See the
 [glossary](../glossary.md#sandbox-kind).
 
-**`Settings.environment` dual-source resolver.** Mandatory at boot, sourced
-`ALFRED_ENVIRONMENT` env var (primary) > `/etc/alfred/environment` file
-(fallback). Neither set → refuse. Disagreement audits
-`daemon.boot.environment_source_conflict` and the env var wins. (Shipped by
-PR-S4-1; consumed here.)
+**`Settings.environment` three-layer resolver ([ADR-0053](../adr/0053-three-layer-environment-precedence.md)).**
+Mandatory at boot, sourced `ALFRED_ENVIRONMENT` env var (highest) >
+`/etc/alfred/environment` file > `.env` (lowest, gap-fill-only, CWD-writable).
+Neither the env var nor `/etc` set but `.env` supplies a value → boots on the
+`.env` value. None of the three set → refuse. Disagreement between the env
+var and `/etc` audits `daemon.boot.environment_source_conflict` and the env
+var wins (`.env` never participates in that conflict — it is the lowest
+layer). A `.env`-sourced value can never unlock the gateway's dev/test-only
+launch-target-override escape hatch, which trusts only the env var and
+`/etc` sources. (Two-source model shipped by PR-S4-1; `.env` + the trust
+floor added by #469 Blocker 1 / ADR-0053; consumed here.)
 
 **Dev escape hatch production-refusal (devex-001).**
 `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED` truthy (`1`/`true`/`yes`/`on`, case-

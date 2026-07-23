@@ -128,9 +128,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Deployment classification (spec §7.3 #174). Mandatory, dual-sourced:
-    # env var ALFRED_ENVIRONMENT wins; /etc/alfred/environment is the
-    # fallback; .env is the lowest gap-fill layer; disagreement between the
+    # Deployment classification (PRD §7.1, ADR-0053 #174/#469). Mandatory,
+    # three-layer: env var ALFRED_ENVIRONMENT wins; /etc/alfred/environment is
+    # the fallback; .env is the lowest gap-fill layer; disagreement between the
     # env var and /etc is audited by the daemon CLI and the env-var value
     # wins; neither set → the field stays absent and Pydantic's
     # required-field error fires (translated to SettingsError by
@@ -310,13 +310,14 @@ class Settings(BaseSettings):
         ),
     )
 
-    # arch-002 closure (#174): the dual-source environment lookup result —
-    # env-var value, file value, conflict flag — that the daemon CLI needs
-    # to emit the ``daemon.boot.environment_source_conflict`` audit row.
+    # arch-002 closure (#174): the three-layer environment lookup result —
+    # value, source, conflict flag, conflicting /etc value, unrecognised raw
+    # value — that the daemon CLI needs to emit the
+    # ``daemon.boot.environment_source_conflict`` audit row (ADR-0053).
     # Held as a PrivateAttr (NOT a model field) so the validated model
     # surface stays clean and serialization never carries it — no Pydantic
     # data-smuggling. ``None`` when ``environment`` was passed explicitly
-    # (the dual-source loader was bypassed).
+    # (the three-layer loader was bypassed).
     _environment_load_result: EnvironmentLoadResult | None = PrivateAttr(default=None)
 
     @classmethod
@@ -338,8 +339,9 @@ class Settings(BaseSettings):
         them: :meth:`_resolve_environment` below, via ``resolve_environment()``, is the
         ONLY remaining path. Without this, a stray ``.env`` (or a misconfigured secrets
         file) could silently source ``environment`` directly through pydantic's own
-        machinery, bypassing the dual-source loader's env-var > /etc precedence and
-        conflict-audit logic entirely — the security downgrade this closes.
+        machinery, bypassing the three-layer loader's env-var > /etc > .env
+        precedence and conflict-audit logic entirely — the security downgrade
+        this closes.
         """
         keys = _environment_keys(settings_cls)
         return (
@@ -354,7 +356,7 @@ class Settings(BaseSettings):
     def _resolve_environment(
         cls, data: Any, handler: ModelWrapValidatorHandler[Settings]
     ) -> Settings:
-        """Populate ``environment`` from the dual-source loader when it is absent.
+        """Populate ``environment`` from the three-layer loader when it is absent.
 
         A single ``mode="wrap"`` validator replaces the old before/after pair +
         ContextVar hand-off (#469 Blocker 1): ``settings_customise_sources`` above
@@ -363,7 +365,7 @@ class Settings(BaseSettings):
         there is exactly one decision to make — inject if absent — and one capture
         to do afterwards, both in one place with no side channel needed.
 
-        When ``environment`` is present (an explicit kwarg), the dual-source loader
+        When ``environment`` is present (an explicit kwarg), the three-layer loader
         is bypassed entirely: ``resolve_environment()`` is not called, and
         ``environment_load_result`` stays ``None`` (the loader was never consulted,
         so there is nothing to audit). When absent, ``resolve_environment()`` runs
@@ -392,7 +394,7 @@ class Settings(BaseSettings):
 
     @property
     def environment_load_result(self) -> EnvironmentLoadResult | None:
-        """The dual-source environment lookup result, or ``None``.
+        """The three-layer environment lookup result, or ``None``.
 
         ``None`` when ``environment`` was supplied explicitly (the loader
         was bypassed) — e.g. unit tests constructing ``Settings(environment
