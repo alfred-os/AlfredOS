@@ -1,14 +1,21 @@
 # #469 Blocker 2 — opt-in Discord (the stock quickstart boots, no gateway crash-loop)
 
-**Status:** design **v2** — revised after a 10-lane `/review-plan` fleet (architect,
+**Status:** design **v3** — revised after a 10-lane `/review-plan` fleet (architect,
 reviewer, test-engineer, security-engineer, comms, devops, devex, i18n, error, docs;
 inline synthesis, no coordinator, no disputes). Fleet verdict: **0 Critical / 7 High
 / 23 Medium / 18 Low**; the core mechanism was verified sound by every lane. **All 48
-findings are folded in below** — fixed in-scope, or dispositioned with a named
-follow-up. Design-changing findings are marked **[R1]/[R2]/[R3]**. Parent epic: #469
-(first-run experience). This spec covers **Blocker 2 only**. The structural relative —
-keeping the gateway alive when a hosted adapter's credential fails — is **#331**, out
-of scope.
+findings are folded in below**, all fixed in-scope. **v3:** per maintainer decision the
+sole prior residual — invalid-token legibility — is now **IN scope** (change #6), so a
+*wrong* token is legible too, not just a missing one. Design-changing findings are
+marked **[R1]/[R2]/[R3]**. Parent epic: #469 (first-run experience). This spec covers
+**Blocker 2 only**. The structural relative — keeping the gateway alive when a hosted
+adapter's credential fails (park-not-abort) — is **#331**, out of scope.
+
+**⚠ Re-review note:** change #6 was added after the v2 fleet pass and touches the
+comms **wire contract** (`LifecycleStartResult`) + the Discord adapter + the gateway
+factory — a trust-boundary-adjacent surface the v2 review did not see. It must be
+scrutinised by the comms + security lanes at plan-review time (the cadence's
+`/review-plan` on the PLAN) before implementation.
 
 ## Problem
 
@@ -141,9 +148,12 @@ refusal** into a friendly "set your Discord token" message — the exact hard-ru
 anti-pattern.
 
 **Revised design:** introduce a narrow **credential-origin marker subclass**
-`GatewayAdapterCredentialError(GatewayAdapterSpawnError)`, raised **only** on the
-supervisor's credential-refusal arm (the `AdapterCredentialError`-wrapped
-`missing_secret` / `grant_mismatch` / `delivery_failed` cases, `adapter_supervisor.py:500-503`).
+`GatewayAdapterCredentialError(GatewayAdapterSpawnError)`, raised on the two
+operator-credential origins ONLY: (i) the supervisor's credential-refusal arm (the
+`AdapterCredentialError`-wrapped `missing_secret` / `grant_mismatch` /
+`delivery_failed` cases, `adapter_supervisor.py:500-503`); and (ii) the factory's
+auth-failed handshake (change #6 — a `LoginFailure`-origin `ok=false`, distinguished
+by a closed-vocab wire reason so a handshake *bug* never qualifies).
 `start_gateway` catches **only that subclass** and:
 
 - renders `t("gateway.start.adapter_spawn_failed", adapter_id=…)` — a static template
@@ -159,18 +169,11 @@ supervisor's credential-refusal arm (the `AdapterCredentialError`-wrapped
   = 10` (next free after 3-9; documented in the exit-code comment block alongside
   siblings — devex-005).
 
-The bare wrapper, the wiring-bug raise, and `LaunchTargetOverrideRefusedError`
+The bare wrapper, the wiring-bug raise, `LaunchTargetOverrideRefusedError`, and any
+`ok=false` handshake WITHOUT the closed-vocab auth reason (i.e. a handshake bug)
 **continue to surface loud** — proven by an out-of-scope masking-regression test.
 Import the new symbol into `start_gateway`'s lazy block (`:238-267` — comms-004/rev-003).
-
-**Invalid-token (`LoginFailure`) legibility is a documented residual + follow-up.**
-That case is a bare-`GatewayAdapterSpawnError` handshake `ok=false`, not cleanly
-distinguishable from a handshake bug without a structured auth-failure reason from the
-child, so it is **not** softened here (surfaces loud, same discipline as a bug). This
-is acceptable because change #1 removes the *stock* crash-loop and a wrong-token
-opt-in is an explicit, rarer misconfig. **Follow-up to FILE:** "Discord adapter
-surfaces a typed auth-failure so a wrong-token opt-in is legible" (would let the
-marker cover it too).
+Both credential origins are audited before the raise (see [R3]).
 
 ### 4. [R2] Doc/scope surfaces the flip changes (else the silent failure just relocates)
 
@@ -193,14 +196,52 @@ the config-failed arm's `except (OSError, ManifestError)` (`:279`) does **not** 
 render the config-failed refusal for the settings-construction `SettingsError`/
 `ValueError` (scoped to that call so unrelated `ValueError`s still surface loud).
 
-## Data flow (four paths)
+### 6. Invalid-token legibility — typed auth-failure end to end (maintainer: in scope)
+
+Make a *wrong* (present-but-invalid) token legible like a missing one, WITHOUT
+softening a genuine handshake bug. Today a `LoginFailure` becomes a secret-free
+`LifecycleStartResult(ok=False)` (`lifecycle.py:199-209`) that the factory raises as a
+**bare** `GatewayAdapterSpawnError` (`adapter_child_factory.py:40-41`),
+indistinguishable from a handshake bug — which is exactly why [R1] cannot catch the
+base type. Fix by carrying a **closed-vocab reason** through three layers:
+
+- **Wire contract** (`comms_mcp/protocol.py:190-207`): add
+  `failure_reason: Literal["auth_failed"] | None = None` to `LifecycleStartResult`.
+  Closed-vocab (no free text → no secret; consistent with the existing secret-free
+  `ok=false` discipline and hard rule #6). Optional-with-default → back-compat (a
+  plugin that omits it still validates). **Wire-version discipline:** confirm whether
+  the §4.9 handshake version needs a bump for an additive optional field; bump it if so
+  (comms-lane plan-review item).
+- **Discord adapter** (`plugins/alfred_discord/gateway_adapter.py` + `lifecycle.py`):
+  distinguish discord.py's `LoginFailure` (bad credential) from other startup errors —
+  raise a dedicated `AuthGatewayError(GatewayError)` on `LoginFailure` only — and have
+  `DiscordLifecycle.start` set `failure_reason="auth_failed"` on that path (still
+  `ok=False`, still secret-free: the reason is a constant, never the token/exception
+  text). Every other failure keeps `failure_reason=None`.
+- **Gateway factory** (`adapter_child_factory.py`): on an `ok=False` handshake, raise
+  `GatewayAdapterCredentialError` (the [R1] marker) **iff**
+  `failure_reason == "auth_failed"`; otherwise raise the bare `GatewayAdapterSpawnError`
+  as today. Auth failure → friendly; a bug → loud.
+- **Audit unification** (`adapter_supervisor.py:490-499`, ties [R3]): give
+  `GatewayAdapterCredentialError` a closed-vocab `.reason` and extend the supervisor's
+  distinct-row gate (currently `isinstance(exc, AdapterCredentialError)`) to fire
+  `_audit_spawn_aborted` for it too — so BOTH credential origins (missing-token and
+  auth-failed) write the same signed row before the raise, superseding the
+  invalid-token EMIT_CRASHED-only trail and satisfying [R3] uniformly.
+
+The [R1] arm then renders the friendly message for the wrong-token case too. This is a
+trust-boundary-adjacent, multi-layer change (see the Status re-review note).
+
+## Data flow (five paths)
 
 - **Stock** (no token, no var): `[]` → no-op → healthy → core boots. *(the fix)*
 - **Opt-in** (token + `["alfred_discord"]`): spawn succeeds → Discord live.
 - **Opt-in, missing token**: credential-refusal → `GatewayAdapterCredentialError` →
   friendly handler → legible message + exit 10.
-- **Opt-in, invalid token**: `LoginFailure` surfaces loud (documented residual);
-  a `["discord"]` typo is caught by the widened config arm (#5).
+- **Opt-in, invalid token** (change #6): `LoginFailure` → `failure_reason="auth_failed"`
+  → factory raises `GatewayAdapterCredentialError` → friendly handler + exit 10.
+- **Opt-in, typo'd id** (`["discord"]`): caught by the widened config arm (#5). A
+  genuine handshake *bug* (no `auth_failed`) still surfaces loud.
 
 ## Testing
 
@@ -228,6 +269,15 @@ render the config-failed refusal for the settings-construction `SettingsError`/
   stays empty/absent.
 - **Config-arm (#5):** a `["discord"]` typo → the config-failed refusal + its exit
   code, not a traceback.
+- **Invalid-token / change #6:** (a) unit — `DiscordLifecycle.start` on a `LoginFailure`
+  returns `ok=False, failure_reason="auth_failed"` and on any other error returns
+  `failure_reason=None` (secret-free either way; no token/exc text on the wire); (b)
+  factory — an `auth_failed` handshake raises `GatewayAdapterCredentialError` while a
+  non-`auth_failed` `ok=False` raises the bare `GatewayAdapterSpawnError` (the
+  bug-stays-loud guarantee); (c) protocol — `LifecycleStartResult` round-trips the new
+  optional field and a result omitting it still validates (back-compat); (d) end-to-end
+  — a present-but-invalid token renders the friendly message + exit 10 (not a traceback)
+  and writes the unified audit row (audit unification).
 - **Integration (test-008):** `test_gateway_unset_discord_token_fails_loud.py` —
   resolver behaviour unchanged; docstring notes the stock default no longer triggers
   it (verified the new key does not trip the `SLICE_4_KEYS` orphan check).
@@ -261,9 +311,8 @@ splits into focused Conventional-Commits, each subject carrying `#469` after the
 
 - **#331 park-not-abort** — keep the gateway/relay alive on a first-attempt credential
   failure. A fail-closed-trust-boundary change; its own security + adversarial sign-off.
-- **Invalid-token legibility** — a typed auth-failure from the Discord child so a
-  wrong-token opt-in is legible too. **Follow-up to be FILED** (this PR documents it as
-  a residual; the default flip already fixes the stock path).
+  (Note: change #6 makes the invalid-token abort *legible*, but it still aborts —
+  surviving it is #331.)
 - **CI first-run smoke lane** (clone → setup → `up -d` → healthy) — the epic's
   *systemic* fix; the `docker compose config` assertion above is the cheap interim.
 - The other #469 blockers; `CLAUDE.md`/`PRD.md` edits (human-gated; no new CLI surface).
