@@ -153,6 +153,53 @@ def test_settings_invalid_message_never_leaks_exception_detail(
     )
 
 
+def test_placeholder_api_key_settings_error_shows_curated_hint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``_bootstrap_settings_message``'s placeholder-key branch (#469 Blocker 1
+    devops-004): a ``SettingsError`` whose message contains ``placeholder_api_key``
+    (the operator copied ``.env.example`` but never edited the DeepSeek key) gets
+    the SAME curated ``error.placeholder_api_key`` hint the interactive CLI
+    bootstrap path (``alfred.cli._bootstrap.load_settings_or_die``) shows — not the
+    generic ``daemon.boot.settings_invalid`` fallback the sibling tests above cover.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.chdir(tmp_path)
+    # Hermetic: never let a real host /etc/alfred/environment participate.
+    monkeypatch.setattr(
+        "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+        tmp_path / "absent",
+    )
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    from alfred.config.settings import SettingsError
+
+    def _raise_settings_error(**_kw: object) -> object:
+        raise SettingsError(
+            "1 validation error for Settings\ndeepseek_api_key\n  Value error, placeholder_api_key"
+        )
+
+    monkeypatch.setattr("alfred.config.settings.Settings", _raise_settings_error)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert t("error.placeholder_api_key") in result.output
+    assert appended, "no audit row emitted before exit (sec-001 violated)"
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "settings_invalid"
+
+
 def test_environment_source_unreadable_refuses_and_audits(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
