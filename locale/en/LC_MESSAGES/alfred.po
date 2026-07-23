@@ -1012,6 +1012,23 @@ msgstr ""
 "boot. Use one of: development, production, test (in your .env) and re-run"
 " `alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
+#: src/alfred/cli/daemon/_commands.py:581
+msgid "daemon.boot.environment_source_unreadable"
+msgstr ""
+"The environment source could not be read (permission or ownership "
+"problem on /etc/alfred/environment). Refusing to boot — a mode-"
+"misconfigured file must never silently fall back to a lower-precedence "
+"source. Fix its permissions/ownership so the daemon process can read it, "
+"then re-run `alfred daemon start` (or `docker compose up -d` on the "
+"compose stack)."
+
+#: src/alfred/cli/daemon/_commands.py:443
+msgid "daemon.boot.settings_invalid"
+msgstr ""
+"Alfred's configuration is invalid. Refusing to boot — check your .env / "
+"secrets file for a missing or malformed required value, then re-run "
+"`alfred daemon start` (or `docker compose up -d` on the compose stack)."
+
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
 #: src/alfred/cli/daemon/_commands.py:386
 #: src/alfred/i18n/_slice_4_reserve.py:115
