@@ -372,16 +372,36 @@ the load (`reason="sandbox_block_missing"`). See the
 [glossary](../glossary.md#sandbox-kind).
 
 **`Settings.environment` three-layer resolver ([ADR-0053](../adr/0053-three-layer-environment-precedence.md)).**
-Mandatory at boot, sourced `ALFRED_ENVIRONMENT` env var (highest) >
-`/etc/alfred/environment` file > `.env` (lowest, gap-fill-only, CWD-writable).
-Neither the env var nor `/etc` set but `.env` supplies a value → boots on the
-`.env` value. None of the three set → refuse. Disagreement between the env
-var and `/etc` audits `daemon.boot.environment_source_conflict` and the env
-var wins (`.env` never participates in that conflict — it is the lowest
-layer). A `.env`-sourced value can never unlock the gateway's dev/test-only
-launch-target-override escape hatch, which trusts only the env var and
-`/etc` sources. (Two-source model shipped by PR-S4-1; `.env` + the trust
-floor added by #469 Blocker 1 / ADR-0053; consumed here.)
+Two DISTINCT resolutions share the one algorithm (CR3, fleet review on
+PR #491) — do not conflate them:
+
+- **Daemon-boot resolution** (`cli/daemon/_commands.py`'s boot gate, and
+  `Settings` itself) consults all three layers: `ALFRED_ENVIRONMENT` env var
+  (highest) > `/etc/alfred/environment` file > `.env` (lowest, gap-fill-only,
+  CWD-writable). Neither the env var nor `/etc` set but `.env` supplies a
+  value → the **daemon** boots on the `.env` value. None of the three set →
+  refuse. Disagreement between the env var and `/etc` audits
+  `daemon.boot.environment_source_conflict` and the env var wins (`.env`
+  never participates in that conflict — it is the lowest layer).
+- **Launcher resolution** (the pre-launcher Python helper above,
+  `manifest_reader.py --read-environment`) resolves **trusted-sources-only**:
+  `resolve_environment(consult_dotenv=False)` — env var + `/etc` ONLY, with
+  `.env` excluded outright (never even read) rather than read-then-discarded.
+  A `.env` value that satisfies **daemon boot** does **not** satisfy a
+  **plugin spawn** through the launcher: on a bare-host, `.env`-only install
+  the daemon boots cleanly but every sandboxed plugin spawn still refuses
+  `daemon.boot.environment_not_set` (ADR-0053 Consequences →
+  Negative/residuals, tracked as #486). The launcher's own trust/production
+  decisions (`IS_PRODUCTION`, the dev escape hatch below) are driven
+  entirely by this env-var-+-`/etc`-only read — `.env` plays no part in them.
+
+A `.env`-sourced value likewise can never unlock the gateway's dev/test-only
+launch-target-override escape hatch, which — like the launcher — trusts only
+the env var and `/etc` sources, and (as of the #469 Blocker-1 M1 perf fix)
+does so via the SAME `consult_dotenv=False` mechanism rather than post-hoc
+source filtering of a value it still read. (Two-source model shipped by
+PR-S4-1; `.env` + both trust floors added by #469 Blocker 1 / ADR-0053;
+consumed here.)
 
 **Dev escape hatch production-refusal (devex-001).**
 `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED` truthy (`1`/`true`/`yes`/`on`, case-

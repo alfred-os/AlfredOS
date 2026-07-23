@@ -89,7 +89,10 @@ log = structlog.get_logger(__name__)
 # production gateway merely by shadowing the value. Only a source with an explicit,
 # operator-controlled trust boundary (the process's own env var, or the root-owned
 # ``/etc`` file) may honor the override, even when the resolved VALUE is a legitimate
-# ``development``/``test`` string.
+# ``development``/``test`` string. M1 (fleet review, PR #491): as of the
+# ``consult_dotenv=False`` fix below, ``.env`` is no longer even READ at this call
+# site, so ``resolved.source`` can never actually be ``DOTENV`` in practice — this
+# frozenset stays as belt-and-braces defense in depth, not the primary mechanism.
 _OVERRIDE_TRUSTED_SOURCES: Final[frozenset[EnvironmentSource]] = frozenset(
     {EnvironmentSource.ENV_VAR, EnvironmentSource.ETC_FILE}
 )
@@ -169,6 +172,14 @@ def _resolve_launch_target(
       ``production``, ``staging``, unset / unrecognised, or a ``.env``-sourced dev value)
       raises :class:`LaunchTargetOverrideRefusedError` — FAIL-CLOSED / default-DENY.
 
+    M1 (fleet review, PR #491): ``resolve_environment`` is called with
+    ``consult_dotenv=False`` — a blocking ``.env`` parse on the event loop
+    (:meth:`spawn_and_handshake` is ``async``) that can never change the outcome:
+    :data:`_OVERRIDE_TRUSTED_SOURCES` already discards any ``DOTENV``-sourced result
+    outright, so reading ``.env`` here was pure waste, never a behavior difference.
+    The :data:`_OVERRIDE_TRUSTED_SOURCES` check is kept as belt-and-braces defense in
+    depth even though ``resolved.source`` can now never actually be ``DOTENV``.
+
     ``etc_path`` is a seam threaded straight to :func:`resolve_environment` so tests can
     point the ``/etc`` layer at a ``tmp_path`` without touching a real
     ``/etc/alfred/environment``; ``None`` (the default) reads the real file.
@@ -176,7 +187,7 @@ def _resolve_launch_target(
     if override_map is None:
         return _production_launch_target(adapter_id)
 
-    resolved = resolve_environment(etc_path=etc_path)
+    resolved = resolve_environment(etc_path=etc_path, consult_dotenv=False)
     environment = resolved.value
     honor = (
         environment in _OVERRIDE_ALLOWED_ENVIRONMENTS

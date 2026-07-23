@@ -1629,7 +1629,10 @@ environment is `∈ {development,test}` **and** came from a trusted source (the
 `ALFRED_ENVIRONMENT` env var or the root-owned `/etc` file — never a `.env`-sourced
 value, per [ADR-0053](adr/0053-three-layer-environment-precedence.md)'s trust floor)
 via the env-gated `override_map` constructor parameter on `GatewayAdapterChildFactory`;
-the production factory never accepts an override. Being a packaged module (not under
+production COMPOSITION never injects one (the constructor itself accepts `override_map:
+Mapping[str, tuple[str, str]] | None`, defaulting to `None` — CR2: it is the daemon
+boot graph's wiring that never passes a non-`None` map in production, not a constructor
+that refuses one). Being a packaged module (not under
 `plugins/`) is load-bearing: the `kind=full`
 bwrap sandbox binds the interpreter prefix read-only, so `alfred.gateway.discord_probe`
 resolves off the bound proto py3.14 interpreter — a `plugins/` module would raise

@@ -58,7 +58,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import structlog
 from dotenv import dotenv_values
+
+log = structlog.get_logger(__name__)
 
 _VALID_VALUES: Final[frozenset[str]] = frozenset({"development", "production", "test"})
 _DEFAULT_ETC_PATH: Final[Path] = Path("/etc/alfred/environment")
@@ -128,16 +131,27 @@ class _EtcRead:
 def _read_etc(etc_path: Path) -> _EtcRead:
     """Read + normalize the ``/etc`` source, distinguishing absent from unreadable.
 
-    A genuinely absent file (``FileNotFoundError``) is skipped like any unset source.
-    A *present* file this process cannot read (``PermissionError``/
-    ``IsADirectoryError``/generic ``OSError``) fails closed [err-01] — the caller must
-    never silently fall through to ``.env`` on a mode-misconfigured ``/etc``.
+    A genuinely absent file (``FileNotFoundError``) is skipped like any unset source
+    (silently — an absent ``/etc/alfred/environment`` is the common, expected case on
+    a fresh install and logging it would be pure noise). A *present* file this process
+    cannot read (``PermissionError``/``IsADirectoryError``/generic ``OSError``) fails
+    closed [err-01] — the caller must never silently fall through to ``.env`` on a
+    mode-misconfigured ``/etc``. H5 (fleet review): that failure also carries a
+    structlog breadcrumb (path + exception class, NEVER file contents) so a
+    mode-misconfigured ``/etc`` is diagnosable from the daemon's own logs, not only
+    from whichever caller happens to audit ``EnvironmentSource.UNREADABLE`` downstream
+    (some callers — e.g. the pre-launcher helper, ADR-0053 residual #487 — do not).
     """
     try:
         return _EtcRead(_norm(etc_path.read_text(encoding="utf-8")), unreadable=False)
     except FileNotFoundError:
         return _EtcRead(None, unreadable=False)
-    except (PermissionError, IsADirectoryError, OSError):
+    except (PermissionError, IsADirectoryError, OSError) as exc:
+        log.warning(
+            "environment_loader.etc_unreadable",
+            path=str(etc_path),
+            error_class=type(exc).__name__,
+        )
         return _EtcRead(None, unreadable=True)
 
 
@@ -147,10 +161,36 @@ def _read_dotenv(dotenv_path: Path) -> str | None:
     ``interpolate=False`` eliminates a ``$VAR`` injection vector (ADR-0053) — it is
     not chosen to mirror pydantic's own ``.env`` parsing, which defaults to
     ``interpolate=True``.
+
+    Every read failure — including ``FileNotFoundError`` (the common, genuinely-absent
+    case) — is treated as absent [err-02/err-03] (fail-closed, unchanged: ``.env`` is
+    the lowest, gap-fill-only layer, so a mode-misconfigured ``.env`` degrading to "no
+    value from this source" cannot itself cause a downgrade). H5 (fleet review): the
+    single except clause is kept UNSPLIT (not two clauses, one per outcome) so no new
+    branch-coverage arc is introduced — ``dotenv_values`` never actually raises
+    ``FileNotFoundError`` for a missing file (it returns an empty mapping instead), so
+    a dedicated "absent, don't log" branch would be permanently unreachable and red
+    the 100% branch-coverage gate. Logging unconditionally on every member of the tuple
+    is therefore harmless in practice (this warning fires only for a genuinely present-
+    but-unreadable/undecodable ``.env``) while closing the real gap: before this fix an
+    unreadable/undecodable ``.env`` was silently indistinguishable from an absent one
+    anywhere in the logs — a structlog breadcrumb (path + exception class, NEVER file
+    contents) now names it.
     """
     try:
         values = dotenv_values(dotenv_path, interpolate=False)
-    except (FileNotFoundError, PermissionError, IsADirectoryError, OSError, UnicodeDecodeError):
+    except (
+        FileNotFoundError,
+        PermissionError,
+        IsADirectoryError,
+        OSError,
+        UnicodeDecodeError,
+    ) as exc:
+        log.warning(
+            "environment_loader.dotenv_unreadable",
+            path=str(dotenv_path),
+            error_class=type(exc).__name__,
+        )
         return None
     return _norm(values.get("ALFRED_ENVIRONMENT"))
 

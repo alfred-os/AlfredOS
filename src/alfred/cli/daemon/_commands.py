@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 import typer
+from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import (
@@ -424,6 +425,33 @@ def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
     return t("daemon.boot.environment_not_set")
 
 
+def _settings_error_field_name(exc: SettingsError) -> str | None:
+    """Extract the offending dotted FIELD PATH from a chained pydantic ``ValidationError``.
+
+    M2 (fleet review): ``ValidationError.errors()[].loc`` is the field path pydantic
+    itself attributes the failure to — safe to surface, unlike ``.msg``/``.input``,
+    either of which can carry the invalid VALUE (a custom validator's ``ValueError``
+    text can embed it, e.g. a ``database_url`` failure quoting the DSN). ``loc`` is
+    excluded from that risk: it names WHERE validation failed, never what value was
+    there. ``Settings.__init__`` chains the original exception via ``raise
+    SettingsError(str(exc)) from exc``, so ``exc.__cause__`` is the real
+    ``ValidationError`` on a genuine ``Settings()`` construction failure. Returns
+    ``None`` when no such chain exists (e.g. a test double raising ``SettingsError``
+    directly with no ``from``) or the cause is not a ``ValidationError`` — the caller
+    falls back to the fully generic message rather than guess.
+    """
+    cause = exc.__cause__
+    if not isinstance(cause, ValidationError):
+        return None
+    errors = cause.errors(include_url=False, include_context=False, include_input=False)
+    if not errors:
+        return None
+    loc = errors[0]["loc"]
+    if not loc:
+        return None
+    return ".".join(str(part) for part in loc)
+
+
 def _bootstrap_settings_message(exc: SettingsError) -> str:
     """Pick the curated operator-facing message for a post-env ``Settings()`` failure.
 
@@ -443,9 +471,18 @@ def _bootstrap_settings_message(exc: SettingsError) -> str:
     the ``alfred daemon start`` / ``docker compose up -d`` re-run — not
     ``/etc/alfred`` (the environment was already resolved by the time this
     runs; the fault is in some OTHER Settings field).
+
+    M2 (fleet review): when the FIELD NAME is safely recoverable
+    (:func:`_settings_error_field_name` — the pydantic ``loc``, never the value),
+    the curated ``daemon.boot.settings_invalid_field`` variant names it, saving the
+    operator a `grep` through the compose logs to find which field is wrong. Still
+    NEVER interpolates ``str(exc)`` or any value — only the field's dotted PATH.
     """
     if "placeholder_api_key" in str(exc):
         return t("error.placeholder_api_key")
+    field = _settings_error_field_name(exc)
+    if field is not None:
+        return t("daemon.boot.settings_invalid_field", field=field)
     return t("daemon.boot.settings_invalid")
 
 

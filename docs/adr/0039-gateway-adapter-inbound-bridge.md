@@ -466,19 +466,29 @@ components together form the privileged real-spawn proof:
 
 2. **Env-gated launch-target override in `GatewayAdapterChildFactory`.** An `override_map`
    constructor parameter (type `Mapping[str, tuple[str, str]] | None`) redirects an adapter id's bwrap
-   launch target (e.g. `discord` → the probe) when `ALFRED_ENVIRONMENT ∈ {development,test}`,
-   read via the sanctioned `resolve_environment()` (renamed from `load_environment()`
-   by [ADR-0053](0053-three-layer-environment-precedence.md), which also added the
-   `.env` layer and the trust-floor refinement described there) **at each spawn call**
-   (inside `_resolve_launch_target`, not at construction — `__init__` only stores the
-   map). The guard is
-   fail-closed by default: any non-None override map passed when `ALFRED_ENVIRONMENT` is
-   `production` (or unset/unrecognised) raises `LaunchTargetOverrideRefusedError`, a subclass
-   of `GatewayAdapterSpawnError`, which the supervisor's spawn-error arm audits as a
-   `gateway.adapter.crashed` row. The rejected module string never appears in any audit
-   field or log line (sec-003). This is a NEW test-only trust seam. It is recorded here as an
-   amendment rather than a new ADR because it is a narrow, env-gated addition to an existing
-   decision boundary (docs-003 disposition).
+   launch target (e.g. `discord` → the probe) when the resolved environment is `∈
+   {development,test}` **and was honored from a trusted source** — read via the
+   sanctioned `resolve_environment()` (renamed from `load_environment()` by
+   [ADR-0053](0053-three-layer-environment-precedence.md), which also added the
+   `.env` layer and this trust floor) **at each spawn call** (inside
+   `_resolve_launch_target`, not at construction — `__init__` only stores the map),
+   with `consult_dotenv=False` so `.env` is never even READ at this call site (a
+   perf fix — `.env`-sourced results were always discarded anyway, see below). The
+   guard is fail-closed by default: any non-None override map passed when the
+   resolved environment is `production` (or unset/unrecognised), **or when the only
+   source claiming `development`/`test` is a CWD `.env` file**, raises
+   `LaunchTargetOverrideRefusedError`, a subclass of `GatewayAdapterSpawnError`,
+   which the supervisor's spawn-error arm audits as a `gateway.adapter.crashed`
+   row. `.env` is the lowest, gap-fill-only, CWD-writable layer of
+   `resolve_environment()` — honoring a `.env`-sourced value here would let a
+   stray or hostile CWD `.env` unlock the override on a production gateway
+   merely by shadowing the value, so it can never satisfy this gate, by
+   construction (never even consulted) as well as by the retained
+   `_OVERRIDE_TRUSTED_SOURCES` source check (belt-and-braces). The rejected module
+   string never appears in any audit field or log line (sec-003). This is a NEW
+   test-only trust seam. It is recorded here as an amendment rather than a new ADR
+   because it is a narrow, env-gated addition to an existing decision boundary
+   (docs-003 disposition).
 
 **The proof.** `tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py`
 (DOCKER-ONLY, `integration-privileged`, marked `@pytest.mark.skipif(_LAUNCHER_REQUIRES_ROOT)`):

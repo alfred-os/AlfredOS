@@ -111,6 +111,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # required field invalid) is a DISTINCT reason from environment_not_set —
     # curated copy, never the raw exception detail (DLP).
     "daemon.boot.settings_invalid",
+    # M2 (fleet review, PR #491): names the offending FIELD PATH (pydantic's
+    # ``loc``, never the value) when safely recoverable from a chained
+    # ValidationError; falls back to the bare settings_invalid above otherwise.
+    "daemon.boot.settings_invalid_field",
     "daemon.boot.unsandboxed_in_production",
     "daemon.boot.launcher_not_policy_resolving",
     "daemon.boot.snapshot_ref_init_failed",
