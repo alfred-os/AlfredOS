@@ -108,10 +108,12 @@ _OVERRIDE_ALLOWED_ENVIRONMENTS: Final[frozenset[str]] = frozenset({"development"
 #
 # Spec B G6-7-7 (#309) de-stale: this map is no longer STRICTLY fixed. A TEST-ONLY,
 # constructor-injected ``override_map`` (resolved by :func:`_resolve_launch_target`) can
-# redirect an entry to a probe target — but ONLY in a development/test environment.
-# Outside that allowlist an injected override is a fail-closed refusal, so a probe
-# redirect can never take effect on a production gateway; production with no override
-# resolves this map exactly as before.
+# redirect an entry to a probe target — but ONLY in a development/test environment
+# resolved from a TRUSTED source (``_OVERRIDE_TRUSTED_SOURCES`` above — the process's
+# own env var or the root-owned ``/etc`` file; #469 Blocker-1 ADR-0053). A ``.env``-sourced
+# ``development``/``test`` value does NOT satisfy this gate. Outside that allowlist an
+# injected override is a fail-closed refusal, so a probe redirect can never take effect
+# on a production gateway; production with no override resolves this map exactly as before.
 _ADAPTER_LAUNCH_TARGETS: Final[Mapping[str, tuple[str, str]]] = {
     "discord": ("alfred.discord", "plugins.alfred_discord.server"),
 }
