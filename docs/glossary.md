@@ -1624,10 +1624,13 @@ gateway real-spawn e2e (G6-7-7) launches in place of the production Discord adap
 the [launch-target override](#launch-target-override). Speaks the gateway adapter wire:
 handshake-first, reads a credential over fd-3 (content-free ack — it does not
 authenticate with Discord), emits exactly one scripted `inbound.message`, then blocks
-until stdin EOF so the host pump completes cleanly. Reachable only when
-`ALFRED_ENVIRONMENT ∈ {development,test}` via the env-gated `override_map` constructor
-parameter on `GatewayAdapterChildFactory`; the production factory never accepts an
-override. Being a packaged module (not under `plugins/`) is load-bearing: the `kind=full`
+until stdin EOF so the host pump completes cleanly. Reachable only when the resolved
+environment is `∈ {development,test}` **and** came from a trusted source (the
+`ALFRED_ENVIRONMENT` env var or the root-owned `/etc` file — never a `.env`-sourced
+value, per [ADR-0053](adr/0053-three-layer-environment-precedence.md)'s trust floor)
+via the env-gated `override_map` constructor parameter on `GatewayAdapterChildFactory`;
+the production factory never accepts an override. Being a packaged module (not under
+`plugins/`) is load-bearing: the `kind=full`
 bwrap sandbox binds the interpreter prefix read-only, so `alfred.gateway.discord_probe`
 resolves off the bound proto py3.14 interpreter — a `plugins/` module would raise
 `ModuleNotFoundError` inside the sandbox. Never a production adapter; the gateway Discord

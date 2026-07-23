@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-23 09:54+0100\n"
+"POT-Creation-Date: 2026-07-23 10:10+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1703,7 +1703,7 @@ msgstr ""
 "event recorded for the operator. This is a security event — inspect the "
 "audit log."
 
-#: src/alfred/gateway/adapter_child_factory.py:192
+#: src/alfred/gateway/adapter_child_factory.py:194
 msgid "gateway.adapter.launch_target.override_refused"
 msgstr ""
 "Launch-target override for adapter {adapter_id} refused: active "
