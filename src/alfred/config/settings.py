@@ -88,6 +88,15 @@ class _Without(PydanticBaseSettingsSource):
         super().__init__(inner.settings_cls)
         self._inner = inner
         self._keys = keys
+        # I-2 (final-review): pydantic-settings keys its per-source `states` dict by
+        # `source.__name__ if hasattr(source, "__name__") else type(source).__name__`
+        # (pydantic_settings/main.py:469, 2.14.2). Without this, all three `_Without`
+        # wrappers share the class name `"_Without"` and collide under ONE state-dict
+        # key — the opposite of "forwards the per-source state protocol faithfully"
+        # (ADR-0053 §6). Adopting the WRAPPED source's own name (matching the stock
+        # `EnvSettingsSource` / `DotEnvSettingsSource` / `SecretsSettingsSource` keys)
+        # keeps each wrapper's entry distinct, exactly as if `_Without` were not there.
+        self.__name__ = getattr(inner, "__name__", type(inner).__name__)
 
     def _set_current_state(self, state: dict[str, Any]) -> None:
         # Forward pydantic-settings' per-source state protocol (2.14.x) to the
@@ -312,12 +321,18 @@ class Settings(BaseSettings):
 
     # arch-002 closure (#174): the three-layer environment lookup result —
     # value, source, conflict flag, conflicting /etc value, unrecognised raw
-    # value — that the daemon CLI needs to emit the
-    # ``daemon.boot.environment_source_conflict`` audit row (ADR-0053).
-    # Held as a PrivateAttr (NOT a model field) so the validated model
-    # surface stays clean and serialization never carries it — no Pydantic
-    # data-smuggling. ``None`` when ``environment`` was passed explicitly
-    # (the three-layer loader was bypassed).
+    # value — captured for any IN-PROCESS reader of ``environment_load_result``
+    # below (ADR-0053). M-1 (final-review): the daemon CLI does NOT read this
+    # property — ``_load_settings_or_die`` calls ``resolve_environment()``
+    # itself and passes the result explicitly into ``Settings(environment=...)``,
+    # so this PrivateAttr stays ``None`` on that path (see the property's own
+    # docstring below) and the daemon emits its
+    # ``daemon.boot.environment_source_conflict`` row from ITS OWN
+    # ``EnvironmentLoadResult``, never from here. Held as a PrivateAttr (NOT a
+    # model field) so the validated model surface stays clean and serialization
+    # never carries it — no Pydantic data-smuggling. ``None`` when
+    # ``environment`` was passed explicitly (the three-layer loader was
+    # bypassed) — which is EVERY daemon-boot construction of ``Settings``.
     _environment_load_result: EnvironmentLoadResult | None = PrivateAttr(default=None)
 
     @classmethod
@@ -398,8 +413,16 @@ class Settings(BaseSettings):
 
         ``None`` when ``environment`` was supplied explicitly (the loader
         was bypassed) — e.g. unit tests constructing ``Settings(environment
-        ="test")``. The daemon CLI reads this to emit the source-conflict
-        audit row (arch-002 closure).
+        ="test")``. M-1 (final-review): this is ALWAYS ``None`` on the daemon
+        boot path — the daemon CLI (``_load_settings_or_die`` in
+        ``cli/daemon/_commands.py``) resolves the environment itself via
+        ``resolve_environment()`` and passes it explicitly as
+        ``Settings(environment=result.value)``, emitting the
+        ``daemon.boot.environment_source_conflict`` audit row from that
+        directly-held result, never from this property. This property has no
+        production reader today; it exists for any FUTURE in-process caller
+        that constructs ``Settings()`` without pre-resolving the environment
+        itself and wants to know which source won.
         """
         return self._environment_load_result
 

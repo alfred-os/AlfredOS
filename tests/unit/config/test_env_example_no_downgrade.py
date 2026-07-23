@@ -20,7 +20,17 @@ _ENV_EXAMPLE_PATH = _REPO_ROOT / ".env.example"
 def test_env_example_environment_is_production() -> None:
     """`.env.example`'s ALFRED_ENVIRONMENT line is uncommented `production`."""
     lines = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8").splitlines()
+    # M-8 (final-review): a bare `next(...)` with no default raises an opaque
+    # `StopIteration` (pytest reports it as an unhandled error, not a readable
+    # assertion failure) if a future edit removes the ALFRED_ENVIRONMENT line
+    # entirely. `default=None` + an explicit assert gives a clear failure message
+    # naming exactly what went missing.
     environment_line = next(
-        entry for entry in lines if entry.strip().startswith("ALFRED_ENVIRONMENT=")
+        (entry for entry in lines if entry.strip().startswith("ALFRED_ENVIRONMENT=")),
+        None,
+    )
+    assert environment_line is not None, (
+        "no ALFRED_ENVIRONMENT= line found in .env.example — "
+        "sec-002 depends on it shipping uncommented and set to production"
     )
     assert environment_line.strip() == "ALFRED_ENVIRONMENT=production"

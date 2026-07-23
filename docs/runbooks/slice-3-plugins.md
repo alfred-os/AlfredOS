@@ -216,7 +216,11 @@ Operator-facing changes before deploying:
   non-policy-resolving launcher.
 + **`ALFRED_ENVIRONMENT` must be set** — the env var (primary) or
   `/etc/alfred/environment` (fallback). Distinct from the Slice-3
-  capability-gate `ALFRED_ENV` selector.
+  capability-gate `ALFRED_ENV` selector. The launcher deliberately does
+  **not** read `.env` (ADR-0053 §3, trusted-sources-only) — on a bare-host,
+  `.env`-only install the daemon boots but every plugin spawn still refuses
+  with `environment_not_set` until the env var or `/etc/alfred/environment`
+  is set directly (a known, documented gap; see ADR-0053's Consequences).
 + **Mid-slice caveat:** the quarantined-LLM manifest declares `kind = "full"`
   but its policy bytes ship in **PR-S4-7**. A daemon running just PR-S4-6 will
   refuse to launch it with `policy_ref_unreadable` — the correct fail-closed
