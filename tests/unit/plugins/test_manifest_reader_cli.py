@@ -205,6 +205,34 @@ def test_read_environment_unrecognised_refuses(tmp_path: Path) -> None:
     assert "environment" in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
+)
+def test_read_environment_env_var_still_beats_cwd_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """sec-001 regression pin: excluding ``.env`` must not touch the TRUSTED chain.
+
+    ``consult_dotenv=False`` (#469 Blocker 1 Task 5) drops the ``.env`` layer
+    entirely so it can never downgrade an unresolved environment — but the
+    trusted env-var > /etc precedence above it is unchanged. A CWD ``.env``
+    claiming a DIFFERENT value than the env var must still lose to the env
+    var, exactly as before the fix.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=development\n", encoding="utf-8")
+    result = _run(
+        "--read-environment",
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "ALFRED_ETC_ENV_FILE": str(tmp_path / "no-file"),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "production"
+
+
 # --------------------------------------------------------------------------
 # --policy-to-bwrap-flags
 # --------------------------------------------------------------------------
