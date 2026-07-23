@@ -82,11 +82,14 @@ def test_environment_injected_from_etc_file_source(
 ) -> None:
     """No env var but /etc file set → loader injects the value into the field.
 
-    Covers the before-validator inject branch (``environment`` absent from
-    data AND the loader resolves a value) and the after-validator capture of
-    the single load result (source=etc_file). The ContextVar threads the one
-    load result through so ``environment_load_result`` reflects the file
-    source without a second disk read (#174 TOCTOU fix).
+    Covers the ``mode="wrap"`` ``_resolve_environment`` validator's inject
+    branch (``environment`` absent from ``data`` AND the loader resolves a
+    value) and its capture of the load result onto the private attribute
+    afterwards. ``resolve_environment()`` runs exactly once — inside the
+    single wrap validator, before ``handler(data)`` — so
+    ``environment_load_result`` reflects the file source from that one read,
+    with no ContextVar hand-off needed (#469 Blocker 1 retired the ContextVar
+    that the old before/after validator pair used for this).
     """
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
@@ -122,32 +125,29 @@ def test_environment_env_var_whitespace_is_normalized(
     assert settings.environment == "production"
 
 
-def test_resolve_environment_passthrough_on_non_dict() -> None:
-    """The before-validator returns non-dict input untouched (defensive arm).
-
-    Pydantic normally hands the validator a dict, but the ``not
-    isinstance(data, dict)`` guard must pass anything else through unchanged
-    rather than crash. Calling the validator directly exercises that arm.
-    """
-    sentinel = object()
-    assert Settings._resolve_environment(sentinel) is sentinel
-
-
-def test_resolve_environment_non_str_value_not_stripped(
+def test_explicit_non_str_environment_kwarg_rejected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """CR #7: a present-but-non-str ``environment`` is left untouched.
+    """A non-str explicit ``environment=`` kwarg is rejected, not silently coerced.
 
-    The whitespace-normalization arm only ``.strip()``s a STRING value; a
-    non-string explicit value falls through unchanged (Literal validation
-    then rejects it). Calling the validator directly exercises that
-    ``isinstance`` False branch without a second disk read mattering.
+    #469 Blocker 1 migration note: the old ``mode="before"`` validator was
+    directly callable, so a prior version of this test invoked
+    ``Settings._resolve_environment({"environment": 123})`` in isolation and
+    asserted the dict came back untouched (Literal validation would reject it
+    later). The ``mode="wrap"`` validator that replaced it has no
+    standalone-callable form — ``handler`` only exists mid-construction — so
+    this now goes through a real ``Settings()`` construction. Because
+    ``settings_customise_sources`` strips ``environment`` out of every
+    env/dotenv/secrets source, an explicit non-str kwarg is the ONLY way a
+    non-str value can reach the field at all; asserting it fails cleanly
+    (rather than being coerced to a string) is the externally-observable
+    behavior the old test protected.
     """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     monkeypatch.setattr(
         "alfred.config._environment_loader._DEFAULT_ETC_PATH",
         tmp_path / "no-such-file",
     )
-    data = {"environment": 123}
-    result = Settings._resolve_environment(data)
-    assert result == {"environment": 123}
+    with pytest.raises(SettingsError):
+        Settings(environment=123)  # type: ignore[arg-type]

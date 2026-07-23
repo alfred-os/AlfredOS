@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -203,3 +204,79 @@ class TestPlaceholderApiKeyValidator:
         ):
             s = Settings()
             assert s.deepseek_api_key.get_secret_value() == "sk-real-1234"
+
+
+class TestSettingsDelegatesEnvironmentResolution:
+    """#469 Blocker 1: ``environment`` is resolved ONLY via ``resolve_environment()``.
+
+    ``Settings.settings_customise_sources`` strips ``environment`` out of the
+    env/dotenv/secrets-file sources entirely (the ``_Without`` filter), so pydantic
+    itself can never populate the field from ``ALFRED_ENVIRONMENT``/``.env``/the
+    secrets file — the ``mode="wrap"`` ``_resolve_environment`` validator is the
+    ONLY path that can set it. This closes a security-downgrade surface: before
+    this change, a stray ``ALFRED_ENVIRONMENT=development`` in a misplaced ``.env``
+    could silently win over an intended ``production`` /etc value via pydantic's
+    own env-file source, bypassing the dual-source loader's precedence and
+    conflict-audit logic entirely.
+    """
+
+    def test_settings_resolves_from_dotenv(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No env var, no /etc file: Settings() reads .env via resolve_environment()."""
+        monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-real")
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=production\n", encoding="utf-8")
+
+        assert Settings().environment == "production"
+
+    def test_pydantic_cannot_populate_environment_from_dotenv(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """/etc beats .env even though pydantic-settings' own dotenv source sees .env first.
+
+        Exclusion airtight: pydantic-settings' built-in ``env_file=".env"`` source would,
+        absent the ``_Without`` filter, populate ``environment`` directly from the CWD
+        ``.env`` (``development``) BEFORE ``resolve_environment()``'s /etc-beats-.env
+        precedence ever runs. Asserting ``production`` (the /etc value, not the .env
+        value) proves the source-level exclusion is airtight, not merely
+        validator-order luck.
+        """
+        monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-real")
+        etc_path = tmp_path / "etc"
+        etc_path.write_text("production\n", encoding="utf-8")
+        monkeypatch.setattr("alfred.config._environment_loader._DEFAULT_ETC_PATH", etc_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=development\n", encoding="utf-8")
+
+        assert Settings().environment == "production"  # NOT development
+
+    def test_explicit_environment_kwarg_wins_over_conflicting_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An explicit ``environment=`` kwarg wins even over an ACTIVELY RESOLVABLE env var.
+
+        Distinct from ``test_environment_explicit_kwarg_bypasses_loader`` (which has no
+        conflicting source to bypass): here ``ALFRED_ENVIRONMENT=production`` is set and
+        would resolve cleanly via ``resolve_environment()`` if consulted. This proves the
+        ``"environment" not in data`` half of the wrap-validator's guard actually gates
+        the loader call, not just the ``isinstance(data, dict)`` half.
+
+        A mutant that drops the ``"environment" not in data`` clause (i.e.
+        ``if isinstance(data, dict):``) would call ``resolve_environment()``
+        unconditionally, resolve ``"production"`` from the env var, and overwrite the
+        explicit ``"test"`` kwarg with it before ``handler(data)`` ever runs —
+        ``settings.environment`` would come back ``"production"``, failing the first
+        assertion outright. The mutant would also leave ``environment_load_result``
+        populated (non-``None``) instead of ``None``, since the loader was consulted;
+        the second assertion is a second, independent tripwire on the same mutant.
+        """
+        monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+        monkeypatch.setenv("ALFRED_ENVIRONMENT", "production")
+
+        settings = Settings(environment="test")
+
+        assert settings.environment == "test"
+        assert settings.environment_load_result is None

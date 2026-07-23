@@ -8,12 +8,25 @@ they never leak into logs by accident.
 from __future__ import annotations
 
 import re
-from contextvars import ContextVar
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, PostgresDsn, PrivateAttr, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import (
+    Field,
+    ModelWrapValidatorHandler,
+    PostgresDsn,
+    PrivateAttr,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from alfred.config._environment_loader import EnvironmentLoadResult, resolve_environment
 
@@ -38,20 +51,62 @@ _COMMS_ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # the repo root).
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# arch-002 / core-eng-pr222-2 / reviewer TOCTOU fix (#174): the dual-source
-# environment loader must run EXACTLY ONCE per ``Settings()`` construction.
-# ``extra="ignore"`` drops any stash key from the raw input dict before the
-# ``mode='after'`` validator runs, so the ``mode='before'`` validator cannot
-# hand the result over through the model. Threading it through a ContextVar
-# lets the single ``resolve_environment()`` call in ``_resolve_environment`` be
-# read by ``_capture_environment_load_result`` without a second disk read —
-# closing the within-construction TOCTOU window where a mid-construction
-# change to ALFRED_ENVIRONMENT / /etc/alfred/environment could make the
-# audited result disagree with the validated field.
-_ENVIRONMENT_LOAD_RESULT: ContextVar[EnvironmentLoadResult | None] = ContextVar(
-    "_alfred_environment_load_result",
-    default=None,
-)
+
+def _environment_keys(settings_cls: type[BaseSettings]) -> tuple[str, ...]:
+    """Keys the ``_Without`` source filter must pop for the ``environment`` field.
+
+    core-plan-09: the env/dotenv/secrets-file sources key a field by its FIELD
+    NAME (``"environment"``), not by the env-prefixed form (``ALFRED_ENVIRONMENT``)
+    — pydantic-settings strips the prefix before the merged dict ever reaches a
+    ``model_validator``. Adding an env-prefixed key here would be dead code (verified
+    via live repro: only the bare field name and any explicit ``validation_alias``
+    ever appear as a key in a source's ``__call__()`` output).
+    """
+    field = settings_cls.model_fields["environment"]
+    keys = {"environment"}
+    # The ``environment`` field sets no ``validation_alias`` today, so this branch is
+    # genuinely unreachable under the current field definition — forward-proofing per
+    # #469 Task 2 ambiguity resolution (b), not dead code left uncovered by oversight.
+    if isinstance(field.validation_alias, str):  # pragma: no cover
+        keys.add(field.validation_alias)
+    return tuple(keys)
+
+
+class _Without(PydanticBaseSettingsSource):
+    """Wraps a settings source, popping ``environment`` (+ alias) from its output.
+
+    #469 Blocker 1: before this filter, pydantic-settings' own env/dotenv/secrets-file
+    sources could populate ``environment`` directly (e.g. a stray ``.env`` in the
+    working directory), bypassing ``resolve_environment()``'s three-layer precedence
+    and conflict-audit logic entirely — a stray lower-priority source could silently
+    downgrade a production deployment. Wrapping every non-init source in this filter
+    makes the ``mode="wrap"`` ``_resolve_environment`` validator the ONLY path that can
+    ever set the field: pydantic itself can never source it.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource, keys: tuple[str, ...]) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+        self._keys = keys
+
+    def _set_current_state(self, state: dict[str, Any]) -> None:
+        # Forward pydantic-settings' per-source state protocol (2.14.x) to the
+        # wrapped source unchanged — the wrapped source still needs to see what
+        # higher-priority sources already resolved.
+        self._inner._set_current_state(state)
+
+    def _set_settings_sources_data(self, states: dict[str, dict[str, Any]]) -> None:
+        self._inner._set_settings_sources_data(states)
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        """Abstract on the base class; never invoked — ``__call__`` is overridden below."""
+        raise NotImplementedError  # pragma: no cover
+
+    def __call__(self) -> dict[str, Any]:
+        data = dict(self._inner())
+        for key in self._keys:
+            data.pop(key, None)
+        return data
 
 
 class SettingsError(ValueError):
@@ -75,11 +130,14 @@ class Settings(BaseSettings):
 
     # Deployment classification (spec §7.3 #174). Mandatory, dual-sourced:
     # env var ALFRED_ENVIRONMENT wins; /etc/alfred/environment is the
-    # fallback; disagreement is audited by the daemon CLI and the env-var
-    # value wins; neither set → the field stays absent and Pydantic's
-    # required-field error fires (translated to SettingsError by __init__).
-    # The ``_resolve_environment`` model-validator below populates the
-    # field from the dual-source loader when it is not passed explicitly.
+    # fallback; .env is the lowest gap-fill layer; disagreement between the
+    # env var and /etc is audited by the daemon CLI and the env-var value
+    # wins; neither set → the field stays absent and Pydantic's
+    # required-field error fires (translated to SettingsError by
+    # __init__). #469 Blocker 1: ``settings_customise_sources`` below strips
+    # ``environment`` out of every non-init source, so pydantic itself can
+    # NEVER populate this field — the ``mode="wrap"`` ``_resolve_environment``
+    # validator is the ONLY path that sets it, via ``resolve_environment()``.
     environment: Literal["development", "production", "test"]
 
     # Provider config
@@ -261,69 +319,76 @@ class Settings(BaseSettings):
     # (the dual-source loader was bypassed).
     _environment_load_result: EnvironmentLoadResult | None = PrivateAttr(default=None)
 
-    @model_validator(mode="before")
     @classmethod
-    def _resolve_environment(cls, data: object) -> object:
-        """Populate ``environment`` from env-var > /etc/alfred/environment.
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Strip ``environment`` out of every non-init source (#469 Blocker 1).
 
-        Pydantic v2 model-validator (``mode='before'``) runs against the
-        raw kwargs dict — when ``environment`` is missing we fall back to
-        the dual-source loader. When the loader returns ``None`` we leave
-        the field absent and let Pydantic's normal "missing required
-        field" error fire, which ``Settings.__init__``'s ``SettingsError``
-        adapter translates to the operator-facing message.
-
-        The resolved :class:`EnvironmentLoadResult` is threaded to
-        :meth:`_capture_environment_load_result` (``mode='after'``) via the
-        ``_ENVIRONMENT_LOAD_RESULT`` ContextVar so the loader runs exactly
-        once and the validated model surface never carries it (arch-002).
+        ``init_settings`` (explicit constructor kwargs — ``Settings(environment=...)``,
+        used by tests and by any caller that has already resolved the value itself) is
+        the ONLY source left untouched. Every other source — ``ALFRED_ENVIRONMENT``,
+        ``.env``, the secrets file — has ``environment`` popped from its output by
+        :class:`_Without`, so pydantic itself can never populate the field from any of
+        them: :meth:`_resolve_environment` below, via ``resolve_environment()``, is the
+        ONLY remaining path. Without this, a stray ``.env`` (or a misconfigured secrets
+        file) could silently source ``environment`` directly through pydantic's own
+        machinery, bypassing the dual-source loader's env-var > /etc precedence and
+        conflict-audit logic entirely — the security downgrade this closes.
         """
-        # Reset the per-construction side channel up front so a previous
-        # construction's result never leaks into this one (the after-
-        # validator may not run if validation fails).
-        _ENVIRONMENT_LOAD_RESULT.set(None)
-        if not isinstance(data, dict):
-            return data
-        # ``environment`` may already be present because pydantic-settings
-        # populates it directly from ``ALFRED_ENVIRONMENT`` (env_prefix).
-        # Run the dual-source loader EXACTLY ONCE here regardless, so the
-        # conflict audit result is captured even when the field was sourced
-        # by pydantic-settings (core-eng-pr222-2 point b), and inject the
-        # value only when it is otherwise absent. The single result is
-        # threaded to the after-validator via the ContextVar — no second
-        # disk read, no TOCTOU window.
-        loaded = resolve_environment()
-        _ENVIRONMENT_LOAD_RESULT.set(loaded)
-        if "environment" not in data:
-            if loaded.value is not None:
-                data["environment"] = loaded.value
-        elif isinstance(data["environment"], str):
-            # CR #7: pydantic-settings populates ``environment`` directly from
-            # the RAW ``ALFRED_ENVIRONMENT`` value, bypassing the loader's
-            # stripping. Normalize it here the SAME way the dual-source loader
-            # strips both of its sources, so ``ALFRED_ENVIRONMENT=" production"``
-            # validates exactly as the bare value (and matches the load result
-            # the after-validator compares against). Leaves a non-str explicit
-            # kwarg untouched.
-            data["environment"] = data["environment"].strip()
-        return data
+        keys = _environment_keys(settings_cls)
+        return (
+            init_settings,
+            _Without(env_settings, keys),
+            _Without(dotenv_settings, keys),
+            _Without(file_secret_settings, keys),
+        )
 
-    @model_validator(mode="after")
-    def _capture_environment_load_result(self) -> Settings:
-        """Lift the single load result onto the private attribute.
+    @model_validator(mode="wrap")
+    @classmethod
+    def _resolve_environment(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Settings]
+    ) -> Settings:
+        """Populate ``environment`` from the dual-source loader when it is absent.
 
-        ``mode='before'`` cannot set a :class:`PrivateAttr` (the instance
-        does not exist yet); ``mode='after'`` reads the ContextVar the
-        ``before`` validator populated from its single ``resolve_environment()``
-        call. No second disk read — the audited result provably matches the
-        value chosen above (reviewer / core-eng-pr222-2 TOCTOU fix). The
-        ContextVar is ``None`` when ``environment`` was passed explicitly
-        (the loader was bypassed), leaving the attribute ``None``.
+        A single ``mode="wrap"`` validator replaces the old before/after pair +
+        ContextVar hand-off (#469 Blocker 1): ``settings_customise_sources`` above
+        guarantees ``environment`` can be present in ``data`` ONLY via an explicit
+        constructor kwarg (never sourced by pydantic from env/dotenv/secrets), so
+        there is exactly one decision to make — inject if absent — and one capture
+        to do afterwards, both in one place with no side channel needed.
+
+        When ``environment`` is present (an explicit kwarg), the dual-source loader
+        is bypassed entirely: ``resolve_environment()`` is not called, and
+        ``environment_load_result`` stays ``None`` (the loader was never consulted,
+        so there is nothing to audit). When absent, ``resolve_environment()`` runs
+        exactly once; a resolved value is injected into ``data`` before ``handler``
+        runs the rest of validation. If the loader resolves no value, ``environment``
+        stays absent and Pydantic's normal "missing required field" error fires,
+        which ``Settings.__init__``'s ``SettingsError`` adapter translates to the
+        operator-facing message.
+
+        The result is compared against the validated ``instance.environment`` before
+        being stored on the private attribute — belt-and-braces: the loader and the
+        Literal field both validate against the same value set, so they cannot
+        disagree today, but the check keeps the private attribute provably in sync
+        with what was actually validated rather than trusting the pre-validation value
+        blindly.
         """
-        loaded = _ENVIRONMENT_LOAD_RESULT.get()
-        if loaded is not None and loaded.value == self.environment:
-            self._environment_load_result = loaded
-        return self
+        result: EnvironmentLoadResult | None = None
+        if isinstance(data, dict) and "environment" not in data:
+            result = resolve_environment()
+            if result.value is not None:
+                data = {**data, "environment": result.value}
+        instance = handler(data)
+        if result is not None and result.value == instance.environment:
+            instance._environment_load_result = result
+        return instance
 
     @property
     def environment_load_result(self) -> EnvironmentLoadResult | None:
