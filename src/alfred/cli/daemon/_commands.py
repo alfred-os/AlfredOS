@@ -97,6 +97,7 @@ from alfred.cli.daemon._failures import (
     DaemonBootFailure,
     EgressPlaneUnavailableFailure,
     EnvironmentNotSetFailure,
+    EnvironmentSourceUnreadableFailure,
     OperatorNotSeededFailure,
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
@@ -104,6 +105,7 @@ from alfred.cli.daemon._failures import (
     QuarantineProviderKeyUnsetFailure,
     RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
+    SettingsInvalidFailure,
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
 )
@@ -181,7 +183,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from alfred.audit.log import AuditWriter
-    from alfred.config.settings import Settings
+    from alfred.config.settings import Settings, SettingsError
 
     # sec-001 (#256 PR-3): annotation-only here (``socket_listeners:
     # list[CommsSocketListener]`` in _start_async). Kept under TYPE_CHECKING so the
@@ -332,34 +334,52 @@ def wait_for_shutdown(  # pragma: no cover - real-loop signal glue; unit tests m
 # ---------------------------------------------------------------------------
 
 
-def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult | None]:
-    """Resolve Settings, signalling refusal when environment is unset.
+def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult]:
+    """Resolve the environment ONCE, then construct ``Settings`` from it.
 
-    arch-002: returns ``(Settings, EnvironmentLoadResult | None)`` — no data
-    smuggled into the Pydantic model. sec-001: the caller has already built
-    the AuditWriter, so the ``_EnvironmentNotSetError`` this raises is
-    converted by the async caller into the audit-then-exit refusal. On
-    success it constructs ``Settings`` (which re-runs the loader internally)
-    and returns the validated settings plus the load result for the conflict
-    audit.
+    #469 Blocker 1 (Task 3): returns a NON-optional ``(Settings,
+    EnvironmentLoadResult)`` — ``resolve_environment()`` is the single read of
+    the environment; the resolved value is passed explicitly into
+    ``Settings(environment=...)`` (Task 2's ``settings_customise_sources``
+    strips ``environment`` from every other pydantic source, so the explicit
+    kwarg is the only path — no re-entrant loader call inside ``Settings``).
+
+    Three fail-closed exits, checked in precedence order:
+
+    * ``EnvironmentSource.UNREADABLE`` (err-01) — a present-but-unreadable
+      ``/etc/alfred/environment`` — raises ``_EnvironmentSourceUnreadableError``
+      immediately. Never falls through to the unset/unrecognised handling.
+    * ``result.value is None`` (``NONE`` or ``UNRECOGNISED``) — no source
+      supplied a recognised value — raises ``_EnvironmentNotSetError`` (the
+      async caller distinguishes typo vs unset via
+      ``_environment_refusal_message``).
+    * ``Settings(environment=result.value)`` still raises ``SettingsError`` —
+      some OTHER required field (a secret, a DSN, a numeric bound) is invalid,
+      NOT the environment. Raises ``_SettingsInvalidError`` carrying a
+      CURATED message (never raw ``str(exc)`` — DLP: a ``database_url``
+      failure can echo a DSN password) built by ``_bootstrap_settings_message``.
+
+    sec-001: the caller has already built the AuditWriter, so every raise
+    here is converted by the async caller into the audited-then-exit refusal.
     """
-    loaded = resolve_environment()
-    if loaded.value is None:
+    result = resolve_environment()
+    if result.source is EnvironmentSource.UNREADABLE:
         # Refusal happens via the async _refuse_boot — but this helper is
         # sync (it precedes Settings construction). Surface a typed signal
         # the async caller converts into the refusal.
-        raise _EnvironmentNotSetError(loaded)
+        raise _EnvironmentSourceUnreadableError(result)
+    if result.value is None:
+        raise _EnvironmentNotSetError(result)
 
     from alfred.config.settings import Settings, SettingsError
 
     try:
-        settings = Settings()  # type: ignore[no-untyped-call]  # reason: Settings.__init__ untyped pending task-17
+        settings = Settings(environment=result.value)  # type: ignore[no-untyped-call]  # reason: Settings.__init__ untyped pending task-17
     except SettingsError as exc:
-        # Defensive: the env was already validated, but a Settings() failure here
-        # must still surface as the audited environment_not_set refusal, never a raw
-        # traceback (covered by test_settings_error_after_valid_env_refuses).
-        raise _EnvironmentNotSetError(loaded) from exc
-    return settings, settings.environment_load_result
+        raise _SettingsInvalidError(
+            _bootstrap_settings_message(exc), source=result.source.value
+        ) from exc
+    return settings, result
 
 
 class _EnvironmentNotSetError(Exception):
@@ -368,6 +388,24 @@ class _EnvironmentNotSetError(Exception):
     def __init__(self, load_result: EnvironmentLoadResult) -> None:
         super().__init__("environment_not_set")
         self.load_result = load_result
+
+
+class _EnvironmentSourceUnreadableError(Exception):
+    """Internal: the highest-precedence-set environment source could not be read (err-01)."""
+
+    def __init__(self, load_result: EnvironmentLoadResult) -> None:
+        super().__init__("environment_source_unreadable")
+        self.load_result = load_result
+
+
+class _SettingsInvalidError(Exception):
+    """Internal: ``Settings()`` failed on a non-environment field after the
+    environment already resolved."""
+
+    def __init__(self, message: str, *, source: str) -> None:
+        super().__init__("settings_invalid")
+        self.message = message
+        self.source = source
 
 
 def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
@@ -384,6 +422,25 @@ def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
             value=load_result.unrecognised_value or "",
         )
     return t("daemon.boot.environment_not_set")
+
+
+def _bootstrap_settings_message(exc: SettingsError) -> str:
+    """Pick the curated operator-facing message for a post-env ``Settings()`` failure.
+
+    Mirrors ``alfred.cli._bootstrap.load_settings_or_die``'s placeholder-vs-
+    generic branch, but the generic arm NEVER interpolates ``str(exc)``. DLP:
+    a ``database_url``/DSN validation failure can echo a password, and this
+    message lands in a durable, DB-queryable audit row (CLAUDE.md hard rule
+    #1) — unlike the interactive CLI bootstrap path this mirrors, which only
+    ever echoes to a first-run operator's own terminal.
+    ``daemon.boot.settings_invalid`` names the fix + the ``alfred daemon
+    start`` / ``docker compose up -d`` re-run — not ``/etc/alfred`` (the
+    environment was already resolved by the time this runs; the fault is in
+    some OTHER Settings field).
+    """
+    if "placeholder_api_key" in str(exc):
+        return t("error.placeholder_api_key")
+    return t("daemon.boot.settings_invalid")
 
 
 def _start_core_metrics_server(boot_id: str) -> None:
@@ -513,6 +570,18 @@ async def _start_async() -> None:
 
     try:
         settings, load_result = _load_settings_or_die()
+    except _EnvironmentSourceUnreadableError as exc:
+        # err-01: a present-but-unreadable /etc/alfred/environment fails
+        # closed BEFORE the unset/unrecognised handling below ever runs —
+        # distinct failure_reason so forensics can tell a permissions/
+        # ownership problem on the host apart from a genuinely unset value.
+        await _refuse_boot(
+            audit,
+            EnvironmentSourceUnreadableFailure(),
+            t("daemon.boot.environment_source_unreadable"),
+            boot_id=boot_id,
+            environment_source=exc.load_result.source.value,
+        )
     except _EnvironmentNotSetError as exc:
         # devex-222-01: distinguish a TYPO (env var set to an unrecognised
         # value) from a fully-unset environment. The unrecognised path
@@ -525,6 +594,18 @@ async def _start_async() -> None:
             message,
             boot_id=boot_id,
             environment_source=exc.load_result.source.value,
+        )
+    except _SettingsInvalidError as exc:
+        # #469 Blocker 1 Task 3: a post-env Settings() failure is a DISTINCT
+        # reason from environment_not_set — the environment already resolved;
+        # some OTHER required field is invalid. exc.message is already the
+        # curated, DLP-safe copy (never raw str(exc)).
+        await _refuse_boot(
+            audit,
+            SettingsInvalidFailure(),
+            exc.message,
+            boot_id=boot_id,
+            environment_source=exc.source,
         )
 
     # #470 (mirrors the gateway's G6-0 pre-relay call site,
@@ -539,7 +620,7 @@ async def _start_async() -> None:
 
     # The conflict audit (if any) goes out BEFORE the probes so the row is
     # present even if a later probe refuses.
-    if load_result is not None and load_result.conflict:
+    if load_result.conflict:
         await _emit_or_quarantine(
             audit,
             fields=DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS,
@@ -554,9 +635,7 @@ async def _start_async() -> None:
             result="success",
         )
 
-    source = (
-        load_result.source.value if load_result is not None else EnvironmentSource.ENV_VAR.value
-    )
+    source = load_result.source.value
 
     # Refusal: unsandboxed escape hatch set in production (sec-002).
     if _truthy_env("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED") and settings.environment == "production":

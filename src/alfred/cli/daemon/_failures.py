@@ -379,6 +379,47 @@ class OperatorNotSeededFailure(_BootFailureBase):
     failure_reason: Literal["operator_not_seeded"] = "operator_not_seeded"
 
 
+class EnvironmentSourceUnreadableFailure(_BootFailureBase):
+    """The highest-precedence-set environment source could not be read (#469 Blocker 1, err-01).
+
+    ``resolve_environment()``'s precedence chain is env-var > ``/etc/alfred/environment``
+    file > ``.env`` (gap-fill only). A present-but-unreadable ``/etc/alfred/environment``
+    (``PermissionError`` / ``IsADirectoryError`` / a generic ``OSError``) fails CLOSED —
+    the loader returns :attr:`alfred.config._environment_loader.EnvironmentSource.UNREADABLE`
+    rather than silently falling through to ``.env``, because a mode-misconfigured
+    ``/etc`` file must never silently downgrade to a lower-precedence source (CLAUDE.md
+    hard rule #7). Distinct from ``environment_not_set`` (no source supplied a value at
+    all): this reason tells forensics the middle source EXISTED but the daemon process
+    could not open it (a permissions/ownership problem to fix on the host), not that the
+    operator simply never configured an environment.
+    """
+
+    failure_reason: Literal["environment_source_unreadable"] = "environment_source_unreadable"
+
+
+class SettingsInvalidFailure(_BootFailureBase):
+    """``Settings()`` raised AFTER the environment was already resolved (#469 Blocker 1).
+
+    ``_load_settings_or_die`` resolves ``environment`` via ``resolve_environment()`` once,
+    then passes it explicitly to ``Settings(environment=...)`` — a single read, no
+    re-entrant loader call. A ``SettingsError`` raised at THAT point means some OTHER
+    required field (a secret, a DSN, a numeric bound) failed pydantic validation, not the
+    environment — distinct from ``environment_not_set`` (this is a right-failure/
+    wrong-reason bug the prior cut had: a post-env ``SettingsError`` collapsed into the
+    SAME ``environment_not_set`` reason as a genuinely unresolved environment).
+
+    The audited row and the ``daemon.boot.failed`` hookpoint payload carry only this
+    reason, never the raw exception text: DLP — ``str(exc)`` on a ``database_url``
+    validation failure can echo a DSN password, and an audit row is a durable,
+    DB-queryable sink (CLAUDE.md hard rule #1). The operator-facing message is a
+    curated, generic catalog string (``daemon.boot.settings_invalid``) naming the fix +
+    the re-run command, mirroring ``alfred.cli._bootstrap.load_settings_or_die``'s
+    placeholder-vs-generic branch without ever interpolating the exception detail.
+    """
+
+    failure_reason: Literal["settings_invalid"] = "settings_invalid"
+
+
 class CommsMultiAdapterUnsupportedFailure(_BootFailureBase):
     """More than one comms adapter is enabled — unsupported in this cut (FIX 4).
 
@@ -416,7 +457,9 @@ DaemonBootFailure = Annotated[
     | CommsMultiAdapterUnsupportedFailure
     | EgressPlaneUnavailableFailure
     | RouterSecretMissingFailure
-    | OperatorNotSeededFailure,
+    | OperatorNotSeededFailure
+    | EnvironmentSourceUnreadableFailure
+    | SettingsInvalidFailure,
     Field(discriminator="failure_reason"),
 ]
 """Discriminated union over the daemon-boot refusal modes (spec §3.4 +
@@ -431,4 +474,5 @@ ADR-0031 ``comms_adapter_bind_failed`` +
 PR-S4-235-1 ``comms_promoter_misconfigured`` +
 FIX 4 ``comms_multi_adapter_unsupported`` +
 #338 PR2 ``egress_plane_unavailable`` / ``router_secret_missing`` (FOLD-2) +
-``operator_not_seeded`` (Task-3-review must-carry))."""
+``operator_not_seeded`` (Task-3-review must-carry) +
+#469 Blocker 1 Task 3 ``environment_source_unreadable`` / ``settings_invalid``)."""

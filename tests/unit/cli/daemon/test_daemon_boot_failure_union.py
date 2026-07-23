@@ -18,6 +18,7 @@ from alfred.cli.daemon._failures import (
     CommsPromoterMisconfiguredFailure,
     EgressPlaneUnavailableFailure,
     EnvironmentNotSetFailure,
+    EnvironmentSourceUnreadableFailure,
     LauncherNotPolicyResolvingFailure,
     OperatorNotSeededFailure,
     QuarantineChildSpawnFailedFailure,
@@ -26,6 +27,7 @@ from alfred.cli.daemon._failures import (
     QuarantineProviderKeyUnsetFailure,
     RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
+    SettingsInvalidFailure,
     SnapshotRefInitFailedFailure,
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
@@ -54,6 +56,8 @@ from alfred.cli.daemon._failures import (
         (EgressPlaneUnavailableFailure, "egress_plane_unavailable"),
         (RouterSecretMissingFailure, "router_secret_missing"),
         (OperatorNotSeededFailure, "operator_not_seeded"),
+        (EnvironmentSourceUnreadableFailure, "environment_source_unreadable"),
+        (SettingsInvalidFailure, "settings_invalid"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:

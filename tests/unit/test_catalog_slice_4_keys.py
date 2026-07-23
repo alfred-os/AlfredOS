@@ -104,6 +104,13 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # quarantine_child_spawn_failed (PR-S4-11c-2b), and comms_socket_bind_failed
     # (ADR-0031)).
     "daemon.boot.environment_not_set",
+    # #469 Blocker 1 Task 3: a present-but-unreadable /etc/alfred/environment
+    # fails closed with its OWN reason, distinct from environment_not_set.
+    "daemon.boot.environment_source_unreadable",
+    # #469 Blocker 1 Task 3: a post-env Settings() failure (some OTHER
+    # required field invalid) is a DISTINCT reason from environment_not_set —
+    # curated copy, never the raw exception detail (DLP).
+    "daemon.boot.settings_invalid",
     "daemon.boot.unsandboxed_in_production",
     "daemon.boot.launcher_not_policy_resolving",
     "daemon.boot.snapshot_ref_init_failed",
