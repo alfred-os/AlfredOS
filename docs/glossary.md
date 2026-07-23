@@ -1637,14 +1637,45 @@ See [launch-target override](#launch-target-override),
 [ADR-0039 §Amendments (G6-7-7)](adr/0039-gateway-adapter-inbound-bridge.md#amendments),
 and [docs/subsystems/comms.md](subsystems/comms.md).
 
+## Environment resolution (three-layer precedence)
+
+The single canonical algorithm for resolving `Settings.environment`
+(`resolve_environment()` in `src/alfred/config/_environment_loader.py`,
+[ADR-0053](adr/0053-three-layer-environment-precedence.md)):
+`os.environ["ALFRED_ENVIRONMENT"]` (highest) > `/etc/alfred/environment` file >
+`.env` file (lowest, gap-fill-only, CWD-writable). Returns an
+`EnvironmentLoadResult(value, source, conflict, conflicting_file_value,
+unrecognised_value)`; `source` is an `EnvironmentSource` member (`ENV_VAR`,
+`ETC_FILE`, `DOTENV`, `NONE`, `UNRECOGNISED`, or `UNREADABLE`). The highest SET
+source decides outright — an invalid value at that source short-circuits to
+`UNRECOGNISED` rather than falling through to a valid lower source (prevents a
+downgrade-via-typo). `Settings` delegates to this resolver instead of letting
+pydantic-settings source the field natively (native `os.environ > .env`
+ordering never consults `/etc` at all, which would let a CWD `.env` outrank a
+root-owned `/etc` file). Not every caller consults all three layers: the
+gateway's [launch-target override](#launch-target-override) trusts only
+`ENV_VAR`/`ETC_FILE` results, and the pre-launcher helper
+(`manifest_reader.py --read-environment`) excludes `.env` outright via
+`consult_dotenv=False` — see ADR-0053 §3 for both trust-floor mechanisms. The
+distinct `ALFRED_ENV` variable (a free-form capability-gate/content-store
+selector, unrelated semantics) is a documented, intentional divergence, not
+covered by this resolver — see ADR-0053 §2.
+
+See [Launch-target override](#launch-target-override),
+[ADR-0053](adr/0053-three-layer-environment-precedence.md), and
+[docs/subsystems/supervisor.md](subsystems/supervisor.md).
+
 ## Launch-target override
 
 The `ALFRED_ENVIRONMENT`-gated, constructor-injected `override_map` (`Mapping[str, tuple[str, str]] | None`)
 in `GatewayAdapterChildFactory` that redirects an adapter id's bwrap launch target — for
-example `discord` → `alfred.gateway.discord_probe` — when
-`ALFRED_ENVIRONMENT ∈ {development,test}` (read via the sanctioned `load_environment()` at
-each spawn call (inside `_resolve_launch_target`)). Fail-closed everywhere else: any non-None `override_map` passed
-when the environment is `production` (or unset/unrecognised) raises
+example `discord` → `alfred.gateway.discord_probe` — when the resolved environment is
+`∈ {development,test}` **and** came from a trusted source (read via the sanctioned
+`resolve_environment()` at each spawn call, inside `_resolve_launch_target`; only an
+`ENV_VAR`- or `ETC_FILE`-sourced value satisfies the gate — a `.env`-sourced
+`development`/`test` value never does, per [ADR-0053](adr/0053-three-layer-environment-precedence.md)'s
+trust floor). Fail-closed everywhere else: any non-None `override_map` passed
+when the environment is `production` (or unset/unrecognised, or `.env`-sourced) raises
 `LaunchTargetOverrideRefusedError`, a subclass of `GatewayAdapterSpawnError`, which the
 supervisor's spawn-error arm audits as a `gateway.adapter.crashed` row. The rejected
 module string never appears in any audit field or log line (sec-003). This is a
@@ -1652,6 +1683,7 @@ deliberately narrow test-only trust seam, recorded as an ADR-0039 amendment (not
 standalone ADR) per the project's docs-003 disposition.
 
 See [Discord probe (`alfred.gateway.discord_probe`)](#discord-probe-alfredgatewaydiscord_probe),
+[Environment resolution (three-layer precedence)](#environment-resolution-three-layer-precedence),
 [ADR-0039 §Amendments (G6-7-7)](adr/0039-gateway-adapter-inbound-bridge.md#amendments),
 and [docs/subsystems/comms.md](subsystems/comms.md).
 

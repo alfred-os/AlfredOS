@@ -121,8 +121,12 @@ class LaunchTargetOverrideRefusedError(GatewayAdapterSpawnError):
     """A launch-target override was injected outside a development/test environment.
 
     Spec B G6-7-7 (#309), FAIL-CLOSED / default-DENY. The override map is honored ONLY
-    in ``{"development", "test"}``; an injected override anywhere else (incl.
-    ``production``, ``staging``, an unset / unrecognised environment) is this loud
+    in ``{"development", "test"}`` **and only when that value came from a trusted
+    source** (:data:`_OVERRIDE_TRUSTED_SOURCES` — the ``ALFRED_ENVIRONMENT`` env var
+    or the root-owned ``/etc`` file; #469 Blocker-1 ADR-0053). An injected override
+    anywhere else (incl. ``production``, ``staging``, an unset / unrecognised
+    environment, OR a ``.env``-sourced ``development``/``test`` value — ``.env`` is the
+    lowest, CWD-writable layer and can never satisfy this gate) is this loud
     refusal. It MUST subclass :class:`GatewayAdapterSpawnError` (load-bearing): the
     supervisor's spawn-error arm catches ``GatewayAdapterSpawnError`` and audits it via
     ``_apply(HANDSHAKE_FAILED, error_class=type(spawn_error).__name__,
@@ -410,9 +414,10 @@ class GatewayAdapterChildFactory:
     later docker-only e2e (Task 4) injects ``{"discord": (probe_plugin_id, probe_module)}``
     so the forwarded-inbound bridge can be proved against a probe child without touching
     the production Discord adapter. It defaults to ``None`` (production never injects one);
-    when injected it is honored ONLY in a development/test environment and is a
-    fail-closed :class:`LaunchTargetOverrideRefusedError` anywhere else (see
-    :func:`_resolve_launch_target`).
+    when injected it is honored ONLY in a development/test environment resolved from a
+    TRUSTED source (ADR-0053: the ``ALFRED_ENVIRONMENT`` env var or ``/etc``, never
+    ``.env``) and is a fail-closed :class:`LaunchTargetOverrideRefusedError` anywhere else
+    (see :func:`_resolve_launch_target`).
     """
 
     def __init__(

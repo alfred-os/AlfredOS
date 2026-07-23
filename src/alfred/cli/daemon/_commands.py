@@ -4,7 +4,7 @@ The boot sequence (core-007 closure — probes at the CLI layer, NOT inside
 ``Supervisor.start()``):
 
 1. ``load_settings_or_die()`` — build the boot AuditWriter FIRST (sec-001),
-   then resolve the mandatory dual-sourced ``environment``. On a
+   then resolve the mandatory three-layer ``environment`` (ADR-0053). On a
    missing/invalid environment, emit ``DAEMON_BOOT_FAILED_FIELDS`` and exit
    2 — never a silent failure (CLAUDE.md hard rule 7).
 2. Emit the ``daemon.boot.environment_source_conflict`` audit row if the
@@ -383,7 +383,7 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult]:
 
 
 class _EnvironmentNotSetError(Exception):
-    """Internal: the dual-source environment loader produced no value."""
+    """Internal: the three-layer environment loader produced no value."""
 
     def __init__(self, load_result: EnvironmentLoadResult) -> None:
         super().__init__("environment_not_set")

@@ -467,7 +467,11 @@ components together form the privileged real-spawn proof:
 2. **Env-gated launch-target override in `GatewayAdapterChildFactory`.** An `override_map`
    constructor parameter (type `Mapping[str, tuple[str, str]] | None`) redirects an adapter id's bwrap
    launch target (e.g. `discord` → the probe) when `ALFRED_ENVIRONMENT ∈ {development,test}`,
-   read via the sanctioned `load_environment()` **at each spawn call** (inside `_resolve_launch_target`, not at construction — `__init__` only stores the map). The guard is
+   read via the sanctioned `resolve_environment()` (renamed from `load_environment()`
+   by [ADR-0053](0053-three-layer-environment-precedence.md), which also added the
+   `.env` layer and the trust-floor refinement described there) **at each spawn call**
+   (inside `_resolve_launch_target`, not at construction — `__init__` only stores the
+   map). The guard is
    fail-closed by default: any non-None override map passed when `ALFRED_ENVIRONMENT` is
    `production` (or unset/unrecognised) raises `LaunchTargetOverrideRefusedError`, a subclass
    of `GatewayAdapterSpawnError`, which the supervisor's spawn-error arm audits as a

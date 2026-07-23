@@ -15,10 +15,13 @@ CLI subcommands (mutually exclusive):
 
   --read-environment
       Print the resolved ``Settings.environment`` value
-      (development|production|test) via the dual-source loader (env var >
+      (development|production|test) via the three-layer loader (env var >
       /etc/alfred/environment; ``ALFRED_ETC_ENV_FILE`` overrides the file
-      path for testing). Refuses (exit 1) if neither source resolves to a
-      Literal value.
+      path for testing). ``.env`` is deliberately EXCLUDED here
+      (``consult_dotenv=False``, ADR-0053) — trusted-sources-only, since
+      this helper's stdout is a bare string the bash launcher consumes and
+      cannot carry a source alongside the value. Refuses (exit 1) if
+      neither trusted source resolves to a Literal value.
 
   --policy-to-bwrap-flags
       Read a TOML policy from stdin; print the bwrap CLI flags one per line.
@@ -39,9 +42,13 @@ convention; the supervisor renders the localised audit row.
 Note (sec-007 carve-out): ``--read-environment`` resolves the environment
 through :func:`alfred.config._environment_loader.resolve_environment`, which is
 the single sanctioned reader of ``ALFRED_ENVIRONMENT`` /
-``/etc/alfred/environment``. The ``ALFRED_ETC_ENV_FILE`` override read below
-is a non-secret test hook (the env-read AST guard only bans
-``ALFRED_<SUPPORTED_SECRET>`` keys, never ``ALFRED_ETC_ENV_FILE``).
+``/etc/alfred/environment`` / ``.env`` (ADR-0053's three-layer precedence).
+This call site passes ``consult_dotenv=False`` so ``.env`` — the lowest,
+CWD-writable layer — is excluded from consultation entirely rather than
+merely deprioritized: the launcher's trusted-sources-only posture. The
+``ALFRED_ETC_ENV_FILE`` override read below is a non-secret test hook (the
+env-read AST guard only bans ``ALFRED_<SUPPORTED_SECRET>`` keys, never
+``ALFRED_ETC_ENV_FILE``).
 """
 
 from __future__ import annotations
