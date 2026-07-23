@@ -409,12 +409,17 @@ class SettingsInvalidFailure(_BootFailureBase):
     SAME ``environment_not_set`` reason as a genuinely unresolved environment).
 
     The audited row and the ``daemon.boot.failed`` hookpoint payload carry only this
-    reason, never the raw exception text: DLP — ``str(exc)`` on a ``database_url``
-    validation failure can echo a DSN password, and an audit row is a durable,
-    DB-queryable sink (CLAUDE.md hard rule #1). The operator-facing message is a
-    curated, generic catalog string (``daemon.boot.settings_invalid``) naming the fix +
-    the re-run command, mirroring ``alfred.cli._bootstrap.load_settings_or_die``'s
-    placeholder-vs-generic branch without ever interpolating the exception detail.
+    reason, never the raw exception text — ``_refuse_boot``'s fixed subject shape has
+    room only for ``boot_id`` / ``attempted_at`` / ``failure_reason`` /
+    ``environment_source``, so there is no field a raw detail could even land in. But
+    the operator-facing MESSAGE must avoid ``str(exc)`` too: it reaches
+    ``typer.echo(..., err=True)`` — stderr, which a container orchestrator or log
+    aggregator commonly captures — and a ``database_url`` validation failure's
+    ``str(exc)`` can echo a DSN password (CLAUDE.md hard rule #1: never log secrets).
+    The operator-facing message is instead a curated, generic catalog string
+    (``daemon.boot.settings_invalid``) naming the fix + the re-run command, mirroring
+    ``alfred.cli._bootstrap.load_settings_or_die``'s placeholder-vs-generic branch
+    without ever interpolating the exception detail.
     """
 
     failure_reason: Literal["settings_invalid"] = "settings_invalid"

@@ -428,15 +428,21 @@ def _bootstrap_settings_message(exc: SettingsError) -> str:
     """Pick the curated operator-facing message for a post-env ``Settings()`` failure.
 
     Mirrors ``alfred.cli._bootstrap.load_settings_or_die``'s placeholder-vs-
-    generic branch, but the generic arm NEVER interpolates ``str(exc)``. DLP:
-    a ``database_url``/DSN validation failure can echo a password, and this
-    message lands in a durable, DB-queryable audit row (CLAUDE.md hard rule
-    #1) — unlike the interactive CLI bootstrap path this mirrors, which only
-    ever echoes to a first-run operator's own terminal.
-    ``daemon.boot.settings_invalid`` names the fix + the ``alfred daemon
-    start`` / ``docker compose up -d`` re-run — not ``/etc/alfred`` (the
-    environment was already resolved by the time this runs; the fault is in
-    some OTHER Settings field).
+    generic branch, but the generic arm NEVER interpolates ``str(exc)``. This
+    message does NOT land in the audit row — ``_refuse_boot``'s fixed subject
+    shape only ever carries ``boot_id`` / ``attempted_at`` / ``failure_reason``
+    / ``environment_source``; the message itself reaches
+    ``typer.echo(..., err=True)`` (stderr), which for a daemon running as a
+    background service is commonly captured into durable container/system
+    logs (journald, ``docker logs``) rather than watched live by an operator —
+    unlike the interactive CLI bootstrap path this mirrors, which only ever
+    echoes to a first-run operator's own terminal. DLP: a ``database_url``/DSN
+    validation failure's ``str(exc)`` can echo a password, and CLAUDE.md hard
+    rule #1 (never log secrets) applies to that stderr/log sink just as much
+    as to a structlog line. ``daemon.boot.settings_invalid`` names the fix +
+    the ``alfred daemon start`` / ``docker compose up -d`` re-run — not
+    ``/etc/alfred`` (the environment was already resolved by the time this
+    runs; the fault is in some OTHER Settings field).
     """
     if "placeholder_api_key" in str(exc):
         return t("error.placeholder_api_key")

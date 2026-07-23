@@ -1009,8 +1009,11 @@ msgstr "Core lifecycle: going down (reason: {reason})."
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
-"boot. Use one of: development, production, test (in your .env) and re-run"
-" `alfred daemon start` (or `docker compose up -d` on the compose stack)."
+"boot. Alfred reads it, in order, from the ALFRED_ENVIRONMENT environment "
+"variable, then /etc/alfred/environment, then your .env file — correct the "
+"value (development, production, or test) in whichever of those you set, "
+"then re-run `alfred daemon start` (or `docker compose up -d` on the "
+"compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:581
 msgid "daemon.boot.environment_source_unreadable"
