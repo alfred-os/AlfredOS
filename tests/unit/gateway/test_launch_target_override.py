@@ -17,6 +17,8 @@ rejected override module string (a canary leak into the audit log).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from alfred.config._environment_loader import (
@@ -39,16 +41,25 @@ _PROBE_PLUGIN_ID = "alfred.discord_probe"
 _PROBE_MODULE = "alfred.gateway.discord_probe"
 
 
-def _patch_environment(monkeypatch: pytest.MonkeyPatch, value: str | None) -> list[bool]:
+def _patch_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+    *,
+    source: EnvironmentSource | None = None,
+) -> list[bool]:
     """Patch ``resolve_environment`` where the factory imports it; return a consult flag.
 
     The returned single-element list flips to ``True`` the first time the factory
     calls ``resolve_environment`` so a test can assert the env was actually consulted
     (case (e)). ``value`` is the resolved environment string (or ``None`` for the
-    unset/unrecognised posture) returned by the patched loader.
+    unset/unrecognised posture) returned by the patched loader. ``source`` lets a
+    test pin an EXPLICIT :class:`EnvironmentSource` (the #469 Blocker-1 trust-floor
+    cases) — default mirrors the pre-trust-floor behaviour (``ENV_VAR`` for any
+    resolved value, ``NONE`` for the absent posture).
     """
     consulted: list[bool] = []
-    source = EnvironmentSource.ENV_VAR if value is not None else EnvironmentSource.NONE
+    if source is None:
+        source = EnvironmentSource.ENV_VAR if value is not None else EnvironmentSource.NONE
 
     def _fake_resolve_environment(**_kwargs: object) -> EnvironmentLoadResult:
         consulted.append(True)
@@ -178,3 +189,61 @@ def test_environment_read_via_resolve_environment(
     _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE)
 
     assert consulted == [True], "resolve_environment was not consulted on the override path"
+
+
+# --- (f) #469 Blocker-1 trust-floor: a "development"/"test" VALUE is not enough —
+# --- the SOURCE must be ENV_VAR or ETC_FILE. A ``.env``-sourced value never unlocks
+# --- the override, even though ``resolve_environment`` reports the value as valid.
+
+
+def test_dotenv_sourced_dev_value_does_not_unlock_mocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mocked-source control: value='development' + source=DOTENV still refuses.
+
+    Pins the trust-floor decision independent of the real three-layer file resolver
+    (the real-file variant below drives the genuine ``.env`` read end-to-end).
+    """
+    _patch_environment(monkeypatch, "development", source=EnvironmentSource.DOTENV)
+
+    with pytest.raises(LaunchTargetOverrideRefusedError):
+        _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE)
+
+
+def test_etc_sourced_dev_value_unlocks_mocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mocked-source control: value='development' + source=ETC_FILE DOES unlock."""
+    _patch_environment(monkeypatch, "development", source=EnvironmentSource.ETC_FILE)
+
+    target = _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE)
+
+    assert target == (_PROBE_PLUGIN_ID, _PROBE_MODULE)
+
+
+def test_dotenv_dev_still_raises_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Real end-to-end: a genuine CWD ``.env`` with a dev value never unlocks.
+
+    Drives the REAL :func:`resolve_environment` (no mock) so the trust-floor is
+    proven against the actual three-layer resolver, not just a stubbed source.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=development\n", encoding="utf-8")
+
+    with pytest.raises(LaunchTargetOverrideRefusedError):
+        _resolve_launch_target(
+            "discord", override_map=_PROBE_OVERRIDE, etc_path=tmp_path / "absent"
+        )
+
+
+def test_etc_dev_unlocks_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Real end-to-end: a genuine ``/etc``-equivalent file with a dev value unlocks."""
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    etc_path = tmp_path / "environment"
+    etc_path.write_text("development\n", encoding="utf-8")
+
+    target = _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE, etc_path=etc_path)
+
+    assert target == (_PROBE_PLUGIN_ID, _PROBE_MODULE)

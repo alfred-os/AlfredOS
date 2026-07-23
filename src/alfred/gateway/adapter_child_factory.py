@@ -66,7 +66,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
-from alfred.config._environment_loader import resolve_environment
+from alfred.config._environment_loader import EnvironmentSource, resolve_environment
 from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
@@ -78,8 +78,21 @@ from alfred.plugins._comms_child_env import _scrubbed_base
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
 
 log = structlog.get_logger(__name__)
+
+# The environment SOURCES trusted to honor a launch-target override (#469 Blocker-1).
+# A ``.env`` file is the lowest, gap-fill-only layer of ``resolve_environment`` and is
+# writable by anything with repo/CWD access — an operator's stray dev ``.env`` (or a
+# hostile one dropped by a compromised dependency) must NEVER unlock the override on a
+# production gateway merely by shadowing the value. Only a source with an explicit,
+# operator-controlled trust boundary (the process's own env var, or the root-owned
+# ``/etc`` file) may honor the override, even when the resolved VALUE is a legitimate
+# ``development``/``test`` string.
+_OVERRIDE_TRUSTED_SOURCES: Final[frozenset[EnvironmentSource]] = frozenset(
+    {EnvironmentSource.ENV_VAR, EnvironmentSource.ETC_FILE}
+)
 
 # The environments in which a constructor-injected launch-target override is honored
 # (Spec B G6-7-7 / #309). Anywhere else an injected override is a fail-closed refusal —
@@ -123,30 +136,49 @@ class LaunchTargetOverrideRefusedError(GatewayAdapterSpawnError):
 
 
 def _resolve_launch_target(
-    adapter_id: str, *, override_map: Mapping[str, tuple[str, str]] | None
+    adapter_id: str,
+    *,
+    override_map: Mapping[str, tuple[str, str]] | None,
+    etc_path: Path | None = None,
 ) -> tuple[str, str]:
     """Resolve ``adapter_id`` to its ``(plugin_id, module)`` launch target.
 
-    Spec B G6-7-7 (#309). Two paths:
+    Spec B G6-7-7 (#309) + #469 Blocker-1 trust-floor. Two paths:
 
     * ``override_map is None`` (production / no override injected) — the pre-G6-7-7
       behaviour, byte-for-byte: return :data:`_ADAPTER_LAUNCH_TARGETS`\\ ``[adapter_id]``
       if present, else raise the SAME closed-static-map :class:`GatewayAdapterSpawnError`.
       The environment is NOT read on this path (no override means no gate to apply).
     * ``override_map is not None`` (an override was injected) — read the active
-      environment via :func:`resolve_environment`. Only in ``{"development", "test"}`` is
-      the override honored: if ``adapter_id`` is in the override map, return its probe
-      target; if it is not, FALL THROUGH to the production default (the override only
-      redirects ids it names). Outside that allowlist (incl. ``production``,
-      ``staging``, unset / unrecognised → ``None``) raise
-      :class:`LaunchTargetOverrideRefusedError` — FAIL-CLOSED / default-DENY.
+      environment via :func:`resolve_environment`. The override is honored ONLY when
+      BOTH hold: the resolved value is in ``{"development", "test"}`` AND its
+      ``source`` is trusted (:data:`_OVERRIDE_TRUSTED_SOURCES` — the process's own
+      ``ALFRED_ENVIRONMENT`` env var or the root-owned ``/etc`` file). A ``.env``-sourced
+      ``development``/``test`` value does NOT satisfy the gate (#469 Blocker-1): ``.env``
+      is the lowest, gap-fill-only, CWD-writable layer, so honoring it would let a stray
+      or hostile CWD ``.env`` unlock the override on a production gateway. When honored
+      and ``adapter_id`` is in the override map, return its probe target; if it is not,
+      FALL THROUGH to the production default (the override only redirects ids it names).
+      Any other outcome (value outside the allowlist, OR an untrusted source, incl.
+      ``production``, ``staging``, unset / unrecognised, or a ``.env``-sourced dev value)
+      raises :class:`LaunchTargetOverrideRefusedError` — FAIL-CLOSED / default-DENY.
+
+    ``etc_path`` is a seam threaded straight to :func:`resolve_environment` so tests can
+    point the ``/etc`` layer at a ``tmp_path`` without touching a real
+    ``/etc/alfred/environment``; ``None`` (the default) reads the real file.
     """
     if override_map is None:
         return _production_launch_target(adapter_id)
 
-    environment = resolve_environment().value
-    if environment not in _OVERRIDE_ALLOWED_ENVIRONMENTS:
-        # FAIL-CLOSED: an override was injected but the environment is not allowlisted.
+    resolved = resolve_environment(etc_path=etc_path)
+    environment = resolved.value
+    honor = (
+        environment in _OVERRIDE_ALLOWED_ENVIRONMENTS
+        and resolved.source in _OVERRIDE_TRUSTED_SOURCES
+    )
+    if not honor:
+        # FAIL-CLOSED: an override was injected but either the resolved value is not
+        # allowlisted, or it came from an untrusted source (``.env``) — #469 Blocker-1.
         # The message is CONTENT-FREE — built from a ``t()`` callsite with kwargs (not
         # f-string interpolation, i18n-001) — and carries NO override module string
         # (sec-003/sec-101): it lands verbatim in the supervisor audit row.
