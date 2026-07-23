@@ -11,10 +11,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
+from pydantic_core import InitErrorDetails, PydanticCustomError
 from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
+from alfred.cli.daemon._commands import _settings_error_field_name
+from alfred.config.settings import SettingsError
 from alfred.i18n import t
 
 
@@ -205,6 +209,60 @@ def test_settings_invalid_names_offending_field_without_leaking_value(
     subject = appended[0]["subject"]
     assert isinstance(subject, dict)
     assert subject["failure_reason"] == "settings_invalid"
+
+
+def test_settings_error_field_name_none_when_cause_has_no_errors() -> None:
+    """``_settings_error_field_name`` defensive branch: a chained ``ValidationError``
+    whose own ``errors()`` is empty falls back to ``None`` instead of indexing
+    ``errors[0]``.
+
+    A REAL ``Settings()`` construction failure can never produce this shape — pydantic
+    only raises ``ValidationError`` when there is at least one line error, so there is
+    no natural (non-synthetic) call path through ``Settings()`` that reaches it. It is
+    still a reachable pydantic-core STATE, not dead code: any caller holding a
+    ``ValidationError`` reference (a test double, a future pydantic version, a
+    library that re-raises one after filtering its errors) can construct exactly this
+    shape via pydantic's own public ``ValidationError.from_exception_data`` — the same
+    constructor pydantic's own test suite uses to build ``ValidationError`` instances
+    without a full model round-trip. Unit-testing the helper directly (rather than
+    contorting a real ``Settings()`` call to reach it) keeps the test deterministic and
+    scoped to the guard being verified.
+    """
+    cause = ValidationError.from_exception_data("Settings", [])
+    try:
+        raise SettingsError("settings blew up") from cause
+    except SettingsError as exc:
+        assert _settings_error_field_name(exc) is None
+
+
+def test_settings_error_field_name_none_when_loc_is_empty() -> None:
+    """``_settings_error_field_name`` defensive branch: a chained ``ValidationError``
+    whose single error has an empty ``loc`` tuple falls back to ``None`` instead of
+    joining an empty path into an empty-string field name.
+
+    Unlike the empty-``errors()`` sibling above, this shape IS reachable through a
+    real pydantic model failure — a ``model_validator(mode="after")`` that raises
+    reports ``loc=()`` (verified directly against pydantic: a minimal model with such
+    a validator produces ``errors() == [{"type": "value_error", "loc": (), ...}]``).
+    ``Settings`` has no such validator today, so no real ``Settings()`` call reaches
+    this via the daemon boot path — but the guard exists precisely so a FUTURE
+    model-level validator on ``Settings`` degrades to the generic
+    ``daemon.boot.settings_invalid`` message rather than rendering an empty field
+    name. Built via pydantic's own ``ValidationError.from_exception_data`` for the
+    same determinism/scoping reason as the sibling test.
+    """
+    line_errors: list[InitErrorDetails] = [
+        InitErrorDetails(
+            type=PydanticCustomError("value_error", "model-level failure"),
+            loc=(),
+            input="irrelevant",
+        )
+    ]
+    cause = ValidationError.from_exception_data("Settings", line_errors)
+    try:
+        raise SettingsError("settings blew up") from cause
+    except SettingsError as exc:
+        assert _settings_error_field_name(exc) is None
 
 
 def test_placeholder_api_key_settings_error_shows_curated_hint(
