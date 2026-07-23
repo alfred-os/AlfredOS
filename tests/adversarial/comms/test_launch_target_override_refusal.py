@@ -135,7 +135,7 @@ async def _instant_sleep(_seconds: float) -> None:  # pragma: no cover
 def _set_environment(monkeypatch: pytest.MonkeyPatch, environment: str | None) -> None:
     """Set the REAL ``ALFRED_ENVIRONMENT`` for one case (drive the real env read).
 
-    Adversarial discipline: this drives the REAL :func:`load_environment` read inside
+    Adversarial discipline: this drives the REAL :func:`resolve_environment` read inside
     :func:`_resolve_launch_target` — we do NOT patch the env gate to "always refuse".
     ``None`` deletes the var (the unset case).
     """

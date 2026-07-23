@@ -42,12 +42,12 @@ def test_no_override_map_never_reads_env_or_returns_probe(
     # If the resolver consulted the environment on the no-override path it could be
     # tricked into a probe redirect; assert it never reads it. A patched loader that
     # FAILS LOUDLY proves the path stays env-free even in a development environment.
-    def _exploding_load_environment(**_kwargs: object) -> EnvironmentLoadResult:
-        raise AssertionError("load_environment consulted on the no-override path")
+    def _exploding_resolve_environment(**_kwargs: object) -> EnvironmentLoadResult:
+        raise AssertionError("resolve_environment consulted on the no-override path")
 
     monkeypatch.setattr(
-        "alfred.gateway.adapter_child_factory.load_environment",
-        _exploding_load_environment,
+        "alfred.gateway.adapter_child_factory.resolve_environment",
+        _exploding_resolve_environment,
     )
 
     target = _resolve_launch_target("discord", override_map=None)
@@ -62,12 +62,12 @@ def test_override_consulted_only_when_injected_and_allowlisted(
 ) -> None:
     probe = {"discord": ("alfred.discord_probe", "alfred.gateway.discord_probe")}
 
-    def _dev_load_environment(**_kwargs: object) -> EnvironmentLoadResult:
+    def _dev_resolve_environment(**_kwargs: object) -> EnvironmentLoadResult:
         return EnvironmentLoadResult(value="development", source=EnvironmentSource.ENV_VAR)
 
     monkeypatch.setattr(
-        "alfred.gateway.adapter_child_factory.load_environment",
-        _dev_load_environment,
+        "alfred.gateway.adapter_child_factory.resolve_environment",
+        _dev_resolve_environment,
     )
 
     # Injected + allowlisted -> the probe is consulted and wins.

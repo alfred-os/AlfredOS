@@ -40,23 +40,23 @@ _PROBE_MODULE = "alfred.gateway.discord_probe"
 
 
 def _patch_environment(monkeypatch: pytest.MonkeyPatch, value: str | None) -> list[bool]:
-    """Patch ``load_environment`` where the factory imports it; return a consult flag.
+    """Patch ``resolve_environment`` where the factory imports it; return a consult flag.
 
     The returned single-element list flips to ``True`` the first time the factory
-    calls ``load_environment`` so a test can assert the env was actually consulted
+    calls ``resolve_environment`` so a test can assert the env was actually consulted
     (case (e)). ``value`` is the resolved environment string (or ``None`` for the
     unset/unrecognised posture) returned by the patched loader.
     """
     consulted: list[bool] = []
     source = EnvironmentSource.ENV_VAR if value is not None else EnvironmentSource.NONE
 
-    def _fake_load_environment(**_kwargs: object) -> EnvironmentLoadResult:
+    def _fake_resolve_environment(**_kwargs: object) -> EnvironmentLoadResult:
         consulted.append(True)
         return EnvironmentLoadResult(value=value, source=source)
 
     monkeypatch.setattr(
-        "alfred.gateway.adapter_child_factory.load_environment",
-        _fake_load_environment,
+        "alfred.gateway.adapter_child_factory.resolve_environment",
+        _fake_resolve_environment,
     )
     return consulted
 
@@ -111,7 +111,7 @@ def test_no_override_map_resolves_production_target(
     assert target == _ADAPTER_LAUNCH_TARGETS["discord"]
     # With override_map=None the resolver must NOT read the environment at all —
     # the no-override path is byte-for-byte the pre-G6-7-7 static lookup.
-    assert consulted == [], "load_environment must not be consulted on the no-override path"
+    assert consulted == [], "resolve_environment must not be consulted on the no-override path"
 
 
 def test_no_override_map_unknown_adapter_raises_static_refusal(
@@ -167,14 +167,14 @@ def test_refusal_message_is_content_free(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "test" in rendered
 
 
-# --- (e) the environment is read via ``load_environment`` (consulted). ---
+# --- (e) the environment is read via ``resolve_environment`` (consulted). ---
 
 
-def test_environment_read_via_load_environment(
+def test_environment_read_via_resolve_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     consulted = _patch_environment(monkeypatch, "test")
 
     _resolve_launch_target("discord", override_map=_PROBE_OVERRIDE)
 
-    assert consulted == [True], "load_environment was not consulted on the override path"
+    assert consulted == [True], "resolve_environment was not consulted on the override path"
