@@ -169,7 +169,13 @@ def test_unreadable_etc_logs_breadcrumb(  # H5 (fleet review)
     breadcrumbs = [entry for entry in logs if entry["event"] == "environment_loader.etc_unreadable"]
     assert len(breadcrumbs) == 1, logs
     assert breadcrumbs[0]["path"] == str(etc_dir)
-    assert breadcrumbs[0]["error_class"] == "IsADirectoryError"
+    # OS-agnostic: opening a directory for reading raises IsADirectoryError on
+    # POSIX but PermissionError on Windows (win32 has no IsADirectoryError errno
+    # equivalent — it reports EACCES instead). ``_read_etc`` deliberately catches
+    # both (see its docstring) as the same "present but unreadable" condition, so
+    # either class is a legitimate breadcrumb for THIS test's directory-at-path
+    # setup; pinning a single OS's class here would fail the cross-OS CI leg.
+    assert breadcrumbs[0]["error_class"] in {"IsADirectoryError", "PermissionError"}
 
 
 def test_generic_os_error_at_etc_path_is_fail_closed(
