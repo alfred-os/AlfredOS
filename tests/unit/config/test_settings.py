@@ -8,8 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic_settings import DotEnvSettingsSource, EnvSettingsSource, SecretsSettingsSource
 
-from alfred.config.settings import Settings, SettingsError
+from alfred.config._environment_loader import EnvironmentSource
+from alfred.config.settings import Settings, SettingsError, _Without
 
 
 class TestSettings:
@@ -226,10 +228,23 @@ class TestSettingsDelegatesEnvironmentResolution:
         """No env var, no /etc file: Settings() reads .env via resolve_environment()."""
         monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
         monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-real")
+        # M-7 (final-review): without pinning _DEFAULT_ETC_PATH away from the real
+        # host default, a host with an actual /etc/alfred/environment present would
+        # green this test VACUOUSLY via the ETC_FILE layer, not the DOTENV layer
+        # this test claims to exercise. Point it at an absent tmp path so the .env
+        # layer is the only source that can possibly resolve a value here.
+        monkeypatch.setattr(
+            "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+            tmp_path / "no-such-file",
+        )
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=production\n", encoding="utf-8")
 
-        assert Settings().environment == "production"
+        settings = Settings()
+        assert settings.environment == "production"
+        result = settings.environment_load_result
+        assert result is not None
+        assert result.source is EnvironmentSource.DOTENV
 
     def test_pydantic_cannot_populate_environment_from_dotenv(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -280,3 +295,42 @@ class TestSettingsDelegatesEnvironmentResolution:
 
         assert settings.environment == "test"
         assert settings.environment_load_result is None
+
+
+class TestWithoutSourceIdentity:
+    """I-2 (final-review): ``_Without`` wrappers must not collide under one state-dict key.
+
+    pydantic-settings 2.14.2 keys its per-source ``states`` dict by
+    ``source.__name__ if hasattr(source, "__name__") else type(source).__name__``
+    (``pydantic_settings/main.py:469``). Before this fix, every ``_Without``
+    instance lacked its own ``__name__``, so ``type(source).__name__`` fell back to
+    the literal class name ``"_Without"`` for ALL THREE wrappers returned by
+    ``settings_customise_sources`` — they collided under one key instead of the
+    three distinct keys the wrapped ``EnvSettingsSource`` / ``DotEnvSettingsSource``
+    / ``SecretsSettingsSource`` would occupy unwrapped. This is the concrete
+    failure mode behind ADR-0053 §6's "forwards the per-source state protocol
+    faithfully" claim — faithful forwarding requires distinct identity, not just
+    the two ``_set_*`` passthrough methods.
+    """
+
+    @staticmethod
+    def _state_dict_key(source: object) -> str:
+        """Mirror pydantic-settings' own key-derivation formula exactly (main.py:469)."""
+        return source.__name__ if hasattr(source, "__name__") else type(source).__name__
+
+    def test_three_wrapped_sources_have_distinct_state_dict_keys(self) -> None:
+        env_source = EnvSettingsSource(Settings)
+        dotenv_source = DotEnvSettingsSource(Settings)
+        secrets_source = SecretsSettingsSource(Settings)
+
+        wrapped = (
+            _Without(env_source, ("environment",)),
+            _Without(dotenv_source, ("environment",)),
+            _Without(secrets_source, ("environment",)),
+        )
+
+        keys = [self._state_dict_key(source) for source in wrapped]
+        assert len(set(keys)) == 3, f"_Without wrappers collided under one state-dict key: {keys}"
+        # Identity mirrors the corresponding UNWRAPPED stock source exactly — the
+        # wrapper is invisible to pydantic-settings' own per-source bookkeeping.
+        assert keys == ["EnvSettingsSource", "DotEnvSettingsSource", "SecretsSettingsSource"]

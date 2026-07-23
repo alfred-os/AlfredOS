@@ -13,6 +13,10 @@ def test_environment_required(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     """Settings() with no environment source raises SettingsError per sec-003."""
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    # I-1 (final-review): hermetic against a real repo-root .env — see the
+    # matching comment in test_probe_environment_not_set.py for why chdir is
+    # required, not just the etc-path override.
+    monkeypatch.chdir(tmp_path)
     # Override etc path so the test never touches /etc.
     monkeypatch.setattr(
         "alfred.config._environment_loader._DEFAULT_ETC_PATH",

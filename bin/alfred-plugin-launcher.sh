@@ -206,6 +206,13 @@ _capture_stderr_last_line() {
 # ALFRED_ENVIRONMENT env var > /etc/alfred/environment). Neither set → refuse.
 # The helper prints the value on stdout and a bare i18n key on stderr.
 #
+# I-4 (final-review, #469): this is DELIBERATE trusted-sources-only resolution
+# (ADR-0053 §3, `resolve_environment(consult_dotenv=False)`) — the launcher
+# never reads a CWD `.env`. A bare-host, `.env`-only install (no env var, no
+# /etc/alfred/environment) boots the daemon fine but this probe still refuses
+# every plugin spawn; see ADR-0053's Consequences → Negative/residuals for the
+# known gap and its fix location (`alfred.plugins._comms_child_env`).
+#
 # sec-keystone (CR PR #229 finding-1): the environment is resolved BEFORE host-
 # OS detection so the FAKE_UNAME shim can be gated to non-production. An
 # attacker who controls the launcher env on a production Linux host must NOT be

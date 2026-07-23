@@ -16,18 +16,28 @@ this prevents a downgrade-via-typo, e.g. a root typo in ``/etc`` letting a
 ``.env=development`` win instead. A source that is unset (absent or blank/whitespace)
 is skipped, not a short-circuit.
 
-**Fail-closed on an unreadable ``/etc`` [err-01].** A present-but-unreadable
-``/etc/alfred/environment`` (``PermissionError``/``IsADirectoryError``/``OSError``)
-returns ``EnvironmentSource.UNREADABLE`` immediately — it never falls through to
-``.env``. Only a genuinely *absent* file (``FileNotFoundError``) is skipped.
+**Fail-closed on an unreadable ``/etc``, scoped to "no higher source resolved"
+[err-01, final-review I-3].** A present-but-unreadable ``/etc/alfred/environment``
+(``PermissionError``/``IsADirectoryError``/``OSError``) returns
+``EnvironmentSource.UNREADABLE`` — but ONLY when the env var (the strictly
+HIGHER-trust source) did not itself resolve a valid value first. A valid env var
+always wins outright regardless of whether ``/etc`` is readable: gating it behind
+``/etc``'s readability bought no real security (whoever controls process launch
+already controls the env var) and would refuse a previously-working
+root-owned-0600-``/etc`` + non-root-daemon + env-var-set deployment. When the env
+var is absent (or itself present-but-invalid — see [D3] above, which short-circuits
+before ``/etc`` is even read), an unreadable ``/etc`` still never falls through to
+``.env``; only a genuinely *absent* file (``FileNotFoundError``) is skipped.
 
 **``.env`` read failures are treated as absent [err-02/err-03].** ``PermissionError``,
 ``OSError``, ``IsADirectoryError``, ``FileNotFoundError`` and ``UnicodeDecodeError`` on
 the ``.env`` read are all caught and treated as "this source is unset" — a
 mode-misconfigured or malformed ``.env`` must never crash boot with a raw, un-audited
 traceback (CLAUDE.md hard rule 7). ``.env`` can never participate in a two-source
-``conflict`` — it is the lowest, gap-fill-only layer; ``conflict`` is computed solely
-against the validated ``/etc`` value.
+``conflict`` — it is the lowest, gap-fill-only layer; ``conflict`` is computed against
+the NORMALIZED (stripped, never Literal-checked) ``/etc`` value [M-2] — a typo'd
+``/etc`` still surfaces as a conflict against a valid, winning env var rather than
+being hidden because it happens to fail Literal validation.
 
 ``consult_dotenv=False`` lets a caller (the launcher, per [D1]) opt out of the
 ``.env`` layer entirely rather than treat it as absent-but-consulted — this is what
@@ -82,7 +92,9 @@ class EnvironmentLoadResult:
             disagree. ``.env`` can never participate in a conflict — it is
             the lowest, gap-fill-only layer.
         conflicting_file_value: When ``conflict`` is ``True``, the
-            validated ``/etc`` value (the env-var value is in ``value``).
+            NORMALIZED ``/etc`` value — stripped, but never Literal-checked
+            [M-2] (the env-var value, which is the one that wins, is in
+            ``value``).
         unrecognised_value: When ``source`` is ``UNRECOGNISED``, the raw
             string that failed Literal validation. Carried so the
             caller's refusal message can echo what the operator typed.
@@ -178,39 +190,65 @@ def resolve_environment(
     # whitespace-only difference between sources never registers as a spurious
     # source conflict or a spurious UNRECOGNISED.
     env_raw = _norm(os.environ.get("ALFRED_ENVIRONMENT"))
-    etc = _read_etc(etc_path)
-    if etc.unreadable:
-        # err-01: a present-but-unreadable /etc fails closed. Never fall through to
-        # a lower source — a mode-misconfigured /etc must not silently downgrade.
-        return EnvironmentLoadResult(value=None, source=EnvironmentSource.UNREADABLE)
-    dotenv_raw = _read_dotenv(dotenv_path) if consult_dotenv else None
 
-    for raw, source in (
-        (env_raw, EnvironmentSource.ENV_VAR),
-        (etc.value, EnvironmentSource.ETC_FILE),
-        (dotenv_raw, EnvironmentSource.DOTENV),
-    ):
-        if raw is None:
-            continue
-        if raw not in _VALID_VALUES:
+    # I-3 (final-review): the env var — the actually-highest-trust source — is
+    # resolved to completion BEFORE /etc is even read. A present-but-invalid env
+    # var still short-circuits UNRECOGNISED here [D3], ahead of any /etc read —
+    # a valid /etc must never rescue a typo'd env var, and an UNREADABLE /etc
+    # must never get the chance to "upgrade" the typo into a different refusal
+    # (the double-fault case).
+    if env_raw is not None and env_raw not in _VALID_VALUES:
+        return EnvironmentLoadResult(
+            value=None,
+            source=EnvironmentSource.UNRECOGNISED,
+            unrecognised_value=env_raw,
+        )
+
+    etc = _read_etc(etc_path)
+
+    if env_raw is not None:
+        # env_raw is valid (the invalid case returned above). Conflict is scoped
+        # to the env-var-vs-/etc pair, computed on the NORMALIZED (never
+        # Literal-checked) /etc value [M-2] — .env is the lowest, gap-fill-only
+        # layer and can never participate in a conflict. `etc.value` is `None`
+        # whenever /etc is absent OR unreadable, so an unreadable /etc simply
+        # yields no conflict here rather than any special-casing: a valid env
+        # var wins outright regardless of /etc's readability [I-3] — whoever
+        # controls process launch already controls this value, so gating it
+        # behind /etc's readability bought no real security.
+        conflict = etc.value is not None and etc.value != env_raw
+        return EnvironmentLoadResult(
+            value=env_raw,
+            source=EnvironmentSource.ENV_VAR,
+            conflict=conflict,
+            conflicting_file_value=etc.value if conflict else None,
+        )
+
+    # err-01: ONLY when no higher-trust source (the env var) resolved does an
+    # unreadable /etc short-circuit here — preserving err-01's real intent:
+    # never silently fall through to the LOWER-trust .env layer.
+    if etc.unreadable:
+        return EnvironmentLoadResult(value=None, source=EnvironmentSource.UNREADABLE)
+
+    if etc.value is not None:
+        if etc.value not in _VALID_VALUES:
             # [D3]: the highest SET source decides. A typo here short-circuits —
             # it does not silently fall through to a valid lower source.
             return EnvironmentLoadResult(
                 value=None,
                 source=EnvironmentSource.UNRECOGNISED,
-                unrecognised_value=raw,
+                unrecognised_value=etc.value,
             )
-        # Conflict is scoped to the env-var-vs-/etc pair, computed on the
-        # VALIDATED /etc value — .env is the lowest, gap-fill-only layer and can
-        # never participate in a conflict.
-        conflict = (
-            source is EnvironmentSource.ENV_VAR and etc.value is not None and etc.value != raw
-        )
-        return EnvironmentLoadResult(
-            value=raw,
-            source=source,
-            conflict=conflict,
-            conflicting_file_value=etc.value if conflict else None,
-        )
+        return EnvironmentLoadResult(value=etc.value, source=EnvironmentSource.ETC_FILE)
+
+    dotenv_raw = _read_dotenv(dotenv_path) if consult_dotenv else None
+    if dotenv_raw is not None:
+        if dotenv_raw not in _VALID_VALUES:
+            return EnvironmentLoadResult(
+                value=None,
+                source=EnvironmentSource.UNRECOGNISED,
+                unrecognised_value=dotenv_raw,
+            )
+        return EnvironmentLoadResult(value=dotenv_raw, source=EnvironmentSource.DOTENV)
 
     return EnvironmentLoadResult(value=None, source=EnvironmentSource.NONE)

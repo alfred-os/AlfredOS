@@ -88,8 +88,11 @@ escape-hatch gate
 (`gateway/adapter_child_factory.py:_resolve_launch_target`) — calls
 `resolve_environment()` directly. `Settings` itself calls it internally (a
 fourth caller, for in-process code that can afford to build a real
-`Settings`). All four run byte-identical precedence logic; there is no
-second implementation anywhere in the tree to drift out of sync.
+`Settings`). All four call the SAME resolver (M-4: not "byte-identical
+precedence logic" — the launcher opts out of the `.env` layer entirely via
+`consult_dotenv=False`, a genuinely two-layer chain per §3, so the logic
+each caller EXERCISES differs by design); there is no second implementation
+anywhere in the tree to drift out of sync.
 
 **This invariant is scoped to the `ALFRED_ENVIRONMENT` variable only.** A
 fifth, pre-existing, security-load-bearing site —
@@ -149,19 +152,33 @@ call sites each close this the way their interface allows:
 support this second pattern: a caller whose downstream interface cannot
 express provenance opts out of the lowest-trust layer up front.
 
-**err-01 — fail-closed on an unreadable higher-trust source.** A
-present-but-unreadable `/etc/alfred/environment` (`PermissionError` /
-`IsADirectoryError` / generic `OSError`) returns
-`EnvironmentSource.UNREADABLE` immediately and never falls through to
-`.env` — a mode-misconfigured `/etc` must not silently downgrade to a
-lower, less-trusted source. Only a genuinely *absent* `/etc` file
-(`FileNotFoundError`) is treated as unset. `.env` read failures
-(`PermissionError`/`OSError`/`IsADirectoryError`/`FileNotFoundError`/
-`UnicodeDecodeError`) are, by contrast, treated as *absent* rather than
-fatal: `.env` is the lowest layer, so a mode-misconfigured `.env` degrading
-to "no value from this source" cannot itself cause a downgrade, and
-CLAUDE.md hard rule 7 (no silent crashes) is served by never raising a raw,
-un-audited traceback out of a boot-time file read.
+**err-01 — fail-closed on an unreadable `/etc`, scoped to "no higher-trust
+source resolved" (final-review I-3).** The resolver evaluates the env var to
+completion FIRST, entirely ahead of any `/etc` read: a present-and-valid env
+var returns immediately (the conflict flag, if any, is still computed against
+whatever `/etc` value the resolver can read — see below), and a
+present-but-invalid env var short-circuits `UNRECOGNISED` before `/etc` is
+even consulted. **Only when the env var did not itself resolve a value** does
+the resolver read `/etc`, and only then can a present-but-unreadable
+`/etc/alfred/environment` (`PermissionError` / `IsADirectoryError` / generic
+`OSError`) return `EnvironmentSource.UNREADABLE` — never falling through to
+`.env`. Gating a *resolved, valid* env-var value behind `/etc`'s readability
+was rejected: whoever controls process launch already controls the env var,
+so refusing boot on an unreadable `/etc` in that case buys no additional
+security and had newly broken a previously-working root-owned-0600-`/etc` +
+non-root-daemon + env-var-set deployment (the concrete regression the final
+whole-branch review caught). The original intent of err-01 is preserved
+exactly where it matters: a mode-misconfigured `/etc` must never silently
+downgrade to the lower-trust `.env` layer when `/etc` is the highest source
+actually consulted. Only a genuinely *absent* `/etc` file
+(`FileNotFoundError`) is treated as unset, at any position in this chain.
+`.env` read failures (`PermissionError`/`OSError`/`IsADirectoryError`/
+`FileNotFoundError`/`UnicodeDecodeError`) are, by contrast, treated as
+*absent* rather than fatal: `.env` is the lowest layer, so a
+mode-misconfigured `.env` degrading to "no value from this source" cannot
+itself cause a downgrade, and CLAUDE.md hard rule 7 (no silent crashes) is
+served by never raising a raw, un-audited traceback out of a boot-time file
+read.
 
 ### 4. Retiring the ContextVar / dual-validator
 
@@ -210,9 +227,22 @@ that resolves to `UNRECOGNISED` when it is the highest set source.
 is *no speculative upper caps* — but ADR-0044 also carves out an explicit
 exception for a **documented, concrete incompatibility**, and this is one:
 the `_Without` source wrapper (§4) forwards pydantic-settings' per-source
-state protocol (`_set_current_state` / `_set_settings_sources_data`) to the
-wrapped inner source — an internal, undocumented 2.14.x mechanism, not
-covered by pydantic-settings' own semver guarantees. The cap is a
+state protocol to the wrapped inner source — an internal, undocumented
+2.14.x mechanism, not covered by pydantic-settings' own semver guarantees.
+Faithful forwarding is two parts, not one: the two `_set_current_state` /
+`_set_settings_sources_data` passthrough methods, **and** an identity pydantic-
+settings can key on. `pydantic_settings/main.py`'s `_settings_build_values`
+keys its per-source `states` dict by `source.__name__ if hasattr(source,
+"__name__") else type(source).__name__`; without a `__name__` of its own,
+every `_Without` instance fell back to the literal class name `"_Without"`,
+so all three instances `settings_customise_sources` constructs collided
+under one shared key instead of the three distinct keys the wrapped
+`EnvSettingsSource` / `DotEnvSettingsSource` / `SecretsSettingsSource` would
+occupy unwrapped (final-review I-2). `_Without.__init__` now sets
+`self.__name__ = getattr(inner, "__name__", type(inner).__name__)`, adopting
+the wrapped source's own identity — the per-source state protocol is now
+forwarded faithfully, verified by a regression test asserting the three
+wrapped sources resolve to three distinct state-dict keys. The cap is a
 tripwire, not a permanent ceiling: widening it is fine, but only after
 re-verifying that internal against the target minor, since a silent
 behavior change there would reopen the exact downgrade this ADR closes.
@@ -238,8 +268,9 @@ not the precedence chain itself. This ADR owns the precedence decision
   A future change to precedence, source normalization, or fail-closed
   behavior touches one function.
 - The documented remedy ("set `ALFRED_ENVIRONMENT` in your `.env`") now
-  actually works on the bare-host path, closing the #469 Blocker-1 boot
-  loop.
+  actually works on the bare-host path **for daemon boot**, closing the #469
+  Blocker-1 boot loop. This does NOT extend to plugin spawns on that same
+  bare-host path — see the Residual below.
 - The escape-hatch danger (a permissive override unlocked by a low-trust
   source) is closed at each consumer by construction, not by a shared
   runtime check that could be bypassed by a new call site forgetting to
@@ -247,6 +278,29 @@ not the precedence chain itself. This ADR owns the precedence decision
 
 **Negative / residuals**
 
+- **The `.env` remedy reaches daemon boot but NOT plugin spawns, on the
+  bare-host path (final-review I-4).** `alfred.plugins._comms_child_env
+  ._scrubbed_base()` forwards `os.environ["ALFRED_ENVIRONMENT"]` verbatim
+  into every sandboxed plugin's child env — it does NOT forward the daemon's
+  own *resolved* value. So on a bare-host, `.env`-only install (no
+  `ALFRED_ENVIRONMENT` env var, no `/etc/alfred/environment`, but a valid
+  `ALFRED_ENVIRONMENT=` line in `.env`), the daemon boots cleanly (`Settings`
+  resolves `environment` from `.env` via `resolve_environment()`, per §1), but
+  EVERY sandboxed plugin spawn (`bin/alfred-plugin-launcher.sh`, via
+  `manifest_reader --read-environment`) still refuses with
+  `daemon.boot.environment_not_set` — the `.env`-blind pre-launcher probe
+  reads only the env var and `/etc` (deliberately — §3's launcher
+  trusted-sources-only trust floor), and the child process the daemon spawns
+  never had `ALFRED_ENVIRONMENT` in ITS `os.environ` to forward, because
+  nothing promoted the `.env` value into the daemon process's own environment
+  block. This is the #469 bug shape recurring one layer down, scoped to
+  **bare-host installs only** — `docker compose` is unaffected, because
+  compose's own `.env` handling promotes `.env` into `os.environ` for every
+  container (including the daemon), so `ALFRED_ENVIRONMENT` is already a real
+  env var by the time `_scrubbed_base()` reads it. Not fixed here: the
+  mechanism fix (teaching `_scrubbed_base()` to forward the daemon's resolved
+  value rather than re-reading `os.environ`) is out of scope for this ADR —
+  filed as a follow-up.
 - **Two `.env` parsers for one file.** The resolver reads `environment`
   out of `.env` via `python-dotenv`'s `dotenv_values(..., interpolate=False)`;
   pydantic-settings' own dotenv source (still active for every *other*
@@ -310,7 +364,11 @@ the short-circuit-on-typo semantics, and the `pydantic-settings<2.15` cap.
 `ALFRED_ENVIRONMENT` (including the latent sec-S3-003 gap in §2); a
 friendlier operator-facing message for a malformed `.env` line (err-03); a
 broader settings-factory DIP consolidation (its own future ADR, not
-pre-reserved a number here).
+pre-reserved a number here); teaching `alfred.plugins._comms_child_env
+._scrubbed_base()` to forward the daemon's own *resolved* `environment`
+value into a sandboxed plugin's child env instead of re-reading
+`os.environ["ALFRED_ENVIRONMENT"]` (the bare-host-only plugin-spawn gap in
+Consequences → Negative/residuals, final-review I-4).
 
 ## References
 
@@ -329,6 +387,10 @@ pre-reserved a number here).
   launcher's trusted-sources-only caller, `consult_dotenv=False`).
 - `src/alfred/gateway/adapter_child_factory.py` — `_resolve_launch_target`
   (the in-process trust-floor caller).
+- `src/alfred/plugins/_comms_child_env.py:52,86` — `_scrubbed_base()`, the
+  bare-host-only plugin-spawn residual named in Consequences →
+  Negative/residuals (final-review I-4): forwards `os.environ`, not the
+  daemon's resolved `environment`.
 - `src/alfred/plugins/content_store_base.py:149` (sec-S3-003) and
   `src/alfred/bootstrap/gate_factory.py` (sec-007) — the two `ALFRED_ENV`
   readers named in §2 as a known, intentional divergence.

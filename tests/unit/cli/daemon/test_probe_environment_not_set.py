@@ -23,6 +23,12 @@ def test_environment_not_set_refuses_and_audits(
 ) -> None:
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    # I-1 (final-review): hermetic against a real repo-root .env — the resolver's
+    # lowest layer is CWD-relative, and this branch ships an uncommented
+    # ALFRED_ENVIRONMENT=production in .env.example (bin/alfred-setup.sh copies it
+    # to .env on first run). Without chdir, a developer/CI checkout with a real
+    # .env at the repo root reads a valid value from it and this test fails.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "alfred.config._environment_loader._DEFAULT_ETC_PATH",
         tmp_path / "absent",

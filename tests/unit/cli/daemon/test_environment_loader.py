@@ -195,6 +195,106 @@ def test_etc_typo_short_circuits_over_valid_dotenv(  # [D3]
     assert result.unrecognised_value == "staging"
 
 
+def test_env_var_typo_short_circuits_over_valid_etc(  # [D3] final-review missing-test
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A typo'd env var short-circuits UNRECOGNISED even when /etc holds a valid value.
+
+    Mirrors ``test_etc_typo_short_circuits_over_valid_dotenv`` one layer up: the env
+    var is the layer operators actually typo, and it is now the FIRST layer
+    evaluated (I-3), so its typo must short-circuit before /etc is even read for
+    validity — a valid /etc must never rescue a typo'd env var.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "prod")  # typo, not "production"
+    (tmp_path / "etc").write_text("production\n", encoding="utf-8")
+    result = resolve_environment(etc_path=tmp_path / "etc", dotenv_path=tmp_path / ".env")
+    assert result.source is EnvironmentSource.UNRECOGNISED
+    assert result.unrecognised_value == "prod"
+
+
+# --- I-3 (final-review): env var beats an unreadable /etc ---
+
+
+def test_env_var_wins_over_unreadable_etc(  # I-3(a)
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A valid env var wins outright even when /etc is unreadable.
+
+    err-01's fail-closed intent is that an unreadable /etc must never silently
+    downgrade to a LOWER-trust source when /etc is the highest source consulted —
+    it must NOT veto a value from the actually-highest-trust source (the env var)
+    that already resolved cleanly. Before this fix, ``resolve_environment()`` read
+    /etc unconditionally BEFORE the precedence loop and returned ``UNREADABLE``
+    even when a valid ``ALFRED_ENVIRONMENT`` was set — newly refusing to boot a
+    previously-working root-owned-0600-``/etc`` + non-root-daemon +
+    env-var-set deployment, for no real security benefit (whoever controls
+    process launch already controls the env var's value).
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "production")
+    etc_dir = tmp_path / "environment"
+    etc_dir.mkdir()  # a directory at the etc path -> IsADirectoryError -> unreadable
+    result = resolve_environment(etc_path=etc_dir, dotenv_path=tmp_path / ".env")
+    assert result.value == "production"
+    assert result.source is EnvironmentSource.ENV_VAR
+    assert result.conflict is False
+    assert result.conflicting_file_value is None
+
+
+def test_no_env_var_unreadable_etc_beats_valid_dotenv(  # I-3(b)
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With NO env var, an unreadable /etc still fails closed — never a valid .env.
+
+    err-01's real intent survives the reorder: it is scoped to "no HIGHER-trust
+    source resolved" rather than "checked before everything else". Distinct from
+    (and independent of) ``test_unreadable_etc_is_fail_closed`` above, which
+    patches ``Path.read_text`` globally — this one uses a directory (matching
+    ``test_directory_at_etc_path_is_fail_closed``) so the two ``UNREADABLE``
+    pins do not share a mechanism.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    etc_dir = tmp_path / "environment"
+    etc_dir.mkdir()
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=development\n", encoding="utf-8")
+    result = resolve_environment(etc_path=etc_dir, dotenv_path=tmp_path / ".env")
+    assert result.value is None
+    assert result.source is EnvironmentSource.UNREADABLE
+
+
+def test_env_var_typo_short_circuits_before_etc_unreadable_is_even_checked(  # double-fault
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Double-fault: an invalid env var AND an unreadable /etc.
+
+    The new ordering resolves the env var to completion FIRST, so the typo
+    short-circuits ``UNRECOGNISED`` before /etc's readability is ever examined —
+    an unreadable /etc cannot "upgrade" a typo'd env var into ``UNREADABLE``.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "staging")  # typo
+    etc_dir = tmp_path / "environment"
+    etc_dir.mkdir()  # would resolve UNREADABLE if ever consulted
+    result = resolve_environment(etc_path=etc_dir, dotenv_path=tmp_path / ".env")
+    assert result.source is EnvironmentSource.UNRECOGNISED
+    assert result.unrecognised_value == "staging"
+
+
+def test_conflict_reported_against_unvalidated_etc_typo(  # M-2
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M-2: the conflict flag is computed on the NORMALIZED /etc value, never
+    Literal-checked. Intentional, not an accident: a typo'd /etc still surfaces
+    as a conflict against a valid, winning env var, so a root-owned misconfig is
+    never hidden just because it happens to fail Literal validation.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "production")
+    (tmp_path / "etc").write_text("prod-typo\n", encoding="utf-8")  # not a valid Literal value
+    result = resolve_environment(etc_path=tmp_path / "etc", dotenv_path=tmp_path / ".env")
+    assert result.value == "production"
+    assert result.source is EnvironmentSource.ENV_VAR
+    assert result.conflict is True
+    assert result.conflicting_file_value == "prod-typo"
+
+
 # --- .env (lowest) ---
 
 
@@ -206,6 +306,22 @@ def test_dotenv_lowest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert result.source is EnvironmentSource.DOTENV
     assert result.value == "production"
     assert result.conflict is False  # .env can never participate in a conflict
+
+
+def test_dotenv_only_unrecognised_value(  # missing-test gap (final review)
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ADR-0053 §5: an unrecognised value present ONLY in .env still short-circuits
+    ``UNRECOGNISED``, not ``NONE``. Previously only the /etc layer's
+    short-circuit-on-typo was pinned by a test; this is the layer the resolver
+    consults LAST, so it exercises the ``for``/if-chain's final rung.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=staging\n", encoding="utf-8")
+    result = _r(tmp_path)
+    assert result.value is None
+    assert result.source is EnvironmentSource.UNRECOGNISED
+    assert result.unrecognised_value == "staging"
 
 
 def test_consult_dotenv_false_ignores_dotenv(
