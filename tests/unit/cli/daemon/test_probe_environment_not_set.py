@@ -99,6 +99,60 @@ def test_post_env_settings_error_audits_settings_invalid(
     assert subject["environment_source"] == "env_var"
 
 
+def test_settings_invalid_message_never_leaks_exception_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Security (devex-03 review, Important 2): the ``settings_invalid`` refusal
+    must never echo ``str(exc)``.
+
+    A ``SettingsError`` from some OTHER required field (e.g. a bad
+    ``database_url``) can carry a secret in its OWN message — pydantic
+    decorates a ``ValidationError`` with the offending value. The curated
+    ``daemon.boot.settings_invalid`` catalog string must render instead of
+    the raw detail: the refusal message reaches ``typer.echo(..., err=True)``
+    (stderr), which for a backgrounded daemon is commonly captured into
+    durable container/system logs, not just a live operator terminal
+    (CLAUDE.md hard rule #1 — never log secrets).
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.chdir(tmp_path)
+    # Hermetic: never let a real host /etc/alfred/environment participate.
+    monkeypatch.setattr(
+        "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+        tmp_path / "absent",
+    )
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    from alfred.config.settings import SettingsError
+
+    fake_secret = "SUPERSECRETPW"  # noqa: S105 -- fabricated leak marker, not a real credential
+
+    def _raise_settings_error(**_kw: object) -> object:
+        raise SettingsError(f"invalid database_url: postgresql://u:{fake_secret}@h/db")
+
+    monkeypatch.setattr("alfred.config.settings.Settings", _raise_settings_error)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert appended, "no audit row emitted before exit (sec-001 violated)"
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "settings_invalid"
+    assert fake_secret not in result.output, (
+        f"the fake secret leaked into the operator-facing refusal output: {result.output!r}"
+    )
+
+
 def test_environment_source_unreadable_refuses_and_audits(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
