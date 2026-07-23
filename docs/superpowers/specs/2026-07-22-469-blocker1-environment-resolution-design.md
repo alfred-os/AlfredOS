@@ -1,289 +1,289 @@
 # #469 Blocker 1 — one canonical environment-resolution path
 
-**Status:** design (approved to draft, pending user spec-review). Branch
-`469-blocker1-environment-resolution`. Parent epic: #469 (first-run experience —
-a documented quickstart that actually boots). This spec covers **Blocker 1 only**.
+**Status:** design v2 — revised after a 10-lane `/review-plan` fleet + coordinator
+cross-check round (0 Critical, 13 High, 27 Medium, 12 Low; 8/8 solo findings
+confirmed, 0 retracted, 0 disputed). Branch `469-blocker1-environment-resolution`.
+Parent epic: #469 (first-run experience). This spec covers **Blocker 1 only**.
+
+Four design decisions were settled with the human during review and are marked
+**[D1]–[D3]/[Db]** below.
 
 ## Problem
 
 `alfred daemon start` refuses to boot with:
 
-> Settings.environment is not set. Refusing to boot — production refuses without
-> an explicit environment. Set ALFRED_ENVIRONMENT to one of: development,
-> production, test (**in your .env**) …
+> Settings.environment is not set. Refusing to boot … Set ALFRED_ENVIRONMENT to
+> one of: development, production, test (**in your .env**) …
 
-…even when the operator has set `ALFRED_ENVIRONMENT` in `.env` exactly as the
-message instructs. The operator does the named remedy, re-runs, and hits the
-byte-identical refusal — unrecoverable without reading source.
+…even when the operator set `ALFRED_ENVIRONMENT` in `.env` exactly as instructed.
+They do the named remedy, re-run, and hit the identical refusal — unrecoverable
+without reading source.
 
 ## Root cause (reproduced)
 
-The daemon boot gate `_load_settings_or_die()` (`cli/daemon/_commands.py:346`)
-calls the standalone `load_environment()` (`config/_environment_loader.py`),
-which reads **only** `os.environ["ALFRED_ENVIRONMENT"]` and
-`/etc/alfred/environment`. It refuses **before** `Settings()` is constructed. But
-`Settings` (pydantic-settings, `env_file=".env"`) **does** read `.env`.
+The boot gate `_load_settings_or_die()` (`cli/daemon/_commands.py:346`) calls the
+standalone `load_environment()` (`config/_environment_loader.py`), which reads
+**only** `os.environ["ALFRED_ENVIRONMENT"]` and `/etc/alfred/environment`, and
+refuses **before** `Settings()` is constructed. But `Settings` (pydantic-settings,
+`env_file=".env"`) **does** read `.env`. Verified: with `ALFRED_ENVIRONMENT=production`
+in a `.env` file and absent from `os.environ`, `load_environment()` returns
+`value=None` (→ refusal) while `Settings()` in the same run resolves
+`environment='production'` from `.env`. The pre-Settings gate is a less-capable,
+`.env`-blind duplicate. Masked in compose (compose forwards `.env`→`os.environ`);
+broken on the documented host path and any `.env`-only setup.
 
-Reproduction (verified): with `ALFRED_ENVIRONMENT=production` in a `.env` file and
-absent from `os.environ`, `load_environment()` returns `value=None` (→ refusal)
-while `Settings()` in the same run resolves `environment='production'` straight
-from `.env`. So the pre-Settings gate is a **less-capable, `.env`-blind duplicate**
-of what `Settings` already does.
-
-In the compose happy-path this is masked (compose forwards `.env` → container
-`os.environ` via `${ALFRED_ENVIRONMENT:-production}`), but the documented **host
-path** (`alfred daemon start`) and any `.env`-only setup stay broken. A separate
-compose-forward gap (no `env_file`/env-forward on `alfred-core`) was already fixed by
-the PR2b-golive cutover (#340); this residual — the `.env`-blindness of the resolution
-path — was deliberately left to this epic.
-
-## The trust-precedence constraint (why not "just let Settings resolve it")
+## The trust-precedence constraint
 
 `environment` is **security-load-bearing**: `environment == "production"` gates the
-sec-002 refusal (refuse boot if `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED` is set in
-production) and the gateway launch-target-override escape hatch (honored only in
-development/test). The dangerous failure is a **silent production → development
-downgrade**, which disarms those guards.
+sec-002 unsandboxed-in-production refusal (`_commands.py:562`) and (permissively)
+the gateway launch-target-override escape hatch. The dangerous failure is a **silent
+production → development downgrade**. The three sources, highest trust to lowest:
 
-The three sources, highest trust to lowest:
+- **`ALFRED_ENVIRONMENT`** (os.environ) — set by whoever controls process launch.
+- **`/etc/alfred/environment`** — a root-owned system file.
+- **`.env`** — a working-dir file writable by the app user.
 
-- **`ALFRED_ENVIRONMENT`** (os.environ) — highest trust; set by whoever controls process launch (systemd/compose).
-- **`/etc/alfred/environment`** — middle trust; a root-owned system file.
-- **`.env`** — lowest trust; a working-dir file writable by the app user.
-
-**pydantic-settings reads only `os.environ` + `.env`; it never reads `/etc`.** Its
-native order is `os.environ > .env`. So making `Settings` the independent authority
-for `environment` yields the effective order `os.environ > .env > /etc` — a
-lower-trust, app-writable `.env=development` would silently override a root-owned
-`/etc=production`, disarming sec-002. Only `os.environ > /etc > .env` keeps `/etc`
-above `.env`; under it `.env` can only fill a genuine gap and can never downgrade
-a higher-trust source.
+pydantic-settings reads only `os.environ` + `.env`; it **never** reads `/etc`. Its
+native order is `os.environ > .env`, so letting `Settings` be the independent
+authority yields `os.environ > .env > /etc` — an app-writable `.env=development`
+could override a root-owned `/etc=production`. Only `os.environ > /etc > .env` keeps
+`/etc` above `.env`.
 
 ## Design — one canonical resolver, `Settings` delegates
 
-### The single authority
+### The single authority (`config/_environment_loader.py`)
 
-`config/_environment_loader.py` grows the one and only precedence implementation:
+`resolve_environment()` becomes the one and only precedence implementation:
+**`os.environ["ALFRED_ENVIRONMENT"] > /etc/alfred/environment > .env`**, returning an
+`EnvironmentLoadResult(value, source, conflict, conflicting_*_value, unrecognised_value)`.
 
-```
-resolve_environment()  # (renamed from / superseding load_environment)
-  precedence: os.environ["ALFRED_ENVIRONMENT"] > /etc/alfred/environment > .env
-  returns EnvironmentLoadResult(value, source, conflict, conflicting_*_value, unrecognised_value)
-```
+- `.env` is parsed with **`python-dotenv`'s `dotenv_values(dotenv_path, interpolate=False)`**.
+  `interpolate=False` is chosen to **eliminate a `$VAR` injection vector**, NOT
+  because it matches pydantic (pydantic defaults `interpolate=True` — the "identical
+  parser semantics" claim from v1 was wrong; the difference is immaterial for a
+  Literal-triple `environment` value and is called out in ADR-0053).
+- Grow `EnvironmentSource` with **`DOTENV`**. The `.env` value is `.strip()`-normalized
+  identically to the other two sources (whitespace/quoted-value symmetry).
+- **[D3] Short-circuit on a typo'd higher source.** The precedence is resolved
+  top-down: the **highest source that is SET** decides. If that source's value is
+  **not** in the Literal triple, the resolver returns `UNRECOGNISED` (echoing the
+  typo) and does **not** silently fall through to a valid lower source. This prevents
+  a downgrade-via-typo (root typos `/etc`, a `.env=development` cannot silently win).
+  This is a deliberate behavior change from today's fall-through; it is specified and
+  tested. A source that is **unset** (absent/empty) is skipped, not a short-circuit.
+- **`.env` read-failure posture (Theme B/err-01).** `dotenv_values` **raises**
+  `PermissionError` on a present-but-unreadable `.env` (routine now #470 locks `.env`
+  to 0600). The resolver catches `PermissionError`/`OSError`/`IsADirectoryError`/
+  `FileNotFoundError` on the `.env` read and treats them as **absent** — mirroring the
+  existing `/etc` guard — so a mode-misconfigured `.env` never crashes boot with a raw,
+  un-audited traceback (CLAUDE.md hard rule 7). Applied at **all** `.env`-reading
+  sites (see Consumer rule).
+- **Residual (err-03):** `dotenv_values` *silently* drops a malformed line (unbalanced
+  quote / missing `=`). If the `ALFRED_ENVIRONMENT` line itself is malformed it reads
+  as absent → an `environment_not_set` refusal in a parse-error guise. Documented as a
+  known limitation with a test pinning the behavior; a friendlier message is a
+  follow-up (we do not re-introduce a hand parser to detect it).
+- `.env` **can never participate in a two-source `conflict`** (it is the lowest,
+  gap-fill-only layer) — only the `UNRECOGNISED` branch extends to it. This negative
+  invariant is pinned by test so no phantom `.env`-conflict field/branch is written.
 
-- `.env` is parsed with **`python-dotenv`'s `dotenv_values(dotenv_path, interpolate=False)`** — the same parser pydantic-settings uses internally, so there is no second `.env` dialect. `interpolate=False` keeps it a pure key/value read.
-- Grow `EnvironmentSource` with a **`DOTENV`** member. The existing conflict and
-  UNRECOGNISED audit logic extends to cover the `.env` layer (e.g. a `.env`-only
-  typo `staging` now echoes UNRECOGNISED for free).
-- `.env` sits **lowest**: consulted only when `os.environ` **and** `/etc` are both
-  absent. This closes the sec-002 downgrade *by construction*.
+### `Settings` becomes one caller (`config/settings.py`)
 
-### `Settings` becomes one caller, not the owner (`config/settings.py`)
+1. **Source exclusion.** `settings_customise_sources` wraps the env + dotenv sources
+   (and, for a security-load-bearing field, `file_secret_settings`) in a **hardened
+   `_Without`** adapter that pops the field key, so pydantic never populates
+   `environment` from any of its own sources. Hardening required (core-eng-01/sec-p5):
+   - **Derive the popped key from the field's alias set**, not the hardcoded string
+     `"environment"` — if `environment` ever gains a `validation_alias`, a literal pop
+     silently rots and reopens the downgrade with no failing test.
+   - **Forward pydantic-settings' per-source state protocol** (`_set_current_state` /
+     `_set_settings_sources_data`) to the wrapped inner source, and give each wrapper a
+     **distinct identity** so the two wrappers do not collide under the same type-name
+     in pydantic's per-source states dict (an undocumented 2.14.2 internal — **pin the
+     pydantic-settings version** and add a regression test).
+   - A test asserts pydantic **cannot** populate `environment` from `.env` (the
+     exclusion is airtight), so a future source-ordering edit fails loudly.
+2. **Single `mode="wrap"` validator** replaces the before+after validator pair and the
+   `_ENVIRONMENT_LOAD_RESULT` ContextVar (both **deleted**). It calls
+   `resolve_environment()` exactly once when `environment` is absent, injects the value,
+   and writes the `EnvironmentLoadResult` PrivateAttr on the constructed instance
+   (verified valid in 2.14.2: `Settings` is not frozen; `init_settings` outranks the
+   validator). `settings.environment_load_result` stays the public property, populated
+   on any *self-resolving* `Settings()`.
 
-Two mechanisms, both required (belt-and-suspenders per the security review):
+With exclusion in place, `"environment" in data` means **explicitly constructed**
+(`Settings(environment="test")`) — the sole legitimate bypass. Direct-invocation unit
+tests of the old `before`-validator (`test_settings_environment_mandatory.py`) are
+updated for the `wrap` signature.
 
-1. **Source exclusion.** Override `settings_customise_sources` to wrap the env and
-   dotenv sources in a thin `_Without("environment")` adapter that pops the key, so
-   pydantic can **never** populate `environment` from env/dotenv — only `init` or the
-   resolver. (`Field(exclude=…)` is serialization-only and does NOT stop the env
-   source under `env_prefix`; the source filter is the real exclusion.)
+### [D1] Trust-floor at the escape-hatch gate — resolver stays uniform
 
-   ```python
-   class _Without(PydanticBaseSettingsSource):
-       def __init__(self, inner, *keys):
-           self._inner, self._keys = inner, keys
-           super().__init__(inner.settings_cls)
-       def get_field_value(self, field, name):  # abstract; unused, __call__ overridden
-           raise NotImplementedError
-       def __call__(self):
-           d = dict(self._inner())
-           for k in self._keys:
-               d.pop(k, None)
-           return d
-
-   @classmethod
-   def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
-                                  dotenv_settings, file_secret_settings):
-       return (init_settings,
-               _Without(env_settings, "environment"),
-               _Without(dotenv_settings, "environment"),
-               file_secret_settings)
-   ```
-
-2. **Single `mode="wrap"` validator** (the only validator kind that can write a
-   `PrivateAttr` on the *constructed* instance — the whole reason the ContextVar
-   existed). It calls `resolve_environment()` exactly once when `environment` is
-   absent, injects the value, and writes the `EnvironmentLoadResult` PrivateAttr:
-
-   ```python
-   @model_validator(mode="wrap")
-   @classmethod
-   def _resolve_environment(cls, data, handler):
-       result = None
-       if isinstance(data, dict) and "environment" not in data:
-           result = resolve_environment()                       # the single read
-           if result.value is not None:
-               data = {**data, "environment": result.value}
-       inst = handler(data)
-       if result is not None and result.value == inst.environment:
-           inst._environment_load_result = result
-       return inst
-   ```
-
-**Deleted:** the `_ENVIRONMENT_LOAD_RESULT` ContextVar, the `_resolve_environment`
-`mode="before"` validator, and the `_capture_environment_load_result` `mode="after"`
-validator. Once-only holds (one call); "audited result matches validated field"
-holds structurally (the same `result` sets both the injected value and the
-PrivateAttr — no second read to disagree). `settings.environment_load_result` stays
-the public property.
-
-With source exclusion in place, `"environment" in data` means **explicitly
-constructed** (`Settings(environment="test")`) — the sole legitimate bypass.
+The resolver is **uniformly `.env`-aware at every call site** (the clean single-path
+directive). The escape-hatch danger (dev/test is the *permissive* state, so a CWD
+`.env=development` could flip a fail-closed refusal to fail-open) is closed **at the
+consumer, by construction**: `gateway/adapter_child_factory._resolve_launch_target`
+honors dev-mode **only when `result.source in {ENV_VAR, ETC_FILE}`** — never `DOTENV`.
+So a lowest-trust `.env` can never unlock the override. The plan audits each
+subprocess consumer (`manifest_reader`, `adapter_child_factory`) for a
+permissive-in-dev behavior and applies the trust-floor where one exists. Production
+was already safe (the override map is `None` in prod, so `environment` isn't read
+there); the trust-floor makes dev/test safe too and de-risks the adversarial test.
 
 ### The daemon gate (`cli/daemon/_commands.py`)
 
-`_load_settings_or_die` keeps its pre-check (sec-001 audit-before-refuse; and it
-avoids mis-attributing a placeholder-`deepseek_api_key` failure as
-`environment_not_set`) but now calls the **same** `resolve_environment()`, then
-constructs `Settings(environment=result.value)` explicitly — so the resolver runs
-exactly once for the whole boot (the explicit `environment=` bypasses the
-wrap-validator's read):
+Resolve once, then construct explicitly (single read/boot):
 
 ```python
 result = resolve_environment()
 if result.value is None:
     raise _EnvironmentNotSetError(result)   # sec-001 audited refusal; UNRECOGNISED echo; .env-aware
-settings = Settings(environment=result.value)   # explicit ⇒ single read (bypasses the wrap-validator)
-return settings, result                          # conflict audit (_commands.py:542) reads result.conflict
+settings = _build_settings_or_die(environment=result.value)  # [Db]: distinct audited failure below
+return settings, result                      # NON-OPTIONAL tuple; conflict audit reads result.conflict
 ```
 
-Because the daemon injects `environment` explicitly, the wrap-validator does **not**
-re-read (single read per boot), and the daemon uses its **own** `result` for the
-conflict audit — it does *not* rely on `settings.environment_load_result` (which the
-wrap-validator only populates on a *self-resolving* `Settings()`).
+- **[Db] Distinct audited reason for a post-env `Settings()` failure.** The v1 sketch
+  dropped the defensive `except SettingsError` arm (err-02/reviewer-02: a placeholder
+  `deepseek_api_key` would escape as a raw, un-audited traceback). Instead of
+  *re-labeling* that as `environment_not_set`, we mint a **new** daemon boot-failure
+  reason (`SettingsInvalidFailure` / `settings_invalid`) with its own audited row + its
+  own `t()` message surfacing the pydantic detail. sec-001 audit-before-refuse holds;
+  the failure is correctly labeled.
+- **Return shape (arch-003/sec-p2/reviewer-06):** keep the **non-optional
+  `tuple[Settings, EnvironmentLoadResult]`**. Do NOT "attach `result` to the instance"
+  (that re-opens the real arch-002 *no-PrivateAttr-smuggling* decision, and leaves the
+  conflict audit reading `None` on the daemon's explicit-construction path). The
+  conflict audit at `_commands.py:542` reads the daemon's own `result`.
 
-**In-scope simplification (falls out of this rewrite):** with the ContextVar retired,
-`settings.environment_load_result` is the authoritative property for every
-self-resolved `Settings` (the bare `Settings()` at the CLI / gateway / alembic roots).
-The daemon's `tuple[Settings, EnvironmentLoadResult | None]` return can then be slimmed
-— either to a bare `-> Settings` by attaching `result` to the instance so the property
-stays uniformly authoritative, or to a non-optional `tuple[Settings, EnvironmentLoadResult]`.
-Either way there is exactly one `resolve_environment()` read per boot and one conflict
-source; the exact return shape is a plan-level detail.
+### Consumer rule
 
-### Consumer rule (no re-divergence)
+Core-process code reads `Settings.environment` (injected narrow Protocols, #351 —
+unchanged). Only the three composition roots that cannot build `Settings` call
+`resolve_environment()` directly: the daemon boot gate, `plugins/manifest_reader.py`,
+`gateway/adapter_child_factory.py`. All run identical precedence code; the `.env`
+read-error guard is inside `resolve_environment()`, so all three inherit it.
 
-- **Core-process code reads `Settings.environment`** (via injected narrow config
-  Protocols, per #351 — unchanged).
-- **Only the three composition roots that cannot build `Settings`** call
-  `resolve_environment()` directly: the daemon boot gate, `plugins/manifest_reader.py`
-  (launcher subprocess), and `gateway/adapter_child_factory.py` (gateway container).
+## Multi-process rationale
 
-All four sites run identical precedence code, so no consumer re-implements
-resolution. The implementation plan MUST verify (test) that `manifest_reader` and
-`adapter_child_factory` behave correctly under the new `.env`-lowest layer — in the
-deployed case `os.environ`/`/etc` are set so `.env` is inert; the risk is only that
-a stray CWD `.env` supplies a value when nothing higher-trust does, which is safe
-(lowest precedence, escalation-only).
+AlfredOS already uses DI for config (#351: narrow read-only Protocols; concrete
+`Settings` only at the composition root; CLAUDE.md forbids global state). But it is
+**multi-process** — the daemon, the launcher subprocess, the gateway container, and
+alembic are each their own composition root, and a `Settings` object cannot cross a
+process boundary. Each process resolves `environment` from ambient sources at its own
+entry point; `resolve_environment()` is that shared primitive. Consistent with #351,
+not a departure.
 
-## Multi-process rationale (why a shared primitive, not pure injection)
+## The `ALFRED_ENV` divergence (arch-002 / sec, confirmed)
 
-AlfredOS already uses dependency injection for config (#351: consumers depend on
-narrow read-only Protocols; concrete `Settings` lives only at the composition root;
-CLAUDE.md forbids global state — so no global singleton). But AlfredOS is
-**multi-process**: the core daemon, the launcher subprocess, the gateway container,
-and alembic are each their own composition root, and a Python `Settings` object
-cannot cross a process boundary (the launcher subprocess gets a scrubbed
-environment). Each process must resolve `environment` from **ambient sources** at
-its own entry point. `resolve_environment()` is exactly that shared ambient-read
-primitive — the fix makes every process agree on precedence. This design is fully
-consistent with the #351 DI architecture, not a departure from it.
+A **fifth** security-load-bearing site, `security/…/content_store_base.py:149`, reads a
+**different** variable `ALFRED_ENV` (a free-form capability-gate selector, `test`→RealGate)
+to drive the sec-S3-003 production-refusal. ADR-0053's "single resolver" invariant is
+therefore scoped to **`ALFRED_ENVIRONMENT`**, and the ADR **names `ALFRED_ENV` as a known,
+intentional divergence** (different semantics, different refusal). Security also found a
+**latent gap** — an `/etc`-set `ALFRED_ENVIRONMENT=production` with `ALFRED_ENV` unset does
+**not** trip sec-S3-003. Unifying/reconciling the two variables is **out of scope** here
+(they are semantically distinct) and filed as a follow-up; this PR only documents the
+divergence honestly so the invariant is not overclaimed.
 
 ## Error handling / invariants preserved
 
-- **sec-001** — the AuditWriter is built before `_load_settings_or_die`; an unset/
-  unrecognised environment still emits an audited `DAEMON_BOOT_FAILED` row then exits 2.
-- **`environment_source_conflict`** — flows from the single `EnvironmentLoadResult`
-  (`result.conflict`), now covering the `.env` layer.
-- **UNRECOGNISED echo (devex-222-01)** — preserved and now covers `.env`-only typos.
-- **No silent failure** (CLAUDE.md hard rule 7) — every refusal is loud + audited.
+- **sec-001** — AuditWriter built before the gate; unset/unrecognised environment and a
+  post-env `Settings()` failure both emit an audited `DAEMON_BOOT_FAILED` row then exit 2.
+- **`environment_source_conflict`** — from the single `EnvironmentLoadResult`
+  (`result.conflict`); `.env` never participates.
+- **UNRECOGNISED echo (devex-222-01)** — preserved; now covers `.env`-only typos.
+- **No silent failure** (hard rule 7) — the `.env` read-error guard converts a
+  `PermissionError` into an audited refusal, not a raw crash.
 
 ## Testing
 
-100%-style rigor on the resolver + the Settings validator; environment is
-security-load-bearing, so the **full adversarial suite** runs.
+Full **adversarial suite** runs (environment is security-load-bearing). Load-bearing tests:
 
-Load-bearing tests:
-
-1. **Downgrade oracle (security):** `os.environ` unset, `/etc/alfred/environment` =
-   `production`, `.env` = `development`, `chdir(tmp)` → `Settings().environment ==
-   "production"` **and** the sec-002 unsandboxed-in-production refusal still fires.
-2. **Precedence / divergence oracle (core-eng):** `os.environ` unset, `/etc` =
-   `development`, `.env` = `production`, `chdir(tmp)` → **both** `resolve_environment().value`
-   **and** `Settings().environment` equal `development`. (Regresses the instant the
-   source filter is dropped.)
-3. **Positive Blocker-1 case:** `.env` = `production` only, `os.environ` cleared, no
-   `/etc` → the daemon **boots** (`source == dotenv`).
-4. **Container path stays green:** `.env` absent, `os.environ` set → success,
-   `source == env_var`.
-5. **`.env`-discovery hygiene:** every daemon-boot env test `monkeypatch.chdir(tmp_path)`
-   (and clears `ALFRED_ENVIRONMENT`) so a dev's real repo-root `.env` never leaks a
-   value and silently vacates an "unset" assertion.
-6. **Vacuity guards:** each oracle isolates all three sources explicitly.
-7. Existing `test_environment_loader.py` / `test_probe_environment_not_set.py` updated
-   for the new source + the tuple→`Settings` collapse.
+1. **Downgrade oracle:** os.environ unset, `/etc`=`production`, `.env`=`development`,
+   `chdir(tmp)` → `Settings().environment == "production"` **and** sec-002 fires.
+2. **Divergence oracle:** same-input → `resolve_environment()` **and** `Settings().environment`
+   agree; assert `.value` **and** `.source` (asserting `.value` alone greens vacuously on a
+   leaked `ALFRED_ENVIRONMENT`).
+3. **[D3] Typo short-circuit:** os.environ=`staging` (invalid) + `.env`=`production` (valid)
+   → `UNRECOGNISED` refusal echoing `staging`, NOT `production`.
+4. **`.env` read-error:** a present-but-unreadable `.env` (0600, wrong owner / chmod 000) →
+   treated as absent + audited, never a raw traceback. At all three `.env`-reading sites.
+5. **Escape-hatch hermeticity (Theme A):** chdir-isolate the **release-blocking**
+   `tests/adversarial/comms/test_launch_target_override_refusal.py` (add `.env` isolation to
+   its unset/staging/unknown cases); add a **positive gateway downgrade oracle**
+   (`/etc`=production + `.env`=development + override injected → still refused, because
+   source≠DOTENV) and a `manifest_reader` os.environ-beats-`.env` precedence test.
+6. **Exclusion airtight:** pydantic cannot populate `environment` from `.env` (guards the
+   `_Without`/alias regression); `.env`-only UNRECOGNISED + whitespace-symmetry cases.
+7. **Positive Blocker-1:** `.env`=`production` only, os.environ cleared, no `/etc` → **boots**
+   (`source == dotenv`). **Container path:** `.env` absent, os.environ set → success
+   (`source == env_var`).
+8. **`.env`-discovery hygiene:** every daemon-boot env test `monkeypatch.chdir(tmp_path)` +
+   clears `ALFRED_ENVIRONMENT`, so a dev's real repo-root `.env` never leaks a value.
+9. Update `test_environment_loader.py`, `test_probe_environment_not_set.py`,
+   `test_settings_environment_mandatory.py` (before→wrap), `test_settings.py`; wire the
+   `config/observability`-style coverage target to a **real per-module gate** (not a paper
+   gate, cf. #474).
 
 ## Governance & adjacencies
 
-- **ADR-0053 — three-layer environment precedence.** Owns: (1) canonical precedence
+- **ADR-0053 — three-layer environment precedence.** Owns: (1) canonical
   `os.environ > /etc > .env`; (2) the single-resolver + `Settings`-delegates invariant
-  (via `settings_customise_sources`), so no consumer re-implements precedence; (3)
-  `.env` lowest — closes the sec-002 downgrade by construction; (4) retiring the
-  ContextVar / dual-validator; (5) `EnvironmentSource.DOTENV`. Formally homes the
-  previously un-homed **arch-002** decision and corrects the loader's stale
-  "Spec §7.3" citation (PRD §7.3 is *Self-Healing*, not environment).
-- **`.env.example`** — add `ALFRED_ENVIRONMENT` with the accepted triple + default +
-  a comment (the missing-discoverability fix; absent today).
-- **`python-dotenv`** — promote from transitive (via pydantic-settings/testcontainers,
-  resolved at 1.2.2) to an **explicit direct dependency** in `pyproject.toml`, since
-  the resolver now imports `dotenv_values` directly. Compatible (pydantic-settings
-  requires `>=0.21.0`).
-- **i18n** — the refusal message copy is unchanged (now true); no new `t()` key.
-  `EnvironmentSource.DOTENV` surfaces only in audit-row/structlog values, which are
-  not `t()` scope.
+  **scoped to `ALFRED_ENVIRONMENT`**, naming `ALFRED_ENV` as a known divergence; (3) `.env`
+  lowest closes the sec-002 downgrade by construction + the trust-floor closes the
+  escape-hatch; (4) retiring the ContextVar/dual-validator; (5) `EnvironmentSource.DOTENV` +
+  the short-circuit semantics. It **homes the precedence decision (no prior ADR does)** —
+  the v1 "homes arch-002" label was a **mis-attribution** (arch-002 was the tuple/
+  no-smuggling finding) and is dropped. Corrects the loader's stale "Spec §7.3" citation
+  (PRD §7.3 is Self-Healing; §7.1 is the candidate anchor). **ADR-0054 is not pre-reserved**
+  (repo already has a duplicate 0047; author it when the follow-up is scheduled).
+- **Doc drift (Theme E)** — update, IN scope: `docs/subsystems/supervisor.md:373-378` (old
+  two-source model), `docs/glossary.md:1645` (CLAUDE.md's single vocabulary source — stale
+  symbol + no precedence entry), the loader's whole module docstring ("Dual-source"),
+  `plugins/manifest_reader.py:40` + `docs/adr/0039` dangling `:func:` refs.
+- **[D2] `.env.example`** — add `ALFRED_ENVIRONMENT=production` **uncommented** (closes the
+  host loop via bare `cp`, keeps compose at production — no silent downgrade, since
+  `bin/alfred-setup.sh` auto-`cp`s it and compose promotes `.env`→`os.environ`), with a
+  comment naming the accepted triple and **disambiguating from the pre-existing `ALFRED_ENV`**
+  capability-gate key. Add a test that `.env.example`'s value cannot downgrade the compose
+  default.
+- **`python-dotenv`** — promote transitive→explicit **direct dep** in `pyproject.toml`,
+  floored at `>=1.2.2` (resolved; ADR-0044 flooring convention), `uv lock` (no change
+  expected); justify the (already-present) fourth-party in the PR description.
+- **i18n** — the existing refusal copy is now accurate; the new `settings_invalid` reason
+  needs **one new `t()` key**. The `_commands.py` rewrite line-shifts the refusal `t()` calls,
+  so run the **pybabel extract/update/compile** cycle (`-D alfred`) and commit the `#:` ref
+  churn. `EnvironmentSource.DOTENV` is audit/structlog-only (not `t()` scope).
 
 ## Scope
 
-**IN (this PR):** the single resolver + `Settings` delegation, ADR-0053, the stale
-§7.3 citation fix, `.env.example` entry, the `python-dotenv` direct dep, the daemon
-factory's `tuple → Settings` collapse, and the tests above.
+**IN (this PR):** the single resolver + `Settings` delegation, the trust-floor, the
+short-circuit semantics, the `.env` read-error guard, the distinct `settings_invalid`
+reason, ADR-0053, the doc-drift updates, the `.env.example` entry, the `python-dotenv`
+direct dep, the daemon factory's non-optional-tuple return, and the tests above.
 
-**OUT (separate follow-up issue, with its own ADR-0054 — a #351 continuation):**
-standardize `gateway` (`cli/gateway/_commands.py:150`) and `alembic`
-(`memory/migrations/env.py:40`) onto the friendly-error factory; fix the supervisor
-re-construction smell (`cli/supervisor.py:697,956` re-read the whole environment to
-grab one interval → should receive injected `settings`/a narrow Protocol). This is all
-real #351 DIP debt — none environment-related, none correctness/security bugs.
+**OUT (follow-up issues):** the settings-factory DIP consolidation (its own ADR-0054);
+reconciling `ALFRED_ENV`/`ALFRED_ENVIRONMENT` + the sec-S3-003 latent gap; a friendlier
+malformed-`.env`-line message. The CI first-run smoke lane belongs to the epic.
 
-**Scope boundary rule:** a change about *how `environment` is resolved* is in; a
-change about *how the `Settings` object is constructed/injected generally* is out.
+**Boundary rule:** a change about *how `environment` is resolved* is in; a change about
+*how the `Settings` object is constructed/injected generally*, or about the separate
+`ALFRED_ENV` variable, is out.
 
 ## Risks / residuals
 
-- **Two `.env` parsers.** The resolver uses `dotenv_values`; pydantic parses the same
-  `.env` for other fields. Excluding `environment` from pydantic's sources means only
-  the resolver's parser touches `environment`, and both are `python-dotenv` — but the
-  plan pins `dotenv_values(interpolate=False)` to keep semantics identical.
-- **CWD-relative `.env`.** `.env` is resolved relative to CWD (matching pydantic). A
-  CWD-planted `.env` is low-severity (lowest precedence, escalation-only), but the
-  plan matches pydantic's `env_file` resolution rather than inventing a new anchor.
-- **`manifest_reader` / `adapter_child_factory` blast radius.** Newly `.env`-aware via
-  the shared resolver; the plan adds a behavior test at each site (see Consumer rule).
+- **Two `.env` parsers** — the resolver's `dotenv_values` vs pydantic's parse of the same
+  file for other fields; excluding `environment` from pydantic's sources means only the
+  resolver touches `environment`, and `interpolate=False` removes the interpolation vector
+  (residual is a benign parser difference, not a divergence).
+- **Malformed `.env` line** silently dropped by `dotenv_values` (err-03) — documented + tested.
+- **`_Without` internal-API dependency** on pydantic-settings 2.14.2's per-source state
+  protocol — mitigated by forwarding it, pinning the version, and a regression test.
+- **CWD-relative `.env`** — matches pydantic's `env_file` resolution; a CWD-planted `.env` is
+  lowest-precedence + gated out of the escape hatch by the trust-floor.
 
 ## References
 
-- Epic #469; #340 PR2b-golive (compose-forward fix); arch-002 (#174 dual-source loader);
-  #351 config-as-interface / DIP (`docs/python-conventions.md:176`).
-- Fleet convergence: alfred-architect, alfred-security-engineer, alfred-core-engineer,
-  alfred-devex-reviewer (all endorse; core-engineer reversed an initial "defer to
-  Settings" position after the trust-precedence + call-site analysis).
+- Epic #469; #340 PR2b-golive; arch-002 (#174 dual-source loader); #351 config-DIP
+  (`docs/python-conventions.md:176`).
+- Review: 10-lane `/review-plan` fleet + `alfred-review-coordinator` (0 Crit / 13 High /
+  27 Med / 12 Low; 8/8 solos confirmed). Decisions D1–D3 + Db settled with the human.
