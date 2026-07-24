@@ -67,6 +67,8 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 > - **`Hook dispatch perf gate`** — `paths:` filter dropped + an in-job changed-files gate added (mitigation option 3) so the check reports on every PR while the variance-prone bench runs only on perf-relevant changes (resolving the path-filter caveat that previously lived here).
 >
 > Three checks can **never** gate PRs and are intentionally excluded: `End-to-end`, `Adversarial test suite`, and `Real-LLM act-loop smoke` (the `real-llm-smoke` job, added by PR4c / issue #339) live in `nightly.yml` (`schedule:`-only — they never run on a PR, so requiring them would block every PR).
+>
+> **`End-to-end` convention ([#494](https://github.com/alfred-os/AlfredOS/issues/494)):** the nightly `End-to-end` job runs the #494 split-baseline lane — a green infra baseline (stack boots, health-checks pass) with `xfail(strict)` markers on each still-open roadmap blocker. It is promoted to release-blocking only at roadmap Step 5, once every `xfail` has turned green (i.e. every blocker is closed and the strict-xfail would itself fail, forcing the marker's removal before promotion).
 
 | Check name | Workflow | Job key | Rationale | Promote after |
 | --- | --- | --- | --- | --- |

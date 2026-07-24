@@ -51,47 +51,37 @@ jobs:
         run: uv sync --frozen --dev
       - name: Load the bwrap userns AppArmor profile (#290)
         if: steps.check.outputs.has_e2e == 'true'
-        # docker-compose.yaml pins alfred-core at `security_opt:
-        # apparmor=alfred-bwrap`. Docker REFUSES to create the container if that
-        # named profile is not loaded into the host kernel — so the stack fails to
-        # boot before any e2e test runs. Load it here (the GH ubuntu runner has
-        # passwordless sudo). Guarded on `command -v apparmor_parser` so a future
-        # non-AppArmor runner skips gracefully (where the security_opt line is a
-        # runtime no-op anyway).
+        # docker-compose.yaml pins alfred-core at security_opt: apparmor=alfred-bwrap; Docker
+        # REFUSES to create the container without the loaded profile — so without this, core's
+        # xfail would fire for an apparmor reason, MASKING blocker B. Guarded on apparmor_parser.
         run: |
           set -euo pipefail
           if command -v apparmor_parser >/dev/null 2>&1; then
             sudo apparmor_parser -r -W docker/apparmor/alfred-bwrap
             echo "Loaded alfred-bwrap AppArmor profile."
           else
-            echo "::notice::apparmor_parser absent — skipping profile load (security_opt is a no-op on this host)."
+            echo "::notice::apparmor_parser absent — skipping profile load (security_opt is a no-op)."
           fi
-      - name: Seed Grafana admin password (#470)
+      - name: Run E2E boot lane
         if: steps.check.outputs.has_e2e == 'true'
-        # docker-compose.yaml's alfred-grafana entrypoint fail-closes (exit 78) on an
-        # unset/guessable GF_SECURITY_ADMIN_PASSWORD. A bare `docker compose up -d --wait`
-        # with no value set crash-loops Grafana under `restart: unless-stopped`, which
-        # would fail this boot step (or worse, only false-green a downstream skip). Seed a
-        # non-guessable per-run value — mirrors what bin/alfred-setup.sh does for an operator.
-        run: echo "GF_SECURITY_ADMIN_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
-      - name: Boot stack
-        if: steps.check.outputs.has_e2e == 'true'
-        run: docker compose up -d --wait
-      - name: Run E2E
-        if: steps.check.outputs.has_e2e == 'true'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_KEY }}
-          OPENAI_API_KEY: ${{ secrets.E2E_OPENAI_KEY }}
-        run: uv run pytest tests/e2e -q
-      - name: Stack logs on failure
-        if: failure() && steps.check.outputs.has_e2e == 'true'
-        run: docker compose logs --no-color > stack.log
-      - name: Upload logs
+        # No GF-password seed and no provider-key env here: the harness's isolated --env-file
+        # owns GF_SECURITY_ADMIN_PASSWORD and the dummy sentinel keys. A shell env var would
+        # SHADOW the --env-file via compose ${..} precedence (ops-004). The real throwaway
+        # quarantine key is a Roadmap Step-3 concern (added when core un-xfails).
+        run: uv run pytest tests/e2e -o addopts=''
+      - name: Assert the boot-lane tally is non-vacuous
+        if: always() && steps.check.outputs.has_e2e == 'true'
+        # always(): the conftest hook writes e2e-tally.json even when pytest exits non-zero;
+        # a missing file (session errored before the hook) is itself a red (_assert_ran).
+        run: uv run python -m tests.e2e._assert_ran e2e-tally.json
+      - name: Upload diagnostics on failure
         if: failure() && steps.check.outputs.has_e2e == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: stack-logs
-          path: stack.log
+          name: e2e-diagnostics
+          path: |
+            e2e-stack.log
+            e2e-tally.json
 
   adversarial:
     name: Adversarial test suite
