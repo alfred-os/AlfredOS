@@ -177,7 +177,14 @@ loud).
 
 ## Data flow (four paths)
 
-- **Stock** (no token, no var): `[]` → no-op → healthy → core boots. *(the fix)*
+> **UAT-confirmed limitation (PR #495):** the "Stock → healthy → core boots" path
+> below describes Blocker 2's *adapter-resolution* fix in isolation. End-to-end it is
+> currently **masked** — the gateway constructs a full `Settings()` (needing
+> `ALFRED_DEEPSEEK_API_KEY`, which it lacks per ADR-0036) *before* adapter resolution, so
+> the stock stack still does not boot until the other known #469 UAT blockers land. This
+> PR removes the Discord-default crash-loop; it is necessary, not sufficient, for the boot.
+
+- **Stock** (no token, no var): `[]` → no-op → healthy → core boots. *(Blocker 2's step; masked end-to-end — see note above)*
 - **Opt-in** (token + `["alfred_discord"]`): spawn succeeds → Discord live.
 - **Opt-in, missing token**: credential-refusal → `GatewayAdapterCredentialError` →
   friendly handler → legible message + exit 10.
