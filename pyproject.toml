@@ -310,6 +310,12 @@ ignore = ["S101"]
 # fixed literals plus a caller-supplied project name / env-file path — same
 # trusted-CLI rationale as the smokes and the docker probe above.
 "tests/_compose.py" = ["S603"]
+# The #494 e2e session-lifecycle conftest polls `docker inspect <container-id>` by name
+# (partial path) with a container id sourced from our own `docker compose ps -q` output
+# (not attacker-controlled) — same trusted-CLI rationale as the docker probe and compose
+# helper above. Assigning the argv to a local before the call (matching `tests/_compose.py`)
+# already keeps S607 out of scope; only S603 remains.
+"tests/e2e/conftest.py" = ["S603"]
 # #496 shell-script LF guard runs `git ls-files` by name (partial path) with
 # fixed-literal argv — same trusted-CLI rationale as the docker probe above.
 # No untrusted input reaches the subprocess.
