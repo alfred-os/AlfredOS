@@ -1047,9 +1047,10 @@ jobs:
         run: |
           set -euo pipefail
           # Supply-chain (#496): pin the uv version + download-to-file — never `curl | sh` of
-          # "latest" (mirrors this file's proto/promtool install convention). 0.11.6 matches
-          # the repo dev env / uv.lock. `curl` comes from setup-wsl additional-packages.
-          UV_VERSION=0.11.6
+          # "latest" (mirrors this file's proto/promtool install convention). 0.11.32 is new
+          # enough to install CPython 3.14.6 (the repo's .python-version / requires-python
+          # floor); uv 0.11.6 only embeds up to 3.14.4. `curl` from setup-wsl additional-packages.
+          UV_VERSION=0.11.32
           for attempt in 1 2 3; do
             if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
                  "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh; then
