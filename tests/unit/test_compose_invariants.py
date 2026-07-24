@@ -360,11 +360,14 @@ def test_quarantine_provider_key_never_reaches_the_gateway(compose: dict[str, An
     assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" not in env
 
 
-def test_alfred_gateway_hosts_discord(compose: dict[str, Any]) -> None:
-    """Spec B G6-7-8 (#309): the gateway is configured to host the Discord adapter."""
+def test_alfred_gateway_defaults_to_no_hosted_adapter(compose: dict[str, Any]) -> None:
+    """#469 Blocker 2: Discord is opt-in — the shipped default hosts NO adapter, but the
+    ALFRED_GATEWAY_HOSTED_ADAPTERS override is still wired so an operator can enable it."""
     gw = compose.get("services", {}).get("alfred-gateway", {})
-    env = gw.get("environment", {}) or {}
-    assert "alfred_discord" in str(env.get("ALFRED_COMMS_ENABLED_ADAPTERS", ""))
+    raw = str(gw.get("environment", {}).get("ALFRED_COMMS_ENABLED_ADAPTERS", ""))
+    assert "alfred_discord" not in raw  # default no longer hosts Discord
+    assert "ALFRED_GATEWAY_HOSTED_ADAPTERS" in raw  # opt-in override still wired
+    assert ":-[]" in raw or ":- []" in raw  # default fallback is the empty list
 
 
 def test_no_secret_env_or_mount_on_gateway(compose: dict[str, Any]) -> None:
