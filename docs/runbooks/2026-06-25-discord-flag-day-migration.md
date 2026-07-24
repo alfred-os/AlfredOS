@@ -208,6 +208,7 @@ moved between env var stores; no database rows changed. After reverting:
 | `docker compose logs alfred-discord` gives "no such service" | Expected — `alfred-discord` service deleted in this release | Switch to `docker compose logs alfred-gateway` |
 | `alfred discord verify` gives "no such command" | Expected — `alfred discord verify` retired in this release | Use `alfred gateway adapters --wait-ready discord` |
 | Bot was up but stopped responding after redeployment | Old `discord_bot_token` in `secrets.toml` shadowing the env var (`_PREFER_FILE`) | Remove `discord_bot_token` from `secrets.toml`; `docker compose up -d alfred-gateway` |
+| Bot went silent after a **version upgrade** — gateway healthy, no error/audit in logs | Pre-existing deploy relied on the old implicit Discord-on default; ADR-0054 makes the default empty, so an operator who never set `ALFRED_GATEWAY_HOSTED_ADAPTERS` now hosts no adapter (no crash, no log — the one silent failure mode in this change) | Re-run `bin/alfred-setup.sh` (re-seeds `ALFRED_GATEWAY_HOSTED_ADAPTERS` from the existing `.env` token), or set `ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]` in `.env`; `docker compose up -d alfred-gateway` |
 
 ## Related docs
 

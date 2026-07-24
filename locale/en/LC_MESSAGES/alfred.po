@@ -1465,11 +1465,11 @@ msgstr ""
 "its manifest — the gateway cannot resolve its canonical adapter id. Fix "
 "the plugin manifest."
 
-#: src/alfred/cli/gateway/_commands.py:277
+#: src/alfred/cli/gateway/_commands.py:278
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:289
+#: src/alfred/cli/gateway/_commands.py:296
 msgid "gateway.start.config_failed"
 msgstr ""
 "The gateway could not resolve its hosted-adapter configuration — a comms "
@@ -1477,7 +1477,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS and the named plugin manifests, then re-run"
 " `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:407
+#: src/alfred/cli/gateway/_commands.py:414
 msgid "gateway.start.egress_relay_bind_failed"
 msgstr ""
 "The gateway could not bind its tool-egress relay — another gateway may "
@@ -1486,7 +1486,7 @@ msgstr ""
 " refuses to start without it. Free the port (or fix the config), then re-"
 "run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:416
+#: src/alfred/cli/gateway/_commands.py:423
 msgid "gateway.start.egress_adapter_bind_failed"
 msgstr ""
 "The gateway could not bind its Discord-adapter egress socket — another "
@@ -1495,7 +1495,7 @@ msgstr ""
 "without it. Free the socket (or fix the volume mount), then re-run "
 "`alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:424
+#: src/alfred/cli/gateway/_commands.py:431
 msgid "gateway.start.egress_proxy_bind_failed"
 msgstr ""
 "The gateway could not bind its egress forward-proxy — another gateway may"
@@ -1504,7 +1504,7 @@ msgstr ""
 "refuses to start without it. Free the port (or fix the config), then re-"
 "run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:442
+#: src/alfred/cli/gateway/_commands.py:449
 msgid "gateway.start.adapter_spawn_failed"
 msgstr ""
 "A hosted comms adapter could not start: its credential was refused. The "
@@ -1514,51 +1514,51 @@ msgstr ""
 "ALFRED_GATEWAY_HOSTED_ADAPTERS. See `docker compose logs alfred-gateway` "
 "for the specific adapter and reason."
 
-#: src/alfred/cli/gateway/_commands.py:448
+#: src/alfred/cli/gateway/_commands.py:455
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:455
+#: src/alfred/cli/gateway/_commands.py:462
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:464
+#: src/alfred/cli/gateway/_commands.py:471
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:466
+#: src/alfred/cli/gateway/_commands.py:473
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:487
-#: src/alfred/cli/gateway/_commands.py:501
+#: src/alfred/cli/gateway/_commands.py:494
+#: src/alfred/cli/gateway/_commands.py:508
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:505
+#: src/alfred/cli/gateway/_commands.py:512
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:578
-#: src/alfred/cli/gateway/_commands.py:584
+#: src/alfred/cli/gateway/_commands.py:585
+#: src/alfred/cli/gateway/_commands.py:591
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:593
+#: src/alfred/cli/gateway/_commands.py:600
 msgid "gateway.healthcheck.not_gateway_exposition"
 msgstr ""
 "Something is serving the gateway metrics port {port}, but its response is"
@@ -1566,7 +1566,7 @@ msgstr ""
 "declared). Check that ALFRED_GATEWAY_METRICS_PORT matches the port the "
 "gateway binds and that nothing else is bound to it."
 
-#: src/alfred/cli/gateway/_commands.py:597
+#: src/alfred/cli/gateway/_commands.py:604
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
