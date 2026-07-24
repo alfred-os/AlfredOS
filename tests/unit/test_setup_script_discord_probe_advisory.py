@@ -19,9 +19,21 @@ from __future__ import annotations
 # Test-controlled invocations of `bash` from the unit suite. Every argv is a literal
 # authored in this module; nothing crosses an untrusted boundary.
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 from tests._setup_script_helpers import slice_shell_function
+
+# Real-execution `.sh` tests: skip on native Windows. `bin/alfred-setup.sh` is the
+# mac/linux/WSL path (Windows uses `bin/alfred-setup.ps1`), and a bare `bash` resolves to
+# the distro-less WSL launcher on win32 CI (`System32\bash.exe`) → exit 1. Mirrors the
+# `bash_available` win32 skip in `test_setup_script_env_seed.py`. #246 Phase B / #245.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bin/alfred-setup.sh is the mac/linux/WSL path; Windows uses alfred-setup.ps1",
+)
 
 _SETUP_SH = Path("bin/alfred-setup.sh")
 _READ_ENV_VAR_START = "read_env_var() {"
