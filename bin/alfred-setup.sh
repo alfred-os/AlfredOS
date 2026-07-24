@@ -69,6 +69,22 @@ read_env_var() {
   grep -E "^${key}=" .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true
 }
 
+# #469 Blocker 2 Task 5: make the opt-in coherent. docker-compose.yaml now defaults
+# ALFRED_GATEWAY_HOSTED_ADAPTERS to [] (Discord is opt-in), so setting a real Discord
+# token alone no longer enables Discord — an operator's single action (the token) must
+# still be the thing that flips the opt-in, or the "just set the token" quickstart story
+# silently breaks. Idempotent (grep-guarded append-if-absent, like the other .env seeds
+# in this script); preserves a deliberate `=[]` opt-out (operator intent wins); a
+# commented/blank token already reads as empty via read_env_var, so it never re-arms the
+# gateway's fail-closed missing-token crash-loop. Never echo the token itself.
+seed_hosted_adapters() {
+  local token; token="$(read_env_var ALFRED_DISCORD_BOT_TOKEN)"
+  if [[ -n "$token" ]] && ! grep -qE '^ALFRED_GATEWAY_HOSTED_ADAPTERS=' .env; then
+    printf '%s\n' 'ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]' >> .env
+    echo "Discord token detected — enabled gateway-hosted Discord (ALFRED_GATEWAY_HOSTED_ADAPTERS in .env)."
+  fi
+}
+
 step "Checking prerequisites"
 require_cmd docker "https://docs.docker.com/engine/install/"
 # `docker compose version` covers both the v2 subcommand and the
@@ -98,6 +114,15 @@ fi
 # ALREADY-seeded. Unconditional + before the seed write, so there is no disclosure window and
 # an already-seeded but world-readable .env still gets locked (#470 security review).
 [[ -f .env ]] && chmod 600 .env
+
+step "Seeding opt-in Discord hosted-adapter set"
+# Top-level — NOT inside the `[[ -t 0 ]]` interactive-snowflake branch further down. This
+# must run on every invocation (TTY or not, whether or not the operator ever binds a
+# snowflake) so a non-interactive/CI/first-run `bin/alfred-setup.sh` still honours a
+# token already present in .env. Placed before the credential-validation gate below
+# (which `exit 1`s on a missing DeepSeek/quarantine key) so the seed still runs even on
+# a first pass where those other keys are not yet set.
+seed_hosted_adapters
 
 step "Seeding Grafana admin password"
 # #470 PR2 Task 3 (rev.4 devops-003/devops-004/sec-004/sec-005): guard on
@@ -495,11 +520,20 @@ if [[ -t 0 ]]; then
     if docker compose ps --services 2>/dev/null | grep -qx alfred-discord; then
       warn "A stale alfred-discord container is running — 'docker compose down' then 'up -d'."
     fi
-    if [[ -n "${ALFRED_DISCORD_BOT_TOKEN:-}" ]]; then
+    # #469 Blocker 2 Task 5: read from .env (via read_env_var), not the shell
+    # environment. The `seed_hosted_adapters` step above already seeds
+    # ALFRED_GATEWAY_HOSTED_ADAPTERS from a token found in .env — checking only
+    # `${ALFRED_DISCORD_BOT_TOKEN:-}` here would report "unset" for the common case
+    # of a token set in .env but never exported to the shell, contradicting what the
+    # seed step already did.
+    if [[ -n "$(read_env_var ALFRED_DISCORD_BOT_TOKEN)" ]]; then
       echo "After 'docker compose up -d alfred-gateway', verify the Discord adapter with:"
       echo "  alfred gateway adapters --wait-ready discord"
     else
-      warn "ALFRED_DISCORD_BOT_TOKEN is unset — NOT enabling Discord. Set it in .env (NOT secrets.toml, which would shadow env) then 'docker compose up -d alfred-gateway'."
+      # devex-004: Discord is opt-in (docker-compose.yaml default is []). The seed step
+      # above only flips ALFRED_GATEWAY_HOSTED_ADAPTERS when a token is present, so an
+      # unset token here means it stayed empty on this run — point at both remedies.
+      warn "ALFRED_DISCORD_BOT_TOKEN is unset. Discord is opt-in: set ALFRED_DISCORD_BOT_TOKEN in .env then re-run setup, or set ALFRED_GATEWAY_HOSTED_ADAPTERS manually (e.g. ALFRED_GATEWAY_HOSTED_ADAPTERS=[\"alfred_discord\"] in .env, NOT secrets.toml, which would shadow env) — then 'docker compose up -d alfred-gateway'."
     fi
   fi
 fi
