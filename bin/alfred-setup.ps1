@@ -42,7 +42,14 @@ if ($_tokenInEnvFile) {
     $_tokenInEnvFile = (Get-Content $_envFile | Select-String -Quiet '^\s*ALFRED_DISCORD_BOT_TOKEN\s*=')
 }
 if (-not $env:ALFRED_DISCORD_BOT_TOKEN -and -not $_tokenInEnvFile) {
-    Write-Warning "ALFRED_DISCORD_BOT_TOKEN is unset — NOT enabling Discord. Set it in .env (NOT secrets.toml, which would shadow env) then 'docker compose up -d alfred-gateway'."
+    # #469 Blocker 2 Task 5: this script only forwards to WSL2 (see `wsl bash
+    # bin/alfred-setup.sh` below) — it does not seed .env itself. The real seed
+    # (`seed_hosted_adapters`, which sets ALFRED_GATEWAY_HOSTED_ADAPTERS when a token is
+    # present) runs inside that forwarded bin/alfred-setup.sh run. This is a heads-up
+    # printed in the operator's native shell before forwarding; message kept in the same
+    # substance as bin/alfred-setup.sh's own advisory (simplified here to avoid embedding
+    # a quoted JSON literal in a PowerShell double-quoted string).
+    Write-Warning "ALFRED_DISCORD_BOT_TOKEN is unset. Discord is opt-in: set ALFRED_DISCORD_BOT_TOKEN in .env then re-run setup, or set ALFRED_GATEWAY_HOSTED_ADAPTERS manually (a JSON array containing alfred_discord, in .env — NOT secrets.toml, which would shadow env) — then 'docker compose up -d alfred-gateway'."
 }
 
 Write-Host "AlfredOS: forwarding setup to WSL2 (bin/alfred-setup.sh) — the supported Windows configuration."
