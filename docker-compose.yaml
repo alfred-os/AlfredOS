@@ -268,11 +268,12 @@ services:
       ALFRED_ENVIRONMENT: ${ALFRED_ENVIRONMENT:-production}
       ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
       ALFRED_GATEWAY_METRICS_PORT: ${ALFRED_GATEWAY_METRICS_PORT:-9464}
-      # Spec B G6-7-8 (#309): the gateway HOSTS the Discord adapter as a bwrap child.
-      # _resolve_hosted_adapter_ids maps alfred_discord -> canonical "discord" and
-      # excludes the tui dial-in. The gateway holds NO secret — the core resolves the
-      # token and delivers it over spawn-grant -> fd-3 at each (re)spawn.
-      ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_GATEWAY_HOSTED_ADAPTERS:-["alfred_discord"]}'
+      # Gateway-hosted comms adapters (#469 ADR-0054): DEFAULT EMPTY — Discord is opt-in.
+      # Enable it by setting BOTH ALFRED_DISCORD_BOT_TOKEN and
+      # ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"] in .env (bin/alfred-setup.sh
+      # seeds the latter when the token is present). _resolve_hosted_adapter_ids maps
+      # alfred_discord -> canonical "discord" and excludes the tui dial-in.
+      ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_GATEWAY_HOSTED_ADAPTERS:-[]}'
       # Spec C G7-1b (#333): the gateway serves the L7 CONNECT egress proxy on this port
       # (the core dials http://alfred-gateway:8889). NEVER host-published (no `ports:` line —
       # test_egress_proxy_port_never_host_published).
