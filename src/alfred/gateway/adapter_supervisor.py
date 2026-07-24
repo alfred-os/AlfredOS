@@ -119,6 +119,18 @@ class GatewayAdapterSpawnError(AlfredError):
     """
 
 
+class GatewayAdapterCredentialError(GatewayAdapterSpawnError):
+    """A first-attempt OPERATOR-CREDENTIAL spawn refusal (missing/mismatched/undeliverable
+    secret) — distinct from a bare GatewayAdapterSpawnError (a launcher/handshake fault or a
+    programming bug), which stays loud. start_gateway catches ONLY this subclass to render a
+    friendly, actionable refusal (#469 [R1]); the base type keeps surfacing as a raw
+    traceback so hard rule #7 holds. Carries the closed-vocab credential ``reason``."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class _AdapterChildLike(Protocol):
     """A spawned + handshaked adapter child whose process exit the supervisor awaits."""
 
@@ -497,9 +509,10 @@ class GatewayAdapterSupervisor:
                 # / missing_secret / ...) — the G6-3 failure-path contract — never collapsed
                 # to the generic ``credential_refused``.
                 await self._audit_spawn_aborted(run, reason=exc.reason)
-                spawn_error: GatewayAdapterSpawnError = GatewayAdapterSpawnError(
+                spawn_error: GatewayAdapterSpawnError = GatewayAdapterCredentialError(
                     f"credential pipeline aborted the spawn (adapter_id={run.adapter_id!r}, "
-                    f"reason={exc.reason!r})"
+                    f"reason={exc.reason!r})",
+                    reason=exc.reason,
                 )
             else:
                 spawn_error = exc
@@ -894,6 +907,7 @@ def _default_monotonic() -> float:
 
 
 __all__ = [
+    "GatewayAdapterCredentialError",
     "GatewayAdapterSpawnError",
     "GatewayAdapterSupervisor",
 ]
