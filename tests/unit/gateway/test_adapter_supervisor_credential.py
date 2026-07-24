@@ -27,6 +27,7 @@ import structlog.testing
 from alfred.comms_mcp.adapter_credential_resolver import AdapterCredentialError
 from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
 from alfred.gateway.adapter_supervisor import (
+    GatewayAdapterCredentialError,
     GatewayAdapterSpawnError,
     GatewayAdapterSupervisor,
     _DeliverCredential,
@@ -65,17 +66,23 @@ class _PipeChildFactory:
     """A factory that owns a real fd-3 pipe per spawn + invokes the credential hook.
 
     Records the (read_fd, write_fd) of each spawn so a test can prove per-spawn fd
-    isolation, and the epoch passed to each spawn (H1).
+    isolation, and the epoch passed to each spawn (H1). ``spawn_raises``, when set,
+    makes the spawn itself fail BEFORE the credential round-trip — a launcher/
+    handshake fault, distinct from a credential-pipeline refusal (which the
+    ``_RecordingCredentialClient`` raise path drives instead).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, spawn_raises: Callable[[], BaseException] | None = None) -> None:
         self.spawn_epochs: list[str] = []
         self.write_fds: list[int] = []
         self.children: list[_FakeChild] = []
+        self._spawn_raises = spawn_raises
 
     async def spawn_and_handshake(
         self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
     ) -> _FakeChild:
+        if self._spawn_raises is not None:
+            raise self._spawn_raises()
         self.spawn_epochs.append(epoch)
         read_fd, write_fd = os.pipe()
         self.write_fds.append(write_fd)
@@ -360,6 +367,51 @@ async def test_first_attempt_credential_refusal_is_boot_refusal() -> None:
         await sup.supervise_one(_A)
     assert "gateway.adapter.up" not in sink.methods()
     assert "gateway.adapter.crashed" in sink.methods()
+
+
+# --- the credential marker: friendly-refusal exception for Task 3 -------------
+
+
+async def test_first_attempt_credential_refusal_raises_marker() -> None:
+    # Task 3 (start_gateway) catches ONLY this marker subclass to render a friendly,
+    # actionable refusal for a missing/mismatched/undeliverable operator credential
+    # (#469 [R1]) -- the credential-refusal wrap must produce it, not the bare base.
+    factory = _PipeChildFactory()
+    client = _RecordingCredentialClient(
+        raise_factory=lambda: AdapterCredentialError(adapter_id=_A, reason="missing_secret")
+    )
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, client=client, sink=sink, epoch_source=lambda: _EPOCH)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(GatewayAdapterCredentialError) as excinfo,
+    ):
+        await sup.supervise_one(_A)
+
+    # The marker carries the closed-vocab credential reason.
+    assert excinfo.value.reason == "missing_secret"
+    # The distinct spawn-aborted audit row is still written (_audit_spawn_aborted
+    # is untouched by the marker change).
+    assert any(e.get("event") == "gateway.adapter.spawn_aborted" for e in logs)
+
+
+async def test_first_attempt_non_credential_spawn_failure_stays_bare() -> None:
+    # A launcher/handshake fault (NOT a credential refusal) is a genuine bug/outage
+    # and must keep surfacing the BARE GatewayAdapterSpawnError -- the friendly wrap
+    # is credential-only (hard rule #7: a non-credential failure stays loud).
+    factory = _PipeChildFactory(
+        spawn_raises=lambda: GatewayAdapterSpawnError("fake launcher fault, not credential")
+    )
+    client = _RecordingCredentialClient()
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, client=client, sink=sink, epoch_source=lambda: _EPOCH)
+
+    with pytest.raises(GatewayAdapterSpawnError) as excinfo:
+        await sup.supervise_one(_A)
+
+    # Exact type, not just isinstance -- must NOT be the credential marker subclass.
+    assert type(excinfo.value) is GatewayAdapterSpawnError
 
 
 class _CrashThenRefuseClient:
