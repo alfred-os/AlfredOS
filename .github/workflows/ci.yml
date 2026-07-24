@@ -1022,9 +1022,11 @@ jobs:
         uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
         with:
           distribution: Ubuntu-24.04
-          # curl is NOT in the bare Ubuntu-24.04 WSL rootfs (unlike GH-hosted images);
-          # the uv installer below needs it. #496.
-          additional-packages: curl
+          # The bare Ubuntu-24.04 WSL rootfs ships neither curl (the uv download below needs
+          # it) nor openssl (the setup-script env-seed tests exercise `openssl rand` and would
+          # SKIP without it — under WSL we want them to RUN, and the assert-0-skipped guard
+          # below enforces that). #496.
+          additional-packages: curl openssl
       - name: Stub docker + jq for --dry-run under WSL
         if: steps.check.outputs.has_py == 'true'
         # bin/alfred-setup.sh's prereq gate (`require_cmd docker`, the `docker compose`
@@ -1064,20 +1066,31 @@ jobs:
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
-          # Supply-chain (#496): pin the uv version + download-to-file — never `curl | sh` of
-          # "latest" (mirrors this file's proto/promtool install convention). 0.11.32 is new
-          # enough to install CPython 3.14.6 (the repo's .python-version / requires-python
-          # floor); uv 0.11.6 only embeds up to 3.14.4. `curl` from setup-wsl additional-packages.
+          # Supply-chain (#496): install uv from its CHECKSUMMED release binary — download the
+          # pinned tarball + verify its published sha256 before use. This is the same integrity
+          # bar as this file's proto/promtool installs (which `sha256sum -c`); we do NOT
+          # `curl | sh` the installer script, for which Astral publishes no checksum. uv 0.11.32
+          # is new enough to install CPython 3.14.6 (the repo's .python-version / requires-python
+          # floor; 0.11.6 embeds only up to 3.14.4). curl comes from setup-wsl additional-
+          # packages; sha256sum/tar are in the base rootfs (coreutils).
           UV_VERSION=0.11.32
+          UV_TARBALL=uv-x86_64-unknown-linux-gnu.tar.gz
+          UV_SHA256=aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967
           for attempt in 1 2 3; do
             if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
-                 "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh; then
+                 "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARBALL}" \
+                 -o /tmp/uv.tgz; then
               break
             fi
-            [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the uv installer after 3 attempts"; exit 1; }
+            [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the uv tarball after 3 attempts"; exit 1; }
             sleep $((attempt * 5))
           done
-          sh /tmp/uv-install.sh
+          echo "${UV_SHA256}  /tmp/uv.tgz" | sha256sum -c - \
+            || { echo "::error::uv tarball sha256 mismatch — refusing to run an unverified binary"; exit 1; }
+          tar -xzf /tmp/uv.tgz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uv  "$HOME/.local/bin/uv"
+          install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uvx "$HOME/.local/bin/uvx"
           export PATH="$HOME/.local/bin:$PATH"
           # The repo is at the mounted Windows workspace (e.g. /mnt/d on windows-latest — the
           # interop we test); keep the venv WSL-native to avoid the mounted-FS I/O cost — the
@@ -1092,46 +1105,64 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
           export UV_PROJECT_ENVIRONMENT="$HOME/.wslvenv"
-          # win32 skips DON'T fire under WSL (sys.platform == "linux") -> these run for real.
-          # assert-RAN (#245): pytest exits 0 on an ALL-SKIPPED run, which would false-green
-          # this required gate. Capture the summary and require >=1 test actually PASSED, so a
-          # regression that made these skip under WSL (missing bash, a stray skipif) fails loud.
+          # The win32 skips don't fire under WSL (sys.platform == "linux") and bash + openssl
+          # are present, so EVERY setup-script test must execute here. pytest exits 0 on an
+          # all- OR partially-skipped run, so two guards keep a regression from silently
+          # greening this required gate:
+          #   (1) require >=1 test PASSED — catches a wholesale collection failure.
+          #   (2) require 0 SKIPPED — catches a regression that re-gated a WSL-executing test
+          #       (e.g. the bash/openssl fixtures skipping). Guard (1) alone would miss this:
+          #       the ~15 tests with no platform gate would still pass and mask the skip.
           rc=0
           out="$(uv run pytest tests/unit/test_setup_script_*.py -v 2>&1)" || rc=$?
           printf '%s\n' "$out"
           if [ "$rc" -ne 0 ]; then
-            echo "::error::WSL setup-script tests failed (pytest exit $rc)."; exit "$rc"
+            echo "::error::WSL setup-script tests failed (pytest exit $rc). See the log above."; exit "$rc"
           fi
           passed="$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || true)"
+          skipped="$(printf '%s\n' "$out" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -1 || true)"
           if [ -z "${passed:-}" ] || [ "$passed" -lt 1 ]; then
-            echo "::error::WSL setup-script tests did NOT run (0 passed — all skipped?). #245 paper-gate guard tripped."
+            echo "::error::No setup-script test passed under WSL (0 passed — all skipped or a collection error). This gate exists to prove they run here; failing loud instead of reporting a false green."
             exit 1
           fi
-          echo "assert-RAN: ${passed} setup-script tests passed under real WSL."
+          if [ -n "${skipped:-}" ] && [ "$skipped" -gt 0 ]; then
+            echo "::error::${skipped} setup-script test(s) SKIPPED under WSL — every one is expected to run here (bash + openssl + python are all present). A skip means a test's platform gating regressed or a WSL dependency went missing; find the skip reason in the log above."
+            exit 1
+          fi
+          echo "assert-RAN: ${passed} setup-script tests passed, 0 skipped, under real WSL."
       - name: Line-ending guard (no CRLF in .sh as WSL sees them)
         if: steps.check.outputs.has_py == 'true'
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
-          # self-test (#245): a guard that cannot detect its target is a paper gate. Prove the
+          # self-test: a guard that cannot detect its target proves nothing. Confirm the
           # detector fires on a synthetic CRLF BEFORE trusting a clean result on the real files.
           probe="$(mktemp)"; printf 'x\r\n' > "$probe"
           if ! grep -lqP '\r$' "$probe"; then
-            rm -f "$probe"; echo "::error::CRLF detector self-test FAILED — the guard cannot see CRLF (paper gate)."; exit 1
+            rm -f "$probe"; echo "::error::CRLF detector self-test failed — grep cannot see CRLF in this WSL rootfs, so the guard would prove nothing. Failing loud."; exit 1
           fi
           rm -f "$probe"
-          # the real check: scan ALL shell scripts in the checkout repo-wide (not just bin/ —
-          # scripts/*.sh exists too, CR #497) and assert we actually found some, so an empty
-          # match can't vacuously pass. A glob (not `git ls-files`) avoids depending on git in
-          # the bare WSL rootfs / the drvfs dubious-ownership guard. nullglob => empty on no
-          # match; dotglob stays off so `.git`/`.github` aren't walked (they hold no *.sh).
+          # scan ALL shell scripts in the checkout repo-wide (not just bin/ — scripts/*.sh
+          # exists too) and assert we found some, so an empty match can't vacuously pass. A
+          # glob (not `git ls-files`) avoids depending on git in the bare WSL rootfs / the
+          # drvfs ownership guard. nullglob => empty on no match; dotglob stays off so
+          # `.git`/`.github` aren't walked (they hold no *.sh).
           shopt -s globstar nullglob
           scripts=( **/*.sh )
           if [ "${#scripts[@]}" -eq 0 ]; then
-            echo "::error::no .sh discovered in the checkout — the CRLF guard would be vacuous."; exit 1
+            echo "::error::no .sh discovered in the checkout — the CRLF guard would be vacuous. Failing loud."; exit 1
           fi
-          if grep -lP '\r$' "${scripts[@]}" 2>/dev/null; then
-            echo "::error::CRLF found in a .sh under WSL — the .gitattributes LF rule regressed."; exit 1
+          # Branch on grep's REAL exit code: 0 = a CRLF match (regression); 1 = clean; >=2 =
+          # the scan itself errored (unreadable file, PCRE failure). Never collapse >=2 into
+          # "clean" (stderr is intentionally NOT discarded), or a broken scan greens this gate.
+          rc=0
+          offenders="$(grep -lP '\r$' "${scripts[@]}")" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::CRLF line endings found in: ${offenders//$'\n'/, }. A Windows editor saved these as CRLF and the .gitattributes LF rule was bypassed. Fix: run \`git add --renormalize . && git commit\` (or re-save each file with LF endings), then push."
+            exit 1
+          elif [ "$rc" -ne 1 ]; then
+            echo "::error::the CRLF scan itself errored (grep exit $rc) — likely an unreadable file or a grep/PCRE failure, NOT a clean result. See grep's error above."
+            exit "$rc"
           fi
           echo "CRLF guard: detector proven + ${#scripts[@]} .sh scanned repo-wide, all LF."
       - name: .ps1 -> wsl bash forwarding smoke

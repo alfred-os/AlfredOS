@@ -118,6 +118,10 @@ See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 
 The guards are `win32`-only, so the Linux and macOS legs keep running every test — no coverage is lost on the runtime target. The Windows leg also enforces an **assert-RAN floor** (it fails if fewer than 3000 unit tests pass), so you can't quietly grow the skip/ignore list until the gate is hollow.
 
+### WSL setup-script leg (Windows-via-WSL)
+
+Separately from the unit-test legs above, a `Python WSL (ubuntu-24.04)` leg provisions real WSL2 and runs the setup-script (`bin/alfred-setup.sh`) tests + the `bin/alfred-setup.ps1`→`wsl bash` forwarding + a line-ending guard **from WSL over the mounted Windows workspace** — the path a real Windows operator hits (WSL2 is the supported Windows dev path; native Windows is out of scope, tracked as [#471](https://github.com/alfred-os/AlfredOS/issues/471)). It becomes a required check once promoted (see [`docs/ci/required-checks.md`](./docs/ci/required-checks.md)). The failure a Windows contributor is most likely to cause is a **CRLF `.sh`** — an editor saved a shell script with `\r\n`, which breaks `bash` under WSL. `.gitattributes` (`*.sh text eol=lf`) normalizes this on checkout for a standard git client, but if a CRLF file slips through, the leg's line-ending guard names the offending files; fix with `git add --renormalize . && git commit`, then push.
+
 ### Running performance benches locally
 
 `make test-perf` runs the release-blocking hook-dispatch perf gate (the same

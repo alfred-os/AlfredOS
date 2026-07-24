@@ -12,8 +12,8 @@ requires WSL and forwards to `wsl bash bin/alfred-setup.sh` (native Windows is o
 scope per ADR-0015 / PRD §6.7; native-Windows sandbox support is tracked separately as
 **#471**). But **no CI leg exercises that path**: the matrix is
 `[macos-latest, windows-latest]` (both native, no WSL) plus the ubuntu jobs. So the
-Windows-operator reality — repo on the Windows filesystem, run from WSL over `/mnt/c` —
-is unverified: CRLF-in-`.sh`, `/mnt/c` path/permission interop, and the
+Windows-operator reality — repo on the Windows filesystem, run from WSL over `/mnt/d` —
+is unverified: CRLF-in-`.sh`, `/mnt/d` path/permission interop, and the
 `.ps1`→`wsl bash` handoff can all break for a real operator with green CI.
 
 ## Approach — realistic Windows-operator interop
@@ -36,7 +36,11 @@ covered by the ubuntu leg).
   tracked required-checks manifest), *before* B2 rebases onto `main`. From that point every
   PR (B2 included) must pass it.
 - `actions/checkout` stays on the **Windows filesystem** (default); WSL reaches the repo
-  via `/mnt/c/…`. This is the interop that catches the real quirks.
+  via `/mnt/d/…`. This is the interop that catches the real quirks. (The `windows-latest`
+  runner's `GITHUB_WORKSPACE` lands on `D:`, hence `/mnt/d`; the drive letter is incidental
+  — every `/mnt/<drive>` is a `drvfs` mount of an NTFS drive with identical Windows↔WSL
+  interop, and a real operator clones wherever their dev drive is. The job intentionally
+  uses the runner's natural workspace rather than forcing a copy to `C:`.)
 
 ### Provisioning
 
@@ -44,11 +48,11 @@ covered by the ubuntu leg).
   the Linux base).
 - Inside WSL: install `uv` (`astral-sh/setup-uv` runs on the Windows side; inside WSL use
   the official `uv` installer or `pipx`), `uv python install 3.14`, `uv sync --frozen --dev`.
-  Confirm `uv sync` over `/mnt/c` is workable; if the `/mnt/c` I/O is prohibitively slow,
-  fall back to syncing into a WSL-native venv while keeping the **repo/tests** on `/mnt/c`
+  Confirm `uv sync` over `/mnt/d` is workable; if the `/mnt/d` I/O is prohibitively slow,
+  fall back to syncing into a WSL-native venv while keeping the **repo/tests** on `/mnt/d`
   (the interop we care about is the repo path, not the venv location).
 
-### What it runs (from WSL, over `/mnt/c`)
+### What it runs (from WSL, over `/mnt/d`)
 
 1. **Setup-script `.sh` tests under WSL** — `uv run pytest tests/unit/test_setup_script_*.py`.
    Under WSL `sys.platform == "linux"`, so the `win32` skips do **not** fire — these run
