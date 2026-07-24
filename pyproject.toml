@@ -304,6 +304,12 @@ ignore = ["S101"]
 # name (partial path) with fixed-literal argv — same trusted-CLI rationale as
 # the smokes above. No untrusted input reaches the subprocess.
 "tests/_docker_probe.py" = ["S603", "S607"]
+# The shared docker-compose lifecycle helper (#494 — extracted from the G6-0b
+# smoke's module-private copy so the e2e harness and the smoke tests share one
+# seam) runs `docker compose` by name (partial path) with argv assembled from
+# fixed literals plus a caller-supplied project name / env-file path — same
+# trusted-CLI rationale as the smokes and the docker probe above.
+"tests/_compose.py" = ["S603"]
 # #496 shell-script LF guard runs `git ls-files` by name (partial path) with
 # fixed-literal argv — same trusted-CLI rationale as the docker probe above.
 # No untrusted input reaches the subprocess.

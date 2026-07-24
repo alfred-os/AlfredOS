@@ -49,14 +49,15 @@ import subprocess
 import time
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 
+from tests import _compose as _compose_helper
+
 pytestmark = pytest.mark.smoke
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPOSE_FILE = _REPO_ROOT / "docker-compose.yaml"
+_REPO_ROOT = _compose_helper.REPO_ROOT
+_COMPOSE_FILE = _compose_helper.COMPOSE_FILE
 _APPARMOR_PROFILE = _REPO_ROOT / "docker" / "apparmor" / "alfred-bwrap"
 
 # --------------------------------------------------------------------------------------
@@ -82,21 +83,8 @@ _CORE_LINK_UP_METRIC = "gateway_core_link_up"
 
 
 def _compose(project: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    """Run ``docker compose -f <file> -p <project> <args>`` from the repo root.
-
-    The seccomp ``security_opt`` path is resolved RELATIVE TO THE COMPOSE-INVOCATION CWD
-    (docker-compose.yaml header documents this), so always invoke from ``_REPO_ROOT``.
-    A throwaway ``-p`` project keeps this smoke's containers/volumes isolated from any
-    operator stack on the same host.
-    """
-    return subprocess.run(
-        ["docker", "compose", "-f", str(_COMPOSE_FILE), "-p", project, *args],
-        cwd=_REPO_ROOT,
-        check=check,
-        capture_output=True,
-        text=True,
-        timeout=_BOOT_TIMEOUT_S,
-    )
+    """Repointed to the shared helper (tests/_compose.py); behavior unchanged."""
+    return _compose_helper.compose(project, *args, check=check, timeout_s=_BOOT_TIMEOUT_S)
 
 
 @pytest.fixture
@@ -108,14 +96,7 @@ def compose_project() -> Iterator[str]:
     finally:
         # ``down -v`` removes the throwaway project's containers AND its named volumes
         # (alfred_run / state.git / pg / redis) so a re-run starts clean.
-        subprocess.run(
-            ["docker", "compose", "-f", str(_COMPOSE_FILE), "-p", project, "down", "-v"],
-            cwd=_REPO_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_TEARDOWN_TIMEOUT_S,
-        )
+        _compose_helper.down_project(project, timeout_s=_TEARDOWN_TIMEOUT_S)
 
 
 def _load_apparmor_profile() -> None:
