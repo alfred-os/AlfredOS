@@ -35,3 +35,13 @@ def test_empty_inspect_is_not_created() -> None:
 
 def test_no_health_block_is_no_healthcheck() -> None:
     assert classify_health([{"State": {"Status": "running"}}]) is ServiceHealth.NO_HEALTHCHECK
+
+
+def test_missing_state_block_is_not_created() -> None:
+    # Container object with no "State" key triggers the `not isinstance(state, Mapping)` branch.
+    assert classify_health([{"Foo": "bar"}]) is ServiceHealth.NOT_CREATED
+
+
+def test_non_str_status_is_starting() -> None:
+    # Health.Status present but not a string (e.g., None) → fallback to STARTING.
+    assert classify_health([{"State": {"Health": {"Status": None}}}]) is ServiceHealth.STARTING
