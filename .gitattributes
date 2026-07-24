@@ -2,11 +2,10 @@
 # `.sh` breaks bash under WSL). Default: let git decide text vs binary.
 * text=auto
 
-# Shell scripts + the bin/ launchers MUST be LF on every platform (run under bash/WSL).
+# All shell scripts MUST be LF on every platform (they run under bash/WSL). A gitattributes
+# pattern without a slash matches at any depth, so `*.sh` already covers every tracked shell
+# script — bin/alfred-*.sh and scripts/*.sh alike — no per-file entries needed.
 *.sh text eol=lf
-bin/alfred-setup.sh text eol=lf
-bin/alfred-plugin-launcher.sh text eol=lf
-bin/alfred-state-git-seed.sh text eol=lf
 
 # PowerShell is native-Windows — keep CRLF.
 *.ps1 text eol=crlf
