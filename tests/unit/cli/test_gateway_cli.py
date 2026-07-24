@@ -292,6 +292,124 @@ def test_start_programming_bug_still_surfaces_loud(
     assert t("gateway.start.handshake_failed") not in result.stdout
 
 
+def test_start_credential_refusal_is_friendly_not_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hosted adapter's credential refusal is a friendly line + exit 10 (#469 [R1]).
+
+    ``GatewayAdapterCredentialError`` (Task 2) is a first-attempt operator-credential
+    spawn refusal — distinct from a bare ``GatewayAdapterSpawnError`` (a bug / a
+    security override refusal), which stays loud (see the two masking-regression
+    tests below, CLAUDE.md hard rule #7). The message is STATIC (i18n-003): it never
+    interpolates the adapter id or the closed-vocab reason.
+    """
+    from alfred.gateway.adapter_supervisor import GatewayAdapterCredentialError
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise GatewayAdapterCredentialError(
+                "adapter_id=discord reason=missing_secret", reason="missing_secret"
+            )
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code == 10, result.stdout
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.stdout
+    assert "ALFRED_DISCORD_BOT_TOKEN" in result.stdout
+    assert "ALFRED_GATEWAY_HOSTED_ADAPTERS" in result.stdout
+    # Non-vacuity: a SIBLING friendly line did not render instead.
+    assert t("gateway.start.bind_failed") not in result.stdout
+    assert t("gateway.start.unavailable") not in result.stdout
+
+
+def test_start_credential_refusal_logs_before_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The credential refusal logs ``gateway.cli.adapter_spawn_failed`` with the reason.
+
+    ``structlog`` events do NOT land in ``caplog`` — assert via
+    :func:`structlog.testing.capture_logs`. The adapter/reason ride the log line
+    (err-002/err-004), never the operator-facing text.
+    """
+    from structlog.testing import capture_logs
+
+    from alfred.gateway.adapter_supervisor import GatewayAdapterCredentialError
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise GatewayAdapterCredentialError(
+                "adapter_id=discord reason=missing_secret", reason="missing_secret"
+            )
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    with capture_logs() as logs:
+        result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code == 10, result.stdout
+    matches = [e for e in logs if e["event"] == "gateway.cli.adapter_spawn_failed"]
+    assert len(matches) == 1, f"expected exactly one adapter_spawn_failed warning, got {logs!r}"
+    assert matches[0]["reason"] == "missing_secret"
+
+
+def test_start_bare_spawn_error_still_surfaces_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A BARE ``GatewayAdapterSpawnError`` is NOT caught — masking-regression (hard #7).
+
+    Only the ``GatewayAdapterCredentialError`` leaf subclass gets the friendly
+    treatment. The base type covers a launcher/handshake fault or a programming bug
+    and MUST still surface loud, with its EXACT type — not silently upgraded to (or
+    confused with) the credential marker.
+    """
+    from alfred.gateway.adapter_supervisor import GatewayAdapterSpawnError
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise GatewayAdapterSpawnError("launcher handshake fault")
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    assert type(result.exception) is GatewayAdapterSpawnError, result.exception
+    assert t("gateway.start.adapter_spawn_failed") not in result.stdout
+
+
+def test_start_override_refusal_still_surfaces_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``LaunchTargetOverrideRefusedError`` (a security override refusal) stays loud.
+
+    A SIBLING subclass of ``GatewayAdapterSpawnError`` (Spec B G6-7-7 / #309) — not the
+    credential marker. Downgrading it to the friendly credential-refusal line would mask
+    a fail-closed security refusal (CLAUDE.md hard rule #7).
+    """
+    from alfred.gateway.adapter_child_factory import LaunchTargetOverrideRefusedError
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise LaunchTargetOverrideRefusedError("override refused outside dev/test")
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, LaunchTargetOverrideRefusedError)
+    assert t("gateway.start.adapter_spawn_failed") not in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # ``alfred gateway status``  (MUST NOT dial — security L3)
 # ---------------------------------------------------------------------------
