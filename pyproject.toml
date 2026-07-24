@@ -303,6 +303,10 @@ ignore = ["S101"]
 # name (partial path) with fixed-literal argv — same trusted-CLI rationale as
 # the smokes above. No untrusted input reaches the subprocess.
 "tests/_docker_probe.py" = ["S603", "S607"]
+# #496 shell-script LF guard runs `git ls-files` by name (partial path) with
+# fixed-literal argv — same trusted-CLI rationale as the docker probe above.
+# No untrusted input reaches the subprocess.
+"tests/unit/meta/test_shell_scripts_lf.py" = ["S607"]
 "src/alfred/memory/migrations/**/*.py" = ["N999"]
 # FBT001/FBT002/FBT003 (boolean-trap rules) are valid for general API design
 # but conflict with Typer's declarative CLI surface — Typer flags are by
