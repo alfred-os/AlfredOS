@@ -1074,14 +1074,37 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           export UV_PROJECT_ENVIRONMENT="$HOME/.wslvenv"
           # win32 skips DON'T fire under WSL (sys.platform == "linux") -> these run for real.
-          uv run pytest tests/unit/test_setup_script_*.py -v
+          # assert-RAN (#245): pytest exits 0 on an ALL-SKIPPED run, which would false-green
+          # this required gate. Capture the summary and require >=1 test actually PASSED, so a
+          # regression that made these skip under WSL (missing bash, a stray skipif) fails loud.
+          rc=0
+          out="$(uv run pytest tests/unit/test_setup_script_*.py -v 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::WSL setup-script tests failed (pytest exit $rc)."; exit "$rc"
+          fi
+          passed="$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1 || true)"
+          if [ -z "${passed:-}" ] || [ "$passed" -lt 1 ]; then
+            echo "::error::WSL setup-script tests did NOT run (0 passed — all skipped?). #245 paper-gate guard tripped."
+            exit 1
+          fi
+          echo "assert-RAN: ${passed} setup-script tests passed under real WSL."
       - name: Line-ending guard (no CRLF in .sh as WSL sees them)
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
+          # self-test (#245): a guard that cannot detect its target is a paper gate. Prove the
+          # detector fires on a synthetic CRLF BEFORE trusting a clean result on the real files.
+          probe="$(mktemp)"; printf 'x\r\n' > "$probe"
+          if ! grep -lqP '\r$' "$probe"; then
+            rm -f "$probe"; echo "::error::CRLF detector self-test FAILED — the guard cannot see CRLF (paper gate)."; exit 1
+          fi
+          rm -f "$probe"
+          # the real check: no tracked .sh may carry CRLF as WSL sees it.
           if grep -lrP '\r$' bin/*.sh 2>/dev/null; then
             echo "::error::CRLF found in a .sh under WSL — the .gitattributes LF rule regressed."; exit 1
           fi
+          echo "CRLF guard: detector proven on a synthetic CRLF + no CRLF in bin/*.sh."
       - name: .ps1 -> wsl bash forwarding smoke
         # bin/alfred-setup.ps1 itself runs `docker compose ps --services` NATIVELY on the
         # pwsh/Windows side (line 36) before forwarding to WSL. windows-latest ships a
