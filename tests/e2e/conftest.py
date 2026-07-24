@@ -90,9 +90,14 @@ def boot_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BootStack]:
         _compose.compose(project, "up", "-d", "--no-deps", *_BASELINE, env_file=env_file)
         yield BootStack(project=project, env_file=env_file)
     finally:
-        # Capture logs BEFORE teardown (ops-104) so a failure's diagnosis survives.
-        logs = _compose.compose(project, "logs", "--no-color", env_file=env_file, check=False)
-        Path("e2e-stack.log").write_text(logs.stdout + logs.stderr)
+        # Capture logs BEFORE teardown (ops-104) so a failure's diagnosis survives — but a
+        # hung/failed `logs` (TimeoutExpired isn't suppressed by check=False) must NEVER skip
+        # teardown of the fixed-name project (final-review Important).
+        try:
+            logs = _compose.compose(project, "logs", "--no-color", env_file=env_file, check=False)
+            Path("e2e-stack.log").write_text(logs.stdout + logs.stderr)
+        except (OSError, subprocess.SubprocessError):
+            pass
         _compose.down_project(project)
 
 
