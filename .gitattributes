@@ -1,0 +1,12 @@
+# #496: normalize line endings so a Windows checkout keeps shell scripts LF (a CRLF
+# `.sh` breaks bash under WSL). Default: let git decide text vs binary.
+* text=auto
+
+# Shell scripts + the bin/ launchers MUST be LF on every platform (run under bash/WSL).
+*.sh text eol=lf
+bin/alfred-setup.sh text eol=lf
+bin/alfred-plugin-launcher.sh text eol=lf
+bin/alfred-state-git-seed.sh text eol=lf
+
+# PowerShell is native-Windows — keep CRLF.
+*.ps1 text eol=crlf
