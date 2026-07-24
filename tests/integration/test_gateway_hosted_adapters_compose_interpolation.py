@@ -51,7 +51,18 @@ _COMPOSE_FILE = _REPO_ROOT / "docker-compose.yaml"
 
 def _config_env(extra_env: dict[str, str]) -> dict[str, Any]:
     """Return the resolved ``alfred-gateway`` ``environment`` mapping from a real
-    ``docker compose config`` run, hermetic against any ambient ``.env``."""
+    ``docker compose config`` run, hermetic against any ambient ``.env`` OR shell env.
+
+    CodeRabbit finding 4 (#469 Blocker 2 PR review): ``--env-file /dev/null`` below only
+    blocks an ambient ``.env`` FILE — the child process still inherits ``os.environ``,
+    so an ``ALFRED_GATEWAY_HOSTED_ADAPTERS`` already exported in a developer's or CI
+    runner's shell would silently shadow the shipped default and the default-case test
+    would never actually exercise the ``[]`` fallback it claims to prove. Strip that one
+    key out of the inherited base environment unconditionally, THEN layer ``extra_env``
+    on top — so the default-case call (``extra_env={}``) is hermetic regardless of the
+    ambient shell, while the override-case call still sets it explicitly.
+    """
+    base_env = {k: v for k, v in os.environ.items() if k != "ALFRED_GATEWAY_HOSTED_ADAPTERS"}
     result = subprocess.run(
         [
             "docker",
@@ -69,7 +80,7 @@ def _config_env(extra_env: dict[str, str]) -> dict[str, Any]:
         text=True,
         check=True,
         timeout=60,
-        env={**os.environ, **extra_env},
+        env={**base_env, **extra_env},
     )
     config = json.loads(result.stdout)
     env = config["services"]["alfred-gateway"]["environment"]
@@ -90,3 +101,22 @@ def test_hosted_adapters_override_interpolates() -> None:
     """An operator's ``.env`` override still round-trips through Compose interpolation."""
     env = _config_env({"ALFRED_GATEWAY_HOSTED_ADAPTERS": '["alfred_discord"]'})
     assert env["ALFRED_COMMS_ENABLED_ADAPTERS"] == '["alfred_discord"]'
+
+
+def test_default_case_is_hermetic_against_ambient_shell_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CodeRabbit finding 4: the default-case test must not be shadowed by an ambient
+    shell env var.
+
+    ``--env-file /dev/null`` blocks an ambient ``.env`` FILE, but ``_config_env`` still
+    passed ``{**os.environ, **extra_env}`` as the child process environment — so an
+    ``ALFRED_GATEWAY_HOSTED_ADAPTERS`` already exported in a developer's or CI runner's
+    shell would silently override the shipped ``[]`` default, and
+    ``test_hosted_adapters_default_is_empty_list`` would never actually exercise the
+    fallback it claims to prove. Simulate that ambient shell state directly (rather
+    than relying on the test runner's own environment happening to be clean) so this
+    regression is provable without depending on the outer shell's state.
+    """
+    monkeypatch.setenv("ALFRED_GATEWAY_HOSTED_ADAPTERS", '["alfred_discord"]')
+    assert _config_env({})["ALFRED_COMMS_ENABLED_ADAPTERS"] == "[]"
