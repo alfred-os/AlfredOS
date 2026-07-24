@@ -80,6 +80,13 @@ _EXIT_EGRESS_RELAY_BIND_FAILED = 8
 # ``restart: unless-stopped``.
 _EXIT_EGRESS_ADAPTER_PROXY_BIND_FAILED = 9
 
+# A friendly "a hosted adapter's credential was refused" refusal (#469 [R1]). Distinct
+# non-zero so an operator / healthcheck can tell a credential misconfig apart from the
+# egress / bind / config refusals. Fail-closed: the gateway still aborts and crash-loops
+# under ``restart: unless-stopped`` — this arm only replaces the raw traceback with a
+# legible message (surviving the abort is #331; a wrong token is #493).
+_EXIT_ADAPTER_SPAWN_FAILED = 10
+
 # The adapter id the gateway dials on the core (the core binds ``comms-{adapter_kind}.sock``;
 # the socket-backed ``alfred_tui`` adapter has manifest ``adapter_kind="tui"``). Operator-
 # overridable via the env so the dial target is not a hidden constant (Spec B G6-0b / #288).
@@ -246,6 +253,7 @@ def start_gateway() -> None:
         build_adapter_egress_proxy,
         serve_adapter_egress_failclosed,
     )
+    from alfred.gateway.adapter_supervisor import GatewayAdapterCredentialError
     from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.egress_audit import record_egress_connect
     from alfred.gateway.egress_proxy import (
@@ -415,6 +423,24 @@ def start_gateway() -> None:
         log.warning("gateway.cli.egress_proxy_bind_failed", error=repr(exc))
         typer.echo(t("gateway.start.egress_proxy_bind_failed"))
         raise typer.Exit(code=_EXIT_EGRESS_PROXY_BIND_FAILED) from exc
+    except GatewayAdapterCredentialError as exc:
+        # Friendly refusal — a hosted adapter's credential was refused at first spawn
+        # (#469 [R1]). Distinct from a bare GatewayAdapterSpawnError (a bug / a
+        # LaunchTargetOverrideRefusedError security refusal), which is NOT caught here and
+        # surfaces loud (hard rule #7). The supervisor already wrote the audit row before
+        # the raise. adapter_id + closed-vocab reason go to the log, never the operator text.
+        #
+        # NOTE: deliberately NO ``exc_info=True`` (unlike the brief's sketch) — every
+        # sibling arm in this function omits it, and with it structlog's UNCONFIGURED
+        # default (this CLI path never calls ``alfred.cli._bootstrap.configure_logging``
+        # — that needs a ``SecretBroker`` the gateway process does not hold, ADR-0036)
+        # renders a real pretty traceback into this line via its default
+        # ``ConsoleRenderer``, which prints to ``sys.stdout`` — reintroducing the exact
+        # raw-traceback leak this whole handler exists to prevent (verified: without this
+        # note, ``test_start_credential_refusal_is_friendly_not_traceback`` fails).
+        log.warning("gateway.cli.adapter_spawn_failed", error=repr(exc), reason=exc.reason)
+        typer.echo(t("gateway.start.adapter_spawn_failed"))
+        raise typer.Exit(code=_EXIT_ADAPTER_SPAWN_FAILED) from exc
     except DaemonUnavailableError as exc:
         # Friendly refusal — the core daemon socket was unreachable. Surface a
         # next-step message + a non-zero exit rather than a bare traceback.
