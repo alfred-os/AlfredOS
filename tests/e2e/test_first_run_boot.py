@@ -55,7 +55,7 @@ def test_every_compose_service_is_classified(boot_stack: BootStack) -> None:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="blocker #A: gateway _resolve_hosted_adapter_ids builds a "
+    reason="blocker #499: gateway _resolve_hosted_adapter_ids builds a "
     "full Settings() needing a provider key it is denied (ADR-0036). Roadmap Step 2.",
 )
 def test_gateway_is_healthy(boot_stack: BootStack) -> None:
@@ -73,7 +73,7 @@ def test_gateway_is_healthy(boot_stack: BootStack) -> None:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="blocker #B: alfred-core.Dockerfile omits plugins/ and "
+    reason="blocker #500: alfred-core.Dockerfile omits plugins/ and "
     "_REPO_ROOT resolves to the install prefix. Ratchets green only when core is "
     "FULLY bootable (image + provisioning) at Roadmap Step 3, whose un-xfail must "
     "add posture assertions (sandbox/gate/egress), not a bare assert-healthy.",
@@ -115,10 +115,10 @@ def _stock_dotenv() -> Iterator[None]:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="blocker: bin/alfred-setup.sh does not complete under the "
+    reason="blocker #501: bin/alfred-setup.sh does not complete under the "
     "stock documented flow — it exits at the credential gate on the .env.example "
     "placeholder DeepSeek key (README:33 omits ALFRED_DEEPSEEK_API_KEY). Roadmap "
-    "Step 4 (README/setup.sh reconciliation); after that, blocker #A's migrate hang.",
+    "Step 4 (README/setup.sh reconciliation); after that, blocker #499's migrate hang.",
 )
 def test_setup_sh_completes(_stock_dotenv: None) -> None:
     setup_project = f"{E2E_PROJECT_NAME}-setup"

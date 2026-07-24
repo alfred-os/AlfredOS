@@ -21,8 +21,8 @@ BASELINE_SERVICES: frozenset[str] = frozenset(
 # Known-blocked services -> the roadmap issue that un-blocks them (refs finalized in Task 10).
 # Shrinks toward empty as blockers land (the ratchet).
 XFAIL_SERVICES: Mapping[str, str] = {
-    "alfred-gateway": "#A",
-    "alfred-core": "#B",
+    "alfred-gateway": "#499",
+    "alfred-core": "#500",
 }
 
 
