@@ -313,10 +313,17 @@ def test_token_present_seeds_hosted_adapters(bash_available: str, tmp_path: Path
     env_path.write_text("ALFRED_DISCORD_BOT_TOKEN=real-token\n")
     first = _run_seed_hosted_adapters(env_path)
     assert first.returncode == 0, f"seed failed:\nstdout: {first.stdout}\nstderr: {first.stderr}"
+    # Security nit: the seed step must never echo the token value itself — only the
+    # generic "Discord token detected" confirmation. Regression-proof this on BOTH
+    # streams, not just by inspecting the echo statement's source text.
+    assert "real-token" not in first.stdout, f"token value echoed to stdout: {first.stdout!r}"
+    assert "real-token" not in first.stderr, f"token value echoed to stderr: {first.stderr!r}"
     second = _run_seed_hosted_adapters(env_path)  # re-run must not duplicate the key
     assert second.returncode == 0, (
         f"re-run failed:\nstdout: {second.stdout}\nstderr: {second.stderr}"
     )
+    assert "real-token" not in second.stdout, f"token value echoed to stdout: {second.stdout!r}"
+    assert "real-token" not in second.stderr, f"token value echoed to stderr: {second.stderr!r}"
     content = env_path.read_text()
     assert content.count("ALFRED_GATEWAY_HOSTED_ADAPTERS=") == 1, (
         f"expected exactly one ALFRED_GATEWAY_HOSTED_ADAPTERS= line, got:\n{content}"
@@ -342,3 +349,37 @@ def test_explicit_opt_out_preserved(bash_available: str, tmp_path: Path) -> None
     content = env_path.read_text()
     assert content.count("ALFRED_GATEWAY_HOSTED_ADAPTERS=") == 1
     assert "ALFRED_GATEWAY_HOSTED_ADAPTERS=[]" in content
+
+
+def test_token_present_no_trailing_newline_still_lands_new_key_on_its_own_line(
+    bash_available: str, tmp_path: Path
+) -> None:
+    """CodeRabbit finding 1: a ``.env`` with NO trailing newline must not glue the new key
+    onto the last existing line.
+
+    The append previously assumed ``.env`` always ends with a newline. Without one, the
+    literal bytes on disk became
+    ``ALFRED_DISCORD_BOT_TOKEN=real-tokenALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]``
+    — one unparseable line, so the new key was never grep-matchable
+    (``^ALFRED_GATEWAY_HOSTED_ADAPTERS=`` never matches mid-line) and Discord silently
+    stayed disabled.
+    """
+    env_path = tmp_path / ".env"
+    env_path.write_bytes(b"ALFRED_DISCORD_BOT_TOKEN=real-token")  # deliberately NO trailing \n
+    result = _run_seed_hosted_adapters(env_path)
+    assert result.returncode == 0, f"seed failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    content = env_path.read_text()
+    lines = content.splitlines()
+    assert "ALFRED_DISCORD_BOT_TOKEN=real-token" in lines, (
+        f"the original token line must be left intact on its own line, got:\n{content!r}"
+    )
+    hosted_lines = [ln for ln in lines if ln.startswith("ALFRED_GATEWAY_HOSTED_ADAPTERS=")]
+    assert len(hosted_lines) == 1, (
+        f"expected the new key on its OWN grep-matchable line, got:\n{content!r}"
+    )
+    assert hosted_lines[0] == 'ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]'
+    # grep-matchable via the script's own anchor pattern (^KEY=), same predicate
+    # seed_hosted_adapters' idempotency guard and read_env_var both rely on.
+    assert re.search(
+        r'^ALFRED_GATEWAY_HOSTED_ADAPTERS=\["alfred_discord"\]$', content, re.MULTILINE
+    ), f"new key is not grep-matchable on its own line:\n{content!r}"

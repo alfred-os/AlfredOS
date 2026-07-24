@@ -47,3 +47,34 @@ def test_ps1_uses_gateway_adapters_verify() -> None:
     assert "alfred-discord verify" not in text
     assert "gateway adapters --wait-ready" in text
     assert "ALFRED_DISCORD_BOT_TOKEN" in text
+
+
+def test_ps1_advisory_uses_non_empty_env_token_semantics() -> None:
+    """#469 Blocker 2 CodeRabbit finding 3: the ``.ps1`` advisory guard must agree with
+    ``seed_hosted_adapters`` (``bin/alfred-setup.sh``, which ``.ps1`` delegates to via
+    WSL) on what counts as "a Discord token is configured".
+
+    ``seed_hosted_adapters`` only ever reads ``.env`` (via ``read_env_var``) and only
+    treats a PRESENT-AND-NON-EMPTY value as proof of opt-in — it never consults the
+    shell environment. Before this fix the ``.ps1`` guard disagreed on both axes: (a) it
+    matched a bare ``ALFRED_DISCORD_BOT_TOKEN=`` key line (empty value) as if it were
+    non-empty, and (b) it treated a parent-shell ``$env:ALFRED_DISCORD_BOT_TOKEN`` as
+    proof of opt-in even though the seeder never sees the shell environment — so the two
+    could disagree (a token exported only in the parent PowerShell shell would suppress
+    the advisory here while ``seed_hosted_adapters`` still left Discord un-hosted).
+
+    There is no pwsh CI leg to execute this script (Windows support is WSL2-forwarding
+    only, ADR-0015), so this is a static-text regression guard for the specific
+    disagreement pattern rather than a real-execution test.
+    """
+    text = PS1.read_text()
+    assert "$env:ALFRED_DISCORD_BOT_TOKEN" not in text, (
+        "a shell-exported token must not be treated as opt-in proof — "
+        "seed_hosted_adapters (which this script delegates to via WSL) never reads "
+        "the shell environment, only .env"
+    )
+    assert r"ALFRED_DISCORD_BOT_TOKEN\s*=\s*\S" in text, (
+        "the .env token match must require a NON-EMPTY value after '=', mirroring "
+        'seed_hosted_adapters\' `[[ -n "$token" ]]` guard — a bare '
+        "'ALFRED_DISCORD_BOT_TOKEN=' key line must not read as opt-in proof"
+    )

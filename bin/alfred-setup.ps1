@@ -39,16 +39,26 @@ if (docker compose ps --services 2>$null | Select-String -Quiet "^alfred-discord
 $_envFile = Join-Path $PSScriptRoot "..\.env"
 $_tokenInEnvFile = Test-Path $_envFile -PathType Leaf -ErrorAction SilentlyContinue
 if ($_tokenInEnvFile) {
-    $_tokenInEnvFile = (Get-Content $_envFile | Select-String -Quiet '^\s*ALFRED_DISCORD_BOT_TOKEN\s*=')
+    # CodeRabbit finding 3 (#469 Blocker 2 PR review): require a NON-EMPTY value after
+    # '=' (the trailing `\s*\S`), mirroring bin/alfred-setup.sh's seed_hosted_adapters
+    # `[[ -n "$token" ]]` guard. A bare `ALFRED_DISCORD_BOT_TOKEN=` key line (the shape
+    # .env.example ships, and what a placeholder-only .env has) must NOT read as opt-in
+    # proof — seed_hosted_adapters would leave ALFRED_GATEWAY_HOSTED_ADAPTERS unseeded
+    # in that case, and this advisory disagreeing with it is the bug being fixed here.
+    $_tokenInEnvFile = (Get-Content $_envFile | Select-String -Quiet '^\s*ALFRED_DISCORD_BOT_TOKEN\s*=\s*\S')
 }
-if (-not $env:ALFRED_DISCORD_BOT_TOKEN -and -not $_tokenInEnvFile) {
-    # #469 Blocker 2 Task 5: this script only forwards to WSL2 (see `wsl bash
-    # bin/alfred-setup.sh` below) — it does not seed .env itself. The real seed
-    # (`seed_hosted_adapters`, which sets ALFRED_GATEWAY_HOSTED_ADAPTERS when a token is
-    # present) runs inside that forwarded bin/alfred-setup.sh run. This is a heads-up
-    # printed in the operator's native shell before forwarding; message kept in the same
-    # substance as bin/alfred-setup.sh's own advisory (simplified here to avoid embedding
-    # a quoted JSON literal in a PowerShell double-quoted string).
+if (-not $_tokenInEnvFile) {
+    # #469 Blocker 2 Task 5 / CodeRabbit finding 3: this script only forwards to WSL2
+    # (see `wsl bash bin/alfred-setup.sh` below) — it does not seed .env itself. The
+    # real seed (`seed_hosted_adapters`, which sets ALFRED_GATEWAY_HOSTED_ADAPTERS when
+    # a NON-EMPTY token is present IN .env) runs inside that forwarded
+    # bin/alfred-setup.sh run and never consults the shell environment — so a token
+    # exported only in this parent PowerShell shell's environment is NOT proof of
+    # opt-in either (previously checked here via the shell-env variable; removed — it
+    # disagreed with what the seeder actually does). This is a heads-up printed in the
+    # operator's native shell before forwarding; message kept in the same substance as
+    # bin/alfred-setup.sh's own advisory (simplified here to avoid embedding a quoted
+    # JSON literal in a PowerShell double-quoted string).
     Write-Warning "ALFRED_DISCORD_BOT_TOKEN is unset. Discord is opt-in: set ALFRED_DISCORD_BOT_TOKEN in .env then re-run setup, or set ALFRED_GATEWAY_HOSTED_ADAPTERS manually (a JSON array containing alfred_discord, in .env — NOT secrets.toml, which would shadow env) — then 'docker compose up -d alfred-gateway'."
 }
 

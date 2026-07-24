@@ -80,8 +80,46 @@ read_env_var() {
 seed_hosted_adapters() {
   local token; token="$(read_env_var ALFRED_DISCORD_BOT_TOKEN)"
   if [[ -n "$token" ]] && ! grep -qE '^ALFRED_GATEWAY_HOSTED_ADAPTERS=' .env; then
+    # CodeRabbit finding 1 (#469 Blocker 2 PR review): a `.env` without a trailing
+    # newline would otherwise glue the new key onto the last existing line — e.g.
+    # `...real-tokenALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]` as ONE
+    # unparseable line — so the new key is never grep-matchable and Discord silently
+    # stays disabled. `tail -c1` reads the file's last byte; command substitution
+    # strips a trailing newline from the result, so a non-empty result here means the
+    # last byte on disk was NOT a newline. `-s .env` guards the fresh-empty-file case
+    # (nothing to glue onto; a leading blank line there would be cosmetic noise).
+    if [[ -s .env ]] && [[ -n "$(tail -c1 .env)" ]]; then
+      printf '\n' >> .env
+    fi
     printf '%s\n' 'ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]' >> .env
     echo "Discord token detected — enabled gateway-hosted Discord (ALFRED_GATEWAY_HOSTED_ADAPTERS in .env)."
+  fi
+}
+
+# CodeRabbit finding 2 (#469 Blocker 2 PR review): the post-bind advisory must be based
+# on the EFFECTIVE hosted-adapter set (i.e. what `.env` looks like AFTER
+# seed_hosted_adapters has already run), not merely token presence. Under an explicit
+# ALFRED_GATEWAY_HOSTED_ADAPTERS=[] opt-out, seed_hosted_adapters leaves operator intent
+# alone even with a real token in .env — advertising the `--wait-ready discord` probe in
+# that case would send the operator after an adapter that will never run. Factored into
+# its own top-level function (mirrors seed_hosted_adapters) so it can be exercised
+# directly by a real-execution test instead of only through the interactive,
+# TTY-gated bind flow.
+discord_probe_advisory() {
+  local hosted; hosted="$(read_env_var ALFRED_GATEWAY_HOSTED_ADAPTERS)"
+  if [[ "$hosted" == *alfred_discord* ]]; then
+    echo "After 'docker compose up -d alfred-gateway', verify the Discord adapter with:"
+    echo "  alfred gateway adapters --wait-ready discord"
+  elif [[ -n "$(read_env_var ALFRED_DISCORD_BOT_TOKEN)" ]]; then
+    # Token present but Discord is not in the effective hosted set — most likely a
+    # deliberate ALFRED_GATEWAY_HOSTED_ADAPTERS=[] opt-out (operator intent wins per
+    # seed_hosted_adapters). Don't advertise a probe for an adapter that won't run.
+    warn "ALFRED_DISCORD_BOT_TOKEN is set but Discord is not in ALFRED_GATEWAY_HOSTED_ADAPTERS — it will not be gateway-hosted. To enable it: remove the ALFRED_GATEWAY_HOSTED_ADAPTERS=[] opt-out (or add \"alfred_discord\" to it) in .env, then 'docker compose up -d alfred-gateway'."
+  else
+    # devex-004: Discord is opt-in (docker-compose.yaml default is []). The seed step
+    # above only flips ALFRED_GATEWAY_HOSTED_ADAPTERS when a token is present, so an
+    # unset token here means it stayed empty on this run — point at both remedies.
+    warn "ALFRED_DISCORD_BOT_TOKEN is unset. Discord is opt-in: set ALFRED_DISCORD_BOT_TOKEN in .env then re-run setup, or set ALFRED_GATEWAY_HOSTED_ADAPTERS manually (e.g. ALFRED_GATEWAY_HOSTED_ADAPTERS=[\"alfred_discord\"] in .env, NOT secrets.toml, which would shadow env) — then 'docker compose up -d alfred-gateway'."
   fi
 }
 
@@ -520,21 +558,13 @@ if [[ -t 0 ]]; then
     if docker compose ps --services 2>/dev/null | grep -qx alfred-discord; then
       warn "A stale alfred-discord container is running — 'docker compose down' then 'up -d'."
     fi
-    # #469 Blocker 2 Task 5: read from .env (via read_env_var), not the shell
-    # environment. The `seed_hosted_adapters` step above already seeds
-    # ALFRED_GATEWAY_HOSTED_ADAPTERS from a token found in .env — checking only
-    # `${ALFRED_DISCORD_BOT_TOKEN:-}` here would report "unset" for the common case
-    # of a token set in .env but never exported to the shell, contradicting what the
-    # seed step already did.
-    if [[ -n "$(read_env_var ALFRED_DISCORD_BOT_TOKEN)" ]]; then
-      echo "After 'docker compose up -d alfred-gateway', verify the Discord adapter with:"
-      echo "  alfred gateway adapters --wait-ready discord"
-    else
-      # devex-004: Discord is opt-in (docker-compose.yaml default is []). The seed step
-      # above only flips ALFRED_GATEWAY_HOSTED_ADAPTERS when a token is present, so an
-      # unset token here means it stayed empty on this run — point at both remedies.
-      warn "ALFRED_DISCORD_BOT_TOKEN is unset. Discord is opt-in: set ALFRED_DISCORD_BOT_TOKEN in .env then re-run setup, or set ALFRED_GATEWAY_HOSTED_ADAPTERS manually (e.g. ALFRED_GATEWAY_HOSTED_ADAPTERS=[\"alfred_discord\"] in .env, NOT secrets.toml, which would shadow env) — then 'docker compose up -d alfred-gateway'."
-    fi
+    # CodeRabbit finding 2 (#469 Blocker 2 PR review): base the advisory on the
+    # EFFECTIVE hosted-adapter set (discord_probe_advisory, defined above), not merely
+    # token presence — under an explicit ALFRED_GATEWAY_HOSTED_ADAPTERS=[] opt-out
+    # Discord is NOT gateway-hosted even with a real token in .env, and the old
+    # token-only check advertised a --wait-ready probe for an adapter that would
+    # never run.
+    discord_probe_advisory
   fi
 fi
 
