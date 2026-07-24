@@ -1002,7 +1002,23 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Check for Python project
+        id: check
+        # Matches python-cross-os's guard: GitHub Actions rejects `hashFiles()` in a
+        # job-level `if:` at parse time, so we probe pyproject.toml here and every
+        # downstream step short-circuits on `has_py`. `shell: bash` (Git-Bash, on the
+        # windows-latest host before WSL exists) runs the POSIX test identically.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            echo "has_py=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_py=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::pyproject.toml missing — skipping Python WSL job."
+          fi
       - name: Provision WSL2 (Ubuntu-24.04)
+        if: steps.check.outputs.has_py == 'true'
         uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
         with:
           distribution: Ubuntu-24.04
@@ -1010,6 +1026,7 @@ jobs:
           # the uv installer below needs it. #496.
           additional-packages: curl
       - name: Stub docker + jq for --dry-run under WSL
+        if: steps.check.outputs.has_py == 'true'
         # bin/alfred-setup.sh's prereq gate (`require_cmd docker`, the `docker compose`
         # probe, `require_cmd jq` — bin/alfred-setup.sh:73-79) runs BEFORE the `--dry-run`
         # early exit (:81-84), and neither binary ships in the bare Ubuntu-24.04 rootfs
@@ -1043,6 +1060,7 @@ jobs:
           install -m 0755 "$stub" /usr/local/bin/docker
           install -m 0755 "$stub" /usr/local/bin/jq
       - name: uv + Python + deps INSIDE WSL, over the mounted workspace
+        if: steps.check.outputs.has_py == 'true'
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
@@ -1068,6 +1086,7 @@ jobs:
           uv python install 3.14
           uv sync --frozen --dev
       - name: Setup-script .sh tests UNDER WSL (over the mounted workspace)
+        if: steps.check.outputs.has_py == 'true'
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
@@ -1090,6 +1109,7 @@ jobs:
           fi
           echo "assert-RAN: ${passed} setup-script tests passed under real WSL."
       - name: Line-ending guard (no CRLF in .sh as WSL sees them)
+        if: steps.check.outputs.has_py == 'true'
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
@@ -1100,12 +1120,22 @@ jobs:
             rm -f "$probe"; echo "::error::CRLF detector self-test FAILED — the guard cannot see CRLF (paper gate)."; exit 1
           fi
           rm -f "$probe"
-          # the real check: no tracked .sh may carry CRLF as WSL sees it.
-          if grep -lrP '\r$' bin/*.sh 2>/dev/null; then
+          # the real check: scan ALL shell scripts in the checkout repo-wide (not just bin/ —
+          # scripts/*.sh exists too, CR #497) and assert we actually found some, so an empty
+          # match can't vacuously pass. A glob (not `git ls-files`) avoids depending on git in
+          # the bare WSL rootfs / the drvfs dubious-ownership guard. nullglob => empty on no
+          # match; dotglob stays off so `.git`/`.github` aren't walked (they hold no *.sh).
+          shopt -s globstar nullglob
+          scripts=( **/*.sh )
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::no .sh discovered in the checkout — the CRLF guard would be vacuous."; exit 1
+          fi
+          if grep -lP '\r$' "${scripts[@]}" 2>/dev/null; then
             echo "::error::CRLF found in a .sh under WSL — the .gitattributes LF rule regressed."; exit 1
           fi
-          echo "CRLF guard: detector proven on a synthetic CRLF + no CRLF in bin/*.sh."
+          echo "CRLF guard: detector proven + ${#scripts[@]} .sh scanned repo-wide, all LF."
       - name: .ps1 -> wsl bash forwarding smoke
+        if: steps.check.outputs.has_py == 'true'
         # bin/alfred-setup.ps1 itself runs `docker compose ps --services` NATIVELY on the
         # pwsh/Windows side (line 36) before forwarding to WSL. windows-latest ships a
         # real docker CLI + compose plugin (Docker 29.1.5 / Compose 2.40.3 per
