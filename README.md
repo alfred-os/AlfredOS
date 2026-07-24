@@ -166,7 +166,9 @@ Operator workflow for a fresh deploy:
    Re-running `bin/alfred-setup.sh` writes the second line for you: it
    seeds `ALFRED_GATEWAY_HOSTED_ADAPTERS` whenever it finds a token
    already in `.env`. Skip the second line and the gateway still hosts
-   nothing — `--wait-ready discord` in step 8 below will just time out.
+   nothing — `--wait-ready discord` in step 8 below then exits `3` (the
+   adapter isn't in the hosted set, so it can't be resolved), rather than
+   timing out.
    The token itself is read by `alfred-core` on boot and delivered to
    the gateway-hosted Discord child over fd-3 at spawn time; the
    gateway and child never hold the token in their environment.
