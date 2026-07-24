@@ -1,0 +1,33 @@
+"""Unit tests for the isolated e2e env-file writer."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from tests.e2e import _env
+
+
+def _read(env_path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in env_path.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            out[k] = v
+    return out
+
+
+def test_writes_gf_password_and_sentinel_keys(tmp_path: Path) -> None:
+    values = _read(_env.write_e2e_env_file(tmp_path))
+    assert values["ALFRED_DEEPSEEK_API_KEY"] == _env.DUMMY_KEY_SENTINEL
+    assert values["ALFRED_QUARANTINE_PROVIDER_API_KEY"] == _env.DUMMY_KEY_SENTINEL
+    assert len(values["GF_SECURITY_ADMIN_PASSWORD"]) >= 32
+
+
+def test_gf_password_is_per_run_random(tmp_path: Path) -> None:
+    a = _read(_env.write_e2e_env_file(tmp_path / "a"))["GF_SECURITY_ADMIN_PASSWORD"]
+    b = _read(_env.write_e2e_env_file(tmp_path / "b"))["GF_SECURITY_ADMIN_PASSWORD"]
+    assert a != b
+
+
+def test_dummy_key_is_not_the_env_example_placeholder(tmp_path: Path) -> None:
+    assert _env.DUMMY_KEY_SENTINEL != "sk-..."
