@@ -132,7 +132,7 @@ prove the detector works before trusting it (the WSL-leg self-test discipline).
 ### The assertion table
 
 | Service / check | Expected today | Disposition |
-|---|---|---|
+| --- | --- | --- |
 | alfred-postgres | healthy | assert healthy (baseline) |
 | alfred-redis | healthy | assert healthy (baseline) |
 | alfred-prometheus | healthy | assert healthy (baseline) |
