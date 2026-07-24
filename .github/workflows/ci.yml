@@ -972,7 +972,7 @@ jobs:
 
   python-wsl:
     # #496: the ONLY leg that exercises the supported Windows path — repo on the Windows
-    # filesystem, setup scripts run FROM WSL over /mnt/c. Catches CRLF / interop / the
+    # filesystem, setup scripts run FROM WSL over the mounted workspace. Catches CRLF / interop / the
     # bin/alfred-setup.ps1 -> `wsl bash` handoff that neither python-cross-os (native) nor
     # the ubuntu legs see. Scoped to the setup-script + .ps1 surface only (WSL ~= Ubuntu
     # for pure Python — already covered by the `python` job).
@@ -1006,6 +1006,9 @@ jobs:
         uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
         with:
           distribution: Ubuntu-24.04
+          # curl is NOT in the bare Ubuntu-24.04 WSL rootfs (unlike GH-hosted images);
+          # the uv installer below needs it. #496.
+          additional-packages: curl
       - name: Stub docker + jq for --dry-run under WSL
         # bin/alfred-setup.sh's prereq gate (`require_cmd docker`, the `docker compose`
         # probe, `require_cmd jq` — bin/alfred-setup.sh:73-79) runs BEFORE the `--dry-run`
@@ -1039,18 +1042,31 @@ jobs:
           chmod +x "$stub"
           install -m 0755 "$stub" /usr/local/bin/docker
           install -m 0755 "$stub" /usr/local/bin/jq
-      - name: uv + Python + deps INSIDE WSL, over /mnt/c
+      - name: uv + Python + deps INSIDE WSL, over the mounted workspace
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # Supply-chain (#496): pin the uv version + download-to-file — never `curl | sh` of
+          # "latest" (mirrors this file's proto/promtool install convention). 0.11.6 matches
+          # the repo dev env / uv.lock. `curl` comes from setup-wsl additional-packages.
+          UV_VERSION=0.11.6
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+                 "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh; then
+              break
+            fi
+            [ "${attempt}" -eq 3 ] && { echo "::error::could not fetch the uv installer after 3 attempts"; exit 1; }
+            sleep $((attempt * 5))
+          done
+          sh /tmp/uv-install.sh
           export PATH="$HOME/.local/bin:$PATH"
-          # repo is at the Windows-side checkout via /mnt/c (the interop we test); keep the
-          # venv WSL-native to avoid /mnt/c I/O cost — the repo path is what matters.
+          # The repo is at the mounted Windows workspace (e.g. /mnt/d on windows-latest — the
+          # interop we test); keep the venv WSL-native to avoid the mounted-FS I/O cost — the
+          # repo path is what matters.
           export UV_PROJECT_ENVIRONMENT="$HOME/.wslvenv"
           uv python install 3.14
           uv sync --frozen --dev
-      - name: Setup-script .sh tests UNDER WSL (over /mnt/c)
+      - name: Setup-script .sh tests UNDER WSL (over the mounted workspace)
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
