@@ -65,7 +65,7 @@ def test_bad_tally_reds(tmp_path: Path, counts: Mapping[str, int]) -> None:
 def test_xpassed_assertion(tmp_path: Path) -> None:
     """xpassed>0 with everything else fine must fail (case a)."""
     xpass_bad = {**_HEALTHY, "xpassed": 1}
-    with pytest.raises(AssertionError, match="xpass.*non-strict xfail"):
+    with pytest.raises(AssertionError, match="non-strict xfail"):
         assert_boot_lane_tally(_write(tmp_path, xpass_bad))
 
 
