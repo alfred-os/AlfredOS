@@ -9,6 +9,8 @@ call runs from ``REPO_ROOT``.
 
 from __future__ import annotations
 
+import contextlib
+
 # Self-aliased so ``mypy --strict`` (which implies --no-implicit-reexport) treats
 # ``subprocess`` as an intentionally exported attribute of this module — tests patch
 # ``_compose.subprocess.run`` directly rather than importing the stdlib module themselves.
@@ -37,5 +39,10 @@ def compose(
 
 
 def down_project(project: str, *, timeout_s: float = 90.0) -> None:
-    """Tear down a throwaway project + its named volumes (idempotent; never raises)."""
-    compose(project, "down", "-v", check=False, timeout_s=timeout_s)
+    """Tear down a throwaway project + its named volumes (idempotent; never raises).
+
+    Best-effort: a hung/failed ``down`` (e.g. a wedged daemon → ``TimeoutExpired``) must not
+    mask a test result, so its own ``SubprocessError`` is swallowed.
+    """
+    with contextlib.suppress(subprocess.SubprocessError):
+        compose(project, "down", "-v", check=False, timeout_s=timeout_s)
