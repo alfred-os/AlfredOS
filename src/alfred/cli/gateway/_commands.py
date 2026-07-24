@@ -243,6 +243,7 @@ def start_gateway() -> None:
     # perf-001: the relay graph imports lazily here, not at module-top, so
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
+    from alfred.config.settings import SettingsError
     from alfred.egress.allowlist import exact_match, provider_egress_allowlist
     from alfred.egress.errors import (
         EgressAdapterProxyUnavailableError,
@@ -281,10 +282,16 @@ def start_gateway() -> None:
     # (:class:`ManifestError`) is a CONFIG fault — reported with the config-fault
     # remediation, NOT mislabelled as a socket ``bind_failed`` (which it would be if the
     # resolution ran inside the bind ``try``'s ``except OSError``). A config fault refuses
-    # the start LOUD before the process is ever constructed.
+    # the start LOUD before the process is ever constructed. ``SettingsError`` (a
+    # ``ValueError`` subclass every ``Settings()`` construction failure is lifted to — see
+    # ``settings.py``) is ALSO a config fault: an operator who opts in with the CANONICAL
+    # ``adapter_id`` (``discord``) instead of the plugin-package id
+    # (``alfred_discord``) fails the ``comms_enabled_adapters`` validator inside
+    # ``_resolve_hosted_adapter_ids``'s ``Settings()`` call, and without this arm that
+    # escaped as a raw traceback instead of this same refusal (#469 Blocker 2 Task 4).
     try:
         hosted_adapter_ids = _resolve_hosted_adapter_ids()
-    except (OSError, ManifestError) as exc:
+    except (OSError, ManifestError, SettingsError) as exc:
         log.warning("gateway.cli.config_failed", error=repr(exc))
         typer.echo(t("gateway.start.config_failed"))
         raise typer.Exit(code=_EXIT_CONFIG_FAILED) from exc
