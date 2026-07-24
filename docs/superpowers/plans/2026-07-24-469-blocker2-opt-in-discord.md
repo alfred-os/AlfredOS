@@ -25,10 +25,12 @@
 ### Task 1: Compose default flip + comment + invariant tests
 
 **Files:**
+
 - Modify: `docker-compose.yaml:275` (the default) and `:271-274` (the comment)
 - Test: `tests/unit/test_compose_invariants.py:363-367` (invert `test_alfred_gateway_hosts_discord`)
 
 **Interfaces:**
+
 - Produces: the stock compose default `ALFRED_GATEWAY_HOSTED_ADAPTERS:-[]`. Nothing else consumes this at the code level (the code default is already `Field(default=())`).
 
 - [ ] **Step 1: Rewrite the failing invariant test** — replace `test_alfred_gateway_hosts_discord` with an opt-in assertion.
@@ -107,10 +109,12 @@ git commit -m "fix(compose): #469 default gateway-hosted adapters to empty (opt-
 ### Task 2: `GatewayAdapterCredentialError` marker at the supervisor credential arm
 
 **Files:**
+
 - Modify: `src/alfred/gateway/adapter_supervisor.py` (add the class near `GatewayAdapterSpawnError:109`; change the credential-refusal wrap at `:490-503`)
 - Test: `tests/unit/gateway/test_adapter_supervisor_credential.py`
 
 **Interfaces:**
+
 - Produces: `class GatewayAdapterCredentialError(GatewayAdapterSpawnError)` in `alfred.gateway.adapter_supervisor`. Raised (first-attempt) when the credential resolver refuses (`missing_secret`/`grant_mismatch`/`delivery_failed`). Task 3 imports and catches it. **A non-credential first-attempt spawn failure still raises the bare `GatewayAdapterSpawnError`** (unchanged).
 
 - [ ] **Step 1: Write the failing supervisor test** — a first-attempt `missing_secret` refusal raises the marker (a `GatewayAdapterSpawnError` subclass) AND still writes the audit row; a non-credential spawn failure raises the bare base type.
@@ -178,11 +182,13 @@ git commit -m "feat(gateway): #469 GatewayAdapterCredentialError marker for cred
 ### Task 3: `start_gateway` friendly refusal + exit 10 + i18n key
 
 **Files:**
+
 - Modify: `src/alfred/cli/gateway/_commands.py` (new exit constant near `:58-81`; lazy import at `:238-267`; new `except` arm in `:391-439`)
 - Modify: `locale/en/LC_MESSAGES/alfred.po` (+ recompile)
 - Test: `tests/unit/cli/test_gateway_cli.py`
 
 **Interfaces:**
+
 - Consumes: `GatewayAdapterCredentialError` from Task 2.
 - Produces: `_EXIT_ADAPTER_SPAWN_FAILED = 10`; the catalog key `gateway.start.adapter_spawn_failed`.
 
@@ -285,10 +291,12 @@ git commit -m "feat(gateway): #469 legible credential-refusal at gateway start (
 ### Task 4: Widen the config-failed arm for the `["discord"]` opt-in typo
 
 **Files:**
+
 - Modify: `src/alfred/cli/gateway/_commands.py:277-282` (the `_resolve_hosted_adapter_ids()` try)
 - Test: `tests/unit/cli/test_gateway_cli.py`
 
 **Interfaces:**
+
 - Consumes: the existing `_EXIT_CONFIG_FAILED = 6` + `t("gateway.start.config_failed")`.
 
 - [ ] **Step 1: Write the failing test** — a canonical `["discord"]` (wrong; the package id is `alfred_discord`) makes `Settings()` raise `SettingsError`/`ValueError`; assert the config-failed refusal + exit 6, not a traceback. Assert an unrelated `ValueError` is NOT swallowed.
@@ -340,11 +348,13 @@ git commit -m "fix(gateway): #469 render config-failed refusal for a bad comms-a
 ### Task 5: Setup-script opt-in coherence (`.sh` + `.ps1`)
 
 **Files:**
+
 - Modify: `bin/alfred-setup.sh` (new top-level step; the advisory at `:502`)
 - Modify: `bin/alfred-setup.ps1` (reconcile the stale advisory at `:45`)
 - Test: `tests/unit/test_setup_script_env_seed.py` (reuse `tests/_setup_script_helpers.py`)
 
 **Interfaces:**
+
 - Consumes: `read_env_var` helper (already in the script) and the `umask 077` grep-else-append pattern at `alfred-setup.sh:130-134`.
 
 > **Plan-review corrections (test-p-001 / devops-p-001 / rev-p-002, corroborated ×3):**
@@ -430,6 +440,7 @@ git commit -m "feat(setup): #469 seed opt-in Discord hosted-adapter set when a t
 ### Task 6: Docs (README + runbook + .env.example) + ADR-0054
 
 **Files:**
+
 - Modify: `README.md:140-191` (Enable Discord); `.env.example:52-57` (WARNING block); `docs/runbooks/2026-06-25-discord-flag-day-migration.md:119-165,184`
 - Create: `docs/adr/0054-gateway-hosted-adapters-default-empty.md`
 - Test: `tests/unit/config/test_env_example_no_downgrade.py` (must stay green); markdownlint

@@ -130,8 +130,8 @@ a security refusal** into a friendly "set your token" message — the hard-rule-
 supervisor's credential-refusal arm (`adapter_supervisor.py:500-503`, where the
 `AdapterCredentialError`-wrapped `missing_secret`/`grant_mismatch`/`delivery_failed` cases
 are already audited via `_audit_spawn_aborted`) — i.e. change the wrapped
-`GatewayAdapterSpawnError` there into the marker. **No factory/runner change** (that is
-#493). `start_gateway` catches **only that subclass** and:
+`GatewayAdapterSpawnError` there into the marker. **No factory/runner change** (that
+is issue #493). `start_gateway` catches **only that subclass** and:
 
 - renders `t("gateway.start.adapter_spawn_failed", adapter_id=…)` — a static template whose
   only interpolation is the non-tainted closed-vocab `adapter_id` (err-004/sec-003: no
@@ -222,8 +222,8 @@ reversal of the #309 flag-day's *compose default* (capability unchanged); cites
 `docs/runbooks/2026-06-25-discord-flag-day-migration.md` as the origin of the on-by-default
 value; that it **restores PRD §4 SC-1** while leaving PRD §5 invariants untouched; that
 fail-closed is preserved for explicitly-enabled adapters; and (arch-002) that
-**opt-in-misconfigured = whole-stack-down** is an accepted limitation until #331. Cross-links
-#309 / ADR-0036 / the flag-day runbook (which gains a forward-pointer, docs-004).
+**opt-in-misconfigured = whole-stack-down** is an accepted limitation until #331.
+Cross-links #309 / ADR-0036 / the flag-day runbook (which gains a forward-pointer, docs-004).
 
 ## Commit discipline (rev-005)
 
