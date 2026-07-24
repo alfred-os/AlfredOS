@@ -316,6 +316,11 @@ ignore = ["S101"]
 # helper above. Assigning the argv to a local before the call (matching `tests/_compose.py`)
 # already keeps S607 out of scope; only S603 remains.
 "tests/e2e/conftest.py" = ["S603"]
+# The #494 boot-lane test file runs `bash bin/alfred-setup.sh` by name (partial path)
+# with fixed-literal argv — same trusted-CLI rationale as the docker probe and compose
+# helper above. Assigning the argv to a local before the call (matching `tests/_compose.py`
+# and `tests/e2e/conftest.py`) already keeps S607 out of scope; only S603 remains.
+"tests/e2e/test_first_run_boot.py" = ["S603"]
 # #496 shell-script LF guard runs `git ls-files` by name (partial path) with
 # fixed-literal argv — same trusted-CLI rationale as the docker probe above.
 # No untrusted input reaches the subprocess.
