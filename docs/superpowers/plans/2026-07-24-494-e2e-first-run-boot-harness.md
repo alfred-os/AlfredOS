@@ -28,10 +28,12 @@
 ### Task 1: Register the `e2e` marker + create the `tests/e2e/` package
 
 **Files:**
+
 - Modify: `pyproject.toml` (the `[tool.pytest.ini_options] markers` list, currently at `:179`)
 - Create: `tests/e2e/__init__.py`
 
 **Interfaces:**
+
 - Produces: the registered `e2e` pytest marker (satisfies `--strict-markers`) and the `tests/e2e/` package that all later tasks live in.
 
 - [ ] **Step 1: Register the marker.** In `pyproject.toml`, inside the `markers = [` list (alongside the existing `docker:` and `real_llm:` entries), add:
@@ -63,10 +65,12 @@ git commit -m "test: #494 register e2e marker + tests/e2e package skeleton"
 ### Task 2: Extract the shared compose lifecycle helper `tests/_compose.py`
 
 **Files:**
+
 - Create: `tests/_compose.py`
 - Modify: `tests/smoke/test_gateway_core_link_smoke.py:84-118` (repoint its `_compose`/`compose_project` to the shared helper)
 
 **Interfaces:**
+
 - Produces:
   - `REPO_ROOT: Path`, `COMPOSE_FILE: Path`
   - `compose(project: str, *args: str, env_file: Path | None = None, check: bool = True, timeout_s: float = 180.0) -> subprocess.CompletedProcess[str]` — runs `docker compose -f <COMPOSE_FILE> -p <project> [--env-file <env_file>] <args>` from `REPO_ROOT`, `capture_output=True, text=True`.
@@ -198,10 +202,12 @@ git commit -m "test: #494 extract shared tests/_compose.py lifecycle helper (DRY
 ### Task 3: Health-state classifier `tests/e2e/_health.py`
 
 **Files:**
+
 - Create: `tests/e2e/_health.py`
 - Test: `tests/e2e/test_health_classifier.py`
 
 **Interfaces:**
+
 - Produces:
   - `class ServiceHealth(StrEnum)` with members `HEALTHY`, `UNHEALTHY`, `STARTING`, `NOT_CREATED`, `NO_HEALTHCHECK`.
   - `classify_health(inspect: Sequence[Mapping[str, object]]) -> ServiceHealth` — pure; maps a parsed `docker inspect` result (a list of 0-or-1 container objects) to a state.
@@ -316,10 +322,12 @@ git commit -m "test: #494 pure health-state classifier + self-test (starting != 
 ### Task 4: Service-set derivation + independent floor `tests/e2e/_services.py`
 
 **Files:**
+
 - Create: `tests/e2e/_services.py`
 - Test: `tests/e2e/test_services.py`
 
 **Interfaces:**
+
 - Produces:
   - `MIN_SERVICE_FLOOR: int = 6` — an **independent literal** floor (round-2 test-003: never re-derive the floor from the same `docker compose config` output being validated).
   - `BASELINE_SERVICES: frozenset[str]` = `{"alfred-postgres", "alfred-redis", "alfred-prometheus", "alfred-grafana"}`.
@@ -429,10 +437,12 @@ git commit -m "test: #494 service-set derivation + independent literal floor gua
 ### Task 5: Isolated env-file writer `tests/e2e/_env.py`
 
 **Files:**
+
 - Create: `tests/e2e/_env.py`
 - Test: `tests/e2e/test_env.py`
 
 **Interfaces:**
+
 - Produces:
   - `E2E_PROJECT_NAME: str = "alfred-e2e"` — the fixed isolated compose project name.
   - `DUMMY_KEY_SENTINEL: str = "sk-DUMMY-e2e-not-a-real-key"` — self-identifying dummy key (round-2 sec-002: never mistakable for real; trivially scrubbed).
@@ -533,10 +543,12 @@ git commit -m "test: #494 isolated e2e env-file (per-run GF pw + sentinel dummy 
 ### Task 6: Tally guard `tests/e2e/_assert_ran.py` (pytest-stats JSON, no XML)
 
 **Files:**
+
 - Create: `tests/e2e/_assert_ran.py`
 - Test: `tests/e2e/test_assert_ran.py`
 
 **Interfaces:**
+
 - Produces:
   - `write_tally(counts: Mapping[str, int], dest: Path) -> None` — serialize the outcome counts as JSON (called from the Task 7 `pytest_terminal_summary` hook).
   - `assert_boot_lane_tally(tally_path: Path) -> None` — read the JSON and raise `AssertionError` unless the tally is the expected non-vacuous shape: `collected >= MIN_SERVICE_FLOOR + 1` (6 services + the setup.sh check), ≥1 genuine pass, ≥1 xfail, and **0 failed / 0 error / 0 skipped / 0 xpassed**.
@@ -686,9 +698,11 @@ git commit -m "test: #494 tally guard from pytest stats (JSON, no XML/XXE; xpass
 ### Task 7: e2e conftest lifecycle `tests/e2e/conftest.py`
 
 **Files:**
+
 - Create: `tests/e2e/conftest.py`
 
 **Interfaces:**
+
 - Consumes: `tests._docker_probe.docker_available`, `tests._compose.compose`/`down_project`, `tests.e2e._env`, `tests.e2e._services`, `tests.e2e._health`.
 - Produces (fixtures for Task 8):
   - `boot_stack` (session-scoped) — yields a `BootStack` dataclass exposing `env_file: Path`, `project: str`, and `health(service: str) -> ServiceHealth` (polls Docker health with a per-service timeout budget). Brings the infra baseline up via `up -d --no-deps`; captures logs before `down -v`.
@@ -813,9 +827,11 @@ git commit -m "test: #494 e2e conftest — isolated compose lifecycle, fail-loud
 ### Task 8: The boot tests `tests/e2e/test_first_run_boot.py`
 
 **Files:**
+
 - Create: `tests/e2e/test_first_run_boot.py`
 
 **Interfaces:**
+
 - Consumes: `boot_stack` fixture (Task 7), `ServiceHealth` (Task 3), `_env`/`_compose` (Tasks 2/5).
 - Produces: the 7 testcases the Task 6 tally expects (4 baseline pass + gateway/core/setup.sh xfail).
 
@@ -949,10 +965,12 @@ git commit -m "test: #494 e2e boot tests — green infra baseline + xfail(strict
 ### Task 9: Restructure the nightly `e2e` job + record the convention
 
 **Files:**
+
 - Modify: `.github/workflows/nightly.yml:22-94` (the `e2e` job)
 - Modify: `docs/ci/required-checks.md` (add the split-baseline + deferred-promotion note)
 
 **Interfaces:**
+
 - Consumes: `tests/e2e/**` (Tasks 1–8), the `python -m tests.e2e._assert_ran` CLI (Task 6).
 
 - [ ] **Step 1: Restructure the `e2e` job.** In `.github/workflows/nightly.yml`, within the `e2e` job: keep the `Check for e2e suite` gate, the AppArmor-profile load, and the Grafana-password seed as baseline host-prep. **Remove** the `Boot stack` step (`docker compose up -d --wait`) — the conftest owns lifecycle. **Replace** the `Run E2E` step (drop the `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env; add junit + the tally guard) and add a buildx cache warm-up for the core image. The new run + tally steps:
@@ -1009,6 +1027,7 @@ git commit -m "ci: #494 wire the e2e boot lane (split baseline, junit tally, log
 ### Task 10: Diagnosis run — confirm blockers, file issues, finalize xfail refs
 
 **Files:**
+
 - Modify: `tests/e2e/_services.py` (finalize the real issue numbers in `XFAIL_SERVICES`)
 - Modify: `tests/e2e/test_first_run_boot.py` (finalize the xfail `reason` issue refs)
 
