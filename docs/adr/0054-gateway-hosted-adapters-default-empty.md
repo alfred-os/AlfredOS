@@ -88,9 +88,16 @@ handled once it exists.
 
 ### Positive
 
-- Restores PRD §4 SC-1: a stock `docker compose up -d` boots a healthy
-  gateway (`supervise_all([])` is a no-op) and the core's health-gated
-  `depends_on` clears, with zero configuration and no token.
+- Removes the Discord-default crash-loop — one obstacle to PRD §4 SC-1. An
+  empty hosted set makes `supervise_all([])` a no-op, so the gateway's
+  adapter-resolution step no longer aborts on a missing Discord token (no
+  Discord config or token required; the base gateway settings still are — not
+  "zero configuration"). **This does not by itself make the stock stack boot.**
+  UAT on PR #495 confirmed the full SC-1 boot still needs the other known #469
+  UAT blockers — in particular the gateway currently constructs a full
+  `Settings()` (requiring `ALFRED_DEEPSEEK_API_KEY`, which it lacks per
+  ADR-0036) *before* it reaches adapter resolution, so until that #469 blocker
+  lands this fix's effect is masked by that earlier failure.
 - The fail-closed posture for an *explicit* opt-in is unchanged — a
   missing credential still refuses the spawn loud, per hard rules #5/#7.
   This ADR only changes whether that refusal is reachable by default.
@@ -157,7 +164,8 @@ handled once it exists.
 ## References
 
 - PRD [§4 Success Criteria — MVP (v0.1)](../../PRD.md#4-success-criteria--mvp-v01)
-  — SC-1, the onboarding criterion this ADR restores.
+  — SC-1, the onboarding criterion this ADR advances toward (it removes the
+  Discord-default crash-loop; the full criterion needs the other #469 blockers).
 - PRD [§5 Architecture Overview](../../PRD.md#5-architecture-overview) —
   the gateway-as-sole-egress-plane, connectivity-free-core, and dual-LLM
   invariants this ADR leaves untouched.

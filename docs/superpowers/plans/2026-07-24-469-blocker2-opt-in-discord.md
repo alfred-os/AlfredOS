@@ -119,6 +119,8 @@ git commit -m "fix(compose): #469 default gateway-hosted adapters to empty (opt-
 
 - [ ] **Step 1: Write the failing supervisor test** — a first-attempt `missing_secret` refusal raises the marker (a `GatewayAdapterSpawnError` subclass) AND still writes the audit row; a non-credential spawn failure raises the bare base type.
 
+> **Note (comms-p-004):** the sketch below calls `_spawn_or_terminal` illustratively; drive the test via the proven **`supervise_one`** entry, as the corrections appendix requires — this is how the shipped test is written.
+
 ```python
 async def test_first_attempt_credential_refusal_raises_marker(...):
     # existing fixture wiring: empty broker -> AdapterCredentialError(missing_secret)
