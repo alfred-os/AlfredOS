@@ -12,6 +12,14 @@ with an empty secret broker (no ``discord_bot_token``) and asserts:
 **Known blast radius**: when the unset-token path fires at runtime the entire gateway
 process aborts (fail-closed). The park-not-abort structural fix is tracked by #331.
 
+**#469 Blocker 2**: this resolver behaviour is UNCHANGED — an operator who explicitly
+opts Discord in (``ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]``) without also
+setting ``ALFRED_DISCORD_BOT_TOKEN`` still hits this exact refusal path. What changed is
+the *stock* ``docker-compose.yaml`` default: Discord is now opt-in
+(``ALFRED_GATEWAY_HOSTED_ADAPTERS:-[]``), so a first-run `docker compose up -d` with no
+Discord config no longer reaches this path at all — the gateway simply hosts no adapter
+and boots healthy.
+
 Fixture pattern mirrors ``tests/adversarial/comms/test_gateway_credential_corpus.py``
 (the ``_CountingBroker`` / ``_FakeAudit`` / ``_resolver`` shapes); reused here as
 inline helpers to keep this test self-contained on the standard integration gate

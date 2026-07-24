@@ -248,3 +248,138 @@ def test_openssl_missing_fails_loud_with_an_actionable_error(
     assert any(mgr in stderr_lower for mgr in ("apt", "dnf", "pacman", "apk", "brew")), (
         f"openssl-missing error names no concrete package manager: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #469 Blocker 2 Task 5: seed_hosted_adapters — opt-in Discord coherence.
+# ---------------------------------------------------------------------------
+# Different slice shape from the GF_SECURITY_ADMIN_PASSWORD block above: this step is a
+# NAMED top-level function (not a step-marker-delimited block), so it is sliced by
+# `slice_shell_function`'s anchor line rather than by a `step "..."` pair — the same
+# technique this file already uses for `openssl_missing_message`. `seed_hosted_adapters`
+# calls `read_env_var`, so both must be sliced and prepended together: extracting
+# `seed_hosted_adapters` alone would fail at runtime with a bash "read_env_var: command
+# not found" the moment the call site ran, not because the seed logic itself is wrong.
+
+_READ_ENV_VAR_START = "read_env_var() {"
+_SEED_HOSTED_ADAPTERS_START = "seed_hosted_adapters() {"
+
+
+def _seed_hosted_adapters_script() -> str:
+    """Slice ``seed_hosted_adapters`` + its ``read_env_var`` dependency out of the real script.
+
+    Anchored on both functions' declaration lines so a moved/renamed helper — or a
+    moved/renamed callee — raises loudly here instead of silently running a stale copy
+    (mirrors ``_openssl_missing_message_func`` above).
+    """
+    return (
+        slice_shell_function(_SETUP_SH, _READ_ENV_VAR_START)
+        + "\n"
+        + slice_shell_function(_SETUP_SH, _SEED_HOSTED_ADAPTERS_START)
+    )
+
+
+def _run_seed_hosted_adapters(env_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the real ``seed_hosted_adapters`` function against ``env_path`` as ``.env``.
+
+    ``cwd=env_path.parent`` so the function's literal (unparameterised) ``.env`` resolves
+    to the caller-supplied temp file — neither ``read_env_var`` nor ``seed_hosted_adapters``
+    take a path argument; they always read/write the literal ``.env`` in the process cwd,
+    exactly as the real script does when invoked from the repo root.
+    """
+    script = "set -euo pipefail\n" + _seed_hosted_adapters_script() + "\nseed_hosted_adapters\n"
+    return subprocess.run(
+        ["bash", "-c", script],
+        cwd=env_path.parent,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        check=False,
+        timeout=30,
+    )
+
+
+def test_seed_hosted_adapters_markers_still_match_the_script() -> None:
+    """Guard the guard — a silently-empty slice would make every test below vacuous."""
+    script = _seed_hosted_adapters_script()
+    assert "read_env_var() {" in script
+    assert "seed_hosted_adapters() {" in script
+    assert 'ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]' in script
+
+
+def test_token_present_seeds_hosted_adapters(bash_available: str, tmp_path: Path) -> None:
+    """A present, non-empty Discord token seeds the opt-in hosted-adapter set — idempotently."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("ALFRED_DISCORD_BOT_TOKEN=real-token\n")
+    first = _run_seed_hosted_adapters(env_path)
+    assert first.returncode == 0, f"seed failed:\nstdout: {first.stdout}\nstderr: {first.stderr}"
+    # Security nit: the seed step must never echo the token value itself — only the
+    # generic "Discord token detected" confirmation. Regression-proof this on BOTH
+    # streams, not just by inspecting the echo statement's source text.
+    assert "real-token" not in first.stdout, f"token value echoed to stdout: {first.stdout!r}"
+    assert "real-token" not in first.stderr, f"token value echoed to stderr: {first.stderr!r}"
+    second = _run_seed_hosted_adapters(env_path)  # re-run must not duplicate the key
+    assert second.returncode == 0, (
+        f"re-run failed:\nstdout: {second.stdout}\nstderr: {second.stderr}"
+    )
+    assert "real-token" not in second.stdout, f"token value echoed to stdout: {second.stdout!r}"
+    assert "real-token" not in second.stderr, f"token value echoed to stderr: {second.stderr!r}"
+    content = env_path.read_text()
+    assert content.count("ALFRED_GATEWAY_HOSTED_ADAPTERS=") == 1, (
+        f"expected exactly one ALFRED_GATEWAY_HOSTED_ADAPTERS= line, got:\n{content}"
+    )
+    assert 'ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]' in content
+
+
+def test_token_absent_leaves_default_empty(bash_available: str, tmp_path: Path) -> None:
+    """A commented-out/blank token is absent to ``read_env_var`` — never re-arm the crash-loop."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("# ALFRED_DISCORD_BOT_TOKEN=\n")
+    result = _run_seed_hosted_adapters(env_path)
+    assert result.returncode == 0, f"seed failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    assert "ALFRED_GATEWAY_HOSTED_ADAPTERS=" not in env_path.read_text()
+
+
+def test_explicit_opt_out_preserved(bash_available: str, tmp_path: Path) -> None:
+    """A deliberate ``=[]`` opt-out survives even when a token is present — operator intent wins."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("ALFRED_DISCORD_BOT_TOKEN=real-token\nALFRED_GATEWAY_HOSTED_ADAPTERS=[]\n")
+    result = _run_seed_hosted_adapters(env_path)
+    assert result.returncode == 0, f"seed failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    content = env_path.read_text()
+    assert content.count("ALFRED_GATEWAY_HOSTED_ADAPTERS=") == 1
+    assert "ALFRED_GATEWAY_HOSTED_ADAPTERS=[]" in content
+
+
+def test_token_present_no_trailing_newline_still_lands_new_key_on_its_own_line(
+    bash_available: str, tmp_path: Path
+) -> None:
+    """CodeRabbit finding 1: a ``.env`` with NO trailing newline must not glue the new key
+    onto the last existing line.
+
+    The append previously assumed ``.env`` always ends with a newline. Without one, the
+    literal bytes on disk became
+    ``ALFRED_DISCORD_BOT_TOKEN=real-tokenALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]``
+    — one unparseable line, so the new key was never grep-matchable
+    (``^ALFRED_GATEWAY_HOSTED_ADAPTERS=`` never matches mid-line) and Discord silently
+    stayed disabled.
+    """
+    env_path = tmp_path / ".env"
+    env_path.write_bytes(b"ALFRED_DISCORD_BOT_TOKEN=real-token")  # deliberately NO trailing \n
+    result = _run_seed_hosted_adapters(env_path)
+    assert result.returncode == 0, f"seed failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    content = env_path.read_text()
+    lines = content.splitlines()
+    assert "ALFRED_DISCORD_BOT_TOKEN=real-token" in lines, (
+        f"the original token line must be left intact on its own line, got:\n{content!r}"
+    )
+    hosted_lines = [ln for ln in lines if ln.startswith("ALFRED_GATEWAY_HOSTED_ADAPTERS=")]
+    assert len(hosted_lines) == 1, (
+        f"expected the new key on its OWN grep-matchable line, got:\n{content!r}"
+    )
+    assert hosted_lines[0] == 'ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]'
+    # grep-matchable via the script's own anchor pattern (^KEY=), same predicate
+    # seed_hosted_adapters' idempotency guard and read_env_var both rely on.
+    assert re.search(
+        r'^ALFRED_GATEWAY_HOSTED_ADAPTERS=\["alfred_discord"\]$', content, re.MULTILINE
+    ), f"new key is not grep-matchable on its own line:\n{content!r}"

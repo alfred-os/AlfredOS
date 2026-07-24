@@ -116,22 +116,39 @@ Per-adapter adapter lifecycle events (`gateway.adapter.up`,
 `gateway.adapter.down`, `gateway.adapter.crashed`) are emitted to the
 structured audit log and appear in `alfred-gateway` container output.
 
-## Misconfig: unset token
+## Misconfig: opted in but unset token
+
+**This section applies only if you have opted in to Discord.** Since
+[ADR-0054](../adr/0054-gateway-hosted-adapters-default-empty.md), the
+gateway hosts **no** comms adapter by default — an unset
+`ALFRED_DISCORD_BOT_TOKEN` on a stock deploy is not a misconfiguration, it
+is the default, and the gateway boots healthy with no token at all. This
+section applies once you have set
+`ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]` (opting in) and then
+left `ALFRED_DISCORD_BOT_TOKEN` blank or unset.
 
 **Symptom**: `docker compose up -d` exits green, but `alfred-gateway` stops
-shortly after. The bot is silent — no replies from Discord. `alfred gateway
-adapters` fails with control-plane-unavailable (exit 2) because the gateway
-process has exited.
+shortly after (and crash-loops under `restart: unless-stopped`). The bot is
+silent — no replies from Discord. `alfred gateway adapters` fails with
+control-plane-unavailable (exit 2) because the gateway process has exited.
 
-**Cause**: `ALFRED_DISCORD_BOT_TOKEN` is not set in `.env` (or is empty).
-When the gateway resolves the Discord adapter's spawn credential it finds no
-secret, raises `AdapterCredentialError` with `reason="missing_secret"`, and
-writes a signed `result="refused"` audit row (hard rules #5 and #7 — a
-missing credential is a non-skippable security event). Today this path
-causes the **entire gateway process to abort** (fail-closed). The bot is
-silent because the gateway has stopped. The structural fix — park the broken
-adapter without aborting the gateway — is tracked by
-[#331](https://github.com/alfred-os/AlfredOS/issues/331).
+**Cause**: `ALFRED_DISCORD_BOT_TOKEN` is not set in `.env` (or is empty)
+while Discord is opted in. When the gateway resolves the Discord adapter's
+spawn credential it finds no secret, raises `AdapterCredentialError` with
+`reason="missing_secret"`, and writes a signed `result="refused"` audit row
+(hard rules #5 and #7 — a missing credential is a non-skippable security
+event). `alfred gateway start` (the container's entrypoint command) catches
+this specific credential refusal and exits `10` with a legible message —
+`docker compose logs alfred-gateway` shows the operator-facing refusal
+text, not a raw traceback. The **entire gateway process still aborts**
+(fail-closed is unchanged; only the message got friendlier), so
+`alfred-core` and `alfred chat` stay down until it is fixed. The structural
+fix — park the broken adapter without aborting the whole gateway — is
+tracked by [#331](https://github.com/alfred-os/AlfredOS/issues/331). A
+*wrong* (not merely absent) token is a narrower, related residual: it still
+surfaces as a raw traceback until
+[#493](https://github.com/alfred-os/AlfredOS/issues/493) makes it legible
+too.
 
 **What the logs show**:
 
@@ -140,7 +157,8 @@ docker compose logs alfred-gateway | grep missing_secret
 ```
 
 You should see a structured log line with `reason=missing_secret` and
-`adapter_id=discord`. The container will have exited.
+`adapter_id=discord`, plus the friendly refusal text. The container will
+have exited.
 
 **Fix**:
 
@@ -164,6 +182,11 @@ You should see a structured log line with `reason=missing_secret` and
 
    Exit `0` confirms the adapter is live.
 
+**Or opt back out.** If you did not mean to enable Discord, clear (or set
+to `[]`) `ALFRED_GATEWAY_HOSTED_ADAPTERS` in `.env` and restart the
+gateway — see [ADR-0054](../adr/0054-gateway-hosted-adapters-default-empty.md)
+for the default-empty rationale.
+
 ## Rollback
 
 Revert PR #309 (the flag-day PR). There is no data migration — the token
@@ -181,10 +204,11 @@ moved between env var stores; no database rows changed. After reverting:
 | `alfred gateway adapters --wait-ready discord` exits `2` | `alfred-gateway` not running | `docker compose ps alfred-gateway` — start if missing: `docker compose up -d alfred-gateway` |
 | `alfred gateway adapters --wait-ready discord` exits `1` (timeout) | Token wrong, missing, or adapter crash-looping | `docker compose logs alfred-gateway \| grep missing_secret`; set correct token; `docker compose up -d alfred-gateway` |
 | `alfred gateway adapters --wait-ready discord` exits `3` | Typo in adapter id or adapter not enabled | Check spelling — `discord` (lowercase). Confirm the adapter is enabled in config. |
-| Gateway container exits immediately after `up -d` | `ALFRED_DISCORD_BOT_TOKEN` unset → gateway aborts fail-closed (#331) | Set the token; `docker compose up -d alfred-gateway` |
+| Gateway container exits immediately after `up -d` | Discord opted in (`ALFRED_GATEWAY_HOSTED_ADAPTERS` names it) but `ALFRED_DISCORD_BOT_TOKEN` unset → legible exit-10 refusal, gateway aborts fail-closed (ADR-0054; park-not-abort tracked by #331) | Set the token, or opt back out by clearing `ALFRED_GATEWAY_HOSTED_ADAPTERS`; `docker compose up -d alfred-gateway` |
 | `docker compose logs alfred-discord` gives "no such service" | Expected — `alfred-discord` service deleted in this release | Switch to `docker compose logs alfred-gateway` |
 | `alfred discord verify` gives "no such command" | Expected — `alfred discord verify` retired in this release | Use `alfred gateway adapters --wait-ready discord` |
 | Bot was up but stopped responding after redeployment | Old `discord_bot_token` in `secrets.toml` shadowing the env var (`_PREFER_FILE`) | Remove `discord_bot_token` from `secrets.toml`; `docker compose up -d alfred-gateway` |
+| Bot went silent after a **version upgrade** — gateway healthy, no error/audit in logs | Pre-existing deploy relied on the old implicit Discord-on default; ADR-0054 makes the default empty, so an operator who never set `ALFRED_GATEWAY_HOSTED_ADAPTERS` now hosts no adapter (no crash, no log — the one silent failure mode in this change) | Re-run `bin/alfred-setup.sh` (re-seeds `ALFRED_GATEWAY_HOSTED_ADAPTERS` from the existing `.env` token), or set `ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]` in `.env`; `docker compose up -d alfred-gateway` |
 
 ## Related docs
 
@@ -193,6 +217,9 @@ moved between env var stores; no database rows changed. After reverting:
   migration).
 - [ADR-0039](../adr/0039-gateway-adapter-inbound-bridge.md) — gateway-hosted
   adapter inbound bridge.
+- [ADR-0054](../adr/0054-gateway-hosted-adapters-default-empty.md) — reverses
+  this migration's on-by-default compose default: Discord is now opt-in, off
+  by default. Read this before following the walkthrough above.
 - [docs/runbooks/slice-2-discord-smoke.md](./slice-2-discord-smoke.md) —
   the original Discord deployment guide (pre-inversion; kept for reference).
 - [docs/subsystems/plugins.md](../subsystems/plugins.md) — gateway adapter
