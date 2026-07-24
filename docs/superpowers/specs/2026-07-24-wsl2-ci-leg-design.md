@@ -27,12 +27,14 @@ covered by the ubuntu leg).
 ### Job: `python-wsl` (ci.yml)
 
 - `runs-on: windows-latest`, `timeout-minutes: 30`, `permissions: contents: read`.
-- **Advisory-first (non-blocking):** land without `continue-on-error` removal / without
-  promoting to a required check. Promote to a **required status check** in a follow-up
-  (via the `author-gating-workflow` skill + the tracked required-checks manifest) after
-  it proves green over a few cycles — the repo's own "informational-until-green, then
-  promote" pattern (#321). For validating B2, advisory-that-runs-green suffices (the B2
-  merge is gated on it manually).
+- **Required from day one (maintainer decision):** a hard merge gate, so WSL issues get
+  fixed rather than accumulating as advisory noise. Mechanical caveat: GitHub cannot mark
+  a check *required* on the same PR that introduces it (the check context must first exist
+  on `main`). So the sequence is — merge the leg PR (the job runs on it, non-required, and
+  must be green to merge), then **immediately promote `python-wsl` to a required status
+  check** via the `author-gating-workflow` skill (branch-protection `gh api` + update the
+  tracked required-checks manifest), *before* B2 rebases onto `main`. From that point every
+  PR (B2 included) must pass it.
 - `actions/checkout` stays on the **Windows filesystem** (default); WSL reaches the repo
   via `/mnt/c/…`. This is the interop that catches the real quirks.
 
@@ -85,9 +87,12 @@ Heavy Docker/integration stays Linux-only.
 
 1. This leg merges to `main` on its own PR (green on its own PR = it works against `main`'s
    current setup scripts).
-2. Rebase Blocker 2 (PR #495) onto the new `main`; B2's CI now includes `python-wsl`, so
-   B2's `seed_hosted_adapters` / advisory / `.ps1` changes are exercised under real WSL.
-3. Merge B2 once that leg (and the rest) is green.
+2. **Immediately promote `python-wsl` to a required status check** (author-gating-workflow:
+   branch-protection `gh api` + required-checks manifest) so it hard-gates every subsequent PR.
+3. Rebase Blocker 2 (PR #495) onto the new `main`; B2's CI now includes the required
+   `python-wsl`, so B2's `seed_hosted_adapters` / advisory / `.ps1` changes are exercised
+   under real WSL and must pass.
+4. Merge B2 once that leg (and the rest) is green.
 
 ## Testing the leg itself (no paper gate — #245 discipline)
 
@@ -97,7 +102,6 @@ throwaway push and confirm the leg goes red. A leg that can only pass is worthle
 
 ## Out of scope
 
-- **Immediately-required** — advisory-first; promotion is a follow-up after green cycles.
 - **Full portable suite under WSL** — redundant with the ubuntu leg (WSL ≈ Ubuntu for pure
   Python); this leg is the interop/`.sh`/`.ps1` surface only.
 - **Native-Windows (non-WSL) support** — a #471-scale sandbox-backend effort with its own
