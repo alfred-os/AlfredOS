@@ -4,9 +4,9 @@
 
 **Goal:** Activate the dormant nightly e2e first-run boot lane with a green infra baseline plus strict-`xfail` assertions on the three known boot blockers, so the lane is green today, reds on any new infra regression, and reds-via-xpass the instant a blocker is fixed.
 
-**Architecture:** A pytest harness under `tests/e2e/` owns an isolated `docker compose` lifecycle. Pure helpers (health classifier, service-set partition, env-file writer, junit tally) are unit-tested TDD-style; the docker-driven fixtures + tests are verified by a real run. The nightly `e2e` job is restructured to run it and enforce an exact per-`<testcase>` junit tally that cannot skip-green. Blocker *fixes* are out of scope (roadmap Steps 2–5).
+**Architecture:** A pytest harness under `tests/e2e/` owns an isolated `docker compose` lifecycle. Pure helpers (health classifier, service-set partition, env-file writer, outcome tally) are unit-tested TDD-style; the docker-driven fixtures + tests are verified by a real run. The nightly `e2e` job is restructured to run it and enforce an exact tally — read from pytest's own outcome stats as JSON (no junit XML, no XXE surface) — that cannot skip-green. Blocker *fixes* are out of scope (roadmap Steps 2–5).
 
-**Tech Stack:** Python 3.14+, pytest (+ junit XML), `docker compose`, GitHub Actions. No new third-party dependencies (stdlib `subprocess`, `xml.etree`, `secrets`, `json`, `pathlib`).
+**Tech Stack:** Python 3.14+, pytest, `docker compose`, GitHub Actions. No new third-party dependencies (stdlib `subprocess`, `json`, `secrets`, `pathlib`).
 
 **Design spec:** `docs/superpowers/specs/2026-07-24-494-e2e-first-run-boot-harness-design.md` (v3). **Roadmap:** `docs/superpowers/specs/2026-07-24-469-first-run-path-to-green-roadmap.md` (this is Step 1).
 
