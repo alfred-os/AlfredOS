@@ -264,6 +264,58 @@ def test_start_manifest_oserror_is_config_fault_not_bind_failed(
     assert t("gateway.start.bind_failed") not in result.stdout
 
 
+def test_start_canonical_discord_typo_is_config_fault_not_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CANONICAL adapter id (``discord``) in the opt-in env is a CONFIG fault, not a traceback.
+
+    ``ALFRED_COMMS_ENABLED_ADAPTERS`` holds PLUGIN-PACKAGE ids (``alfred_discord``), not
+    the canonical ``adapter_id`` (``discord``) the rest of the gateway-hosted chain keys on
+    (see ``_resolve_adapter_kind`` / ``test_hosted_adapter_id_reconciliation.py``). An
+    operator who opts in with the canonical id has no ``plugins/discord/manifest.toml`` on
+    disk, so ``Settings()`` construction (inside ``_resolve_hosted_adapter_ids``) raises
+    ``alfred.config.settings.SettingsError`` — a ``ValueError`` subclass every pydantic
+    construction failure is lifted to (CLAUDE.md hard rule #7). Before this fix
+    ``SettingsError`` was not in the caught tuple, so it escaped as a raw traceback instead
+    of the existing config-failed refusal + exit 6.
+    """
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", '["discord"]')
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code == 6, result.stdout  # _EXIT_CONFIG_FAILED
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert t("gateway.start.config_failed") in result.stdout
+    assert t("gateway.start.bind_failed") not in result.stdout
+
+
+def test_start_unrelated_resolve_error_still_surfaces_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity control (sec-p-001): a bug OUTSIDE ``Settings()`` is NOT swallowed.
+
+    ``Settings.__init__`` lifts every construction exception to ``SettingsError``, so this
+    control must raise from a step AFTER ``Settings()`` succeeds — ``_resolve_adapter_kind``,
+    the per-adapter manifest-kind lookup ``_resolve_hosted_adapter_ids`` calls next. A VALID
+    plugin-package id (``alfred_discord``) reaches the monkeypatched
+    ``_resolve_adapter_kind``, which raises a plain ``RuntimeError``: proof the widened
+    ``except`` tuple catches ``SettingsError`` specifically, not every exception the resolve
+    call can raise (CLAUDE.md hard rule #7 — no swallowing unrelated bugs).
+    """
+
+    def _boom(*_args: object, **_kw: object) -> str:
+        raise RuntimeError("unrelated programming bug")
+
+    monkeypatch.setattr("alfred.cli.gateway._commands._resolve_adapter_kind", _boom)
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", '["alfred_discord"]')
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    assert type(result.exception) is RuntimeError, result.exception
+    assert t("gateway.start.config_failed") not in result.stdout
+
+
 def test_start_programming_bug_still_surfaces_loud(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
