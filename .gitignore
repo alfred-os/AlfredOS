@@ -155,3 +155,7 @@ secrets.*.toml
 # graphify knowledge-graph output — regenerated locally via `graphify update .`.
 # The .graphifyignore / .code-review-graphignore config files stay tracked.
 graphify-out/
+
+# #494 e2e boot lane run artifacts (written to CWD by the harness)
+/e2e-tally.json
+/e2e-stack.log
