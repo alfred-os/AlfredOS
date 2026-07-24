@@ -1,341 +1,272 @@
-# #494 — First-run e2e boot harness (self-ratcheting green baseline)
+# #494 — First-run e2e boot harness (split green baseline + xfail'd blockers)
 
 - **Issue:** [#494](https://github.com/alfred-os/AlfredOS/issues/494) — activate the dormant e2e first-run boot lane (clone → `up -d` → healthy)
 - **Epic:** [#469](https://github.com/alfred-os/AlfredOS/issues/469) — first-run experience: a documented quickstart that actually boots
+- **Roadmap:** this is **Step 1** of `docs/superpowers/specs/2026-07-24-469-first-run-path-to-green-roadmap.md` (instrument first, then ratchet)
 - **Domain:** test-engineer (integration/e2e layer, CI non-vacuity)
-- **Status:** design **v2** — 5-lane `/review-plan` fleet findings folded (see *Review findings folded* at the end). Pending spec re-review.
+- **Status:** design **v3** — two `/review-plan` rounds (10 specialist passes) + code-trace folded. Pending spec review.
 
 ## Problem
 
-Nothing in CI drives the documented quickstart end to end. The README's first
-run (README:30–37) is:
+Nothing in CI drives the documented quickstart end to end. `nightly.yml` already
+has an `e2e` job that does `docker compose up -d --wait` then `pytest tests/e2e`,
+but it is gated on `tests/e2e/conftest.py`, which does not exist, so the job
+**skip-greens** — a paper-gate that reports green while gating nothing (the #245
+anti-pattern this repo has fought repeatedly).
 
-```sh
-cp .env.example .env       # then set ALFRED_QUARANTINE_PROVIDER_API_KEY
-bin/alfred-setup.sh        # macOS/Linux; on Windows, run inside WSL
-docker compose up -d
-```
+### The stack is broken in a masked chain (established by review + code-trace)
 
-Every individual piece is unit-tested; the *composed* path a new operator walks
-— including `bin/alfred-setup.sh`, the artifact that #491/#495 actually fixed —
-is never exercised. This is the systemic gap behind the whole #469 epic.
+Verified against `main` (`eaec26a1`):
 
-`nightly.yml` already contains an `e2e` job that does `docker compose up -d
---wait` then `pytest tests/e2e` — but it is gated on `tests/e2e/conftest.py`,
-which does not exist, so the job **skip-greens**. It is a paper-gate: a lane that
-reports green while gating nothing (the #245 anti-pattern this repo has fought
-repeatedly).
+1. **`bin/alfred-setup.sh` cannot complete.** At `:341` it runs `docker compose run
+   --rm alfred-core migrate` with no `--no-deps`, pulling core's `depends_on:
+   alfred-gateway: service_healthy` (compose:95–101). The gateway is never healthy
+   (blocker A), so **setup.sh hangs at migrate**. Its later `alfred user list/add`
+   (`:494–535`) build `Settings()`, hitting the eager `comms_enabled_adapters`
+   validator (`settings.py:449`) — blocker B.
+2. **Blocker A — gateway can't construct `Settings()`.** `_resolve_hosted_adapter_ids()`
+   (`cli/gateway/_commands.py:157`) builds a full `Settings()` needing a provider key
+   the gateway is denied (ADR-0036).
+3. **Blocker B — core can't boot in the shipped image.** `alfred-core.Dockerfile`
+   omits `plugins/`; `Settings._REPO_ROOT` resolves to the install prefix. The eager
+   validator (`settings.py:449/485`) then fails for **every** `Settings()`
+   construction in the built image.
 
-### Why a naive smoke test can't just be added (diagnosis, corrected)
+Blocker fixes are the roadmap's Steps 2–5, out of scope here.
 
-The stack does not boot from a *hand-provisioned* subset, but the true blocker
-set is **narrower than a first pass suggests** — because much of what looks like a
-blocker is actually provisioned by `bin/alfred-setup.sh`, which the lane must run.
-Verified against `main` (HEAD `eaec26a1`):
+### Why v2's "green baseline via running the real setup.sh" was wrong
 
-- **Real blocker A — gateway can't construct `Settings()`.**
-  `_resolve_hosted_adapter_ids()` (`src/alfred/cli/gateway/_commands.py:157`)
-  builds a full `Settings()` that requires a provider key. The gateway service is
-  never given `ALFRED_DEEPSEEK_API_KEY` (ADR-0036 — no secret on the gateway), so
-  `Settings()` raises and the gateway never becomes healthy. **The fix is to
-  decouple adapter-list resolution from full `Settings()` — NOT to give the
-  gateway the key (that would violate ADR-0036).**
-- **Real blocker B — core can't boot in the shipped image.**
-  `docker/alfred-core.Dockerfile` copies `src`, `config`, `bin`, `locale` — **but
-  never `plugins/`** — and `Settings._REPO_ROOT` resolves to the Python install
-  prefix in the built image, so `Settings()` fails with "no manifest for comms
-  adapter id 'alfred_tui'".
-- **NOT a blocker of the documented flow (corrected):** `state.git` seeding and
-  `audit.hash_pepper` bootstrap are performed by `bin/alfred-setup.sh` (`:349`
-  seeds `state.git` via `alfred-state-git-seed.sh`; `:397` bootstraps
-  `audit.hash_pepper`; `:142` does `cp .env.example .env`). An earlier draft
-  listed these as blockers — that was an artifact of *not* running setup.sh. The
-  harness must run the real flow, and the diagnosis must be re-derived from that
-  run, not asserted up front.
-- **Confirm-by-run:** `policies.yaml` provisioning (setup.sh only *comments* about
-  it at `:375` — "shipped by downstream PR-S4-7 as default policies"), and the
-  exact **quarantine-key boot semantics** below.
+v2 proposed the harness run `bin/alfred-setup.sh` and take a *green* baseline from
+it. The v2 re-review (architect + test-engineer + devops + code-trace) proved that
+**self-contradictory**: setup.sh is exactly the thing that hangs/fails on blockers
+A/B, so it can never produce a green baseline today. The green-baseline posture and
+the run-real-setup.sh mechanism cannot both hold until the core boots.
 
-**The credential gate — both keys are prerequisites for the flow to run at all
-(new — surfaced during review verification).** `bin/alfred-setup.sh` has a single
-credential-validation gate (`:201–273`) that accumulates problems and **`exit 1`s
-at `:271`** when either `ALFRED_DEEPSEEK_API_KEY` is empty/still the `sk-...`
-placeholder *or* `ALFRED_QUARANTINE_PROVIDER_API_KEY` is unset. Critically, this
-gate runs **before** all the real provisioning — the AppArmor load (`:275`),
-`docker compose build` (`:317`), postgres start + `alfred migrate` (`:319–341`),
-`state.git` seed (`:349`), and `audit.hash_pepper` bootstrap (`:397`) all come
-*after* it. Stock `.env.example` ships the `sk-...` DeepSeek placeholder **and** an
-empty quarantine key, so `cp .env.example .env && bin/alfred-setup.sh` on stock
-values **exits 1 having provisioned nothing**. Therefore the harness must inject
-**both** non-placeholder keys before running setup.sh, or setup.sh never reaches
-the provisioning and the "real documented flow" degrades to the same
-hand-provisioned subset this design exists to avoid. Boot-to-`healthy` makes no
-real provider call at boot, so syntactically-valid non-placeholder dummy values
-are *expected* to suffice; the first diagnosis run confirms presence-only vs.
-live-provider validation, with a real throwaway low-balance key (repo secret, as
-`real-llm-smoke` already does) as the fallback. Note: even with a DeepSeek key in
-`.env`, the gateway service is denied it (ADR-0036 forwards no provider secret to
-the gateway), so **blocker A holds regardless** — it is a code-coupling defect, not
-a provisioning gap.
+## Scope
 
-### Dependency masking
+Deliver the **harness + diagnosis** (roadmap Step 1) — not the blocker fixes:
 
-`alfred-core` `depends_on` postgres + redis + **gateway**, all `condition:
-service_healthy` (compose:97–101). With the gateway broken, a plain `docker
-compose up -d --wait` waits forever on the gateway and never creates core —
-masking blocker B behind blocker A. The harness therefore owns lifecycle and
-starts core with its *real* deps sequenced but the gateway dependency bypassed
-(see Architecture), so blocker B is directly observable.
+- `tests/e2e/conftest.py` + per-service boot tests + the `nightly.yml` `e2e` wiring.
+- A first real run that produces the authoritative diagnosis and files/confirms each
+  downstream blocker (A, B, README/key mismatch, `hash_pepper`, `policies.yaml`).
 
-## Scope (approved)
+## Approach: split the green baseline from the xfail'd blockers
 
-Deliver the **harness + diagnosis**, not the blocker fixes:
+Two independent things, so the lane is green today *and* still exercises the real
+broken flow as an observed failure:
 
-- Build `tests/e2e/conftest.py` + a per-service boot smoke test that drives the
-  **real documented flow** (`cp .env.example .env` → inject both non-placeholder
-  keys → `bin/alfred-setup.sh` → `docker compose up -d`).
-- Run it to reproduce and precisely itemize every boot blocker **from that run**.
-- File each confirmed blocker as a root-caused issue, cross-linked from the harness.
-- Land the lane in the self-ratcheting posture below.
-
-The blocker **fixes** (gateway `Settings()` decoupling, core Dockerfile,
-`policies.yaml` provisioning if confirmed) are follow-on work for the
-devops/core/gateway domains.
-
-## Approach: self-ratcheting green baseline
-
-The harness owns the compose lifecycle and polls per-service health. Each known
-blocker is encoded as a **strict** expected-failure. The consequence:
+- **Green baseline (today):** the infra tier — postgres, redis, prometheus, grafana
+  — brought up via `docker compose up -d --no-deps <those>` (pulled images, no build,
+  no core/gateway dep, no setup.sh) and asserted `healthy`. This is the
+  regression-catching baseline; it does not depend on anything broken.
+- **`xfail(strict=True)` (today):** three assertions, each tagged with its blocker
+  issue — (a) `bin/alfred-setup.sh` completes exit 0 (run under a bounded timeout so
+  blocker A's *hang* becomes a fast fail); (b) alfred-gateway `healthy`; (c)
+  alfred-core `healthy`.
 
 ```
-TODAY:          gateway=xfail(#gw)  core=xfail(#core)  every other service asserted healthy  -> GREEN
-NEW REGRESSION: a baseline service unexpectedly unhealthy  OR a new compose service unobserved -> RED
-BLOCKER FIXED:  that service now healthy but still xfail -> strict XPASS  -> RED
-                (forces: drop the xfail, assert healthy)                  -> GREEN
-ALL FIXED:      every service asserted healthy, zero xfails               -> GREEN gate
+TODAY:   postgres/redis/prometheus/grafana -> assert healthy     -> GREEN
+         setup.sh completes exit 0         -> xfail(strict, #A)
+         gateway healthy                   -> xfail(strict, #A)
+         core healthy                      -> xfail(strict, #B)
+=> GREEN today; a new infra regression reds the baseline; each xfail reds via
+   strict XPASS the instant its blocker lands (forcing the assertion to tighten);
+   ALL green => the full documented flow boots healthy (roadmap Step 5).
 ```
 
-Non-vacuous by construction: green today (known blockers expected), red on any
-*new* boot regression, and red the instant a known blocker is fixed. Chosen over
-an *honest-red nightly* (persistent red trains reviewers to ignore it and masks
-new regressions) and *runnable-now/gate-later* (no continuous signal).
+Non-vacuous by construction and free of persistent-red noise — the two postures the
+earlier options (honest-red / gate-later) each sacrificed one of.
 
 ## Architecture
 
-### `tests/e2e/conftest.py` — drives the real documented flow
+### `tests/e2e/conftest.py` — isolated lifecycle owner
 
-A **session-scoped fixture** re-enacts the README quickstart as an operator would,
-then tears down:
+- **Isolation (never touch an operator's stack).** Every compose invocation uses a
+  fixed dedicated `COMPOSE_PROJECT_NAME` (e.g. `alfred-e2e`) **and** an isolated
+  `--env-file` the harness writes under a temp dir — so a local run never runs `cp
+  .env.example .env` over an operator's real `.env` and never shares/​clobbers their
+  volumes. `docker compose down -v` on that project only.
+- **Fail loud if Docker is unavailable** — probe via `tests/_docker_probe.py`
+  (`docker_available()`); if absent, **raise** (never skip). The e2e tests use a
+  dedicated `e2e` marker, **not** `@pytest.mark.docker` — the root
+  `tests/conftest.py:50–82` auto-*skips* `docker`-marked items on a daemon-less/win32
+  host, re-introducing skip-green.
+- **cwd = repo root** for every compose subprocess *and* the setup.sh invocation —
+  the `seccomp=docker/seccomp/alfred-bwrap.json` path is CWD-relative (compose:131–134).
+- **Env-file contents:** a per-run random `GF_SECURITY_ADMIN_PASSWORD` (grafana
+  fail-closes on an unset/guessable one) and self-identifying dummy non-placeholder
+  keys (`ALFRED_DEEPSEEK_API_KEY`, `ALFRED_QUARANTINE_PROVIDER_API_KEY`) with a
+  recognizable sentinel (e.g. `sk-DUMMY-e2e-not-a-real-key`) so they can never be
+  mistaken for real and are trivially scrubbed from logs. (The baseline services
+  need only the GF password; the keys are for the setup.sh-completes assertion.)
+- **Build the core image with a cross-run cache.** The core-health xfail needs core
+  built; use a buildx/GHA cache backend so nightlies don't rebuild the multi-stage
+  image from zero against the 60-minute job budget.
+- **Reuse, with an explicit extract step.** `_compose()`/`compose_project`/
+  `compose_stack` currently live *module-private* in `tests/smoke/
+  test_gateway_core_link_smoke.py` and `test_slice4_graduation.py`; the plan extracts
+  the shared lifecycle helper into an importable module (e.g. `tests/_compose.py`
+  alongside `tests/_docker_probe.py`) that both smoke and e2e consume (DRY without
+  over-claiming a reuse that isn't importable today).
 
-1. **Fail loud if Docker is unavailable** — probe via the existing
-   `tests/_docker_probe.py` (`docker_available()`); if absent, **raise** (never
-   skip). The e2e tests use a dedicated `e2e` marker, **not** `@pytest.mark.docker`
-   — the root `tests/conftest.py:50–82` auto-*skips* `docker`-marked items on a
-   daemon-less/win32 host, which would re-introduce the exact skip-green paper-gate
-   this effort exists to kill.
-2. `cp .env.example .env` (idempotent) and inject **both** non-placeholder keys
-   (`ALFRED_DEEPSEEK_API_KEY` and `ALFRED_QUARANTINE_PROVIDER_API_KEY`) — from CI
-   secrets, or dummy non-placeholder values locally — so setup.sh clears its
-   credential gate (`:271`) and reaches the provisioning steps.
-3. Run `bin/alfred-setup.sh` — the real, verified provisioning: Grafana admin
-   password (`:181`), AppArmor profile load (`:291`), `docker compose build`
-   (`:317`), postgres start + `alfred migrate` (`:319–341`), `state.git` seed
-   (`:349`), `audit.hash_pepper` bootstrap (`:397`). The harness runs setup.sh as
-   the operator does; it hand-rolls none of this.
-4. `docker compose up -d` the remaining services (setup.sh brings up only postgres,
-   for migrations) **without blocking on the unsatisfiable gateway health gate**:
-   sequence the real leaf deps first (`up -d --wait alfred-postgres alfred-redis
-   alfred-prometheus`), then the rest, using `--no-deps` for `alfred-core` so it is
-   gated on its *own* blocker rather than the never-healthy gateway. Reuse the
-   proven `_compose()` wrapper + `compose_project`/`compose_stack` lifecycle
-   fixtures already in `tests/smoke/test_gateway_core_link_smoke.py` and
-   `tests/smoke/test_slice4_graduation.py` rather than re-implementing them (DRY).
-5. **Every compose subprocess pins `cwd=<repo root>`** — the `seccomp=docker/
-   seccomp/alfred-bwrap.json` path in compose is resolved by the Docker CLI
-   relative to CWD (compose:131–134); a subprocess launched from elsewhere fails to
-   *create* gateway/core, and that failure would otherwise hide under their xfail.
-6. **Poll Docker's own health** per service (`docker inspect --format
-   '{{.State.Health.Status}}'`) with a bounded, per-service **timeout budget**
-   (documented per service; generous enough that a slow-but-healthy baseline does
-   not false-red). The oracle is Docker's health status — independent of the app's
-   own notion of health.
-7. On teardown, `docker compose down -v` and capture `docker compose logs` for the
-   diagnosis / CI artifact.
+### Two assertion groups (separate fixtures / compose projects)
 
-### State classifier
+1. **Service-health group** — `up -d --no-deps <service>` per service (sequencing the
+   real leaf deps postgres/redis so services that need them can reach healthy), poll
+   Docker health, assert per the table below.
+2. **setup.sh-completes group** — in its own throwaway project, run `bin/alfred-setup.sh`
+   under a bounded `timeout` with both dummy keys injected; assert exit 0 (xfail
+   today; captures the "hangs at migrate" signature for the diagnosis). Kept separate
+   so setup.sh's own `up -d`/migrate can't interfere with group 1.
 
-The classifier distinguishes `healthy` / `unhealthy` / `starting` / `not-created`.
-Under `restart: unless-stopped`, a service whose process exits on a boot refusal
-**crash-loops and presents as perpetual `starting`, not `unhealthy`** — so
-"reaches `healthy` within its timeout budget, else fail" is the assertion, and the
-xfail reason wording says "does not reach healthy (crash-loops as `starting`)",
-not "unhealthy". The classifier ships with a **self-test** (feeding it synthetic
-`docker inspect` payloads for each terminal state) — the WSL-leg CRLF-self-test
-discipline: prove the detector works before trusting it.
+### Health oracle + state classifier
 
-### The asserted service set is derived, not hardcoded
+Poll Docker's own health (`docker inspect --format '{{.State.Health.Status}}'`) — an
+oracle independent of the app. Classify `healthy` / `unhealthy` / `starting` /
+`not-created`. Under `restart: unless-stopped`, a boot-refusing service **crash-loops
+as perpetual `starting`, not `unhealthy`** — so the assertion is "reaches `healthy`
+within its (documented, per-service) timeout budget, else fail", and the classifier
+ships with a **self-test** (synthetic `docker inspect` payloads per terminal state) —
+prove the detector works before trusting it (the WSL-leg self-test discipline).
 
-The set of services to assert is derived at runtime from `docker compose config
---services`, partitioned into `{known-blocked → xfail}` (an explicit, small,
-issue-tagged deny-list) and `{everything else → assert healthy}`. A **new** compose
-service (e.g. Qdrant, per PRD §5/§8) therefore lands in the assert-healthy set
-automatically and is observed on its first nightly — closing the "new service
-boots unobserved while the lane stays green" hole. The known-blocked deny-list is
-the only hardcoded part, and it shrinks to empty as blockers are fixed.
+### The assertion table
 
-### The xfail table (re-derived from the real flow)
-
-| Service | Expected today (real flow, key provisioned) | Disposition |
+| Service / check | Expected today | Disposition |
 |---|---|---|
 | alfred-postgres | healthy | assert healthy (baseline) |
 | alfred-redis | healthy | assert healthy (baseline) |
 | alfred-prometheus | healthy | assert healthy (baseline) |
-| alfred-grafana | healthy (GF admin pw seeded by setup.sh) | assert healthy (baseline) |
-| alfred-gateway | not healthy — `Settings()` needs a provider key it is denied (ADR-0036; `_commands.py:157`) | `xfail(strict)` → **blocker A** issue |
-| alfred-core | not healthy — Dockerfile omits `plugins/`, `_REPO_ROOT` wrong (`--no-deps` unmasks it from the gateway) | `xfail(strict)` → **blocker B** issue |
+| alfred-grafana | healthy (harness seeds GF pw) | assert healthy (baseline) |
+| `bin/alfred-setup.sh` completes exit 0 | hangs at `:341` migrate (blocker A) | `xfail(strict)` → **#A** |
+| alfred-gateway healthy | `Settings()` denied the provider key (ADR-0036) | `xfail(strict)` → **#A** |
+| alfred-core healthy | Dockerfile omits `plugins/`, `_REPO_ROOT` wrong | `xfail(strict)` → **#B** |
 
-The exact today-state and the residual blockers are **confirmed by the first
-diagnosis run** before issues are filed and before the xfail reason strings are
-finalized — the table is the expected shape, the run is the source of truth.
+The exact today-states and xfail reason strings are **finalized by the first
+diagnosis run**, not asserted blind.
+
+### The asserted set is derived, guarded by an independent floor
+
+The service list is derived at runtime from `docker compose config --services`
+(no `profiles:` in compose, so it returns exactly the 6 `up -d` starts), partitioned
+into `{known-blocked → xfail}` (a small, issue-tagged deny-list) and `{rest → assert
+healthy}` — so a **new** service (e.g. Qdrant, PRD §5/§8) lands in assert-healthy
+automatically. But the non-vacuity floor does **not** trust that derivation: it pins
+an **independent literal** minimum service count (6) so a collapsed `docker compose
+config` can't yield `collected == 0 == N` and false-green.
 
 ### Non-vacuity floor (#245 discipline)
 
-- **No skip-green:** conftest raises on missing Docker; the `e2e` marker avoids the
-  root-conftest auto-skip; the job's `has_e2e` gate is permanently true once
-  `conftest.py` exists.
-- **Exact assert-RAN tally.** The CI step parses `--junitxml` (not the `-q` text
-  summary) and asserts the *exact* tally: `collected == N` (where `N =` the
-  compose-derived service count), `passed == N − |deny-list|`, `xfailed ==
-  |deny-list|`, `failed == 0`, `errors == 0`, `xpassed == 0`, `skipped == 0`.
-  This is load-bearing: pytest bins fixture/setup exceptions as `errors` (not
-  `failures`) and absorbs setup-phase exceptions on `xfail(strict)` tests as plain
-  XFAIL, so a loose "0 failed / 0 xpassed" check would pass a run where the stack
-  never came up. The exact tally closes that.
-- **Host-prep is baseline-covered.** Because the lane runs the *real*
-  `bin/alfred-setup.sh` (rather than hand-rolled host-prep steps that gate only the
-  xfail'd services), a broken AppArmor load / provisioning step fails the setup step
-  itself or a baseline-service health assertion — it can no longer stay green under
-  the xfails. Any host-prep that genuinely gates only the xfail'd services (and is
-  thus invisible to the baseline today) is explicitly noted in the diagnosis as a
-  gap that closes when core un-xfails.
-- **Strict xfail** turns a silently-fixed blocker red.
+- **No skip-green:** conftest raises on missing Docker; the `e2e` marker dodges the
+  root-conftest auto-skip; `has_e2e` is permanently true once `conftest.py` exists.
+- **Parse junit per-`<testcase>` by `type` — not the `-q` summary.** pytest reports
+  `xfail` in junit XML as `<skipped type="pytest.xfail">` (there is no `xfailed`
+  attribute), so a naive `skipped == 0` false-reds the happy path and the naive fix
+  re-opens skip-green. The assert-RAN step classifies each `<testcase>` by its child
+  element + `type`. Today's shape: **7 testcases** — 6 service-health (4 baseline
+  passes: postgres/redis/prometheus/grafana; 2 xfail: gateway, core) + 1
+  setup.sh-completes (xfail) — i.e. **4 genuine passes and 3 `pytest.xfail` skips**.
+  The step asserts: `collected == 4 passes + all deny-list xfails`; the **6 compose
+  services are all present as testcases** (independent literal floor of 6, so a
+  collapsed `docker compose config` can't shrink the set unseen) plus the setup.sh
+  check; every baseline testcase is a genuine pass; every deny-list testcase is a
+  `pytest.xfail` skip (not a plain skip, `xpass`, failure, or error); and **0
+  failures / 0 errors / 0 plain-skips / 0 xpass**. The deny-list *count* comes from
+  pytest's own xfail tally, not a second hardcoded CI constant that must track the
+  shrinking ratchet.
+- **Strict xfail** turns a silently-fixed blocker red (xpass), and `pytest` overall
+  exit status is asserted 0.
 
-### CI wiring — restructure the existing `nightly.yml` `e2e` job
+### CI wiring — restructure the `nightly.yml` `e2e` job
 
-- **Remove** the `Boot stack` (`docker compose up -d --wait`) step — conftest owns
-  lifecycle (and `--wait` is incompatible with observing partial boot).
-- **Run the real flow:** the job (or conftest) runs `bin/alfred-setup.sh`. The
-  hand-rolled `Load the bwrap userns AppArmor profile` and `Seed Grafana admin
-  password` steps are **dropped** — setup.sh owns both (`:291` and `:181`,
-  verified). This both de-duplicates and raises fidelity: the lane now exercises the
-  operator's real host-prep instead of a CI-only reimplementation of it.
-- **Inject both keys unconditionally so the lane always runs (never skips).** The
-  harness writes dummy non-placeholder `ALFRED_DEEPSEEK_API_KEY` and
-  `ALFRED_QUARANTINE_PROVIDER_API_KEY` values into `.env` (built at runtime, not
-  committed — no push-protection trip) so setup.sh clears its credential gate every
-  time. This is deliberately *not* a secret-or-skip pattern: skip-green is the
-  anti-pattern this effort kills. A real throwaway low-balance quarantine key as a
-  repo secret (scoped via `env:`, never interpolated into `run:` — workflow-injection
-  guard, as `real-llm-smoke` does) is the **fallback**, needed only if the diagnosis
-  run shows core validates the key against the live provider at boot — which matters
-  only once core un-xfails.
-- **Remove** the now-unused `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env from the Run
-  step — boot-to-healthy needs no provider key beyond the quarantine one.
-- **Keep** the on-failure `docker compose logs` capture + artifact upload, with the
-  standing constraint that the harness adds **no secret-echoing diagnostic** and the
-  Grafana password stays per-run random.
-- Stays on the 06:00 UTC cron + `workflow_dispatch`. No required-status-check
-  promotion — nightly, not per-PR; the release-blocking promotion is deferred to
-  when the lane is fully green (this is not just a choice but structurally
-  consistent with `docs/ci/required-checks.md:69`, which already excludes
-  `End-to-end` from required checks).
+- **Remove** the `Boot stack` (`up -d --wait`) step — conftest owns lifecycle.
+- **Remove** the now-unused `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env from the Run step.
+- **Keep** the AppArmor-profile load and GF-password seed as *baseline* host-prep
+  (the baseline `up -d` does not run setup.sh, so these stay in the job; setup.sh's
+  own copies are exercised only inside the setup.sh-completes xfail). Add a buildx
+  cache step for the core image.
+- **Capture `docker compose logs` BEFORE teardown** (the current step runs after the
+  fixture's `down -v`, losing the diagnosis) and upload on failure; scrub the
+  sentinel dummy keys + keep the GF password per-run random.
+- Stays on the 06:00 UTC cron + `workflow_dispatch`. **No** release-blocking
+  promotion — that is roadmap Step 5, and is consistent with
+  `docs/ci/required-checks.md:69` already excluding `End-to-end`.
 
 ## Diagnosis deliverable
 
-The first harness run produces the first reproducible, itemized boot-blocker report
-**derived from the documented flow**. Each *confirmed* blocker is filed as a
-root-caused issue and cross-linked from the xfail reason and #469/#494:
+The first harness run confirms each blocker's exact failure and files the roadmap's
+downstream issues, cross-linked from the xfail reasons and #469/#494:
 
-- **Blocker A** — gateway `_resolve_hosted_adapter_ids()` couples adapter-list
-  resolution to a full `Settings()` needing a provider key the gateway is denied;
-  decouple (must not violate ADR-0036).
-- **Blocker B** — `alfred-core.Dockerfile` omits `plugins/`; `_REPO_ROOT` resolves
-  to the install prefix in the built image.
-- **`policies.yaml` provisioning** — filed only if the run confirms it is a real
-  gap (setup.sh may or may not provision it).
-
-`state.git` seeding and `audit.hash_pepper` bootstrap are **explicitly not filed** —
-the documented flow provisions them.
+- **#A** — gateway `_resolve_hosted_adapter_ids()` couples to a full `Settings()`
+  (decouple, ADR-0036-safe); also the cause of setup.sh's migrate hang.
+- **#B** — `alfred-core.Dockerfile` omits `plugins/`; `_REPO_ROOT` resolves to the
+  install prefix.
+- **README/DeepSeek key mismatch** (`README:33` documents the quarantine key only,
+  but setup.sh also rejects the `sk-...` DeepSeek placeholder) — the harness injects
+  a DeepSeek key to run setup.sh at all, which is a **documented deviation** recorded
+  here, not silent fidelity.
+- **`audit.hash_pepper` path** and **`policies.yaml` provisioning** — confirm-by-run;
+  file if real (both may have been masked behind A/B).
 
 ## Security posture (not a security oracle)
 
-Boot-to-`healthy` is **not** a security oracle: `alfred daemon healthcheck` →
-`/metrics` responding proves nothing about the bwrap sandbox being active, the
-capability gate being seeded, or the egress chokepoint being enforced. The harness
-weakens no security default (it keeps the real AppArmor/seccomp profiles, runs
-unprivileged, does not stub the capability gate — the gate seeds from real
-`state.git`). The design records a **hard requirement on the future core-un-xfail
-PR**: when blocker B is fixed and core's `xfail` is dropped, the replacement
-assertion MUST include security-posture checks (sandbox active, gate seeded, egress
-chokepoint on) — a bare `xfail → assert healthy` swap would bless a core with its
-trust boundary silently off. No `src/alfred/security/` code changes here, so the
-100%-coverage rule is N/A.
+Boot-to-`healthy` proves nothing about the bwrap sandbox, capability-gate seeding, or
+the egress chokepoint. This harness weakens no security default (keeps the real
+AppArmor/seccomp profiles, runs unprivileged, does not stub the gate — it seeds from
+real `state.git`). The **hard requirement** on roadmap Step 3 (core un-xfail): the
+replacement for `assert core healthy` MUST include posture assertions (sandbox
+active, gate seeded, egress chokepoint on), carried in **blocker #B's acceptance
+criteria and the core xfail-reason string** — not left as spec prose. No
+`src/alfred/security/` change here → the 100%-coverage rule is N/A.
 
 ## Validation before merge
 
 - **Local** `docker compose` run on Docker Desktop: validates the green baseline
-  (postgres/redis/prometheus/grafana healthy) + the gateway `xfail` + the exact
-  tally. Core stays blocker-B-red either way; the macOS/AppArmor divergence (the
-  bwrap profile is not loaded on Docker Desktop) only matters once blocker B is
-  fixed and core starts, so it does not affect v1.
-- **`workflow_dispatch`** run of `nightly.yml` on the branch: the authoritative
-  parity check on the real ubuntu runner (runs setup.sh's AppArmor load + GF-password
-  seed, injects both keys, exercises the optional real quarantine-key secret path).
+  (infra healthy) + the three xfails + the exact junit tally. The setup.sh-completes
+  xfail reproduces the migrate hang (timeout-bounded). macOS/AppArmor divergence only
+  matters once core un-xfails (Step 3), so it does not affect v1.
+- **`workflow_dispatch`** run of `nightly.yml` on the branch: the authoritative parity
+  check on the ubuntu runner.
 
 ## Convention recording
 
-- Record the deferred-promotion + self-ratcheting-baseline convention as a row/note
-  in `docs/ci/required-checks.md` (no ADR required — the restructure touches no PRD
-  §5 invariant; a lightweight ADR is optional, not mandatory).
-- Note boot-only as the v1 of PRD §8's conversation-e2e: the shared conftest
-  lifecycle seam is designed so a later conversation-e2e reuses it.
+- Record the split-baseline + deferred-promotion convention in
+  `docs/ci/required-checks.md` (no ADR — no PRD §5 invariant touched).
+- Note boot-only as the v1 of PRD §8's conversation-e2e; the shared conftest lifecycle
+  seam (`tests/_compose.py`) is designed for later reuse.
 
 ## Out of scope
 
-- The blocker **fixes** (devops/core/gateway).
-- Any functional / LLM message round-trip or keyed assertion beyond the dummy keys
-  needed to clear setup.sh's credential gate — boot-to-healthy only, per #494.
-- Qdrant — not in the default `docker-compose.yaml` yet (but the compose-derived
-  service set means it is observed automatically when it lands).
-- Release-blocking promotion of the lane — deferred until it is fully green.
+- The blocker **fixes** — roadmap Steps 2–5.
+- Any functional/LLM round-trip or keyed assertion beyond the dummy keys needed to
+  drive the setup.sh-completes xfail — boot-to-healthy only, per #494.
+- Qdrant (absent from compose; auto-observed when it lands via the derived set).
+- Release-blocking promotion — roadmap Step 5.
 
 ## Risks
 
-- **`up -d` hanging on a `service_healthy` dependency.** Mitigated by sequencing the
-  real leaf deps `--wait` and using `--no-deps` for core, so no compose command
-  blocks on the never-healthy gateway.
-- **Dummy keys insufficient for boot** (if core validates a key against the live
-  provider rather than presence). Surfaced and resolved by the first diagnosis run;
-  fallback is a real throwaway low-balance quarantine key as a repo secret (as
-  `real-llm-smoke` already does for its provider key).
+- **setup.sh hanging unbounded.** Mitigated by running the setup.sh-completes
+  assertion under a `timeout`; the baseline never invokes setup.sh at all.
+- **Core build time vs the 60-minute budget.** Mitigated by the buildx cross-run cache;
+  the baseline needs no build (pulled images), so a cache miss only delays the two
+  build-dependent xfails.
 - **A baseline service flakier than assumed.** Mitigated by generous per-service
-  timeout budgets and by validating the baseline is genuinely green on the runner
-  before merge.
-- **macOS local run diverging from the runner.** Accepted: the `workflow_dispatch`
-  runner run is authoritative; local is a fast first pass.
+  timeout budgets and validating the baseline green on the runner before merge.
+- **Diagnosis uncertainty** (exact setup.sh failure point, hash_pepper/policies.yaml
+  reality). Resolved by the first run — which is the point of Step 1.
 
 ## Review findings folded (traceability)
 
-5-lane `/review-plan` fleet (architect, reviewer, test-engineer, security-engineer,
-devops) + direct code-verification of load-bearing findings. 0 Critical. Folded:
-run the real `setup.sh` flow (test-001/ops-001); corrected diagnosis — state.git/
-hash_pepper are provisioned, not blockers (ops-007); quarantine-key requirement
-(verification); non-`docker` marker to avoid the root-conftest auto-skip (rev-001);
-exact `--junitxml` tally (test-002); compose-derived service set (arch-001);
-`cwd=repo-root` pin for the CWD-relative seccomp path (ops-002); reuse existing
-compose machinery (rev-002/003); rewrite the "masked" prose — `--no-deps` unmasks
-core (rev-004/test-003/4/arch-002); `starting`-not-`unhealthy` classifier (ops-004);
-remove unused provider-key env (sec-001); future-core-un-xfail security-posture
-assertions (sec-002); per-service timeout budgets (test-006); classifier self-test
-(test-005); log-artifact hygiene (sec-003); required-checks.md convention +
-PRD §8 forward-compat note (arch-003/004).
+Two `/review-plan` rounds (architect, reviewer, test-engineer, security-engineer,
+devops ×2) + direct code-verification. Round 1 → v2 (run the real flow; corrected
+diagnosis; both-keys prerequisite; non-`docker` marker; compose-derived set;
+cwd/seccomp pin; DRY; masked-prose fix; sec/ops nits). Round 2 → v3: **the pivot** —
+setup.sh can't complete under A/B, so split the green infra baseline from the xfail'd
+setup.sh/gateway/core (arch-001/test-001/ops-101); junit-per-testcase parsing since
+xfail reports as `skipped` (test-002); independent literal floor, not a self-derived
+`N` (test-003); fixed `COMPOSE_PROJECT_NAME` + isolated `--env-file` so a local run
+can't clobber an operator's `.env`/volumes (test-004); README/DeepSeek mismatch filed
+as a deviation (rev-001); extract the private smoke `_compose` helper before reusing
+it + derive the deny-list count from pytest (rev-002/003); buildx cache + budget
+(ops-103); capture logs before `down -v` (ops-104); cwd pin extends to setup.sh
+(ops-105); hash_pepper path confirm-by-run (ops-102); posture assertions into #B's
+acceptance criteria + dummy-key sentinels/broadened log scrub (sec-001/sec-002).
