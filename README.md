@@ -139,8 +139,13 @@ endpoint is not supported — it would be denied by the allowlist.
 
 ### Enable Discord (Developer Mode walkthrough)
 
-AlfredOS ships a DM-only Discord adapter hosted by the gateway. Operator
-workflow for a fresh deploy:
+AlfredOS ships a DM-only Discord adapter hosted by the gateway. It is
+**off by default** — a stock `docker compose up -d` hosts no comms
+adapter at all, so the gateway boots healthy with zero configuration
+([ADR-0054](docs/adr/0054-gateway-hosted-adapters-default-empty.md)).
+Enabling Discord is opt-in and requires **both** a bot token and the
+hosted-adapter flag below — the token alone does not turn Discord on.
+Operator workflow for a fresh deploy:
 
 1. **Create a bot in the Discord developer portal.** Visit
    <https://discord.com/developers/applications>, create a new
@@ -150,16 +155,21 @@ workflow for a fresh deploy:
    this, the adapter sees every DM as empty content and never reaches
    the orchestrator.
 3. **Copy the bot token.** Bot settings → Reset Token → copy.
-4. **Set the token in `.env`.** Open your `.env` file (copy from
-   `.env.example` if you have not already) and set:
+4. **Set the token and opt in, in `.env`.** Open your `.env` file (copy
+   from `.env.example` if you have not already) and set **both** lines:
 
    ```sh
    ALFRED_DISCORD_BOT_TOKEN=YOUR-TOKEN-HERE
+   ALFRED_GATEWAY_HOSTED_ADAPTERS=["alfred_discord"]
    ```
 
-   The token is read by `alfred-core` on boot and delivered to the
-   gateway-hosted Discord child over fd-3 at spawn time. The gateway
-   and child never hold the token in their environment.
+   Re-running `bin/alfred-setup.sh` writes the second line for you: it
+   seeds `ALFRED_GATEWAY_HOSTED_ADAPTERS` whenever it finds a token
+   already in `.env`. Skip the second line and the gateway still hosts
+   nothing — `--wait-ready discord` in step 8 below will just time out.
+   The token itself is read by `alfred-core` on boot and delivered to
+   the gateway-hosted Discord child over fd-3 at spawn time; the
+   gateway and child never hold the token in their environment.
 5. **Invite the bot to a server with the `bot` scope.** AlfredOS only
    reads DMs; you do not need any guild-message permissions yet.
 6. **Bind your Discord user to the operator identity.** In Discord:
