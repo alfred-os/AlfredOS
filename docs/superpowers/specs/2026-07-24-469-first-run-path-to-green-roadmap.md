@@ -65,6 +65,15 @@ flips a named part of the lane from red/xfail to green.
 Build `tests/e2e/conftest.py` + per-service boot tests and wire the dormant
 `nightly.yml` `e2e` job.
 
+> **Shipped in PR #502 — the code is authoritative.** The bullets below are the design-time
+> record; the implementation refined them (see the design doc's *Shipped implementation
+> refinements* section): the tally reads pytest stats as **JSON** (not junit); **8** testcases
+> (5 passed / 3 xfailed); the service set is **fail-closed** (a new service reds the
+> classification test, not auto-asserted healthy); a **per-run-unique** `COMPOSE_PROJECT_NAME`;
+> the setup.sh check runs in an **isolated git worktree** (operator `.env` never touched);
+> images build once in the fixture; the GF password is env-file-owned; `e2e-stack.log` is
+> secret-scrubbed.
+
 - **Green today:** postgres, redis, prometheus, grafana brought up via `docker
   compose up -d --no-deps <those>` (pulled images, no build, no core dep) and
   asserted healthy — the regression-catching baseline.

@@ -12,6 +12,8 @@
 
 **Premises verified current (before writing):** the gateway xfail holds — `alfred-gateway`'s compose env (docker-compose.yaml) has no `ALFRED_DEEPSEEK_API_KEY` and `deepseek_api_key: SecretStr` (settings.py:160) is required-no-default, so `Settings()` fails regardless of the opt-in-`[]` adapter default. The core xfail holds — the env-file sentinel key clears `_reject_placeholder_key` (settings.py:549, exact-match on the `.env.example` placeholder only), so core reaches blocker B (the eager comms-manifest validator, settings.py:449), not the key validator.
 
+> **Shipped in PR #502 — the code is authoritative.** This plan is the as-written blueprint; per-task/final/CodeRabbit review refined several task code blocks below. Where they disagree, the shipped code + the design doc's *Shipped implementation refinements* section win: **per-run-unique `COMPOSE_PROJECT_NAME`** (`_env.new_project_name()`, not a fixed name); the **setup.sh check runs in an isolated git worktree** (operator `.env` never touched — no backup/restore); `down_project` suppresses `OSError` too; the teardown `finally` guarantees `down_project` even if log-capture raises, and the log is **secret-scrubbed** (`_env.scrub_env_secrets`); the service-classification test is **fail-closed** (a new service reds it, not auto-asserted healthy) and asserts `BASELINE isdisjoint XFAIL`.
+
 ## Global Constraints
 
 - **Python 3.14+**, PEP 604/585/695 idioms; frozen/immutable by default; `Mapping` over `dict` for read-only inputs.
