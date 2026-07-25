@@ -34,9 +34,9 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ALFRED_EGRESS_PROXY_PORT", raising=False)
     monkeypatch.delenv("ALFRED_EGRESS_PROXY_BIND", raising=False)
     monkeypatch.delenv("ALFRED_DEEPSEEK_BASE_URL", raising=False)
-    # start_gateway() resolves hosted adapters (via Settings) BEFORE building the
-    # proxy/relay, so an ambient value would divert these tests to config_failed (CR
-    # review). The relay mount (third sibling task) is also patched per-test.
+    # start_gateway() resolves hosted adapters (via GatewayHostedAdaptersSettings) BEFORE
+    # building the proxy/relay, so an ambient value would divert these tests to config_failed
+    # (CR review). The relay mount (third sibling task) is also patched per-test.
     monkeypatch.delenv("ALFRED_COMMS_ENABLED_ADAPTERS", raising=False)
 
 

@@ -30,9 +30,9 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     # _resolve_hosted_adapter_ids() (in start) constructs the key-free
     # GatewayHostedAdaptersSettings (ADR-0036 / #499) — no provider key needed.
     # Pin the relay/proxy resolvers' defaults so they never read a polluted env, and
-    # clear the hosted-adapter set — start_gateway() resolves it (via Settings) BEFORE
-    # building the relay, so an ambient value would send the test down config_failed
-    # before any relay assertion runs (CR review).
+    # clear the hosted-adapter set — start_gateway() resolves it (via
+    # GatewayHostedAdaptersSettings) BEFORE building the relay, so an ambient value would send
+    # the test down config_failed before any relay assertion runs (CR review).
     for var in (
         "ALFRED_EGRESS_PROXY_PORT",
         "ALFRED_EGRESS_PROXY_BIND",

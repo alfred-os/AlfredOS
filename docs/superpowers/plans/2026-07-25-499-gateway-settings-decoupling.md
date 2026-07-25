@@ -48,10 +48,12 @@ Every task's requirements implicitly include these (verbatim from the spec + CLA
 ## Task 1: Shared adapter-id validator + `GatewayHostedAdaptersSettings`
 
 **Files:**
+
 - Modify: `src/alfred/config/settings.py`
 - Test: `tests/unit/config/test_gateway_hosted_adapters_settings.py` (create)
 
 **Interfaces:**
+
 - Produces: `validate_comms_adapter_ids(value: tuple[str, ...]) -> tuple[str, ...]` (module-level, raises `ValueError` on a bad id); `GatewayHostedAdaptersSettings` (a `BaseSettings` with one field `comms_enabled_adapters: tuple[str, ...]`, default `()`, whose construction lifts failures to `SettingsError`).
 - Consumes: existing module-level `_COMMS_ADAPTER_ID_RE`, `_REPO_ROOT`, `SettingsError`.
 
@@ -319,11 +321,13 @@ EOF
 ## Task 2: Point the gateway resolver at the minimal model
 
 **Files:**
+
 - Modify: `src/alfred/cli/gateway/_commands.py:143-159`
 - Test: `tests/unit/cli/gateway/test_hosted_adapter_id_reconciliation.py`, `tests/unit/cli/gateway/test_gateway_start_adapter_ids.py`, `tests/unit/cli/gateway/test_resolve_hosted_adapter_ids_empty_env.py`
 - Modify (wording/setup): `tests/unit/cli/test_gateway_cli.py`, `tests/unit/cli/gateway/test_adapter_egress_mount.py`, `test_egress_relay_mount.py`, `test_egress_proxy_mount.py`
 
 **Interfaces:**
+
 - Consumes: `alfred.config.settings.GatewayHostedAdaptersSettings` (Task 1).
 - Produces: `_resolve_hosted_adapter_ids() -> list[str]` (unchanged signature; now key-free).
 
@@ -454,21 +458,27 @@ Expected: the `:65` patch now targets `...GatewayHostedAdaptersSettings`; no bar
 Update the two docstrings that say `Settings()` (behavior is unchanged — the autouse `_env` key fixture is now a harmless leftover, leave it):
 
 Edit `test_start_canonical_discord_typo_is_config_fault_not_traceback` (line ~276) — replace:
+
 ```
     disk, so ``Settings()`` construction (inside ``_resolve_hosted_adapter_ids``) raises
 ```
+
 with:
+
 ```
     disk, so ``GatewayHostedAdaptersSettings()`` construction (inside
     ``_resolve_hosted_adapter_ids``) raises
 ```
 
 Edit `test_start_unrelated_resolve_error_still_surfaces_loud` (line ~297) — replace:
+
 ```
     ``Settings.__init__`` lifts every construction exception to ``SettingsError``, so this
     control must raise from a step AFTER ``Settings()`` succeeds — ``_resolve_adapter_kind``,
 ```
+
 with:
+
 ```
     ``GatewayHostedAdaptersSettings.__init__`` (via ``_SettingsErrorLifting``) lifts every
     construction exception to ``SettingsError``, so this control must raise from a step AFTER
@@ -480,19 +490,23 @@ with:
 The autouse `_env` fixtures set the provider key/environment ONLY because the OLD resolver built a full `Settings()`. Remove those two setenv lines and fix the comment in ALL THREE mount tests; KEEP the adapter-var clearing (still needed so the resolve yields `[]` and does not divert to `config_failed`).
 
 `test_egress_relay_mount.py` — replace:
+
 ```python
     # _resolve_hosted_adapter_ids() (in start) constructs Settings(), which needs the
     # provider key + environment. The relay itself NEVER constructs Settings.
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 ```
+
 with:
+
 ```python
     # _resolve_hosted_adapter_ids() (in start) constructs the key-free
     # GatewayHostedAdaptersSettings (ADR-0036 / #499) — no provider key needed.
 ```
 
 `test_adapter_egress_mount.py` — replace the fixture docstring + the two setenvs:
+
 ```python
     """Minimal env for ``start_gateway``.
 
@@ -504,7 +518,9 @@ with:
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 ```
+
 with:
+
 ```python
     """Minimal env for ``start_gateway``.
 
@@ -550,6 +566,7 @@ EOF
 ## Task 3: Adversarial-corpus parity for the gateway sole-guard path
 
 **Files:**
+
 - Create: `tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml`
 - Create: `tests/adversarial/capability_bypass/test_cap_2026_006_gateway_keyfree_traversal_refused.py`
 
@@ -560,8 +577,9 @@ EOF
 Invoke the `alfred-adversarial-corpus` skill for the exact YAML schema + loader wiring, modelled on the existing `cap-2026-005` pair. Target content:
 
 `gateway_keyfree_traversal_refused.yaml`:
+
 ```yaml
-id: cap-2026-006
+id: cap-2026-012
 category: capability_bypass
 threat: "A traversal-shaped comms-adapter id in the gateway's key-free ALFRED_COMMS_ENABLED_ADAPTERS reaches the gateway resolver's _resolve_adapter_kind manifest read sink (which has NO sink-local containment re-check, unlike the daemon builder), escaping the plugins/ directory to read an arbitrary manifest.toml off the host."
 ingestion_path: capability_gate
@@ -580,6 +598,7 @@ references:
 ```
 
 `test_cap_2026_006_gateway_keyfree_traversal_refused.py` — mirror the `cap-2026-005` test shape (corpus-filter fixture with the missing/duplicate drift-guard), driving the REAL production `_resolve_hosted_adapter_ids` (NEVER a shim). The assertion body:
+
 ```python
 def test_gateway_keyfree_traversal_refused(
     gateway_traversal_payload: AdversarialPayload, monkeypatch: pytest.MonkeyPatch
@@ -609,7 +628,7 @@ Run: `uv run ruff check tests/adversarial/capability_bypass && uv run ruff forma
 ```bash
 git add tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml tests/adversarial/capability_bypass/test_cap_2026_006_gateway_keyfree_traversal_refused.py
 git commit -m "$(cat <<'EOF'
-test: #499 adversarial parity for the gateway key-free traversal-refusal (cap-2026-006)
+test: #499 adversarial parity for the gateway key-free traversal-refusal (cap-2026-012)
 
 The gateway resolver path's sole guard is the construction-time validator (no sink re-check,
 unlike the daemon builder's cap-2026-005). Pins that a traversal-shaped ALFRED_COMMS_ENABLED_ADAPTERS
@@ -626,11 +645,13 @@ EOF
 ## Task 4: The #494 e2e ratchet (un-xfail the gateway)
 
 **Files:**
+
 - Modify: `tests/e2e/_services.py`
 - Modify: `tests/e2e/test_first_run_boot.py`
 - Test: `tests/unit/e2e/test_services.py`
 
 **Interfaces:**
+
 - Produces: `_services.HEALTHY_APP_SERVICES: frozenset[str]` (services graduated from XFAIL to "asserted healthy by a dedicated build-required test").
 
 - [ ] **Step 1: Write the failing unit test for the new partition**
@@ -689,6 +710,7 @@ XFAIL_SERVICES: Mapping[str, str] = {
 In `tests/e2e/test_first_run_boot.py`:
 
 (a) Widen the classification union in `test_every_compose_service_is_classified` (line 51):
+
 ```python
     known = (
         _services.BASELINE_SERVICES
@@ -698,6 +720,7 @@ In `tests/e2e/test_first_run_boot.py`:
 ```
 
 (b) Remove the `@pytest.mark.xfail(...)` decorator on `test_gateway_is_healthy` (lines 58–62) and restore the full health budget by dropping the `timeout_s` override (line 74). The test becomes:
+
 ```python
 def test_gateway_is_healthy(boot_stack: BootStack) -> None:
     # #499 landed: the gateway resolves its hosted-adapter allowlist without a provider key
@@ -715,6 +738,7 @@ def test_gateway_is_healthy(boot_stack: BootStack) -> None:
 ```
 
 (c) Fix the now-stale `_XFAIL_HEALTH_TIMEOUT_S` comment (lines 30–33) — only core remains xfail:
+
 ```python
 # The core xfail test polls a SHORTER health budget: its blocker (#500) crash-loops as a
 # perpetual `starting` and can never resolve early, so the full 180s baseline budget would just
@@ -771,7 +795,7 @@ Expected: lint + format + mypy + pyright + unit all green. If the macOS integrat
 - [ ] **Step 3: Run the full adversarial suite (security-adjacent change)**
 
 Run: `uv run pytest tests/adversarial -q`
-Expected: PASS — incl. the existing `cap-2026-005` (validator behavior unchanged) and the new `cap-2026-006` (gateway key-free traversal refusal).
+Expected: PASS — incl. the existing `cap-2026-005` (validator behavior unchanged) and the new `cap-2026-012` (gateway key-free traversal refusal).
 
 - [ ] **Step 4: Live-verify the gateway boots healthy with NO provider key (MANDATORY pre-merge)**
 
@@ -793,6 +817,7 @@ done
 docker compose logs alfred-gateway | tail -40
 docker compose down
 ```
+
 Expected: `health=healthy`. If it stalls at `starting`/`unhealthy`, read the logs — if the gateway needs Redis (or any `--no-deps`-omitted service) to reach healthy, that is a NEW finding the harness diagnosis did not name; STOP and apply superpowers:systematic-debugging (do not pre-solve). If the container fails to CREATE on Linux, confirm the AppArmor profile loaded (the step above). Otherwise the standalone-healthy premise is confirmed.
 
 - [ ] **Step 5: Confirm no i18n / catalog drift**
@@ -817,7 +842,7 @@ Security: the path-traversal guard on the gateway adapter-id read is unchanged (
 validator; `_resolve_adapter_kind`'s read sink has no sink-local re-check, so the construction-time
 validator is the sole guard — pinned by a single/multi-segment resolver-level regression-lock, a
 direct symlink-escape test on the containment branch, and a new release-blocking adversarial entry
-`cap-2026-006`). Full adversarial suite green.
+`cap-2026-012`). Full adversarial suite green.
 
 Spec: `docs/superpowers/specs/2026-07-25-499-gateway-settings-decoupling-design.md`
 Plan: `docs/superpowers/plans/2026-07-25-499-gateway-settings-decoupling.md`
@@ -838,8 +863,8 @@ Per the standing cadence: run the full `/review-pr` fleet (security ALWAYS) + Co
 ## Definition of Done
 
 1. `alfred-gateway` reaches Docker `healthy` with no provider key — verified live (Task 5 Step 4, mandatory pre-merge) and via the un-xfailed nightly `test_gateway_is_healthy`.
-2. The path-traversal guard on the gateway adapter-id path is provably intact: the resolver-level single/multi-segment regression-lock, the direct symlink-escape test on the `is_relative_to` containment branch, and the `cap-2026-006` adversarial entry.
+2. The path-traversal guard on the gateway adapter-id path is provably intact: the resolver-level single/multi-segment regression-lock, the direct symlink-escape test on the `is_relative_to` containment branch, and the `cap-2026-012` adversarial entry.
 3. One definition of the adapter-id validator; `Settings` and `GatewayHostedAdaptersSettings` share `validate_comms_adapter_ids`; equivalence pinned over the full bad-id corpus.
-4. `make check` green; full adversarial suite green (incl. `cap-2026-006`); no i18n drift.
+4. `make check` green; full adversarial suite green (incl. `cap-2026-012`); no i18n drift.
 5. `XFAIL_SERVICES == {"alfred-core": "#500"}`; `HEALTHY_APP_SERVICES == {"alfred-gateway"}`.
 6. PR through `/review-pr` fleet + CodeRabbit, all threads resolved, rebase-merged.

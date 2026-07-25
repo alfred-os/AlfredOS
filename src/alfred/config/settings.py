@@ -574,10 +574,13 @@ class GatewayHostedAdaptersSettings(BaseSettings):
     def __init__(self, **kw):  # type: ignore[no-untyped-def]
         # On-class __init__ (NOT a shared base): the pydantic mypy plugin only respects a
         # user __init__ defined on the model class — extracting it to a base makes the plugin
-        # synthesize a typed constructor, breaking every bare env-sourced Settings()/
-        # GatewayHostedAdaptersSettings() call site with call-arg (#499). The lift behavior is
-        # the shared invariant (both raise SettingsError); the validator SoT is
-        # validate_comms_adapter_ids.
+        # synthesize a typed constructor, breaking bare env-sourced construction at every call
+        # site (Settings() sites gain `call-arg` for its required fields; this all-defaulted
+        # model's own sites gain `unused-ignore`) (#499). The lift is the shared invariant:
+        # both raise SettingsError with `from exc` chaining (daemon/_commands.py reads the
+        # pydantic cause via exc.__cause__), so the CLI catch sites — _load_settings_or_die
+        # and start_gateway's config arm (_commands.py) — depend on the single SettingsError
+        # type. The validator SoT is validate_comms_adapter_ids.
         try:
             super().__init__(**kw)
         except Exception as exc:

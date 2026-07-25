@@ -202,6 +202,13 @@ metric + an audit row; never a silent drop.
 
 ## Consequences
 
+- **Key-free config read (#499):** the gateway reads its hosted-adapter allowlist via
+  `GatewayHostedAdaptersSettings` (a one-field, key-free `BaseSettings`), never the full
+  `Settings` — which requires the `deepseek_api_key` provider secret this ADR denies the
+  gateway. The path-traversal safety of the adapter-id → `plugins/<id>/manifest.toml` read is
+  the shared `validate_comms_adapter_ids` validator (same rule the full `Settings` uses); a
+  traversal-shaped id is refused at construction (`SettingsError` → `_EXIT_CONFIG_FAILED`).
+
 ### Honest scope (§6)
 
 - The gateway stays **payload-blind for T3 message bodies** — it parses only the

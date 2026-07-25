@@ -101,7 +101,8 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
     reason="blocker #501: bin/alfred-setup.sh does not complete under the "
     "stock documented flow — it exits at the credential gate on the .env.example "
     "placeholder DeepSeek key (README:33 omits ALFRED_DEEPSEEK_API_KEY). Roadmap "
-    "Step 4 (README/setup.sh reconciliation); after that, blocker #499's migrate hang.",
+    "Step 4 (README/setup.sh reconciliation); after that, the remaining blocker is "
+    "#500 (core) — #499 already un-hung migrate by making the gateway healthy.",
 )
 def test_setup_sh_completes() -> None:
     # Run setup.sh in an ISOLATED detached git worktree so the operator's repo-root .env is
