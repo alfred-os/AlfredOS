@@ -155,24 +155,7 @@ class SettingsError(ValueError):
     """
 
 
-class _SettingsErrorLifting(BaseSettings):
-    """Base that lifts any construction failure to :class:`SettingsError` (#499).
-
-    Both ``Settings`` and ``GatewayHostedAdaptersSettings`` inherit this so a pydantic
-    ``ValidationError`` (which is NOT a ``ValueError``) never escapes raw — the CLI catch
-    sites (``_load_settings_or_die``, ``start_gateway``'s config arm at ``_commands.py:294``)
-    depend on the single ``SettingsError`` type. The ``from exc`` chaining is preserved so
-    ``daemon/_commands.py``'s ``exc.__cause__`` field-name reader still works.
-    """
-
-    def __init__(self, **kw):  # type: ignore[no-untyped-def]
-        try:
-            super().__init__(**kw)
-        except Exception as exc:
-            raise SettingsError(str(exc)) from exc
-
-
-class Settings(_SettingsErrorLifting):
+class Settings(BaseSettings):
     """Top-level AlfredOS settings."""
 
     model_config = SettingsConfigDict(
@@ -559,8 +542,15 @@ class Settings(_SettingsErrorLifting):
             raise ValueError("placeholder_api_key")
         return v
 
+    def __init__(self, **kw):  # type: ignore[no-untyped-def]
+        try:
+            super().__init__(**kw)
+        except Exception as exc:
+            # Translate pydantic ValidationError into a SettingsError the CLI can render.
+            raise SettingsError(str(exc)) from exc
 
-class GatewayHostedAdaptersSettings(_SettingsErrorLifting):
+
+class GatewayHostedAdaptersSettings(BaseSettings):
     """The gateway's key-free read of the hosted-adapter allowlist (ADR-0036, #499).
 
     ONE field. The gateway holds no provider secret, so it MUST NOT construct the full
@@ -580,3 +570,15 @@ class GatewayHostedAdaptersSettings(_SettingsErrorLifting):
     @classmethod
     def _validate_comms_enabled_adapters(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return validate_comms_adapter_ids(value)
+
+    def __init__(self, **kw):  # type: ignore[no-untyped-def]
+        # On-class __init__ (NOT a shared base): the pydantic mypy plugin only respects a
+        # user __init__ defined on the model class — extracting it to a base makes the plugin
+        # synthesize a typed constructor, breaking every bare env-sourced Settings()/
+        # GatewayHostedAdaptersSettings() call site with call-arg (#499). The lift behavior is
+        # the shared invariant (both raise SettingsError); the validator SoT is
+        # validate_comms_adapter_ids.
+        try:
+            super().__init__(**kw)
+        except Exception as exc:
+            raise SettingsError(str(exc)) from exc
