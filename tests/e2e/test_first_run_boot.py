@@ -1,8 +1,9 @@
 """The e2e first-run boot assertions (#494): green infra baseline + xfail'd blockers.
 
-Baseline services are asserted healthy (regression net). The gateway/core/setup.sh
-assertions are strict-xfail on their roadmap blockers — each reds via XPASS the instant
-its blocker lands, forcing the assertion to tighten (Steps 2/3/5).
+Baseline services are asserted healthy (regression net). The gateway graduated to a plain
+asserted-healthy test at #499. The core/setup.sh assertions are still strict-xfail on their
+roadmap blockers — each reds via XPASS the instant its blocker lands, forcing the assertion
+to tighten (Steps 3/5).
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ pytestmark = pytest.mark.e2e
 # comfortable margin for local runs where the fixture just built.
 _UP_TIMEOUT_S = 300.0
 _SETUP_SH_TIMEOUT_S = 900.0
-# The gateway/core xfail tests poll a SHORTER health budget: their blockers (#499/#500) crash-loop
-# as perpetual `starting` and can never resolve early, so the full 180s baseline budget would just
-# burn ~6 min/nightly (review: performance). Restore the full budget when Step 2/3 un-xfails them.
+# The core xfail test polls a SHORTER health budget: its blocker (#500) crash-loops as a
+# perpetual `starting` and can never resolve early, so the full 180s baseline budget would just
+# burn ~6 min/nightly (review: performance). Restore the full budget when Step 3 un-xfails core.
 _XFAIL_HEALTH_TIMEOUT_S = 60.0
 
 
@@ -42,25 +43,25 @@ def test_baseline_service_is_healthy(boot_stack: BootStack, service: str) -> Non
 
 def test_every_compose_service_is_classified(boot_stack: BootStack) -> None:
     # Derived-set guard (arch-001): a NEW compose service must not boot unobserved. Reds if
-    # `docker compose config --services` returns anything not in BASELINE or XFAIL.
+    # `docker compose config --services` returns anything not in BASELINE, HEALTHY_APP, or XFAIL.
     out = _compose.compose(
         boot_stack.project, "config", "--services", env_file=boot_stack.env_file
     ).stdout
     discovered = _services.parse_services(out)
     _services.assert_service_floor(discovered)
-    known = _services.BASELINE_SERVICES | set(_services.XFAIL_SERVICES)
+    known = (
+        _services.BASELINE_SERVICES | _services.HEALTHY_APP_SERVICES | set(_services.XFAIL_SERVICES)
+    )
     assert set(discovered) == known, (
         f"compose services {sorted(discovered)} != classified {sorted(known)} — add a new/removed "
-        f"service to BASELINE_SERVICES or XFAIL_SERVICES in tests/e2e/_services.py."
+        f"service to BASELINE_SERVICES, HEALTHY_APP_SERVICES, or XFAIL_SERVICES in "
+        f"tests/e2e/_services.py."
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="blocker #499: gateway _resolve_hosted_adapter_ids builds a "
-    "full Settings() needing a provider key it is denied (ADR-0036). Roadmap Step 2.",
-)
 def test_gateway_is_healthy(boot_stack: BootStack) -> None:
+    # #499 landed: the gateway resolves its hosted-adapter allowlist without a provider key
+    # (ADR-0036), so it boots healthy standalone (core absent -> healthy-while-buffering).
     _compose.compose(
         boot_stack.project,
         "up",
@@ -70,10 +71,7 @@ def test_gateway_is_healthy(boot_stack: BootStack) -> None:
         env_file=boot_stack.env_file,
         timeout_s=_UP_TIMEOUT_S,
     )
-    assert (
-        boot_stack.health("alfred-gateway", timeout_s=_XFAIL_HEALTH_TIMEOUT_S)
-        is ServiceHealth.HEALTHY
-    )
+    assert boot_stack.health("alfred-gateway") is ServiceHealth.HEALTHY
 
 
 @pytest.mark.xfail(
