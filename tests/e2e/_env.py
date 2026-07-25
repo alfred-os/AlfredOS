@@ -10,8 +10,18 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
-E2E_PROJECT_NAME = "alfred-e2e"
+E2E_PROJECT_PREFIX = "alfred-e2e"
 DUMMY_KEY_SENTINEL = "sk-DUMMY-e2e-not-a-real-key"
+
+
+def new_project_name() -> str:
+    """A per-run-unique isolated compose project name.
+
+    Unique per run so concurrent/re-entrant LOCAL runs never share Docker Compose labels — one
+    run's ``down -v`` would otherwise tear down another's containers/volumes (CR). Mirrors the
+    smoke suite's suffixed-project pattern.
+    """
+    return f"{E2E_PROJECT_PREFIX}-{secrets.token_hex(4)}"
 
 
 def write_e2e_env_file(dest_dir: Path) -> Path:

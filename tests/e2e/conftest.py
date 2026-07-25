@@ -65,6 +65,17 @@ class BootStack:
         return last
 
 
+def _scrub_secrets(text: str, env_file: Path) -> str:
+    """Redact the harness's injected env-file values (per-run Grafana password + dummy sentinel
+    keys) from captured logs before they land in the failure-uploaded artifact (sec-003)."""
+    for line in env_file.read_text().splitlines():
+        _, sep, value = line.partition("=")
+        value = value.strip()
+        if sep and value:
+            text = text.replace(value, "***REDACTED***")
+    return text
+
+
 @pytest.fixture(scope="session")
 def boot_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BootStack]:
     if not docker_available():
@@ -72,7 +83,7 @@ def boot_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BootStack]:
             f"e2e boot lane requires a Docker daemon: {docker_unavailable_reason()}"
         )
     env_file = _env.write_e2e_env_file(tmp_path_factory.mktemp("e2e-env"))
-    project = _env.E2E_PROJECT_NAME
+    project = _env.new_project_name()
     try:
         # Build the app images ONCE with a long timeout so a cold build fails LOUD (fixture
         # error -> tally error>0 -> RED) rather than tripping the per-`up` 180s timeout and
@@ -92,10 +103,10 @@ def boot_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BootStack]:
     finally:
         # Capture logs BEFORE teardown (ops-104) so a failure's diagnosis survives — but a
         # hung/failed `logs` (TimeoutExpired isn't suppressed by check=False) must NEVER skip
-        # teardown of the fixed-name project (final-review Important).
+        # teardown (final-review Important). Redact the harness's injected secrets first (sec-003).
         try:
             logs = _compose.compose(project, "logs", "--no-color", env_file=env_file, check=False)
-            Path("e2e-stack.log").write_text(logs.stdout + logs.stderr)
+            Path("e2e-stack.log").write_text(_scrub_secrets(logs.stdout + logs.stderr, env_file))
         except (OSError, subprocess.SubprocessError):
             pass
         _compose.down_project(project)

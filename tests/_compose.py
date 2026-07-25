@@ -44,5 +44,7 @@ def down_project(project: str, *, timeout_s: float = 90.0) -> None:
     Best-effort: a hung/failed ``down`` (e.g. a wedged daemon → ``TimeoutExpired``) must not
     mask a test result, so its own ``SubprocessError`` is swallowed.
     """
-    with contextlib.suppress(subprocess.SubprocessError):
+    # OSError too: a missing/uncallable `docker` raises FileNotFoundError (an OSError, NOT a
+    # SubprocessError), and teardown must honour its documented never-raises guarantee.
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         compose(project, "down", "-v", check=False, timeout_s=timeout_s)
