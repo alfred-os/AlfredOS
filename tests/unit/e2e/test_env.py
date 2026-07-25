@@ -31,3 +31,26 @@ def test_gf_password_is_per_run_random(tmp_path: Path) -> None:
 
 def test_dummy_key_is_not_the_env_example_placeholder(tmp_path: Path) -> None:
     assert _env.DUMMY_KEY_SENTINEL != "sk-..."
+
+
+def test_new_project_name_is_unique_and_prefixed() -> None:
+    a, b = _env.new_project_name(), _env.new_project_name()
+    prefix = f"{_env.E2E_PROJECT_PREFIX}-"
+    assert a.startswith(prefix) and b.startswith(prefix)
+    assert a != b  # per-run-unique so concurrent runs never share Compose labels
+
+
+def test_scrub_env_secrets_redacts_every_injected_value(tmp_path: Path) -> None:
+    env_file = _env.write_e2e_env_file(tmp_path)
+    values = _read(env_file)
+    gf = values["GF_SECURITY_ADMIN_PASSWORD"]
+    text = f"grafana logged pw={gf} and key={_env.DUMMY_KEY_SENTINEL} in the boot output"
+    scrubbed = _env.scrub_env_secrets(text, env_file)
+    assert gf not in scrubbed
+    assert _env.DUMMY_KEY_SENTINEL not in scrubbed
+    assert "***REDACTED***" in scrubbed
+
+
+def test_scrub_env_secrets_leaves_non_secret_text_intact(tmp_path: Path) -> None:
+    env_file = _env.write_e2e_env_file(tmp_path)
+    assert _env.scrub_env_secrets("no secrets here", env_file) == "no secrets here"

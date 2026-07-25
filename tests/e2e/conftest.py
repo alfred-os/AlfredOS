@@ -65,17 +65,6 @@ class BootStack:
         return last
 
 
-def _scrub_secrets(text: str, env_file: Path) -> str:
-    """Redact the harness's injected env-file values (per-run Grafana password + dummy sentinel
-    keys) from captured logs before they land in the failure-uploaded artifact (sec-003)."""
-    for line in env_file.read_text().splitlines():
-        _, sep, value = line.partition("=")
-        value = value.strip()
-        if sep and value:
-            text = text.replace(value, "***REDACTED***")
-    return text
-
-
 @pytest.fixture(scope="session")
 def boot_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BootStack]:
     if not docker_available():
@@ -106,7 +95,9 @@ def boot_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BootStack]:
         # teardown (final-review Important). Redact the harness's injected secrets first (sec-003).
         try:
             logs = _compose.compose(project, "logs", "--no-color", env_file=env_file, check=False)
-            Path("e2e-stack.log").write_text(_scrub_secrets(logs.stdout + logs.stderr, env_file))
+            Path("e2e-stack.log").write_text(
+                _env.scrub_env_secrets(logs.stdout + logs.stderr, env_file)
+            )
         except (OSError, subprocess.SubprocessError):
             pass
         _compose.down_project(project)
