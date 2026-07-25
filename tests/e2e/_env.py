@@ -24,6 +24,17 @@ def new_project_name() -> str:
     return f"{E2E_PROJECT_PREFIX}-{secrets.token_hex(4)}"
 
 
+def scrub_env_secrets(text: str, env_file: Path) -> str:
+    """Redact this env-file's injected values (per-run Grafana password + dummy sentinel keys)
+    from captured text before it lands in a failure-uploaded artifact (sec-003)."""
+    for line in env_file.read_text().splitlines():
+        _, sep, value = line.partition("=")
+        value = value.strip()
+        if sep and value:
+            text = text.replace(value, "***REDACTED***")
+    return text
+
+
 def write_e2e_env_file(dest_dir: Path) -> Path:
     """Write ``<dest_dir>/e2e.env`` (per-run random GF password + dummy keys); return it."""
     dest_dir.mkdir(parents=True, exist_ok=True)
