@@ -1,0 +1,12 @@
+# #500: keep the build context hermetic so the shipped image is reproducible across
+# machines (a dev tree's plugins/*/.venv holds a dangling host-absolute python symlink;
+# __pycache__ / plugin tests are non-runtime). This governs EVERY COPY in the Dockerfile.
+.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+plugins/*/tests
+plugins/*/.venv
