@@ -121,6 +121,31 @@ class _Without(PydanticBaseSettingsSource):
         return data
 
 
+def validate_comms_adapter_ids(value: tuple[str, ...]) -> tuple[str, ...]:
+    """Reject any adapter id that is mis-charset, traversal-shaped, or has no real manifest.
+
+    THE single source of truth for comms-adapter-id path-safety (#499). Both ``Settings``
+    (full core config) and ``GatewayHostedAdaptersSettings`` (the gateway's key-free read)
+    delegate their ``comms_enabled_adapters`` field validator here, so the two can never
+    drift (CLAUDE.md hard rule #7; security/_config_protocols.py). The ``is_relative_to``
+    containment branch is the SOLE path-traversal guard on the gateway resolver path
+    (``_resolve_adapter_kind`` does a bare ``read_text()`` with no sink re-check). The
+    message stays raw English (no ``t()``): Settings loads too early in boot for the translator.
+    """
+    plugins_root = (_REPO_ROOT / "plugins").resolve()
+    for adapter_id in value:
+        if not _COMMS_ADAPTER_ID_RE.match(adapter_id):
+            raise ValueError(f"invalid comms adapter id {adapter_id!r}")
+        if adapter_id in {".", ".."}:
+            raise ValueError(f"invalid comms adapter id {adapter_id!r}")
+        manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
+        if not manifest_path.resolve().is_relative_to(plugins_root):
+            raise ValueError(f"invalid comms adapter id {adapter_id!r}")
+        if not manifest_path.is_file():
+            raise ValueError(f"no manifest for comms adapter id {adapter_id!r}")
+    return value
+
+
 class SettingsError(ValueError):
     """Raised when Settings fail to load with a usable, operator-facing message.
 
@@ -130,7 +155,24 @@ class SettingsError(ValueError):
     """
 
 
-class Settings(BaseSettings):
+class _SettingsErrorLifting(BaseSettings):
+    """Base that lifts any construction failure to :class:`SettingsError` (#499).
+
+    Both ``Settings`` and ``GatewayHostedAdaptersSettings`` inherit this so a pydantic
+    ``ValidationError`` (which is NOT a ``ValueError``) never escapes raw — the CLI catch
+    sites (``_load_settings_or_die``, ``start_gateway``'s config arm at ``_commands.py:294``)
+    depend on the single ``SettingsError`` type. The ``from exc`` chaining is preserved so
+    ``daemon/_commands.py``'s ``exc.__cause__`` field-name reader still works.
+    """
+
+    def __init__(self, **kw):  # type: ignore[no-untyped-def]
+        try:
+            super().__init__(**kw)
+        except Exception as exc:
+            raise SettingsError(str(exc)) from exc
+
+
+class Settings(_SettingsErrorLifting):
     """Top-level AlfredOS settings."""
 
     model_config = SettingsConfigDict(
@@ -449,41 +491,8 @@ class Settings(BaseSettings):
     @field_validator("comms_enabled_adapters")
     @classmethod
     def _validate_comms_enabled_adapters(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        """Reject any adapter id that is mis-charset, traversal-shaped, or has no real manifest.
-
-        Each entry must match :data:`_COMMS_ADAPTER_ID_RE` (so a multi-segment
-        path-traversal-shaped id never reaches the filesystem probe), must NOT be
-        the single-segment ``.`` / ``..`` traversal probes (FIX 3), must resolve
-        to a manifest path UNDER ``plugins/``, AND name a real
-        ``plugins/<id>/manifest.toml``. A bad entry raises ``ValueError`` —
-        :meth:`Settings.__init__` lifts it to :class:`SettingsError`, so boot
-        fails loudly instead of silently dropping an adapter the operator
-        believes is enabled (CLAUDE.md hard rule #7). The message stays raw
-        English (no ``t()``): Settings loads too early in boot to depend on the
-        translator, matching ``_reject_placeholder_key``.
-        """
-        plugins_root = (_REPO_ROOT / "plugins").resolve()
-        for adapter_id in value:
-            if not _COMMS_ADAPTER_ID_RE.match(adapter_id):
-                raise ValueError(f"invalid comms adapter id {adapter_id!r}")
-            # FIX 3 (defence in depth): ``.`` and ``..`` are charset-clean under
-            # _COMMS_ADAPTER_ID_RE but are single-segment path-traversal probes
-            # (``.`` → ``plugins/manifest.toml``, ``..`` → escapes ``plugins/``).
-            # ``/`` is already blocked so they are capped, but ``is_file()``
-            # follows symlinks; refuse them explicitly rather than relying on the
-            # escape target not existing.
-            if adapter_id in {".", ".."}:
-                raise ValueError(f"invalid comms adapter id {adapter_id!r}")
-            manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
-            # Belt-and-braces containment: the resolved manifest path must stay
-            # under ``plugins/``. A traversal that slips past the charset/segment
-            # guards (e.g. a future loosened regex) is refused here before the
-            # filesystem probe trusts it.
-            if not manifest_path.resolve().is_relative_to(plugins_root):
-                raise ValueError(f"invalid comms adapter id {adapter_id!r}")
-            if not manifest_path.is_file():
-                raise ValueError(f"no manifest for comms adapter id {adapter_id!r}")
-        return value
+        """Delegate to the shared :func:`validate_comms_adapter_ids` (the SoT, #499)."""
+        return validate_comms_adapter_ids(value)
 
     @field_validator("egress_proxy_url", mode="before")
     @classmethod
@@ -550,9 +559,24 @@ class Settings(BaseSettings):
             raise ValueError("placeholder_api_key")
         return v
 
-    def __init__(self, **kw):  # type: ignore[no-untyped-def]
-        try:
-            super().__init__(**kw)
-        except Exception as exc:
-            # Translate pydantic ValidationError into a SettingsError the CLI can render.
-            raise SettingsError(str(exc)) from exc
+
+class GatewayHostedAdaptersSettings(_SettingsErrorLifting):
+    """The gateway's key-free read of the hosted-adapter allowlist (ADR-0036, #499).
+
+    ONE field. The gateway holds no provider secret, so it MUST NOT construct the full
+    ``Settings`` (whose ``deepseek_api_key`` is required-no-default). pydantic-settings does
+    the ``ALFRED_COMMS_ENABLED_ADAPTERS`` env-read + JSON-decode natively; the shared
+    :func:`validate_comms_adapter_ids` keeps path-safety identical to the full ``Settings``.
+    ``extra="ignore"`` drops any provider key present in the env (ADR-0036 belt-and-braces).
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="ALFRED_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    comms_enabled_adapters: tuple[str, ...] = Field(default=())
+
+    @field_validator("comms_enabled_adapters")
+    @classmethod
+    def _validate_comms_enabled_adapters(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return validate_comms_adapter_ids(value)
