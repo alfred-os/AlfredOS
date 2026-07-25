@@ -96,6 +96,7 @@ from typing import IO, TYPE_CHECKING
 
 import structlog
 
+from alfred._repo_root import repo_root
 from alfred.egress import control_fd_broker
 from alfred.egress._config_protocols import EgressProxyConfig
 from alfred.errors import AlfredError
@@ -236,15 +237,13 @@ class QuarantineChildSpawnError(AlfredError):
 
 
 def _repo_root() -> Path:
-    """Resolve the in-tree repo root that ships ``bin/``.
-
-    This module lives at ``src/alfred/security/`` so the repo root is four
-    parents up. Mirrors :func:`alfred.cli._launcher_spawn.repo_root` (three
-    parents from ``src/alfred/cli/``) shifted one level deeper. Used only for the
-    default launcher path; the child code itself ships in the wheel now (ADR-0030)
-    and needs no repo-relative import root.
+    """Resolve the in-tree repo root that ships ``bin/`` (delegates to the single
+    resolver — #500). Thin wrapper so existing importers / test patches of
+    ``quarantine_child_io._repo_root`` keep working. Used only for the default
+    launcher path; the child code itself ships in the wheel now (ADR-0030) and
+    needs no repo-relative import root.
     """
-    return Path(__file__).resolve().parents[3]
+    return repo_root()
 
 
 def _launcher_path() -> str:

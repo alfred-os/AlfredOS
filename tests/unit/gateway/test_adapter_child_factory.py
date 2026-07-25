@@ -35,6 +35,7 @@ from alfred.comms_mcp.adapter_credential_resolver import AdapterCredentialError
 from alfred.gateway.adapter_child_factory import (
     GatewayAdapterChildFactory,
     _GatewayAdapterChild,
+    _launcher_path,
 )
 from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
 from alfred.gateway.adapter_supervisor import GatewayAdapterSpawnError
@@ -346,6 +347,18 @@ async def test_spawn_argv_targets_the_launcher_with_discord_plugin_and_module() 
     assert argv[1] == "alfred.discord"
     assert argv[-3:] == [argv[2], "-m", "plugins.alfred_discord.server"]
     await child.aclose()
+
+
+def test_launcher_default_resolves_under_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#500: with no ``ALFRED_PLUGIN_LAUNCHER`` override, the default launcher
+    path resolves via the shared ``alfred._repo_root.repo_root()`` resolver
+    (``ALFRED_REPO_ROOT``) rather than ``__file__`` arithmetic — the arithmetic
+    resolves under ``site-packages``, not the repo root, once ``alfred`` is
+    installed non-editable into the shipped image."""
+    monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
+
+    assert _launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
 
 
 async def test_spawn_env_is_scrubbed_and_sets_environment_no_host_secrets(
