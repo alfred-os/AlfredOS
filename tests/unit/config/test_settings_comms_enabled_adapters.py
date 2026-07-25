@@ -74,29 +74,32 @@ def test_rejects_dotdot_even_when_escape_target_exists(
     ``.``/``..`` refusal, ``is_file()`` would follow the ``..`` segment and ACCEPT
     the id — a single-segment traversal escaping ``plugins/``. The explicit
     refusal must reject it regardless."""
-    import alfred.config.settings as settings_mod
-
     fake_root = tmp_path / "repo"
     (fake_root / "plugins").mkdir(parents=True)
     # The file ``plugins/../manifest.toml`` resolves to — make it real so the
     # naive ``is_file()`` probe would otherwise pass.
     (fake_root / "manifest.toml").write_text("# escape target", encoding="utf-8")
-    monkeypatch.setattr(settings_mod, "_REPO_ROOT", fake_root)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(fake_root))
 
     with pytest.raises(SettingsError):
         Settings(comms_enabled_adapters=("..",))
 
 
-def test_resolved_manifest_path_stays_under_plugins() -> None:
+def test_resolved_manifest_path_stays_under_plugins(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """FIX 3: a valid adapter's resolved manifest path stays under ``plugins/``.
 
     Belt-and-braces on the containment invariant the ``.``/``..`` refusal
     protects: the reference adapter resolves to ``plugins/<id>/manifest.toml``,
     not an escape outside ``plugins/``."""
-    from alfred.config.settings import _REPO_ROOT
+    manifest_path = tmp_path / "plugins" / _REAL_ADAPTER_ID / "manifest.toml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(tmp_path))
 
     settings = Settings(comms_enabled_adapters=(_REAL_ADAPTER_ID,))
-    plugins_root = (_REPO_ROOT / "plugins").resolve()
+    plugins_root = (tmp_path / "plugins").resolve()
     for adapter_id in settings.comms_enabled_adapters:
-        resolved = (_REPO_ROOT / "plugins" / adapter_id / "manifest.toml").resolve()
+        resolved = (tmp_path / "plugins" / adapter_id / "manifest.toml").resolve()
         assert resolved.is_relative_to(plugins_root)

@@ -29,6 +29,7 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from alfred._repo_root import repo_root
 from alfred.config._environment_loader import EnvironmentLoadResult, resolve_environment
 
 log = structlog.get_logger(__name__)
@@ -45,14 +46,6 @@ _PLACEHOLDER_API_KEY = "sk-..."
 # validator rejects those explicitly (FIX 3) and asserts the resolved manifest
 # path stays under ``plugins/``.
 _COMMS_ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-# Repo root, resolved from this module's location (``src/alfred/config/``). The
-# comms-adapter manifest probe joins ``plugins/<id>/manifest.toml`` onto it. We
-# do NOT import ``alfred.cli._launcher_spawn.repo_root`` here: Settings loads
-# very early in boot and pulling the CLI package into its import closure risks a
-# cycle. The path arithmetic is identical (both modules live three levels under
-# the repo root).
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _environment_keys(settings_cls: type[BaseSettings]) -> tuple[str, ...]:
@@ -132,13 +125,14 @@ def validate_comms_adapter_ids(value: tuple[str, ...]) -> tuple[str, ...]:
     (``_resolve_adapter_kind`` does a bare ``read_text()`` with no sink re-check). The
     message stays raw English (no ``t()``): Settings loads too early in boot for the translator.
     """
-    plugins_root = (_REPO_ROOT / "plugins").resolve()
+    root = repo_root()  # #500: re-read per call so ALFRED_REPO_ROOT / tests are honoured.
+    plugins_root = (root / "plugins").resolve()
     for adapter_id in value:
         if not _COMMS_ADAPTER_ID_RE.match(adapter_id):
             raise ValueError(f"invalid comms adapter id {adapter_id!r}")
         if adapter_id in {".", ".."}:
             raise ValueError(f"invalid comms adapter id {adapter_id!r}")
-        manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
+        manifest_path = root / "plugins" / adapter_id / "manifest.toml"
         if not manifest_path.resolve().is_relative_to(plugins_root):
             raise ValueError(f"invalid comms adapter id {adapter_id!r}")
         if not manifest_path.is_file():

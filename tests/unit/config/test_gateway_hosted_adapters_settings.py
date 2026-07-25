@@ -54,7 +54,7 @@ def test_validate_rejects_symlink_escape(tmp_path: object, monkeypatch: pytest.M
     plugins = root / "plugins"
     plugins.mkdir()
     (plugins / "escape").symlink_to(outside)  # plugins/escape -> root/outside
-    monkeypatch.setattr("alfred.config.settings._REPO_ROOT", root)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(root))
 
     with pytest.raises(ValueError):
         validate_comms_adapter_ids(("escape",))
