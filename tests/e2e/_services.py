@@ -18,10 +18,14 @@ BASELINE_SERVICES: frozenset[str] = frozenset(
     {"alfred-postgres", "alfred-redis", "alfred-prometheus", "alfred-grafana"}
 )
 
-# Known-blocked services -> the roadmap issue that un-blocks them (refs finalized in Task 10).
-# Shrinks toward empty as blockers land (the ratchet).
+# Services graduated from XFAIL to "asserted healthy by a dedicated build-required test"
+# (NOT the pulled-image infra baseline the boot_stack fixture co-boots). Grows as blockers
+# land; the ratchet advances XFAIL -> HEALTHY_APP one service at a time.
+HEALTHY_APP_SERVICES: frozenset[str] = frozenset({"alfred-gateway"})
+
+# Known-blocked services -> the roadmap issue that un-blocks them. Shrinks toward empty as
+# blockers land (the ratchet). alfred-gateway graduated to HEALTHY_APP_SERVICES at #499.
 XFAIL_SERVICES: Mapping[str, str] = {
-    "alfred-gateway": "#499",
     "alfred-core": "#500",
 }
 

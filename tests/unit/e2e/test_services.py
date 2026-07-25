@@ -21,11 +21,17 @@ def test_floor_fails_on_collapsed_config() -> None:
         _services.assert_service_floor([])
 
 
-def test_baseline_and_xfail_partition_covers_the_six() -> None:
-    # Disjoint AND covering = a genuine partition. The union alone would still pass if a
-    # service were mis-classified into BOTH sets, so assert disjointness explicitly (CR).
-    assert _services.BASELINE_SERVICES.isdisjoint(_services.XFAIL_SERVICES)
-    known = _services.BASELINE_SERVICES | set(_services.XFAIL_SERVICES)
+def test_baseline_app_and_xfail_partition_covers_the_six() -> None:
+    # Disjoint AND covering = a genuine partition across the three buckets (CR: assert
+    # pairwise-disjoint, not just the union — a service mis-classified into two buckets
+    # would still satisfy the union alone).
+    baseline = _services.BASELINE_SERVICES
+    app = _services.HEALTHY_APP_SERVICES
+    xfail = set(_services.XFAIL_SERVICES)
+    assert baseline.isdisjoint(app)
+    assert baseline.isdisjoint(xfail)
+    assert app.isdisjoint(xfail)
+    known = baseline | app | xfail
     assert known == {
         "alfred-postgres",
         "alfred-redis",
@@ -34,3 +40,6 @@ def test_baseline_and_xfail_partition_covers_the_six() -> None:
         "alfred-gateway",
         "alfred-core",
     }
+    # The ratchet has advanced: the gateway is asserted-healthy, only core remains xfail.
+    assert app == {"alfred-gateway"}
+    assert xfail == {"alfred-core"}
