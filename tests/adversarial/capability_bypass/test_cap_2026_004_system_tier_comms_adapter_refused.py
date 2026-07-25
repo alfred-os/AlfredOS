@@ -113,6 +113,10 @@ def test_system_tier_comms_adapter_refused(
     assert payload_fields["declared_tier"] == "system"
     assert system_tier_refused_payload.expected_outcome == "refused"
 
+    # Construct against the REAL repo root (env unset) — mirrors production,
+    # where the Settings validator and the builder do not share one boot-time
+    # root. Only after construction is the shared resolver pointed at the tmp
+    # tree the builder itself re-reads.
     settings = Settings(
         environment="test",
         deepseek_api_key="not-a-real-secret-adversarial-test-placeholder",
@@ -124,9 +128,7 @@ def test_system_tier_comms_adapter_refused(
     # Positive control: an operator-tier adapter seeds one wildcard grant — the
     # builder is a real tier evaluator, not a blanket refusal.
     _write_manifest_with_tier(repo_root, _ENABLED_ADAPTER, tier="operator")
-    monkeypatch.setattr(
-        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", repo_root
-    )
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(repo_root))
     (operator_grant,) = comms_adapter_load_grants(settings)
     assert operator_grant.subscriber_tier == "operator"
 

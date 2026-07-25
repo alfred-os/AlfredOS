@@ -74,9 +74,9 @@ never returns a short tuple that omits an enabled adapter's grant.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from alfred._repo_root import repo_root
 from alfred.plugins.errors import CommsAdapterManifestEscapeError, CommsAdapterSystemTierError
 from alfred.plugins.manifest import parse_manifest
 from alfred.security.capability_gate.policy import GrantRow
@@ -91,13 +91,6 @@ if TYPE_CHECKING:
 # from config alone would be a self-escalation to the OS trust tier riding the
 # boot seed, so the builder REFUSES it (CLAUDE.md hard rule #7).
 _FORBIDDEN_COMMS_ADAPTER_TIER: Final[str] = "system"
-
-# Resolve the repo root the same way ``Settings`` does (``parents[3]`` lands
-# on the repo root from ``src/alfred/security/capability_gate/``). The
-# comms-adapter manifests live at ``plugins/<id>/manifest.toml`` — the SAME
-# location the ``comms_enabled_adapters`` validator probes, so the builder
-# reads exactly the file the validator proved exists.
-_REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[4]
 
 # The state.git ``proposal_branch`` sentinel for a config-sourced
 # comms-adapter load grant. DISTINCT from ADR-0026's
@@ -147,12 +140,13 @@ def comms_adapter_load_grants(config: CommsAdapterGrantsConfig) -> tuple[GrantRo
             builder's repo root. Also surfaced loudly — never a silent skip.
     """
     grants: list[GrantRow] = []
+    root = repo_root()  # #500: fresh per call (honours ALFRED_REPO_ROOT / test patches).
     # Sink-local containment root (DiD, #364). Computed inside the function
-    # (not a module constant) so it tracks a monkeypatched ``_REPO_ROOT`` and
-    # mirrors how the Settings validator computes ``plugins_root`` in its body.
-    plugins_root = (_REPO_ROOT / "plugins").resolve()
+    # (not a module constant) so it tracks ``root`` above and mirrors how the
+    # Settings validator computes ``plugins_root`` in its body.
+    plugins_root = (root / "plugins").resolve()
     for adapter_id in config.comms_enabled_adapters:
-        manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
+        manifest_path = root / "plugins" / adapter_id / "manifest.toml"
         # Sink-local containment (DiD, #364): re-check the resolved manifest
         # path stays under ``plugins/`` rather than trusting the construction
         # validator — the same "re-check at the sink, the tool layer is the

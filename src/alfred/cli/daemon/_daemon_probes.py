@@ -32,6 +32,7 @@ from typing import Final, Protocol
 
 import yaml
 
+from alfred.cli._launcher_spawn import launcher_path
 from alfred.cli.daemon._failures import (
     CapabilityGateHandshakeFailedFailure,
     DaemonBootFailure,
@@ -83,14 +84,6 @@ def _truthy_env(name: str) -> bool:
     return raw.strip().lower() in _TRUTHY_VALUES
 
 
-# Repo-relative path to the launcher. Resolved from this file's location so
-# the probe works from any cwd (the daemon may boot from /).
-# _daemon_probes.py → daemon → cli → alfred → src → <repo-root>.
-_LAUNCHER_PATH: Final[Path] = (
-    Path(__file__).resolve().parents[4] / "bin" / "alfred-plugin-launcher.sh"
-)
-
-
 async def _launcher_self_test_impl() -> str:
     """Run ``bin/alfred-plugin-launcher.sh --self-test`` and return its stdout.
 
@@ -106,9 +99,10 @@ async def _launcher_self_test_impl() -> str:
     timeout can kill the whole group (the launcher + any child it spawned),
     never orphaning a subprocess.
     """
+    launcher = launcher_path()  # #500: image-correct + env-overridable (was a wrong-path const).
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(_LAUNCHER_PATH),
+            launcher,
             "--self-test",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

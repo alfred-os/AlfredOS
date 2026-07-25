@@ -172,9 +172,7 @@ def test_builder_fails_closed_on_unparseable_manifest(tmp_path, monkeypatch) -> 
     (bad_root / "plugins" / _ENABLED_ADAPTER / "manifest.toml").write_text(
         "this is = = not valid toml ["
     )
-    monkeypatch.setattr(
-        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", bad_root
-    )
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(bad_root))
 
     # Build a Settings whose validator we bypass for the manifest-exists check
     # by pointing the BUILDER's repo root at the broken tree. The validator
@@ -192,13 +190,16 @@ def test_builder_fails_closed_on_missing_manifest_file(tmp_path, monkeypatch) ->
     existed at construction, a builder pointed at a tree without it must NOT
     silently skip the grant.
     """
+    # Construct against the REAL repo root first (env unset) so the Settings
+    # validator proves the manifest exists there — mirrors production, where
+    # the validator and the builder do not share one boot-time root. Only
+    # THEN point the shared resolver at a tree without it, so the builder's
+    # OWN re-read (not construction) is what raises.
+    settings = _settings_with_adapters(_ENABLED_ADAPTER)
+
     empty_root = tmp_path / "empty_repo"
     (empty_root / "plugins").mkdir(parents=True)
-    monkeypatch.setattr(
-        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", empty_root
-    )
-
-    settings = _settings_with_adapters(_ENABLED_ADAPTER)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(empty_root))
 
     with pytest.raises((FileNotFoundError, SettingsError, OSError)):
         comms_adapter_load_grants(settings)
@@ -249,9 +250,7 @@ def test_builder_refuses_system_tier_comms_adapter(tmp_path, monkeypatch) -> Non
     """
     repo_root = tmp_path / "repo"
     _write_manifest_with_tier(repo_root, _ENABLED_ADAPTER, tier="system")
-    monkeypatch.setattr(
-        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", repo_root
-    )
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(repo_root))
     settings = _settings_with_adapters(_ENABLED_ADAPTER)
 
     with pytest.raises(CommsAdapterSystemTierError) as excinfo:
@@ -322,9 +321,7 @@ def test_builder_refuses_symlinked_adapter_dir_escaping_plugins(tmp_path, monkey
     (repo_root / "plugins" / "evil").symlink_to(
         outside / "plugins" / "evil", target_is_directory=True
     )
-    monkeypatch.setattr(
-        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", repo_root
-    )
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(repo_root))
 
     settings = Settings.model_construct(comms_enabled_adapters=("evil",))
 
@@ -345,9 +342,7 @@ def test_builder_allows_operator_and_user_plugin_tiers(tmp_path, monkeypatch, ti
     """
     repo_root = tmp_path / "repo"
     _write_manifest_with_tier(repo_root, _ENABLED_ADAPTER, tier=tier)
-    monkeypatch.setattr(
-        "alfred.security.capability_gate._comms_adapter_grants._REPO_ROOT", repo_root
-    )
+    monkeypatch.setenv("ALFRED_REPO_ROOT", str(repo_root))
     settings = _settings_with_adapters(_ENABLED_ADAPTER)
 
     (grant,) = comms_adapter_load_grants(settings)

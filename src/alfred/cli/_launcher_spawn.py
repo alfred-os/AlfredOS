@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 
+from alfred._repo_root import repo_root as _resolve_repo_root
 from alfred.plugins._comms_child_env import _SCRUBBED_ENV_ALLOWLIST, _spec_env
 
 #: Handshake-probe window (seconds). A launcher that exits non-zero within this
@@ -52,18 +53,20 @@ _LAUNCHER_ENV_VAR = "ALFRED_PLUGIN_LAUNCHER"
 
 
 def repo_root() -> Path:
-    """Resolve the in-tree repo root that ships ``bin/`` and ``plugins/``.
+    """Repo root that ships ``bin/`` and ``plugins/`` (delegates to the single
+    resolver — #500). Thin wrapper so existing importers + test patches of
+    ``_launcher_spawn.repo_root`` keep working."""
+    return _resolve_repo_root()
 
-    The CLI module lives at ``src/alfred/cli/`` so the repo root is three
-    parents up. An operator running from the repo root (or with the package
-    installed alongside ``bin/``/``plugins/``) gets the right launcher,
-    manifest, and plugin-source paths.
-    """
-    return Path(__file__).resolve().parents[3]
+
+def launcher_path() -> str:
+    """The plugin-launcher path: ``ALFRED_PLUGIN_LAUNCHER`` override else the
+    in-tree default. Public so daemon-boot probe (a) shares ONE resolution."""
+    return os.environ.get(_LAUNCHER_ENV_VAR, str(repo_root() / "bin" / "alfred-plugin-launcher.sh"))
 
 
 def _launcher_path() -> str:
-    return os.environ.get(_LAUNCHER_ENV_VAR, str(repo_root() / "bin" / "alfred-plugin-launcher.sh"))
+    return launcher_path()
 
 
 class LaunchResult(Enum):
@@ -286,6 +289,7 @@ __all__ = [
     "LaunchOutcome",
     "LaunchResult",
     "PluginLaunchSpec",
+    "launcher_path",
     "repo_root",
     "spawn_plugin_via_launcher",
 ]
