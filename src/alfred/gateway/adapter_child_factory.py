@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from alfred._repo_root import repo_root
 from alfred.config._environment_loader import EnvironmentSource, resolve_environment
 from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
 from alfred.gateway.adapter_supervisor import (
@@ -258,15 +259,15 @@ class _RunnerLike(Protocol):
 
 
 def _launcher_path() -> str:
-    """Resolve the bwrap launcher path (env override, else the in-tree script).
+    """Resolve the bwrap launcher path (env override, else the in-tree default).
 
     Mirrors :func:`alfred.security.quarantine_child_io._launcher_path` — the gateway is
-    a SECOND bwrap-launcher host (ADR-0015 annotation). The repo root is three parents
-    up from ``src/alfred/gateway/``.
+    a SECOND bwrap-launcher host (ADR-0015 annotation). The default resolves via the
+    single shared resolver (:func:`alfred._repo_root.repo_root`, #500) rather than
+    ``__file__`` arithmetic — the earliest boot gate that breaks once ``alfred`` is
+    installed non-editable into the shipped image.
     """
-    from pathlib import Path
-
-    default = Path(__file__).resolve().parents[3] / "bin" / "alfred-plugin-launcher.sh"
+    default = repo_root() / "bin" / "alfred-plugin-launcher.sh"
     return os.environ.get("ALFRED_PLUGIN_LAUNCHER", str(default))
 
 

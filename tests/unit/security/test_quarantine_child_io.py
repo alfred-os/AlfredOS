@@ -205,6 +205,20 @@ async def test_spawn_argv_execs_wheel_child_module(_spawn_capture: dict[str, Any
         await cio.aclose()
 
 
+def test_quarantine_launcher_default_resolves_under_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#500: with no ``ALFRED_PLUGIN_LAUNCHER`` override, the default launcher
+    path resolves via the shared ``alfred._repo_root.repo_root()`` resolver
+    (``ALFRED_REPO_ROOT``) rather than ``__file__`` arithmetic — the arithmetic
+    resolves under ``site-packages``, not the repo root, once ``alfred`` is
+    installed non-editable into the shipped image."""
+    monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
+
+    assert child_io_mod._launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+
+
 async def test_spawn_honours_child_python_override(
     _spawn_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

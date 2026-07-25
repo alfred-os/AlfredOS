@@ -399,6 +399,22 @@ async def test_default_launcher_path_resolves_to_repo_bin(monkeypatch: pytest.Mo
     assert (mod._repo_root() / "bin").is_dir()
 
 
+async def test_comms_launcher_default_resolves_under_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#500: with no ``ALFRED_PLUGIN_LAUNCHER`` override, the default launcher
+    path resolves via the shared ``alfred._repo_root.repo_root()`` resolver
+    (``ALFRED_REPO_ROOT``) rather than ``__file__`` arithmetic — the arithmetic
+    resolves under ``site-packages``, not the repo root, once ``alfred`` is
+    installed non-editable into the shipped image."""
+    from alfred.plugins import comms_stdio_transport as mod
+
+    monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
+
+    assert mod._comms_launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+
+
 async def test_close_with_no_stdin_still_reaps() -> None:
     """A child whose stdin is already None is reaped without a stdin.close()."""
     proc = _FakeProc(stdout=None, stdin=None, returncode=None)

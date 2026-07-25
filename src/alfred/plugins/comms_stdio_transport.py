@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from alfred._repo_root import repo_root as _resolve_repo_root
 from alfred.i18n import t
 from alfred.plugins._comms_child_env import comms_child_env
 
@@ -67,15 +68,15 @@ _LAUNCHER_ENV_VAR: Final[str] = "ALFRED_PLUGIN_LAUNCHER"
 
 
 def _repo_root() -> Path:
-    """Resolve the in-tree repo root that ships ``bin/`` and ``plugins/``.
-
-    This module lives at ``src/alfred/plugins/`` so the repo root is three
-    parents up. Mirrors :func:`alfred.cli._launcher_spawn.repo_root`; resolved
-    here (not imported) so the ``plugins`` package never imports the ``cli``
-    package — ``cli._launcher_spawn`` already imports ``plugins._comms_child_env``,
-    and a back-import would close an import cycle.
+    """Resolve the in-tree repo root that ships ``bin/`` and ``plugins/``
+    (delegates to the single resolver — #500). Thin wrapper so existing
+    importers / test patches of ``comms_stdio_transport._repo_root`` keep
+    working. Imported from ``alfred._repo_root`` (not ``cli._launcher_spawn``)
+    so the ``plugins`` package never imports the ``cli`` package —
+    ``cli._launcher_spawn`` already imports ``plugins._comms_child_env``, and a
+    back-import would close an import cycle.
     """
-    return Path(__file__).resolve().parents[3]
+    return _resolve_repo_root()
 
 
 def _comms_launcher_path() -> str:
