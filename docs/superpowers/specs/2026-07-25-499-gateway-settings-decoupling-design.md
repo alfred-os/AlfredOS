@@ -128,14 +128,18 @@ def _resolve_hosted_adapter_ids() -> list[str]:
 
 ### Boundaries / decisions
 
-- **`GatewayHostedAdaptersSettings.__init__` error handling.** It does **not** need `Settings`'
-  `SettingsError`-lifting wrapper: `start_gateway` already catches `SettingsError` in its config
-  arm (`_commands.py:294`), and a validator `ValueError` on a malformed id must still surface as a
-  config refusal. To keep the existing arm's behaviour (a bad `ALFRED_GATEWAY_HOSTED_ADAPTERS`
-  entry is a config fault, not a raw traceback), the minimal model raises the same
-  `SettingsError` on construction failure — i.e. it carries the identical `__init__` try/except
-  adapter. (Confirmed against `_commands.py:287–297`, which explicitly documents `SettingsError`
-  as one of the caught config faults for exactly this "operator opted in with a bad id" case.)
+- **`GatewayHostedAdaptersSettings.__init__` error handling.** The minimal model does **not**
+  need to *inherit* from `Settings` (it shares no fields with it), but it **must replicate**
+  `Settings`' construction-failure behaviour: its own `__init__` lifts every construction fault
+  (a validator `ValueError` on a malformed id, a pydantic `ValidationError`, a malformed-JSON
+  decode) to `SettingsError` via `raise SettingsError(str(exc)) from exc`, exactly as
+  `Settings.__init__` does. That is required because `start_gateway` catches only `SettingsError`
+  in its config arm (`_commands.py:287–297`), so an un-lifted construction fault would escape as a
+  raw traceback instead of the existing config refusal. **Shipped note:** each model carries its
+  OWN on-class `__init__` (not a shared base) — the pydantic mypy plugin only honours a user
+  `__init__` defined directly on the model class; see the plan's *Shipped implementation
+  refinements*. The security-critical single-source-of-truth is the shared
+  `validate_comms_adapter_ids` validator, not the (deliberately duplicated) 3-line lift.
 - **No `bin/alfred-setup.sh` change.** The roadmap's "consider `--no-deps`" is unnecessary: a
   *healthy* gateway satisfies the `service_healthy` dependency, so `docker compose run alfred-core
   migrate` stops *hanging*. It then fails on blocker B (#500), whose fix is Step 3's corner-turn —
