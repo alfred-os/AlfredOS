@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from alfred.cli._launcher_spawn import launcher_path
 from alfred.cli.daemon._daemon_probes import (
     _POLICY_RESOLVING_SIGNATURE,
     _STUB_SIGNATURE,
@@ -117,10 +118,7 @@ async def test_self_test_missing_launcher_returns_stub(
 ) -> None:
     """An un-runnable launcher (OSError) yields the STUB signature — fail
     closed: a broken launcher must not impersonate a resolving one."""
-    monkeypatch.setattr(
-        "alfred.cli.daemon._daemon_probes._LAUNCHER_PATH",
-        Path("/nonexistent/alfred-plugin-launcher.sh"),
-    )
+    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", "/nonexistent/alfred-plugin-launcher.sh")
     assert await _launcher_self_test_impl() == _STUB_SIGNATURE
 
 
@@ -134,10 +132,7 @@ async def test_self_test_nonzero_exit_returns_stub(
     fake = tmp_path / "fake-launcher.sh"
     fake.write_text("#!/bin/sh\nexit 3\n")
     fake.chmod(0o755)
-    monkeypatch.setattr(
-        "alfred.cli.daemon._daemon_probes._LAUNCHER_PATH",
-        fake,
-    )
+    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", str(fake))
     assert await _launcher_self_test_impl() == _STUB_SIGNATURE
 
 
@@ -157,10 +152,7 @@ async def test_self_test_hang_times_out_to_stub(
     fake = tmp_path / "hang-launcher.sh"
     fake.write_text("#!/bin/sh\nsleep 30\n")
     fake.chmod(0o755)
-    monkeypatch.setattr(
-        "alfred.cli.daemon._daemon_probes._LAUNCHER_PATH",
-        fake,
-    )
+    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", str(fake))
     monkeypatch.setattr(
         "alfred.cli.daemon._daemon_probes._SELF_TEST_TIMEOUT_S",
         0.5,
@@ -184,10 +176,7 @@ async def test_self_test_hang_does_not_orphan_subprocess(
     fake = tmp_path / "hang-launcher.sh"
     fake.write_text(f"#!/bin/sh\nsleep 2\ntouch {marker}\n")
     fake.chmod(0o755)
-    monkeypatch.setattr(
-        "alfred.cli.daemon._daemon_probes._LAUNCHER_PATH",
-        fake,
-    )
+    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", str(fake))
     monkeypatch.setattr(
         "alfred.cli.daemon._daemon_probes._SELF_TEST_TIMEOUT_S",
         0.3,
@@ -197,6 +186,63 @@ async def test_self_test_hang_does_not_orphan_subprocess(
     # Wait past when the child WOULD have touched the marker had it survived.
     await asyncio.sleep(2.5)
     assert not marker.exists(), "self-test child survived the timeout — it was not killed"
+
+
+@pytest.mark.asyncio
+async def test_probe_launcher_uses_repo_root_default_when_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#500: the ACTUAL fix — with no ``ALFRED_PLUGIN_LAUNCHER``, the probe
+    resolves the launcher under ``repo_root()/bin`` (not the old wrong
+    ``parents[4]`` const, which pointed one directory too shallow). Pin
+    ``ALFRED_REPO_ROOT`` so the default is deterministic, and assert the probe
+    itself execs THAT path — not just that ``launcher_path()`` computes it.
+    """
+    monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
+    monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
+    assert launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+
+    captured: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (_POLICY_RESOLVING_SIGNATURE.encode(), b"")
+
+    async def _fake_exec(*args: object, **kwargs: object) -> _FakeProc:
+        captured["argv0"] = args[0]
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._daemon_probes.asyncio.create_subprocess_exec",
+        _fake_exec,
+    )
+
+    result = await _launcher_self_test_impl()
+
+    assert captured["argv0"] == "/app/bin/alfred-plugin-launcher.sh"
+    assert result == _POLICY_RESOLVING_SIGNATURE
+
+
+@pytest.mark.asyncio
+async def test_launcher_self_test_honours_env_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``ALFRED_PLUGIN_LAUNCHER`` overrides the default, end to end.
+
+    Pins the override at both layers: ``launcher_path()`` resolves it (the
+    seam the daemon probe and the launcher-spawn seam now share), AND the
+    probe's real subprocess exec drives THIS launcher, not the in-tree
+    default.
+    """
+    fake = tmp_path / "my-launcher.sh"
+    fake.write_text(f'#!/bin/sh\necho "{_POLICY_RESOLVING_SIGNATURE}"\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", str(fake))
+
+    assert launcher_path() == str(fake)
+    assert await _launcher_self_test_impl() == _POLICY_RESOLVING_SIGNATURE
 
 
 @pytest.mark.skipif(
