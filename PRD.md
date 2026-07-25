@@ -555,6 +555,15 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 | **Adversarial security** | Custom harness in `tests/adversarial/` | See §8.1 — runs nightly, blocks release |
 | **Skill-author tests** | Generated per skill | Happy-path + error-path + out-of-scope refusal; executed in sandbox during review |
 
+> **e2e layer — current shipped state.** The **End-to-end** row above states the *target*:
+> scripted multi-turn conversations. It currently ships as the **#494 first-run boot-health
+> lane** — a nightly `clone → cp .env.example .env → bin/alfred-setup.sh → docker compose up -d
+> → healthy` check with a self-ratcheting green baseline (green today; known boot blockers are
+> strict-`xfail`; each reds-via-xpass the instant a blocker is fixed). Real-LLM conversation
+> coverage is layered on as the first-run boot blockers lift; the shared conftest lifecycle seam
+> is built for that reuse. See the #469 first-run roadmap
+> (`docs/superpowers/specs/2026-07-24-469-first-run-path-to-green-roadmap.md`).
+
 ### 8.1 Adversarial Security Suite (MVP requirement, blocks release)
 
 1. **Prompt-injection corpus** — curated payloads attempting to escape trust-tier isolation via web pages, emails, RAG snippets, tool outputs, file contents, inter-persona messages. Every payload must be neutralized — orchestrator must not perform tool calls instructed by T3 content.
@@ -565,7 +574,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 
 **Coverage targets:** ≥ 80% for core; **100% for security boundaries** (input tagging, tool capability check, DLP, secret broker, audit log writes).
 
-**CI:** GitHub Actions runs unit + integration on every PR; full e2e + adversarial nightly. Release-blocking. Pre-commit hooks for lint + type-check + the fast subset of unit tests.
+**CI:** GitHub Actions runs unit + integration on every PR; full e2e + adversarial nightly. Adversarial is release-blocking now. The **#494 first-run e2e boot lane** runs nightly green-with-`xfail`s and is **promoted to release-blocking at #469 Step 5** — once every boot blocker (#499/#500/#501) has landed and the lane is fully green (see the e2e-layer note above). Pre-commit hooks for lint + type-check + the fast subset of unit tests.
 
 ## 9. MVP Scope vs. Roadmap
 
