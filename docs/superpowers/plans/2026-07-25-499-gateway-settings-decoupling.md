@@ -11,6 +11,14 @@
 **Spec:** `docs/superpowers/specs/2026-07-25-499-gateway-settings-decoupling-design.md`
 **Plan review:** the 6-reviewer `/review-plan` fleet (2026-07-25) — findings folded into this revision (High test-001/rev-001, the mypy type-ignore, the containment-branch coverage gap, the missing key-free positive resolve, the sed breadth, + the test/doc polish set).
 
+## Shipped implementation refinements
+
+The task bodies below are the design-time record; the implementation refined them (the shipped code is authoritative). What changed during execution:
+
+- **No `_SettingsErrorLifting` shared base.** Task 1 (File Structure, Architecture, Step 5) prescribed a shared `_SettingsErrorLifting(BaseSettings)` base holding the `__init__` lift. It was implemented, then **reverted** (commit `e42de01a`): the pydantic mypy plugin only synthesizes a typed constructor from an `__init__` defined *on the model class*, so the base broke whole-tree `mypy --strict` at every bare env-sourced `Settings()` call site (`_bootstrap.py`, `daemon/_commands.py`). Each of `Settings` and `GatewayHostedAdaptersSettings` **keeps its own on-class `__init__`** with the identical `raise SettingsError(str(exc)) from exc` lift. The single-source-of-truth that matters — the security-critical validator `validate_comms_adapter_ids` — is unchanged and shared by both. (The plan's per-task single-file `mypy` step missed this; whole-tree `mypy src/` caught it.)
+- **Adversarial entry shipped as `cap-2026-012`.** Task 3 drafted the id/filename as `cap-2026-006`; the corpus had grown to `-011`, so the corpus id-uniqueness drift-guard forced a renumber to **`cap-2026-012`** (`test_cap_2026_012_gateway_keyfree_traversal_refused.py`).
+- **`ci.yml` settings.py 100% gate added.** A final-review fix wave added a dedicated `--fail-under=100` coverage gate for `src/alfred/config/settings.py` (now that the containment branch is covered) and rewrote the stale exclusion comment — closing the paper-only-gate the `/review-pr` fleet flagged.
+
 ## Global Constraints
 
 Every task's requirements implicitly include these (verbatim from the spec + CLAUDE.md):
@@ -37,7 +45,7 @@ Every task's requirements implicitly include these (verbatim from the spec + CLA
 | `tests/unit/cli/gateway/test_resolve_hosted_adapter_ids_empty_env.py` | Tighten: key-free empty resolve; single- AND multi-segment traversal regression-lock; real key-free `["alfred_discord"]→["discord"]` positive resolve. |
 | `tests/unit/cli/test_gateway_cli.py` | Two stale-docstring wording fixes (`Settings()` → `GatewayHostedAdaptersSettings()`). Autouse key fixture is harmless — leave it. |
 | `tests/unit/cli/gateway/test_adapter_egress_mount.py`, `test_egress_relay_mount.py`, `test_egress_proxy_mount.py` | Drop the now-unnecessary key/env setenvs; fix the fixture comment (all THREE mount tests). |
-| `tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml` + `test_cap_2026_006_gateway_keyfree_traversal_refused.py` (new) | Release-blocking parity for the gateway sole-guard path (mirrors `cap-2026-005`). |
+| `tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml` + `test_cap_2026_012_gateway_keyfree_traversal_refused.py` (new) | Release-blocking parity for the gateway sole-guard path (mirrors `cap-2026-005`). |
 | `tests/e2e/_services.py` | Remove `alfred-gateway` from `XFAIL_SERVICES`; add `HEALTHY_APP_SERVICES`. |
 | `tests/e2e/test_first_run_boot.py` | Un-xfail `test_gateway_is_healthy`; widen the classification union; restore its full health budget; fix the `_XFAIL_HEALTH_TIMEOUT_S` comment (core-only). |
 | `tests/unit/e2e/test_services.py` | Update the partition test for the new bucket. |
@@ -568,7 +576,7 @@ EOF
 **Files:**
 
 - Create: `tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml`
-- Create: `tests/adversarial/capability_bypass/test_cap_2026_006_gateway_keyfree_traversal_refused.py`
+- Create: `tests/adversarial/capability_bypass/test_cap_2026_012_gateway_keyfree_traversal_refused.py`
 
 **Why:** the daemon builder path has `cap-2026-005` (sink-local containment). The gateway resolver path is the MORE weakly-guarded one — its only guard is the construction-time validator (`_resolve_adapter_kind` has no sink re-check) — yet has no release-blocking coverage. This pins the sole-guard property at the adversarial (release-blocking) layer, symmetric with the daemon path.
 
@@ -597,7 +605,7 @@ references:
   - "cap-2026-005"
 ```
 
-`test_cap_2026_006_gateway_keyfree_traversal_refused.py` — mirror the `cap-2026-005` test shape (corpus-filter fixture with the missing/duplicate drift-guard), driving the REAL production `_resolve_hosted_adapter_ids` (NEVER a shim). The assertion body:
+`test_cap_2026_012_gateway_keyfree_traversal_refused.py` — mirror the `cap-2026-005` test shape (corpus-filter fixture with the missing/duplicate drift-guard), driving the REAL production `_resolve_hosted_adapter_ids` (NEVER a shim). The assertion body:
 
 ```python
 def test_gateway_keyfree_traversal_refused(
@@ -618,15 +626,15 @@ def test_gateway_keyfree_traversal_refused(
 
 - [ ] **Step 2: Run the new adversarial entry**
 
-Run: `uv run pytest tests/adversarial/capability_bypass/test_cap_2026_006_gateway_keyfree_traversal_refused.py -q`
+Run: `uv run pytest tests/adversarial/capability_bypass/test_cap_2026_012_gateway_keyfree_traversal_refused.py -q`
 Expected: PASS.
 
 - [ ] **Step 3: Lint + commit**
 
-Run: `uv run ruff check tests/adversarial/capability_bypass && uv run ruff format --check tests/adversarial/capability_bypass/test_cap_2026_006_gateway_keyfree_traversal_refused.py`
+Run: `uv run ruff check tests/adversarial/capability_bypass && uv run ruff format --check tests/adversarial/capability_bypass/test_cap_2026_012_gateway_keyfree_traversal_refused.py`
 
 ```bash
-git add tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml tests/adversarial/capability_bypass/test_cap_2026_006_gateway_keyfree_traversal_refused.py
+git add tests/adversarial/capability_bypass/gateway_keyfree_traversal_refused.yaml tests/adversarial/capability_bypass/test_cap_2026_012_gateway_keyfree_traversal_refused.py
 git commit -m "$(cat <<'EOF'
 test: #499 adversarial parity for the gateway key-free traversal-refusal (cap-2026-012)
 

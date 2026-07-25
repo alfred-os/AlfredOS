@@ -718,19 +718,36 @@ jobs:
         # unit tier (``tests/unit/cli/daemon/test_environment_loader.py`` +
         # ``tests/unit/config/``) — no combined-job twin needed (mirrors the
         # Observability leak-guard / First-party bootstrap-grants unit-only gates
-        # above). Deliberately does NOT gate ``src/alfred/config/settings.py`` as a
-        # whole file: it carries one PRE-EXISTING uncovered line (the
-        # ``comms_enabled_adapters`` traversal-containment branch, unrelated to
-        # environment resolution, predating this branch) that would red this gate on
-        # day one — the env-resolution surface settings.py DOES add (``_Without``,
+        # above). ``src/alfred/config/settings.py`` as a whole file is gated in the
+        # dedicated step below: #499 closed its last uncovered line (the
+        # ``comms_enabled_adapters`` traversal-containment branch) with a direct
+        # symlink-escape test, so the whole module now holds at 100% on the same
+        # unit run — the env-resolution surface settings.py adds (``_Without``,
         # ``_environment_keys``, the ``mode="wrap"`` ``_resolve_environment``
-        # validator) is proven at 100% by the same unit run; verify locally with
-        # ``coverage report --include='src/alfred/config/settings.py'
-        # --show-missing`` (the only reported gap must be the pre-existing line).
+        # validator) is covered there too.
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/config/_environment_loader.py') != ''
         run: |
           uv run coverage report \
             --include='src/alfred/config/_environment_loader.py' \
+            --fail-under=100 \
+            --show-missing
+      - name: Settings model 100% line+branch coverage (unit)
+        # #499: settings.py is a config trust boundary — it carries
+        # ``validate_comms_adapter_ids`` (the SOLE path-traversal guard on the
+        # gateway's key-free hosted-adapter read; the ``_resolve_adapter_kind`` read
+        # sink does a bare ``read_text()`` with no re-check) alongside the three-layer
+        # ``environment`` resolver. Its last uncovered line (the ``is_relative_to``
+        # containment branch) is now exercised by
+        # ``test_validate_rejects_symlink_escape`` (Linux CI runs it; it self-skips
+        # only on win32), so the whole module is gated at 100% here — a future deletion
+        # of that test or a weakened containment check reds this gate instead of
+        # shipping green (closing the paper-only-gate the prior exclusion described).
+        # Re-uses the unit ``.coverage`` data; verify locally with
+        # ``coverage report --include='src/alfred/config/settings.py' --show-missing``.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/config/settings.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/config/settings.py' \
             --fail-under=100 \
             --show-missing
 
