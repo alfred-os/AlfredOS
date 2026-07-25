@@ -959,3 +959,14 @@ def test_scrape_target_ports_match_compose_defaults(compose: dict[str, Any]) -> 
         f"prometheus.yml's alfred-gateway scrape target {targets['alfred-gateway']!r} must "
         f"match compose's ALFRED_GATEWAY_METRICS_PORT default ({gateway_port!r})."
     )
+
+
+def test_alfred_core_points_policies_path_at_shipped_config(compose: dict[str, Any]) -> None:
+    # #500 probe (b): settings.policies_path defaults to /etc/alfred/policies.yaml (not in
+    # the image); the image ships it at /app/config/policies.yaml, so compose must override
+    # the path or the daemon refuses boot in production with snapshot_ref_init_failed.
+    core = compose.get("services", {}).get("alfred-core", {})
+    val = core.get("environment", {}).get("ALFRED_POLICIES_PATH", "")
+    assert "/app/config/policies.yaml" in val, (
+        "alfred-core must set ALFRED_POLICIES_PATH to the in-image /app/config/policies.yaml."
+    )
