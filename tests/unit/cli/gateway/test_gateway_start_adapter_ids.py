@@ -1,14 +1,15 @@
 """G6-5 Task 7/10 (#288): ``alfred gateway start`` sources its hosted adapter set from settings.
 
 The standalone gateway now spawns + supervises the comms adapters an operator opts in via
-``Settings.comms_enabled_adapters`` (env ``ALFRED_COMMS_ENABLED_ADAPTERS``, holding
-**plugin-package ids** — the ``plugins/<id>/`` dir name). The CLI maps each through the
-G6-5 Task-10 reconciliation seam to its canonical ``adapter_kind`` and EXCLUDES the TUI
+``GatewayHostedAdaptersSettings.comms_enabled_adapters`` (env ``ALFRED_COMMS_ENABLED_ADAPTERS``,
+holding **plugin-package ids** — the ``plugins/<id>/`` dir name; the gateway reads this
+KEY-FREE model, not the full ``Settings``, per ADR-0036 / #499). The CLI maps each through
+the G6-5 Task-10 reconciliation seam to its canonical ``adapter_kind`` and EXCLUDES the TUI
 dial-in kind (the TUI dials the gateway; it is not a spawned adapter), then threads the
 canonical subset into ``GatewayProcess(adapter_ids=...)``.
 
-Settings is stubbed in the command module (so the test does not re-run the
-manifest-existence validator), but the stub holds the REAL plugin-package ids
+``GatewayHostedAdaptersSettings`` is stubbed in the command module (so the test does not
+re-run the manifest-existence validator), but the stub holds the REAL plugin-package ids
 (``alfred_discord`` / ``alfred_tui``) — the seam reads their real in-repo manifests, so
 the captured ``adapter_ids`` are the canonical wire ids the factory + credential allowlist
 key on (``discord``), NOT a per-test fiction. ``GatewayProcess`` is replaced with a double
@@ -116,3 +117,29 @@ def test_start_keeps_a_mixed_set_minus_tui(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert result.exit_code == 0, result.stdout
     assert captured.get("adapter_ids") == ["discord"]
+
+
+def test_start_boots_without_a_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#499 at the CLI surface: ``gateway start`` exits 0 with NO provider key in the env.
+
+    The other tests stub ``GatewayHostedAdaptersSettings`` entirely; this one exercises the
+    REAL key-free model construction through the actual command an operator invokes. It
+    ``delenv``s ``ALFRED_DEEPSEEK_API_KEY`` + ``ALFRED_ENVIRONMENT`` (the fields the OLD
+    full-``Settings()`` resolver required, ADR-0036 denies the gateway), sets an empty
+    hosted-adapter set, and asserts the start reaches the (doubled) run loop — a per-PR
+    regression lock on the property the nightly-only ``test_gateway_is_healthy`` otherwise
+    guards alone: a reintroduced full ``Settings()`` ANYWHERE in ``start_gateway``'s
+    config-resolution chain would fail the key-required construction and red this test.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.delenv("ALFRED_DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", "[]")
+    # Deliberately NO _patch_settings — the real GatewayHostedAdaptersSettings must construct.
+    _patch_process(monkeypatch, captured)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured.get("ran") is True
+    assert captured.get("adapter_ids") == []
