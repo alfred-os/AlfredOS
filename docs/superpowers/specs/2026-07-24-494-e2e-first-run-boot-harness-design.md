@@ -4,7 +4,33 @@
 - **Epic:** [#469](https://github.com/alfred-os/AlfredOS/issues/469) — first-run experience: a documented quickstart that actually boots
 - **Roadmap:** this is **Step 1** of `docs/superpowers/specs/2026-07-24-469-first-run-path-to-green-roadmap.md` (instrument first, then ratchet)
 - **Domain:** test-engineer (integration/e2e layer, CI non-vacuity)
-- **Status:** design **v3** — two `/review-plan` rounds (10 specialist passes) + code-trace folded. Pending spec review.
+- **Status:** design **v3** — two `/review-plan` rounds (10 specialist passes) + code-trace folded. **Shipped** in PR #502.
+
+## Shipped implementation refinements (post-design; the code is authoritative)
+
+This design doc is the design-time record. During subagent-driven implementation +
+per-task/final/CodeRabbit review the harness refined below its original design text; where
+this section and the sections further down disagree, **this section and the shipped code win**:
+
+- **Tally reads pytest's own stats as JSON, not junit XML.** A `pytest_terminal_summary` hook
+  writes `e2e-tally.json` from `terminalreporter.stats` (which already separates
+  `xfailed`/`skipped`/`xpassed`), so there is no junit XML to parse (no XXE surface). Wherever
+  the text below says "parse junit per-`<testcase>`", read "read pytest stats as JSON".
+- **8 testcases, not 7:** 4 baseline passes + 1 service-classification pass + 3 xfails
+  (gateway, core, setup.sh) = **5 passed, 3 xfailed**. `_assert_ran` asserts the independent
+  floor `collected >= 7` plus `failed==0 / error==0 / skipped==0 / xpassed==0 / passed>=1 / xfailed>=1`.
+- **The service set is fail-closed, not "auto-observed healthy":** a compose service absent from
+  the baseline∪xfail partition **reds** `test_every_compose_service_is_classified` until it is
+  explicitly classified — it is never silently asserted healthy.
+- **Per-run-unique `COMPOSE_PROJECT_NAME`** (`_env.new_project_name()`), not a fixed name, so
+  concurrent/re-entrant local runs never tear down each other's containers.
+- **The setup.sh check runs in an isolated detached git worktree**, not via a repo-root `.env`
+  backup/restore — the operator's `.env` is never touched (no SIGKILL residual).
+- **Images are built once in the `boot_stack` fixture** (long build timeout so a cold build
+  errors, not masks); there is no separate buildx-cache CI step. The **GF password is owned by
+  the harness's isolated `--env-file`** (no job-level GF-seed — a shell var would shadow it via
+  compose `${..}` precedence). The failure-uploaded `e2e-stack.log` is **secret-scrubbed**
+  (`_env.scrub_env_secrets`).
 
 ## Problem
 
