@@ -22,6 +22,9 @@ def test_floor_fails_on_collapsed_config() -> None:
 
 
 def test_baseline_and_xfail_partition_covers_the_six() -> None:
+    # Disjoint AND covering = a genuine partition. The union alone would still pass if a
+    # service were mis-classified into BOTH sets, so assert disjointness explicitly (CR).
+    assert _services.BASELINE_SERVICES.isdisjoint(_services.XFAIL_SERVICES)
     known = _services.BASELINE_SERVICES | set(_services.XFAIL_SERVICES)
     assert known == {
         "alfred-postgres",

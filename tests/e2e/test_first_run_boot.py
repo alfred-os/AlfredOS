@@ -10,13 +10,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Iterator
+import tempfile
+from pathlib import Path
 
 import pytest
 
 from tests import _compose
-from tests.e2e import _services
-from tests.e2e._env import E2E_PROJECT_NAME
+from tests.e2e import _env, _services
 from tests.e2e._health import ServiceHealth
 from tests.e2e.conftest import BootStack
 
@@ -91,28 +91,6 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
     assert boot_stack.health("alfred-core") is ServiceHealth.HEALTHY
 
 
-@pytest.fixture
-def _stock_dotenv() -> Iterator[None]:
-    """Deterministic, host-independent, operator-safe setup.sh precondition (sec-001).
-
-    setup.sh reads repo-root ``.env``. If a dev box has a real .env with real keys, setup.sh
-    would clear its credential gate and run the INVASIVE path (sudo apparmor / build / migrate)
-    and hang. So we WRITE the stock ``.env.example`` (placeholder keys) to ``.env`` before the
-    run — guaranteeing the fast credential-gate exit everywhere — and restore the original after.
-    """
-    dotenv = _compose.REPO_ROOT / ".env"
-    example = _compose.REPO_ROOT / ".env.example"
-    backup = dotenv.read_bytes() if dotenv.exists() else None
-    try:
-        shutil.copyfile(example, dotenv)
-        yield
-    finally:
-        if backup is None:
-            dotenv.unlink(missing_ok=True)
-        else:
-            dotenv.write_bytes(backup)
-
-
 @pytest.mark.xfail(
     strict=True,
     reason="blocker #501: bin/alfred-setup.sh does not complete under the "
@@ -120,21 +98,41 @@ def _stock_dotenv() -> Iterator[None]:
     "placeholder DeepSeek key (README:33 omits ALFRED_DEEPSEEK_API_KEY). Roadmap "
     "Step 4 (README/setup.sh reconciliation); after that, blocker #499's migrate hang.",
 )
-def test_setup_sh_completes(_stock_dotenv: None) -> None:
-    setup_project = f"{E2E_PROJECT_NAME}-setup"
-    try:
-        cmd = ["bash", str(_compose.REPO_ROOT / "bin" / "alfred-setup.sh")]
-        proc = subprocess.run(
-            cmd,
-            cwd=_compose.REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=_SETUP_SH_TIMEOUT_S,
-            check=False,
-            env={**os.environ, "COMPOSE_PROJECT_NAME": setup_project},
+def test_setup_sh_completes() -> None:
+    # Run setup.sh in an ISOLATED detached git worktree so the operator's repo-root .env is
+    # NEVER touched (CR: no backup/restore window, no SIGKILL residual, no concurrent-reader
+    # placeholder exposure). On the stock flow setup.sh writes a placeholder .env INSIDE the
+    # worktree then exits at the credential gate — before any docker build/up — so this is fast
+    # and creates no containers. COMPOSE_PROJECT_NAME is per-run-unique for the same isolation.
+    setup_project = _env.new_project_name()
+    with tempfile.TemporaryDirectory(prefix="alfred-e2e-setup-") as tmp:
+        worktree = Path(tmp) / "repo"
+        add = ["git", "worktree", "add", "--detach", "--force", str(worktree), "HEAD"]
+        subprocess.run(
+            add, cwd=_compose.REPO_ROOT, capture_output=True, text=True, timeout=120.0, check=True
         )
-        assert proc.returncode == 0, f"setup.sh exit {proc.returncode}: {proc.stderr[-800:]}"
-    finally:
-        # Belt-and-braces: on the stock fast-exit path setup.sh creates no containers, but tear
-        # down the -setup project anyway in case a future change lets it reach `up`.
-        _compose.down_project(setup_project)
+        try:
+            shutil.copyfile(worktree / ".env.example", worktree / ".env")
+            run_setup = ["bash", str(worktree / "bin" / "alfred-setup.sh")]
+            proc = subprocess.run(
+                run_setup,
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                timeout=_SETUP_SH_TIMEOUT_S,
+                check=False,
+                env={**os.environ, "COMPOSE_PROJECT_NAME": setup_project},
+            )
+            assert proc.returncode == 0, f"setup.sh exit {proc.returncode}: {proc.stderr[-800:]}"
+        finally:
+            # Belt-and-braces teardown (stock flow creates no containers), then drop the worktree.
+            _compose.down_project(setup_project)
+            remove = ["git", "worktree", "remove", "--force", str(worktree)]
+            subprocess.run(
+                remove,
+                cwd=_compose.REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+                check=False,
+            )
