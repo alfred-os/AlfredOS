@@ -69,13 +69,11 @@ def test_adapter_except_precedes_io_plane() -> None:
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Minimal env for ``start_gateway``.
 
-    ``_resolve_hosted_adapter_ids()`` constructs ``Settings()``, which requires the
-    provider key + environment. The adapter proxy itself never constructs Settings.
-    Relay / proxy resolvers' defaults are pinned; the hosted-adapter set is cleared so
-    the test does not divert to ``config_failed``.
+    ``_resolve_hosted_adapter_ids()`` constructs the key-free
+    ``GatewayHostedAdaptersSettings`` (ADR-0036 / #499) — no provider key needed. Relay /
+    proxy resolvers' defaults are pinned; the hosted-adapter set is cleared so the test
+    does not divert to ``config_failed``.
     """
-    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     for var in (
         "ALFRED_EGRESS_PROXY_PORT",
         "ALFRED_EGRESS_PROXY_BIND",

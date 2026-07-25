@@ -144,17 +144,17 @@ def _resolve_hosted_adapter_ids() -> list[str]:
     """The gateway-hosted (bwrap-spawned) adapter subset from settings (G6-5 Task 7/10, #288).
 
     Sources the configured comms-adapter allowlist from
-    :attr:`alfred.config.settings.Settings.comms_enabled_adapters` (env
-    ``ALFRED_COMMS_ENABLED_ADAPTERS``, holding plugin-package ids), maps each through the
-    :func:`_resolve_adapter_kind` reconciliation seam to its canonical ``adapter_id``, and
+    :attr:`alfred.config.settings.GatewayHostedAdaptersSettings.comms_enabled_adapters` (env
+    ``ALFRED_COMMS_ENABLED_ADAPTERS``, holding plugin-package ids) — the gateway's KEY-FREE
+    read (ADR-0036 / #499): it must NOT construct the full ``Settings`` (whose required
+    ``deepseek_api_key`` the gateway is denied). Maps each id through the
+    :func:`_resolve_adapter_kind` reconciliation seam to its canonical ``adapter_id`` and
     EXCLUDES the TUI dial-in kind — the TUI dials the gateway, it is not a spawned adapter.
-    The remaining canonical ids are the children the gateway supervises + spawns, and are
-    the SAME strings the factory + credential allowlist key on. An empty / TUI-only set
-    yields ``[]`` so the supervisor is a clean no-op (behaviour-preserving for G5).
+    An empty / TUI-only set yields ``[]`` so the supervisor is a clean no-op.
     """
-    from alfred.config.settings import Settings
+    from alfred.config.settings import GatewayHostedAdaptersSettings
 
-    settings: Settings = Settings()  # type: ignore[no-untyped-call]  # BaseSettings __init__ is untyped
+    settings = GatewayHostedAdaptersSettings()
     resolved = (_resolve_adapter_kind(a) for a in settings.comms_enabled_adapters)
     return [kind for kind in resolved if kind != _TUI_DIAL_IN_ADAPTER_ID]
 

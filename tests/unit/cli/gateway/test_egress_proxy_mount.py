@@ -28,9 +28,8 @@ from alfred.i18n import t
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Settings() (the proxy allowlist source) needs the provider key + environment.
-    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    # _resolve_hosted_adapter_ids() (in start) constructs the key-free
+    # GatewayHostedAdaptersSettings (ADR-0036 / #499) — no provider key needed.
     # Pin the proxy/allowlist resolvers' defaults so they never read a polluted env.
     monkeypatch.delenv("ALFRED_EGRESS_PROXY_PORT", raising=False)
     monkeypatch.delenv("ALFRED_EGRESS_PROXY_BIND", raising=False)
