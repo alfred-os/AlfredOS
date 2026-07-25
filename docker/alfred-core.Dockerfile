@@ -110,7 +110,11 @@ ENV PYTHONUNBUFFERED=1 \
     # the sandbox. (`sys.executable` is now this same interpreter, so the production
     # default would also resolve here — we set the override explicitly for clarity
     # and so a non-PBS daemon interpreter can never silently leak in.)
-    ALFRED_QUARANTINE_CHILD_PYTHON=/opt/alfred-python/bin/python3
+    ALFRED_QUARANTINE_CHILD_PYTHON=/opt/alfred-python/bin/python3 \
+    # #500: the repo-root deploy seam (alfred._repo_root.repo_root). WORKDIR is /app
+    # and plugins/bin/config/alembic.ini are COPYed there; the non-editable install
+    # means parents[N] arithmetic overshoots into site-packages, so pin the root here.
+    ALFRED_REPO_ROOT=/app
 
 # Install git + util-linux.
 # git: required for state.git operations (spec §8.1, §11.1).
@@ -187,6 +191,10 @@ WORKDIR /app
 # repo-root files the running container reads from /app.
 COPY alembic.ini ./alembic.ini
 COPY config ./config
+# #500: plugins/ is a RUNTIME artifact — the daemon resolves plugins/<id>/manifest.toml
+# by path (comms-adapter validator + first-party grant seed). The wheel does NOT carry it.
+# .dockerignore keeps .venv/__pycache__/tests out so the image is reproducible.
+COPY plugins ./plugins
 COPY locale ./locale
 # bin/ contains alfred-plugin-launcher.sh (the bwrap launcher) plus the
 # alfred-state-git-seed.sh script invoked by bin/alfred-setup.sh. Copied into the
