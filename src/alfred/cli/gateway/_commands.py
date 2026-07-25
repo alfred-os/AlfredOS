@@ -154,7 +154,7 @@ def _resolve_hosted_adapter_ids() -> list[str]:
     """
     from alfred.config.settings import GatewayHostedAdaptersSettings
 
-    settings = GatewayHostedAdaptersSettings()
+    settings = GatewayHostedAdaptersSettings()  # type: ignore[no-untyped-call]  # BaseSettings __init__ is untyped
     resolved = (_resolve_adapter_kind(a) for a in settings.comms_enabled_adapters)
     return [kind for kind in resolved if kind != _TUI_DIAL_IN_ADAPTER_ID]
 

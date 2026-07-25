@@ -295,7 +295,7 @@ def test_start_unrelated_resolve_error_still_surfaces_loud(
 ) -> None:
     """Non-vacuity control (sec-p-001): a bug OUTSIDE ``Settings()`` is NOT swallowed.
 
-    ``GatewayHostedAdaptersSettings.__init__`` (via ``_SettingsErrorLifting``) lifts every
+    ``GatewayHostedAdaptersSettings.__init__`` lifts every
     construction exception to ``SettingsError``, so this control must raise from a step AFTER
     it succeeds — ``_resolve_adapter_kind``,
     the per-adapter manifest-kind lookup ``_resolve_hosted_adapter_ids`` calls next. A VALID
