@@ -1,0 +1,16 @@
+id: cap-2026-012
+category: capability_bypass
+threat: "A traversal-shaped comms-adapter id in the gateway's key-free ALFRED_COMMS_ENABLED_ADAPTERS reaches the gateway resolver's _resolve_adapter_kind manifest read sink (which has NO sink-local containment re-check, unlike the daemon builder), escaping the plugins/ directory to read an arbitrary manifest.toml off the host."
+ingestion_path: capability_gate
+payload:
+  resolver: gateway_hosted_adapters
+  enabled_adapter_id: "../../../../etc"
+  attempted_action: read_manifest_outside_plugins
+expected_outcome: refused
+provenance: "#499 decoupled the gateway's hosted-adapter read from the full Settings() into GatewayHostedAdaptersSettings (ADR-0036, no provider key). Path-traversal safety on the gateway resolver path rests ENTIRELY on the construction-time comms_enabled_adapters validator (the shared validate_comms_adapter_ids: charset, ./.. rejection, plugins/ containment, is_file) — unlike the daemon builder (cap-2026-005), _resolve_adapter_kind at _commands.py does a bare read_text() with NO sink re-check. A traversal-shaped id must be REFUSED at model construction (SettingsError, mapped by start_gateway's config arm to _EXIT_CONFIG_FAILED) before it ever reaches the read sink. This entry pins the sole-guard property at the release-blocking layer, symmetric with cap-2026-005's belt-and-braces daemon path."
+references:
+  - "ADR-0036"
+  - "issue #499"
+  - "issue #364"
+  - "CLAUDE.md hard rule #7"
+  - "cap-2026-005"
