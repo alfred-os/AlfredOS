@@ -27,10 +27,8 @@ from alfred.i18n import t
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # _resolve_hosted_adapter_ids() (in start) constructs Settings(), which needs the
-    # provider key + environment. The relay itself NEVER constructs Settings.
-    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    # _resolve_hosted_adapter_ids() (in start) constructs the key-free
+    # GatewayHostedAdaptersSettings (ADR-0036 / #499) — no provider key needed.
     # Pin the relay/proxy resolvers' defaults so they never read a polluted env, and
     # clear the hosted-adapter set — start_gateway() resolves it (via Settings) BEFORE
     # building the relay, so an ambient value would send the test down config_failed

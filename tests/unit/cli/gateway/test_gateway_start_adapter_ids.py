@@ -62,7 +62,7 @@ def _patch_settings(monkeypatch: pytest.MonkeyPatch, enabled: tuple[str, ...]) -
     class _FakeSettings:
         comms_enabled_adapters = enabled
 
-    monkeypatch.setattr("alfred.config.settings.Settings", _FakeSettings)
+    monkeypatch.setattr("alfred.config.settings.GatewayHostedAdaptersSettings", _FakeSettings)
 
 
 def test_start_threads_enabled_adapters_into_adapter_ids(monkeypatch: pytest.MonkeyPatch) -> None:

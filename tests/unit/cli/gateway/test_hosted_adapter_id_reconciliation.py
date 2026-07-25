@@ -45,7 +45,9 @@ def test_discord_plugin_package_id_maps_to_canonical_adapter_id(monkeypatch) -> 
     the resolve seam must translate it to the canonical ``adapter_kind`` the rest of the
     spawn chain keys on.
     """
-    monkeypatch.setattr("alfred.config.settings.Settings", _settings_stub("alfred_discord"))
+    monkeypatch.setattr(
+        "alfred.config.settings.GatewayHostedAdaptersSettings", _settings_stub("alfred_discord")
+    )
     assert _resolve_hosted_adapter_ids() == ["discord"]
 
 
@@ -57,7 +59,9 @@ def test_canonical_id_hits_factory_and_credential_allowlist(monkeypatch) -> None
     MUST be a launch-target key AND a credential-allowlist key, else the spawn refuses at
     the factory or the credential resolver.
     """
-    monkeypatch.setattr("alfred.config.settings.Settings", _settings_stub("alfred_discord"))
+    monkeypatch.setattr(
+        "alfred.config.settings.GatewayHostedAdaptersSettings", _settings_stub("alfred_discord")
+    )
     (adapter_id,) = _resolve_hosted_adapter_ids()
     assert adapter_id in _ADAPTER_LAUNCH_TARGETS
     assert adapter_id in _ADAPTER_SECRET_ALLOWLIST
@@ -70,7 +74,10 @@ def test_reference_adapter_kind_passes_through(monkeypatch) -> None:
     same string, so the seam is a no-op for it — the reference boots byte-for-byte as
     before the seam existed.
     """
-    monkeypatch.setattr("alfred.config.settings.Settings", _settings_stub("alfred_comms_test"))
+    monkeypatch.setattr(
+        "alfred.config.settings.GatewayHostedAdaptersSettings",
+        _settings_stub("alfred_comms_test"),
+    )
     assert _resolve_hosted_adapter_ids() == ["alfred_comms_test"]
 
 
@@ -82,14 +89,16 @@ def test_tui_excluded_by_plugin_package_id(monkeypatch) -> None:
     ``alfred_tui``; the seam resolves it to ``adapter_kind="tui"`` and excludes it — the
     TUI dials the gateway, it is never a spawned adapter.
     """
-    monkeypatch.setattr("alfred.config.settings.Settings", _settings_stub("alfred_tui"))
+    monkeypatch.setattr(
+        "alfred.config.settings.GatewayHostedAdaptersSettings", _settings_stub("alfred_tui")
+    )
     assert _resolve_hosted_adapter_ids() == []
 
 
 def test_mixed_set_keeps_discord_drops_tui(monkeypatch) -> None:
     """A mixed set resolves discord -> canonical and drops the TUI dial-in."""
     monkeypatch.setattr(
-        "alfred.config.settings.Settings",
+        "alfred.config.settings.GatewayHostedAdaptersSettings",
         _settings_stub("alfred_tui", "alfred_discord"),
     )
     assert _resolve_hosted_adapter_ids() == ["discord"]

@@ -273,7 +273,8 @@ def test_start_canonical_discord_typo_is_config_fault_not_traceback(
     the canonical ``adapter_id`` (``discord``) the rest of the gateway-hosted chain keys on
     (see ``_resolve_adapter_kind`` / ``test_hosted_adapter_id_reconciliation.py``). An
     operator who opts in with the canonical id has no ``plugins/discord/manifest.toml`` on
-    disk, so ``Settings()`` construction (inside ``_resolve_hosted_adapter_ids``) raises
+    disk, so ``GatewayHostedAdaptersSettings()`` construction (inside
+    ``_resolve_hosted_adapter_ids``) raises
     ``alfred.config.settings.SettingsError`` — a ``ValueError`` subclass every pydantic
     construction failure is lifted to (CLAUDE.md hard rule #7). Before this fix
     ``SettingsError`` was not in the caught tuple, so it escaped as a raw traceback instead
@@ -294,8 +295,9 @@ def test_start_unrelated_resolve_error_still_surfaces_loud(
 ) -> None:
     """Non-vacuity control (sec-p-001): a bug OUTSIDE ``Settings()`` is NOT swallowed.
 
-    ``Settings.__init__`` lifts every construction exception to ``SettingsError``, so this
-    control must raise from a step AFTER ``Settings()`` succeeds — ``_resolve_adapter_kind``,
+    ``GatewayHostedAdaptersSettings.__init__`` (via ``_SettingsErrorLifting``) lifts every
+    construction exception to ``SettingsError``, so this control must raise from a step AFTER
+    it succeeds — ``_resolve_adapter_kind``,
     the per-adapter manifest-kind lookup ``_resolve_hosted_adapter_ids`` calls next. A VALID
     plugin-package id (``alfred_discord``) reaches the monkeypatched
     ``_resolve_adapter_kind``, which raises a plain ``RuntimeError``: proof the widened
