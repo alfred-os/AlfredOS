@@ -61,11 +61,24 @@ that must agree in the shipped image." The correct fix unifies them.
 
 ### Trace findings that bound scope
 
+> **Post-`/review-plan` correction (core-engineer finding core-002).** The
+> original trace under-stated what `daemon start` does with the tui default. The
+> tui *carrier* is socket-backed and spawns no subprocess, but the comms *graph*
+> built around it (`ALFRED_COMMS_ENABLED_ADAPTERS=["alfred_tui"]` → the full graph)
+> DOES: it constructs the real `Orchestrator` — which requires a **seeded operator**
+> (`Orchestrator.__init__` → `get_operator()` → `daemon.boot.operator_not_seeded`
+> refusal on an unseeded DB) — and spawns the **bwrap-sandboxed quarantine child**
+> (the first live userns bwrap spawn in the e2e lane). Two consequences folded into
+> the design below: (i) provisioning must seed an operator, not just migrate
+> (Part D); (ii) the sandbox posture is provable via a *live* bwrapped child, which
+> replaces the tautological launcher self-test (Part E).
+
 - **`/app/src` is NOT needed** for the shipped `ALFRED_COMMS_ENABLED_ADAPTERS=["alfred_tui"]`
-  default. The TUI adapter is **socket-backed** (`adapter_kind = "tui"`,
+  default. The tui *carrier* is **socket-backed** (`adapter_kind = "tui"`,
   `[sandbox] kind = "none"`): `daemon start` binds `comms-tui.sock` under the
-  mounted `/home/alfred/.run` and spawns **no** subprocess. The
-  `repo_root()/"src"` join (`_comms_boot.py:1213`) lives only in
+  mounted `/home/alfred/.run` and the carrier itself spawns **no** subprocess (the
+  quarantine child it does spawn resolves `alfred` from the PBS prefix, not
+  `/app/src`). The `repo_root()/"src"` join (`_comms_boot.py:1213`) lives only in
   `_spawn_comms_adapter`, the **stdio** carrier for the opt-in Discord/reference
   adapters — not reached by the tui default. `src/` is deliberately **not** in the
   image (non-editable install; #290).
@@ -158,16 +171,27 @@ for its first candidate; not required.
 `src/alfred/security/` / gateway trust-boundary-adjacent code → the **adversarial
 suite runs** (CLAUDE.md HARD security rule).
 
-### Part B — Dockerfile
+### Part B — Dockerfile + `.dockerignore`
 
 - `COPY plugins ./plugins` in the runtime stage (alongside `config`, `bin`,
   `locale`). Chowned by the existing `RUN chown -R alfred:alfred /app`.
 - `ENV ALFRED_REPO_ROOT=/app` (runtime stage). This is the seam Part A honours;
   the built image never depends on `parents[N]` arithmetic.
+- **New `.dockerignore` (devops-001, review finding).** There is no
+  `.dockerignore` today, so `COPY plugins` would ship non-runtime noise — most
+  dangerously `plugins/alfred_tui/.venv/bin/python`, a **dangling host-absolute
+  symlink** (`/Users/<dev>/.local/share/mise/...`) that exists only on a dev tree
+  — making the CI-built image and a local repro **differ**, defeating the
+  reproducible-image goal that is #500's whole point. The `.dockerignore` excludes
+  `**/.venv`, `**/__pycache__`, `**/*.pyc`, `plugins/*/tests`, and VCS/cache dirs
+  from the entire build context. A unit invariant asserts the shipped `/app/plugins`
+  is clean (no `.venv`/`tests`) and the manifest is present.
 
 The builder stage still needs source `locale/` for the wheel force-include (per
 its existing comment); `plugins/` is a **runtime** artifact (read by the running
-container), copied only into the runtime stage — the wheel does not carry it.
+container), copied only into the runtime stage — the wheel does not carry it. The
+Dockerfile invariant test scopes its pins to the **runtime** stage (a builder-stage
+COPY must not satisfy a runtime-stage requirement — test-007).
 
 ### Part C — Compose
 
@@ -188,14 +212,23 @@ seeds the real Postgres gate). `ALFRED_ENVIRONMENT` already defaults to
 
 ### Part D — e2e provisioning + env-file
 
-- **Provision before `up`:** `test_core_is_healthy` runs
-  `docker compose run --rm alfred-core migrate` (mirrors `bin/alfred-setup.sh`
-  step "Running migrations") before `up -d --no-deps alfred-core`. Postgres/redis
-  are already up (the `boot_stack` fixture brought up `BASELINE`). `migrate`
-  constructs `Settings()`, so it exercises the Part A/B fix too. The core health
-  budget is restored from the shrunken `_XFAIL_HEALTH_TIMEOUT_S` (60 s) back to
-  the full baseline budget (the perpetual-`starting` rationale is gone once core
-  can reach healthy).
+- **Provision before `up` — migrate AND seed an operator (core-001, review
+  finding):** `test_core_is_healthy` runs `docker compose run --rm --no-deps
+  alfred-core migrate` **and** `docker compose run --rm --no-deps alfred-core user
+  add --name e2e-operator --authorization operator ...` before `up -d --no-deps
+  alfred-core`. The tui-default comms graph constructs the real `Orchestrator`,
+  which **refuses boot on an unseeded operator** (`daemon.boot.operator_not_seeded`)
+  — so migrate alone is insufficient; both steps mirror `bin/alfred-setup.sh`
+  ("Running migrations" + "Bootstrapping operator identity"). Postgres/redis are
+  already up (the `boot_stack` fixture brought up `BASELINE`). Both provisioning
+  commands construct `Settings()`, so they exercise the Part A/B fix too. A non-zero
+  `migrate`/`user add` raises `CalledProcessError` (surfaced by the fixture's
+  scrubbed re-raise), so a provisioning failure fails loud. The core health budget
+  is restored from the shrunken `_XFAIL_HEALTH_TIMEOUT_S` (60 s) back to the full
+  baseline budget (the perpetual-`starting` rationale is gone once core can reach
+  healthy). **Tally:** post-#500 the lane is **7 passed / 1 xfailed** (the gateway
+  and core both assert healthy; only `test_setup_sh_completes` stays xfail on #501)
+  — NOT the pre-#500 6/2 (arch-002).
 - **sec-003 — explicit production in the env-file:** add
   `ALFRED_ENVIRONMENT=production` to `tests/e2e/_env.py:write_e2e_env_file`. Compose
   already defaults it, but making it explicit means the posture assertions
@@ -220,22 +253,29 @@ present, not-privileged, internal network, SETUID set):
    -c "select count(*) from plugin_grants"` returns `> 0`. Runtime proof the
    `daemon start` boot seeded the first-party `RealGate` grants (not inferred from
    healthy).
-4. **Sandbox active** — the launcher self-test resolves policy inside the running
-   container: `docker compose exec -T alfred-core /app/bin/alfred-plugin-launcher.sh
-   --self-test` returns the policy-resolving signature (the same check probe (a)
-   runs at boot; production refuses a stub). This proves the bwrap sandbox
-   machinery is live and correctly path-resolved in the image.
+4. **Sandbox machinery live** — bwrap can build an unprivileged userns **inside the
+   running production container**: `docker compose exec -T alfred-core bwrap
+   --ro-bind / / --unshare-user --uid 0 true` exits 0. This exercises the SAME
+   userns machinery the apparmor/seccomp profiles must permit and the quarantine
+   child requires (core-002: the daemon spawns that child under bwrap to reach
+   healthy), independently of the daemon. **NOT the launcher `--self-test`** — the
+   `/review-plan` security + test lanes (sec-001/test-002) found that answer is an
+   *unconditional* `printf 'policy-resolving'; exit 0`: it proves only the script
+   was COPYed in, would pass on a broken sandbox, and is tautological with `healthy`
+   (boot probe (a) already gates on it).
 
-The **exact oracle set is subject to security-lane refinement in /review-plan** —
-e.g. whether (4) should additionally assert an audited boot event, or (2) should
-be complemented by a negative egress probe. The invariant the design commits to:
-**no property is asserted by `healthy` alone.**
+The security-engineer signs off the final oracle set at PR time (they own it) and
+may ADD a negative production-refusal probe (assert an unsandboxed / policy-less
+spawn is DENIED in the running production container — making
+`ALFRED_ENVIRONMENT=production` load-bearing for the sandbox axis). The invariant
+the design commits to: **no property is asserted by `healthy` alone, and the
+`--self-test` tautology is not used.**
 
 > **Verification caveat.** macOS Docker-Desktop does not load the `alfred-bwrap`
-> AppArmor profile, so posture (4) — and possibly boot itself — fails there via a
-> different mechanism. The **Linux nightly End-to-end lane is authoritative**;
-> local verification uses the Linux/arm64-privileged docker repro (established
-> recipe) for the sandbox parts.
+> AppArmor profile, so posture (4) — and the boot-time live bwrap quarantine-child
+> spawn itself — fails there via a different mechanism. The **Linux nightly
+> End-to-end lane is authoritative**; local verification uses the
+> Linux/arm64-privileged docker repro (established recipe) with the profile loaded.
 
 ### Part F — ratchet the service partition
 
@@ -243,22 +283,29 @@ be complemented by a negative egress probe. The invariant the design commits to:
   becomes **empty**, `{}`) into `HEALTHY_APP_SERVICES` (joining `alfred-gateway`).
 - `tests/unit/e2e/test_services.py`: update the partition assertions — `xfail`
   bucket is now empty; `HEALTHY_APP_SERVICES == {"alfred-gateway", "alfred-core"}`.
-  The disjoint-and-covering partition test stays honest with an empty xfail set
-  (an empty set is disjoint from everything and the union still covers the six).
+  Because an empty xfail set makes the `isdisjoint` asserts trivially true
+  (test-005), the test ALSO asserts the concrete membership of each bucket and that
+  the union covers exactly the six — the guard that actually catches a mis-move.
 - The `test_every_compose_service_is_classified` derived-set guard continues to
   red if a new compose service appears unclassified.
 
-### Part G — ADR-0055
+### Part G — ADRs (split — one decision each, arch-001)
 
-Record two decisions:
-1. **Repo-root resolution convention** — one `alfred._repo_root.repo_root()`
-   honoring `ALFRED_REPO_ROOT` (deploy seam) with a source-tree + `/app`
-   fallback; all repo-root call sites route through it; the installed image never
-   depends on `parents[N]` arithmetic. Supersedes the copy-pasted per-module
-   `parents[N]` pattern.
-2. **Boot-posture assertion contract** — the e2e core-healthy assertion must
-   carry runtime posture oracles (network isolation, gate seeded, sandbox active),
-   never a bare `assert healthy`.
+- **ADR-0055 — repo-root resolution convention.** One
+  `alfred._repo_root.repo_root()` honoring `ALFRED_REPO_ROOT` (deploy seam) with a
+  marker-gated source-tree + `/app` fallback; all repo-root call sites route
+  through it; the installed image never depends on `parents[N]` arithmetic;
+  supersedes the copy-pasted per-module `parents[N]` pattern. Records the
+  **`ALFRED_REPO_ROOT` seam trust model** (process-env-only, not T3-reachable → no
+  `/etc`-vs-env precedence à la ADR-0053; the traversal-containment guard
+  re-anchors to the resolved root, unchanged — sec-002/003) and the **scope
+  boundaries** (no `src/` COPY → Discord/stdio follow-up; `hash_pepper`/`state.git`
+  non-boot-gating — arch-003).
+- **ADR-0056 — e2e boot-posture assertion contract.** The e2e core-healthy
+  assertion carries runtime posture oracles (network isolation, gate seeded,
+  sandbox machinery live), never a bare `assert healthy`; the `--self-test`
+  tautology is not used; `ALFRED_ENVIRONMENT=production` makes the sandbox axis
+  live; the Linux nightly is authoritative for the sandbox oracle.
 
 ## Test plan
 
