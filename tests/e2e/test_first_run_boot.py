@@ -7,6 +7,7 @@ its blocker lands, forcing the assertion to tighten (Steps 2/3/5).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -26,12 +27,13 @@ pytestmark = pytest.mark.e2e
 # comfortable margin for local runs where the fixture just built.
 _UP_TIMEOUT_S = 300.0
 _SETUP_SH_TIMEOUT_S = 900.0
+# The gateway/core xfail tests poll a SHORTER health budget: their blockers (#499/#500) crash-loop
+# as perpetual `starting` and can never resolve early, so the full 180s baseline budget would just
+# burn ~6 min/nightly (review: performance). Restore the full budget when Step 2/3 un-xfails them.
+_XFAIL_HEALTH_TIMEOUT_S = 60.0
 
 
-@pytest.mark.parametrize(
-    "service",
-    ["alfred-postgres", "alfred-redis", "alfred-prometheus", "alfred-grafana"],
-)
+@pytest.mark.parametrize("service", sorted(_services.BASELINE_SERVICES))
 def test_baseline_service_is_healthy(boot_stack: BootStack, service: str) -> None:
     assert boot_stack.health(service) is ServiceHealth.HEALTHY, (
         f"{service} did not reach healthy — a NEW infra regression (this is the green baseline)."
@@ -68,7 +70,10 @@ def test_gateway_is_healthy(boot_stack: BootStack) -> None:
         env_file=boot_stack.env_file,
         timeout_s=_UP_TIMEOUT_S,
     )
-    assert boot_stack.health("alfred-gateway") is ServiceHealth.HEALTHY
+    assert (
+        boot_stack.health("alfred-gateway", timeout_s=_XFAIL_HEALTH_TIMEOUT_S)
+        is ServiceHealth.HEALTHY
+    )
 
 
 @pytest.mark.xfail(
@@ -88,7 +93,9 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
         env_file=boot_stack.env_file,
         timeout_s=_UP_TIMEOUT_S,
     )
-    assert boot_stack.health("alfred-core") is ServiceHealth.HEALTHY
+    assert (
+        boot_stack.health("alfred-core", timeout_s=_XFAIL_HEALTH_TIMEOUT_S) is ServiceHealth.HEALTHY
+    )
 
 
 @pytest.mark.xfail(
@@ -128,11 +135,14 @@ def test_setup_sh_completes() -> None:
             # Belt-and-braces teardown (stock flow creates no containers), then drop the worktree.
             _compose.down_project(setup_project)
             remove = ["git", "worktree", "remove", "--force", str(worktree)]
-            subprocess.run(
-                remove,
-                cwd=_compose.REPO_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=60.0,
-                check=False,
-            )
+            # suppress: a hung `worktree remove` (TimeoutExpired isn't caught by check=False) must
+            # not shadow the test result; a stale worktree is pruned by git's next op (err-review).
+            with contextlib.suppress(subprocess.SubprocessError):
+                subprocess.run(
+                    remove,
+                    cwd=_compose.REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0,
+                    check=False,
+                )

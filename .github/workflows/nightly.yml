@@ -68,6 +68,8 @@ jobs:
         # owns GF_SECURITY_ADMIN_PASSWORD and the dummy sentinel keys. A shell env var would
         # SHADOW the --env-file via compose ${..} precedence (ops-004). The real throwaway
         # quarantine key is a Roadmap Step-3 concern (added when core un-xfails).
+        # `-o addopts=''` clears the repo default `-m "not real_llm"` for this lane (a no-op today —
+        # no e2e test is real_llm-marked) so the full e2e set runs; strict-markers still holds per-PR.
         run: uv run pytest tests/e2e -o addopts=''
       - name: Assert the boot-lane tally is non-vacuous
         if: always() && steps.check.outputs.has_e2e == 'true'
@@ -75,7 +77,10 @@ jobs:
         # a missing file (session errored before the hook) is itself a red (_assert_ran).
         run: uv run python -m tests.e2e._assert_ran e2e-tally.json
       - name: Upload diagnostics on failure
-        if: failure() && steps.check.outputs.has_e2e == 'true'
+        # cancelled() too: the job's own timeout-minutes cancellation reports as `cancelled`, not
+        # `failed`, so a lane that overruns its budget (a genuine regression) would otherwise lose
+        # its diagnostics exactly when they're most needed (review: devops).
+        if: (failure() || cancelled()) && steps.check.outputs.has_e2e == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-diagnostics
