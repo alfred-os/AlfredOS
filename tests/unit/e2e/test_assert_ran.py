@@ -107,3 +107,11 @@ def test_main_with_bad_tally(tmp_path: Path) -> None:
     tally_path = _write(tmp_path, _REGRESSION)
     result = main([str(tally_path)])
     assert result == 1
+
+
+def test_main_with_corrupt_tally_reds(tmp_path: Path) -> None:
+    """main() treats a truncated/corrupt tally JSON as a red (return 1), not an uncaught
+    traceback — write_tally isn't atomic, so a CI cancellation can leave a partial file (devex)."""
+    tally_path = tmp_path / "tally.json"
+    tally_path.write_text('{"collected": 8, "passed":')  # truncated mid-write
+    assert main([str(tally_path)]) == 1

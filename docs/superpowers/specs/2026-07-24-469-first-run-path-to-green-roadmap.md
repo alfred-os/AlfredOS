@@ -119,12 +119,16 @@ comms-manifest validator passes in the built image.
 
 Whatever Step 1's diagnosis + Step 3's completion confirm are real:
 
-- **README/DeepSeek key mismatch** (rev-001): `README:33` tells operators to set only
-  the quarantine key, but setup.sh's gate also rejects the `sk-...` DeepSeek
-  placeholder → a literal README-follow fails. Fix the README or relax setup.sh
-  (the epic owner's call).
-- **`audit.hash_pepper` path** (ops-102) and **`policies.yaml` provisioning** —
-  confirm-by-run; fix if real.
+- **README/DeepSeek key mismatch** — filed as **#501**. `README:33` tells operators to set
+  only the quarantine key, but setup.sh's gate also rejects the `sk-...` DeepSeek placeholder →
+  a literal README-follow fails. Fix the README or relax setup.sh (the epic owner's call).
+  **This is a hard prerequisite for the #494 `test_setup_sh_completes` xfail to flip green**, not
+  merely parallel to Steps 2–3: setup.sh exits at this credential gate *before* it can reach
+  blocker #499's migrate hang.
+- **`audit.hash_pepper`** — reconciled into **#500**'s acceptance criteria (setup.sh provisions
+  it; not a separate blocker). **`policies.yaml` provisioning — STILL OPEN**: the Step-1 diagnosis
+  run never reached that code path (setup.sh exits at the credential gate first), so whether it is
+  a real gap is unconfirmed; confirm-by-run once #501/#500 lift, and file if real.
 - Any further blocker the harness surfaces once A/B lift.
 - **Flips green:** any remaining setup.sh/core sub-failures. The README fix is
   independent and may land in parallel with Steps 2–3.

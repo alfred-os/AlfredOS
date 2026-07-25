@@ -15,7 +15,7 @@
 
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
-        check format-check lint-check typecheck strict-declarations-lint tag-t3-check test test-unit test-integration test-smoke test-adversarial test-perf \
+        check format-check lint-check typecheck strict-declarations-lint tag-t3-check test test-unit test-integration test-smoke test-e2e test-adversarial test-perf \
         docs-check wiki-check
 
 help: ## Show this help.
@@ -108,6 +108,13 @@ test-smoke: ## Run smoke tests against a running stack (requires `docker compose
 		uv run pytest tests/smoke -q -m "not real_llm"; \
 	else \
 		echo "::notice::no tests/smoke/ yet — skipping test-smoke"; \
+	fi
+
+test-e2e: ## Run the #494 e2e first-run boot lane (nightly-only; needs Docker + builds the core image).
+	@if [ -f tests/e2e/conftest.py ]; then \
+		uv run pytest tests/e2e -o addopts='' && uv run python -m tests.e2e._assert_ran e2e-tally.json; \
+	else \
+		echo "::notice::no tests/e2e/ yet — skipping test-e2e"; \
 	fi
 
 test-adversarial: ## Run the adversarial security suite (nightly + release-blocking).

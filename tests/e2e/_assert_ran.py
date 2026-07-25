@@ -59,7 +59,9 @@ def main(argv: Sequence[str]) -> int:
         return 1
     try:
         assert_boot_lane_tally(tally)
-    except AssertionError as exc:
+    except (AssertionError, json.JSONDecodeError) as exc:
+        # JSONDecodeError: `write_tally` isn't atomic, so a CI cancellation can leave a truncated
+        # tally — treat a corrupt tally as a red (not an uncaught traceback) (review: devex).
         print(f"e2e boot-lane tally FAILED: {exc}", file=sys.stderr)
         return 1
     print("e2e boot-lane tally OK")
