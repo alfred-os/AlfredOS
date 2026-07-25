@@ -12,6 +12,7 @@ from pathlib import Path
 
 E2E_PROJECT_PREFIX = "alfred-e2e"
 DUMMY_KEY_SENTINEL = "sk-DUMMY-e2e-not-a-real-key"
+_NON_SECRET_KEYS = frozenset({"ALFRED_ENVIRONMENT"})  # sec-007: values here are not secrets.
 
 
 def new_project_name() -> str:
@@ -28,9 +29,9 @@ def scrub_env_secrets(text: str, env_file: Path) -> str:
     """Redact this env-file's injected values (per-run Grafana password + dummy sentinel keys)
     from captured text before it lands in a failure-uploaded artifact (sec-003)."""
     for line in env_file.read_text().splitlines():
-        _, sep, value = line.partition("=")
+        key, sep, value = line.partition("=")
         value = value.strip()
-        if sep and value:
+        if sep and value and key.strip() not in _NON_SECRET_KEYS:
             text = text.replace(value, "***REDACTED***")
     return text
 
@@ -43,6 +44,7 @@ def write_e2e_env_file(dest_dir: Path) -> Path:
         f"GF_SECURITY_ADMIN_PASSWORD={secrets.token_hex(24)}",
         f"ALFRED_DEEPSEEK_API_KEY={DUMMY_KEY_SENTINEL}",
         f"ALFRED_QUARANTINE_PROVIDER_API_KEY={DUMMY_KEY_SENTINEL}",
+        "ALFRED_ENVIRONMENT=production",
     )
     env_path.write_text("\n".join(lines) + "\n")
     env_path.chmod(0o600)
