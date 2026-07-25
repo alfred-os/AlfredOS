@@ -88,8 +88,11 @@ services:
     # gateway dials its comms-tui.sock (bound when the socket-backed alfred_tui
     # adapter is enabled), so the core must stay up and share alfred_run.
     # `docker compose run --rm alfred-core <cmd>` still works for one-off
-    # subcommands (run overrides command). Requires a seeded audit.hash_pepper
-    # (bin/alfred-setup.sh) before `up -d`, or the daemon refuse-boots/crash-loops.
+    # subcommands (run overrides command). Boot-to-healthy needs a MIGRATED
+    # database + a seeded operator (bin/alfred-setup.sh) — without either the
+    # daemon refuse-boots/crash-loops. `audit.hash_pepper` is required for
+    # inbound message handling (resolved lazily on first hash use), NOT for
+    # boot: an unseeded pepper does not gate reaching healthy.
     command: ["daemon", "start"]
     restart: unless-stopped
     depends_on:
@@ -208,6 +211,12 @@ services:
       # #470 PR2, which adds the bundled Prometheus/Grafana services.
       # Compose-internal only — NEVER host-published (test_core_metrics_port_never_host_published).
       ALFRED_CORE_METRICS_PORT: ${ALFRED_CORE_METRICS_PORT:-9465}
+      # #500 probe (b): the daemon loads policies.yaml at boot. settings.policies_path
+      # defaults to the bare-host /etc/alfred/policies.yaml, which the image does not
+      # provision; the Dockerfile COPYs it to /app/config/policies.yaml, so point the
+      # documented ALFRED_POLICIES_PATH override there. In production a missing policies
+      # file refuses boot (snapshot_ref_init_failed) — this is what lets core reach healthy.
+      ALFRED_POLICIES_PATH: ${ALFRED_POLICIES_PATH:-/app/config/policies.yaml}
     # state.git lives on this volume and is the source of truth for
     # reviewer-gated proposals + plugin grants (spec §11.1). NOT mounted in
     # alfred-discord — the comms adapter has no business writing grants.
