@@ -54,3 +54,16 @@ def test_scrub_env_secrets_redacts_every_injected_value(tmp_path: Path) -> None:
 def test_scrub_env_secrets_leaves_non_secret_text_intact(tmp_path: Path) -> None:
     env_file = _env.write_e2e_env_file(tmp_path)
     assert _env.scrub_env_secrets("no secrets here", env_file) == "no secrets here"
+
+
+def test_e2e_env_file_sets_production(tmp_path: Path) -> None:
+    env_file = _env.write_e2e_env_file(tmp_path)
+    assert "ALFRED_ENVIRONMENT=production" in env_file.read_text()
+
+
+def test_scrub_does_not_redact_nonsecret_environment_value(tmp_path: Path) -> None:
+    # sec-007: ALFRED_ENVIRONMENT=production is not a secret; scrubbing "production" from
+    # captured logs would over-redact legitimate log text. Non-secret keys are skipped.
+    env_file = _env.write_e2e_env_file(tmp_path)
+    text = "core booting in production mode"
+    assert "production" in _env.scrub_env_secrets(text, env_file)
