@@ -97,7 +97,7 @@ lefthook install
 
 **Lefthook runs (no Docker needed):** `ruff format --check`, `ruff check`, `mypy --strict`, `pyright`, `pytest tests/unit -q`.
 
-**CI also runs (require Docker / fuller scope):** `pytest tests/integration` against testcontainers Postgres, plus the i18n catalog freshness check once that gate lands.
+**CI also runs (require Docker / fuller scope):** `pytest tests/integration` against testcontainers Postgres, plus the `i18n catalog drift` gate (required since 2026-06-24) and the `tag(T3)` grep gate.
 
 So lefthook ≠ CI: lefthook catches the fast failures locally; CI is the source of truth. Don't habituate to `LEFTHOOK=0` — the local gate exists for a reason. CLAUDE.md hard rule #8 (no hook-bypass via `--no-verify`) applies in spirit here.
 
@@ -110,8 +110,12 @@ Every PR to `main` runs required status gates. See [`docs/ci/required-checks.md`
 - `Mypy (strict)` — primary type-checker
 - `Pyright` — secondary type-checker
 - `Pytest` — `tests/unit tests/integration -q` (smoke and adversarial run on a separate schedule)
+- `tag(T3) grep gate` — `scripts/check_tag_t3.py`, CLAUDE.md hard rule #3
+- `i18n catalog drift` — `pybabel extract`/`update --check`/`compile`, hard rule #4
 
-All five skip cleanly when there's no Python source (pre-Slice-1), then activate once code lands.
+All are FAIL-CLOSED as of [#514](https://github.com/alfred-os/AlfredOS/issues/514): the source
+probe exits 1 rather than skipping, because a probe finding nothing means the probe broke. They
+previously skipped-and-passed, and six of them enforced nothing for about a month.
 
 ---
 

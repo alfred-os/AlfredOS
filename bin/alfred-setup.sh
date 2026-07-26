@@ -555,7 +555,10 @@ if [[ -t 0 ]]; then
     if grep -qE '^[[:space:]]*alfred-discord:' docker-compose.yaml 2>/dev/null; then
       warn "Legacy alfred-discord Compose service detected — removed in the #309 flag-day. Pull latest docker-compose.yaml. See docs/runbooks/2026-06-25-discord-flag-day-migration.md."
     fi
-    if docker compose ps --services 2>/dev/null | grep -qx alfred-discord; then
+    # #514: `docker compose ps … | grep -qx` SIGPIPEs the producer under `pipefail` once the
+    # service list outgrows the pipe buffer. Read into a var, then match with no pipeline.
+    _services="$(docker compose ps --services 2>/dev/null || true)"
+    if grep -qx alfred-discord <<<"$_services"; then
       warn "A stale alfred-discord container is running — 'docker compose down' then 'up -d'."
     fi
     # CodeRabbit finding 2 (#469 Blocker 2 PR review): base the advisory on the

@@ -7,10 +7,11 @@ name: PR Python validation
 # Each gate is a separate job so it surfaces as its own checkbox in the
 # PR checks panel and can be promoted to a required status individually.
 #
-# Pre-Slice-1 state has no Python source files. Each job's first step is
-# a srccheck guard that detects this and short-circuits with success so
-# the gate exists from day 1 but never blocks PRs that don't touch
-# Python. Once Slice 1 lands src/alfred/**/*.py the steps activate.
+# Each job's first step is a srccheck guard. It is FAIL-CLOSED (#514): src/
+# and tests/ are permanent, so a probe finding nothing means the PROBE broke
+# and the job exits 1. It previously short-circuited with SUCCESS, which is
+# exactly how six jobs — including the required tag(T3) and i18n gates —
+# reported green while executing nothing for about a month.
 #
 # Convention reference: docs/python-conventions.md.
 
@@ -349,8 +350,11 @@ jobs:
 
   # -----------------------------------------------------------------
   # Job 7: i18n catalog drift
-  # CLAUDE.md hard rule (i18n #4): `pybabel extract` runs in pre-commit;
-  # `pybabel compile --check` runs in CI. Catalog drift fails the build.
+  # CLAUDE.md hard rule (i18n #4). NOTE two inaccuracies in that rule's wording:
+  # there is no `.pre-commit-config.yaml` in this repo (lefthook is pre-push and
+  # runs no pybabel), and `pybabel compile --check` is not a real flag — `--check`
+  # belongs to `pybabel update`. This job is therefore the ONLY enforcement of
+  # rule #4 anywhere, which is why #514 (it silently never ran) mattered.
   # Splitting into its own gating job lets it be promoted to a required
   # status independently of the other Python jobs.
   # -----------------------------------------------------------------

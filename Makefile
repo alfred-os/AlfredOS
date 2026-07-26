@@ -8,10 +8,11 @@
 # `make check` is the contract. If it passes locally, it should pass in CI.
 # If it fails with mutation-recoverable issues, run `make fix` first.
 #
-# Pre-Slice-1 state: src/ and tests/ don't exist yet. Each Python-tool target
-# below probes for the relevant directories and no-ops with a `::notice::` line
-# if absent, matching the CI workflow's srccheck guards and lefthook's path
-# probes. Once Slice 1 lands the directories, the guards transparently activate.
+# Python-tool targets probe for their directories first. `test-perf` is FAIL-CLOSED
+# (#514) — tests/perf is permanent, so finding nothing means the probe broke and it
+# exits 1, matching the CI srccheck guards which are now fail-closed too. Other
+# targets still emit a `::notice::` and no-op; those are convenience wrappers, not
+# merge gates. Never probe with `find … | grep -q` (SIGPIPE under pipefail — #514).
 
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
