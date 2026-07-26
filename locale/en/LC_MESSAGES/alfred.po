@@ -1723,7 +1723,7 @@ msgstr ""
 "event recorded for the operator. This is a security event — inspect the "
 "audit log."
 
-#: src/alfred/gateway/adapter_child_factory.py:205
+#: src/alfred/gateway/adapter_child_factory.py:206
 msgid "gateway.adapter.launch_target.override_refused"
 msgstr ""
 "Launch-target override for adapter {adapter_id} refused: active "
@@ -1739,10 +1739,10 @@ msgstr ""
 #: src/alfred/plugins/comms_socket_transport.py:402
 #: src/alfred/plugins/comms_socket_transport.py:449
 #: src/alfred/plugins/comms_socket_transport.py:456
-#: src/alfred/plugins/comms_stdio_transport.py:241
-#: src/alfred/plugins/comms_stdio_transport.py:251
-#: src/alfred/plugins/comms_stdio_transport.py:270
-#: src/alfred/plugins/comms_stdio_transport.py:277
+#: src/alfred/plugins/comms_stdio_transport.py:242
+#: src/alfred/plugins/comms_stdio_transport.py:252
+#: src/alfred/plugins/comms_stdio_transport.py:271
+#: src/alfred/plugins/comms_stdio_transport.py:278
 msgid "comms.transport.malformed_frame"
 msgstr ""
 "Comms adapter {adapter_id} sent a malformed or oversized frame; the wire "
@@ -3320,40 +3320,40 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:489
+#: src/alfred/security/quarantine_child_io.py:488
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:507
+#: src/alfred/security/quarantine_child_io.py:506
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:550
+#: src/alfred/security/quarantine_child_io.py:549
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:576
-#: src/alfred/security/quarantine_child_io.py:1130
+#: src/alfred/security/quarantine_child_io.py:575
+#: src/alfred/security/quarantine_child_io.py:1129
 msgid "security.quarantine_child.broker_unconfigured"
 msgstr "Quarantine child egress broker is not configured."
 
-#: src/alfred/security/quarantine_child_io.py:1128
+#: src/alfred/security/quarantine_child_io.py:1127
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:1144
+#: src/alfred/security/quarantine_child_io.py:1143
 msgid "security.quarantine_child.provider_config_missing"
 msgstr ""
 "Refusing to spawn the live quarantine child without its provider model "
 "and token budget."
 
-#: src/alfred/security/quarantine_child_io.py:1223
+#: src/alfred/security/quarantine_child_io.py:1222
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:1274
+#: src/alfred/security/quarantine_child_io.py:1273
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "
