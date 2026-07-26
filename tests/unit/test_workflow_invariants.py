@@ -1,21 +1,26 @@
-"""Structural invariants for the GitHub Actions workflows (#514).
+"""Structural invariants for the CI gating surfaces (#514).
 
-Sibling of ``test_compose_invariants.py`` / ``test_dockerfile_invariants.py``: the
-workflows are load-bearing infrastructure that no Python test would otherwise read, so
-the invariants that keep the *gates* honest are pinned here.
+Sibling of ``test_compose_invariants.py`` / ``test_dockerfile_invariants.py``: workflows and
+the ``Makefile`` are load-bearing infrastructure no other Python test reads, so the invariants
+that keep the *gates honest* are pinned here.
 
-The motivating defect (#514): every source-probe guard used
+The motivating defect (#514): source probes were written as::
 
     find <dir> -name '*.py' | grep -q .
 
-``grep -q`` exits on its FIRST match, ``find`` then takes ``SIGPIPE`` and dies with status
-141, and ``set -o pipefail`` propagates that as the pipeline status — so the probe reports
-"no source" for a tree that is full of source. It is a race that depends on how many paths
-``find`` emits: on ``ubuntu-latest`` a 73-entry directory survived while a 292-entry one did
-not, which is why it went unnoticed for a month and why "it passes today" is not a defence.
+``grep -q`` exits on its FIRST match, ``find`` then takes SIGPIPE and dies with status 141, and
+``set -o pipefail`` propagates that — so the probe reports "no source" for a tree full of source.
 
-Six jobs in ``pr-validate-python.yml`` (including the REQUIRED ``tag(T3)`` security gate and
-``i18n catalog drift``) plus CodeQL skipped every real step and reported success.
+It is a size/speed race, not a clean platform split: on ``ubuntu-latest`` a 73-entry directory
+survived while a 292-entry one did not. "It passes today" is therefore never a defence — every
+surviving instance is one directory-growth away from flipping. Six ``pr-validate-python`` jobs
+(including the REQUIRED ``tag(T3)`` gate and ``i18n catalog drift``) plus CodeQL skipped every
+real step and reported success for about a month.
+
+The general hazard is **an early-exiting reader on the right-hand side of a pipe under
+``pipefail``** — not specifically ``find`` and not specifically ``grep -q``. Both sides are
+therefore matched as sets, because the first draft of this guard matched only ``find … |
+grep -q`` and would have missed the ``grep -Eq`` spelling already live in two workflows.
 """
 
 from __future__ import annotations
@@ -25,17 +30,58 @@ from pathlib import Path
 
 import pytest
 
-_WORKFLOW_DIR = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_WORKFLOW_DIR = _REPO_ROOT / ".github" / "workflows"
 
-# `find ... | grep -q` — the pipe is the defect: `grep -q`'s early exit is what SIGPIPEs `find`.
-# Applied to LOGICAL lines (shell continuations already joined), because the real CodeQL
-# offender spells its `find` across five backslash-continued lines and a naive per-physical-line
-# scan silently misses it — a drift guard that under-counts is worse than none.
-_FIND_PIPED_TO_GREP_Q = re.compile(r"\bfind\b.*\|\s*grep\s+-q")
+# Producers that stream (so a reader closing early can SIGPIPE/EPIPE them).
+_PRODUCER = r"(?:find|git\s+ls-files|printf|echo|cat|ls|docker\s+compose\s+ps)\b"
+# Readers that exit before draining stdin. `grep -q`/`-Eq`/`-qE`/`-m1`, `head -1`, `sed q`, `read`.
+_EARLY_EXIT_READER = (
+    r"(?:grep\s+(?:-[A-Za-z]*q[A-Za-z]*|-m\s*1|--max-count[= ]1)"
+    r"|head\s+(?:-n\s*)?-?1\b"
+    r"|sed\s+(?:-n\s*)?['\"]?q"
+    r"|read\b)"
+)
+_PIPE_INTO_EARLY_EXIT = re.compile(rf"{_PRODUCER}.*\|\s*{_EARLY_EXIT_READER}")
+
+# `|| true` (or an explicit `|| :`) neutralises pipefail, so the pipeline cannot poison the
+# exit status. ci.yml uses this deliberately for value extraction — not a defect.
+_PIPEFAIL_NEUTRALISED = re.compile(r"\|\|\s*(?:true|:)\b")
+
+# A probe that writes `has_*=false` and lets the job PASS. The quote after `false` is
+# load-bearing: the real line is `echo "has_source=false" >> "$GITHUB_OUTPUT"`, and a
+# pattern without `"?` silently matches nothing — verified by mutation, since the first
+# attempt at this guard passed while the tag(T3) branch was reverted to skip-and-pass.
+_SKIP_AND_PASS_WRITE = re.compile(r'has_[a-z_]*=false"?\s*>>\s*"?\$GITHUB_OUTPUT')
+
+# Files whose source probes MUST fail closed. These are the ones #514 found actively broken.
+_FAIL_CLOSED_FILES = ("pr-validate-python.yml", "codeql.yml", "perf.yml")
+
+# ci.yml's probes already used the SIGPIPE-safe `-print -quit`, so they return the right answer
+# and are only skip-and-pass on a genuinely vanished directory — a materially lower risk than
+# the actively-broken guards above. Converting all of them is tracked in #517; this ratchet
+# blocks NEW skip-and-pass probes from appearing while allowing them to be removed.
+_CI_YML_LEGACY_SKIP_PROBES = 11
+
+
+def _scanned_files() -> list[Path]:
+    """Every CI gating surface — workflows plus the Makefile perf.yml delegates to."""
+    files = sorted(_WORKFLOW_DIR.glob("*.yml")) + sorted(_WORKFLOW_DIR.glob("*.yaml"))
+    makefile = _REPO_ROOT / "Makefile"
+    if makefile.exists():
+        files.append(makefile)
+    # Anti-vacuity: this suite is worthless if the glob silently matches nothing.
+    assert len(files) > 5, f"expected the CI surface under {_REPO_ROOT}; found {files}"
+    return files
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
-    """Join backslash-continued shell lines, keeping each fragment's FIRST physical line no."""
+    """Join backslash-continued shell lines, keeping each fragment's FIRST physical line no.
+
+    A COMMENT line is never treated as a continuation: a trailing ``\\`` inside a comment would
+    otherwise swallow the following real line into a ``#``-prefixed logical line, and the
+    comment-skipping in the checks below would then hide a genuine offender.
+    """
     joined: list[tuple[int, str]] = []
     buffer = ""
     start = 0
@@ -43,7 +89,10 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
         if not buffer:
             start = lineno
         stripped = physical.rstrip()
-        if stripped.endswith("\\"):
+        is_comment = stripped.lstrip().startswith("#")
+        # A trailing `\\` is an escaped literal backslash, not a continuation.
+        continues = stripped.endswith("\\") and not stripped.endswith("\\\\")
+        if continues and not is_comment:
             buffer += stripped[:-1] + " "
             continue
         joined.append((start, buffer + physical))
@@ -53,79 +102,124 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
     return joined
 
 
-def _workflow_files() -> list[Path]:
-    files = sorted(_WORKFLOW_DIR.glob("*.yml")) + sorted(_WORKFLOW_DIR.glob("*.yaml"))
-    # Anti-vacuity: this suite is worthless if the glob silently matches nothing.
-    assert files, f"no workflow files found under {_WORKFLOW_DIR} — the invariant is vacuous"
-    return files
+def _executable_lines(path: Path) -> list[tuple[int, str]]:
+    """Logical lines with comments dropped — comments are not executable shell."""
+    return [
+        (lineno, text)
+        for lineno, text in _logical_lines(path.read_text(encoding="utf-8"))
+        if not text.lstrip().startswith("#")
+    ]
 
 
-def test_detector_catches_a_multi_line_find() -> None:
-    """Non-vacuity control: the detector must see a backslash-continued `find` (the CodeQL shape).
+def test_detector_sees_the_shapes_it_must_see() -> None:
+    """Non-vacuity control for the detector itself.
 
-    Pinned because the first version of this guard scanned physical lines and therefore missed
-    `codeql.yml` — the single most consequential offender (CodeQL security analysis had been
-    silently skipping). A detector that cannot see the real bug is a paper gate.
+    Every entry here is a shape that a PREVIOUS draft of this guard missed, or that exists in
+    the tree today. A detector that cannot see the real bug is itself a paper gate — which is
+    the whole subject of #514.
     """
-    multi_line = "if find . -name '*.py' \\\n     -not -path './x/*' 2>/dev/null | grep -q .; then"
-    assert any(_FIND_PIPED_TO_GREP_Q.search(text) for _, text in _logical_lines(multi_line)), (
-        "detector failed to join shell continuations — it would under-count real offenders"
+    must_catch = {
+        # The CodeQL shape: `find` spelled across backslash-continued lines.
+        "multi-line find": (
+            "if find . -name '*.py' \\\n  -not -path './x/*' 2>/dev/null | grep -q .; then"
+        ),
+        "single-line find": "if [ -d src ] && find src -name '*.py' | grep -q .; then",
+        # `grep -Eq` — the spelling live in perf.yml / pr-validate-commits.yml that the
+        # first draft's `grep -q`-only regex silently missed.
+        "grep -Eq": "if printf '%s\\n' \"$changed\" | grep -Eq '^src/'; then",
+        "grep -qE": "if printf '%s\\n' \"$s\" | grep -qE '^fix'; then",
+        "head -1": "first=$(find src -name '*.py' | head -1)",
+        "git ls-files": "if git ls-files '*.py' | grep -q .; then",
+    }
+    for label, snippet in must_catch.items():
+        assert any(_PIPE_INTO_EARLY_EXIT.search(text) for _, text in _logical_lines(snippet)), (
+            f"detector missed the {label!r} shape — it would under-count real offenders"
+        )
+
+    must_ignore = {
+        # Reads a FILE, no pipe from a streaming producer.
+        "grep on a file": "if grep -q '^PROBE=OK$' control.log; then",
+        # Reader drains to EOF — no early exit, so nothing to SIGPIPE.
+        "sort | tail": "latest=$(printf '%s\\n' \"$v\" | sort -V | tail -1)",
+    }
+    for label, snippet in must_ignore.items():
+        assert not any(_PIPE_INTO_EARLY_EXIT.search(text) for _, text in _logical_lines(snippet)), (
+            f"detector false-positived on {label!r}"
+        )
+
+
+def test_logical_lines_does_not_let_a_comment_swallow_code() -> None:
+    """A trailing ``\\`` in a COMMENT must not absorb the next line (L2).
+
+    Otherwise a real offender becomes part of a ``#``-prefixed logical line and is skipped.
+    """
+    text = "# a trailing backslash in prose \\\nfind src -name '*.py' | grep -q .\n"
+    executable = [t for _, t in _logical_lines(text) if not t.lstrip().startswith("#")]
+    assert any(_PIPE_INTO_EARLY_EXIT.search(t) for t in executable), (
+        "a comment ending in `\\` swallowed the following line — offenders could hide behind it"
     )
 
-    single_line = "if [ -d src ] && find src -name '*.py' | grep -q .; then"
-    assert any(_FIND_PIPED_TO_GREP_Q.search(text) for _, text in _logical_lines(single_line))
 
-    # And it must NOT fire on a legitimate `grep -q` that reads a FILE, not a `find` pipe.
-    benign = "if grep -q '^PROBE_RESULT=OK$' control.log; then"
-    assert not any(_FIND_PIPED_TO_GREP_Q.search(text) for _, text in _logical_lines(benign))
+@pytest.mark.parametrize("path", _scanned_files(), ids=lambda p: p.name)
+def test_no_streaming_producer_piped_into_an_early_exit_reader(path: Path) -> None:
+    """No CI gating surface may pipe a streaming producer into an early-exiting reader (#514).
 
+    Use a form with no pipe to break::
 
-def test_source_probes_are_fail_closed() -> None:
-    """A source probe must never report success while gating nothing (#514).
+        if [ -n "$(find src -name '*.py' -print -quit)" ]; then   # find stops itself
+        if grep -Eq 'pat' <<<"$var"; then                          # here-string, no producer
 
-    The original guards' else-branch wrote ``has_source=false`` + a ``::notice::`` and let the
-    job PASS, so six jobs (including the required ``tag(T3)`` and ``i18n catalog drift`` gates)
-    plus CodeQL reported success without executing a single real step. ``adversarial.yml``
-    already had the right posture — fail loud — and this pins every probe to it.
-
-    These directories are permanent; "nothing found" means the probe broke.
-    """
-    stale_skips = []
-    for workflow in _workflow_files():
-        for lineno, text in _logical_lines(workflow.read_text(encoding="utf-8")):
-            stripped = text.strip()
-            if stripped.startswith("#"):
-                continue
-            # The obsolete rationale that made a green skip look intentional.
-            if "expected pre-Slice-1" in stripped:
-                stale_skips.append(f"{workflow.name}:{lineno}: {stripped[:110]}")
-    assert not stale_skips, (
-        "a source probe still skips-and-passes on the obsolete 'pre-Slice-1' rationale; "
-        "src/ and tests/ are permanent, so the probe finding nothing means it BROKE (#514):\n  "
-        + "\n  ".join(stale_skips)
-    )
-
-
-@pytest.mark.parametrize("workflow", _workflow_files(), ids=lambda p: p.name)
-def test_no_find_piped_into_grep_q(workflow: Path) -> None:
-    """No workflow may probe for files with ``find ... | grep -q`` (#514).
-
-    Use a form that cannot SIGPIPE because nothing reads the pipe early::
-
-        if [ -n "$(find src -name '*.py' -print -quit)" ]; then
-
-    ``-print -quit`` makes ``find`` stop after the first hit itself — one process, no pipe.
+    A pipeline explicitly neutralised with ``|| true`` is exempt: ``pipefail`` cannot then
+    poison the exit status, which is how ci.yml safely extracts values with ``head -1``.
     """
     offenders = [
-        f"{workflow.name}:{lineno}: {text.strip()[:120]}"
-        for lineno, text in _logical_lines(workflow.read_text(encoding="utf-8"))
-        # Skip comments: a `#`-prefixed line is not executable shell, and the fix's own
-        # in-workflow note necessarily NAMES the banned idiom to warn against it.
-        if not text.lstrip().startswith("#") and _FIND_PIPED_TO_GREP_Q.search(text)
+        f"{path.name}:{lineno}: {text.strip()[:110]}"
+        for lineno, text in _executable_lines(path)
+        if _PIPE_INTO_EARLY_EXIT.search(text) and not _PIPEFAIL_NEUTRALISED.search(text)
     ]
     assert not offenders, (
-        "`find … | grep -q` SIGPIPEs `find` under `set -o pipefail` once the file list is "
-        "large enough, so the probe reports 'no source' and the gate silently skips while "
-        'reporting success (#514). Use `[ -n "$(find … -print -quit)" ]`.\n  '
-        + "\n  ".join(offenders)
+        "a streaming producer piped into an early-exiting reader SIGPIPEs under `pipefail` "
+        "once the output outgrows the pipe buffer, so the gate silently reports the wrong "
+        "answer (#514):\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow", [f for f in _scanned_files() if f.name in _FAIL_CLOSED_FILES], ids=lambda p: p.name
+)
+def test_actively_broken_probes_are_fail_closed(workflow: Path) -> None:
+    """The probes #514 found broken must FAIL, never skip-and-pass (#514).
+
+    Asserted STRUCTURALLY — on the absence of a ``has_*=false`` output write — not on the
+    presence of some notice string. The first draft of this test keyed on the literal
+    ``"expected pre-Slice-1"``, which two of the eight replaced branches never contained,
+    including ``tag(T3)`` — the headline gate this PR is named for. Keying a guard on
+    incidental prose is how it becomes a paper gate.
+    """
+    skip_and_pass = [
+        f"{workflow.name}:{lineno}: {text.strip()[:110]}"
+        for lineno, text in _executable_lines(workflow)
+        if _SKIP_AND_PASS_WRITE.search(text)
+    ]
+    assert not skip_and_pass, (
+        f"{workflow.name} still has a probe that reports success while gating nothing; these "
+        "paths are permanent, so finding nothing means the PROBE broke (#514):\n  "
+        + "\n  ".join(skip_and_pass)
+    )
+
+
+def test_ci_yml_skip_and_pass_probes_do_not_grow() -> None:
+    """Ratchet on ci.yml's remaining skip-and-pass probes (#514).
+
+    ci.yml's probes already use the SIGPIPE-safe ``-print -quit``, so they return the RIGHT
+    answer and only skip on a genuinely vanished directory — lower risk than the actively
+    broken guards, and converting all of them is out of scope here (#517). This ratchet lets that
+    count shrink but never grow, so no NEW skip-and-pass probe is introduced.
+    """
+    ci_yml = _WORKFLOW_DIR / "ci.yml"
+    count = sum(1 for _, text in _executable_lines(ci_yml) if _SKIP_AND_PASS_WRITE.search(text))
+    assert count <= _CI_YML_LEGACY_SKIP_PROBES, (
+        f"ci.yml grew a NEW skip-and-pass source probe ({count} > "
+        f"{_CI_YML_LEGACY_SKIP_PROBES}). A probe must fail closed: finding nothing means the "
+        "probe broke, not that there is nothing to gate (#514)."
     )

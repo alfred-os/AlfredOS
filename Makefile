@@ -132,7 +132,7 @@ test-adversarial: ## Run the adversarial security suite (nightly + release-block
 # deselects `test_refusal_short_circuits_subscribers` (a correctness pin
 # paired with the 5-chain bench; no benchmark fixture by design).
 test-perf: ## Run the release-blocking hook-dispatch perf gate (host-load-sensitive).
-	@if [ -d tests/perf ] && find tests/perf -name 'test_*.py' 2>/dev/null | grep -q .; then \
+	@if [ -n "$$(find tests/perf -name 'test_*.py' -print -quit 2>/dev/null)" ]; then \
 		FORCE=0; \
 		case "$$(printf '%s' "$$ALFRED_TEST_PERF_FORCE" | tr '[:upper:]' '[:lower:]')" in 1|true|yes) FORCE=1 ;; esac; \
 		if [ "$$FORCE" = "0" ]; then \
@@ -158,7 +158,8 @@ test-perf: ## Run the release-blocking hook-dispatch perf gate (host-load-sensit
 		uv run pytest tests/perf -v --benchmark-only --benchmark-json=benchmark.json && \
 		uv run pytest tests/perf -v -k refusal_short_circuits_subscribers ; \
 	else \
-		echo "::notice::no tests/perf/test_*.py — skipping test-perf"; \
+		echo "::error::tests/perf/test_*.py probe found nothing — release-blocking perf gate cannot run"; \
+		exit 1; \
 	fi
 
 strict-declarations-lint: ## #119 SEC-Med-1: `strict_declarations=False` MUST NOT appear in src/.
