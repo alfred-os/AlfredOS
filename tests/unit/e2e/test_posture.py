@@ -7,7 +7,7 @@ cannot run on this (non-Linux, no apparmor) host — this is the local proof for
 
 from __future__ import annotations
 
-from tests.e2e._posture import _is_egress_chokepoint_ok, _is_gate_seeded
+from tests.e2e._posture import _is_egress_chokepoint_ok, _is_gate_seeded, positive_count
 
 # --- _is_egress_chokepoint_ok ------------------------------------------------------------
 
@@ -74,3 +74,18 @@ def test_positive_count_with_surrounding_whitespace_is_seeded() -> None:
 def test_non_digit_stdout_is_not_seeded() -> None:
     # A psql error (e.g. relation-does-not-exist) prints prose, not a bare integer.
     assert _is_gate_seeded('ERROR:  relation "plugin_grants" does not exist') is False
+
+
+# --- positive_count (public predicate, #501) ---------------------------------------------
+
+
+def test_positive_count_parses_positive_int() -> None:
+    assert positive_count("3\n") is True
+
+
+def test_positive_count_zero_is_false() -> None:
+    assert positive_count("0") is False
+
+
+def test_positive_count_nondigit_is_false() -> None:
+    assert positive_count('ERROR:  relation "users" does not exist') is False
