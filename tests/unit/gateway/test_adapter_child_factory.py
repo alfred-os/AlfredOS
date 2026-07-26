@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -358,7 +359,7 @@ def test_launcher_default_resolves_under_repo_root(monkeypatch: pytest.MonkeyPat
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
     monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
 
-    assert _launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+    assert _launcher_path() == str(Path("/app") / "bin" / "alfred-plugin-launcher.sh")
 
 
 async def test_spawn_env_is_scrubbed_and_sets_environment_no_host_secrets(

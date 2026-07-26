@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -216,7 +217,7 @@ def test_quarantine_launcher_default_resolves_under_repo_root(
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
     monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
 
-    assert child_io_mod._launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+    assert child_io_mod._launcher_path() == str(Path("/app") / "bin" / "alfred-plugin-launcher.sh")
 
 
 async def test_spawn_honours_child_python_override(

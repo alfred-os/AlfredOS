@@ -412,7 +412,7 @@ async def test_comms_launcher_default_resolves_under_repo_root(
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
     monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
 
-    assert mod._comms_launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+    assert mod._comms_launcher_path() == str(Path("/app") / "bin" / "alfred-plugin-launcher.sh")
 
 
 async def test_close_with_no_stdin_still_reaps() -> None:
