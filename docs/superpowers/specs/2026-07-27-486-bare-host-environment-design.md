@@ -1,7 +1,7 @@
 # #486 — bare-host `.env`-only install: every sandboxed plugin spawn refuses
 
 **Status:** design, awaiting security sign-off on the chosen option.
-**Issue:** [#486](https://github.com/alfred-os/AlfredOS/issues/486) · epic [#469](https://github.com/alfred-os/AlfredOS/issues/469) · residual of [#469 Blocker 1](https://github.com/alfred-os/AlfredOS/pull/491) / [ADR-0053](../../adr/0053-one-canonical-environment-resolver.md)
+**Issue:** [#486](https://github.com/alfred-os/AlfredOS/issues/486) · epic [#469](https://github.com/alfred-os/AlfredOS/issues/469) · residual of [#469 Blocker 1](https://github.com/alfred-os/AlfredOS/pull/491) / [ADR-0053](../../adr/0053-three-layer-environment-precedence.md)
 
 ## The defect
 
@@ -108,9 +108,37 @@ set. It should name the trusted sources: export `ALFRED_ENVIRONMENT`, or write
 `/etc/alfred/environment`. Cheap, no trust change, and it is a genuine first-run defect on its
 own (#469's subject matter).
 
+## Two holes in option D, found while drafting
+
+**D1 — there is no bare-host installer to hook into.** `bin/alfred-setup.sh` is a *compose*
+installer (31 `docker compose` invocations, no bare-host mode). The bare-host path #486 is about
+is "run `alfred daemon start` directly" (`docs/runbooks/alfred-chat-through-the-gateway.md`).
+So "setup provisions `/etc/alfred/environment`" has nowhere to live today without either adding
+a bare-host setup path (larger scope than this issue) or having the daemon write its own trust
+anchor — which is circular and should not be entertained.
+
+Mitigating context: setup.sh *already* performs a one-time root-requiring host step (the
+AppArmor profile load, `:282-311`) with exactly the shape D would need — `id -u` check, `sudo`
+only when not already root, idempotent, graceful WARN where inapplicable, loud fail where it is
+an integrity error. So the *mechanism* is precedented; the *hook point* is missing.
+
+**D2 — D can create a worse trap than it fixes.** Once `/etc/alfred/environment` exists, an
+operator editing `.env` to change environment sees NOTHING happen, because `/etc` outranks
+`.env`. The current failure is at least loud; a silently-ignored edit is not.
+
+## The documentation defect underneath all of this
+
+`README.md:273` tells the operator: *"copy it to `.env` as-is, **or** export the env var, **or**
+write `/etc/alfred/environment`, to satisfy this."* Those three are **not** equivalent. `.env`
+satisfies daemon boot and does **not** satisfy sandboxed plugin spawns. Whatever option is
+chosen, that sentence is wrong today and is arguably the root first-run defect — an operator
+followed the README exactly and hit a dead end.
+
 ## Recommendation
 
-**D + E.** It resolves #486 without trading away the launcher's independent check at all,
+**E unconditionally, plus D *if* a bare-host setup path is in scope** (see D1 — it may not
+be). E alone already fixes the documented-quickstart defect, which is what epic #469 is about.
+D resolves #486 without trading away the launcher's independent check at all,
 which means it needs no security concession — the operator's intent reaches the launcher
 through the channel the design already trusts. E makes the residual case (operator declined
 `sudo`, or a non-root install) self-service instead of a dead end.
