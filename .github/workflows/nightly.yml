@@ -62,7 +62,7 @@ jobs:
           else
             echo "::notice::apparmor_parser absent — skipping profile load (security_opt is a no-op)."
           fi
-      - name: Run E2E boot lane
+      - name: Run E2E boot lane (services + core/gateway; setup runs separately)
         if: steps.check.outputs.has_e2e == 'true'
         # No GF-password seed and no provider-key env here: the harness's isolated --env-file
         # owns GF_SECURITY_ADMIN_PASSWORD and the dummy sentinel keys. A shell env var would
@@ -71,13 +71,28 @@ jobs:
         # migrated DB + a seeded operator. A real throwaway quarantine key remains a future
         # concern only for tests that exercise an actual provider call, not this boot lane.
         # `-o addopts=''` clears the repo default `-m "not real_llm"` for this lane (a no-op today —
-        # no e2e test is real_llm-marked) so the full e2e set runs; strict-markers still holds per-PR.
-        run: uv run pytest tests/e2e -o addopts=''
+        # no e2e test is real_llm-marked); strict-markers still holds per-PR. `-m 'not
+        # e2e_full_setup'` deselects the full setup.sh run — it boots its own postgres and would
+        # collide on host port 5432 with the session-scoped boot_stack, so it runs isolated below.
+        run: uv run pytest tests/e2e -o addopts='' -m 'not e2e_full_setup'
       - name: Assert the boot-lane tally is non-vacuous
         if: always() && steps.check.outputs.has_e2e == 'true'
         # always(): the conftest hook writes e2e-tally.json even when pytest exits non-zero;
         # a missing file (session errored before the hook) is itself a red (_assert_ran).
         run: uv run python -m tests.e2e._assert_ran e2e-tally.json
+      - name: Run the isolated full setup.sh provisioning lane (#501)
+        # always(): an independent lane (its own session/resources) — a boot-lane failure must
+        # not skip it (which would leave the always() setup-assert reding on a missing tally).
+        if: always() && steps.check.outputs.has_e2e == 'true'
+        # Its OWN pytest session — never instantiates the session-scoped boot_stack, so
+        # setup.sh's `up -d alfred-postgres` (host 5432) does not collide. Distinct tally file
+        # via ALFRED_E2E_TALLY_PATH so it does not clobber the boot lane's e2e-tally.json.
+        env:
+          ALFRED_E2E_TALLY_PATH: e2e-setup-tally.json
+        run: uv run pytest tests/e2e -o addopts='' -m 'e2e_full_setup'
+      - name: Assert the setup-lane ran (non-vacuity, #245)
+        if: always() && steps.check.outputs.has_e2e == 'true'
+        run: uv run python -m tests.e2e._assert_ran --setup e2e-setup-tally.json
       - name: Upload diagnostics on failure
         # cancelled() too: the job's own timeout-minutes cancellation reports as `cancelled`, not
         # `failed`, so a lane that overruns its budget (a genuine regression) would otherwise lose
@@ -89,6 +104,7 @@ jobs:
           path: |
             e2e-stack.log
             e2e-tally.json
+            e2e-setup-tally.json
 
   adversarial:
     name: Adversarial test suite
