@@ -7,7 +7,7 @@
 1. **Enable the TUI comms adapter** so the daemon binds its socket. The daemon binds `~/.run/alfred/comms-tui.sock` ONLY when `comms_enabled_adapters` includes a `tui`-kind adapter (default is empty — no socket). Set it in your config / env:
 
    ```bash
-   export ALFRED_COMMS_ENABLED_ADAPTERS='["tui"]'   # or set comms_enabled_adapters in config
+   export ALFRED_COMMS_ENABLED_ADAPTERS='["alfred_tui"]'   # or set comms_enabled_adapters in config
    ```
 
 2. **Start the core daemon** (owns the orchestrator graph; binds `comms-tui.sock`):
@@ -36,7 +36,7 @@ A typed turn round-trips `chat → gateway → daemon → ack → chat`. When th
 | --- | --- | --- |
 | `alfred chat` exits 3 with "start the gateway" | The gateway isn't running (the dial to `comms-gateway.sock` failed). | `alfred gateway start`. |
 | chat connects but a turn never echoes; a reconnect/unavailable banner shows | The gateway is up but cannot reach the daemon (daemon down). | Start the daemon; check the gateway's logs (`gateway.core_link.*`). |
-| same as above, but the daemon IS up | The daemon did not bind `comms-tui.sock` — the `tui` adapter is not enabled. | Set `comms_enabled_adapters=("tui",)` and restart the daemon. |
+| same as above, but the daemon IS up | The daemon did not bind `comms-tui.sock` — the `tui` adapter is not enabled. | Set `comms_enabled_adapters=("alfred_tui",)` and restart the daemon. |
 
 The `alfred chat` error reports only what the CLIENT can see ("can't reach the gateway"); the gateway-can't-reach-core cases surface in the gateway's own logs + the TUI banner — `alfred chat` does not overclaim to diagnose them.
 

@@ -290,6 +290,45 @@ def test_start_canonical_discord_typo_is_config_fault_not_traceback(
     assert t("gateway.start.bind_failed") not in result.stdout
 
 
+def test_start_config_failed_names_both_adapter_list_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The config-fault remediation names the var for BOTH deployment frames (#505).
+
+    The gateway reads ``ALFRED_COMMS_ENABLED_ADAPTERS``. Under compose the operator never
+    sets that directly — ``docker-compose.yaml`` maps it from ``ALFRED_GATEWAY_HOSTED_ADAPTERS``
+    for the gateway service only, and that is what the README / setup scripts seed into ``.env``.
+    Run OUTSIDE compose the mapping does not exist: ``GatewayHostedAdaptersSettings`` is
+    ``env_prefix="ALFRED_"`` + ``extra="ignore"``, so ``ALFRED_GATEWAY_HOSTED_ADAPTERS`` in a
+    bare-host ``.env`` is SILENTLY DISCARDED (verified: it resolves to ``()``).
+
+    So naming EITHER var alone misdirects one half of the supported install matrix — naming only
+    the internal one was the original #505 defect; naming only the compose one would have sent
+    bare-host operators (the path epic #469 / #486 targets, and the one
+    ``docs/runbooks/alfred-chat-through-the-gateway.md`` documents) to an inert setting. The
+    message must carry both, framed.
+
+    Assertions bind to ``result.stdout``, not to the catalog lookup alone: a catalog-only
+    assertion still passes if the ``typer.echo`` at ``_commands.py:296`` is dropped or retargeted
+    (verified by mutation), which is precisely the regression this test exists to catch.
+    """
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", '["discord"]')
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code == 6, result.stdout  # _EXIT_CONFIG_FAILED
+    # Bind to what the operator actually SEES — this is what makes the rest non-vacuous.
+    assert t("gateway.start.config_failed") in result.stdout
+
+    message = t("gateway.start.config_failed")
+    assert "ALFRED_GATEWAY_HOSTED_ADAPTERS" in message  # compose frame
+    assert "ALFRED_COMMS_ENABLED_ADAPTERS" in message  # bare-host frame
+    assert "docker compose logs" in message
+    # The plugin-package-id vs adapter-kind split is THE dominant first-run typo (this test's
+    # own env reproduces it), and the hint is static/closed-vocabulary — no tainted value.
+    assert "alfred_discord" in message
+
+
 def test_start_unrelated_resolve_error_still_surfaces_loud(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
