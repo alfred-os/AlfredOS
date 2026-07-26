@@ -383,13 +383,38 @@ class _CannedAnthropicProxy:
         thread.start()
 
     def set_reject(self, reject: bool) -> None:  # noqa: FBT001 - test toggle, positional is clear
-        """Close the listener (connects -> ECONNREFUSED) or re-open it on the SAME port."""
+        """Close the listener (connects -> ECONNREFUSED) or re-open it on the SAME port.
+
+        Turning reject ON is made DETERMINISTIC (was an arm64-timing flake): a bare
+        ``listener.close()`` does not reliably interrupt the ``_serve`` thread blocked
+        in ``accept()`` — the in-flight syscall keeps the socket alive, so the port
+        goes on completing the core's connects into the backlog and a "rejected"
+        extraction can still be served (observed on the arm64 real-spawn leg while the
+        x86 leg passed the same commit). So: ``shutdown(SHUT_RDWR)`` forces the blocked
+        ``accept()`` to return an error (Linux; this suite is ``@_DOCKER_ONLY``), then
+        JOIN the serve thread so the port is fully released before we return — the
+        core's next connects then get a deterministic ``ECONNREFUSED`` -> refusal.
+        """
         if reject and not self._reject:
             self._reject = True
             listener = self._listen
+            accept_thread = self._accept_thread
             self._listen = None
+            self._accept_thread = None
             if listener is not None:
+                with suppress(OSError):
+                    listener.shutdown(socket.SHUT_RDWR)  # wake the blocked accept()
                 listener.close()
+            if accept_thread is not None:
+                accept_thread.join(timeout=5.0)  # ensure the serve loop has exited
+                # Fail LOUD if the join didn't take: a still-alive serve thread means the
+                # shutdown()-wakes-accept() assumption didn't hold (older kernel / edge
+                # case), which would silently reintroduce the very race this fixes — a bare
+                # 5s stall is not acceptable for a determinism fix.
+                assert not accept_thread.is_alive(), (
+                    "reject-mode serve thread did not exit within 5s of shutdown()+close() — "
+                    "the listener-accept wake assumption failed; the reject race may be back."
+                )
         elif not reject and self._reject:
             self._reject = False
             self._open_listener()
@@ -399,7 +424,15 @@ class _CannedAnthropicProxy:
             try:
                 conn, _ = listener.accept()
             except OSError:
-                return  # listener closed (reject toggle or teardown)
+                return  # listener closed / shut down (reject toggle or teardown)
+            if self._reject:
+                # Backstop for the tiny accept/close window: a connect that slipped into
+                # the backlog around a reject toggle must NOT be served — close it
+                # unhandled (records no first-bytes, so HARD #5's used-socket count is
+                # unaffected; the child's CONNECT then fails -> refusal, never a serve).
+                with suppress(OSError):
+                    conn.close()
+                continue
             handler = threading.Thread(target=self._handle, args=(conn,), daemon=True)
             with self._lock:
                 self._threads.append(handler)
@@ -503,9 +536,9 @@ class _CannedAnthropicProxy:
             handler.join(timeout=_STUB_RECV_TIMEOUT_S + 2)
 
     def close(self) -> None:
-        self.set_reject(True)  # close the listener, unblock _serve
-        if self._accept_thread is not None:
-            self._accept_thread.join(timeout=5)
+        # set_reject(True) now shuts down + closes the listener AND joins the serve thread
+        # (see set_reject), so no separate accept-thread join is needed here.
+        self.set_reject(True)
         self.settle()
 
 
