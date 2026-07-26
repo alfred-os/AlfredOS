@@ -87,6 +87,27 @@ def test_slice_step_missing_raises(tmp_path: Path) -> None:
         slice_shell_step(s, "Absent")
 
 
+def test_slice_step_indented_nested_step_does_not_truncate(tmp_path: Path) -> None:
+    # An INDENTED `step "..."` (a nested call inside an if, or a heredoc line) is not a top-level
+    # boundary — the slice must run through it to the next COLUMN-0 `step "` (CodeRabbit).
+    s = _script(
+        tmp_path,
+        'step "Outer"\nif x; then\n  step "inner-nested"\nfi\necho end\nstep "Next"\necho two\n',
+    )
+    out = slice_shell_step(s, "Outer")
+    assert out == 'step "Outer"\nif x; then\n  step "inner-nested"\nfi\necho end\n'
+    assert "inner-nested" in out  # the nested call is INSIDE the block, not a truncation point
+    assert 'step "Next"' not in out
+
+
+def test_slice_step_indented_anchor_is_not_matched(tmp_path: Path) -> None:
+    # The anchor is column-0 only: an indented `step "X"` is a nested call, not the top-level
+    # step, so requesting it raises rather than slicing from the wrong (nested) line.
+    s = _script(tmp_path, 'step "Real"\nif x; then\n  step "Nested"\nfi\n')
+    with pytest.raises(ValueError, match="Nested"):
+        slice_shell_step(s, "Nested")
+
+
 def test_the_real_credential_gate_step_is_sliced_whole() -> None:
     block = slice_shell_step(Path("bin/alfred-setup.sh"), "Validating .env credentials")
     assert block.startswith('step "Validating .env credentials"')
