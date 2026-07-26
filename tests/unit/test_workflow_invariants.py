@@ -171,7 +171,13 @@ def _probe_steps(path: Path) -> list[tuple[str, str]]:
     try:
         doc: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:  # pragma: no cover - a malformed workflow is its own failure
-        pytest.fail(f"{path.name} is not valid YAML: {exc}")
+        # `raise`, not `pytest.fail`: both abort, but only an explicit raise makes the
+        # exception path obvious to a reader AND to static analysis. CodeQL flagged the
+        # pytest.fail form as "doc may be used before initialization" because it does not
+        # model NoReturn (alert 62) — technically a false positive, but the restructure is
+        # strictly clearer than dismissing it, and a helper raising beats a helper calling
+        # into pytest's outcome machinery.
+        raise AssertionError(f"{path.name} is not valid YAML: {exc}") from exc
     found: list[tuple[str, str]] = []
     for job_name, job in ((doc or {}).get("jobs") or {}).items():
         for idx, step in enumerate((job or {}).get("steps") or []):
