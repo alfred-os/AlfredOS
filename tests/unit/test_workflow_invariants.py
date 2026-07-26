@@ -34,7 +34,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW_DIR = _REPO_ROOT / ".github" / "workflows"
 
 # Producers that stream (so a reader closing early can SIGPIPE/EPIPE them).
-_PRODUCER = r"(?:find|git\s+ls-files|printf|echo|cat|ls|docker\s+compose\s+ps)\b"
+# Any command that STREAMS its output can be SIGPIPEd by a reader that closes early.
+# `grep`/`awk`/`sed`/`jq`/`rg` reading a FILE are producers too — verified in ubuntu:24.04,
+# `grep pat big.txt | head -1` and `awk … big.txt | head -1` both give pipeline status 141
+# and an `if` around that shape evaluates FALSE (CodeRabbit, PR #516).
+_PRODUCER = r"(?:find|git\s+ls-files|printf|echo|cat|ls|docker\s+compose\s+ps|grep|rg|awk|jq|sed)\b"
 # Readers that exit before draining stdin. `grep -q`/`-Eq`/`-qE`/`-m1`, `head -1`, `sed q`, `read`.
 _EARLY_EXIT_READER = (
     r"(?:grep\s+(?:-[A-Za-z]*q[A-Za-z]*|-m\s*1|--max-count[= ]1)"
@@ -126,6 +130,9 @@ def test_detector_sees_the_shapes_it_must_see() -> None:
         "grep -qE": "if printf '%s\\n' \"$s\" | grep -qE '^fix'; then",
         "head -1": "first=$(find src -name '*.py' | head -1)",
         "git ls-files": "if git ls-files '*.py' | grep -q .; then",
+        # File-reading filters stream too — the shapes CodeRabbit flagged as a bypass route.
+        "grep producer": "first=$(grep '^x' large.log | head -1)",
+        "awk producer": "first=$(awk '{print $1}' large.log | head -1)",
     }
     for label, snippet in must_catch.items():
         assert any(_PIPE_INTO_EARLY_EXIT.search(text) for _, text in _logical_lines(snippet)), (
