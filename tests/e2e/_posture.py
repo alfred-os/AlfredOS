@@ -47,15 +47,19 @@ def _is_egress_chokepoint_ok(networks: Iterable[tuple[str, bool]]) -> bool:
     return len(nets) == 1 and nets[0][0].endswith("alfred_internal") and nets[0][1] is True
 
 
-def _is_gate_seeded(psql_stdout: str) -> bool:
-    """Pure decision: the psql ``count(*)`` reply parses as a positive integer.
+def positive_count(psql_stdout: str) -> bool:
+    """A psql ``count(*)`` reply parses as a strictly-positive integer.
 
-    No I/O — takes the already-captured stdout so it can be unit-tested without a running
-    container (tests/unit/e2e/test_posture.py). A non-digit reply (e.g. a psql error message)
-    or a zero count both mean "not seeded".
+    No I/O — takes captured stdout so it is unit-testable without a container. A non-digit reply
+    (e.g. a psql error message) or a zero count both read as ``False``.
     """
     stripped = psql_stdout.strip()
     return stripped.isdigit() and int(stripped) > 0
+
+
+def _is_gate_seeded(psql_stdout: str) -> bool:
+    """The plugin_grants ``count(*)`` reply parses as a positive integer (>0 rows seeded)."""
+    return positive_count(psql_stdout)
 
 
 def _docker(*args: str) -> str:
