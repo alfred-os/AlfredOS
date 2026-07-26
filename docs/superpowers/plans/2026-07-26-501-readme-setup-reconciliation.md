@@ -727,6 +727,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 
 Replace the single e2e run + assert steps. The main step deselects the setup marker; a new step runs the setup lane in isolation (fresh pytest session → no `boot_stack` → no 5432 holder) with its own tally + guard. Keep `-o addopts=''` (clears the repo `-m "not real_llm"` default) and the `AppArmor profile load` pre-step (already present) — the full run needs it.
 
+Give the AppArmor-load pre-step an `id: load_apparmor`. The isolated setup RUN + ASSERT gate on
+`!cancelled()` (independent of the boot *pytest* outcome, but a cancellation stops the expensive
+lane) **and** on `steps.load_apparmor.conclusion == 'success'` (skip if the infra setup broke, so
+the always-independent assert can't red on a never-written tally). `!cancelled()` must be wrapped
+in `${{ }}` — a bare leading `!` is an invalid YAML tag.
+
 ```yaml
       - name: Run the e2e boot lane (services + core/gateway; setup runs separately)
         if: steps.check.outputs.has_e2e == 'true'
@@ -735,14 +741,14 @@ Replace the single e2e run + assert steps. The main step deselects the setup mar
         if: always() && steps.check.outputs.has_e2e == 'true'
         run: uv run python -m tests.e2e._assert_ran e2e-tally.json
       - name: Run the isolated full setup.sh provisioning lane (#501)
-        if: steps.check.outputs.has_e2e == 'true'
         # Its OWN pytest session — never instantiates the session-scoped boot_stack, so
         # setup.sh's `up -d alfred-postgres` (host 5432) does not collide. Distinct tally file.
+        if: ${{ !cancelled() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success' }}
         env:
           ALFRED_E2E_TALLY_PATH: e2e-setup-tally.json
         run: uv run pytest tests/e2e -o addopts='' -m 'e2e_full_setup'
       - name: Assert the setup-lane ran (non-vacuity, #245)
-        if: always() && steps.check.outputs.has_e2e == 'true'
+        if: ${{ !cancelled() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success' }}
         run: uv run python -m tests.e2e._assert_ran --setup e2e-setup-tally.json
 ```
 
