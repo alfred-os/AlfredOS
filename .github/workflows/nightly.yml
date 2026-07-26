@@ -66,8 +66,10 @@ jobs:
         if: steps.check.outputs.has_e2e == 'true'
         # No GF-password seed and no provider-key env here: the harness's isolated --env-file
         # owns GF_SECURITY_ADMIN_PASSWORD and the dummy sentinel keys. A shell env var would
-        # SHADOW the --env-file via compose ${..} precedence (ops-004). The real throwaway
-        # quarantine key is a Roadmap Step-3 concern (added when core un-xfails).
+        # SHADOW the --env-file via compose ${..} precedence (ops-004). #500 un-xfailed core
+        # on this same dummy sentinel: boot-to-healthy needs no real provider key, only a
+        # migrated DB + a seeded operator. A real throwaway quarantine key remains a future
+        # concern only for tests that exercise an actual provider call, not this boot lane.
         # `-o addopts=''` clears the repo default `-m "not real_llm"` for this lane (a no-op today —
         # no e2e test is real_llm-marked) so the full e2e set runs; strict-markers still holds per-PR.
         run: uv run pytest tests/e2e -o addopts=''

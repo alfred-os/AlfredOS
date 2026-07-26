@@ -21,13 +21,12 @@ BASELINE_SERVICES: frozenset[str] = frozenset(
 # Services graduated from XFAIL to "asserted healthy by a dedicated build-required test"
 # (NOT the pulled-image infra baseline the boot_stack fixture co-boots). Grows as blockers
 # land; the ratchet advances XFAIL -> HEALTHY_APP one service at a time.
-HEALTHY_APP_SERVICES: frozenset[str] = frozenset({"alfred-gateway"})
+HEALTHY_APP_SERVICES: frozenset[str] = frozenset({"alfred-gateway", "alfred-core"})
 
 # Known-blocked services -> the roadmap issue that un-blocks them. Shrinks toward empty as
-# blockers land (the ratchet). alfred-gateway graduated to HEALTHY_APP_SERVICES at #499.
-XFAIL_SERVICES: Mapping[str, str] = {
-    "alfred-core": "#500",
-}
+# blockers land (the ratchet). alfred-gateway graduated at #499; alfred-core at #500.
+# Empty now: every boot-gating blocker has landed. Kept typed so a regression can re-add.
+XFAIL_SERVICES: Mapping[str, str] = {}
 
 
 def parse_services(config_services_stdout: str) -> tuple[str, ...]:

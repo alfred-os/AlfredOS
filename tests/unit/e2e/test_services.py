@@ -40,6 +40,18 @@ def test_baseline_app_and_xfail_partition_covers_the_six() -> None:
         "alfred-gateway",
         "alfred-core",
     }
-    # The ratchet has advanced: the gateway is asserted-healthy, only core remains xfail.
-    assert app == {"alfred-gateway"}
-    assert xfail == {"alfred-core"}
+    # The ratchet has advanced: both gateway and core are asserted-healthy; xfail is empty.
+    assert app == {"alfred-gateway", "alfred-core"}
+    assert xfail == set()
+    # test-005: an empty xfail bucket makes the isdisjoint asserts trivially true, so ALSO
+    # assert the concrete membership + that baseline/app carry the six and are non-empty —
+    # the guard that actually catches a mis-move.
+    assert baseline == {"alfred-postgres", "alfred-redis", "alfred-prometheus", "alfred-grafana"}
+    assert (baseline | app | xfail) == {
+        "alfred-postgres",
+        "alfred-redis",
+        "alfred-prometheus",
+        "alfred-grafana",
+        "alfred-gateway",
+        "alfred-core",
+    }

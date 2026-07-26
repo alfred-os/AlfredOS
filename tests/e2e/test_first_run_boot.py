@@ -1,9 +1,9 @@
 """The e2e first-run boot assertions (#494): green infra baseline + xfail'd blockers.
 
 Baseline services are asserted healthy (regression net). The gateway graduated to a plain
-asserted-healthy test at #499. The core/setup.sh assertions are still strict-xfail on their
-roadmap blockers — each reds via XPASS the instant its blocker lands, forcing the assertion
-to tighten (Steps 3/5).
+asserted-healthy test at #499; core graduated (provisioned + posture-asserted) at #500. Only
+the setup.sh assertion remains strict-xfail on its roadmap blocker — it reds via XPASS the
+instant that blocker lands, forcing the assertion to tighten (Roadmap Step 4).
 """
 
 from __future__ import annotations
@@ -28,10 +28,6 @@ pytestmark = pytest.mark.e2e
 # comfortable margin for local runs where the fixture just built.
 _UP_TIMEOUT_S = 300.0
 _SETUP_SH_TIMEOUT_S = 900.0
-# The core xfail test polls a SHORTER health budget: its blocker (#500) crash-loops as a
-# perpetual `starting` and can never resolve early, so the full 180s baseline budget would just
-# burn ~6 min/nightly (review: performance). Restore the full budget when Step 3 un-xfails core.
-_XFAIL_HEALTH_TIMEOUT_S = 60.0
 
 
 @pytest.mark.parametrize("service", sorted(_services.BASELINE_SERVICES))
@@ -74,14 +70,41 @@ def test_gateway_is_healthy(boot_stack: BootStack) -> None:
     assert boot_stack.health("alfred-gateway") is ServiceHealth.HEALTHY
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="blocker #500: alfred-core.Dockerfile omits plugins/ and "
-    "_REPO_ROOT resolves to the install prefix. Ratchets green only when core is "
-    "FULLY bootable (image + provisioning) at Roadmap Step 3, whose un-xfail must "
-    "add posture assertions (sandbox/gate/egress), not a bare assert-healthy.",
-)
 def test_core_is_healthy(boot_stack: BootStack) -> None:
+    # #500: core boots in the shipped image (plugins/ COPYed hermetically, repo_root()
+    # unified, policies.yaml pointed at /app/config). The tui-default comms graph builds the
+    # real Orchestrator, which REFUSES boot on an unseeded operator (core-001) — so provision
+    # BOTH a migrated DB AND an operator, mirroring bin/alfred-setup.sh. --no-deps: baseline
+    # postgres/redis are already up; core reaches healthy without the gateway (verified).
+    from tests.e2e import _posture
+
+    _compose.compose(
+        boot_stack.project,
+        "run",
+        "--rm",
+        "--no-deps",
+        "alfred-core",
+        "migrate",
+        env_file=boot_stack.env_file,
+        timeout_s=_UP_TIMEOUT_S,
+    )
+    _compose.compose(
+        boot_stack.project,
+        "run",
+        "--rm",
+        "--no-deps",
+        "alfred-core",
+        "user",
+        "add",
+        "--name",
+        "e2e-operator",
+        "--authorization",
+        "operator",
+        "--daily-budget-usd",
+        "1.0",
+        env_file=boot_stack.env_file,
+        timeout_s=_UP_TIMEOUT_S,
+    )
     _compose.compose(
         boot_stack.project,
         "up",
@@ -91,9 +114,8 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
         env_file=boot_stack.env_file,
         timeout_s=_UP_TIMEOUT_S,
     )
-    assert (
-        boot_stack.health("alfred-core", timeout_s=_XFAIL_HEALTH_TIMEOUT_S) is ServiceHealth.HEALTHY
-    )
+    assert boot_stack.health("alfred-core") is ServiceHealth.HEALTHY
+    _posture.assert_core_boot_posture(boot_stack)  # sec-002: posture oracles, not bare-healthy.
 
 
 @pytest.mark.xfail(
@@ -101,8 +123,8 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
     reason="blocker #501: bin/alfred-setup.sh does not complete under the "
     "stock documented flow — it exits at the credential gate on the .env.example "
     "placeholder DeepSeek key (README:33 omits ALFRED_DEEPSEEK_API_KEY). Roadmap "
-    "Step 4 (README/setup.sh reconciliation); after that, the remaining blocker is "
-    "#500 (core) — #499 already un-hung migrate by making the gateway healthy.",
+    "Step 4 (README/setup.sh reconciliation) is the sole remaining blocker — "
+    "#499 un-hung migrate (gateway healthy) and #500 landed core provisioning + posture.",
 )
 def test_setup_sh_completes() -> None:
     # Run setup.sh in an ISOLATED detached git worktree so the operator's repo-root .env is
