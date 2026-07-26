@@ -30,19 +30,21 @@ def _core_container_id(boot_stack: BootStack) -> str:
     return cid
 
 
-def _is_egress_chokepoint_ok(network_names: Iterable[str]) -> bool:
-    """Pure decision: the container is attached to EXACTLY the internal network.
+def _is_egress_chokepoint_ok(networks: Iterable[tuple[str, bool]]) -> bool:
+    """Pure decision: the container is attached to EXACTLY the kernel-internal network.
 
-    The connectivity-free-core invariant (ADR-0040) is that alfred-core joins ONLY the
-    internal (``internal: true``) network — ANY second attachment (a bridge, the external
-    plane, a stray default network) is a potential egress route. A mere "has internal AND
-    not external" check is too weak (CodeRabbit: ``{…alfred_internal, bridge}`` would pass
-    it), so require exactly one attached network whose name ends with ``alfred_internal``.
-    No I/O — takes already-parsed names so it is unit-tested without a running container
+    The connectivity-free-core invariant (ADR-0040/0042) is that alfred-core joins ONLY the
+    internal (``internal: true``) network. Two ways it can be violated: (1) a SECOND
+    attachment (a bridge, the external plane, a stray default network — a routable egress
+    path); (2) the sole attachment merely NAMING itself ``…alfred_internal`` while carrying
+    ``Internal: false`` (routable — CodeRabbit: the name suffix alone is not the kernel
+    primitive ADR-0040/0042 require). So require EXACTLY one attachment whose name ends with
+    ``alfred_internal`` AND whose Docker ``Internal`` flag is ``True``. Each element is a
+    ``(network_name, is_internal)`` pair. No I/O — unit-tested without a running container
     (tests/unit/e2e/test_posture.py).
     """
-    names = list(network_names)
-    return len(names) == 1 and names[0].endswith("alfred_internal")
+    nets = list(networks)
+    return len(nets) == 1 and nets[0][0].endswith("alfred_internal") and nets[0][1] is True
 
 
 def _is_gate_seeded(psql_stdout: str) -> bool:
@@ -56,24 +58,29 @@ def _is_gate_seeded(psql_stdout: str) -> bool:
     return stripped.isdigit() and int(stripped) > 0
 
 
+def _docker(*args: str) -> str:
+    """Run a read-only ``docker`` query and return stripped stdout (S607: trusted CLI)."""
+    cmd = ["docker", *args]  # argv-as-local keeps ruff S607 out of scope; S603 is per-file-ignored.
+    return subprocess.run(
+        cmd, cwd=_compose.REPO_ROOT, capture_output=True, text=True, timeout=30.0, check=True
+    ).stdout.strip()
+
+
 def assert_egress_chokepoint(boot_stack: BootStack) -> None:
-    """Core is attached ONLY to the internal (internal:true) network — no external route."""
+    """Core joins EXACTLY the kernel-internal (internal:true) network — no external route."""
     cid = _core_container_id(boot_stack)
-    # Assigning the argv to a local before the call (matching tests/e2e/conftest.py) keeps
-    # ruff's S607 (partial-executable-path) out of scope; only S603 remains (per-file ignore).
-    cmd = ["docker", "inspect", cid]
-    inspect = subprocess.run(
-        cmd,
-        cwd=_compose.REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30.0,
-        check=True,
-    )
-    names = set(json.loads(inspect.stdout)[0]["NetworkSettings"]["Networks"])
-    assert _is_egress_chokepoint_ok(names), (
-        f"alfred-core must join the internal network and must NOT join alfred_external "
-        f"(connectivity-free core); got {sorted(names)}."
+    names = list(json.loads(_docker("inspect", cid))[0]["NetworkSettings"]["Networks"])
+    # `docker inspect <container>` reports the ATTACHMENT, not the network's Internal
+    # property, so resolve the ADR-0040/0042 kernel-isolation flag per network with a
+    # `docker network inspect` — a name ending in `alfred_internal` on a routable
+    # (Internal:false) network must NOT satisfy the chokepoint (CodeRabbit).
+    nets = [
+        (name, _docker("network", "inspect", name, "--format", "{{.Internal}}") == "true")
+        for name in names
+    ]
+    assert _is_egress_chokepoint_ok(nets), (
+        f"alfred-core must join EXACTLY the kernel-internal (internal:true) network "
+        f"(connectivity-free core, ADR-0040/0042); got {nets}."
     )
 
 

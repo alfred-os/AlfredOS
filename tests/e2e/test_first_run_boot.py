@@ -102,11 +102,15 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
         timeout_s=_PROVISION_TIMEOUT_S,
         check=False,
     )
-    # Scrub the env-file's injected values from the surfaced stderr (matches conftest's
+    # Combine stdout+stderr before scrubbing/truncating: `alfred migrate` may write its
+    # failure explanation to EITHER stream (CodeRabbit), and losing stdout would drop the
+    # root cause on a CI red. Scrub the env-file's injected values (matches conftest's
     # e2e-stack.log handling; commit-security-review hardening) — the error text stays.
-    migrate_stderr = _env.scrub_env_secrets(migrate.stderr, boot_stack.env_file)[-800:]
+    migrate_out = _env.scrub_env_secrets(
+        (migrate.stdout or "") + (migrate.stderr or ""), boot_stack.env_file
+    )[-1000:]
     assert migrate.returncode == 0, (
-        f"alfred migrate (provisioning) failed: rc={migrate.returncode} stderr={migrate_stderr!r}"
+        f"alfred migrate (provisioning) failed: rc={migrate.returncode} output={migrate_out!r}"
     )
     _compose.compose(
         boot_stack.project,
