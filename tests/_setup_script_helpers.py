@@ -48,3 +48,24 @@ def slice_shell_function(setup_sh: Path, func_start: str) -> str:
         if depth == 0:
             return "".join(lines[start : i + 1])
     raise ValueError(f"{func_start!r} never closes (unbalanced braces)")
+
+
+def slice_shell_step(setup_sh: Path, step_title: str) -> str:
+    """Return one ``step "<step_title>"`` block, sliced out of ``setup_sh``.
+
+    Runs from the ``step "<step_title>"`` marker line to (but not including) the next top-level
+    ``step "`` marker, or EOF. Anchoring on the exact title raises ``ValueError`` on a
+    renamed/removed step rather than returning a stale/empty block — same fail-loud contract as
+    :func:`slice_shell_function`. Matching ``step "`` (with the quote) skips the ``step()``
+    function *definition*. For cross-document consistency tests that need a step's content.
+    """
+    lines = setup_sh.read_text().splitlines(keepends=True)
+    anchor = f'step "{step_title}"'
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == anchor), None)
+    if start is None:
+        raise ValueError(f"{anchor!r} not found in {setup_sh}")
+    end = next(
+        (j for j in range(start + 1, len(lines)) if lines[j].lstrip().startswith('step "')),
+        len(lines),
+    )
+    return "".join(lines[start:end])
