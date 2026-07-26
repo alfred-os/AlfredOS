@@ -191,3 +191,37 @@ This test is grep/parse-only (no bash, no Docker) and lives in `tests/unit`.
 - Step 5 (promote the #494 lane to release-blocking; close #494/#469).
 - Any change to `bin/alfred-setup.sh`'s gate logic (it is correct).
 - Any `src/alfred/**` change.
+
+## Revision — post plan-review (2026-07-26)
+
+The focused plan-review trio (test/security/devops) cleared the README fix, consistency test,
+`slice_shell_step`, and the DB-assertion query, and gave a definitive **SAFE** verdict on the
+psql-injection question (static literal, argv not shell). Three findings + one deeper discovery
+reshaped Component 3/4:
+
+- **C1 (Critical, both reviewers) — host-port 5432 collision.** `docker-compose.yaml` publishes
+  `alfred-postgres` on host `5432`; the session-scoped `boot_stack` holds it for the whole
+  nightly session, so a co-run setup.sh (`up -d alfred-postgres`) fails to bind → non-zero exit.
+  **Fix (epic owner: "Full run, isolated"):** mark the test `e2e_full_setup` and run it in its
+  OWN nightly pytest step (a fresh session that never instantiates `boot_stack`). No product
+  compose change.
+- **H1 (High) — 3-service boot, not just postgres.** setup.sh's `run --rm alfred-core …` calls
+  do not pass `--no-deps`, so they pull up redis + a (keyless-healthy, #499) gateway. The
+  spec's "only starts postgres, bounded cost" claim was wrong; the cost is postgres + redis +
+  gateway (still inside the 900s budget). Documented, not blocking.
+- **M1 (Medium) — host `$HOME` writes.** setup.sh writes the hash_pepper secret to
+  `$HOME/.config/alfred/secrets.toml`. **Fix:** the test passes `ALFRED_SECRETS_FILE=<tmp>` (a
+  setup.sh-honoured seam) to redirect the real secret into the tempdir — which doubles as a
+  queryable **late-step provisioning artifact** (asserting it proves setup.sh reached the near-
+  final hash_pepper step, strengthening the outcome check beyond "migrate ran").
+- **Tally-guard graduation (discovered during the fold).** `tests/e2e/_assert_ran.py` couples
+  to the blocker existing: `_MIN_COLLECTED = MIN_SERVICE_FLOOR + 1` (the +1 IS setup.sh) and
+  `assert xfailed >= 1` (satisfied today only by setup.sh's strict-xfail). Removing the last
+  blocker drops the lane's `xfailed` to 0 **regardless** of the isolation choice, so #501 must
+  graduate the guard to the fully-green shape (`xfailed == 0`, floor drops the +1) and add an
+  `assert_setup_lane_tally` non-vacuity guard for the isolated step (#245). The conftest tally
+  path becomes env-configurable so the two nightly steps write distinct tallies.
+
+Net task list: see `docs/superpowers/plans/2026-07-26-501-readme-setup-reconciliation.md`
+(7 tasks). The change is docs + tests + a scoped `nightly.yml`/`pyproject.toml`/`conftest.py`
+edit — still no `src/alfred/**`.
