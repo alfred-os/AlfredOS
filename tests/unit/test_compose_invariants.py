@@ -967,6 +967,11 @@ def test_alfred_core_points_policies_path_at_shipped_config(compose: dict[str, A
     # the path or the daemon refuses boot in production with snapshot_ref_init_failed.
     core = compose.get("services", {}).get("alfred-core", {})
     val = core.get("environment", {}).get("ALFRED_POLICIES_PATH", "")
-    assert "/app/config/policies.yaml" in val, (
-        "alfred-core must set ALFRED_POLICIES_PATH to the in-image /app/config/policies.yaml."
+    # Exact match on the whole Compose expression (CodeRabbit: a bare `in` would also accept
+    # e.g. `/tmp/app/config/policies.yaml`). The `:-` default is the in-image shipped path;
+    # an operator may still override ALFRED_POLICIES_PATH, but the default MUST be /app/config.
+    assert val == "${ALFRED_POLICIES_PATH:-/app/config/policies.yaml}", (
+        "alfred-core ALFRED_POLICIES_PATH must be exactly "
+        "${ALFRED_POLICIES_PATH:-/app/config/policies.yaml} (the in-image shipped path); "
+        f"got {val!r}."
     )
