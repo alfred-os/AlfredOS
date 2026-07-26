@@ -1246,7 +1246,7 @@ jobs:
           # which is OFF by default and which `compgen -G '**/*.py'` silently
           # depends on — without it, `**` collapses to a single `*` and the
           # probe false-negatives on tests nested deeper than one directory.
-          if find tests/integration -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then
+          if [ -n "$(find tests/integration -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_integration=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
@@ -1432,7 +1432,7 @@ jobs:
           set -euo pipefail
           # `find … -print -quit` is shell-stable (independent of bash `globstar`,
           # which is OFF by default) — same probe as the amd64 `integration` job.
-          if find tests/integration -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then
+          if [ -n "$(find tests/integration -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_integration=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
@@ -1526,8 +1526,8 @@ jobs:
         # rejected at parse time.
         run: |
           set -euo pipefail
-          if find tests/integration tests/smoke -type f -name '*.py' \
-              -print -quit 2>/dev/null | grep -q .; then
+          if [ -n "$(find tests/integration tests/smoke -type f -name '*.py' \
+              -print -quit 2>/dev/null)" ]; then
             echo "has_spawn=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_spawn=false" >> "$GITHUB_OUTPUT"
@@ -2066,8 +2066,8 @@ jobs:
         id: check
         run: |
           set -euo pipefail
-          if find tests/integration tests/smoke -type f -name '*.py' \
-              -print -quit 2>/dev/null | grep -q .; then
+          if [ -n "$(find tests/integration tests/smoke -type f -name '*.py' \
+              -print -quit 2>/dev/null)" ]; then
             echo "has_spawn=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_spawn=false" >> "$GITHUB_OUTPUT"
@@ -2360,8 +2360,8 @@ jobs:
           # instead of `compgen -G '**/*.py'` (bash `globstar` is off by default
           # and `**` silently collapses to `*`, producing false negatives on
           # nested test files).
-          if find tests/unit -type f -name '*.py' -print -quit 2>/dev/null | grep -q . \
-            && find tests/integration -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then
+          if [ -n "$(find tests/unit -type f -name '*.py' -print -quit 2>/dev/null)" ] \
+            && [ -n "$(find tests/integration -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_coverage_corpus=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_coverage_corpus=false" >> "$GITHUB_OUTPUT"
@@ -2838,7 +2838,7 @@ jobs:
           # instead of `compgen -G '**/*.py'` (bash `globstar` is off by default
           # and `**` silently collapses to `*`, producing false negatives on
           # nested test files).
-          if find tests/smoke -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then
+          if [ -n "$(find tests/smoke -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_smoke=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_smoke=false" >> "$GITHUB_OUTPUT"

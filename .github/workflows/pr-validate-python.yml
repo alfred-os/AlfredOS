@@ -51,19 +51,23 @@ jobs:
         id: srccheck
         run: |
           set -euo pipefail
-          # Probe each path independently so a missing src/ or tests/ doesn't
-          # cause `find` (under set -euo pipefail) to fail the whole guard and
-          # produce a false-negative "has_source=false" when the other path
-          # does contain code.
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
           has_src=false
           has_tests=false
-          [ -d src ] && find src -name '*.py' 2>/dev/null | grep -q . && has_src=true
-          [ -d tests ] && find tests -name '*.py' 2>/dev/null | grep -q . && has_tests=true
+          if [ -n "$(find src -name '*.py' -print -quit 2>/dev/null)" ]; then has_src=true; fi
+          if [ -n "$(find tests -name '*.py' -print -quit 2>/dev/null)" ]; then has_tests=true; fi
           if [ "$has_src" = "true" ] || [ "$has_tests" = "true" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source — skipping ruff format check (expected pre-Slice-1)."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
@@ -110,19 +114,23 @@ jobs:
         id: srccheck
         run: |
           set -euo pipefail
-          # Probe each path independently so a missing src/ or tests/ doesn't
-          # cause `find` (under set -euo pipefail) to fail the whole guard and
-          # produce a false-negative "has_source=false" when the other path
-          # does contain code.
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
           has_src=false
           has_tests=false
-          [ -d src ] && find src -name '*.py' 2>/dev/null | grep -q . && has_src=true
-          [ -d tests ] && find tests -name '*.py' 2>/dev/null | grep -q . && has_tests=true
+          if [ -n "$(find src -name '*.py' -print -quit 2>/dev/null)" ]; then has_src=true; fi
+          if [ -n "$(find tests -name '*.py' -print -quit 2>/dev/null)" ]; then has_tests=true; fi
           if [ "$has_src" = "true" ] || [ "$has_tests" = "true" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source — skipping ruff check (expected pre-Slice-1)."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
@@ -172,11 +180,19 @@ jobs:
           set -euo pipefail
           # Probe src/ defensively: under `set -euo pipefail` a missing src/
           # would otherwise abort the guard before the else-branch.
-          if [ -d src ] && find src -name '*.py' 2>/dev/null | grep -q .; then
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
+          if [ -n "$(find src -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source in src/ — skipping mypy (expected pre-Slice-1)."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
@@ -222,11 +238,19 @@ jobs:
           set -euo pipefail
           # Probe src/ defensively: under `set -euo pipefail` a missing src/
           # would otherwise abort the guard before the else-branch.
-          if [ -d src ] && find src -name '*.py' 2>/dev/null | grep -q .; then
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
+          if [ -n "$(find src -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source in src/ — skipping pyright (expected pre-Slice-1)."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
@@ -294,11 +318,19 @@ jobs:
           # may have no src/alfred/, in which case the gate is a no-op.
           # The script is stdlib-only so no uv/python provisioning is
           # needed when src/ is absent.
-          if [ -d src/alfred ] && find src/alfred -name '*.py' 2>/dev/null | grep -q .; then
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
+          if [ -n "$(find src/alfred -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source in src/alfred/ - skipping tag(T3) grep gate."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Set up Python
         if: steps.srccheck.outputs.has_source == 'true'
@@ -340,11 +372,19 @@ jobs:
           set -euo pipefail
           # Same guard pattern as the other Python jobs: pre-Slice-1 main has
           # no src/, so the catalog check is a no-op until Slice 1 lands.
-          if [ -d src ] && find src -name '*.py' 2>/dev/null | grep -q .; then
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
+          if [ -n "$(find src -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source in src/ - skipping i18n drift (expected pre-Slice-1)."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'

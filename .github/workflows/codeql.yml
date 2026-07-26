@@ -82,15 +82,23 @@ jobs:
         id: srccheck
         run: |
           set -euo pipefail
-          if find . -name '*.py' \
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
+          if [ -n "$(find . -name '*.py' \
                -not -path './.claude/*' \
                -not -path './.gemini/*' \
                -not -path './.cursor/*' \
-               -not -path './node_modules/*' 2>/dev/null | grep -q .; then
+               -not -path './node_modules/*' -print -quit 2>/dev/null)" ]; then
             echo "has_source=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_source=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Python source files found; CodeQL analysis skipped (expected pre-Slice-1)."
+            # FAIL-CLOSED (#514, mirroring adversarial.yml): this path is permanent, so
+            # "nothing found" means the PROBE broke, not that there is nothing to check.
+            # Skipping here would pass a required check while gating nothing.
+            echo "::error::CodeQL Python source probe found nothing — required gate cannot run"
+            exit 1
           fi
       - name: Initialize CodeQL
         if: steps.srccheck.outputs.has_source == 'true'

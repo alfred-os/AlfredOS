@@ -62,7 +62,12 @@ jobs:
         id: corpuscheck
         run: |
           set -euo pipefail
-          if [ -d tests/adversarial ] && find tests/adversarial -name 'test_*.py' 2>/dev/null | grep -q .; then
+          # #514: probe via `find … -print -quit` — NEVER `find … | grep -q`, whose
+          # early-exiting reader SIGPIPEs `find` (status 141) under `pipefail`, so the
+          # probe false-negatives once the tree grows past a few hundred entries and the
+          # gate silently skips while reporting success. Pinned by
+          # tests/unit/test_workflow_invariants.py.
+          if [ -n "$(find tests/adversarial -name 'test_*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_corpus=true" >> "$GITHUB_OUTPUT"
           else
             # FAIL-CLOSED (Spec B G6-7-6, #309): this is now a REQUIRED gate.
