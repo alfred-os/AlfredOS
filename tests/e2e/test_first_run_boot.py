@@ -27,6 +27,9 @@ pytestmark = pytest.mark.e2e
 # Cold image builds happen in the boot_stack fixture; per-service `up` here is fast, but keep a
 # comfortable margin for local runs where the fixture just built.
 _UP_TIMEOUT_S = 300.0
+# Named separately from _UP_TIMEOUT_S because it bounds `run --rm ... migrate` / `user add`
+# provisioning, not an `up`; same budget today, but a future divergence won't need a rename.
+_PROVISION_TIMEOUT_S = _UP_TIMEOUT_S
 _SETUP_SH_TIMEOUT_S = 900.0
 
 
@@ -86,7 +89,7 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
         "alfred-core",
         "migrate",
         env_file=boot_stack.env_file,
-        timeout_s=_UP_TIMEOUT_S,
+        timeout_s=_PROVISION_TIMEOUT_S,
     )
     _compose.compose(
         boot_stack.project,
@@ -103,7 +106,7 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
         "--daily-budget-usd",
         "1.0",
         env_file=boot_stack.env_file,
-        timeout_s=_UP_TIMEOUT_S,
+        timeout_s=_PROVISION_TIMEOUT_S,
     )
     _compose.compose(
         boot_stack.project,

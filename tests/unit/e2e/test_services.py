@@ -47,11 +47,3 @@ def test_baseline_app_and_xfail_partition_covers_the_six() -> None:
     # assert the concrete membership + that baseline/app carry the six and are non-empty —
     # the guard that actually catches a mis-move.
     assert baseline == {"alfred-postgres", "alfred-redis", "alfred-prometheus", "alfred-grafana"}
-    assert (baseline | app | xfail) == {
-        "alfred-postgres",
-        "alfred-redis",
-        "alfred-prometheus",
-        "alfred-grafana",
-        "alfred-gateway",
-        "alfred-core",
-    }

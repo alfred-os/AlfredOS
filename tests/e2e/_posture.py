@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Iterable
 
 from tests import _compose
 from tests.e2e.conftest import BootStack
@@ -26,6 +27,29 @@ def _core_container_id(boot_stack: BootStack) -> str:
     ).stdout.strip()
     assert cid, "alfred-core container not found — cannot assert boot posture."
     return cid
+
+
+def _is_egress_chokepoint_ok(network_names: Iterable[str]) -> bool:
+    """Pure decision: joins the internal network AND does not join the external one.
+
+    No I/O — takes already-parsed network names so it can be unit-tested without a running
+    container (tests/unit/e2e/test_posture.py).
+    """
+    names = list(network_names)
+    return any(n.endswith("alfred_internal") for n in names) and not any(
+        n.endswith("alfred_external") for n in names
+    )
+
+
+def _is_gate_seeded(psql_stdout: str) -> bool:
+    """Pure decision: the psql ``count(*)`` reply parses as a positive integer.
+
+    No I/O — takes the already-captured stdout so it can be unit-tested without a running
+    container (tests/unit/e2e/test_posture.py). A non-digit reply (e.g. a psql error message)
+    or a zero count both mean "not seeded".
+    """
+    stripped = psql_stdout.strip()
+    return stripped.isdigit() and int(stripped) > 0
 
 
 def assert_egress_chokepoint(boot_stack: BootStack) -> None:
@@ -43,17 +67,15 @@ def assert_egress_chokepoint(boot_stack: BootStack) -> None:
         check=True,
     )
     names = set(json.loads(inspect.stdout)[0]["NetworkSettings"]["Networks"])
-    assert any(n.endswith("alfred_internal") for n in names), (
-        f"alfred-core must join the internal network; got {sorted(names)}."
-    )
-    assert not any(n.endswith("alfred_external") for n in names), (
-        f"alfred-core must NOT join alfred_external (connectivity-free core); got {sorted(names)}."
+    assert _is_egress_chokepoint_ok(names), (
+        f"alfred-core must join the internal network and must NOT join alfred_external "
+        f"(connectivity-free core); got {sorted(names)}."
     )
 
 
 def assert_capability_gate_seeded(boot_stack: BootStack) -> None:
     """The daemon boot seeded the first-party RealGate grants into Postgres (>0 rows)."""
-    out = _compose.compose(
+    proc = _compose.compose(
         boot_stack.project,
         "exec",
         "-T",
@@ -66,9 +88,11 @@ def assert_capability_gate_seeded(boot_stack: BootStack) -> None:
         "-tAc",
         "select count(*) from plugin_grants",
         env_file=boot_stack.env_file,
-    ).stdout.strip()
-    assert out.isdigit() and int(out) > 0, (
-        f"plugin_grants must be seeded by daemon boot; psql returned {out!r}."
+        check=False,
+    )
+    assert _is_gate_seeded(proc.stdout), (
+        f"plugin_grants must be seeded by daemon boot; psql count={proc.stdout.strip()!r} "
+        f"rc={proc.returncode} stderr={proc.stderr[-400:]!r}."
     )
 
 
