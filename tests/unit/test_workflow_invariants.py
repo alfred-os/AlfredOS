@@ -54,14 +54,10 @@ _PIPEFAIL_NEUTRALISED = re.compile(r"\|\|\s*(?:true|:)\b")
 # attempt at this guard passed while the tag(T3) branch was reverted to skip-and-pass.
 _SKIP_AND_PASS_WRITE = re.compile(r'has_[a-z_]*=false"?\s*>>\s*"?\$GITHUB_OUTPUT')
 
-# Files whose source probes MUST fail closed. These are the ones #514 found actively broken.
-_FAIL_CLOSED_FILES = ("pr-validate-python.yml", "codeql.yml", "perf.yml")
-
-# ci.yml's probes already used the SIGPIPE-safe `-print -quit`, so they return the right answer
-# and are only skip-and-pass on a genuinely vanished directory — a materially lower risk than
-# the actively-broken guards above. Converting all of them is tracked in #517; this ratchet
-# blocks NEW skip-and-pass probes from appearing while allowing them to be removed.
-_CI_YML_LEGACY_SKIP_PROBES = 11
+# Every CI gating surface whose source probes MUST fail closed. pr-validate-python/codeql/perf
+# were the actively-broken ones (#514); ci.yml's probes were already SIGPIPE-safe but still
+# skip-and-passed, converted in #517. A probe finding nothing means the PROBE broke.
+_FAIL_CLOSED_FILES = ("pr-validate-python.yml", "codeql.yml", "perf.yml", "ci.yml")
 
 
 def _scanned_files() -> list[Path]:
@@ -187,8 +183,8 @@ def test_no_streaming_producer_piped_into_an_early_exit_reader(path: Path) -> No
 @pytest.mark.parametrize(
     "workflow", [f for f in _scanned_files() if f.name in _FAIL_CLOSED_FILES], ids=lambda p: p.name
 )
-def test_actively_broken_probes_are_fail_closed(workflow: Path) -> None:
-    """The probes #514 found broken must FAIL, never skip-and-pass (#514).
+def test_source_probes_are_fail_closed(workflow: Path) -> None:
+    """Every CI source probe must FAIL, never skip-and-pass (#514, #517).
 
     Asserted STRUCTURALLY — on the absence of a ``has_*=false`` output write — not on the
     presence of some notice string. The first draft of this test keyed on the literal
@@ -205,21 +201,4 @@ def test_actively_broken_probes_are_fail_closed(workflow: Path) -> None:
         f"{workflow.name} still has a probe that reports success while gating nothing; these "
         "paths are permanent, so finding nothing means the PROBE broke (#514):\n  "
         + "\n  ".join(skip_and_pass)
-    )
-
-
-def test_ci_yml_skip_and_pass_probes_do_not_grow() -> None:
-    """Ratchet on ci.yml's remaining skip-and-pass probes (#514).
-
-    ci.yml's probes already use the SIGPIPE-safe ``-print -quit``, so they return the RIGHT
-    answer and only skip on a genuinely vanished directory — lower risk than the actively
-    broken guards, and converting all of them is out of scope here (#517). This ratchet lets that
-    count shrink but never grow, so no NEW skip-and-pass probe is introduced.
-    """
-    ci_yml = _WORKFLOW_DIR / "ci.yml"
-    count = sum(1 for _, text in _executable_lines(ci_yml) if _SKIP_AND_PASS_WRITE.search(text))
-    assert count <= _CI_YML_LEGACY_SKIP_PROBES, (
-        f"ci.yml grew a NEW skip-and-pass source probe ({count} > "
-        f"{_CI_YML_LEGACY_SKIP_PROBES}). A probe must fail closed: finding nothing means the "
-        "probe broke, not that there is nothing to gate (#514)."
     )

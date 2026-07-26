@@ -104,8 +104,12 @@ jobs:
           if [ -f pyproject.toml ]; then
             echo "has_py=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_py=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::pyproject.toml missing — skipping Python job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::pyproject.toml missing — Python job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_py == 'true'
@@ -796,8 +800,12 @@ jobs:
           if [ -f pyproject.toml ]; then
             echo "has_py=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_py=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::pyproject.toml missing — skipping Python arm64 job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::pyproject.toml missing — Python arm64 job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_py == 'true'
@@ -908,8 +916,12 @@ jobs:
           if [ -f pyproject.toml ]; then
             echo "has_py=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_py=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::pyproject.toml missing — skipping Python cross-OS job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::pyproject.toml missing — Python cross-OS job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_py == 'true'
@@ -1031,8 +1043,12 @@ jobs:
           if [ -f pyproject.toml ]; then
             echo "has_py=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_py=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::pyproject.toml missing — skipping Python WSL job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::pyproject.toml missing — Python WSL job cannot run"
+            exit 1
           fi
       - name: Provision WSL2 (Ubuntu-24.04)
         if: steps.check.outputs.has_py == 'true'
@@ -1249,8 +1265,12 @@ jobs:
           if [ -n "$(find tests/integration -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_integration=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_integration=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tests/integration/**/*.py missing — skipping Integration job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::tests/integration/**/*.py missing — Integration job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_integration == 'true'
@@ -1435,8 +1455,12 @@ jobs:
           if [ -n "$(find tests/integration -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_integration=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_integration=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tests/integration/**/*.py missing — skipping Integration arm64 job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::tests/integration/**/*.py missing — Integration arm64 job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_integration == 'true'
@@ -1530,8 +1554,12 @@ jobs:
               -print -quit 2>/dev/null)" ]; then
             echo "has_spawn=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_spawn=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no integration/smoke corpus — skipping privileged-spawn job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::no integration/smoke corpus — privileged-spawn job cannot run"
+            exit 1
           fi
       - name: Install bubblewrap + jq and relax unprivileged-userns
         if: steps.check.outputs.has_spawn == 'true'
@@ -2070,8 +2098,12 @@ jobs:
               -print -quit 2>/dev/null)" ]; then
             echo "has_spawn=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_spawn=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no integration/smoke corpus — skipping privileged-spawn arm64 job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::no integration/smoke corpus — privileged-spawn arm64 job cannot run"
+            exit 1
           fi
       - name: Install bubblewrap + jq and relax unprivileged-userns
         if: steps.check.outputs.has_spawn == 'true'
@@ -2364,8 +2396,12 @@ jobs:
             && [ -n "$(find tests/integration -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_coverage_corpus=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_coverage_corpus=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tests/unit or tests/integration missing — skipping coverage-gates job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::tests/unit or tests/integration missing — coverage-gates job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_coverage_corpus == 'true'
@@ -2841,8 +2877,12 @@ jobs:
           if [ -n "$(find tests/smoke -type f -name '*.py' -print -quit 2>/dev/null)" ]; then
             echo "has_smoke=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_smoke=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tests/smoke/**/*.py missing — skipping Smoke job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::tests/smoke/**/*.py missing — Smoke job cannot run"
+            exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         if: steps.check.outputs.has_smoke == 'true'
@@ -2897,8 +2937,12 @@ jobs:
           if [ -f bin/alfred-setup.sh ]; then
             echo "has_setup_script=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_setup_script=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::bin/alfred-setup.sh missing — skipping setup-script-smoke job."
+            # FAIL-CLOSED (#517, from #514): this path is permanent and ci.yml runs only on
+            # pull_request/push to main — a full checkout, no arbitrary-ref dispatch. So
+            # finding nothing means the PROBE broke, not that there is nothing to gate;
+            # skipping would pass this check while gating nothing.
+            echo "::error::bin/alfred-setup.sh missing — setup-script-smoke job cannot run"
+            exit 1
           fi
       - name: Stub docker on macOS for --dry-run
         if: matrix.os == 'macos-latest' && steps.check.outputs.has_setup_script == 'true'
