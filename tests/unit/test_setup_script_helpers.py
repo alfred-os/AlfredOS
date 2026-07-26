@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._setup_script_helpers import slice_shell_function
+from tests._setup_script_helpers import slice_shell_function, slice_shell_step
 
 
 def _script(tmp_path: Path, body: str) -> Path:
@@ -58,3 +58,39 @@ def test_the_real_openssl_missing_message_is_sliced_whole() -> None:
     assert func.startswith("openssl_missing_message() {")
     assert func.rstrip().endswith("}")
     assert "apt-get install" in func  # heredoc content is present, not truncated
+
+
+def test_slice_step_returns_block_up_to_next_step(tmp_path: Path) -> None:
+    s = _script(
+        tmp_path,
+        'step "First"\necho one\nadd_config_problem "x"\nstep "Second"\necho two\n',
+    )
+    out = slice_shell_step(s, "First")
+    assert out == 'step "First"\necho one\nadd_config_problem "x"\n'
+    assert "Second" not in out
+
+
+def test_slice_step_runs_to_eof_when_last(tmp_path: Path) -> None:
+    s = _script(tmp_path, 'step "Only"\necho done\n')
+    assert slice_shell_step(s, "Only") == 'step "Only"\necho done\n'
+
+
+def test_slice_step_ignores_the_step_function_definition(tmp_path: Path) -> None:
+    # `step() { ... }` is the function def, not a `step "Title"` call — must not anchor on it.
+    s = _script(tmp_path, 'step() {\n  echo "$1"\n}\nstep "Real"\necho body\n')
+    assert slice_shell_step(s, "Real") == 'step "Real"\necho body\n'
+
+
+def test_slice_step_missing_raises(tmp_path: Path) -> None:
+    s = _script(tmp_path, 'step "Present"\necho hi\n')
+    with pytest.raises(ValueError, match="Absent"):
+        slice_shell_step(s, "Absent")
+
+
+def test_the_real_credential_gate_step_is_sliced_whole() -> None:
+    block = slice_shell_step(Path("bin/alfred-setup.sh"), "Validating .env credentials")
+    assert block.startswith('step "Validating .env credentials"')
+    assert "config_problems" in block
+    assert "ALFRED_DEEPSEEK_API_KEY" in block and "ALFRED_QUARANTINE_PROVIDER_API_KEY" in block
+    # Bounded: it must not run past the gate into the next step.
+    assert "Loading the bwrap userns AppArmor profile" not in block
