@@ -1,8 +1,8 @@
-"""Structural invariants for the CI gating surfaces (#514).
+"""Structural invariants for the CI gating surfaces (#514, #517).
 
-Sibling of ``test_compose_invariants.py`` / ``test_dockerfile_invariants.py``: workflows and
-the ``Makefile`` are load-bearing infrastructure no other Python test reads, so the invariants
-that keep the *gates honest* are pinned here.
+Sibling of ``test_compose_invariants.py`` / ``test_dockerfile_invariants.py``: workflows, the
+``Makefile`` and the CI-executed shell in ``bin/``/``scripts/`` are load-bearing infrastructure
+no other Python test reads, so the invariants that keep the *gates honest* are pinned here.
 
 The motivating defect (#514): source probes were written as::
 
@@ -10,90 +10,114 @@ The motivating defect (#514): source probes were written as::
 
 ``grep -q`` exits on its FIRST match, ``find`` then takes SIGPIPE and dies with status 141, and
 ``set -o pipefail`` propagates that — so the probe reports "no source" for a tree full of source.
+It is a size/speed race: on ``ubuntu-latest`` a 73-entry directory survived while a 292-entry one
+did not, so "it passes today" is never a defence. Six ``pr-validate-python`` jobs (including the
+REQUIRED ``tag(T3)`` gate and ``i18n catalog drift``) plus CodeQL skipped every real step and
+reported success for about a month.
 
-It is a size/speed race, not a clean platform split: on ``ubuntu-latest`` a 73-entry directory
-survived while a 292-entry one did not. "It passes today" is therefore never a defence — every
-surviving instance is one directory-growth away from flipping. Six ``pr-validate-python`` jobs
-(including the REQUIRED ``tag(T3)`` gate and ``i18n catalog drift``) plus CodeQL skipped every
-real step and reported success for about a month.
+BOTH invariants below are deliberately **derived and fail-closed**, because every hand-curated
+version of this file has been wrong:
 
-The general hazard is **an early-exiting reader on the right-hand side of a pipe under
-``pipefail``** — not specifically ``find`` and not specifically ``grep -q``. Both sides are
-therefore matched as sets, because the first draft of this guard matched only ``find … |
-grep -q`` and would have missed the ``grep -Eq`` spelling already live in two workflows.
+* v1 scanned physical lines and missed ``codeql.yml`` (its ``find`` spans continued lines).
+* v2 keyed the fail-closed check on the prose ``"expected pre-Slice-1"``; two replaced branches
+  never contained it — including ``tag(T3)``, the gate #514 is named for.
+* v3 keyed on ``has_*=false`` but omitted the ``"?`` before ``>>``, so it matched nothing.
+* v4's producer allow-list omitted ``grep``/``awk`` reading a file (CodeRabbit).
+* v5's ``_FAIL_CLOSED_FILES`` was a hand-written tuple that omitted ``nightly.yml`` — whose
+  ``has_adversarial`` probe gates the RELEASE-BLOCKING adversarial suite — and its
+  ``has_[a-z_]*`` character class could not see ``has_e2e``.
+
+So: the hazard test allow-lists the *safe* left-hand sides and flags everything else, and the
+fail-closed test is derived from the workflow YAML rather than a file list.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW_DIR = _REPO_ROOT / ".github" / "workflows"
 
-# Producers that stream (so a reader closing early can SIGPIPE/EPIPE them).
-# Any command that STREAMS its output can be SIGPIPEd by a reader that closes early.
-# `grep`/`awk`/`sed`/`jq`/`rg` reading a FILE are producers too — verified in ubuntu:24.04,
-# `grep pat big.txt | head -1` and `awk … big.txt | head -1` both give pipeline status 141
-# and an `if` around that shape evaluates FALSE (CodeRabbit, PR #516).
-_PRODUCER = r"(?:find|git\s+ls-files|printf|echo|cat|ls|docker\s+compose\s+ps|grep|rg|awk|jq|sed)\b"
-# Readers that exit before draining stdin. `grep -q`/`-Eq`/`-qE`/`-m1`, `head -1`, `sed q`, `read`.
+# Readers that exit before draining stdin: `grep -q`/`-Eq`/`-qE`/`-m1`, `head -1`, `sed q`, `read`.
 _EARLY_EXIT_READER = (
     r"(?:grep\s+(?:-[A-Za-z]*q[A-Za-z]*|-m\s*1|--max-count[= ]1)"
     r"|head\s+(?:-n\s*)?-?1\b"
     r"|sed\s+(?:-n\s*)?['\"]?q"
     r"|read\b)"
 )
-_PIPE_INTO_EARLY_EXIT = re.compile(rf"{_PRODUCER}.*\|\s*{_EARLY_EXIT_READER}")
+# A single `|` that is NOT part of `||`. `||` is a control operator, not a pipe.
+_SINGLE_PIPE = r"(?<!\|)\|(?!\|)"
+_PIPE_INTO_EARLY_EXIT = re.compile(rf"{_SINGLE_PIPE}\s*{_EARLY_EXIT_READER}")
 
-# `|| true` (or an explicit `|| :`) neutralises pipefail, so the pipeline cannot poison the
-# exit status. ci.yml uses this deliberately for value extraction — not a defect.
-_PIPEFAIL_NEUTRALISED = re.compile(r"\|\|\s*(?:true|:)\b")
+# INVERTED POLARITY (fail-closed): anything piped into an early-exiting reader is a hazard unless
+# its producer is known NOT to stream. A producer allow-list under-covers by construction — v4
+# proved that — so the burden is on the safe case to be named.
+_SAFE_PRODUCER_TAIL = re.compile(
+    r"(?:"
+    r"sort(?:\s+-\S+)*"  # sort must consume all input before emitting
+    r"|wc(?:\s+-\S+)*"  # wc likewise
+    r"|tail(?:\s+-\S+)*"  # tail must reach EOF
+    r")\s*$"
+)
 
-# A probe that writes `has_*=false` and lets the job PASS. The quote after `false` is
-# load-bearing: the real line is `echo "has_source=false" >> "$GITHUB_OUTPUT"`, and a
-# pattern without `"?` silently matches nothing — verified by mutation, since the first
-# attempt at this guard passed while the tag(T3) branch was reverted to skip-and-pass.
-_SKIP_AND_PASS_WRITE = re.compile(r'has_[a-z_]*=false"?\s*>>\s*"?\$GITHUB_OUTPUT')
+# `|| true` / `|| :` neutralises pipefail so the pipeline cannot poison the exit status.
+_PIPEFAIL_NEUTRALISED = re.compile(r"\|\|\s*(?:true|:)(?![\w-])")
 
-# Every CI gating surface whose source probes MUST fail closed. pr-validate-python/codeql/perf
-# were the actively-broken ones (#514); ci.yml's probes were already SIGPIPE-safe but still
-# skip-and-passed, converted in #517. A probe finding nothing means the PROBE broke.
-_FAIL_CLOSED_FILES = ("pr-validate-python.yml", "codeql.yml", "perf.yml", "ci.yml")
+# Steps whose `has_*` output is a PRESENCE probe must fail closed. `run_bench`-style relevance
+# gates legitimately evaluate false and are excluded by the `has_` naming convention the repo uses.
+_PRESENCE_OUTPUT = re.compile(r"\bhas_[a-z0-9_]*\s*=\s*true")
 
 
-def _scanned_files() -> list[Path]:
-    """Every CI gating surface — workflows plus the Makefile perf.yml delegates to."""
-    files = sorted(_WORKFLOW_DIR.glob("*.yml")) + sorted(_WORKFLOW_DIR.glob("*.yaml"))
-    makefile = _REPO_ROOT / "Makefile"
-    if makefile.exists():
-        files.append(makefile)
-    # Anti-vacuity: this suite is worthless if the glob silently matches nothing.
-    assert len(files) > 5, f"expected the CI surface under {_REPO_ROOT}; found {files}"
-    return files
+def _strip_quoted(text: str) -> str:
+    """Blank out single/double-quoted spans so a `|` inside a regex or message is not a pipe.
+
+    Without this, ``grep -Eq '^(src/|head -1/)'`` self-reports as a SIGPIPE hazard — a real
+    false positive against perf.yml's changed-files gate.
+    """
+    out: list[str] = []
+    quote = ""
+    for ch in text:
+        if quote:
+            out.append(ch if ch == quote else " ")
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
     """Join backslash-continued shell lines, keeping each fragment's FIRST physical line no.
 
-    A COMMENT line is never treated as a continuation: a trailing ``\\`` inside a comment would
-    otherwise swallow the following real line into a ``#``-prefixed logical line, and the
-    comment-skipping in the checks below would then hide a genuine offender.
+    Splits on ``\\n`` only. ``str.splitlines()`` also breaks on ``\\v``/``\\f``/``\\x85``/
+    ``\\u2028``, which the shell does not, so a stray form-feed would silently hide an offender.
+
+    A COMMENT line is never a continuation: a trailing ``\\`` in prose would otherwise swallow the
+    next real line into a ``#``-prefixed logical line that the checks below skip.
     """
     joined: list[tuple[int, str]] = []
     buffer = ""
     start = 0
-    for lineno, physical in enumerate(text.splitlines(), start=1):
+    for lineno, physical in enumerate(text.split("\n"), start=1):
         if not buffer:
             start = lineno
-        stripped = physical.rstrip()
+        stripped = physical.rstrip("\r").rstrip()
         is_comment = stripped.lstrip().startswith("#")
-        # A trailing `\\` is an escaped literal backslash, not a continuation.
-        continues = stripped.endswith("\\") and not stripped.endswith("\\\\")
-        if continues and not is_comment:
-            buffer += stripped[:-1] + " "
+        # An ODD number of trailing backslashes continues the line; an even count is
+        # escaped literals.
+        trailing = len(stripped) - len(stripped.rstrip("\\"))
+        if trailing % 2 == 1 and not is_comment:
+            # Drop the continuation backslash and collapse to exactly one separating space, so
+            # the joined text is byte-comparable rather than accumulating indentation runs.
+            buffer += stripped[:-1].rstrip() + " "
             continue
         joined.append((start, buffer + physical))
         buffer = ""
@@ -102,8 +126,25 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
     return joined
 
 
+def _shell_files() -> list[Path]:
+    """Every CI-executed shell surface: workflows, the Makefile, and bin//scripts/ shell."""
+    files = sorted(_WORKFLOW_DIR.glob("*.yml")) + sorted(_WORKFLOW_DIR.glob("*.yaml"))
+    makefile = _REPO_ROOT / "Makefile"
+    if makefile.exists():
+        files.append(makefile)
+    files += sorted((_REPO_ROOT / "bin").glob("*.sh"))
+    files += sorted((_REPO_ROOT / "scripts").glob("*.sh"))
+    assert len(files) > 10, f"CI shell surface not found under {_REPO_ROOT}; got {files}"
+    return files
+
+
+def _workflow_files() -> list[Path]:
+    files = sorted(_WORKFLOW_DIR.glob("*.yml")) + sorted(_WORKFLOW_DIR.glob("*.yaml"))
+    assert len(files) > 5, f"no workflows found under {_WORKFLOW_DIR} — the invariant is vacuous"
+    return files
+
+
 def _executable_lines(path: Path) -> list[tuple[int, str]]:
-    """Logical lines with comments dropped — comments are not executable shell."""
     return [
         (lineno, text)
         for lineno, text in _logical_lines(path.read_text(encoding="utf-8"))
@@ -111,101 +152,142 @@ def _executable_lines(path: Path) -> list[tuple[int, str]]:
     ]
 
 
-def test_detector_sees_the_shapes_it_must_see() -> None:
-    """Non-vacuity control for the detector itself.
-
-    Every entry here is a shape that a PREVIOUS draft of this guard missed, or that exists in
-    the tree today. A detector that cannot see the real bug is itself a paper gate — which is
-    the whole subject of #514.
-    """
-    must_catch = {
-        # The CodeQL shape: `find` spelled across backslash-continued lines.
-        "multi-line find": (
-            "if find . -name '*.py' \\\n  -not -path './x/*' 2>/dev/null | grep -q .; then"
-        ),
-        "single-line find": "if [ -d src ] && find src -name '*.py' | grep -q .; then",
-        # `grep -Eq` — the spelling live in perf.yml / pr-validate-commits.yml that the
-        # first draft's `grep -q`-only regex silently missed.
-        "grep -Eq": "if printf '%s\\n' \"$changed\" | grep -Eq '^src/'; then",
-        "grep -qE": "if printf '%s\\n' \"$s\" | grep -qE '^fix'; then",
-        "head -1": "first=$(find src -name '*.py' | head -1)",
-        "git ls-files": "if git ls-files '*.py' | grep -q .; then",
-        # File-reading filters stream too — the shapes CodeRabbit flagged as a bypass route.
-        "grep producer": "first=$(grep '^x' large.log | head -1)",
-        "awk producer": "first=$(awk '{print $1}' large.log | head -1)",
-    }
-    for label, snippet in must_catch.items():
-        assert any(_PIPE_INTO_EARLY_EXIT.search(text) for _, text in _logical_lines(snippet)), (
-            f"detector missed the {label!r} shape — it would under-count real offenders"
-        )
-
-    must_ignore = {
-        # Reads a FILE, no pipe from a streaming producer.
-        "grep on a file": "if grep -q '^PROBE=OK$' control.log; then",
-        # Reader drains to EOF — no early exit, so nothing to SIGPIPE.
-        "sort | tail": "latest=$(printf '%s\\n' \"$v\" | sort -V | tail -1)",
-    }
-    for label, snippet in must_ignore.items():
-        assert not any(_PIPE_INTO_EARLY_EXIT.search(text) for _, text in _logical_lines(snippet)), (
-            f"detector false-positived on {label!r}"
-        )
+def _hazard_matches(raw: str) -> list[re.Match[str]]:
+    """Un-neutralised, un-allow-listed pipelines feeding an early-exiting reader."""
+    text = _strip_quoted(raw)
+    out = []
+    for match in _PIPE_INTO_EARLY_EXIT.finditer(text):
+        # `|| true` AFTER the pipeline neutralises pipefail for it (scoped, not line-wide).
+        if _PIPEFAIL_NEUTRALISED.search(text[match.end() :]):
+            continue
+        if _SAFE_PRODUCER_TAIL.search(text[: match.start()].strip()):
+            continue
+        out.append(match)
+    return out
 
 
-def test_logical_lines_does_not_let_a_comment_swallow_code() -> None:
-    """A trailing ``\\`` in a COMMENT must not absorb the next line (L2).
+def _probe_steps(path: Path) -> list[tuple[str, str]]:
+    """(job/step label, run-body) for every step writing a `has_*` presence output."""
+    try:
+        doc: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:  # pragma: no cover - a malformed workflow is its own failure
+        pytest.fail(f"{path.name} is not valid YAML: {exc}")
+    found: list[tuple[str, str]] = []
+    for job_name, job in ((doc or {}).get("jobs") or {}).items():
+        for idx, step in enumerate((job or {}).get("steps") or []):
+            body = (step or {}).get("run") or ""
+            if _PRESENCE_OUTPUT.search(body):
+                label = step.get("name") or step.get("id") or f"step {idx}"
+                found.append((f"{job_name} :: {label}", body))
+    return found
 
-    Otherwise a real offender becomes part of a ``#``-prefixed logical line and is skipped.
-    """
-    text = "# a trailing backslash in prose \\\nfind src -name '*.py' | grep -q .\n"
-    executable = [t for _, t in _logical_lines(text) if not t.lstrip().startswith("#")]
-    assert any(_PIPE_INTO_EARLY_EXIT.search(t) for t in executable), (
-        "a comment ending in `\\` swallowed the following line — offenders could hide behind it"
-    )
+
+# ---------------------------------------------------------------------------
+# Detector self-tests (non-vacuity + false-positive controls)
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", _scanned_files(), ids=lambda p: p.name)
-def test_no_streaming_producer_piped_into_an_early_exit_reader(path: Path) -> None:
-    """No CI gating surface may pipe a streaming producer into an early-exiting reader (#514).
-
-    Use a form with no pipe to break::
-
-        if [ -n "$(find src -name '*.py' -print -quit)" ]; then   # find stops itself
-        if grep -Eq 'pat' <<<"$var"; then                          # here-string, no producer
-
-    A pipeline explicitly neutralised with ``|| true`` is exempt: ``pipefail`` cannot then
-    poison the exit status, which is how ci.yml safely extracts values with ``head -1``.
-    """
-    offenders = [
-        f"{path.name}:{lineno}: {text.strip()[:110]}"
-        for lineno, text in _executable_lines(path)
-        if _PIPE_INTO_EARLY_EXIT.search(text) and not _PIPEFAIL_NEUTRALISED.search(text)
-    ]
-    assert not offenders, (
-        "a streaming producer piped into an early-exiting reader SIGPIPEs under `pipefail` "
-        "once the output outgrows the pipe buffer, so the gate silently reports the wrong "
-        "answer (#514):\n  " + "\n  ".join(offenders)
+@pytest.mark.parametrize(
+    ("label", "snippet"),
+    [
+        ("multi-line find", "if find . -name x \\\n  -not -path ./y 2>/dev/null | grep -q .; then"),
+        ("single-line find", "if [ -d src ] && find src -name x | grep -q .; then"),
+        ("grep -Eq", "if printf %s $changed | grep -Eq ^src/; then"),
+        ("grep producer", "first=$(grep ^x large.log | head -1)"),
+        ("awk producer", "first=$(awk {print} large.log | head -1)"),
+        ("git ls-files", "if git ls-files *.py | grep -q .; then"),
+        # v6: producers nobody would think to allow-list — why the polarity is inverted.
+        ("gh api", "id=$(gh api repos/x/y/pulls --paginate | head -1)"),
+        ("git diff", "if git diff --name-only | grep -q src/; then"),
+        ("curl", "v=$(curl -s https://example.invalid/list | head -1)"),
+        ("docker logs", "if docker compose logs | grep -q ERROR; then"),
+        ("python -c", "n=$(python -c print | head -1)"),
+        ("form feed is not a line break", "find src -name x \x0c| grep -q ."),
+    ],
+)
+def test_detector_catches_hazard_shapes(label: str, snippet: str) -> None:
+    """Non-vacuity: every shape a previous draft missed, or that exists in the tree."""
+    assert any(_hazard_matches(t) for _, t in _logical_lines(snippet)), (
+        f"detector missed the {label!r} shape — it would under-count real offenders"
     )
 
 
 @pytest.mark.parametrize(
-    "workflow", [f for f in _scanned_files() if f.name in _FAIL_CLOSED_FILES], ids=lambda p: p.name
+    ("label", "snippet"),
+    [
+        ("grep reads a file", "if grep -q ^PROBE=OK control.log; then"),
+        ("sort drains its input", "latest=$(cat v.txt | sort -V | tail -1)"),
+        ("neutralised by || true", "n=$(cat big.txt | head -1 || true)"),
+        # False positives a greedy/unquoted matcher produced (v5).
+        ("pipe inside a regex", "if grep -Eq '^(src/|head -1/)' <<<\"$c\"; then"),
+        ("|| is not a pipe", 'echo "confirm" || read -r ans'),
+        ("pipe inside a message", "echo 'see the README | read it'"),
+    ],
 )
-def test_source_probes_are_fail_closed(workflow: Path) -> None:
-    """Every CI source probe must FAIL, never skip-and-pass (#514, #517).
+def test_detector_ignores_safe_shapes(label: str, snippet: str) -> None:
+    """False-positive control: a self-inflicted red is as bad as a miss."""
+    assert not any(_hazard_matches(t) for _, t in _logical_lines(snippet)), (
+        f"detector false-positived on {label!r}: {snippet!r}"
+    )
 
-    Asserted STRUCTURALLY — on the absence of a ``has_*=false`` output write — not on the
-    presence of some notice string. The first draft of this test keyed on the literal
-    ``"expected pre-Slice-1"``, which two of the eight replaced branches never contained,
-    including ``tag(T3)`` — the headline gate this PR is named for. Keying a guard on
-    incidental prose is how it becomes a paper gate.
+
+def test_logical_lines_does_not_let_a_comment_swallow_code() -> None:
+    """A trailing ``\\`` in a COMMENT must not absorb the next line."""
+    text = "# a trailing backslash in prose \\\nfind src -name x | grep -q .\n"
+    executable = [t for _, t in _logical_lines(text) if not t.lstrip().startswith("#")]
+    assert any(_hazard_matches(t) for t in executable)
+
+
+def test_logical_lines_preserves_content_and_line_numbers() -> None:
+    """Joining must not lose text, and every reported line number must be real."""
+    joined = _logical_lines("a\nb \\\nc\nd\n")
+    assert [n for n, _ in joined] == [1, 2, 4, 5]
+    assert [t for _, t in joined][:3] == ["a", "b c", "d"]
+
+
+# ---------------------------------------------------------------------------
+# The invariants
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", _shell_files(), ids=lambda p: p.name)
+def test_no_pipe_into_an_early_exit_reader(path: Path) -> None:
+    """Nothing CI executes may pipe into an early-exiting reader (#514).
+
+    Use a form with no pipe to break::
+
+        if [ -n "$(find src -name '*.py' -print -quit)" ]; then   # find stops itself
+        if grep -Eq 'pat' <<<"$var"; then                          # here-string
     """
-    skip_and_pass = [
-        f"{workflow.name}:{lineno}: {text.strip()[:110]}"
-        for lineno, text in _executable_lines(workflow)
-        if _SKIP_AND_PASS_WRITE.search(text)
+    offenders = [
+        f"{path.name}:{lineno}: {raw.strip()[:110]}"
+        for lineno, raw in _executable_lines(path)
+        if _hazard_matches(raw)
     ]
-    assert not skip_and_pass, (
-        f"{workflow.name} still has a probe that reports success while gating nothing; these "
-        "paths are permanent, so finding nothing means the PROBE broke (#514):\n  "
-        + "\n  ".join(skip_and_pass)
+    assert not offenders, (
+        "a pipeline feeding an early-exiting reader SIGPIPEs its producer under `pipefail` once "
+        "the output outgrows the pipe buffer, so the gate silently reports the wrong answer "
+        "(#514):\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("workflow", _workflow_files(), ids=lambda p: p.name)
+def test_presence_probes_fail_closed(workflow: Path) -> None:
+    """Every `has_*` presence probe must FAIL, never skip-and-pass (#514, #517).
+
+    Asserted POSITIVELY — the step body must contain ``exit 1`` — and DERIVED from the workflow
+    YAML, not a curated file list. A negative assertion on ``has_*=false`` was survivable by
+    deleting the else-branch outright (the output then defaults to ``''``, every gated step
+    skips, and the required job reports success), and a curated file list omitted ``nightly.yml``
+    whose probe gates the release-blocking adversarial suite.
+    """
+    offenders = [
+        f"{workflow.name} :: {where}"
+        for where, body in _probe_steps(workflow)
+        if "exit 1" not in body
+    ]
+    assert not offenders, (
+        "a presence probe can report success while gating nothing; these paths are permanent, so "
+        "finding nothing means the PROBE broke and the step must `exit 1` (#514, #517):\n  "
+        + "\n  ".join(offenders)
     )

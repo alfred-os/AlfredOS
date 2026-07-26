@@ -3,9 +3,10 @@ name: CodeQL
 # Deep semantic analysis via CodeQL. Free for public repos via GitHub
 # Advanced Security. Authored per the author-gating-workflow skill.
 #
-# Pre-Slice-1 state has no Python source files yet; the `srccheck` step
-# detects this and skips init+analyze so the job succeeds. Once Slice 1
-# lands `src/alfred/**/*.py`, the steps activate automatically.
+# The `srccheck` step is FAIL-CLOSED (#514): Python source is permanent here, so
+# a probe finding none means the PROBE broke and the job exits 1. It previously
+# skipped init+analyze and let the job SUCCEED — which is how this required check
+# reported green without analysing the repository from ~2026-05-27 to 2026-07-26.
 #
 # No `strategy.matrix` here even though CodeQL typically uses one — when a
 # matrix is present GitHub appends the matrix value to the job's display
@@ -76,9 +77,9 @@ jobs:
       - name: Check for Python source files
         # CodeQL's Python extractor exits with a fatal error if it finds no
         # Python source ("CodeQL detected code written in GitHub Actions,
-        # but not any written in Python"). Pre-Slice-1 there's no Python
-        # code yet; this step lets the job succeed cleanly until Slice 1
-        # introduces src/alfred/**/*.py.
+        # but not any written in Python") — which is why this probe exists.
+        # It is FAIL-CLOSED (#514): it no longer lets the job succeed on a
+        # negative probe, it exits 1 so a broken probe is loud.
         id: srccheck
         run: |
           set -euo pipefail
