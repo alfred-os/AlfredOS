@@ -200,7 +200,7 @@ async def test_probe_launcher_uses_repo_root_default_when_no_env(
     """
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER", raising=False)
     monkeypatch.setenv("ALFRED_REPO_ROOT", "/app")
-    assert launcher_path() == "/app/bin/alfred-plugin-launcher.sh"
+    assert launcher_path() == str(Path("/app") / "bin" / "alfred-plugin-launcher.sh")
 
     captured: dict[str, object] = {}
 
@@ -221,10 +221,14 @@ async def test_probe_launcher_uses_repo_root_default_when_no_env(
 
     result = await _launcher_self_test_impl()
 
-    assert captured["argv0"] == "/app/bin/alfred-plugin-launcher.sh"
+    assert captured["argv0"] == str(Path("/app") / "bin" / "alfred-plugin-launcher.sh")
     assert result == _POLICY_RESOLVING_SIGNATURE
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: execs a #!/bin/sh launcher script (Windows cannot exec a .sh directly).",
+)
 @pytest.mark.asyncio
 async def test_launcher_self_test_honours_env_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
