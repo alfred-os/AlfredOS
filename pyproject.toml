@@ -321,6 +321,11 @@ ignore = ["S101"]
 # helper above. Assigning the argv to a local before the call (matching `tests/_compose.py`
 # and `tests/e2e/conftest.py`) already keeps S607 out of scope; only S603 remains.
 "tests/e2e/test_first_run_boot.py" = ["S603"]
+# #500 runtime boot-posture oracles poll `docker inspect <container-id>` by name (partial
+# path) with a container id sourced from our own `docker compose ps -q` output (not
+# attacker-controlled) — same trusted-CLI rationale as `tests/e2e/conftest.py`. Assigning
+# the argv to a local before the call already keeps S607 out of scope; only S603 remains.
+"tests/e2e/_posture.py" = ["S603"]
 # #496 shell-script LF guard runs `git ls-files` by name (partial path) with
 # fixed-literal argv — same trusted-CLI rationale as the docker probe above.
 # No untrusted input reaches the subprocess.
