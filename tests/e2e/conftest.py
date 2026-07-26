@@ -7,6 +7,7 @@ run never touches an operator's stack. Fails LOUD (raises) if Docker is absent â
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -35,7 +36,7 @@ _BUILD_TIMEOUT_S = (
 # `_services.BASELINE_SERVICES` (also consumed by the parametrized health tests), so a new
 # baseline service can't be classified-but-never-started (review: reviewer/test-engineer).
 _BASELINE = tuple(sorted(_services.BASELINE_SERVICES))
-_TALLY_PATH = Path("e2e-tally.json")
+_TALLY_PATH = Path(os.environ.get("ALFRED_E2E_TALLY_PATH", "e2e-tally.json"))
 
 
 @dataclass(frozen=True)
