@@ -75,13 +75,23 @@ def test_gateway_is_healthy(boot_stack: BootStack) -> None:
 
 def test_core_is_healthy(boot_stack: BootStack) -> None:
     # #500: core boots in the shipped image (plugins/ COPYed hermetically, repo_root()
-    # unified, policies.yaml pointed at /app/config). The tui-default comms graph builds the
-    # real Orchestrator, which REFUSES boot on an unseeded operator (core-001) — so provision
-    # BOTH a migrated DB AND an operator, mirroring bin/alfred-setup.sh. --no-deps: baseline
-    # postgres/redis are already up; core reaches healthy without the gateway (verified).
+    # unified, policies.yaml pointed at /app/config). Provision a migrated DB before boot:
+    # `alfred migrate` runs migration 0004_users_and_identities, which SEEDS the bootstrap
+    # operator (display name from ALFRED_OPERATOR_NAME — compose default "operator" — with
+    # `ON CONFLICT (slug) DO NOTHING`). So the tui-default comms graph's real Orchestrator
+    # finds its operator and does NOT refuse boot with `operator_not_seeded`. --no-deps:
+    # baseline postgres/redis are already up; core reaches healthy without the gateway.
+    #
+    # NB: an earlier revision added a separate `user add --authorization operator` step per
+    # review finding core-001 ("migrate seeds no operator"). The nightly Linux lane proved
+    # that empirically wrong — migrate DOES seed the operator, so a second operator fails
+    # with OperatorAlreadyExists (exit 2). The redundant step is removed; migrate suffices.
     from tests.e2e import _posture
 
-    _compose.compose(
+    # check=False + assert-with-stderr: a provisioning failure (or the NEXT masked boot
+    # blocker) must surface its cause in the CI log directly — a bare CalledProcessError
+    # omits stderr (the same diagnostics gap that hid this very failure once).
+    migrate = _compose.compose(
         boot_stack.project,
         "run",
         "--rm",
@@ -90,23 +100,11 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
         "migrate",
         env_file=boot_stack.env_file,
         timeout_s=_PROVISION_TIMEOUT_S,
+        check=False,
     )
-    _compose.compose(
-        boot_stack.project,
-        "run",
-        "--rm",
-        "--no-deps",
-        "alfred-core",
-        "user",
-        "add",
-        "--name",
-        "e2e-operator",
-        "--authorization",
-        "operator",
-        "--daily-budget-usd",
-        "1.0",
-        env_file=boot_stack.env_file,
-        timeout_s=_PROVISION_TIMEOUT_S,
+    assert migrate.returncode == 0, (
+        f"alfred migrate (provisioning) failed: rc={migrate.returncode} "
+        f"stderr={migrate.stderr[-800:]!r}"
     )
     _compose.compose(
         boot_stack.project,
