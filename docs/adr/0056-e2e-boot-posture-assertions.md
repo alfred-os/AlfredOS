@@ -216,7 +216,7 @@ asserting it again from the e2e lane adds no new information.
 - `tests/e2e/test_first_run_boot.py::test_core_is_healthy` — the assertion
   site; calls `assert_core_boot_posture` after the Docker-`healthy` check,
   never in place of it.
-- `bin/alfred-plugin-launcher.sh:43-51` — the `--self-test` case arm whose
+- `bin/alfred-plugin-launcher.sh:46-51` — the `--self-test` case arm whose
   unconditional `printf`/`exit 0` makes it tautological as a sandbox oracle.
 - `tests/unit/test_compose_invariants.py` — the sibling static compose-config
   pins this ADR's runtime oracles complement.
