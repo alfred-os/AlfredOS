@@ -30,29 +30,36 @@ AlfredOS is hardened from day one against prompt injection, credential leakage, 
 ```sh
 git clone https://github.com/alfred-os/AlfredOS
 cd AlfredOS
-cp .env.example .env       # then set ALFRED_QUARANTINE_PROVIDER_API_KEY (see below)
+cp .env.example .env       # then set ALFRED_DEEPSEEK_API_KEY + ALFRED_QUARANTINE_PROVIDER_API_KEY (see below)
 bin/alfred-setup.sh        # macOS/Linux; on Windows, run inside WSL
 docker compose up -d
 alfred user add --authorization operator --name "Your Name"   # one-time
 alfred chat                 # start a TUI conversation
 ```
 
-> **A provider key is required before the first `docker compose up -d`.**
-> `ALFRED_QUARANTINE_PROVIDER_API_KEY` in `.env` is the credential for the
-> quarantined half of the dual-LLM split, which now makes real provider calls. With
-> it unset the core exits 2 (`quarantine_provider_key_unset`) and crash-loops under
-> `restart: unless-stopped`. This is deliberate — a real client on a placeholder key
-> would be a silently dead LLM — but it means a keyless first run does not start.
-> `bin/alfred-setup.sh` warns when the key is missing; it cannot seed one for you.
+> **Two provider keys are required before the first `docker compose up -d`.**
+> `bin/alfred-setup.sh` validates both up front and refuses to proceed (exit 1), listing every
+> problem at once, if either is missing or still a placeholder:
 >
-> **Precisely:** the refuse-boot is gated on comms being enabled
-> (`settings.comms_enabled_adapters`). With no adapters enabled there is no
-> quarantine path, so no key is needed and the core boots fine. That is not the
-> quickstart above: `docker-compose.yaml` defaults
-> `ALFRED_COMMS_ENABLED_ADAPTERS` to `["alfred_tui"]`, so the compose stack — the
-> path this README documents — does enable comms and does require the key. If you
-> run the core outside compose with `ALFRED_COMMS_ENABLED_ADAPTERS` unset, the key
-> is genuinely optional.
+> - **`ALFRED_DEEPSEEK_API_KEY`** — the privileged (primary) LLM credential. It is a required
+>   setting with no default (`src/alfred/config/settings.py`): the core cannot even construct
+>   its settings without it, and it rejects the literal `sk-...` placeholder shipped in
+>   `.env.example`. This key is required regardless of which comms adapters are enabled. Get one
+>   from <https://platform.deepseek.com>.
+> - **`ALFRED_QUARANTINE_PROVIDER_API_KEY`** — the credential for the quarantined half of the
+>   dual-LLM split, which now makes real provider calls. With it unset the core exits 2
+>   (`quarantine_provider_key_unset`) and crash-loops under `restart: unless-stopped`. This is
+>   deliberate — a real client on a placeholder key would be a silently dead LLM — but it means
+>   a keyless first run does not start. `bin/alfred-setup.sh` warns when the key is missing; it
+>   cannot seed one for you.
+>
+> **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
+> (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so
+> that key is not needed and the core boots fine. That is not the quickstart above:
+> `docker-compose.yaml` defaults `ALFRED_COMMS_ENABLED_ADAPTERS` to `["alfred_tui"]`, so the
+> compose stack — the path this README documents — does enable comms and does require the key.
+> (`ALFRED_DEEPSEEK_API_KEY` is required either way.) If you run the core outside compose with
+> `ALFRED_COMMS_ENABLED_ADAPTERS` unset, only the quarantine key is genuinely optional.
 
 `docker compose up -d` now starts **`alfred-core`** as a **long-running daemon**
 (`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a
