@@ -243,7 +243,7 @@ on marker-file heuristics to infer it correctly in every future image layout.
   (now calls `launcher_path()`, closing the const-ignores-env bug).
 - `src/alfred/security/quarantine_child_io.py:239` — `_repo_root()` wrapper.
 - `src/alfred/plugins/comms_stdio_transport.py:70` — `_repo_root()` wrapper.
-- `src/alfred/gateway/adapter_child_factory.py:266` — `_launcher_path()`.
+- `src/alfred/gateway/adapter_child_factory.py:261` — `_launcher_path()`.
 - `src/alfred/i18n/translator.py` — the pre-existing `/app`-fallback
   precedent this ADR's terminal fallback mirrors.
 - `docker/alfred-core.Dockerfile` — `ENV ALFRED_REPO_ROOT=/app`.
