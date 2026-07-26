@@ -144,3 +144,15 @@ def test_main_with_corrupt_tally_reds(tmp_path: Path) -> None:
     tally_path = tmp_path / "tally.json"
     tally_path.write_text('{"collected": 7, "passed":')  # truncated mid-write
     assert main([str(tally_path)]) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["[1, 2, 3]", '{"collected": null, "passed": 7}', '"a string"', "42"],
+)
+def test_main_with_wrong_shape_tally_reds(tmp_path: Path, payload: str) -> None:
+    """A well-formed-but-wrong-shape tally (top-level list, null field, scalar) must red cleanly
+    (return 1), not raise a TypeError/AttributeError traceback (CodeRabbit)."""
+    tally_path = tmp_path / "tally.json"
+    tally_path.write_text(payload)
+    assert main([str(tally_path)]) == 1

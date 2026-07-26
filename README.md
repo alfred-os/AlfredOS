@@ -33,13 +33,17 @@ cd AlfredOS
 cp .env.example .env       # then set ALFRED_DEEPSEEK_API_KEY + ALFRED_QUARANTINE_PROVIDER_API_KEY (see below)
 bin/alfred-setup.sh        # macOS/Linux; on Windows, run inside WSL
 docker compose up -d
-alfred user add --authorization operator --name "Your Name"   # one-time
 alfred chat                 # start a TUI conversation
 ```
 
+> The operator account is created for you by `bin/alfred-setup.sh` (migration `0004` seeds it;
+> display name from `ALFRED_OPERATOR_NAME` in `.env`, default `operator`). There is no manual
+> `alfred user add` step — running one after setup fails with `OperatorAlreadyExists` (exit 2).
+> Set `ALFRED_OPERATOR_NAME` in `.env` before `bin/alfred-setup.sh` for a custom display name.
+
 > **Two provider keys are required before the first `docker compose up -d`.**
 > `bin/alfred-setup.sh` validates both up front and refuses to proceed (exit 1), listing every
-> problem at once, if either is missing or still a placeholder:
+> problem at once, if either is missing (or, for the DeepSeek key, still the `sk-...` placeholder):
 >
 > - **`ALFRED_DEEPSEEK_API_KEY`** — the privileged (primary) LLM credential. It is a required
 >   setting with no default (`src/alfred/config/settings.py`): the core cannot even construct
@@ -47,11 +51,12 @@ alfred chat                 # start a TUI conversation
 >   `.env.example`. This key is required regardless of which comms adapters are enabled. Get one
 >   from <https://platform.deepseek.com>.
 > - **`ALFRED_QUARANTINE_PROVIDER_API_KEY`** — the credential for the quarantined half of the
->   dual-LLM split, which now makes real provider calls. With it unset the core exits 2
->   (`quarantine_provider_key_unset`) and crash-loops under `restart: unless-stopped`. This is
->   deliberate — a real client on a placeholder key would be a silently dead LLM — but it means
->   a keyless first run does not start. `bin/alfred-setup.sh` warns when the key is missing; it
->   cannot seed one for you.
+>   dual-LLM split, which now makes real provider calls. The quarantined provider **must differ**
+>   from the privileged one (`config/routing.yaml`), so with the default DeepSeek-privileged setup
+>   this is an **Anthropic** key — get one from <https://console.anthropic.com>. With it unset the
+>   core exits 2 (`quarantine_provider_key_unset`) and crash-loops under `restart: unless-stopped`.
+>   This is deliberate — a keyless first run does not start. `bin/alfred-setup.sh` reports the
+>   missing key and exits 1; it cannot seed one for you.
 >
 > **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
 > (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so

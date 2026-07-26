@@ -33,7 +33,8 @@ def assert_boot_lane_tally(tally_path: Path) -> None:
 
     assert t["collected"] >= _MIN_COLLECTED, (
         f"collected {t['collected']} — below the independent floor {_MIN_COLLECTED} "
-        f"(6 services + setup.sh); a collapsed run or collection error is masked otherwise."
+        f"(the service/app health checks; setup.sh runs in its own lane since #501); a "
+        f"collapsed run or collection error is masked otherwise."
     )
     assert t["failed"] == 0, (
         f"{t['failed']} failure(s) — a baseline regression OR a strict XPASS "
@@ -86,9 +87,11 @@ def main(argv: Sequence[str]) -> int:
     check = assert_setup_lane_tally if setup else assert_boot_lane_tally
     try:
         check(tally)
-    except (AssertionError, json.JSONDecodeError) as exc:
+    except (AssertionError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
         # JSONDecodeError: `write_tally` isn't atomic, so a CI cancellation can leave a truncated
-        # tally — treat a corrupt tally as a red (not an uncaught traceback) (review: devex).
+        # tally. TypeError/AttributeError/ValueError: a well-formed-but-wrong-shape tally (a
+        # top-level JSON list, or a null field) must also red cleanly, not raise a traceback
+        # (CodeRabbit). Every malformed tally is a loud red, never a silent pass.
         print(f"e2e {'setup' if setup else 'boot'}-lane tally FAILED: {exc}", file=sys.stderr)
         return 1
     print(f"e2e {'setup' if setup else 'boot'}-lane tally OK")

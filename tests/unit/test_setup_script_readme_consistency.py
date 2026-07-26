@@ -28,6 +28,11 @@ def _gate_required_credentials() -> set[str]:
     block = slice_shell_step(_SETUP_SH, _GATE_STEP)
     creds: set[str] = set()
     for line in block.splitlines():
+        # Only actual `add_config_problem "..."` CALLS name a required credential — skip comment
+        # lines (a `#`-prefixed line that merely mentions the helper) so a documented rationale
+        # can't be misread as a gate requirement (CodeRabbit).
+        if line.lstrip().startswith("#"):
+            continue
         if "add_config_problem" in line:
             creds.update(_CRED_RE.findall(line))
     return creds

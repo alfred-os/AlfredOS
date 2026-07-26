@@ -50,6 +50,7 @@ jobs:
       - if: steps.check.outputs.has_e2e == 'true'
         run: uv sync --frozen --dev
       - name: Load the bwrap userns AppArmor profile (#290)
+        id: load_apparmor
         if: steps.check.outputs.has_e2e == 'true'
         # docker-compose.yaml pins alfred-core at security_opt: apparmor=alfred-bwrap; Docker
         # REFUSES to create the container without the loaded profile — so without this, core's
@@ -81,9 +82,13 @@ jobs:
         # a missing file (session errored before the hook) is itself a red (_assert_ran).
         run: uv run python -m tests.e2e._assert_ran e2e-tally.json
       - name: Run the isolated full setup.sh provisioning lane (#501)
-        # always(): an independent lane (its own session/resources) — a boot-lane failure must
-        # not skip it (which would leave the always() setup-assert reding on a missing tally).
-        if: always() && steps.check.outputs.has_e2e == 'true'
+        # always() makes this an independent lane — a boot-lane *test* failure must not skip it
+        # (which would leave the always() setup-assert reding on a missing tally). But gate on the
+        # infra prereq (`load_apparmor` succeeded → so did setup-uv + uv sync, since it is
+        # not-always and would be skipped otherwise): if the environment setup broke, don't run
+        # this lane on a broken env and don't red the setup-assert on a never-written tally
+        # (CodeRabbit). The gate is independent of the boot *pytest* outcome (that step runs later).
+        if: always() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success'
         # Its OWN pytest session — never instantiates the session-scoped boot_stack, so
         # setup.sh's `up -d alfred-postgres` (host 5432) does not collide. Distinct tally file
         # via ALFRED_E2E_TALLY_PATH so it does not clobber the boot lane's e2e-tally.json.
@@ -91,7 +96,7 @@ jobs:
           ALFRED_E2E_TALLY_PATH: e2e-setup-tally.json
         run: uv run pytest tests/e2e -o addopts='' -m 'e2e_full_setup'
       - name: Assert the setup-lane ran (non-vacuity, #245)
-        if: always() && steps.check.outputs.has_e2e == 'true'
+        if: always() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success'
         run: uv run python -m tests.e2e._assert_ran --setup e2e-setup-tally.json
       - name: Upload diagnostics on failure
         # cancelled() too: the job's own timeout-minutes cancellation reports as `cancelled`, not

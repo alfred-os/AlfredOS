@@ -56,16 +56,19 @@ def slice_shell_step(setup_sh: Path, step_title: str) -> str:
     Runs from the ``step "<step_title>"`` marker line to (but not including) the next top-level
     ``step "`` marker, or EOF. Anchoring on the exact title raises ``ValueError`` on a
     renamed/removed step rather than returning a stale/empty block — same fail-loud contract as
-    :func:`slice_shell_function`. Matching ``step "`` (with the quote) skips the ``step()``
-    function *definition*. For cross-document consistency tests that need a step's content.
+    :func:`slice_shell_function`. Both the anchor and the boundary match at **column 0** (setup.sh
+    calls ``step`` only at top level), so an *indented* ``step "..."`` (a nested call inside an
+    ``if``/loop, or a heredoc line) can neither anchor nor prematurely truncate the slice, and the
+    ``step()`` function *definition* (no quote) is skipped. For cross-document consistency tests
+    that need a step's content.
     """
     lines = setup_sh.read_text().splitlines(keepends=True)
     anchor = f'step "{step_title}"'
-    start = next((i for i, ln in enumerate(lines) if ln.strip() == anchor), None)
+    start = next((i for i, ln in enumerate(lines) if ln.rstrip() == anchor), None)
     if start is None:
         raise ValueError(f"{anchor!r} not found in {setup_sh}")
     end = next(
-        (j for j in range(start + 1, len(lines)) if lines[j].lstrip().startswith('step "')),
+        (j for j in range(start + 1, len(lines)) if lines[j].startswith('step "')),
         len(lines),
     )
     return "".join(lines[start:end])

@@ -51,7 +51,9 @@ the AppArmor reload is idempotent under the nightly's passwordless sudo).
 
 ## Design
 
-Four components. Touches docs + tests only — no `src/alfred/**`.
+Four components. Touches docs, tests, configuration (`pyproject.toml`, `tests/e2e/conftest.py`),
+and scoped CI (`.github/workflows/nightly.yml`) — no `src/alfred/**`. (See the post-review
+Revision below for the CI split + tally-guard graduation that the plan-review surfaced.)
 
 ### Component 1 — README fix (`README.md`)
 
@@ -79,17 +81,20 @@ README is a user-facing doc, not `PRD.md`/`CLAUDE.md`, so it is not human-gated;
 
 Durable drift net so the README and the gate can never diverge again.
 
-- **New helper** in `tests/_setup_script_helpers.py`: `slice_shell_step(script: Path | str,
+- **New helper** in `tests/_setup_script_helpers.py`: `slice_shell_step(setup_sh: Path,
   step_title: str) -> str` — returns the text of the `step "<step_title>"` block up to (but not
-  including) the next `step "` marker or EOF. Mirrors `slice_shell_function`'s "fail loud if the
-  anchor is missing" contract (raise on a missing step). This is the same marker-slicing seam the
+  including) the next **column-0** `step "` marker or EOF. Anchor and boundary both match at
+  column 0 (setup.sh calls `step` only at top level), so an indented/nested `step "..."` neither
+  anchors nor truncates. Mirrors `slice_shell_function`'s "fail loud if the anchor is missing"
+  contract (raise on a missing step). This is the same marker-slicing seam the
   `test_setup_script_env_seed.py` docstring describes; extracting it as a named helper makes it
   reusable and unit-testable.
 - **New test** `tests/unit/test_setup_script_readme_consistency.py`:
   - Slice the "Validating .env credentials" block from `bin/alfred-setup.sh` via
     `slice_shell_step`.
-  - Extract the set of credential keys the gate *requires* — the `ALFRED_[A-Z0-9_]*_API_KEY`
-    tokens that appear on `add_config_problem "..."` lines within that block (a key that feeds an
+  - Extract the set of credentials the gate *requires* — **every** `ALFRED_[A-Z0-9_]+` token
+    (not just `*_API_KEY`, so a future non-API credential is caught too) that appears on a
+    non-comment `add_config_problem "..."` line within that block (a token that feeds an
     `add_config_problem` is, by construction, one whose absence/placeholder fails the gate).
   - Assert the set is non-empty (guards against the regex silently matching nothing) and that
     **every** such key name appears as a literal substring in `README.md`.
@@ -160,9 +165,10 @@ This test is grep/parse-only (no bash, no Docker) and lives in `tests/unit`.
       undocumented (verified by a local mutation: temporarily drop one key from the README →
       test reds).
 - [ ] `slice_shell_step` has its own unit coverage (simple / next-step boundary / missing-step
-      raises).
+      raises / indented-nested step does not truncate).
 - [ ] `test_setup_sh_completes` is un-xfail'd, runs the full setup.sh with dummy keys, and asserts
-      exit 0 **and** a seeded operator in setup.sh's postgres.
+      exit 0 **and** a seeded operator in setup.sh's postgres **and** a redirected `audit.hash_pepper`
+      artifact (`ALFRED_SECRETS_FILE`) proving a late provisioning step ran.
 - [ ] The #494 lane has no remaining strict-xfail; module docstring updated.
 - [ ] `make check` clean (ruff, mypy, pyright, unit tests). i18n unaffected (docs/tests only).
 - [ ] The full run is proven on the authoritative Linux nightly (`gh workflow run Nightly --ref
@@ -177,7 +183,8 @@ This test is grep/parse-only (no bash, no Docker) and lives in `tests/unit`.
   passwordless sudo on the GH runner), and setup.sh's `apparmor_parser -r` reload is idempotent,
   so the setup.sh step re-applies an already-loaded profile. Verify on the nightly run.
 - **Full run is heavier than the fast xfail.** setup.sh now builds images (cache-hit in the lane),
-  starts its own postgres, and provisions. It does **not** boot the app services (`docker compose
+  and its `run --rm alfred-core …` calls pull up postgres + redis + a (keyless-healthy, #499)
+  gateway as dependencies, then provisions. It does **not** boot the app services (`docker compose
   up -d` is a separate documented step setup.sh does not run), so the cost is bounded and well
   inside the 900s budget. If flake surfaces, root-cause deterministically (the #509 lesson) — do
   not paper over with retries.
