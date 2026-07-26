@@ -15,8 +15,9 @@ from pathlib import Path
 
 from tests.e2e._services import MIN_SERVICE_FLOOR
 
-# 6 compose services + the setup.sh-completes check.
-_MIN_COLLECTED = MIN_SERVICE_FLOOR + 1
+# The main boot lane collects the service/app health checks (>= the service floor). The
+# setup.sh full run graduated to its OWN lane at #501, so it is no longer the "+1" here.
+_MIN_COLLECTED = MIN_SERVICE_FLOOR
 _KEYS = ("collected", "passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
 
@@ -44,27 +45,53 @@ def assert_boot_lane_tally(tally_path: Path) -> None:
         f"must be a strict xfail on a known blocker, not a skip."
     )
     assert t["xpassed"] == 0, f"{t['xpassed']} xpass(es) — a non-strict xfail leaked; use strict."
-    assert t["passed"] >= 1, "no genuine passes — the green baseline did not run."
-    assert t["xfailed"] >= 1, "no xfails — the known-blocker assertions did not run."
+    assert t["xfailed"] == 0, (
+        f"{t['xfailed']} xfail(s) — the lane graduated to fully green at #501; a reappearing "
+        f"strict-xfail means a blocker regressed or a new one was added without its own lane."
+    )
+    assert t["passed"] >= _MIN_COLLECTED, (
+        f"only {t['passed']} passes — below the service floor {_MIN_COLLECTED}; a baseline "
+        f"check did not run or did not pass."
+    )
+
+
+def assert_setup_lane_tally(tally_path: Path) -> None:
+    """Raise unless the isolated full-setup lane ran exactly one genuine pass (#245 non-vacuity).
+
+    A marker typo -> 0 collected -> red; a silent skip -> skipped>0 -> red. The lane must never
+    skip-green.
+    """
+    raw = json.loads(tally_path.read_text())
+    t = {k: int(raw.get(k, 0)) for k in _KEYS}
+    assert t["collected"] == 1, f"setup lane collected {t['collected']} (expected exactly 1)."
+    assert t["passed"] == 1, f"setup lane passed {t['passed']} (expected 1) — did it run?"
+    for bad in ("failed", "error", "skipped", "xfailed", "xpassed"):
+        assert t[bad] == 0, f"setup lane {bad}={t[bad]} (expected 0)."
 
 
 def main(argv: Sequence[str]) -> int:
-    if len(argv) != 1:
-        print("usage: python -m tests.e2e._assert_ran <tally.json>", file=sys.stderr)
+    args = list(argv)
+    setup = False
+    if args and args[0] == "--setup":
+        setup = True
+        args = args[1:]
+    if len(args) != 1:
+        print("usage: python -m tests.e2e._assert_ran [--setup] <tally.json>", file=sys.stderr)
         return 2
-    tally = Path(argv[0])
+    tally = Path(args[0])
     if not tally.is_file():
         msg = f"tally file {tally} missing — pytest never wrote it (session errored?)"
         print(msg, file=sys.stderr)
         return 1
+    check = assert_setup_lane_tally if setup else assert_boot_lane_tally
     try:
-        assert_boot_lane_tally(tally)
+        check(tally)
     except (AssertionError, json.JSONDecodeError) as exc:
         # JSONDecodeError: `write_tally` isn't atomic, so a CI cancellation can leave a truncated
         # tally — treat a corrupt tally as a red (not an uncaught traceback) (review: devex).
-        print(f"e2e boot-lane tally FAILED: {exc}", file=sys.stderr)
+        print(f"e2e {'setup' if setup else 'boot'}-lane tally FAILED: {exc}", file=sys.stderr)
         return 1
-    print("e2e boot-lane tally OK")
+    print(f"e2e {'setup' if setup else 'boot'}-lane tally OK")
     return 0
 
 
