@@ -36,10 +36,14 @@ def scrub_env_secrets(text: str, env_file: Path) -> str:
     return text
 
 
-def write_e2e_env_file(dest_dir: Path) -> Path:
-    """Write ``<dest_dir>/e2e.env`` (per-run random GF password + dummy keys); return it."""
+def write_e2e_env_file(dest_dir: Path, *, filename: str = "e2e.env") -> Path:
+    """Write ``<dest_dir>/<filename>`` (per-run random GF password + dummy keys); return it.
+
+    ``filename`` lets the setup.sh e2e test write the SAME dummy-key content as the worktree's
+    ``.env`` (#501), so the full script sees non-placeholder credentials and passes its gate.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    env_path = dest_dir / "e2e.env"
+    env_path = dest_dir / filename
     lines = (
         f"GF_SECURITY_ADMIN_PASSWORD={secrets.token_hex(24)}",
         f"ALFRED_DEEPSEEK_API_KEY={DUMMY_KEY_SENTINEL}",

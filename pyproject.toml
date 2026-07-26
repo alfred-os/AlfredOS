@@ -202,6 +202,7 @@ markers = [
   "no_getaddrinfo_stub: opt out of the web_fetch conftest's autouse getaddrinfo stub",
   "real_llm: spends real provider tokens against a live LLM; nightly-only, skip-unless ALFRED_SMOKE_PROVIDER_KEY. Deselected from every per-commit lane via -m 'not real_llm'.",
   "e2e: end-to-end first-run boot lane (drives real docker compose; nightly-only). NOT the `docker` marker — the root conftest auto-skips `docker`-marked items on daemon-less/win32 hosts, which would skip-green this lane.",
+  "e2e_full_setup: the isolated full bin/alfred-setup.sh provisioning run (nightly-only). Runs in its OWN pytest session — it boots its own postgres+redis+gateway and would collide on host port 5432 with the session-scoped boot_stack, so it is deselected from the main e2e step and run in a dedicated nightly step (#501).",
 ]
 
 [tool.coverage.run]
