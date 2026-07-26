@@ -45,13 +45,13 @@ the installed package.
 The trace found **four repo-root resolvers on the boot-to-healthy path, at three
 different `parents[N]` depths, plus one un-provisioned production gate**:
 
-| # | Gate | Location | Depth | Refusal in image |
-|---|------|----------|-------|------------------|
-| 1 | Settings load: `alfred_tui` manifest probe | `config/settings.py:55` + `:141` | `parents[3]` | `SettingsError` — earliest; blocks **every** `Settings()` incl. `migrate`, `user add` |
-| 2 | TUI wire-spec manifest resolve at boot | `cli/_launcher_spawn.py:62` via `cli/daemon/_comms_boot.py:162` | `parents[3]` | wire-spec resolve fails |
-| 3 | First-party grant seed (comms manifest read) | `security/capability_gate/_comms_adapter_grants.py:100` | `parents[4]` | `boot_infra_install_failed` (masked by #1 until #1 fixed) |
-| 4 | Probe (a) launcher self-test — **hardcoded module const, ignores `ALFRED_PLUGIN_LAUNCHER`** | `cli/daemon/_daemon_probes.py:89-91`, exec at `:111`, prod-refuse at `:166` | `parents[4]` | `launcher_not_policy_resolving` (production) |
-| 5 | Probe (b) policies.yaml — `settings.policies_path` default `/etc/alfred/policies.yaml` absent in image | `config/settings.py:316`, probe `cli/daemon/_daemon_probes.py:194` | — | `snapshot_ref_init_failed` (production) |
+| #   | Gate                                                                                                   | Location                                                                    | Depth        | Refusal in image                                                                      |
+| --- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------- |
+| 1   | Settings load: `alfred_tui` manifest probe                                                             | `config/settings.py:55` + `:141`                                            | `parents[3]` | `SettingsError` — earliest; blocks **every** `Settings()` incl. `migrate`, `user add` |
+| 2   | TUI wire-spec manifest resolve at boot                                                                 | `cli/_launcher_spawn.py:62` via `cli/daemon/_comms_boot.py:162`             | `parents[3]` | wire-spec resolve fails                                                               |
+| 3   | First-party grant seed (comms manifest read)                                                           | `security/capability_gate/_comms_adapter_grants.py:100`                     | `parents[4]` | `boot_infra_install_failed` (masked by #1 until #1 fixed)                             |
+| 4   | Probe (a) launcher self-test — **hardcoded module const, ignores `ALFRED_PLUGIN_LAUNCHER`**            | `cli/daemon/_daemon_probes.py:89-91`, exec at `:111`, prod-refuse at `:166` | `parents[4]` | `launcher_not_policy_resolving` (production)                                          |
+| 5   | Probe (b) policies.yaml — `settings.policies_path` default `/etc/alfred/policies.yaml` absent in image | `config/settings.py:316`, probe `cli/daemon/_daemon_probes.py:194`          | —            | `snapshot_ref_init_failed` (production)                                               |
 
 Because the four `parents[N]` resolvers sit at **different depths**, they cannot
 be fixed consistently by editing each in place — that is precisely the drift that
@@ -132,6 +132,7 @@ def repo_root() -> Path:
 ```
 
 Design points:
+
 - **Single source of truth.** Every repo-root call site computes the root via
   this one function and joins `plugins/` / `bin/` / `src/` onto it. The
   three-different-`parents[N]`-depths drift disappears: the function lives at one
@@ -151,15 +152,15 @@ Design points:
 
 **Call sites routed through `repo_root()`** (unify-all, per the approved scope):
 
-| Module | Current | After |
-|--------|---------|-------|
-| `config/settings.py` | `_REPO_ROOT = parents[3]` | `repo_root()` (fresh per validator call) |
-| `cli/_launcher_spawn.py` | `repo_root()` = `parents[3]` | delegates to `alfred._repo_root.repo_root()` |
-| `security/capability_gate/_comms_adapter_grants.py` | `_REPO_ROOT = parents[4]` | `repo_root()` |
-| `cli/daemon/_daemon_probes.py` | `_LAUNCHER_PATH` const from `parents[4]` | resolve launcher from `repo_root()` (still `ALFRED_PLUGIN_LAUNCHER`-overridable — closes the const-ignores-env bug) |
-| `security/quarantine_child_io.py` | `_repo_root()` = `parents[3]` | delegate |
-| `plugins/comms_stdio_transport.py` | `_repo_root()` = `parents[3]` | delegate |
-| `gateway/adapter_child_factory.py` | `parents[3]` inline | `repo_root()` |
+| Module                                              | Current                                  | After                                                                                                               |
+| --------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `config/settings.py`                                | `_REPO_ROOT = parents[3]`                | `repo_root()` (fresh per validator call)                                                                            |
+| `cli/_launcher_spawn.py`                            | `repo_root()` = `parents[3]`             | delegates to `alfred._repo_root.repo_root()`                                                                        |
+| `security/capability_gate/_comms_adapter_grants.py` | `_REPO_ROOT = parents[4]`                | `repo_root()`                                                                                                       |
+| `cli/daemon/_daemon_probes.py`                      | `_LAUNCHER_PATH` const from `parents[4]` | resolve launcher from `repo_root()` (still `ALFRED_PLUGIN_LAUNCHER`-overridable — closes the const-ignores-env bug) |
+| `security/quarantine_child_io.py`                   | `_repo_root()` = `parents[3]`            | delegate                                                                                                            |
+| `plugins/comms_stdio_transport.py`                  | `_repo_root()` = `parents[3]`            | delegate                                                                                                            |
+| `gateway/adapter_child_factory.py`                  | `parents[3]` inline                      | `repo_root()`                                                                                                       |
 
 `i18n/translator.py` keeps its richer 3-candidate logic (source /
 `/app/locale` / wheel `alfred/_locale` force-include) — it resolves a *specific

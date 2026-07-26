@@ -25,38 +25,40 @@
 
 ## File structure
 
-| File | Responsibility |
-|------|----------------|
-| `src/alfred/_repo_root.py` (**new**) | The single repo-root resolver: `repo_root()` + pure `_resolve` helper |
-| `src/alfred/config/settings.py` | validator uses `repo_root()`; drop the `_REPO_ROOT` const |
-| `src/alfred/cli/_launcher_spawn.py` | `repo_root()` delegates to the shared resolver; expose `launcher_path()` |
-| `src/alfred/security/capability_gate/_comms_adapter_grants.py` | grant-seed manifest read uses `repo_root()` |
-| `src/alfred/cli/daemon/_daemon_probes.py` | launcher self-test resolves path via `launcher_path()` (fixes const-ignores-env + wrong path) |
-| `src/alfred/security/quarantine_child_io.py` | launcher default via shared resolver |
-| `src/alfred/plugins/comms_stdio_transport.py` | launcher default via shared resolver |
-| `src/alfred/gateway/adapter_child_factory.py` | launcher default via `repo_root()` |
-| `.dockerignore` (**new**) | exclude `.venv/`, `__pycache__/`, plugin `tests/`, VCS from the build context |
-| `docker/alfred-core.Dockerfile` | `COPY plugins/`; `ENV ALFRED_REPO_ROOT=/app` |
-| `docker-compose.yaml` | `ALFRED_POLICIES_PATH` on `alfred-core` (+ fix stale hash_pepper comment) |
-| `tests/e2e/_env.py` | e2e env-file adds `ALFRED_ENVIRONMENT=production`; scrub skips non-secret keys |
-| `tests/e2e/test_first_run_boot.py` | provision `migrate` + operator-seed; un-xfail core with posture assertions |
-| `tests/e2e/_posture.py` (**new**) | posture probe helpers (network / grants / sandbox-machinery) |
-| `tests/e2e/_services.py` | `alfred-core`: XFAIL → HEALTHY_APP |
-| `tests/unit/e2e/test_services.py` | partition test: xfail bucket empty (kept non-vacuous) |
-| `tests/unit/test_repo_root.py` (**new**) | resolver unit tests |
-| `tests/unit/test_dockerfile_invariants.py` (**new**) | pin runtime-stage `plugins/` COPY + `ALFRED_REPO_ROOT` |
-| `docs/adr/0055-repo-root-resolution.md` (**new**) | ADR — repo-root resolution convention |
-| `docs/adr/0056-e2e-boot-posture-assertions.md` (**new**) | ADR — boot-posture assertion contract |
+| File                                                           | Responsibility                                                                                |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `src/alfred/_repo_root.py` (**new**)                           | The single repo-root resolver: `repo_root()` + pure `_resolve` helper                         |
+| `src/alfred/config/settings.py`                                | validator uses `repo_root()`; drop the `_REPO_ROOT` const                                     |
+| `src/alfred/cli/_launcher_spawn.py`                            | `repo_root()` delegates to the shared resolver; expose `launcher_path()`                      |
+| `src/alfred/security/capability_gate/_comms_adapter_grants.py` | grant-seed manifest read uses `repo_root()`                                                   |
+| `src/alfred/cli/daemon/_daemon_probes.py`                      | launcher self-test resolves path via `launcher_path()` (fixes const-ignores-env + wrong path) |
+| `src/alfred/security/quarantine_child_io.py`                   | launcher default via shared resolver                                                          |
+| `src/alfred/plugins/comms_stdio_transport.py`                  | launcher default via shared resolver                                                          |
+| `src/alfred/gateway/adapter_child_factory.py`                  | launcher default via `repo_root()`                                                            |
+| `.dockerignore` (**new**)                                      | exclude `.venv/`, `__pycache__/`, plugin `tests/`, VCS from the build context                 |
+| `docker/alfred-core.Dockerfile`                                | `COPY plugins/`; `ENV ALFRED_REPO_ROOT=/app`                                                  |
+| `docker-compose.yaml`                                          | `ALFRED_POLICIES_PATH` on `alfred-core` (+ fix stale hash_pepper comment)                     |
+| `tests/e2e/_env.py`                                            | e2e env-file adds `ALFRED_ENVIRONMENT=production`; scrub skips non-secret keys                |
+| `tests/e2e/test_first_run_boot.py`                             | provision `migrate` + operator-seed; un-xfail core with posture assertions                    |
+| `tests/e2e/_posture.py` (**new**)                              | posture probe helpers (network / grants / sandbox-machinery)                                  |
+| `tests/e2e/_services.py`                                       | `alfred-core`: XFAIL → HEALTHY_APP                                                            |
+| `tests/unit/e2e/test_services.py`                              | partition test: xfail bucket empty (kept non-vacuous)                                         |
+| `tests/unit/test_repo_root.py` (**new**)                       | resolver unit tests                                                                           |
+| `tests/unit/test_dockerfile_invariants.py` (**new**)           | pin runtime-stage `plugins/` COPY + `ALFRED_REPO_ROOT`                                        |
+| `docs/adr/0055-repo-root-resolution.md` (**new**)              | ADR — repo-root resolution convention                                                         |
+| `docs/adr/0056-e2e-boot-posture-assertions.md` (**new**)       | ADR — boot-posture assertion contract                                                         |
 
 ---
 
 ### Task 1: The shared repo-root resolver
 
 **Files:**
+
 - Create: `src/alfred/_repo_root.py`
 - Test: `tests/unit/test_repo_root.py`
 
 **Interfaces:**
+
 - Produces: `alfred._repo_root.repo_root() -> Path` and pure `alfred._repo_root._resolve(env_value: str | None, module_path: Path) -> Path`. Env var name constant `_REPO_ROOT_ENV = "ALFRED_REPO_ROOT"`; `_CONTAINER_ROOT = Path("/app")`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -188,16 +190,19 @@ git commit -m "feat: #500 single repo-root resolver honouring ALFRED_REPO_ROOT
 ### Task 2: Route `settings.py` through the resolver
 
 **Files:**
+
 - Modify: `src/alfred/config/settings.py:49-55` (drop `_REPO_ROOT`), `:135`, `:141` (validator body)
 - Test: `tests/unit/config/test_settings_comms_enabled_adapters.py`, `tests/unit/config/test_gateway_hosted_adapters_settings.py`
 
 **Interfaces:**
+
 - Consumes: `alfred._repo_root.repo_root` (Task 1).
 - Produces: `validate_comms_adapter_ids` plugins-root is now `repo_root() / "plugins"`, re-read per validation call.
 
 - [ ] **Step 1: Migrate the tests first — BOTH the monkeypatch AND the direct import (rev-002/sec-004)**
 
 `grep -n "_REPO_ROOT" tests/unit/config/test_settings_comms_enabled_adapters.py tests/unit/config/test_gateway_hosted_adapters_settings.py`. Two shapes exist and BOTH must change:
+
 - **Direct import** at `test_settings_comms_enabled_adapters.py:96` — `from alfred.config.settings import _REPO_ROOT` (used at :99/:101). Deleting the const makes this an **ImportError at collection**. Replace the import + its uses with `monkeypatch.setenv("ALFRED_REPO_ROOT", str(tmp_path))` and point the fake `plugins/<id>/manifest.toml` under `tmp_path`.
 - **`monkeypatch.setattr(..., "_REPO_ROOT", ...)`** sites → `monkeypatch.setenv("ALFRED_REPO_ROOT", str(tmp_path))`.
 
@@ -241,12 +246,14 @@ git commit -m "refactor: #500 settings validator resolves plugins/ via repo_root
 ### Task 3: Route the boot-critical resolvers (+ migrate ALL patch sites)
 
 **Files:**
+
 - Modify: `src/alfred/cli/_launcher_spawn.py:54-66,289` (delegate `repo_root`; expose `launcher_path`)
 - Modify: `src/alfred/security/capability_gate/_comms_adapter_grants.py:95-155` (use `repo_root()`)
 - Modify: `src/alfred/cli/daemon/_daemon_probes.py:89-91,111` (launcher via `launcher_path()`)
 - Test: migrate `_REPO_ROOT`/`_LAUNCHER_PATH` patch sites (see Step 4 — includes an ADVERSARIAL file), add a default-branch test + a probe-USE test.
 
 **Interfaces:**
+
 - Consumes: `alfred._repo_root.repo_root` (Task 1).
 - Produces: `alfred.cli._launcher_spawn.repo_root() -> Path` (delegates), `alfred.cli._launcher_spawn.launcher_path() -> str` (public; `ALFRED_PLUGIN_LAUNCHER` override else `repo_root()/bin/alfred-plugin-launcher.sh`).
 
@@ -296,6 +303,7 @@ Do NOT touch the `_STUB_SIGNATURE` / production-refusal logic.
 - [ ] **Step 4: Migrate ALL patch sites (rev-001, test-003) + add the two missing tests**
 
 `grep -rn "_REPO_ROOT\|_LAUNCHER_PATH" tests/` and migrate EVERY site — the migration MUST include (these were missed in v1):
+
 - **`tests/adversarial/comms_confusion/test_cap_2026_004_system_tier_comms_adapter_refused.py:127`** — patches `_comms_adapter_grants._REPO_ROOT` (release-blocking; will ERROR the adversarial suite if not migrated) → `monkeypatch.setenv("ALFRED_REPO_ROOT", str(tmp_path))`.
 - **`tests/unit/cli/daemon/test_probe_launcher_not_policy_resolving.py`** — the `_LAUNCHER_PATH` patch sites → `monkeypatch.setenv("ALFRED_PLUGIN_LAUNCHER", str(fake_launcher))`.
 - **`tests/adversarial/sandbox_escape/test_quarantined_llm_spawn_site_and_import_time_egress_backstop.py`** — any `_LAUNCHER_PATH` reference → same env form.
@@ -351,6 +359,7 @@ git commit -m "refactor: #500 boot-critical resolvers share repo_root()/launcher
 ### Task 4: Route the remaining security/gateway resolvers (finish unify-all)
 
 **Files:**
+
 - Modify: `src/alfred/security/quarantine_child_io.py:238-252` (the `parents[3]` `_repo_root()`, NOT the package-relative `:306` — that one is correctly out of scope)
 - Modify: `src/alfred/plugins/comms_stdio_transport.py:69-83`
 - Modify: `src/alfred/gateway/adapter_child_factory.py:269`
@@ -403,6 +412,7 @@ git commit -m "refactor: #500 finish unify-all — every repo-root resolver shar
 ### Task 5: `.dockerignore` + Dockerfile COPY `plugins/` + `ALFRED_REPO_ROOT`
 
 **Files:**
+
 - Create: `.dockerignore`
 - Modify: `docker/alfred-core.Dockerfile` (runtime stage: `ENV` block + runtime-artefact COPY block)
 - Test: `tests/unit/test_dockerfile_invariants.py` (new; parse the Dockerfile — verify the RUNTIME stage, test-007)
@@ -513,6 +523,7 @@ git commit -m "build: #500 COPY plugins/ into image + ALFRED_REPO_ROOT + hermeti
 ### Task 6: Compose — point the daemon at the shipped `policies.yaml`
 
 **Files:**
+
 - Modify: `docker-compose.yaml` (`alfred-core` `environment:` block; fix the stale hash_pepper header comment — test-008)
 - Test: `tests/unit/test_compose_invariants.py` (add one pin)
 
@@ -563,6 +574,7 @@ git commit -m "build: #500 point alfred-core at the in-image /app/config/policie
 ### Task 7: e2e env-file — explicit `ALFRED_ENVIRONMENT=production` (+ scrub fix)
 
 **Files:**
+
 - Modify: `tests/e2e/_env.py:write_e2e_env_file`, `scrub_env_secrets`
 - Test: `tests/unit/e2e/test_env.py`
 
@@ -620,6 +632,7 @@ git commit -m "test: #500 e2e env-file sets ALFRED_ENVIRONMENT=production; scrub
 ### Task 8: Flip `alfred-core` green — provision (migrate + operator seed) + posture + ratchet
 
 **Files:**
+
 - Create: `tests/e2e/_posture.py`
 - Modify: `tests/e2e/test_first_run_boot.py:test_core_is_healthy` (+ drop `_XFAIL_HEALTH_TIMEOUT_S` for core)
 - Modify: `tests/e2e/_services.py` (`alfred-core`: XFAIL → HEALTHY_APP)
@@ -627,6 +640,7 @@ git commit -m "test: #500 e2e env-file sets ALFRED_ENVIRONMENT=production; scrub
 - Modify: `.github/workflows/nightly.yml` (fix the stale "real quarantine key" comment — devops-low)
 
 **Interfaces:**
+
 - Consumes: `tests._compose.compose`, `tests.e2e.conftest.BootStack`, `tests.e2e._health.ServiceHealth`.
 - Produces: `tests.e2e._posture.assert_core_boot_posture(boot_stack) -> None`.
 
