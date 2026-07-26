@@ -72,34 +72,51 @@ _PRESENCE_OUTPUT = re.compile(r"\bhas_[a-z0-9_]*\s*=\s*true")
 
 
 def _strip_quoted(text: str) -> str:
-    """Blank quoted LITERALS so a `|` inside a regex or message is not read as a pipe.
+    """Reduce a shell line to its executable text: blank quoted literals, drop comments.
 
-    Command substitution is NOT a literal: the body of ``$( … )`` is shell code even when the
-    substitution itself sits inside double quotes. A naive scanner blanks
-    ``passed="$(printf … | head -1 || true)"`` wholesale and goes blind to the pipeline inside —
-    which is exactly how an earlier draft of this helper stopped seeing ci.yml's extractors.
-    So `$(` pushes a fresh code context and the matching `)` pops it.
+    Three things this must get right, each learned the hard way:
+
+    * **Command substitution is code, not a literal.** The body of ``$( … )`` is shell even when
+      the substitution sits inside double quotes, so ``$(`` pushes a fresh context. A naive
+      scanner blanks ``passed="$(printf … | head -1 || true)"`` wholesale and goes blind.
+    * **Grouping parens nest inside it.** In ``"$( ( : ); find … | grep -q . )"`` the FIRST ``)``
+      closes the inner subshell, not the substitution — popping there blanks the pipeline that
+      follows. Depth is tracked per context.
+    * **An unquoted ``#`` at a word start begins a comment.** Otherwise
+      ``… | grep -q . # || true`` reads as neutralised when bash actually returns 141.
     """
     out: list[str] = []
-    stack: list[str] = []
+    stack: list[list[object]] = []  # [saved_quote, grouping-paren depth] per $( ) context
     quote = ""
+    prev = ""
     i = 0
     while i < len(text):
         ch = text[i]
         nxt = text[i + 1] if i + 1 < len(text) else ""
-        # `$(` opens shell code, even mid-double-quote. (Single quotes are literal — no
-        # substitution happens inside them, so `$(` there really is text.)
+        # `$(` opens shell code (single quotes are literal, so no substitution happens there).
         if quote != "'" and ch == "$" and nxt == "(":
-            stack.append(quote)
+            stack.append([quote, 0])
             quote = ""
             out.append("$(")
-            i += 2
+            prev, i = "(", i + 2
             continue
-        if not quote and ch == ")" and stack:
-            quote = stack.pop()
-            out.append(")")
-            i += 1
-            continue
+        if not quote and stack:
+            if ch == "(":
+                stack[-1][1] = int(stack[-1][1]) + 1  # type: ignore[arg-type]
+                out.append(ch)
+                prev, i = ch, i + 1
+                continue
+            if ch == ")":
+                if int(stack[-1][1]) > 0:  # type: ignore[arg-type]
+                    stack[-1][1] = int(stack[-1][1]) - 1  # type: ignore[arg-type]
+                else:
+                    quote = str(stack.pop()[0])
+                out.append(ch)
+                prev, i = ch, i + 1
+                continue
+        # Unquoted `#` at a word start comments out the remainder.
+        if not quote and ch == "#" and (prev == "" or prev.isspace()):
+            break
         if quote:
             out.append(ch if ch == quote else " ")
             if ch == quote:
@@ -109,7 +126,7 @@ def _strip_quoted(text: str) -> str:
             out.append(ch)
         else:
             out.append(ch)
-        i += 1
+        prev, i = ch, i + 1
     return "".join(out)
 
 
@@ -244,6 +261,13 @@ def _probe_steps(path: Path) -> list[tuple[str, str]]:
         # introduced while fixing a false positive.
         ("pipeline inside a quoted command substitution", 'n="$(cat big.txt | head -1)"'),
         ("nested command substitution", 'n="$(a | $(b) | head -1)"'),
+        # v8 (CodeRabbit): the FIRST `)` closes the grouping subshell, not the substitution.
+        ("grouping parens inside $( )", 'n="$( ( : ); find src -name x | grep -q . )"'),
+        # An unquoted `#` starts a comment, so this `|| true` neutralises NOTHING — measured:
+        # `cat big | head -1 # || true` still exits 141.
+        ("|| true inside a trailing comment", "find src -name x | grep -q . # || true"),
+        # `${#arr}` is a length expansion, not a comment introducer.
+        ("hash inside a parameter expansion", "n=${#arr}; find s -name x | grep -q ."),
         # A trailing `|| true` on the ENCLOSING compound does not rescue the inner pipeline:
         # the `if` still evaluates FALSE because SIGPIPE poisons it before `|| true` applies.
         (
