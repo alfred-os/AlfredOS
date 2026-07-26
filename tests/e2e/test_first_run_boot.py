@@ -1,16 +1,17 @@
-"""The e2e first-run boot assertions (#494): green infra baseline + xfail'd blockers.
+"""The e2e first-run boot assertions (#494): green infra baseline.
 
 Baseline services are asserted healthy (regression net). The gateway graduated to a plain
-asserted-healthy test at #499; core graduated (provisioned + posture-asserted) at #500. Only
-the setup.sh assertion remains strict-xfail on its roadmap blocker — it reds via XPASS the
-instant that blocker lands, forcing the assertion to tighten (Roadmap Step 4).
+asserted-healthy test at #499; core graduated (provisioned + posture-asserted) at #500; the
+setup.sh assertion graduated to a full-run provisioning test at #501, run in its OWN nightly
+step (marker `e2e_full_setup`) so it does not collide with the session-scoped boot_stack. No
+strict-xfail remains — the lane is fully green and ready for Step 5 (promote release-blocking;
+close #494/#469).
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -125,29 +126,32 @@ def test_core_is_healthy(boot_stack: BootStack) -> None:
     _posture.assert_core_boot_posture(boot_stack)  # sec-002: posture oracles, not bare-healthy.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="blocker #501: bin/alfred-setup.sh does not complete under the "
-    "stock documented flow — it exits at the credential gate on the .env.example "
-    "placeholder DeepSeek key (README:33 omits ALFRED_DEEPSEEK_API_KEY). Roadmap "
-    "Step 4 (README/setup.sh reconciliation) is the sole remaining blocker — "
-    "#499 un-hung migrate (gateway healthy) and #500 landed core provisioning + posture.",
-)
-def test_setup_sh_completes() -> None:
-    # Run setup.sh in an ISOLATED detached git worktree so the operator's repo-root .env is
-    # NEVER touched (CR: no backup/restore window, no SIGKILL residual, no concurrent-reader
-    # placeholder exposure). On the stock flow setup.sh writes a placeholder .env INSIDE the
-    # worktree then exits at the credential gate — before any docker build/up — so this is fast
-    # and creates no containers. COMPOSE_PROJECT_NAME is per-run-unique for the same isolation.
+@pytest.mark.e2e_full_setup
+def test_setup_sh_completes(tmp_path: Path) -> None:
+    # #501: the documented quickstart IS bin/alfred-setup.sh. Run the FULL script with
+    # non-placeholder dummy keys (as test_core_is_healthy uses) in an ISOLATED detached worktree.
+    # It runs in its OWN nightly pytest session (marker e2e_full_setup, deselected from the main
+    # e2e step): setup.sh's `run --rm alfred-core ...` calls do NOT pass --no-deps, so they pull
+    # up redis AND a (keyless-healthy, #499) gateway, and `up -d alfred-postgres` publishes host
+    # 5432 — which would collide with the session-scoped boot_stack postgres if co-run. Asserts
+    # (1) exit 0 (setup.sh `fail`s loudly on any step, so exit 0 gates migrate->seed->prime->
+    # hash_pepper->operator), (2) a seeded operator (DB query, not the script's stdout), and
+    # (3) a redirected hash_pepper artifact (a LATE step ran). user add is has_operator-guarded
+    # and migration 0004 seeds the operator, so setup.sh skips create (no OperatorAlreadyExists,
+    # the #500 trap). ALFRED_SECRETS_FILE redirects the real pepper secret into tmp_path (M1:
+    # hermeticity — the pepper does not land in the runner $HOME) and gives us the artifact.
+    from tests.e2e import _posture
+
     setup_project = _env.new_project_name()
+    secrets_file = tmp_path / "secrets.toml"
     with tempfile.TemporaryDirectory(prefix="alfred-e2e-setup-") as tmp:
         worktree = Path(tmp) / "repo"
         add = ["git", "worktree", "add", "--detach", "--force", str(worktree), "HEAD"]
         subprocess.run(
             add, cwd=_compose.REPO_ROOT, capture_output=True, text=True, timeout=120.0, check=True
         )
+        env_file = _env.write_e2e_env_file(worktree, filename=".env")
         try:
-            shutil.copyfile(worktree / ".env.example", worktree / ".env")
             run_setup = ["bash", str(worktree / "bin" / "alfred-setup.sh")]
             proc = subprocess.run(
                 run_setup,
@@ -156,11 +160,47 @@ def test_setup_sh_completes() -> None:
                 text=True,
                 timeout=_SETUP_SH_TIMEOUT_S,
                 check=False,
-                env={**os.environ, "COMPOSE_PROJECT_NAME": setup_project},
+                env={
+                    **os.environ,
+                    "COMPOSE_PROJECT_NAME": setup_project,
+                    "ALFRED_SECRETS_FILE": str(secrets_file),
+                },
             )
-            assert proc.returncode == 0, f"setup.sh exit {proc.returncode}: {proc.stderr[-800:]}"
+            setup_out = _env.scrub_env_secrets((proc.stdout or "") + (proc.stderr or ""), env_file)[
+                -2000:
+            ]
+            assert proc.returncode == 0, f"setup.sh exit {proc.returncode}: {setup_out!r}"
+
+            # (2) Outcome, not self-report: setup.sh's own postgres holds a seeded operator row.
+            # `authorization` is a Postgres reserved keyword -> double-quote it.
+            op = _compose.compose(
+                setup_project,
+                "exec",
+                "-T",
+                "alfred-postgres",
+                "psql",
+                "-U",
+                "alfred",
+                "-d",
+                "alfred",
+                "-tAc",
+                "select count(*) from users where \"authorization\"='operator'",
+                env_file=env_file,
+                check=False,
+            )
+            op_out = _env.scrub_env_secrets(op.stdout, env_file)
+            op_stderr = _env.scrub_env_secrets(op.stderr, env_file)[-400:]
+            assert _posture.positive_count(op.stdout), (
+                f"setup.sh did not seed an operator: psql count={op_out.strip()!r} "
+                f"rc={op.returncode} stderr={op_stderr!r}"
+            )
+
+            # (3) A late step ran: the hash_pepper bootstrap wrote the redirected secrets file.
+            assert secrets_file.is_file() and "audit.hash_pepper" in secrets_file.read_text(), (
+                "setup.sh did not bootstrap audit.hash_pepper into ALFRED_SECRETS_FILE — the "
+                "provisioning did not reach the late secret-seed step."
+            )
         finally:
-            # Belt-and-braces teardown (stock flow creates no containers), then drop the worktree.
             _compose.down_project(setup_project)
             remove = ["git", "worktree", "remove", "--force", str(worktree)]
             # suppress: a hung `worktree remove` (TimeoutExpired isn't caught by check=False) must
