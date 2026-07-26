@@ -82,13 +82,14 @@ jobs:
         # a missing file (session errored before the hook) is itself a red (_assert_ran).
         run: uv run python -m tests.e2e._assert_ran e2e-tally.json
       - name: Run the isolated full setup.sh provisioning lane (#501)
-        # always() makes this an independent lane — a boot-lane *test* failure must not skip it
-        # (which would leave the always() setup-assert reding on a missing tally). But gate on the
-        # infra prereq (`load_apparmor` succeeded → so did setup-uv + uv sync, since it is
-        # not-always and would be skipped otherwise): if the environment setup broke, don't run
-        # this lane on a broken env and don't red the setup-assert on a never-written tally
-        # (CodeRabbit). The gate is independent of the boot *pytest* outcome (that step runs later).
-        if: always() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success'
+        # !cancelled() makes this an independent lane — a boot-lane *test* failure must not skip it
+        # (which would leave the setup-assert reding on a missing tally) — but a manual/timeout
+        # CANCELLATION does stop it, so it can't keep the runner busy for the whole 60m budget
+        # (CodeRabbit). Also gate on the infra prereq (`load_apparmor` succeeded → so did setup-uv
+        # + uv sync, since it is not-always and would be skipped otherwise): if the environment
+        # setup broke, don't run this lane on a broken env and don't red the setup-assert on a
+        # never-written tally. The gate is independent of the boot *pytest* outcome (runs later).
+        if: ${{ !cancelled() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success' }}
         # Its OWN pytest session — never instantiates the session-scoped boot_stack, so
         # setup.sh's `up -d alfred-postgres` (host 5432) does not collide. Distinct tally file
         # via ALFRED_E2E_TALLY_PATH so it does not clobber the boot lane's e2e-tally.json.
@@ -96,7 +97,7 @@ jobs:
           ALFRED_E2E_TALLY_PATH: e2e-setup-tally.json
         run: uv run pytest tests/e2e -o addopts='' -m 'e2e_full_setup'
       - name: Assert the setup-lane ran (non-vacuity, #245)
-        if: always() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success'
+        if: ${{ !cancelled() && steps.check.outputs.has_e2e == 'true' && steps.load_apparmor.conclusion == 'success' }}
         run: uv run python -m tests.e2e._assert_ran --setup e2e-setup-tally.json
       - name: Upload diagnostics on failure
         # cancelled() too: the job's own timeout-minutes cancellation reports as `cancelled`, not
