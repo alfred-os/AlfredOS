@@ -27,8 +27,12 @@ version of this file has been wrong:
   ``has_adversarial`` probe gates the RELEASE-BLOCKING adversarial suite — and its
   ``has_[a-z_]*`` character class could not see ``has_e2e``.
 
-So: the hazard test allow-lists the *safe* left-hand sides and flags everything else, and the
-fail-closed test is derived from the workflow YAML rather than a file list.
+* v6 allow-listed `sort`/`wc`/`tail` as "safe producers"; measured, `sort big | head -1` is
+  141 — they still EMIT a stream and the early-exiting reader SIGPIPEs them mid-emission.
+  Safety belongs to the READER draining, not the producer (CodeRabbit).
+
+So: the hazard test flags EVERY pipe into an early-exiting reader with no producer exceptions,
+and the fail-closed test is derived from the workflow YAML rather than a file list.
 """
 
 from __future__ import annotations
@@ -54,19 +58,13 @@ _EARLY_EXIT_READER = (
 _SINGLE_PIPE = r"(?<!\|)\|(?!\|)"
 _PIPE_INTO_EARLY_EXIT = re.compile(rf"{_SINGLE_PIPE}\s*{_EARLY_EXIT_READER}")
 
-# INVERTED POLARITY (fail-closed): anything piped into an early-exiting reader is a hazard unless
-# its producer is known NOT to stream. A producer allow-list under-covers by construction — v4
-# proved that — so the burden is on the safe case to be named.
-_SAFE_PRODUCER_TAIL = re.compile(
-    r"(?:"
-    r"sort(?:\s+-\S+)*"  # sort must consume all input before emitting
-    r"|wc(?:\s+-\S+)*"  # wc likewise
-    r"|tail(?:\s+-\S+)*"  # tail must reach EOF
-    r")\s*$"
-)
-
-# `|| true` / `|| :` neutralises pipefail so the pipeline cannot poison the exit status.
+# `|| true` / `|| :` neutralises pipefail ONLY when it binds to the offending pipeline itself.
+# A trailing `|| true` on an enclosing compound does NOT rescue the guard: verified in
+# ubuntu:24.04 that `if find … | grep -q .; then … fi || true` still evaluates the `if` as
+# FALSE, because the SIGPIPE poisons the inner pipeline before `|| true` ever applies.
 _PIPEFAIL_NEUTRALISED = re.compile(r"\|\|\s*(?:true|:)(?![\w-])")
+# Anything that ends the current pipeline, so the `|| true` search cannot run past it.
+_PIPELINE_END = re.compile(r"[;\n]|&&|\bthen\b|\bfi\b|\bdone\b")
 
 # Steps whose `has_*` output is a PRESENCE probe must fail closed. `run_bench`-style relevance
 # gates legitimately evaluate false and are excluded by the `has_` naming convention the repo uses.
@@ -74,14 +72,34 @@ _PRESENCE_OUTPUT = re.compile(r"\bhas_[a-z0-9_]*\s*=\s*true")
 
 
 def _strip_quoted(text: str) -> str:
-    """Blank out single/double-quoted spans so a `|` inside a regex or message is not a pipe.
+    """Blank quoted LITERALS so a `|` inside a regex or message is not read as a pipe.
 
-    Without this, ``grep -Eq '^(src/|head -1/)'`` self-reports as a SIGPIPE hazard — a real
-    false positive against perf.yml's changed-files gate.
+    Command substitution is NOT a literal: the body of ``$( … )`` is shell code even when the
+    substitution itself sits inside double quotes. A naive scanner blanks
+    ``passed="$(printf … | head -1 || true)"`` wholesale and goes blind to the pipeline inside —
+    which is exactly how an earlier draft of this helper stopped seeing ci.yml's extractors.
+    So `$(` pushes a fresh code context and the matching `)` pops it.
     """
     out: list[str] = []
+    stack: list[str] = []
     quote = ""
-    for ch in text:
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        # `$(` opens shell code, even mid-double-quote. (Single quotes are literal — no
+        # substitution happens inside them, so `$(` there really is text.)
+        if quote != "'" and ch == "$" and nxt == "(":
+            stack.append(quote)
+            quote = ""
+            out.append("$(")
+            i += 2
+            continue
+        if not quote and ch == ")" and stack:
+            quote = stack.pop()
+            out.append(")")
+            i += 1
+            continue
         if quote:
             out.append(ch if ch == quote else " ")
             if ch == quote:
@@ -91,6 +109,7 @@ def _strip_quoted(text: str) -> str:
             out.append(ch)
         else:
             out.append(ch)
+        i += 1
     return "".join(out)
 
 
@@ -153,14 +172,22 @@ def _executable_lines(path: Path) -> list[tuple[int, str]]:
 
 
 def _hazard_matches(raw: str) -> list[re.Match[str]]:
-    """Un-neutralised, un-allow-listed pipelines feeding an early-exiting reader."""
+    """Pipelines feeding an early-exiting reader, minus those neutralised on the SAME pipeline.
+
+    There is deliberately NO producer allow-list. v6 exempted `sort`/`wc`/`tail` on the reasoning
+    that they consume all input before emitting — which is true and irrelevant: they still EMIT a
+    stream, and the early-exiting reader SIGPIPEs them mid-emission. Measured in ubuntu:24.04 on a
+    500k-line input: `sort big | head -1` => 141 and `tail -n +1 big | head -1` => 141. Safety
+    comes from the READER draining, and readers that drain are already absent from
+    ``_EARLY_EXIT_READER`` — so the producer side needs no exceptions at all.
+    """
     text = _strip_quoted(raw)
     out = []
     for match in _PIPE_INTO_EARLY_EXIT.finditer(text):
-        # `|| true` AFTER the pipeline neutralises pipefail for it (scoped, not line-wide).
-        if _PIPEFAIL_NEUTRALISED.search(text[match.end() :]):
-            continue
-        if _SAFE_PRODUCER_TAIL.search(text[: match.start()].strip()):
+        rest = text[match.end() :]
+        end = _PIPELINE_END.search(rest)
+        same_pipeline = rest[: end.start()] if end else rest
+        if _PIPEFAIL_NEUTRALISED.search(same_pipeline):
             continue
         out.append(match)
     return out
@@ -209,6 +236,20 @@ def _probe_steps(path: Path) -> list[tuple[str, str]]:
         ("docker logs", "if docker compose logs | grep -q ERROR; then"),
         ("python -c", "n=$(python -c print | head -1)"),
         ("form feed is not a line break", "find src -name x \x0c| grep -q ."),
+        # v6 regressions (CodeRabbit): both were WRONGLY exempted. Measured in ubuntu:24.04.
+        ("sort into head -1", "first=$(sort big.txt | head -1)"),  # => 141
+        ("tail into head -1", "first=$(tail -n +1 big.txt | head -1)"),  # => 141
+        # v7: `"$( … )"` is shell CODE, not a quoted literal. An earlier _strip_quoted blanked
+        # the whole substitution and went blind to ci.yml's extractors — a false NEGATIVE
+        # introduced while fixing a false positive.
+        ("pipeline inside a quoted command substitution", 'n="$(cat big.txt | head -1)"'),
+        ("nested command substitution", 'n="$(a | $(b) | head -1)"'),
+        # A trailing `|| true` on the ENCLOSING compound does not rescue the inner pipeline:
+        # the `if` still evaluates FALSE because SIGPIPE poisons it before `|| true` applies.
+        (
+            "|| true on the compound, not the pipe",
+            "if find src -name x | grep -q .; then echo ok; fi || true",
+        ),
     ],
 )
 def test_detector_catches_hazard_shapes(label: str, snippet: str) -> None:
@@ -222,7 +263,9 @@ def test_detector_catches_hazard_shapes(label: str, snippet: str) -> None:
     ("label", "snippet"),
     [
         ("grep reads a file", "if grep -q ^PROBE=OK control.log; then"),
-        ("sort drains its input", "latest=$(cat v.txt | sort -V | tail -1)"),
+        # Safe because `tail -1` DRAINS (it must reach EOF), not because `sort` is a safe
+        # producer — that inversion is exactly what v6 got wrong.
+        ("reader drains to EOF", "latest=$(cat v.txt | sort -V | tail -1)"),
         ("neutralised by || true", "n=$(cat big.txt | head -1 || true)"),
         # False positives a greedy/unquoted matcher produced (v5).
         ("pipe inside a regex", "if grep -Eq '^(src/|head -1/)' <<<\"$c\"; then"),
