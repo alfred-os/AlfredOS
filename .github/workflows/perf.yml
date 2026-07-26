@@ -130,7 +130,10 @@ jobs:
             exit 0
           fi
           changed="$(gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"
-          if printf '%s\n' "$changed" | grep -Eq '^(src/alfred/hooks/|src/alfred/memory/episodic\.py$|tests/perf/|pyproject\.toml$|uv\.lock$|Makefile$|\.github/workflows/perf\.yml$)'; then
+          # #514: here-string, NOT `printf … | grep -Eq`. Under `pipefail` a large
+          # $changed plus grep's early exit gives printf EPIPE -> nonzero pipeline ->
+          # the gate silently short-circuits to green on a perf-touching PR.
+          if grep -Eq '^(src/alfred/hooks/|src/alfred/memory/episodic\.py$|tests/perf/|pyproject\.toml$|uv\.lock$|Makefile$|\.github/workflows/perf\.yml$)' <<<"$changed"; then
             echo "run_bench=true" >> "$GITHUB_OUTPUT"
             echo "::notice::perf-relevant paths changed — running the benchmark."
           else

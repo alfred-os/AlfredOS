@@ -189,8 +189,7 @@ jobs:
             #   feat(security): add T3 quarantine path (#42)
             #   refactor!: drop deprecated FooAPI (#101)
             #   fix(memory): close #88 race condition in episodic.recent
-            if ! printf '%s\n' "$SUBJECT" \
-              | grep -qE '^[a-z]+(\([^)]+\))?(!)?: .*#[0-9]+.*$'; then
+            if ! grep -qE '^[a-z]+(\([^)]+\))?(!)?: .*#[0-9]+.*$' <<<"$SUBJECT"; then
               printf '%s %s\n' "$SHA" "$SUBJECT" >> "$BAD_FILE"
             fi
           done < <(git log --format='%H%x09%s' "$BASE_SHA..$HEAD_SHA")
