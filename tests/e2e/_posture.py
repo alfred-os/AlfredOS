@@ -18,6 +18,7 @@ import subprocess
 from collections.abc import Iterable
 
 from tests import _compose
+from tests.e2e import _env
 from tests.e2e.conftest import BootStack
 
 
@@ -30,15 +31,18 @@ def _core_container_id(boot_stack: BootStack) -> str:
 
 
 def _is_egress_chokepoint_ok(network_names: Iterable[str]) -> bool:
-    """Pure decision: joins the internal network AND does not join the external one.
+    """Pure decision: the container is attached to EXACTLY the internal network.
 
-    No I/O — takes already-parsed network names so it can be unit-tested without a running
-    container (tests/unit/e2e/test_posture.py).
+    The connectivity-free-core invariant (ADR-0040) is that alfred-core joins ONLY the
+    internal (``internal: true``) network — ANY second attachment (a bridge, the external
+    plane, a stray default network) is a potential egress route. A mere "has internal AND
+    not external" check is too weak (CodeRabbit: ``{…alfred_internal, bridge}`` would pass
+    it), so require exactly one attached network whose name ends with ``alfred_internal``.
+    No I/O — takes already-parsed names so it is unit-tested without a running container
+    (tests/unit/e2e/test_posture.py).
     """
     names = list(network_names)
-    return any(n.endswith("alfred_internal") for n in names) and not any(
-        n.endswith("alfred_external") for n in names
-    )
+    return len(names) == 1 and names[0].endswith("alfred_internal")
 
 
 def _is_gate_seeded(psql_stdout: str) -> bool:
@@ -90,9 +94,12 @@ def assert_capability_gate_seeded(boot_stack: BootStack) -> None:
         env_file=boot_stack.env_file,
         check=False,
     )
+    # Scrub the env-file's injected values from the surfaced stderr before it lands in the
+    # CI log (matches conftest's e2e-stack.log handling; commit-security-review hardening).
+    stderr_tail = _env.scrub_env_secrets(proc.stderr, boot_stack.env_file)[-400:]
     assert _is_gate_seeded(proc.stdout), (
         f"plugin_grants must be seeded by daemon boot; psql count={proc.stdout.strip()!r} "
-        f"rc={proc.returncode} stderr={proc.stderr[-400:]!r}."
+        f"rc={proc.returncode} stderr={stderr_tail!r}."
     )
 
 
@@ -119,9 +126,10 @@ def assert_sandbox_machinery_live(boot_stack: BootStack) -> None:
         env_file=boot_stack.env_file,
         check=False,
     )
+    stderr_tail = _env.scrub_env_secrets(proc.stderr, boot_stack.env_file)[-400:]
     assert proc.returncode == 0, (
         f"bwrap userns build failed inside alfred-core (sandbox machinery not live): "
-        f"rc={proc.returncode} {proc.stderr[-400:]!r}"
+        f"rc={proc.returncode} {stderr_tail!r}"
     )
 
 

@@ -13,19 +13,26 @@ from tests.e2e._posture import _is_egress_chokepoint_ok, _is_gate_seeded
 
 
 def test_internal_only_is_ok() -> None:
-    assert _is_egress_chokepoint_ok({"myproject_alfred_internal"}) is True
+    # Exactly one attached network, and it is the internal one — the connectivity-free posture.
+    assert _is_egress_chokepoint_ok(["myproject_alfred_internal"]) is True
 
 
 def test_internal_plus_external_is_not_ok() -> None:
-    # any(internal) True, any(external) True -> the `not any(external)` conjunct flips it.
-    names = {"myproject_alfred_internal", "myproject_alfred_external"}
+    # Two attachments (internal + external) — the strict len==1 check rejects it.
+    names = ["myproject_alfred_internal", "myproject_alfred_external"]
     assert _is_egress_chokepoint_ok(names) is False
 
 
+def test_internal_plus_bridge_is_not_ok() -> None:
+    # CodeRabbit regression: a core also attached to a routable `bridge` would have an egress
+    # route; the old "has internal AND not external" check passed it — the strict len==1 rejects it.
+    assert _is_egress_chokepoint_ok(["myproject_alfred_internal", "bridge"]) is False
+
+
 def test_neither_network_is_not_ok() -> None:
-    # any(internal) False short-circuits the `and` — never joining the intended network at all
-    # must not read as "ok" just because it also didn't join the external one.
-    assert _is_egress_chokepoint_ok({"bridge"}) is False
+    # Exactly one network, but not the internal one — never joining the intended network must
+    # not read as "ok" just because it also didn't join the external one.
+    assert _is_egress_chokepoint_ok(["bridge"]) is False
 
 
 # --- _is_gate_seeded ----------------------------------------------------------------------
