@@ -34,7 +34,10 @@ ENV PYTHONUNBUFFERED=1 \
     PROTO_HOME=/opt/proto \
     ALFRED_PYTHON_PREFIX=/opt/alfred-python
 
-COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
+# Pinned to the SAME uv as .prototools and every workflow (#525). This builds the SHIPPED
+# image, so it resolves the production dependency set — it was 0.5.4, the oldest uv in the
+# repo, and invisible to both the drift guard and Renovate. Both now cover it.
+COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
 
 # curl/ca-certificates: fetch the proto installer + the PBS tarball.
 # xz-utils: proto's python-build-standalone tarball is `.tar.xz`; the slim base
@@ -45,8 +48,13 @@ RUN apt-get update -qq \
     && rm -rf /var/lib/apt/lists/*
 
 # Fetch a hermetic, self-contained PBS python 3.14 via proto (NOT `uv python
-# install`: the pinned uv 0.5.4 predates 3.14 PBS availability — "No download
-# found for cpython-3.14-linux-x86_64-gnu"). proto installs under
+# install`). This originally existed because the then-pinned uv 0.5.4 predated
+# 3.14 PBS availability ("No download found for cpython-3.14-linux-x86_64-gnu").
+# That pin is now 0.11.32 (#525), so the original reason no longer holds — but
+# the proto path is retained deliberately: it is what the runtime stage, the
+# entrypoint, the launcher prefix-bind and ALFRED_QUARANTINE_CHILD_PYTHON all
+# resolve against, so swapping it is a behavioural change to the shipped image,
+# not a comment fix. Revisit separately, with the e2e boot lane as the gate. proto installs under
 # ${PROTO_HOME}/tools/python/<ver>; the PBS layout is bin/python3. We RELOCATE
 # the resolved version dir to a STABLE, version-independent prefix
 # (${ALFRED_PYTHON_PREFIX}) so the runtime stage, the entrypoint, the launcher

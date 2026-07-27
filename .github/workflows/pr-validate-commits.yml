@@ -134,8 +134,12 @@ jobs:
   # issue ref (the bot has no human-filed issue to point at), so the
   # regex below rejects every dependency-bump PR otherwise. The
   # exemption emits `exit 0` (PASS, not a workflow `if:` skip) so that
-  # required-status-check semantics on `main` still hold. Other bots
-  # (renovate, pre-commit-ci) are NOT exempt — add them here if/when
+  # required-status-check semantics on `main` still hold. `renovate[bot]`
+  # is exempt for the same reason as of #525 — its subject is
+  # `build(deps): update uv ... to X` with no issue ref, and
+  # `Conventional commit format` is REQUIRED, so without this every
+  # Renovate PR would be blocked from merging forever. Other bots
+  # (pre-commit-ci) are NOT exempt — add them here if/when
   # the repo adopts them.
   # ──────────────────────────────────────────────────────────────
   conventional-commits:
@@ -166,7 +170,7 @@ jobs:
           # so a literal `case` match against it is safe under the
           # workflow-injection model documented at the top of this file.
           case "$PR_AUTHOR" in
-            "dependabot[bot]")
+            "dependabot[bot]" | "renovate[bot]")
               echo "✓ PR authored by $PR_AUTHOR — exempt from conventional-commits validation."
               exit 0
               ;;

@@ -1,17 +1,44 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
-  "labels": ["dependencies"],
+  "extends": [
+    "config:recommended"
+  ],
+  "labels": [
+    "dependencies"
+  ],
   "commitMessagePrefix": "build(deps):",
   "prConcurrentLimit": 5,
-  "schedule": ["before 6am on monday"],
-  "enabledManagers": ["proto", "custom.regex"],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "enabledManagers": [
+    "proto",
+    "custom.regex",
+    "dockerfile"
+  ],
   "customManagers": [
     {
       "customType": "regex",
-      "description": "uv pin inside GitHub Actions workflows. Dependabot cannot do this — its github-actions manager only bumps `uses:` SHAs, and there is no manager for .prototools. Both spellings CI uses are matched: the workflow `env:` key and ci.yml's shell assignment.",
-      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
-      "matchStrings": ["UV_VERSION\\s*[:=]\\s*[\"']?(?<currentValue>\\d+\\.\\d+\\.\\d+)[\"']?"],
+      "description": "uv pin inside GitHub Actions workflows. Dependabot cannot do this \u2014 its github-actions manager only bumps `uses:` SHAs, and there is no manager for .prototools. Both spellings CI uses are matched: the workflow `env:` key and ci.yml's shell assignment.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "UV_VERSION\\s*[:=]\\s*[\"']?(?<currentValue>\\d+\\.\\d+\\.\\d+)[\"']?"
+      ],
+      "depNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "uv pinned in the core Dockerfile \u2014 it builds the SHIPPED image, so it resolves the production dependency set. The dockerfile manager alone would treat it as a generic image bump; this makes it join the grouped uv PR so it can never drift from .prototools.",
+      "managerFilePatterns": [
+        "/^docker/.+\\.Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ghcr\\.io/astral-sh/uv:(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
       "depNameTemplate": "astral-sh/uv",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
@@ -19,8 +46,11 @@
   ],
   "packageRules": [
     {
-      "description": "CRITICAL: .prototools and every workflow UV_VERSION must move in ONE PR. tests/unit/test_workflow_invariants.py asserts they match exactly (#525), so a bot that bumps only one location reds the build. Grouping is what keeps the single-source-of-truth guard and automated updates compatible.",
-      "matchPackageNames": ["uv", "astral-sh/uv"],
+      "description": "CRITICAL: .prototools, every workflow UV_VERSION, and the core Dockerfile's uv must move in ONE PR. tests/unit/test_workflow_invariants.py asserts they match exactly (#525), so a bot bumping only one location reds the build. NOTE: ci.yml also carries UV_SHA256 for the WSL tarball, which Renovate CANNOT compute \u2014 a version bump requires updating it from https://github.com/astral-sh/uv/releases/download/<version>/<tarball>.sha256 or the WSL leg fails its checksum verification (by design, fail-closed).",
+      "matchPackageNames": [
+        "uv",
+        "astral-sh/uv"
+      ],
       "groupName": "uv toolchain",
       "commitMessageTopic": "uv (.prototools + all workflow UV_VERSION pins)"
     }
