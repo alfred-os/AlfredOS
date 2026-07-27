@@ -1227,6 +1227,9 @@ SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
         # Pre-flight: environment + host-OS resolution (launcher).
         "environment_not_set",
         "environment_unrecognised",
+        # ADR-0057 (#486): a `.env`-sourced value that is not `production`. A writable
+        # `.env` may tighten the sandbox, never loosen it.
+        "environment_untrusted_source",
         "fake_uname_in_production",
         "unknown_host_os",
         "uid_separation_unavailable",

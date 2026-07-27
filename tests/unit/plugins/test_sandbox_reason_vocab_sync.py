@@ -61,7 +61,9 @@ def test_sandbox_refused_reasons_constant_shape() -> None:
     reasons = audit_row_schemas.SANDBOX_REFUSED_REASONS
     assert isinstance(reasons, frozenset)
     assert all(isinstance(r, str) and r for r in reasons)
-    assert len(reasons) == 35, f"expected 35 reasons, got {len(reasons)}: {sorted(reasons)}"
+    # 36 as of ADR-0057 (#486): +environment_untrusted_source. Bump DELIBERATELY — this
+    # count exists so adding a refusal reason is a conscious act, not a side effect.
+    assert len(reasons) == 36, f"expected 36 reasons, got {len(reasons)}: {sorted(reasons)}"
     missing_reserved = _RESERVED_UNEMITTED - reasons
     assert not missing_reserved, (
         f"reserved reasons dropped from the vocab: {sorted(missing_reserved)}"
@@ -401,7 +403,8 @@ def test_environment_case_classifies_exactly_the_read_environment_keys() -> None
     """
     first_arm, _ = _parse_case("${_env_err_key}")
     expected = _read_environment_keys()
-    assert len(expected) == 2, f"vacuity floor: derived {len(expected)} environment keys, want 2"
+    # 3 as of ADR-0057 (#486): not_set, unrecognised, untrusted_source.
+    assert len(expected) == 3, f"vacuity floor: derived {len(expected)} environment keys, want 3"
     assert first_arm == expected, (
         "the launcher's environment `case` allow-list has drifted from the keys "
         "`manifest_reader --read-environment` can emit.\n"
@@ -603,7 +606,7 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     """
     assert len(_sandbox_policy_invalid_reasons()) >= 7, "SandboxPolicyInvalid literal floor"
     assert len(_flags_path_reasons()) >= 9, "flags-path floor"
-    assert len(_read_environment_keys()) == 2, "env-key floor"
+    assert len(_read_environment_keys()) == 3, "env-key floor"  # +untrusted_source (#486)
     assert len(_launcher_emittable_reasons()) >= 31, "launcher-emittable floor"
     assert len(_RESERVED_UNEMITTED) == 4, "reserved floor"
     assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 35, "vocab floor"

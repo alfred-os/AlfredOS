@@ -22,12 +22,22 @@ host. The fix (Task 5) makes ``_cmd_read_environment`` resolve
 carries the VALUE but not the SOURCE, so source-EXCLUSION is the only way to
 express the trust floor across that boundary.
 
+AMENDED by ADR-0057 (#486). Source-EXCLUSION was replaced by DIRECTIONAL TRUST: the helper
+now resolves WITH ``.env`` but honours a ``.env``-sourced value only when it is ``production``
+— the strictest setting. The security property this file exists to defend is UNCHANGED and
+still proven below: a ``.env`` can never select ``development``/``test`` for the launcher, so
+it can never un-gate the sandbox. Only the refusal REASON moved, from the generic
+``daemon.boot.environment_not_set`` to its own ``daemon.boot.environment_untrusted_source``
+— the value resolved fine, its SOURCE is not trusted for it. Every other assertion here is
+untouched, which is the evidence that the amendment preserved the invariant rather than
+weakening it.
+
 Two properties are proven end-to-end:
 
 1. The Python helper's ``--read-environment`` stdout never contains
    "development" when a CWD ``.env`` is the ONLY source claiming it — it
-   emits the closed-vocabulary "no value" refusal instead
-   (``daemon.boot.environment_not_set``).
+   emits the closed-vocabulary untrusted-source refusal instead
+   (``daemon.boot.environment_untrusted_source``).
 2. The REAL bash launcher, driven with the maximally dangerous adjacent
    env (the dev escape hatch ``ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1``
    already set), still refuses outright and never execs the plugin — a
@@ -114,7 +124,7 @@ def test_read_environment_ignores_cwd_dotenv_only_source(
     assert "development" not in result.stdout
     assert result.stdout.strip() == ""
     assert result.returncode != 0
-    assert "daemon.boot.environment_not_set" in result.stderr
+    assert "daemon.boot.environment_untrusted_source" in result.stderr
 
 
 @pytest.mark.skipif(
@@ -163,4 +173,4 @@ def test_launcher_refuses_to_spawn_when_only_cwd_dotenv_claims_development(
     assert not canary.exists(), "the stub plugin executed despite the unresolved environment"
     assert "development" not in result.stdout
     assert "development" not in result.stderr
-    assert "daemon.boot.environment_not_set" in result.stderr
+    assert "daemon.boot.environment_untrusted_source" in result.stderr

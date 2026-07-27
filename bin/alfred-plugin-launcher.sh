@@ -245,7 +245,7 @@ if ! _capture_stderr_last_line "unset" "unknown" python3 -m alfred.plugins.manif
     # capture was empty (fail-closed).
     _env_err_key="${_CAPTURE_ERR_LAST_LINE}"
     case "${_env_err_key}" in
-        daemon.boot.environment_unrecognised | daemon.boot.environment_not_set) : ;;
+        daemon.boot.environment_unrecognised | daemon.boot.environment_not_set | daemon.boot.environment_untrusted_source) : ;;
         *) _env_err_key="daemon.boot.environment_not_set" ;;
     esac
     printf '%s plugin_id=%s\n' "${_env_err_key}" "${PLUGIN_ID}" >&2

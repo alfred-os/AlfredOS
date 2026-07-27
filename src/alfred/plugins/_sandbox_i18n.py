@@ -133,6 +133,7 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
 #: future reader can trace where each key's catalog reference actually lives.
 _ENVIRONMENT_KEYS_RENDERED_ELSEWHERE: tuple[str, ...] = (
     "daemon.boot.environment_not_set",  # _slice_4_reserve.py + manifest_reader
+    "daemon.boot.environment_untrusted_source",  # ADR-0057 (#486), manifest_reader
     "daemon.boot.environment_unrecognised",  # _slice_4_reserve.py + manifest_reader
 )
 
