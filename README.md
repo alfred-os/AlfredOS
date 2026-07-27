@@ -274,14 +274,22 @@ highest wins:
 `.env` as-is, or export the env var, or write `/etc/alfred/environment`, to
 satisfy this.
 
-**The three are not fully equivalent.** The plugin sandbox launcher trusts only
-the env var and the root-owned `/etc/alfred/environment`; from `.env` it accepts
-`production` and nothing else. `.env` is writable by anything with project-
-directory access, so honouring a laxer value there would let a sandbox escape
-make itself permanent. Practically: the shipped `production` default works from
-`.env`, but to run `development` or `test` you must export the variable or write
-`/etc/alfred/environment` — otherwise the daemon starts and every sandboxed
-plugin spawn refuses with `environment_untrusted_source`.
+**The three are not fully equivalent when the process reads `.env` itself.** The
+plugin sandbox launcher fully trusts the env var and the root-owned
+`/etc/alfred/environment`; from a `.env` it reads directly it accepts `production`
+and nothing else, because `.env` is writable by anything with project-directory
+access and honouring a laxer value there would let a sandbox escape make itself
+permanent.
+
+- **Compose (the default deployment): unaffected.** `docker-compose.yaml`
+  substitutes `ALFRED_ENVIRONMENT` from your host shell or host `.env` into a
+  container _environment variable_ before the container starts, so inside the
+  container it arrives as the fully-trusted env-var source. `development` and
+  `test` work normally.
+- **Bare host, configured only through `.env`:** the shipped `production` default
+  works, but to run `development` or `test` you must export the variable or write
+  `/etc/alfred/environment` — otherwise the daemon starts and every sandboxed
+  plugin spawn refuses with `environment_untrusted_source`.
 
 See [ADR-0057](docs/adr/0057-directional-trust-for-the-launcher-environment.md)
 for that rule, and [ADR-0053](docs/adr/0053-three-layer-environment-precedence.md)

@@ -50,6 +50,7 @@ async def test_real_launcher_self_test_returns_policy_resolving(
     reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec",
 )
 async def test_probe_refuses_in_production_when_launcher_cannot_resolve_environment(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#521: a launcher that cannot resolve the environment must NOT pass the boot probe.
@@ -59,6 +60,9 @@ async def test_probe_refuses_in_production_when_launcher_cannot_resolve_environm
     the #514 paper-gate shape. The refusal names the fault in ``probe_response`` rather than
     collapsing into the generic stub signature, so the operator learns WHY.
     """
+    # #486 made the launcher resolve `.env` CWD-relative, so a repo-root `.env` would
+    # otherwise decide this and the test would pass for the wrong reason.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     monkeypatch.setenv("ALFRED_ETC_ENV_FILE", "/nonexistent/alfred-environment")
 
@@ -74,6 +78,7 @@ async def test_probe_refuses_in_production_when_launcher_cannot_resolve_environm
     reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec",
 )
 async def test_probe_still_tolerates_unresolvable_environment_outside_production(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#521 must not regress dev convenience: non-production still boots.
@@ -81,6 +86,9 @@ async def test_probe_still_tolerates_unresolvable_environment_outside_production
     The sec-004 posture is unchanged — only production refuses on a non-resolving signature.
     Pinned so a future tightening of #521 is a deliberate decision, not a side effect.
     """
+    # #486 made the launcher resolve `.env` CWD-relative, so a repo-root `.env` would
+    # otherwise decide this and the test would pass for the wrong reason.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     monkeypatch.setenv("ALFRED_ETC_ENV_FILE", "/nonexistent/alfred-environment")
 

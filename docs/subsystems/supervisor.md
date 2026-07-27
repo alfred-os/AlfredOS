@@ -384,16 +384,21 @@ PR #491) — do not conflate them:
   `daemon.boot.environment_source_conflict` and the env var wins (`.env`
   never participates in that conflict — it is the lowest layer).
 - **Launcher resolution** (the pre-launcher Python helper above,
-  `manifest_reader.py --read-environment`) resolves **trusted-sources-only**:
-  `resolve_environment(consult_dotenv=False)` — env var + `/etc` ONLY, with
-  `.env` excluded outright (never even read) rather than read-then-discarded.
-  A `.env` value that satisfies **daemon boot** does **not** satisfy a
-  **plugin spawn** through the launcher: on a bare-host, `.env`-only install
-  the daemon boots cleanly but every sandboxed plugin spawn still refuses
-  `daemon.boot.environment_not_set` (ADR-0053 Consequences →
-  Negative/residuals, tracked as #486). The launcher's own trust/production
-  decisions (`IS_PRODUCTION`, the dev escape hatch below) are driven
-  entirely by this env-var-+-`/etc`-only read — `.env` plays no part in them.
+  `manifest_reader.py --read-environment`) applies **directional trust**
+  ([ADR-0057](../adr/0057-directional-trust-for-the-launcher-environment.md), #486):
+  it resolves `resolve_environment(consult_dotenv=True)` but honours a
+  `DOTENV`-sourced value ONLY when it is `production` — the strictest setting.
+  A `.env` can therefore ratchet the launcher's posture tighter and can never
+  loosen it; a `.env`-sourced `development`/`test` refuses with
+  `daemon.boot.environment_untrusted_source`.
+
+  This replaced the original source-EXCLUSION rule (`consult_dotenv=False`,
+  ADR-0053 §3), which was safe but left a bare-host `.env`-only install booting
+  the daemon and then refusing every sandboxed spawn (#486) — while the README
+  and `.env.example` presented `.env` as sufficient. The security property is
+  unchanged: the launcher's trust/production decisions
+  (`ALFRED_RESOLVED_ENVIRONMENT`, `IS_PRODUCTION`, the dev escape hatch below)
+  can still never be relaxed by a `.env`.
 
 A `.env`-sourced value likewise can never unlock the gateway's dev/test-only
 launch-target-override escape hatch, which — like the launcher — trusts only

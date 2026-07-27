@@ -609,7 +609,7 @@ def test_derived_vocabularies_are_not_vacuous() -> None:
     assert len(_read_environment_keys()) == 3, "env-key floor"  # +untrusted_source (#486)
     assert len(_launcher_emittable_reasons()) >= 31, "launcher-emittable floor"
     assert len(_RESERVED_UNEMITTED) == 4, "reserved floor"
-    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 35, "vocab floor"
+    assert len(audit_row_schemas.SANDBOX_REFUSED_REASONS) >= 36, "vocab floor"  # +1 (#486)
 
 
 # ---------------------------------------------------------------------------
