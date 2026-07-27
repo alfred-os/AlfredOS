@@ -1,16 +1,8 @@
 id: sbx-2026-028
 category: sandbox_escape
 threat: >-
-  The launcher derives ALFRED_RESOLVED_ENVIRONMENT / IS_PRODUCTION from the exact
-  bytes on manifest_reader --read-environment's stdout. configure_stderr_logging()
-  pins only STDLIB logging; structlog's default PrintLoggerFactory writes to
-  STDOUT, and _environment_loader logs via structlog. A present-but-unreadable
-  /etc/alfred/environment therefore emitted a warning onto fd 1, so the launcher
-  compared "<warning...>\nproduction" against "production", failed the test, and
-  set IS_PRODUCTION=false ON A PRODUCTION HOST — un-gating the FAKE_UNAME
-  keystone, the non-Linux UID-drop refusal, and the unsandboxed-in-production
-  escape hatch. The multi-line value was also interpolated raw into the
-  sandbox_refused JSON rows, splitting them.
+  A structlog warning written to manifest_reader's STDOUT corrupts the launcher's sole
+  IS_PRODUCTION signal, flipping it false on a production host and un-gating the sandbox.
 ingestion_path: sandbox_policy_load
 payload:
   attack: stdout_pollution_flips_is_production

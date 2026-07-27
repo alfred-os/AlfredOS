@@ -177,6 +177,20 @@ def _read_dotenv(dotenv_path: Path) -> str | None:
     anywhere in the logs — a structlog breadcrumb (path + exception class, NEVER file
     contents) now names it.
     """
+    # ADR-0057 residual: `.env` is writable by anything with project-directory access, and
+    # since directional trust the LAUNCHER reads it too. `open()` on a FIFO with no writer
+    # blocks forever, and the spawn path is unbounded (unlike the boot probe) — so a plain
+    # `mkfifo .env` wedges every subsequent plugin spawn. Verified: without this the read
+    # hangs until an external timeout kills it. Refuse anything that is not a REGULAR file
+    # and fall through to the existing fail-closed "no value from this source".
+    # `is_file()` follows symlinks (a symlink TO a regular file stays supported) and is
+    # False for FIFOs, sockets, devices and directories alike.
+    if dotenv_path.exists() and not dotenv_path.is_file():
+        log.warning(
+            "environment_loader.dotenv_not_regular_file",
+            path=str(dotenv_path),
+        )
+        return None
     try:
         values = dotenv_values(dotenv_path, interpolate=False)
     except (
