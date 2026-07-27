@@ -364,3 +364,73 @@ def test_presence_probes_fail_closed(workflow: Path) -> None:
         "finding nothing means the PROBE broke and the step must `exit 1` (#514, #517):\n  "
         + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Toolchain: `.prototools` is the single declared uv version (#525, PR #526)
+# ---------------------------------------------------------------------------
+
+# Both spellings CI uses: the workflow-level `env:` key and the shell assignment in
+# ci.yml's WSL leg. A guard matching only the first would have missed the very
+# inconsistency that motivated this — ci.yml was on 0.11.32 while three workflows sat on
+# 0.5.14, roughly a year behind, in the tool that resolves the lockfile.
+_UV_VERSION_DECL = re.compile(r"""UV_VERSION\s*[:=]\s*["']?(?P<version>\d+\.\d+\.\d+)["']?""")
+_PROTOTOOLS_UV = re.compile(r"""^\s*uv\s*=\s*["'](?P<version>[^"']+)["']""", re.MULTILINE)
+
+
+def _prototools_uv_version() -> str:
+    proto = _REPO_ROOT / ".prototools"
+    assert proto.exists(), (
+        ".prototools is missing — it is the declared source of truth for the uv version "
+        "that local and CI must share (#525)"
+    )
+    match = _PROTOTOOLS_UV.search(proto.read_text(encoding="utf-8"))
+    assert match, f'no `uv = "..."` pin found in .prototools:\n{proto.read_text()}'
+    version = match.group("version")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+        f"the .prototools uv pin must be EXACT, got {version!r}. A range (e.g. '~0.11') would "
+        "let CI float across patch releases, which this repo does not do anywhere else — "
+        "actions are SHA-pinned and dependencies are capped deliberately (ADR-0044)."
+    )
+    return version
+
+
+def test_prototools_declares_an_exact_uv_version() -> None:
+    """The toolchain pin exists and is exact — the anchor every workflow is checked against."""
+    assert _prototools_uv_version()
+
+
+def test_every_workflow_uv_version_matches_prototools() -> None:
+    """No workflow may pin a uv version other than `.prototools`' (#525).
+
+    Local (proto) and CI must resolve dependencies with the SAME uv. They silently diverged
+    by a major version — `ci.yml`'s WSL leg on 0.11.32 while `adversarial`, `perf` and
+    `pr-validate-python` sat on 0.5.14 — so five of six legs resolved the lockfile with a
+    different tool than the sixth, and than every developer's machine.
+
+    This is the repo's usual answer to "two copies must agree": pin one as the source and
+    make drift loud, rather than deleting the copy (see `test_compose_invariants.py`,
+    `test_setup_script_readme_consistency.py`). Installing uv FROM `.prototools` in CI was
+    considered and rejected — it would add a third-party action to the SHA-pinned supply
+    chain and, with a range pin, let CI float.
+    """
+    expected = _prototools_uv_version()
+    mismatched = []
+    found = 0
+    for workflow in _workflow_files():
+        for lineno, text in _executable_lines(workflow):
+            for match in _UV_VERSION_DECL.finditer(text):
+                found += 1
+                if match.group("version") != expected:
+                    mismatched.append(
+                        f"{workflow.name}:{lineno}: pins {match.group('version')} "
+                        f"(.prototools says {expected})"
+                    )
+    assert found >= 4, (
+        f"vacuity floor: found only {found} UV_VERSION declarations across the workflows. "
+        "Both spellings must be detected — the `env:` key AND ci.yml's shell assignment."
+    )
+    assert not mismatched, (
+        "workflow uv pins have drifted from .prototools, so CI and local resolve the "
+        "lockfile with different tools:\n  " + "\n  ".join(mismatched)
+    )
