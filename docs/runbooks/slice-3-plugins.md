@@ -214,13 +214,16 @@ Operator-facing changes before deploying:
   is bwrap's internal sync fd and would consume fd 3 (verified 0.8.0/0.9.0,
   #218). The daemon-boot launcher probe refuses a production boot on a
   non-policy-resolving launcher.
-+ **`ALFRED_ENVIRONMENT` must be set** — the env var (primary) or
-  `/etc/alfred/environment` (fallback). Distinct from the Slice-3
-  capability-gate `ALFRED_ENV` selector. The launcher deliberately does
-  **not** read `.env` (ADR-0053 §3, trusted-sources-only) — on a bare-host,
-  `.env`-only install the daemon boots but every plugin spawn still refuses
-  with `environment_not_set` until the env var or `/etc/alfred/environment`
-  is set directly (a known, documented gap; see ADR-0053's Consequences).
++ **`ALFRED_ENVIRONMENT` must be set** — the env var (primary),
+  `/etc/alfred/environment` (fallback), or a `.env` **saying `production`**.
+  Distinct from the Slice-3 capability-gate `ALFRED_ENV` selector. Per
+  [ADR-0057](../adr/0057-directional-trust-for-the-launcher-environment.md)
+  (#486) the launcher applies *directional trust* to `.env`: it accepts
+  `production` from there — the strictest setting — and refuses a
+  `.env`-sourced `development`/`test` with `environment_untrusted_source`,
+  because `.env` is writable by anything with project-directory access. To run
+  a relaxed environment on a bare host, export the env var or write
+  `/etc/alfred/environment`. (This closes the gap ADR-0053 recorded as #486.)
 + **Mid-slice caveat:** the quarantined-LLM manifest declares `kind = "full"`
   but its policy bytes ship in **PR-S4-7**. A daemon running just PR-S4-6 will
   refuse to launch it with `policy_ref_unreadable` — the correct fail-closed

@@ -1,3 +1,6 @@
+<!-- Amended by ADR-0057 (#486): §3's launcher trust rule and the §2 two-layer aside.
+     Source-EXCLUSION became DIRECTIONAL TRUST — see the AMENDED block in §3. -->
+
 # ADR-0053 — Three-layer `Settings.environment` precedence
 
 - **Status**: Accepted
@@ -96,9 +99,11 @@ escape-hatch gate
 `resolve_environment()` directly. `Settings` itself calls it internally (a
 fourth caller, for in-process code that can afford to build a real
 `Settings`). All four call the SAME resolver (M-4: not "byte-identical
-precedence logic" — the launcher opts out of the `.env` layer entirely via
-`consult_dotenv=False`, a genuinely two-layer chain per §3, so the logic
-each caller EXERCISES differs by design); there is no second implementation
+precedence logic" — the launcher CONSTRAINS the `.env` layer rather than
+consuming it as-is: originally by opting out entirely via
+`consult_dotenv=False`, and since ADR-0057 by accepting a `DOTENV`-sourced
+value only when it is `production`; so the logic each caller EXERCISES
+differs by design); there is no second implementation
 anywhere in the tree to drift out of sync.
 
 **This invariant is scoped to the `ALFRED_ENVIRONMENT` variable only.** A
@@ -150,11 +155,19 @@ call sites each close this the way their interface allows:
 - **Launcher trusted-sources-only** — `plugins/manifest_reader.py`'s
   `--read-environment` subcommand cannot use the same trick: its interface
   is a bare stdout string consumed by `bin/alfred-plugin-launcher.sh`
-  (bash), which has no way to carry a `source` alongside the value. Instead
-  it calls `resolve_environment(consult_dotenv=False)` — the `.env` layer
-  is excluded from consultation entirely, so a CWD `.env` cannot influence
-  the value the launcher receives at all, trusted-source-only by
-  construction rather than by post-hoc filtering.
+  (bash), which has no way to carry a `source` alongside the value. It
+  therefore called `resolve_environment(consult_dotenv=False)` — excluding
+  the `.env` layer entirely.
+
+  > **AMENDED by [ADR-0057](0057-directional-trust-for-the-launcher-environment.md)
+  > (#486).** Source-EXCLUSION was replaced by DIRECTIONAL TRUST: the
+  > subcommand now resolves WITH `.env` but honours a `DOTENV`-sourced value
+  > only when it is `production`, the strictest setting. The security
+  > property is unchanged — a CWD `.env` still cannot select a laxer
+  > environment, so it can never un-gate the sandbox — but it is now
+  > enforced by a value check rather than by construction. A `.env`-sourced
+  > `development`/`test` refuses with `environment_untrusted_source`. Read
+  > ADR-0057 before relying on the paragraph above.
 
 `resolve_environment()`'s `consult_dotenv` parameter exists specifically to
 support this second pattern: a caller whose downstream interface cannot
@@ -431,7 +444,9 @@ per-module coverage gate to `settings.py` as a whole file —
   boot gate; the sole caller that also emits the
   `daemon.boot.environment_source_conflict` audit row).
 - `src/alfred/plugins/manifest_reader.py` — `_cmd_read_environment` (the
-  launcher's trusted-sources-only caller, `consult_dotenv=False`).
+  launcher's caller; `consult_dotenv=False` originally, and since ADR-0057
+  `consult_dotenv=True` with a `production`-only floor on `DOTENV` — this is
+  where #486 was fixed, NOT in `_comms_child_env`).
 - `src/alfred/gateway/adapter_child_factory.py` — `_resolve_launch_target`
   (the in-process trust-floor caller).
 - (ADR-0057 note: #486 was fixed in `manifest_reader._cmd_read_environment`, not in the

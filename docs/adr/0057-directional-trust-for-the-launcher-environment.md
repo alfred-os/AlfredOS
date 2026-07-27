@@ -2,16 +2,20 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-27
-- **Supersedes:** nothing. Amends [ADR-0053](0053-three-layer-environment-precedence.md) §3.
+- **Supersedes:** nothing. **Amends** [ADR-0053](0053-three-layer-environment-precedence.md)
+  §3 (the launcher's trust rule) and its §2 aside describing the launcher as a two-layer
+  chain. ADR-0053 §1, §4, §5 and §6 stand unchanged — superseding it would orphan them.
 - **Issue:** [#486](https://github.com/alfred-os/AlfredOS/issues/486) · epic
   [#469](https://github.com/alfred-os/AlfredOS/issues/469)
 
 ## Context
 
 `bin/alfred-plugin-launcher.sh` resolves `ALFRED_ENVIRONMENT` for itself, via
-`manifest_reader --read-environment`. Its answer becomes `IS_PRODUCTION`, which gates the
-unsandboxed-in-production refusal (`:324`), the non-Linux UID-drop refusal (`:310`), and the
-`FAKE_UNAME` keystone (`:250`, `:271`).
+`manifest_reader --read-environment`. Its answer becomes `ALFRED_RESOLVED_ENVIRONMENT` and the
+`IS_PRODUCTION` flag derived from it, which gate the unsandboxed-in-production refusal (`:341`,
+which tests `ALFRED_RESOLVED_ENVIRONMENT` directly), the non-Linux UID-drop refusal (`:327`), and
+the `FAKE_UNAME` keystone (`:267`, `:288`). Line numbers are against this branch — the #521
+commit shifts them 17 lines from `origin/main`.
 
 ADR-0053 §3 resolved that path **trusted-sources-only** (`consult_dotenv=False`): env var and
 `/etc/alfred/environment`, never a CWD `.env`. The reasoning was sound — a `.env` is writable by
@@ -59,8 +63,11 @@ decides the case where `.env` is the **only** source.
 
 ### Positive
 
-- The documented default path works. `.env.example` ships `production`, so the operator who
-  copied it as the README instructs gets a working, **fully sandboxed** spawn.
+- The documented default path works on Linux. `.env.example` ships `production`, so the
+  operator who copied it as the README instructs gets a working, **fully sandboxed** spawn.
+  On a macOS/Windows bare host the spawn still refuses — `uid_separation_unavailable` at
+  `:327`, unrelated to this ADR — so this fixes the environment dead end there without making
+  those hosts spawn-capable.
 - **No trust concession.** The only value `.env` can supply is the strictest one. Someone who can
   write `.env` could previously deny service by corrupting it; they still can, and they still
   cannot relax the sandbox.
