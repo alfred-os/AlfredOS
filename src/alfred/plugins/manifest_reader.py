@@ -383,7 +383,6 @@ def _pin_structlog_to_stderr() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _pin_structlog_to_stderr()
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.read_sandbox:
@@ -398,4 +397,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry
+    # Pin here, NOT inside main(): `structlog.configure` is PROCESS-GLOBAL and
+    # `PrintLoggerFactory(file=...)` binds the stream at configure time. Tests call
+    # `main()` IN-PROCESS, so pinning there captured pytest's per-test stderr capture
+    # object; once that closed, every later structlog write in the session raised
+    # `ValueError: I/O operation on closed file` — 15 adversarial failures, none of them
+    # about the code under test. Only the `python -m` entry the launcher actually spawns
+    # needs the pin, and that process is dedicated.
+    _pin_structlog_to_stderr()
     sys.exit(main())
