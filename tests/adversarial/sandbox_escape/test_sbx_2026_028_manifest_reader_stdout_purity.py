@@ -79,3 +79,27 @@ def test_stdout_is_exactly_the_value_on_the_happy_path(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert result.stdout == "production\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
+def test_a_fifo_dotenv_cannot_wedge_the_launcher(tmp_path: Path) -> None:
+    """A non-regular `.env` must not hang the environment read (ADR-0057 residual).
+
+    ADR-0057 lets the launcher READ `.env` (directional trust), and `.env` is writable by
+    anything with project-directory access. `open()` on a FIFO with no writer BLOCKS FOREVER,
+    and the spawn path — unlike the boot probe — is unbounded. So an attacker who can create
+    `.env` as a FIFO wedges every subsequent plugin spawn: a denial of service that needs no
+    exploit, just `mkfifo`.
+
+    The read must refuse a non-regular file and fall through to "no value from this source",
+    which is the existing fail-closed behaviour for an unreadable `.env`.
+    """
+    os.mkfifo(tmp_path / ".env")
+
+    # No env var and no /etc, so the resolver REACHES the .env layer — the only
+    # configuration in which the FIFO is reachable at all.
+    result = _read_environment(tmp_path, {"ALFRED_ETC_ENV_FILE": str(tmp_path / "absent")})
+
+    # Refused (no value from any source) — NOT hung.
+    assert result.returncode != 0
+    assert result.stdout == ""

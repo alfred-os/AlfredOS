@@ -8,9 +8,12 @@ into an assertion that isn't specifically exercising the ``.env`` layer.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
+import structlog
 import structlog.testing
 
 from alfred.config._environment_loader import (
@@ -416,3 +419,30 @@ def test_neither_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     result = _r(tmp_path)
     assert result.value is None
     assert result.source is EnvironmentSource.NONE
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
+def test_non_regular_dotenv_is_refused_without_blocking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A FIFO ``.env`` must be refused, not opened (ADR-0057 residual).
+
+    Since directional trust the LAUNCHER reads ``.env`` too, and ``.env`` is writable by
+    anything with project-directory access. ``open()`` on a FIFO with no writer blocks
+    forever and the spawn path is unbounded — so `mkfifo .env` wedges every subsequent
+    plugin spawn. Measured before the fix: the read hung until an external timeout killed it.
+
+    Refused with a breadcrumb rather than silently, so it is distinguishable from a genuinely
+    absent ``.env`` — the same reason the unreadable-file breadcrumb above exists.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    fifo = tmp_path / ".env"
+    os.mkfifo(fifo)
+
+    with structlog.testing.capture_logs() as logs:
+        result = resolve_environment(etc_path=tmp_path / "absent", dotenv_path=fifo)
+
+    assert result.value is None
+    assert any(e["event"] == "environment_loader.dotenv_not_regular_file" for e in logs), (
+        f"a non-regular .env must leave a breadcrumb, got: {[e['event'] for e in logs]}"
+    )
