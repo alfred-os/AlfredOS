@@ -436,38 +436,73 @@ def test_every_workflow_uv_version_matches_prototools() -> None:
     )
 
 
+def _setup_uv_steps(path: Path) -> list[tuple[str, dict]]:
+    """(job label, step mapping) for every `astral-sh/setup-uv` step, via real YAML parsing.
+
+    Parsed, not line-windowed: an earlier version of this guard scanned a 4-line window after
+    the `uses:` line, so an UNPINNED step followed by an unrelated step that happened to
+    mention ``env.UV_VERSION`` passed. Mutation-confirmed. The step boundary is a structural
+    fact, so read it structurally.
+    """
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    found: list[tuple[str, dict]] = []
+    for job_name, job in ((doc or {}).get("jobs") or {}).items():
+        for idx, step in enumerate((job or {}).get("steps") or []):
+            if "astral-sh/setup-uv" in str((step or {}).get("uses", "")):
+                found.append((f"{path.name}::{job_name}[{idx}]", step or {}))
+    return found
+
+
 def test_every_setup_uv_use_pins_its_version() -> None:
-    """`astral-sh/setup-uv` must never be used without an explicit version (#525).
+    """`astral-sh/setup-uv` must never install a floating uv (#525).
 
-    An unpinned `uses: astral-sh/setup-uv@<sha>` silently installs whatever the ACTION
-    defaults to — a floating uv that no file in this repo declares. It is invisible to the
-    `.prototools`-vs-workflow guard above, because that only compares DECLARED versions: a
-    job with no declaration has nothing to disagree with.
+    An unpinned step installs whatever the ACTION defaults to — a version no file in this
+    repo declares, invisible to the `.prototools` equality guard (which compares DECLARED
+    versions; a step with no declaration has nothing to disagree with).
 
-    That is exactly how it drifted. When this guard was written, 12 of 19 uses were
-    unpinned — every `ci.yml` job (lint/types/unit, integration, coverage) and all of
-    `nightly.yml`, which declared no `UV_VERSION` at all. Only the WSL leg's manual tarball
-    install used the pinned version, which is why CI looked aligned while most of it was not.
+    That is how it drifted: when this guard was first written 12 of 19 uses were unpinned —
+    every `ci.yml` job and all of `nightly.yml`, which declared no `UV_VERSION` at all.
     """
     unpinned = []
     total = 0
     for workflow in _workflow_files():
-        lines = workflow.read_text(encoding="utf-8").split("\n")
-        for i, line in enumerate(lines):
-            if "astral-sh/setup-uv@" not in line or line.lstrip().startswith("#"):
-                continue
+        for label, step in _setup_uv_steps(workflow):
             total += 1
-            # The version must be supplied by the `with:` block attached to THIS step —
-            # i.e. within the few lines before the next step begins.
-            window = "\n".join(lines[i + 1 : i + 5])
-            if "env.UV_VERSION" not in window:
-                unpinned.append(f"{workflow.name}:{i + 1}")
-    assert total >= 15, (
-        f"vacuity floor: found only {total} setup-uv uses; the sweep is not seeing the "
-        "workflows it is supposed to check"
+            version = str((step.get("with") or {}).get("version", "")).strip()
+            if "env.UV_VERSION" not in version:
+                unpinned.append(f"{label}: with.version={version!r}")
+    assert total >= 19, (
+        f"vacuity floor: found only {total} setup-uv steps (expected >= 19); the parse is not "
+        "seeing the workflows it must check"
     )
     assert not unpinned, (
-        "these `astral-sh/setup-uv` steps take the ACTION'S DEFAULT uv, not the pinned one, "
-        "so they resolve the lockfile with an undeclared floating version and the "
-        ".prototools guard cannot see them (#525):\n  " + "\n  ".join(unpinned)
+        "these steps install the ACTION'S DEFAULT uv, so they resolve the lockfile with an "
+        "undeclared floating version the .prototools guard cannot see (#525):\n  "
+        + "\n  ".join(unpinned)
+    )
+
+
+def test_a_workflow_referencing_uv_version_must_declare_it() -> None:
+    """`version: ${{ env.UV_VERSION }}` in a workflow that never declares it floats (#525).
+
+    An undefined `${{ env.X }}` renders as the EMPTY STRING, and `setup-uv` treats an empty
+    `version:` as not-provided — falling back to `pyproject.toml`'s `required-version`
+    (absent here) and then to **latest**. So the step LOOKS pinned, passes the guard above,
+    and silently floats.
+
+    This is the paper-gate shape twice already paid for (#514, #245) re-entering through the
+    front door of the guard written to prevent it. Found by the devops review of PR #526,
+    mutation-confirmed: a workflow with the reference and no `env:` block passed every other
+    check.
+    """
+    undeclared = []
+    for workflow in _workflow_files():
+        text = workflow.read_text(encoding="utf-8")
+        if "env.UV_VERSION" not in text:
+            continue
+        if not re.search(r"^\s*UV_VERSION\s*:", text, re.MULTILINE):
+            undeclared.append(workflow.name)
+    assert not undeclared, (
+        "these workflows reference ${{ env.UV_VERSION }} but never declare it, so it renders "
+        "empty and setup-uv silently installs `latest` (#525): " + ", ".join(undeclared)
     )
