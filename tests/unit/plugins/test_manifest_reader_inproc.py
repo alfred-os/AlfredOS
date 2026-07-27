@@ -9,6 +9,7 @@ in-process so every branch is measured for the 100% trust-boundary floor.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -408,3 +409,32 @@ def test_read_environment_etc_still_outranks_a_loosening_dotenv(
 
     assert rc == 0
     assert capsys.readouterr().out.strip() == "production"
+
+
+def test_pin_structlog_to_stderr_targets_stderr() -> None:
+    """`_pin_structlog_to_stderr` must send structlog to fd 2, never fd 1 (sbx-2026-028).
+
+    The launcher reads this module's STDOUT as its `IS_PRODUCTION` signal, so a structlog
+    byte on fd 1 flips the sandbox gate. `configure_stderr_logging()` pins only stdlib
+    logging; structlog's default factory writes to stdout, hence this pin.
+
+    The test SAVES AND RESTORES the global structlog config. `structlog.configure` is
+    process-global and `PrintLoggerFactory` binds its stream at configure time — leaking that
+    into the session is precisely what broke 15 adversarial tests with
+    `ValueError: I/O operation on closed file` when the pin was called from `main()`.
+    """
+    import structlog
+
+    saved = structlog.get_config().copy()
+    try:
+        manifest_reader._pin_structlog_to_stderr()
+        logger = structlog.get_config()["logger_factory"]()
+        assert logger._file is sys.stderr, (
+            "structlog is not pinned to stderr; a log byte on stdout would corrupt the "
+            "launcher's IS_PRODUCTION signal (sbx-2026-028)"
+        )
+    finally:
+        structlog.configure(**saved)
+
+    # The restore must actually have happened, or this test poisons the rest of the session.
+    assert structlog.get_config()["logger_factory"] is saved["logger_factory"]
