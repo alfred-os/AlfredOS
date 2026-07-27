@@ -272,7 +272,19 @@ highest wins:
 
 `.env.example` ships `ALFRED_ENVIRONMENT=production` uncommented — copy it to
 `.env` as-is, or export the env var, or write `/etc/alfred/environment`, to
-satisfy this. See [ADR-0053](docs/adr/0053-three-layer-environment-precedence.md)
+satisfy this.
+
+**The three are not fully equivalent.** The plugin sandbox launcher trusts only
+the env var and the root-owned `/etc/alfred/environment`; from `.env` it accepts
+`production` and nothing else. `.env` is writable by anything with project-
+directory access, so honouring a laxer value there would let a sandbox escape
+make itself permanent. Practically: the shipped `production` default works from
+`.env`, but to run `development` or `test` you must export the variable or write
+`/etc/alfred/environment` — otherwise the daemon starts and every sandboxed
+plugin spawn refuses with `environment_untrusted_source`.
+
+See [ADR-0057](docs/adr/0057-directional-trust-for-the-launcher-environment.md)
+for that rule, and [ADR-0053](docs/adr/0053-three-layer-environment-precedence.md)
 for the full precedence chain, the fail-closed behaviour on an unreadable
 `/etc`, and why a `.env`-sourced value can never unlock that escape hatch.
 

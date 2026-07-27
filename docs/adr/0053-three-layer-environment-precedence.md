@@ -308,7 +308,7 @@ not the precedence chain itself. This ADR owns the precedence decision
   env var by the time `_scrubbed_base()` reads it. Not fixed here: the
   mechanism fix (teaching `_scrubbed_base()` to forward the daemon's resolved
   value rather than re-reading `os.environ`) is out of scope for this ADR —
-  filed as issue [#486](https://github.com/alfred-os/AlfredOS/issues/486).
+  filed as issue [#486](https://github.com/alfred-os/AlfredOS/issues/486). **RESOLVED by [ADR-0057](0057-directional-trust-for-the-launcher-environment.md):** the fix landed in `manifest_reader._cmd_read_environment` (directional trust — a `.env` may select only `production`), NOT in `_comms_child_env`. This paragraph names the wrong module.
 - **The launcher and the daemon report DIFFERENT refusal reasons for the
   IDENTICAL condition — a present-but-unreadable `/etc` (final-review
   M-5).** The daemon boot gate distinguishes this precisely:
@@ -410,7 +410,7 @@ issue; teaching `alfred.plugins._comms_child_env._scrubbed_base()` to
 forward the daemon's own *resolved* `environment` value into a sandboxed
 plugin's child env instead of re-reading `os.environ["ALFRED_ENVIRONMENT"]`
 (the bare-host-only plugin-spawn gap in Consequences → Negative/residuals,
-final-review I-4) — [#486](https://github.com/alfred-os/AlfredOS/issues/486);
+final-review I-4) — [#486](https://github.com/alfred-os/AlfredOS/issues/486); **RESOLVED by ADR-0057 — in `manifest_reader`, not here.**
 teaching the launcher's bare-key vocabulary to distinguish an unreadable
 `/etc` from a fully-absent one (final-review M-5) —
 [#487](https://github.com/alfred-os/AlfredOS/issues/487); extending the
@@ -434,6 +434,8 @@ per-module coverage gate to `settings.py` as a whole file —
   launcher's trusted-sources-only caller, `consult_dotenv=False`).
 - `src/alfred/gateway/adapter_child_factory.py` — `_resolve_launch_target`
   (the in-process trust-floor caller).
+- (ADR-0057 note: #486 was fixed in `manifest_reader._cmd_read_environment`, not in the
+  module below.)
 - `src/alfred/plugins/_comms_child_env.py:52,86` — `_scrubbed_base()`, the
   bare-host-only plugin-spawn residual named in Consequences →
   Negative/residuals (final-review I-4): forwards `os.environ`, not the

@@ -137,6 +137,10 @@ def test_read_environment_file(tmp_path, monkeypatch, capsys) -> None:
 
 
 def test_read_environment_unset(tmp_path, monkeypatch, capsys) -> None:
+    # #486: chdir is load-bearing now that `.env` is consulted. `resolve_environment` reads
+    # it CWD-relative, so without this a real `.env` — one the repo's own setup script
+    # creates — silently decides the result and this test passes on the wrong path.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     monkeypatch.setenv("ALFRED_ETC_ENV_FILE", str(tmp_path / "absent"))
     rc = manifest_reader.main(["--read-environment"])
@@ -145,6 +149,7 @@ def test_read_environment_unset(tmp_path, monkeypatch, capsys) -> None:
 
 
 def test_read_environment_unrecognised(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)  # #486: hermeticity — see test_read_environment_unset
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "staging")
     monkeypatch.setenv("ALFRED_ETC_ENV_FILE", str(tmp_path / "absent"))
     rc = manifest_reader.main(["--read-environment"])
@@ -316,3 +321,90 @@ class _StdinStub:
 
     def read(self) -> str:
         return self._text
+
+
+# ---------------------------------------------------------------------------
+# #486 — directional trust: a `.env` may ratchet TOWARD the stricter value only
+# ---------------------------------------------------------------------------
+#
+# ADR-0057. The launcher previously refused to read `.env` at all (ADR-0053 §3), which is
+# why a bare-host `.env`-only install booted the daemon and then refused every plugin
+# spawn. It may now honour a `.env`-sourced value, but ONLY `production` — the strictest
+# setting. A `.env` can therefore tighten the sandbox and never loosen it.
+#
+# Every test here chdirs to tmp_path. `resolve_environment` reads `.env` CWD-relative, so
+# without that a real `.env` in the repo root silently decides the result — the exact
+# hermeticity leak that made three tests pass on the wrong path during #469 Blocker 1.
+
+
+def test_read_environment_dotenv_production_is_honoured(tmp_path, monkeypatch, capsys) -> None:
+    """The documented default path works: `.env.example` ships `production` (#486)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=production\n")
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_ETC_ENV_FILE", str(tmp_path / "absent"))
+
+    rc = manifest_reader.main(["--read-environment"])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "production"
+
+
+@pytest.mark.parametrize("loosening", ["development", "test"])
+def test_read_environment_dotenv_may_not_loosen(
+    loosening: str, tmp_path, monkeypatch, capsys
+) -> None:
+    """THE security invariant: a `.env` can never select a laxer environment (#486).
+
+    `IS_PRODUCTION=false` gates the unsandboxed-in-prod refusal, the non-Linux UID-drop
+    refusal, and the FAKE_UNAME keystone. A CWD `.env` is writable by anything with CWD
+    access — including a plugin that escaped its sandbox — so honouring a laxer value here
+    would make an escape permanent.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(f"ALFRED_ENVIRONMENT={loosening}\n")
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_ETC_ENV_FILE", str(tmp_path / "absent"))
+
+    rc = manifest_reader.main(["--read-environment"])
+
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "", "a refused resolution must print NO value on stdout"
+    assert captured.err.strip().splitlines()[-1] == "daemon.boot.environment_untrusted_source"
+
+
+def test_read_environment_trusted_source_may_still_select_development(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The dev escape hatch stays reachable — via a TRUSTED source (#486).
+
+    Directional trust constrains `.env` only. An operator who exports the variable, or
+    writes the root-owned `/etc` file, can still select `development`.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=production\n")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
+    monkeypatch.setenv("ALFRED_ETC_ENV_FILE", str(tmp_path / "absent"))
+
+    rc = manifest_reader.main(["--read-environment"])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "development"
+
+
+def test_read_environment_etc_still_outranks_a_loosening_dotenv(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Precedence is unchanged: `/etc` wins, and a laxer `.env` cannot override it (#486)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ALFRED_ENVIRONMENT=development\n")
+    etc = tmp_path / "environment"
+    etc.write_text("production\n")
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_ETC_ENV_FILE", str(etc))
+
+    rc = manifest_reader.main(["--read-environment"])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "production"

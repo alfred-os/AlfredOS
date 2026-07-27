@@ -113,6 +113,10 @@ def _register() -> None:
 
     # Daemon boot refusals (PR-S4-1).
     t("daemon.boot.environment_not_set")
+    # ADR-0057 (#486). Reached via _ENV_UNTRUSTED_SOURCE_KEY in manifest_reader, so pybabel
+    # cannot see it without this anchor — without one it is extracted as OBSOLETE and never
+    # renders, which is how it first landed here.
+    t("daemon.boot.environment_untrusted_source")
     t("daemon.boot.unsandboxed_in_production")
     t("daemon.boot.launcher_not_policy_resolving")
     t("daemon.boot.snapshot_ref_init_failed")

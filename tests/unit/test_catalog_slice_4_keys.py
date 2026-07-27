@@ -104,6 +104,9 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # quarantine_child_spawn_failed (PR-S4-11c-2b), and comms_socket_bind_failed
     # (ADR-0031)).
     "daemon.boot.environment_not_set",
+    # ADR-0057 (#486): a .env-sourced value that would RELAX the sandbox. Distinct from
+    # environment_not_set — the value resolved fine, its SOURCE is not trusted for it.
+    "daemon.boot.environment_untrusted_source",
     # #469 Blocker 1 Task 3: a present-but-unreadable /etc/alfred/environment
     # fails closed with its OWN reason, distinct from environment_not_set.
     "daemon.boot.environment_source_unreadable",

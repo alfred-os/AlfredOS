@@ -103,6 +103,10 @@ _DEFAULT_POLICY_SUBDIR = "config/sandbox"
 
 _ENV_NOT_SET_KEY = "daemon.boot.environment_not_set"
 _ENV_UNRECOGNISED_KEY = "daemon.boot.environment_unrecognised"
+_ENV_UNTRUSTED_SOURCE_KEY = "daemon.boot.environment_untrusted_source"
+#: The ONLY value a `.env` may select for the launcher (ADR-0057, #486). It is the
+#: strictest setting, so a writable `.env` can tighten the sandbox and never loosen it.
+_DOTENV_PERMITTED_VALUE = "production"
 _PLUGIN_ID_INVALID_KEY = "plugin.launcher_plugin_id_invalid"
 _MANIFEST_UNREADABLE_KEY = "plugin.manifest_unreadable"
 _READ_SANDBOX_NO_SOURCE_KEY = "plugin.manifest_reader_no_source"
@@ -247,24 +251,30 @@ def _cmd_read_sandbox(args: argparse.Namespace) -> int:
 def _cmd_read_environment() -> int:
     etc_override = os.environ.get("ALFRED_ETC_ENV_FILE")
     etc_path = Path(etc_override) if etc_override else None
-    # sec-001 (#469 Blocker 1, Critical): resolve TRUSTED-SOURCES-ONLY (env var
-    # + /etc), never `.env`. This helper's stdout is the launcher's sole
-    # signal for IS_PRODUCTION (bin/alfred-plugin-launcher.sh), which gates
-    # the bwrap sandbox refusals + the dev escape hatch + the FAKE_UNAME
-    # keystone. `resolve_environment`'s in-process callers (Settings) can
-    # express a trust floor by checking EnvironmentLoadResult.source (see the
-    # gateway launch-target override, dcfcc441) — but THIS interface is a bare
-    # stdout string consumed by bash; it carries the resolved VALUE but not
-    # the SOURCE that produced it, so a source-conditioned check is
-    # unexpressable here. Source-EXCLUSION (`consult_dotenv=False`) is the
-    # equivalent recourse: a CWD `.env` — writable by anything with CWD
-    # access, unlike root-owned `/etc/alfred/environment` — can never resolve
-    # a value this helper will hand to the launcher. On the `.env`-only path
-    # (env var + /etc both unset) this now falls through to NONE instead of
-    # silently downgrading to whatever `.env` claims, and the existing
-    # NONE/UNRECOGNISED handling below refuses exactly as it already did for
-    # a genuinely unresolved environment.
-    result = resolve_environment(etc_path=etc_path, consult_dotenv=False)
+    # sec-001 (#469 Blocker 1) + ADR-0057 (#486): DIRECTIONAL TRUST.
+    #
+    # This helper's stdout is the launcher's sole signal for IS_PRODUCTION
+    # (bin/alfred-plugin-launcher.sh), which gates the bwrap sandbox refusals, the dev
+    # escape hatch, and the FAKE_UNAME keystone. A CWD `.env` is writable by anything with
+    # CWD access — including a plugin that escaped its sandbox — unlike root-owned
+    # /etc/alfred/environment.
+    #
+    # #469 Blocker 1 therefore excluded `.env` outright (`consult_dotenv=False`). That was
+    # correct against the threat but left a bare-host `.env`-only install booting the daemon
+    # and then refusing EVERY plugin spawn (#486) — while the README and `.env.example`
+    # present `.env` as a sufficient way to configure this.
+    #
+    # The rule is now directional rather than exclusionary: a `.env`-sourced value is
+    # honoured ONLY when it is `production`, the STRICTEST setting. So a writable `.env` can
+    # ratchet the sandbox tighter and can never loosen it — the property the exclusion was
+    # protecting. `development`/`test` from `.env` still refuse, loudly and with their own
+    # key, and remain reachable through either trusted source.
+    #
+    # Precedence is untouched: a trusted source still outranks `.env` entirely, so this only
+    # ever decides the case where `.env` is the ONLY source — exactly #486's configuration.
+    result = resolve_environment(etc_path=etc_path, consult_dotenv=True)
+    if result.source is EnvironmentSource.DOTENV and result.value != _DOTENV_PERMITTED_VALUE:
+        return _fail(_ENV_UNTRUSTED_SOURCE_KEY)
     if result.value is not None:
         print(result.value)
         return 0

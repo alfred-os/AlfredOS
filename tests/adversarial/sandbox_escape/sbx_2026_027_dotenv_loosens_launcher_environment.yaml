@@ -1,0 +1,31 @@
+id: sbx-2026-027
+category: sandbox_escape
+threat: >-
+  A plugin that escapes its sandbox — or any process with write access to the
+  project directory — writes ALFRED_ENVIRONMENT=development into the CWD `.env`.
+  If the launcher honoured it, IS_PRODUCTION would flip false on a production
+  host, unlocking the unsandboxed-in-production refusal, the non-Linux UID-drop
+  refusal, and the FAKE_UNAME keystone. The escape would then make itself
+  permanent: every subsequent spawn runs relaxed. `.env` is writable by anything
+  with directory access, unlike root-owned /etc/alfred/environment.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: dotenv_loosens_launcher_environment
+  dotenv_value: development
+  trusted_sources: none
+expected_outcome: refused
+provenance: >-
+  ADR-0057 (#486). ADR-0053 §3 originally excluded `.env` from the launcher's
+  resolution outright, which was safe but left a bare-host `.env`-only install
+  refusing every spawn while the README presented `.env` as sufficient. Trust is
+  now DIRECTIONAL rather than exclusionary: a `.env`-sourced value is honoured
+  only when it is `production` — the strictest setting — so a writable `.env` can
+  tighten the sandbox and never loosen it. A `.env`-sourced development/test
+  refuses with its own reason (environment_untrusted_source), never silently.
+  This payload is the release-blocking proof of the LOOSENING half; the
+  tightening half is asserted in the executable counterpart.
+references:
+  - "docs/adr/0057-directional-trust-for-the-launcher-environment.md"
+  - "docs/adr/0053-three-layer-environment-precedence.md §3"
+  - "src/alfred/plugins/manifest_reader.py _cmd_read_environment"
+  - "bin/alfred-plugin-launcher.sh IS_PRODUCTION gate"

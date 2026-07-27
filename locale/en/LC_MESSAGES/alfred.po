@@ -390,7 +390,7 @@ msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
-#: src/alfred/cli/main.py:384 src/alfred/i18n/_slice_4_reserve.py:154
+#: src/alfred/cli/main.py:384 src/alfred/i18n/_slice_4_reserve.py:158
 msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
 "alfred chat needs the gateway. Start it with: alfred gateway start. If "
@@ -996,12 +996,12 @@ msgstr ""
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
 #: src/alfred/cli/daemon/_boot_audit.py:233
-#: src/alfred/i18n/_slice_4_reserve.py:126
+#: src/alfred/i18n/_slice_4_reserve.py:130
 msgid "daemon.lifecycle.ready"
 msgstr "Core lifecycle: ready (epoch {epoch})."
 
 #: src/alfred/cli/daemon/_boot_audit.py:272
-#: src/alfred/i18n/_slice_4_reserve.py:127
+#: src/alfred/i18n/_slice_4_reserve.py:131
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
@@ -1015,7 +1015,6 @@ msgstr ""
 "then re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-# Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
 #: src/alfred/cli/daemon/_commands.py:425
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
@@ -1052,7 +1051,7 @@ msgstr ""
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:688
-#: src/alfred/i18n/_slice_4_reserve.py:116
+#: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in a production environment. "
@@ -1060,7 +1059,7 @@ msgstr ""
 "daemon start` (or `docker compose up -d` on the compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:699
-#: src/alfred/i18n/_slice_4_reserve.py:117
+#: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
 "bin/alfred-plugin-launcher.sh does not resolve per-plugin policies. "
@@ -1069,7 +1068,7 @@ msgstr ""
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:723
-#: src/alfred/i18n/_slice_4_reserve.py:118
+#: src/alfred/i18n/_slice_4_reserve.py:122
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
 "Cannot start: the policies file at {path} could not be loaded ({detail})."
@@ -1082,7 +1081,7 @@ msgstr ""
 "stack)."
 
 #: src/alfred/cli/daemon/_commands.py:745
-#: src/alfred/i18n/_slice_4_reserve.py:119
+#: src/alfred/i18n/_slice_4_reserve.py:123
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
 "Cannot start: the capability gate could not reach its backing store "
@@ -1215,7 +1214,7 @@ msgstr ""
 " the compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:1250
-#: src/alfred/i18n/_slice_4_reserve.py:121
+#: src/alfred/i18n/_slice_4_reserve.py:125
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
@@ -1231,7 +1230,7 @@ msgstr ""
 "Nothing to stop."
 
 #: src/alfred/cli/daemon/_commands.py:1458
-#: src/alfred/i18n/_slice_4_reserve.py:128
+#: src/alfred/i18n/_slice_4_reserve.py:132
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
@@ -1246,7 +1245,7 @@ msgstr ""
 "running (stale pidfile). The daemon is not running."
 
 #: src/alfred/cli/daemon/_commands.py:1484
-#: src/alfred/i18n/_slice_4_reserve.py:129
+#: src/alfred/i18n/_slice_4_reserve.py:133
 msgid "daemon.status.template"
 msgstr ""
 "Daemon PID {pid}\n"
@@ -1634,7 +1633,7 @@ msgid "gateway.egress.allowlist_unresolved"
 msgstr "(unresolved — check gateway config)"
 
 #: src/alfred/comms_mcp/audit_hash.py:94
-#: src/alfred/i18n/_slice_4_reserve.py:120
+#: src/alfred/i18n/_slice_4_reserve.py:124
 msgid "daemon.boot.audit_hash_pepper_missing"
 msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
@@ -2177,94 +2176,109 @@ msgstr "Cannot queue a plugin grant/revoke without an active operator session."
 msgid "cli.plugin.grant.refused.not_logged_in.recovery"
 msgstr "Run `alfred login` first, then re-run the command."
 
+#: src/alfred/i18n/_slice_4_reserve.py:119
+msgid "daemon.boot.environment_untrusted_source"
+msgstr ""
+"The plugin sandbox launcher refused the environment value it found. Your "
+".env file sets ALFRED_ENVIRONMENT to a value that relaxes the sandbox "
+"(development or test), and .env is not a trusted source for that — it is "
+"writable by anything that can write to the project directory, including a "
+"plugin that escaped its sandbox, so honouring it there would let an escape "
+"make itself permanent. A .env may only select production, the strictest "
+"setting. To run a relaxed environment, set it somewhere the launcher "
+"trusts: export ALFRED_ENVIRONMENT=development in the shell you start the "
+"daemon from, or write that bare value — no ALFRED_ENVIRONMENT= prefix, no "
+"quotes — to the root-owned file /etc/alfred/environment. Then re-run "
+"`alfred daemon start`."
+
 # Sandbox refusal reasons (PR-S4-6 launcher).
-#: src/alfred/i18n/_slice_4_reserve.py:132
+#: src/alfred/i18n/_slice_4_reserve.py:136
 msgid "supervisor.sandbox.refused.policy_ref_missing"
 msgstr ""
 "Plugin {plugin_id} declares sandbox kind=full but has no policy_ref for "
 "{host_os}. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:133
+#: src/alfred/i18n/_slice_4_reserve.py:137
 msgid "supervisor.sandbox.refused.policy_ref_os_mismatch"
 msgstr ""
 "Plugin {plugin_id} policy_ref points to a {policy_os} policy on a "
 "{host_os} host. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:136
+#: src/alfred/i18n/_slice_4_reserve.py:140
 msgid "supervisor.sandbox.refused.sandbox_block_missing"
 msgstr ""
 "Plugin {plugin_id} manifest is missing the [sandbox] block. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:137
+#: src/alfred/i18n/_slice_4_reserve.py:141
 msgid "supervisor.sandbox.refused.windows_stub_in_production"
 msgstr ""
 "Plugin {plugin_id} resolves to the Windows stub policy in production. "
 "Refusing to launch — Windows requires WSL2 per spec §7.7."
 
-#: src/alfred/i18n/_slice_4_reserve.py:138
+#: src/alfred/i18n/_slice_4_reserve.py:142
 msgid "supervisor.sandbox.unsandboxed_refused_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in production. Refusing to "
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:141 src/alfred/policies/watcher.py:377
+#: src/alfred/i18n/_slice_4_reserve.py:145 src/alfred/policies/watcher.py:377
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:142 src/alfred/policies/watcher.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:146 src/alfred/policies/watcher.py:87
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:143 src/alfred/policies/watcher.py:89
+#: src/alfred/i18n/_slice_4_reserve.py:147 src/alfred/policies/watcher.py:89
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:144 src/alfred/policies/watcher.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:148 src/alfred/policies/watcher.py:91
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:145 src/alfred/policies/watcher.py:93
+#: src/alfred/i18n/_slice_4_reserve.py:149 src/alfred/policies/watcher.py:93
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:146 src/alfred/policies/watcher.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:150 src/alfred/policies/watcher.py:95
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:147 src/alfred/policies/watcher.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:151 src/alfred/policies/watcher.py:97
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:148 src/alfred/policies/watcher.py:506
+#: src/alfred/i18n/_slice_4_reserve.py:152 src/alfred/policies/watcher.py:506
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:149 src/alfred/policies/watcher.py:523
+#: src/alfred/i18n/_slice_4_reserve.py:153 src/alfred/policies/watcher.py:523
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
-#: src/alfred/i18n/_slice_4_reserve.py:151 src/alfred/policies/watcher.py:489
+#: src/alfred/i18n/_slice_4_reserve.py:155 src/alfred/policies/watcher.py:489
 msgid "policies.watcher.fallback_write_failed"
 msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
 "{path}: both the audit store and the fallback are unwritable. The watcher"
 " continues; fix the state directory."
 
-#: src/alfred/i18n/_slice_4_reserve.py:162
+#: src/alfred/i18n/_slice_4_reserve.py:166
 msgid "comms.socket.peer_uid_rejected"
 msgstr ""
 "Refused a comms socket peer with a mismatched uid (peer_uid={peer_uid}, "
@@ -4053,4 +4067,30 @@ msgstr "alfred"
 #~ "Operator can adjust the size cap "
 #~ "in config/policies.yaml `web_fetch.size_limit_bytes` "
 #~ "(default 5 MiB)."
+
+# Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
+#~ msgid "daemon.boot.environment_untrusted_source"
+#~ msgstr ""
+#~ "The plugin sandbox launcher refused the"
+#~ " environment value it found. Your "
+#~ ".env file sets ALFRED_ENVIRONMENT to a"
+#~ " value that relaxes the sandbox "
+#~ "(development or test), and .env is "
+#~ "not a trusted source for that —"
+#~ " it is writable by anything that "
+#~ "can write to the project directory, "
+#~ "including a plugin that escaped its "
+#~ "sandbox, so honouring it there would "
+#~ "let an escape make itself permanent. "
+#~ "A .env may only select production, "
+#~ "the strictest setting. To run a "
+#~ "relaxed environment, set it somewhere "
+#~ "the launcher trusts: export "
+#~ "ALFRED_ENVIRONMENT=development in the shell "
+#~ "you start the daemon from, or "
+#~ "write that bare value — no "
+#~ "ALFRED_ENVIRONMENT= prefix, no quotes — "
+#~ "to the root-owned file "
+#~ "/etc/alfred/environment. Then re-run `alfred"
+#~ " daemon start`."
 
