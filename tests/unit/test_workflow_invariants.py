@@ -434,3 +434,40 @@ def test_every_workflow_uv_version_matches_prototools() -> None:
         "workflow uv pins have drifted from .prototools, so CI and local resolve the "
         "lockfile with different tools:\n  " + "\n  ".join(mismatched)
     )
+
+
+def test_every_setup_uv_use_pins_its_version() -> None:
+    """`astral-sh/setup-uv` must never be used without an explicit version (#525).
+
+    An unpinned `uses: astral-sh/setup-uv@<sha>` silently installs whatever the ACTION
+    defaults to — a floating uv that no file in this repo declares. It is invisible to the
+    `.prototools`-vs-workflow guard above, because that only compares DECLARED versions: a
+    job with no declaration has nothing to disagree with.
+
+    That is exactly how it drifted. When this guard was written, 12 of 19 uses were
+    unpinned — every `ci.yml` job (lint/types/unit, integration, coverage) and all of
+    `nightly.yml`, which declared no `UV_VERSION` at all. Only the WSL leg's manual tarball
+    install used the pinned version, which is why CI looked aligned while most of it was not.
+    """
+    unpinned = []
+    total = 0
+    for workflow in _workflow_files():
+        lines = workflow.read_text(encoding="utf-8").split("\n")
+        for i, line in enumerate(lines):
+            if "astral-sh/setup-uv@" not in line or line.lstrip().startswith("#"):
+                continue
+            total += 1
+            # The version must be supplied by the `with:` block attached to THIS step —
+            # i.e. within the few lines before the next step begins.
+            window = "\n".join(lines[i + 1 : i + 5])
+            if "env.UV_VERSION" not in window:
+                unpinned.append(f"{workflow.name}:{i + 1}")
+    assert total >= 15, (
+        f"vacuity floor: found only {total} setup-uv uses; the sweep is not seeing the "
+        "workflows it is supposed to check"
+    )
+    assert not unpinned, (
+        "these `astral-sh/setup-uv` steps take the ACTION'S DEFAULT uv, not the pinned one, "
+        "so they resolve the lockfile with an undeclared floating version and the "
+        ".prototools guard cannot see them (#525):\n  " + "\n  ".join(unpinned)
+    )
