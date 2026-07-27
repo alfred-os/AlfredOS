@@ -15,6 +15,11 @@ concurrency:
   cancel-in-progress: false
 
 
+env:
+  # Single source of truth: .prototools. Pinned by tests/unit/test_workflow_invariants.py
+  # (#525) — every setup-uv use must consume this, never the action default.
+  UV_VERSION: "0.11.32"
+
 permissions:
   contents: read  # Minimal: read repo content for e2e + adversarial runs
 
@@ -49,6 +54,8 @@ jobs:
             exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_e2e == 'true'
       - if: steps.check.outputs.has_e2e == 'true'
         run: uv sync --frozen --dev
@@ -140,6 +147,8 @@ jobs:
             exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_adversarial == 'true'
       - if: steps.check.outputs.has_adversarial == 'true'
         run: uv sync --frozen --dev
@@ -173,6 +182,8 @@ jobs:
             exit 1
           fi
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_smoke == 'true'
       - if: steps.check.outputs.has_smoke == 'true'
         run: uv sync --frozen --dev
