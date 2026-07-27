@@ -97,7 +97,7 @@ def _launcher_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     sys.platform == "win32",
     reason="POSIX-only: subprocess PATH hermeticity (/usr/bin:/bin) breaks child launch on Windows",
 )
-def test_read_environment_ignores_cwd_dotenv_only_source(
+def test_read_environment_refuses_a_loosening_cwd_dotenv_only_source(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A CWD ``.env=development`` alone must NOT make --read-environment report it.
@@ -106,8 +106,10 @@ def test_read_environment_ignores_cwd_dotenv_only_source(
     it) and ``/etc`` is absent (``ALFRED_ETC_ENV_FILE`` points at a
     nonexistent path — hermetic against a real ``/etc/alfred/environment`` on
     the test host). The ONLY signal claiming "development" is the CWD
-    ``.env`` this test plants — trusted-sources-only resolution must ignore
-    it and fall through to the closed-vocabulary "no value" refusal.
+    ``.env`` this test plants. Under DIRECTIONAL TRUST (ADR-0057) a
+    ``.env``-sourced value is honoured only when it is ``production``, so this
+    LOOSENING value must be refused with the closed-vocabulary
+    ``environment_untrusted_source`` key and nothing on stdout.
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(_DOTENV_BODY, encoding="utf-8")
@@ -169,8 +171,19 @@ def test_launcher_refuses_to_spawn_when_only_cwd_dotenv_claims_development(
         timeout=_LAUNCHER_TIMEOUT_S,
     )
 
-    assert result.returncode != 0
-    assert not canary.exists(), "the stub plugin executed despite the unresolved environment"
-    assert "development" not in result.stdout
-    assert "development" not in result.stderr
+    # The refusal must happen AT THE ENVIRONMENT STAGE. Asserting only `returncode != 0` and
+    # an absent canary is VACUOUS on non-Linux: with the guard deleted the launcher resolves
+    # `development`, proceeds, and is then refused DOWNSTREAM (macos_full_not_yet_shipped /
+    # uid_separation_unavailable) — so both still pass while the sandbox gate is wide open.
+    # Verified by mutation. The reason assertions below are what actually bind.
+    assert "development" not in result.stdout, "the resolved value reached the launcher"
     assert "daemon.boot.environment_untrusted_source" in result.stderr
+    assert '"reason":"environment_untrusted_source"' in result.stderr, (
+        "the sandbox_refused audit row must attribute the refusal to the environment stage; "
+        "a downstream reason here means the guard did not fire and something else refused"
+    )
+    assert "development" not in result.stderr
+
+    # Secondary, and deliberately kept: on Linux these DO bind (the escape hatch would exec).
+    assert result.returncode != 0
+    assert not canary.exists(), "the stub plugin executed despite the refused environment"

@@ -61,12 +61,23 @@ def run_launcher(tmp_path: Path):
     def _run(
         *args: str,
         env: dict[str, str] | None = None,
+        cwd: Path | None = None,
     ) -> LauncherResult:
+        """Invoke the launcher. Pass ``cwd`` to control `.env` resolution.
+
+        #486: the launcher resolves `.env` CWD-relative. Tests asserting an UNRESOLVED
+        environment must pass an empty ``cwd`` (typically ``tmp_path``), or a repo-root
+        `.env` — which the README instructs operators to create (`cp .env.example .env`,
+        shipping `production`) — silently resolves it and the test fails for anyone who
+        followed the setup docs. CI never sees it: runners have no `.env`. Default stays
+        ``None`` (inherit) because other tests resolve manifests relative to the repo root.
+        """
         proc = subprocess.run(  # noqa: S603 — repo-owned launcher script path
             [str(LAUNCHER), *args],
             capture_output=True,
             text=True,
             env=_base_env(env),
+            cwd=cwd,
             check=False,
             timeout=_LAUNCHER_TIMEOUT_S,
         )

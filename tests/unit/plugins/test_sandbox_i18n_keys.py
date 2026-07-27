@@ -96,3 +96,26 @@ def test_interpreter_prefix_too_broad_renders_with_emitter_kwargs() -> None:
     assert rendered != "supervisor.sandbox.refused.interpreter_prefix_too_broad"
     assert "{" not in rendered and "}" not in rendered
     assert "alfred.quarantined-llm" in rendered and "/python" in rendered
+
+
+def test_environment_keys_rendered_elsewhere_actually_resolve() -> None:
+    """Bind `_ENVIRONMENT_KEYS_RENDERED_ELSEWHERE` to the catalog (#486 review, L-2).
+
+    The tuple documents keys the launcher surfaces but the supervisor does not render — the
+    daemon-boot path renders them. It had NO test binding: it appeared in this suite only
+    inside a docstring, making it a comment in tuple form. So a key could be added there,
+    the author could believe the contract was enforced, and nothing would check the catalog
+    actually carries it.
+
+    Asserting each key resolves to a real message closes that. A bare key echoed back is
+    `t()`'s miss behaviour, so identity means the catalog entry is absent.
+    """
+    from alfred.i18n import t
+    from alfred.plugins._sandbox_i18n import _ENVIRONMENT_KEYS_RENDERED_ELSEWHERE
+
+    assert _ENVIRONMENT_KEYS_RENDERED_ELSEWHERE, "vacuity floor: the tuple is empty"
+    unresolved = [k for k in _ENVIRONMENT_KEYS_RENDERED_ELSEWHERE if t(k) == k]
+    assert not unresolved, (
+        "these keys are declared as rendered elsewhere but have no catalog entry, so the "
+        f"operator would see the bare key: {unresolved}"
+    )

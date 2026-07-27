@@ -223,12 +223,13 @@ _capture_stderr_last_line() {
 # ALFRED_ENVIRONMENT env var > /etc/alfred/environment). Neither set → refuse.
 # The helper prints the value on stdout and a bare i18n key on stderr.
 #
-# I-4 (final-review, #469): this is DELIBERATE trusted-sources-only resolution
-# (ADR-0053 §3, `resolve_environment(consult_dotenv=False)`) — the launcher
-# never reads a CWD `.env`. A bare-host, `.env`-only install (no env var, no
-# /etc/alfred/environment) boots the daemon fine but this probe still refuses
-# every plugin spawn; see ADR-0053's Consequences → Negative/residuals for the
-# known gap and its fix location (`alfred.plugins._comms_child_env`).
+# DIRECTIONAL TRUST (ADR-0057, #486; amends ADR-0053 §3). The helper resolves
+# WITH `.env` but honours a `.env`-sourced value only when it is `production` —
+# the strictest setting — so a CWD `.env` can ratchet this probe's answer
+# tighter and can NEVER loosen it. A `.env`-sourced development/test refuses
+# with `daemon.boot.environment_untrusted_source`. This closed the #486 gap
+# (a bare-host `.env`-only install booted the daemon and then refused every
+# plugin spawn) without letting an app-writable file relax the sandbox.
 #
 # sec-keystone (CR PR #229 finding-1): the environment is resolved BEFORE host-
 # OS detection so the FAKE_UNAME shim can be gated to non-production. An
