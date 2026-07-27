@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "labels": ["dependencies"],
+  "commitMessagePrefix": "build(deps):",
+  "prConcurrentLimit": 5,
+  "schedule": ["before 6am on monday"],
+  "enabledManagers": ["proto", "custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "uv pin inside GitHub Actions workflows. Dependabot cannot do this — its github-actions manager only bumps `uses:` SHAs, and there is no manager for .prototools. Both spellings CI uses are matched: the workflow `env:` key and ci.yml's shell assignment.",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": ["UV_VERSION\\s*[:=]\\s*[\"']?(?<currentValue>\\d+\\.\\d+\\.\\d+)[\"']?"],
+      "depNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "CRITICAL: .prototools and every workflow UV_VERSION must move in ONE PR. tests/unit/test_workflow_invariants.py asserts they match exactly (#525), so a bot that bumps only one location reds the build. Grouping is what keeps the single-source-of-truth guard and automated updates compatible.",
+      "matchPackageNames": ["uv", "astral-sh/uv"],
+      "groupName": "uv toolchain",
+      "commitMessageTopic": "uv (.prototools + all workflow UV_VERSION pins)"
+    }
+  ]
+}
