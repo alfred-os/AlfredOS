@@ -59,6 +59,11 @@ honours a `DOTENV`-sourced value **only when it is `production`** — the strict
 Precedence is unchanged: a trusted source still outranks `.env` entirely, so this only ever
 decides the case where `.env` is the **only** source.
 
+`.env` here means `Path(".env")` relative to the **daemon process's CWD**, not the repo
+directory — no spawn site passes `cwd=`. Under a systemd unit with `WorkingDirectory=/` there
+is no `.env` to find and #486's dead end persists as `environment_not_set`; such a deployment
+must use a trusted source.
+
 ## Consequences
 
 ### Positive
@@ -68,9 +73,9 @@ decides the case where `.env` is the **only** source.
   On a macOS/Windows bare host the spawn still refuses — `uid_separation_unavailable` at
   `:327`, unrelated to this ADR — so this fixes the environment dead end there without making
   those hosts spawn-capable.
-- **No trust concession.** The only value `.env` can supply is the strictest one. Someone who can
-  write `.env` could previously deny service by corrupting it; they still can, and they still
-  cannot relax the sandbox.
+- **No trust concession in the VALUE.** The only value `.env` can supply is the strictest one,
+  and it can never relax the sandbox. This is *not* a claim of no concession in the SURFACE —
+  see Negative below.
 - Fail-closed and **loud**. The loosening case refuses with a distinct, actionable reason rather
   than being silently overridden — CLAUDE.md hard rule #7.
 - One edit site. Every spawn surface (`comms_stdio_transport`, `quarantine_child_io`,
@@ -81,6 +86,14 @@ decides the case where `.env` is the **only** source.
 
 ### Negative
 
+- **A new attack SURFACE, even though the value domain is closed.** The launcher now opens and
+  parses an attacker-writable file it previously never touched: a python-dotenv parse over
+  adversary bytes, and a blocking `open()` with no timeout (a `mkfifo .env` wedges the read;
+  the boot probe is bounded, the spawn path is not).
+- **A new runtime DoS primitive — not the pre-existing one.** Corrupting `.env` previously
+  affected only the DAEMON AT BOOT, because the launcher never read it. It now denies every
+  subsequent spawn of an already-running daemon, live, with no restart. Measured: garbage →
+  `environment_unrecognised`; directory / mode-000 / invalid UTF-8 → `environment_not_set`.
 - **The invariant is weaker to state, and therefore easier to break.** It was "the launcher never
   reads `.env`" — structurally verifiable by grepping for `consult_dotenv=False`. It is now "a
   `.env` may never *loosen* the launcher's posture", which a future change can violate while still

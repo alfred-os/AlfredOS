@@ -17,11 +17,13 @@ CLI subcommands (mutually exclusive):
       Print the resolved ``Settings.environment`` value
       (development|production|test) via the three-layer loader (env var >
       /etc/alfred/environment; ``ALFRED_ETC_ENV_FILE`` overrides the file
-      path for testing). ``.env`` is deliberately EXCLUDED here
-      (``consult_dotenv=False``, ADR-0053) — trusted-sources-only, since
-      this helper's stdout is a bare string the bash launcher consumes and
-      cannot carry a source alongside the value. Refuses (exit 1) if
-      neither trusted source resolves to a Literal value.
+      path for testing). ``.env`` is consulted under DIRECTIONAL TRUST
+      (ADR-0057, #486): a ``.env``-sourced value is honoured ONLY when it is
+      ``production`` — the strictest setting — so an app-writable ``.env`` can
+      ratchet the launcher tighter and never loosen it. A ``.env``-sourced
+      ``development``/``test`` refuses with
+      ``daemon.boot.environment_untrusted_source``. Refuses (exit 1) if no
+      source resolves to a Literal value.
 
   --policy-to-bwrap-flags
       Read a TOML policy from stdin; print the bwrap CLI flags one per line.
@@ -43,9 +45,12 @@ Note (sec-007 carve-out): ``--read-environment`` resolves the environment
 through :func:`alfred.config._environment_loader.resolve_environment`, which is
 the single sanctioned reader of ``ALFRED_ENVIRONMENT`` /
 ``/etc/alfred/environment`` / ``.env`` (ADR-0053's three-layer precedence).
-This call site passes ``consult_dotenv=False`` so ``.env`` — the lowest,
-CWD-writable layer — is excluded from consultation entirely rather than
-merely deprioritized: the launcher's trusted-sources-only posture. The
+This call site passes ``consult_dotenv=True`` but constrains the result: a
+``DOTENV``-sourced value is accepted only when it equals ``production``
+(ADR-0057, amending ADR-0053 §3's original source-exclusion). The security
+property is unchanged — the lowest, CWD-writable layer can never select a
+laxer environment for the launcher — but it is now enforced by a value check
+rather than by construction, so DO NOT relax that check. The
 ``ALFRED_ETC_ENV_FILE`` override read below is a non-secret test hook (the
 env-read AST guard only bans ``ALFRED_<SUPPORTED_SECRET>`` keys, never
 ``ALFRED_ETC_ENV_FILE``).
@@ -67,6 +72,7 @@ from pathlib import Path
 from alfred._stdio_logging import configure_stderr_logging
 
 configure_stderr_logging()
+
 
 from alfred.config._environment_loader import (  # noqa: E402 - after stderr-logging pin (BUG-1)
     EnvironmentSource,
@@ -355,7 +361,29 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _pin_structlog_to_stderr() -> None:
+    """Keep structlog off fd 1 — sbx-2026-028 (Critical).
+
+    ``configure_stderr_logging()`` pins only STDLIB logging; structlog does not go through it
+    and its default ``PrintLoggerFactory`` writes to **stdout**. ``_environment_loader`` logs
+    via structlog, so a present-but-unreadable ``/etc/alfred/environment`` put a warning on
+    fd 1. The launcher then compared ``"<warning...>\nproduction"`` against ``"production"``,
+    failed, and set ``IS_PRODUCTION=false`` **on a production host** — un-gating the
+    FAKE_UNAME keystone, the UID-drop refusal, and the unsandboxed escape hatch.
+
+    Called from ``main`` rather than at import: ``structlog.configure`` is PROCESS-GLOBAL, so
+    doing it at import time re-pins structlog for every test that imports this module and
+    broke an unrelated log-capture test. As a ``python -m`` entrypoint this process is
+    dedicated, so configuring here is safe — the same placement
+    ``security/quarantine_child/__main__.py`` uses.
+    """
+    import structlog
+
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
+
+
 def main(argv: list[str] | None = None) -> int:
+    _pin_structlog_to_stderr()
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.read_sandbox:

@@ -1,0 +1,32 @@
+id: sbx-2026-028
+category: sandbox_escape
+threat: >-
+  The launcher derives ALFRED_RESOLVED_ENVIRONMENT / IS_PRODUCTION from the exact
+  bytes on manifest_reader --read-environment's stdout. configure_stderr_logging()
+  pins only STDLIB logging; structlog's default PrintLoggerFactory writes to
+  STDOUT, and _environment_loader logs via structlog. A present-but-unreadable
+  /etc/alfred/environment therefore emitted a warning onto fd 1, so the launcher
+  compared "<warning...>\nproduction" against "production", failed the test, and
+  set IS_PRODUCTION=false ON A PRODUCTION HOST — un-gating the FAKE_UNAME
+  keystone, the non-Linux UID-drop refusal, and the unsandboxed-in-production
+  escape hatch. The multi-line value was also interpolated raw into the
+  sandbox_refused JSON rows, splitting them.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: stdout_pollution_flips_is_production
+  etc_environment: present_but_unreadable
+  env_var: production
+expected_outcome: refused
+provenance: >-
+  Found by the security lane reviewing PR #523 (ADR-0057 / #486). PRE-EXISTING on
+  main, not introduced by that PR — but #486 adds a second structlog producer to
+  the same path and its ADR asserts the channel is byte-pure, so the fix landed
+  there. Fail-open, not fail-closed: the warning is still emitted, on stderr.
+  The triggering deployment is one ADR-0053 explicitly blesses — root-owned 0600
+  /etc + a non-root daemon + ALFRED_ENVIRONMENT exported. Fix: pin structlog to
+  stderr in manifest_reader, matching security/quarantine_child/__main__.py.
+references:
+  - "src/alfred/plugins/manifest_reader.py (structlog stderr pin)"
+  - "src/alfred/_stdio_logging.py (stdlib-only pin — the incomplete guarantee)"
+  - "bin/alfred-plugin-launcher.sh IS_PRODUCTION derivation"
+  - "docs/adr/0057-directional-trust-for-the-launcher-environment.md"

@@ -46,7 +46,12 @@ sandbox_profile = "user-plugin"
 """
 
 
-def _run(*args: str, env: dict[str, str] | None = None, stdin: str | None = None):
+def _run(
+    *args: str,
+    env: dict[str, str] | None = None,
+    stdin: str | None = None,
+    cwd: Path | None = None,
+):
     base_env = {"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin"}
     if env:
         base_env.update(env)
@@ -56,6 +61,10 @@ def _run(*args: str, env: dict[str, str] | None = None, stdin: str | None = None
         text=True,
         env=base_env,
         input=stdin,
+        # #486: `.env` is resolved CWD-relative. Callers asserting an UNRESOLVED environment
+        # must pass an empty cwd, or a repo-root `.env` — which the README instructs operators
+        # to create — decides the result and the test fails for anyone who followed the docs.
+        cwd=cwd,
         check=False,
     )
 
@@ -184,6 +193,7 @@ def test_read_environment_unset_refuses(tmp_path: Path) -> None:
     result = _run(
         "--read-environment",
         env={"ALFRED_ETC_ENV_FILE": str(tmp_path / "no-file")},
+        cwd=tmp_path,  # #486: no `.env` here — see _run's cwd note
     )
     assert result.returncode != 0
     assert "daemon.boot.environment_not_set" in result.stderr

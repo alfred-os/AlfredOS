@@ -172,7 +172,7 @@ def test_self_test_returns_policy_resolving(run_launcher) -> None:
     assert result.stdout.strip() == "policy-resolving"
 
 
-def test_self_test_does_not_report_resolving_without_an_environment(run_launcher) -> None:
+def test_self_test_does_not_report_resolving_without_an_environment(run_launcher, tmp_path) -> None:
     """The self-test must exercise the launcher's FIRST real check (#521).
 
     ``--self-test`` used to print the resolving signature and exit BEFORE the
@@ -184,7 +184,11 @@ def test_self_test_does_not_report_resolving_without_an_environment(run_launcher
     boot in production, so emitting a distinct token here converts a latent per-spawn dead
     end into a loud, diagnosable boot refusal.
     """
-    result = run_launcher("--self-test", env={"ALFRED_ETC_ENV_FILE": "/nonexistent/alfred-env"})
+    result = run_launcher(
+        "--self-test",
+        env={"ALFRED_ETC_ENV_FILE": "/nonexistent/alfred-env"},
+        cwd=tmp_path,  # #486: no `.env` here — see run_launcher's cwd note
+    )
 
     assert result.stdout.strip() != "policy-resolving", (
         "the self-test reported a policy-resolving launcher despite being unable to resolve "
@@ -209,6 +213,7 @@ def test_refuses_when_environment_unset(run_launcher, tmp_path) -> None:
         "alfred.example",
         str(stub),
         env={"ALFRED_ETC_ENV_FILE": str(tmp_path / "absent")},
+        cwd=tmp_path,  # #486: no `.env` here — see run_launcher's cwd note
     )
     assert result.returncode != 0
     assert "daemon.boot.environment_not_set" in result.stderr
