@@ -31,9 +31,60 @@ from alfred.cli.daemon._failures import LauncherNotPolicyResolvingFailure
     reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec "
     "(no POSIX shebang interpreter on Windows; falls back to the stub signature)",
 )
-async def test_real_launcher_self_test_returns_policy_resolving() -> None:
-    """PR-S4-6: the real launcher --self-test returns the resolving signature."""
+async def test_real_launcher_self_test_returns_policy_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-S4-6: the real launcher --self-test returns the resolving signature.
+
+    #521: the environment is now supplied explicitly. The self-test resolves it (it is the
+    launcher's first real check), so leaving it unset made this test pass for the wrong
+    reason — it asserted "resolving" on a launcher that would refuse every spawn.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "production")
     assert await _launcher_self_test_impl() == _POLICY_RESOLVING_SIGNATURE
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec",
+)
+async def test_probe_refuses_in_production_when_launcher_cannot_resolve_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#521: a launcher that cannot resolve the environment must NOT pass the boot probe.
+
+    Before #521 ``--self-test`` returned the resolving signature without ever attempting the
+    resolution, so this probe reported green on a launcher that would refuse EVERY spawn —
+    the #514 paper-gate shape. The refusal names the fault in ``probe_response`` rather than
+    collapsing into the generic stub signature, so the operator learns WHY.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_ETC_ENV_FILE", "/nonexistent/alfred-environment")
+
+    result = await probe_launcher_policy_resolving(environment="production")
+
+    assert isinstance(result, LauncherNotPolicyResolvingFailure)
+    assert result.probe_response == "environment-unresolved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec",
+)
+async def test_probe_still_tolerates_unresolvable_environment_outside_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#521 must not regress dev convenience: non-production still boots.
+
+    The sec-004 posture is unchanged — only production refuses on a non-resolving signature.
+    Pinned so a future tightening of #521 is a deliberate decision, not a side effect.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ALFRED_ETC_ENV_FILE", "/nonexistent/alfred-environment")
+
+    assert await probe_launcher_policy_resolving(environment="development") is None
 
 
 @pytest.mark.asyncio
@@ -49,13 +100,19 @@ async def test_probe_passes_in_development() -> None:
     reason="POSIX-only: exec of the .sh launcher script via asyncio.create_subprocess_exec "
     "(no POSIX shebang interpreter on Windows; falls back to the stub signature)",
 )
-async def test_probe_passes_in_production_with_real_launcher() -> None:
+async def test_probe_passes_in_production_with_real_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """PR-S4-6 flip: the real policy-resolving launcher boots in production.
 
-    No monkeypatch — exercises the SHIPPED launcher's --self-test. This is the
-    arch-001 closure: once PR-S4-6 ships the real self-test, prod boot
-    succeeds (the stub-era refusal is gone).
+    Exercises the SHIPPED launcher's --self-test. This is the arch-001 closure: once
+    PR-S4-6 ships the real self-test, prod boot succeeds (the stub-era refusal is gone).
+
+    #521: the environment is supplied explicitly. Without it the shipped self-test now
+    reports ``environment-unresolved`` — correctly, since such a launcher would refuse every
+    spawn — so this test previously asserted prod boot on a launcher that could not work.
     """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "production")
     result = await probe_launcher_policy_resolving(environment="production")
     assert result is None
 

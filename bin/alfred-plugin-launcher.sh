@@ -45,6 +45,23 @@ set -eu
 # run BEFORE positional-arg parsing so the probe needs no plugin args.
 case "${1:-}" in
     --self-test)
+        # #521: the self-test must exercise the launcher's FIRST real check — the
+        # environment resolution below. It previously printed the signature and exited
+        # HERE, so `probe_launcher_policy_resolving` reported green on a launcher that
+        # would refuse EVERY subsequent spawn (the #514 paper-gate shape, in the probe
+        # whose whole purpose is to validate this launcher). On the bare-host `.env`-only
+        # path (#486) that meant a green boot followed by a misdiagnosed failure at first
+        # spawn.
+        #
+        # Emit a DISTINCT token rather than exiting non-zero: `_launcher_self_test_impl`
+        # returns stdout verbatim on a zero exit but collapses ANY non-zero exit into the
+        # generic stub signature, so exiting non-zero would refuse the boot without saying
+        # why. The probe treats every token except `policy-resolving` as a failure, so this
+        # still fails closed in production — it just names the fault in `probe_response`.
+        if ! python3 -m alfred.plugins.manifest_reader --read-environment >/dev/null 2>&1; then
+            printf 'environment-unresolved\n'
+            exit 0
+        fi
         printf 'policy-resolving\n'
         exit 0
         ;;

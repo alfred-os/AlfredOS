@@ -162,9 +162,40 @@ def _path_without_tool(tmp_path, missing_tool: str) -> str:
 
 
 def test_self_test_returns_policy_resolving(run_launcher) -> None:
-    result = run_launcher("--self-test")
+    """A launcher with a resolvable environment reports the resolving signature.
+
+    #521: the env is now supplied explicitly. Previously this passed with NO
+    environment at all, which is precisely the defect — see the test below.
+    """
+    result = run_launcher("--self-test", env={"ALFRED_ENVIRONMENT": "production"})
     assert result.returncode == 0
     assert result.stdout.strip() == "policy-resolving"
+
+
+def test_self_test_does_not_report_resolving_without_an_environment(run_launcher) -> None:
+    """The self-test must exercise the launcher's FIRST real check (#521).
+
+    ``--self-test`` used to print the resolving signature and exit BEFORE the
+    environment resolution, so ``probe_launcher_policy_resolving`` reported green on a
+    launcher that would refuse EVERY subsequent spawn — the #514 paper-gate shape, in the
+    probe whose entire purpose is to validate the launcher.
+
+    The probe treats any token other than ``policy-resolving`` as a failure and refuses the
+    boot in production, so emitting a distinct token here converts a latent per-spawn dead
+    end into a loud, diagnosable boot refusal.
+    """
+    result = run_launcher("--self-test", env={"ALFRED_ETC_ENV_FILE": "/nonexistent/alfred-env"})
+
+    assert result.stdout.strip() != "policy-resolving", (
+        "the self-test reported a policy-resolving launcher despite being unable to resolve "
+        "the environment — every spawn will refuse and the boot probe will not notice"
+    )
+    # A DISTINCT token, not a generic failure: `_launcher_self_test_impl` returns stdout
+    # verbatim on a zero exit, so this reaches LauncherNotPolicyResolvingFailure's
+    # `probe_response` and names the real fault. A non-zero exit would be collapsed into the
+    # generic stub signature and the diagnosis would be lost.
+    assert result.stdout.strip() == "environment-unresolved"
+    assert result.returncode == 0
 
 
 # --------------------------------------------------------------------------
