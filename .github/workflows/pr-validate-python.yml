@@ -29,7 +29,10 @@ permissions: {}
 # Shared environment: pin uv and Python version once so all jobs agree.
 env:
   PYTHON_VERSION: "3.14"
-  UV_VERSION: "0.5.14"
+  # Pinned to match the WSL leg (ci.yml, which already used 0.11.32) and the repo
+  # `.prototools` pin, so local and CI resolve with the SAME uv. Was 0.5.14 — roughly a
+  # year behind, in the tool that owns lockfile resolution and env creation.
+  UV_VERSION: "0.11.32"
 
 jobs:
   # ─────────────────────────────────────────────────────────────
