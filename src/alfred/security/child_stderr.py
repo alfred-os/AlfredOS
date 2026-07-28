@@ -69,6 +69,7 @@ _READ_CHUNK_BYTES: Final[int] = 64 * 1024
 # a child that never emits a newline must not defeat that.
 _MAX_LINE_BYTES: Final[int] = 64 * 1024
 
+
 def sanitize_child_stderr(raw: bytes, *, cap: int, truncated: bool = False) -> str | None:
     """De-fang child stderr into a single-line structured-log field (or ``None``).
 
@@ -104,7 +105,7 @@ class _Read1able(Protocol):
     requirement. A real ``Popen.stderr`` is a ``BufferedReader``, which has it.
     """
 
-    def read1(self, size: int = ..., /) -> bytes: ...
+    def read1(self, size: int = -1, /) -> bytes: ...
 
 
 class _LineAssembler:
