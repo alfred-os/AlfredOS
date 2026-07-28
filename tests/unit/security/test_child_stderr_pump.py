@@ -154,12 +154,19 @@ async def test_aclose_is_idempotent_and_never_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unterminated_overlong_run_is_dropped_and_recovery_resyncs() -> None:
-    """A child that floods WITHOUT a newline must not grow the parent buffer.
+async def test_an_overlong_run_spanning_chunks_is_reported_not_dropped() -> None:
+    """A flood with no newline must be REPORTED clamped, never silently dropped.
 
-    Covers the drop-and-resync path: the over-long partial is discarded, its tail is
-    swallowed up to the next newline (so no spurious short line is forged from the
-    remainder), and the line after that arrives intact.
+    This case previously asserted the opposite — that the run vanished — which
+    encoded a silent failure as the contract. CodeRabbit caught it: the head was
+    discarded with no log line and no truncation marker, and it was easy to reach
+    rather than exotic, since `_MAX_LINE_BYTES == _READ_CHUNK_BYTES` means ANY line
+    spanning more than one read with no embedded newline took that path. A refusal
+    row caught in such a run disappeared undetected.
+
+    The head is now emitted clamped (so it carries the truncation marker), the
+    remainder is swallowed up to the closing newline so no spurious short line is
+    forged from it, and the next real line still arrives intact.
     """
     pump = ChildStderrPump(
         plugin_id="alfred.discord", event="gateway.adapter.child_stderr", max_line_bytes=512
@@ -167,15 +174,21 @@ async def test_unterminated_overlong_run_is_dropped_and_recovery_resyncs() -> No
     with structlog.testing.capture_logs() as logs:
         reader = asyncio.StreamReader()
         pump.start(reader)
-        reader.feed_data(b"z" * 4096)  # no newline: exceeds the cap, gets dropped
+        reader.feed_data(b"z" * 4096)  # no newline: exceeds the cap mid-stream
         await asyncio.sleep(0.05)
-        reader.feed_data(b"tail-of-the-dropped-line\nrecovered\n")
+        reader.feed_data(b"tail-of-the-clamped-line\nrecovered\n")
         reader.feed_eof()
         await asyncio.sleep(0.1)
         await pump.aclose()
 
     texts = [e["child_stderr"] for e in logs if e["event"] == "gateway.adapter.child_stderr"]
-    assert texts == ["recovered"], texts
+    assert len(texts) == 2, texts
+    assert texts[0].startswith("z"), "the head of the over-long run was not reported"
+    assert texts[0].endswith(STDERR_TRUNCATION_MARKER), "a clamp must be VISIBLE"
+    assert "tail-of-the-clamped-line" not in texts[0], (
+        "the swallowed remainder was forged into the reported line"
+    )
+    assert texts[1] == "recovered", "the reader did not resync onto the next line"
 
 
 @pytest.mark.asyncio
@@ -268,3 +281,54 @@ async def test_aclose_cancels_a_pump_blocked_on_read() -> None:
     await pump.aclose()
 
     assert task.cancelled(), "the pump task survived aclose()"
+
+
+@pytest.mark.asyncio
+async def test_multibyte_stderr_is_not_falsely_marked_truncated() -> None:
+    """A line over the BYTE cap but under the CHARACTER cap was never cut.
+
+    `truncated` reports that the raw bytes were already clipped. Comparing
+    `len(line)` in BYTES against a constant the sanitizer applies as a CHARACTER
+    cap stamped a truncation marker onto CJK/emoji stderr that was fully intact —
+    a false loss report in a field an operator reads to diagnose a refusal.
+    """
+    # 3 bytes per char: over the 4096-BYTE cap, comfortably under it in CHARACTERS.
+    line = ("世" * 2000).encode()
+    assert len(line) > 4096 and len("世" * 2000) < 4096
+
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        await _feed(pump, line + b"\n")
+
+    texts = [e["child_stderr"] for e in logs if e["event"] == "gateway.adapter.child_stderr"]
+    assert len(texts) == 1
+    assert not texts[0].endswith(STDERR_TRUNCATION_MARKER), (
+        "content that was never cut was reported as truncated"
+    )
+    assert len(texts[0]) == 2000
+
+
+@pytest.mark.asyncio
+async def test_aclose_logs_a_pump_fault_instead_of_swallowing_it() -> None:
+    """A fault surfacing at close must be LOUD, not blanket-suppressed.
+
+    `aclose` previously wrapped the await in
+    `contextlib.suppress(asyncio.CancelledError, Exception)`, so a genuine pump
+    fault that only surfaced when the task was reaped vanished — a silent failure
+    in a security path (hard rule #7). It now distinguishes the CancelledError we
+    caused (expected) from a real fault (logged with its `error_class`).
+    """
+
+    async def _explode() -> None:
+        raise RuntimeError("pump died on reap")
+
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    pump._task = asyncio.create_task(_explode())
+    await asyncio.sleep(0.01)  # let it fail before we close
+
+    with structlog.testing.capture_logs() as logs:
+        await pump.aclose()  # must not raise
+
+    failures = [e for e in logs if e["event"] == "security.child_stderr.pump_failed"]
+    assert len(failures) == 1, f"the fault was swallowed: {logs}"
+    assert failures[0]["error_class"] == "RuntimeError"

@@ -36,7 +36,6 @@ drain, not at a spawn-time probe barrier" shape ADR-0051 §2 chose.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import threading
 import unicodedata
 from typing import IO, Final
@@ -132,6 +131,16 @@ class _LineAssembler:
             # the log cap, where the sanitizer would not mark it on length alone.
             lines.append((line, clamped))
         if len(self._buf) > self._max:
+            # The line ran past the cap WITHOUT a newline in this chunk. Emit the
+            # head we have — clamped, therefore marked — rather than dropping it.
+            #
+            # Dropping was a SILENT failure, and the one this file's own comments
+            # promise not to commit. It was also easy to hit, not exotic:
+            # `_MAX_LINE_BYTES == _READ_CHUNK_BYTES`, so ANY line spanning more than
+            # one read() with no embedded newline took this path, vanished whole, and
+            # left no log line and no truncation marker. A refusal row or diagnostic
+            # caught in such a run disappeared undetected.
+            lines.append((bytes(self._buf[: self._max]), True))
             self._buf.clear()
             self._discarding = True
         return lines
@@ -185,11 +194,13 @@ class ChildStderrPump:
                 with self._lock:
                     if len(self._rows) < _MAX_RETAINED_REFUSAL_ROWS:
                         self._rows.append(row)
-            text = sanitize_child_stderr(
-                line,
-                cap=STDERR_LOG_CAP_BYTES,
-                truncated=clamped or len(line) > STDERR_LOG_CAP_BYTES,
-            )
+            # `truncated` reports that the RAW bytes were already clipped before
+            # this call — which is exactly what `clamped` means and nothing else.
+            # Comparing `len(line)` (BYTES) against STDERR_LOG_CAP_BYTES (applied by
+            # the sanitizer as a CHARACTER cap) forced a false truncation marker onto
+            # CJK/emoji stderr that was never actually cut. The sanitizer already
+            # makes the character-length decision correctly on the decoded string.
+            text = sanitize_child_stderr(line, cap=STDERR_LOG_CAP_BYTES, truncated=clamped)
             if text is None:
                 return
             if rows:
@@ -284,10 +295,19 @@ class ChildStderrPump:
         no way for it to outlive the interpreter.
         """
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # expected — we just cancelled it
+        except Exception as exc:  # a genuine pump fault must be loud (hard rule #7)
+            log.warning(
+                "security.child_stderr.pump_failed",
+                plugin_id=self._plugin_id,
+                error_class=type(exc).__name__,
+            )
 
 
 __all__ = [
