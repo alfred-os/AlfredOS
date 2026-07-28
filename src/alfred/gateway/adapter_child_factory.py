@@ -76,6 +76,7 @@ from alfred.gateway.adapter_supervisor import (
 )
 from alfred.i18n import t
 from alfred.plugins._comms_child_env import _scrubbed_base
+from alfred.security.child_stderr import ChildStderrPump
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -460,6 +461,17 @@ class GatewayAdapterChildFactory:
         plugin_id, module = _resolve_launch_target(adapter_id, override_map=self._override_map)
 
         process, write_fd = self._spawn_in_fd3_window(plugin_id=plugin_id, module=module)
+
+        # #520: start draining stderr IMMEDIATELY, before the credential leg. This is a
+        # raw ``Popen``, so — unlike the asyncio comms sibling — nothing polls the pipe
+        # on our behalf: the 64KB kernel buffer fills and the child blocks in ``write()``
+        # forever, with no crash and no error (measured: stalled at exactly 64/20000 KB).
+        # Draining also makes the launcher's sandbox refusals observable at all; they are
+        # emitted on this stream and, before this, reached no log, no audit row and no
+        # operator (hard rule #7).
+        stderr_pump = ChildStderrPump(plugin_id=plugin_id, event="gateway.adapter.child_stderr")
+        if process.stderr is not None:
+            stderr_pump.start_blocking(process.stderr)
 
         # The credential hook runs AFTER the window closes / BEFORE the handshake. A
         # CredentialLegDownError / AdapterCredentialError propagates UNWRAPPED (the

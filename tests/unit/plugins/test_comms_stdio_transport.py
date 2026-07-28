@@ -73,9 +73,16 @@ class _FakeProc:
         stdout: asyncio.StreamReader | None,
         stdin: _FakeStdin | None,
         returncode: int | None = None,
+        stderr: asyncio.StreamReader | None = None,
     ) -> None:
         self.stdout = stdout
         self.stdin = stdin
+        # A real ``asyncio.subprocess.Process`` ALWAYS exposes ``stderr`` (``None``
+        # when not piped). The double omitted it, so the #520 stderr drain — which
+        # reads ``proc.stderr`` right after spawn — hit an AttributeError that the
+        # real object cannot raise. Modelled here rather than guarded at the call
+        # site, so a genuinely absent stream still surfaces.
+        self.stderr = stderr
         self.returncode = returncode
         self.terminated = False
         self.killed = False

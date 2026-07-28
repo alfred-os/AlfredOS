@@ -1,0 +1,153 @@
+"""``ChildStderrPump`` — the continuous launcher-child stderr drain (#520).
+
+The drain exists so a launcher sandbox refusal reaches a log line and an audit row
+instead of the floor (CLAUDE.md hard rule #7), and so an unread pipe cannot wedge a
+raw-``Popen`` child or grow an asyncio parent without bound.
+
+Assertions go through ``structlog.testing.capture_logs``: these events are emitted
+via structlog, which does NOT land in pytest's ``caplog``, so a caplog-based
+assertion here would be vacuous.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+import structlog
+
+from alfred.security.child_stderr import (
+    STDERR_TRUNCATION_MARKER,
+    ChildStderrPump,
+    sanitize_child_stderr,
+)
+
+
+def _refusal_line(reason: str = "environment_not_set") -> bytes:
+    return (
+        json.dumps(
+            {
+                "event": "supervisor.plugin.sandbox_refused",
+                "plugin_id": "alfred.discord",
+                "policy_ref": "",
+                "reason": reason,
+                "environment": "production",
+                "host_os": "linux",
+            }
+        ).encode()
+        + b"\n"
+    )
+
+
+async def _feed(pump: ChildStderrPump, payload: bytes) -> None:
+    """Drive the async driver over an in-memory stream to EOF."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(payload)
+    reader.feed_eof()
+    pump.start(reader)
+    await asyncio.sleep(0)  # let the pump task run
+    for _ in range(50):
+        if reader.at_eof() and not reader._buffer:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_refusal_is_logged_loudly_with_its_reason() -> None:
+    """THE #520 case: a refusal must not vanish. It is a WARNING carrying the reason."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        await _feed(pump, _refusal_line())
+
+    refusals = [e for e in logs if e["event"] == "security.child_stderr.sandbox_refused"]
+    assert len(refusals) == 1, f"expected exactly one refusal log line, got {logs}"
+    assert refusals[0]["reason"] == "environment_not_set"
+    assert refusals[0]["log_level"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_refusal_is_retained_for_the_audit_path() -> None:
+    """The row must survive for the spawn site's failure arm to persist it (#433)."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    await _feed(pump, _refusal_line("policy_ref_missing"))
+
+    rows = pump.refusal_rows
+    assert len(rows) == 1
+    assert rows[0].reason == "policy_ref_missing"
+    assert rows[0].plugin_id == "alfred.discord"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_chatter_is_forwarded_at_debug_not_info() -> None:
+    """A healthy adapter logs continuously; that must not dominate the daemon's logs."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        await _feed(pump, b"just an ordinary adapter log line\n")
+
+    forwarded = [e for e in logs if e["event"] == "gateway.adapter.child_stderr"]
+    assert len(forwarded) == 1
+    assert forwarded[0]["log_level"] == "debug"
+    assert forwarded[0]["child_stderr"] == "just an ordinary adapter log line"
+
+
+@pytest.mark.asyncio
+async def test_retained_refusal_rows_are_bounded() -> None:
+    """A hostile child spamming refusal rows must not grow the parent without bound."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    await _feed(pump, _refusal_line() * 200)
+
+    assert len(pump.refusal_rows) == 16, "retention cap not enforced"
+
+
+@pytest.mark.asyncio
+async def test_an_overlong_line_is_discarded_not_buffered() -> None:
+    """A child that never emits a newline must not be able to grow the parent."""
+    pump = ChildStderrPump(
+        plugin_id="alfred.discord", event="gateway.adapter.child_stderr", max_line_bytes=1024
+    )
+    with structlog.testing.capture_logs() as logs:
+        # An over-long unterminated run, then a normal line: the giant one is dropped,
+        # its tail discarded up to the newline, and the following line still arrives.
+        await _feed(pump, b"y" * 8192 + b"\nkept\n")
+
+    forwarded = [e for e in logs if e["event"] == "gateway.adapter.child_stderr"]
+    texts = [e["child_stderr"] for e in forwarded]
+    assert len(texts) == 2, texts
+    # The giant line is clamped, not buffered whole and not silently dropped...
+    assert texts[0].endswith(STDERR_TRUNCATION_MARKER), "a clamp must be VISIBLE, not silent"
+    assert len(texts[0]) <= 1024 + len(STDERR_TRUNCATION_MARKER)
+    # ...and the line after it still arrives intact.
+    assert texts[1] == "kept"
+
+
+def test_sanitizer_strips_control_and_format_chars() -> None:
+    """Forged newlines / ANSI / bidi must not reach a log field or an operator's term."""
+    raw = b"before\x1b[31m\nforged: level=error\x00\xe2\x80\xaeafter"
+    out = sanitize_child_stderr(raw, cap=4096)
+    assert out is not None
+    assert "\n" not in out and "\x1b" not in out and "\x00" not in out
+    assert "‮" not in out  # bidi override (Cf)
+    assert "before" in out and "after" in out
+
+
+def test_sanitizer_returns_none_when_nothing_printable_remains() -> None:
+    assert sanitize_child_stderr(b"\x00\x01\x02", cap=4096) is None
+
+
+def test_sanitizer_marks_truncation_from_the_raw_byte_cap() -> None:
+    """Load-bearing for multi-byte UTF-8: a byte-capped read can decode to < cap chars."""
+    out = sanitize_child_stderr("é".encode() * 10, cap=4096, truncated=True)
+    assert out is not None
+    assert out.endswith(STDERR_TRUNCATION_MARKER)
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_idempotent_and_never_raises() -> None:
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    await pump.aclose()  # never started
+    reader = asyncio.StreamReader()
+    pump.start(reader)
+    await pump.aclose()
+    await pump.aclose()
