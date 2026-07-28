@@ -151,3 +151,120 @@ async def test_aclose_is_idempotent_and_never_raises() -> None:
     pump.start(reader)
     await pump.aclose()
     await pump.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unterminated_overlong_run_is_dropped_and_recovery_resyncs() -> None:
+    """A child that floods WITHOUT a newline must not grow the parent buffer.
+
+    Covers the drop-and-resync path: the over-long partial is discarded, its tail is
+    swallowed up to the next newline (so no spurious short line is forged from the
+    remainder), and the line after that arrives intact.
+    """
+    pump = ChildStderrPump(
+        plugin_id="alfred.discord", event="gateway.adapter.child_stderr", max_line_bytes=512
+    )
+    with structlog.testing.capture_logs() as logs:
+        reader = asyncio.StreamReader()
+        pump.start(reader)
+        reader.feed_data(b"z" * 4096)  # no newline: exceeds the cap, gets dropped
+        await asyncio.sleep(0.05)
+        reader.feed_data(b"tail-of-the-dropped-line\nrecovered\n")
+        reader.feed_eof()
+        await asyncio.sleep(0.1)
+        await pump.aclose()
+
+    texts = [e["child_stderr"] for e in logs if e["event"] == "gateway.adapter.child_stderr"]
+    assert texts == ["recovered"], texts
+
+
+@pytest.mark.asyncio
+async def test_a_consume_failure_is_logged_loudly_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drain fault must surface with its error_class, never silently (hard rule #7)."""
+
+    def _boom(_line: bytes) -> object:
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr("alfred.security.child_stderr.parse_launcher_refusal_rows", _boom)
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        await _feed(pump, b"anything\n")
+
+    failures = [e for e in logs if e["event"] == "security.child_stderr.consume_failed"]
+    assert len(failures) == 1
+    assert failures[0]["error_class"] == "RuntimeError"
+    assert failures[0]["log_level"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_stream_read_failure_is_logged_loudly_not_swallowed() -> None:
+    """A torn pipe must not raise out of the pump and preempt the caller's error."""
+
+    class _ExplodingReader:
+        async def read(self, _n: int) -> bytes:
+            raise OSError("pipe torn")
+
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        pump.start(_ExplodingReader())  # type: ignore[arg-type]
+        await asyncio.sleep(0.05)
+        await pump.aclose()
+
+    failures = [e for e in logs if e["event"] == "security.child_stderr.pump_failed"]
+    assert len(failures) == 1
+    assert failures[0]["error_class"] == "OSError"
+
+
+def test_a_blocking_read_failure_is_logged_loudly_not_swallowed() -> None:
+    """Same contract on the thread driver, which cannot propagate to the caller at all."""
+
+    class _ExplodingStream:
+        def read1(self, _n: int) -> bytes:
+            raise OSError("pipe torn")
+
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        pump.start_blocking(_ExplodingStream())  # type: ignore[arg-type]
+        pump._thread.join(timeout=5)
+
+    failures = [e for e in logs if e["event"] == "security.child_stderr.pump_failed"]
+    assert len(failures) == 1
+    assert failures[0]["error_class"] == "OSError"
+
+
+@pytest.mark.asyncio
+async def test_an_unprintable_line_emits_no_empty_field_noise() -> None:
+    """Nothing printable left -> no log line at all, rather than an empty field."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        await _feed(pump, b"\x00\x01\x02\n")
+
+    assert [e for e in logs if e["event"] == "gateway.adapter.child_stderr"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_unterminated_final_line_is_still_drained_at_eof() -> None:
+    """A child that dies mid-line must not lose that line — it may name the reason."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        await _feed(pump, b"died before the newline")
+
+    texts = [e["child_stderr"] for e in logs if e["event"] == "gateway.adapter.child_stderr"]
+    assert texts == ["died before the newline"]
+
+
+@pytest.mark.asyncio
+async def test_aclose_cancels_a_pump_blocked_on_read() -> None:
+    """aclose must actually stop a live drain, not leave a task on a dead child."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    reader = asyncio.StreamReader()  # never fed, never EOF: the pump blocks in read()
+    pump.start(reader)
+    await asyncio.sleep(0.05)  # let it reach the blocking read
+    task = pump._task
+    assert task is not None and not task.done()
+
+    await pump.aclose()
+
+    assert task.cancelled(), "the pump task survived aclose()"
