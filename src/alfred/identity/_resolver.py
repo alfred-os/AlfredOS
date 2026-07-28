@@ -78,10 +78,19 @@ log = structlog.get_logger(__name__)
 _REFUSED_HOOKPOINT = "operator.session.refused"
 
 # Ceiling on establishing the pooled connection BEFORE the resolution budget
-# starts (#527). Generous — it bounds a cold TCP connect + Postgres auth against a
-# possibly remote, TLS-terminated server, not any resolution work. Exceeding it is
-# not fatal: the pipeline runs anyway and fails with its own typed error.
-_WARM_CONNECTION_TIMEOUT_S: float = 5.0
+# starts (#527). Deliberately the SAME as the resolution budget, so the resolver's
+# worst case is 2x250ms = 500ms rather than unbounded-ish.
+#
+# A generous warm ceiling (the first attempt used 5s) inverts err-008: its whole
+# purpose is that the resolver fails FAST rather than hanging a CLI command, and a
+# 5s warm in front of a 250ms budget makes the worst case 20x worse for exactly the
+# pathological database err-008 exists to protect against. The integration suite's
+# `test_resolver_hard_timeout` asserts the whole call returns in <0.6s and caught
+# precisely that.
+#
+# Exceeding this is not fatal: the pipeline runs anyway and fails with its own
+# typed error.
+_WARM_CONNECTION_TIMEOUT_S: float = 0.250
 
 # Maps a file-load / machine-id failure exception type to its closed-vocab
 # audit ``reason``. These refusals fire BEFORE a valid ``OperatorSessionFile``
@@ -187,8 +196,19 @@ class DefaultOperatorSessionResolver:
         swallowed).
         """
         try:
-            async with asyncio.timeout(_WARM_CONNECTION_TIMEOUT_S), self._session_scope():
-                pass
+            async with (
+                asyncio.timeout(_WARM_CONNECTION_TIMEOUT_S),
+                self._session_scope() as db,
+            ):
+                # The round-trip is load-bearing: ``async_sessionmaker`` builds the
+                # session LAZILY and does not touch the pool until the first
+                # statement executes. Entering the scope alone therefore warms
+                # NOTHING — it was the first version of this fix, and CI disproved
+                # it while a test double that slept on scope ENTRY made it look
+                # green. Executing forces the connect, the auth, and SQLAlchemy's
+                # one-time statement/mapper setup — all of which were being charged
+                # to the resolution budget.
+                await db.execute(select(1))
         except Exception as exc:
             log.warning(
                 "identity.operator_session.connection_warm_failed",
