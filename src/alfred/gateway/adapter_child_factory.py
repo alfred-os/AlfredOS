@@ -475,7 +475,7 @@ class GatewayAdapterChildFactory:
             # declare `read1`. The runtime object is a `BufferedReader` (the default
             # `bufsize=-1` above), which does. Narrowing HERE puts the cast where
             # that knowledge lives, rather than weakening the pump's own signature.
-            stderr_pump.start_blocking(cast("_Read1able", process.stderr))
+            stderr_pump.start_blocking(cast(_Read1able, process.stderr))
 
         # The credential hook runs AFTER the window closes / BEFORE the handshake. A
         # CredentialLegDownError / AdapterCredentialError propagates UNWRAPPED (the

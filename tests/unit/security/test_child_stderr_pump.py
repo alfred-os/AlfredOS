@@ -314,22 +314,28 @@ async def test_aclose_logs_a_pump_fault_instead_of_swallowing_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_refusal_is_reported_even_when_it_sanitizes_to_nothing() -> None:
+async def test_a_refusal_is_reported_even_when_it_sanitizes_to_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The WARNING must not be gated on how the chatter happens to format.
 
     `_consume` returned early on `text is None`, so a refusal that parsed cleanly
-    as a row but whose line left nothing printable after Cc/Cf stripping was
-    silently dropped — in the drain whose entire purpose is that refusals stop
-    disappearing.
+    as a row but left nothing printable after Cc/Cf stripping was silently dropped
+    — in the drain whose entire purpose is that refusals stop disappearing.
+
+    The sanitizer is forced to return `None` rather than hoping a payload does it:
+    a refusal row is valid JSON and therefore always printable, so the obvious
+    payload could never reach the branch and the case would have passed with the
+    early return restored. (It did — CodeRabbit caught exactly that.)
     """
+    monkeypatch.setattr("alfred.security.child_stderr.sanitize_child_stderr", lambda *a, **k: None)
     pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
     with structlog.testing.capture_logs() as logs:
-        # Valid refusal JSON, but every character outside it is a stripped control
-        # char, so the sanitized rendering of the raw line is empty.
-        await _feed(pump, _refusal_line().strip() + b"\n")
+        await _feed(pump, _refusal_line())
 
     refusals = [e for e in logs if e["event"] == "security.child_stderr.sandbox_refused"]
     assert len(refusals) == 1, f"the refusal was gated on formatting: {logs}"
+    assert refusals[0]["reason"] == "environment_not_set"
 
 
 @pytest.mark.asyncio
