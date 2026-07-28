@@ -1,13 +1,8 @@
 id: sbx-2026-027
 category: sandbox_escape
 threat: >-
-  A plugin that escapes its sandbox — or any process with write access to the
-  project directory — writes ALFRED_ENVIRONMENT=development into the CWD `.env`.
-  If the launcher honoured it, IS_PRODUCTION would flip false on a production
-  host, unlocking the unsandboxed-in-production refusal, the non-Linux UID-drop
-  refusal, and the FAKE_UNAME keystone. The escape would then make itself
-  permanent: every subsequent spawn runs relaxed. `.env` is writable by anything
-  with directory access, unlike root-owned /etc/alfred/environment.
+  A sandbox-escaped plugin writes ALFRED_ENVIRONMENT=development into the CWD `.env` to flip
+  IS_PRODUCTION false on a production host, making its own escape permanent.
 ingestion_path: sandbox_policy_load
 payload:
   attack: dotenv_loosens_launcher_environment

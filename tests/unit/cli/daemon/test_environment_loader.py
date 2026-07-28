@@ -446,3 +446,28 @@ def test_non_regular_dotenv_is_refused_without_blocking(
     assert any(e["event"] == "environment_loader.dotenv_not_regular_file" for e in logs), (
         f"a non-regular .env must leave a breadcrumb, got: {[e['event'] for e in logs]}"
     )
+
+
+def test_dotenv_undecodable_after_open_logs_breadcrumb(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A `.env` that opens but fails to DECODE is refused with a breadcrumb (ADR-0057).
+
+    Distinct from the pre-open failure covered above: since the read became race-free the
+    file is opened first (O_NONBLOCK) and validated by descriptor, so a decode failure now
+    surfaces from the STREAM parse rather than from `dotenv_values(path)`. It must still be
+    treated as absent AND still leave a trail — an unreadable `.env` silently
+    indistinguishable from a missing one is the gap #469 Blocker 1 closed.
+    """
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
+    dotenv_path = tmp_path / ".env"
+    # Invalid UTF-8: decodes only on read, i.e. after the descriptor check has passed.
+    dotenv_path.write_bytes(b"ALFRED_ENVIRONMENT=\xff\xfe production\n")
+
+    with structlog.testing.capture_logs() as logs:
+        result = resolve_environment(etc_path=tmp_path / "absent", dotenv_path=dotenv_path)
+
+    assert result.value is None
+    assert any(e["event"] == "environment_loader.dotenv_unreadable" for e in logs), (
+        f"an undecodable .env must leave a breadcrumb, got: {[e['event'] for e in logs]}"
+    )

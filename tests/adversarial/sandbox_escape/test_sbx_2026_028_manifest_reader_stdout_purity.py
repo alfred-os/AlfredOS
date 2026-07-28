@@ -27,6 +27,13 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# `os.geteuid` does not exist on Windows and skipif conditions are evaluated at IMPORT time,
+# so the attribute must be probed, never called unguarded — otherwise the module fails to
+# COLLECT on the required Windows leg (#246). Kept as a separate predicate from the
+# platform check because tests/unit/meta/test_posix_only_skipif_guards.py requires the
+# POSIX-only guard itself to be win32-EXACT; a compound `or` would hollow that gate.
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
 
 def _read_environment(cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Drive the REAL subcommand as the launcher does — a subprocess, capturing fd 1 alone."""
@@ -45,15 +52,8 @@ def _read_environment(cwd: Path, env: dict[str, str]) -> subprocess.CompletedPro
     )
 
 
-# NOTE the ORDER: `sys.platform` MUST be checked first. `os.geteuid` does not exist on
-# Windows, and `skipif` conditions are evaluated at IMPORT time, so calling it first raises
-# AttributeError and the whole module fails to COLLECT on the required Windows leg (#246).
-# `or` short-circuits left-to-right, so the platform test is what protects the call — the
-# reverse order (as originally suggested in review) still crashes.
-@pytest.mark.skipif(
-    sys.platform == "win32" or os.geteuid() == 0,
-    reason="POSIX-only: needs real permission semantics, and root bypasses the 0000 mode",
-)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: needs real permission semantics")
+@pytest.mark.skipif(_IS_ROOT, reason="root bypasses the 0000 mode, so /etc stays readable")
 def test_unreadable_etc_does_not_pollute_stdout(tmp_path: Path) -> None:
     """A warning about an unreadable /etc must NEVER reach the launcher's value channel."""
     etc = tmp_path / "etc_environment"

@@ -97,8 +97,8 @@ validation regression has happened; treat the audit row as a P1.
 
 ### Bare i18n keys on stderr — what to expect
 
-The launcher does not emit hardcoded English. Instead it prints one of four
-bare i18n keys on stderr, plus optional `key=value` context fields:
+The launcher does not emit hardcoded English. Instead it prints a bare i18n key
+on stderr, plus optional `key=value` context fields:
 
 | Key | Meaning |
 | --- | --- |
@@ -106,6 +106,13 @@ bare i18n keys on stderr, plus optional `key=value` context fields:
 | `plugin.launcher_unsandboxed_rejected` | dev-only escape hatch refused in production |
 | `plugin.launcher_no_sandbox_policy` | sandbox policy file missing |
 | `plugin.launcher_uid_drop_unavailable` | Linux host without `runuser` — refused to exec un-dropped |
+| `daemon.boot.environment_not_set` | no source resolved `ALFRED_ENVIRONMENT` |
+| `daemon.boot.environment_unrecognised` | a source set it to something outside `development`/`production`/`test` |
+| `daemon.boot.environment_untrusted_source` | a `.env` selected `development`/`test` — only `production` is honoured from there (ADR-0057) |
+
+The three `daemon.boot.environment_*` keys are forwarded verbatim from the
+pre-launcher helper (`manifest_reader --read-environment`); the rest are the
+launcher's own.
 
 The supervisor parses stderr, persists the audit row, and renders the
 localised message for any operator surface (CLI, TUI, log dashboard).

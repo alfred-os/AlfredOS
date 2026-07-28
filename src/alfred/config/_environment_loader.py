@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import enum
 import os
+import stat as stat_module
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -179,18 +180,45 @@ def _read_dotenv(dotenv_path: Path) -> str | None:
     """
     # ADR-0057 residual: `.env` is writable by anything with project-directory access, and
     # since directional trust the LAUNCHER reads it too. `open()` on a FIFO with no writer
-    # blocks forever, and the spawn path is unbounded (unlike the boot probe) — so a plain
-    # `mkfifo .env` wedges every subsequent plugin spawn. Verified: without this the read
-    # hangs until an external timeout kills it. Refuse anything that is not a REGULAR file
-    # and fall through to the existing fail-closed "no value from this source".
-    # `is_file()` follows symlinks (a symlink TO a regular file stays supported) and is
-    # False for FIFOs, sockets, devices and directories alike.
-    if dotenv_path.exists() and not dotenv_path.is_file():
-        log.warning(
-            "environment_loader.dotenv_not_regular_file",
-            path=str(dotenv_path),
-        )
-        return None
+    # blocks forever and the spawn path is unbounded (unlike the boot probe), so a plain
+    # `mkfifo .env` wedged every subsequent plugin spawn. Measured: 31s (killed by an
+    # external timeout) vs 1.9s.
+    #
+    # RACE-FREE by construction. A `stat`-then-open guard is TOCTOU: an attacker can swap a
+    # regular file for a FIFO between the two, and `dotenv_values(path)` would open the
+    # replacement and block. So we open ONCE with O_NONBLOCK — which returns immediately on a
+    # FIFO instead of waiting for a writer — then validate the FILE DESCRIPTOR we actually
+    # hold via `fstat`, and hand that same descriptor to python-dotenv as a stream. The
+    # object checked and the object read are guaranteed identical.
+    try:
+        fd = os.open(dotenv_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        # Absent (the common case) / unreadable / a directory. Fall through to the
+        # existing fail-closed handling below, which logs the breadcrumb.
+        fd = None
+    if fd is not None:
+        try:
+            if not stat_module.S_ISREG(os.fstat(fd).st_mode):
+                log.warning(
+                    "environment_loader.dotenv_not_regular_file",
+                    path=str(dotenv_path),
+                )
+                return None
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                fd = None  # ownership passed to the context manager
+                return _norm(
+                    dotenv_values(stream=handle, interpolate=False).get("ALFRED_ENVIRONMENT")
+                )
+        except (OSError, UnicodeDecodeError) as exc:
+            log.warning(
+                "environment_loader.dotenv_unreadable",
+                path=str(dotenv_path),
+                error_class=type(exc).__name__,
+            )
+            return None
+        finally:
+            if fd is not None:
+                os.close(fd)
     try:
         values = dotenv_values(dotenv_path, interpolate=False)
     except (
