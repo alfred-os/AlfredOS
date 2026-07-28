@@ -56,6 +56,17 @@ class _FakeStdio:
     def close(self) -> None:
         self.closed = True
 
+    def read1(self, _size: int = -1) -> bytes:
+        """Immediate EOF, so the #520 stderr drain terminates instead of erroring.
+
+        Without this the pump's reader thread raised ``AttributeError`` on every
+        spawn in this module — caught and logged as ``pump_failed``, so the tests
+        still passed while the drain was never actually exercised. A real
+        ``Popen.stderr`` is a ``BufferedReader``; modelling its read surface keeps
+        the double honest.
+        """
+        return b""
+
 
 class _FakePopen:
     """A ``subprocess.Popen`` double that NEVER drives the event loop.
@@ -855,3 +866,32 @@ async def test_terminate_and_reap_cancelled_reap_propagates() -> None:
         await acf_mod._terminate_and_reap(_ReapCancel())  # type: ignore[arg-type]
 
     assert not [e for e in logs if e["event"] == "gateway.adapter.reap_failed"]
+
+
+async def test_spawn_survives_a_child_without_a_stderr_stream() -> None:
+    """A ``Popen`` whose ``stderr`` is ``None`` must spawn, not crash on the drain.
+
+    ``Popen.stderr`` is typed ``IO[bytes] | None`` and ``popen_factory`` is
+    injectable, so the #520 drain guards it. This pins the guard's False arm: an
+    absent stream costs the diagnostics, never the spawn.
+    """
+    popen_factory = _PopenFactory()
+    runner_factory = _RunnerFactory()
+    deliver = _DeliverRecorder()
+    deliver.bind_runner_factory(runner_factory)
+    factory = _build_factory(popen_factory=popen_factory, runner_factory=runner_factory)
+
+    original = popen_factory.__call__
+
+    def _no_stderr(*args: object, **kwargs: object) -> object:
+        process = original(*args, **kwargs)
+        process.stderr = None  # type: ignore[assignment]
+        return process
+
+    factory._popen_factory = cast("Any", _no_stderr)  # noqa: SLF001 - pinning the guard
+
+    child = await factory.spawn_and_handshake(
+        adapter_id="discord", epoch="e1", deliver_credential=deliver
+    )
+
+    assert child is not None
