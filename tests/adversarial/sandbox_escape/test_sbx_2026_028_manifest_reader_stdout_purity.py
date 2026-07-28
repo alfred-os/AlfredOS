@@ -45,7 +45,15 @@ def _read_environment(cwd: Path, env: dict[str, str]) -> subprocess.CompletedPro
     )
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses the 0000 mode, so /etc stays readable")
+# NOTE the ORDER: `sys.platform` MUST be checked first. `os.geteuid` does not exist on
+# Windows, and `skipif` conditions are evaluated at IMPORT time, so calling it first raises
+# AttributeError and the whole module fails to COLLECT on the required Windows leg (#246).
+# `or` short-circuits left-to-right, so the platform test is what protects the call — the
+# reverse order (as originally suggested in review) still crashes.
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX-only: needs real permission semantics, and root bypasses the 0000 mode",
+)
 def test_unreadable_etc_does_not_pollute_stdout(tmp_path: Path) -> None:
     """A warning about an unreadable /etc must NEVER reach the launcher's value channel."""
     etc = tmp_path / "etc_environment"
