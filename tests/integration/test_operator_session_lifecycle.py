@@ -179,6 +179,14 @@ async def test_operator_session_full_lifecycle(scope: Any, tmp_path: Path) -> No
         hook_dispatcher=hooks,
         host=_HOST,
         session_file_path=session_path,
+        # This is a LIFECYCLE test — login -> resolve -> logout, and the audit +
+        # hookpoint trail each step leaves. It is not a timing test, and it must not
+        # become one by accident: with err-008's production 250ms budget it doubled
+        # as a wall-clock assertion over a containerised Postgres round-trip on a
+        # SHARED runner, where it failed on both legs and blocked three unrelated
+        # PRs (#527). The timeout POLICY is asserted deliberately, and
+        # deterministically, by ``test_resolver_hard_timeout`` below.
+        hard_timeout_s=10.0,
     )
     assert await resolver.resolve() == str(alice_id)
 

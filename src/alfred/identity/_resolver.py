@@ -41,7 +41,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Protocol
+from typing import Any, Final, Protocol
 
 import structlog
 from sqlalchemy import select
@@ -92,6 +92,11 @@ _REFUSED_HOOKPOINT = "operator.session.refused"
 # typed error.
 _WARM_CONNECTION_TIMEOUT_S: float = 0.250
 
+# err-008's PRODUCTION resolution budget. Production never overrides it; the
+# constructor parameter exists so a test can state which property it exercises
+# (see ``DefaultOperatorSessionResolver.__init__``).
+_DEFAULT_HARD_TIMEOUT_S: Final[float] = 0.250
+
 # Maps a file-load / machine-id failure exception type to its closed-vocab
 # audit ``reason``. These refusals fire BEFORE a valid ``OperatorSessionFile``
 # exists, so they emit via ``_emit_refused_fileless`` (no session object) —
@@ -133,8 +138,6 @@ class DefaultOperatorSessionResolver:
     monkeypatching ``os.environ``.
     """
 
-    _hard_timeout_s: ClassVar[float] = 0.250
-
     def __init__(
         self,
         *,
@@ -146,6 +149,7 @@ class DefaultOperatorSessionResolver:
         host: str,
         session_file_path: Path,
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+        hard_timeout_s: float = _DEFAULT_HARD_TIMEOUT_S,
     ) -> None:
         self._session_scope = session_scope
         self._secret_broker = secret_broker
@@ -155,6 +159,13 @@ class DefaultOperatorSessionResolver:
         self._host = host
         self._session_file_path = session_file_path
         self._now_fn = now_fn
+        # Production always takes the default (err-008's 250ms policy). It is
+        # injectable ONLY so a test can state which property it exercises: a
+        # LIFECYCLE test that happens to run the resolver is not a timing test, and
+        # on a contended CI runner that implicit wall-clock assertion is a flake
+        # which blocked three unrelated PRs (#527). The timeout POLICY is still
+        # asserted, deliberately, by the cases that inject a small value on purpose.
+        self._hard_timeout_s = hard_timeout_s
 
     async def resolve(self) -> str:
         """Return the canonical ``User.id`` (stringified) of the operator.
