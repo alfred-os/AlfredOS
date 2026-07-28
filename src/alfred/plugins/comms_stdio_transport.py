@@ -57,6 +57,7 @@ from alfred.plugins.comms_seq_codec import (
     encode_seq_frame,
 )
 from alfred.plugins.comms_wire import _MAX_COMMS_LINE_BYTES, CommsProtocolError
+from alfred.security.child_stderr import ChildStderrPump
 
 if TYPE_CHECKING:
     from alfred.cli._launcher_spawn import PluginLaunchSpec
@@ -111,6 +112,7 @@ class CommsStdioTransport:
         self._spec = spec
         self._max_line_bytes = max_line_bytes
         self._proc: asyncio.subprocess.Process | None = None
+        self._stderr_pump: ChildStderrPump | None = None
         # Spec A G2 (#237): out-of-band seq/ack framing, OFF by default. The
         # runner flips this ON (via enable_seq_ack) only when BOTH peers
         # advertised support at the lifecycle.start handshake (version-gate).
@@ -175,6 +177,19 @@ class CommsStdioTransport:
             env=comms_child_env(self._spec),
             limit=self._max_line_bytes,
         )
+        # #520: start draining stderr IMMEDIATELY. asyncio polls a PIPE transport into
+        # the StreamReader whether or not anyone reads it, so an undrained stderr does
+        # not wedge this child (unlike the raw-Popen gateway sibling) — it retains
+        # every byte the adapter ever logs in the parent instead (measured: 20MB
+        # written -> 20MB held). The adapter logs to stderr for its whole life via
+        # ``configure_stderr_json_logging``, so that grows without bound. Draining also
+        # makes launcher sandbox refusals visible at all: they are emitted here and,
+        # before this, reached no log, no audit row and no operator.
+        if self._proc.stderr is not None:
+            self._stderr_pump = ChildStderrPump(
+                plugin_id=self._spec.plugin_id, event="comms.adapter.child_stderr"
+            )
+            self._stderr_pump.start(self._proc.stderr)
 
     async def send(self, frame: Mapping[str, object]) -> None:
         """Write one ``json.dumps(frame) + "\\n"`` frame to the plugin's stdin.
@@ -290,6 +305,13 @@ class CommsStdioTransport:
         proc = self._proc
         if proc is None:
             return
+        # #520: stop the stderr drain BEFORE the reap escalation. The pump owns a
+        # task reading the child's stderr; leaving it running past close() would
+        # keep a task alive on a dead child. aclose() is idempotent and never
+        # raises, so it cannot preempt the escalation below.
+        pump, self._stderr_pump = self._stderr_pump, None
+        if pump is not None:
+            await pump.aclose()
         if proc.returncode is not None:
             # Already reaped — idempotent fast path.
             return
