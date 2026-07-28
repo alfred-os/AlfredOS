@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 12:22+0100\n"
+"POT-Creation-Date: 2026-07-28 17:12+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1747,10 +1747,10 @@ msgstr ""
 #: src/alfred/plugins/comms_socket_transport.py:402
 #: src/alfred/plugins/comms_socket_transport.py:449
 #: src/alfred/plugins/comms_socket_transport.py:456
-#: src/alfred/plugins/comms_stdio_transport.py:257
-#: src/alfred/plugins/comms_stdio_transport.py:267
-#: src/alfred/plugins/comms_stdio_transport.py:286
-#: src/alfred/plugins/comms_stdio_transport.py:293
+#: src/alfred/plugins/comms_stdio_transport.py:263
+#: src/alfred/plugins/comms_stdio_transport.py:273
+#: src/alfred/plugins/comms_stdio_transport.py:292
+#: src/alfred/plugins/comms_stdio_transport.py:299
 msgid "comms.transport.malformed_frame"
 msgstr ""
 "Comms adapter {adapter_id} sent a malformed or oversized frame; the wire "
