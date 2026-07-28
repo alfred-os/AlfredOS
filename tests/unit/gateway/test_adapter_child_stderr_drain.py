@@ -41,7 +41,14 @@ for n in range(1, {_CHUNKS} + 1):
     sys.stdout.flush()
 """
 
+# The POSITIVE case needs room to stream 4MB under CI load.
 _DEADLINE_S = 30.0
+
+# The NEGATIVE control stalls at the 64KB pipe buffer within milliseconds and then
+# never progresses, so waiting the full deadline is pure burnt wall-clock on every
+# run — by construction, not on failure. Long enough that a slow runner cannot
+# fake a stall, short enough not to tax the suite.
+_STALL_DEADLINE_S = 5.0
 
 
 def _spawn_chatty_child() -> subprocess.Popen[bytes]:
@@ -52,7 +59,7 @@ def _spawn_chatty_child() -> subprocess.Popen[bytes]:
     )
 
 
-def _drive_stdout(process: subprocess.Popen[bytes]) -> int:
+def _drive_stdout(process: subprocess.Popen[bytes], deadline: float = _DEADLINE_S) -> int:
     """Read the child's progress counter to EOF on a thread; return the highest seen."""
     seen = {"n": 0}
 
@@ -63,7 +70,7 @@ def _drive_stdout(process: subprocess.Popen[bytes]) -> int:
 
     thread = threading.Thread(target=_read, daemon=True)
     thread.start()
-    thread.join(timeout=_DEADLINE_S)
+    thread.join(timeout=deadline)
     return seen["n"]
 
 
@@ -76,7 +83,7 @@ def test_undrained_popen_stderr_wedges_the_child() -> None:
     """
     process = _spawn_chatty_child()
     try:
-        highest = _drive_stdout(process)
+        highest = _drive_stdout(process, deadline=_STALL_DEADLINE_S)
     finally:
         process.kill()
         process.wait()

@@ -26,23 +26,27 @@ one-shot read used by the quarantine child
 right for a short-lived extraction child and useless for an adapter that must keep
 running while it logs.
 
-Refusal rows are ACCUMULATED here, not written here. Persisting them is ``async``
-(:class:`alfred.security.sandbox_refusal_audit.SandboxRefusalRecorder`) and the
-blocking driver runs on a thread that cannot await, so the spawn site drains
-:attr:`ChildStderrPump.refusal_rows` on its failure arm — the same "record at the
-drain, not at a spawn-time probe barrier" shape ADR-0051 §2 chose.
+Refusals are PARSED here and reported at WARNING with their closed-vocab reason.
+They are deliberately not RETAINED for an audit writer: nothing in the tree reads
+such a buffer today, and a store with no consumer is dead capability that reads
+like a working audit path. Persisting them is ``#440`` (the daemon owns the
+``AuditWriter``, so it is genuine wiring) and ``#441`` (the gateway process has NO
+``AuditWriter`` at all — Spec B / ADR-0036 makes it credential-free and
+core-mediated — so it needs a forward-to-core design decision first). Retention
+lands with the consumer that needs it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import unicodedata
-from typing import IO, Final
+from typing import Final, Protocol
 
 import structlog
 
-from alfred.audit.launcher_refusal import SandboxRefusalRow, parse_launcher_refusal_rows
+from alfred.audit.launcher_refusal import parse_launcher_refusal_rows
 
 log = structlog.get_logger(__name__)
 
@@ -64,11 +68,6 @@ _READ_CHUNK_BYTES: Final[int] = 64 * 1024
 # whole point of the drain is that a child cannot grow the parent without bound, and
 # a child that never emits a newline must not defeat that.
 _MAX_LINE_BYTES: Final[int] = 64 * 1024
-
-# Refusals are emitted once, pre-``exec``, before the child image exists. Retaining a
-# handful is sufficient and keeps a chatty (or hostile) child from growing this list.
-_MAX_RETAINED_REFUSAL_ROWS: Final[int] = 16
-
 
 def sanitize_child_stderr(raw: bytes, *, cap: int, truncated: bool = False) -> str | None:
     """De-fang child stderr into a single-line structured-log field (or ``None``).
@@ -95,6 +94,17 @@ def sanitize_child_stderr(raw: bytes, *, cap: int, truncated: bool = False) -> s
     if truncated or len(collapsed) > cap:
         return collapsed[:cap] + STDERR_TRUNCATION_MARKER
     return collapsed
+
+
+class _Read1able(Protocol):
+    """What the blocking driver actually needs: a single non-blocking-ish read.
+
+    ``IO[bytes]`` does not declare ``read1``, so annotating with it forced a
+    ``type: ignore`` that papered over the wrong type rather than describing the
+    requirement. A real ``Popen.stderr`` is a ``BufferedReader``, which has it.
+    """
+
+    def read1(self, size: int = ..., /) -> bytes: ...
 
 
 class _LineAssembler:
@@ -167,16 +177,8 @@ class ChildStderrPump:
         self._plugin_id = plugin_id
         self._event = event
         self._assembler = _LineAssembler(max_line_bytes)
-        self._rows: list[SandboxRefusalRow] = []
-        self._lock = threading.Lock()  # the blocking driver consumes off-loop
         self._task: asyncio.Task[None] | None = None
         self._thread: threading.Thread | None = None
-
-    @property
-    def refusal_rows(self) -> tuple[SandboxRefusalRow, ...]:
-        """Launcher refusal rows seen so far, for the caller's failure arm."""
-        with self._lock:
-            return tuple(self._rows)
 
     def _consume(self, line: bytes, *, clamped: bool = False) -> None:
         """Handle one drained stderr line. Never raises.
@@ -190,10 +192,6 @@ class ChildStderrPump:
         """
         try:
             rows = parse_launcher_refusal_rows(line)
-            for row in rows:
-                with self._lock:
-                    if len(self._rows) < _MAX_RETAINED_REFUSAL_ROWS:
-                        self._rows.append(row)
             # `truncated` reports that the RAW bytes were already clipped before
             # this call — which is exactly what `clamped` means and nothing else.
             # Comparing `len(line)` (BYTES) against STDERR_LOG_CAP_BYTES (applied by
@@ -201,8 +199,11 @@ class ChildStderrPump:
             # CJK/emoji stderr that was never actually cut. The sanitizer already
             # makes the character-length decision correctly on the decoded string.
             text = sanitize_child_stderr(line, cap=STDERR_LOG_CAP_BYTES, truncated=clamped)
-            if text is None:
-                return
+            # Refusals are reported REGARDLESS of what the sanitizer made of the
+            # line. Returning early on `text is None` gated the WARNING — the whole
+            # point of this drain — on how the chatter happened to format, so a
+            # refusal whose line sanitized to nothing printable would have been
+            # silently dropped despite having parsed cleanly as a row.
             if rows:
                 for row in rows:
                     log.warning(
@@ -213,7 +214,7 @@ class ChildStderrPump:
                         host_os=row.host_os,
                         source_event=self._event,
                     )
-            else:
+            elif text is not None:
                 log.debug(self._event, plugin_id=self._plugin_id, child_stderr=text)
         except Exception as exc:  # loud, never silent (hard rule #7)
             log.warning(
@@ -233,7 +234,14 @@ class ChildStderrPump:
     # --- drivers -------------------------------------------------------------
 
     def start(self, stream: asyncio.StreamReader) -> None:
-        """Drain an ``asyncio`` child's stderr on a background task."""
+        """Drain an ``asyncio`` child's stderr on a background task.
+
+        A second call is a programming error, raised loudly rather than silently
+        orphaning the first driver (which would leave it reading a dead stream while
+        its refusal rows went nowhere).
+        """
+        if self._task is not None or self._thread is not None:
+            raise RuntimeError(f"ChildStderrPump already started for {self._plugin_id!r}")
         self._task = asyncio.create_task(
             self._pump_stream(stream), name=f"child-stderr-pump[{self._plugin_id}]"
         )
@@ -255,13 +263,17 @@ class ChildStderrPump:
                 error_class=type(exc).__name__,
             )
 
-    def start_blocking(self, stream: IO[bytes]) -> None:
+    def start_blocking(self, stream: _Read1able) -> None:
         """Drain a synchronous ``Popen`` child's stderr on a daemon thread.
 
         A daemon thread, not ``loop.run_in_executor``: ``asyncio.run`` JOINS the
         default executor at teardown, so an executor-hosted reader blocked on a live
         child's pipe would hang interpreter shutdown. A daemon thread cannot.
+
+        A second call is a programming error, raised loudly (see :meth:`start`).
         """
+        if self._task is not None or self._thread is not None:
+            raise RuntimeError(f"ChildStderrPump already started for {self._plugin_id!r}")
         self._thread = threading.Thread(
             target=self._pump_blocking,
             args=(stream,),
@@ -270,12 +282,12 @@ class ChildStderrPump:
         )
         self._thread.start()
 
-    def _pump_blocking(self, stream: IO[bytes]) -> None:
+    def _pump_blocking(self, stream: _Read1able) -> None:
         try:
             while True:
                 # ``read1`` returns as soon as ANY bytes are available; plain ``read(n)``
                 # would block until n bytes or EOF, re-creating the stall being fixed.
-                chunk = stream.read1(_READ_CHUNK_BYTES)  # type: ignore[attr-defined]
+                chunk = stream.read1(_READ_CHUNK_BYTES)
                 if not chunk:
                     break
                 self._consume_chunk(chunk)
@@ -286,6 +298,19 @@ class ChildStderrPump:
                 plugin_id=self._plugin_id,
                 error_class=type(exc).__name__,
             )
+
+    async def drained(self) -> None:
+        """Wait for the drain to reach EOF on its own. Never raises.
+
+        Lets a caller that has just reaped a child collect its final stderr instead
+        of cancelling mid-read. The child's death closes the write end, so this
+        returns almost immediately; the caller bounds it anyway.
+        """
+        task = self._task
+        if task is None:
+            return
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.shield(task)
 
     async def aclose(self) -> None:
         """Stop the drain. Idempotent; never raises.

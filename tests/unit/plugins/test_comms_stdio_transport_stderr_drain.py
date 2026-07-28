@@ -109,11 +109,18 @@ async def _read_all_stdout(transport: CommsStdioTransport) -> int:
 
 
 def _retained_stderr_bytes(transport: CommsStdioTransport) -> int:
-    """Bytes of child stderr the parent is still holding in the reader buffer."""
+    """Bytes of child stderr the parent is still holding in the reader buffer.
+
+    Deliberately ASSERTS rather than returning 0 for an absent reader. Returning 0
+    made this module's only real assertion vacuously passable: any future change
+    that dropped `stderr=PIPE`, or detached the reader, would have satisfied
+    "retained <= cap" while measuring nothing at all.
+    """
     proc = transport._proc
-    assert proc is not None
-    if proc.stderr is None:  # the drain may detach the reader entirely
-        return 0
+    assert proc is not None, "transport was never spawned"
+    assert proc.stderr is not None, (
+        "no stderr reader to measure — this case cannot prove the pipe is drained"
+    )
     return len(proc.stderr._buffer)
 
 

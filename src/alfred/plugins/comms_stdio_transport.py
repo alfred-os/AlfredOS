@@ -92,6 +92,12 @@ log = structlog.get_logger(__name__)
 # terminate() -> kill(). Matches :data:`StdioTransport._CLOSE_TIMEOUT_S`.
 _CLOSE_TIMEOUT_S: Final[float] = 5.0
 
+# Grace period for the stderr drain to consume a reaped child's final output
+# before the pump is cancelled (#520). Short: the child is already dead, so its
+# stderr is at EOF and the pump returns almost immediately. It exists so a slow
+# scheduler cannot cost us the dying words, not to wait on anything live.
+_STDERR_DRAIN_GRACE_S: Final[float] = 1.0
+
 
 class CommsStdioTransport:
     """A line-delimited JSON-RPC duplex pipe to a comms-plugin subprocess.
@@ -305,21 +311,23 @@ class CommsStdioTransport:
         proc = self._proc
         if proc is None:
             return
-        # #520: stop the stderr drain BEFORE the reap escalation. The pump owns a
-        # task reading the child's stderr; leaving it running past close() would
-        # keep a task alive on a dead child. aclose() is idempotent and never
-        # raises, so it cannot preempt the escalation below.
+        # #520: the drain must OUTLIVE the reap. Stopping it first threw away the
+        # child's dying words — the last thing an adapter writes before it is
+        # terminated is usually the reason it is being terminated, which is exactly
+        # the diagnostic this drain exists to preserve. The pump ends on its own at
+        # EOF, which the child's death guarantees, so the escalation below runs with
+        # the drain still reading and `_close_stderr_pump` reaps it afterwards.
         pump, self._stderr_pump = self._stderr_pump, None
-        if pump is not None:
-            await pump.aclose()
         if proc.returncode is not None:
-            # Already reaped — idempotent fast path.
+            # Already reaped — idempotent fast path, but still settle the drain.
+            await self._close_stderr_pump(pump)
             return
         if proc.stdin is not None:
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 proc.stdin.close()
         try:
             await asyncio.wait_for(proc.wait(), timeout=_CLOSE_TIMEOUT_S)
+            await self._close_stderr_pump(pump)
             return
         except TimeoutError:
             # Child ignored the cooperative close — escalate. Suppress
@@ -338,6 +346,23 @@ class CommsStdioTransport:
                 proc.kill()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=_CLOSE_TIMEOUT_S)
+        await self._close_stderr_pump(pump)
+
+    @staticmethod
+    async def _close_stderr_pump(pump: ChildStderrPump | None) -> None:
+        """Let the drain consume the child's final stderr, then stop it (#520).
+
+        Called AFTER the child is reaped on every exit path. The child's death
+        closes the write end, so the pump sees EOF and finishes on its own; the
+        brief grace period lets it consume whatever the child wrote on its way out
+        before ``aclose`` cancels. Without it the dying words — usually the reason
+        the child is being terminated — are cancelled away mid-read.
+        """
+        if pump is None:
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(pump.drained(), timeout=_STDERR_DRAIN_GRACE_S)
+        await pump.aclose()
 
 
 __all__ = [
