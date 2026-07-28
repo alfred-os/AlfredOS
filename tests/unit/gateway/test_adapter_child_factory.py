@@ -888,7 +888,7 @@ async def test_spawn_survives_a_child_without_a_stderr_stream() -> None:
         process.stderr = None  # type: ignore[assignment]
         return process
 
-    factory._popen_factory = cast("Any", _no_stderr)  # noqa: SLF001 - pinning the guard
+    factory._popen_factory = cast("Any", _no_stderr)
 
     child = await factory.spawn_and_handshake(
         adapter_id="discord", epoch="e1", deliver_credential=deliver
