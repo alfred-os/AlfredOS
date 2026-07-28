@@ -255,6 +255,36 @@ if ! _capture_stderr_last_line "unset" "unknown" python3 -m alfred.plugins.manif
 fi
 ALFRED_RESOLVED_ENVIRONMENT="${_CAPTURE_STDOUT}"
 
+# #524 (sbx-2026-029): validate the captured value against the CLOSED environment
+# vocabulary before it is used or interpolated anywhere.
+#
+# This value lands in five sandbox_refused JSON templates below. Both fields beside
+# it there are already guarded for exactly that reason — PLUGIN_ID at entry (CR on
+# PR #140) and POLICY_REF in #437 — and each refuses WITHOUT echoing the tainted
+# bytes, because interpolating them IS the injection. This one was trusted purely
+# because the helper is EXPECTED to print only these three values.
+#
+# sbx-2026-028 is the proof that expectation can break: a structlog warning reached
+# fd 1, so the captured value became a multi-line string carrying a timestamp and a
+# path, which was then interpolated into the row and split it across lines. That
+# leak is closed; this is what stops the NEXT fd-1 regression being an
+# audit-integrity failure instead of a cosmetic one.
+#
+# An allow-list, not a charset class: the vocabulary is closed
+# (`_environment_loader._VALID_VALUES`), so anything else is fail-closed — which it
+# must be regardless, since an unrecognised value leaves IS_PRODUCTION false and
+# would un-gate the sandbox on a production host (the #486 Critical).
+case "${ALFRED_RESOLVED_ENVIRONMENT}" in
+    development | production | test) : ;;
+    *)
+        printf 'daemon.boot.environment_unrecognised plugin_id=%s\n' "${PLUGIN_ID}" >&2
+        # `environment` carries the launcher-authored `unset` sentinel, NEVER the
+        # captured bytes — same discipline as the plugin_id row above (D2).
+        printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"environment_unrecognised","environment":"unset","host_os":"unknown"}\n' "${PLUGIN_ID}" >&2
+        exit 1
+        ;;
+esac
+
 IS_PRODUCTION=false
 [ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ] && IS_PRODUCTION=true
 
