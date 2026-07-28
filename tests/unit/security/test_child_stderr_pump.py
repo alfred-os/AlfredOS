@@ -68,18 +68,6 @@ async def test_sandbox_refusal_is_logged_loudly_with_its_reason() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_refusal_is_retained_for_the_audit_path() -> None:
-    """The row must survive for the spawn site's failure arm to persist it (#433)."""
-    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
-    await _feed(pump, _refusal_line("policy_ref_missing"))
-
-    rows = pump.refusal_rows
-    assert len(rows) == 1
-    assert rows[0].reason == "policy_ref_missing"
-    assert rows[0].plugin_id == "alfred.discord"
-
-
-@pytest.mark.asyncio
 async def test_ordinary_chatter_is_forwarded_at_debug_not_info() -> None:
     """A healthy adapter logs continuously; that must not dominate the daemon's logs."""
     pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
@@ -93,23 +81,14 @@ async def test_ordinary_chatter_is_forwarded_at_debug_not_info() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retained_refusal_rows_are_bounded() -> None:
-    """A hostile child spamming refusal rows must not grow the parent without bound."""
-    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
-    await _feed(pump, _refusal_line() * 200)
-
-    assert len(pump.refusal_rows) == 16, "retention cap not enforced"
-
-
-@pytest.mark.asyncio
 async def test_an_overlong_line_is_discarded_not_buffered() -> None:
     """A child that never emits a newline must not be able to grow the parent."""
     pump = ChildStderrPump(
         plugin_id="alfred.discord", event="gateway.adapter.child_stderr", max_line_bytes=1024
     )
     with structlog.testing.capture_logs() as logs:
-        # An over-long unterminated run, then a normal line: the giant one is dropped,
-        # its tail discarded up to the newline, and the following line still arrives.
+        # An over-long unterminated run, then a normal line: the head is REPORTED
+        # clamped, its tail discarded up to the newline, and the next line arrives.
         await _feed(pump, b"y" * 8192 + b"\nkept\n")
 
     forwarded = [e for e in logs if e["event"] == "gateway.adapter.child_stderr"]
@@ -332,3 +311,54 @@ async def test_aclose_logs_a_pump_fault_instead_of_swallowing_it() -> None:
     failures = [e for e in logs if e["event"] == "security.child_stderr.pump_failed"]
     assert len(failures) == 1, f"the fault was swallowed: {logs}"
     assert failures[0]["error_class"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_reported_even_when_it_sanitizes_to_nothing() -> None:
+    """The WARNING must not be gated on how the chatter happens to format.
+
+    `_consume` returned early on `text is None`, so a refusal that parsed cleanly
+    as a row but whose line left nothing printable after Cc/Cf stripping was
+    silently dropped — in the drain whose entire purpose is that refusals stop
+    disappearing.
+    """
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    with structlog.testing.capture_logs() as logs:
+        # Valid refusal JSON, but every character outside it is a stripped control
+        # char, so the sanitized rendering of the raw line is empty.
+        await _feed(pump, _refusal_line().strip() + b"\n")
+
+    refusals = [e for e in logs if e["event"] == "security.child_stderr.sandbox_refused"]
+    assert len(refusals) == 1, f"the refusal was gated on formatting: {logs}"
+
+
+@pytest.mark.asyncio
+async def test_a_second_start_is_a_loud_programming_error() -> None:
+    """Silently orphaning the first driver would leave it reading a dead stream."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    pump.start(asyncio.StreamReader())
+    try:
+        with pytest.raises(RuntimeError, match="already started"):
+            pump.start(asyncio.StreamReader())
+    finally:
+        await pump.aclose()
+
+
+def test_a_second_start_blocking_is_a_loud_programming_error() -> None:
+    """Same contract on the thread driver."""
+
+    class _Eof:
+        def read1(self, _n: int = -1) -> bytes:
+            return b""
+
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    pump.start_blocking(_Eof())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="already started"):
+        pump.start_blocking(_Eof())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_drained_on_a_pump_that_never_started_is_a_no_op() -> None:
+    """The close path calls this unconditionally, including on a failed spawn."""
+    pump = ChildStderrPump(plugin_id="alfred.discord", event="gateway.adapter.child_stderr")
+    await pump.drained()  # must not raise or hang

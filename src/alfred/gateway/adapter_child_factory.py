@@ -62,7 +62,7 @@ import contextlib
 import os
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import structlog
 
@@ -76,7 +76,7 @@ from alfred.gateway.adapter_supervisor import (
 )
 from alfred.i18n import t
 from alfred.plugins._comms_child_env import _scrubbed_base
-from alfred.security.child_stderr import ChildStderrPump
+from alfred.security.child_stderr import ChildStderrPump, _Read1able
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -471,7 +471,11 @@ class GatewayAdapterChildFactory:
         # operator (hard rule #7).
         stderr_pump = ChildStderrPump(plugin_id=plugin_id, event="gateway.adapter.child_stderr")
         if process.stderr is not None:
-            stderr_pump.start_blocking(process.stderr)
+            # The stdlib stubs type `Popen.stderr` as `IO[bytes]`, which does not
+            # declare `read1`. The runtime object is a `BufferedReader` (the default
+            # `bufsize=-1` above), which does. Narrowing HERE puts the cast where
+            # that knowledge lives, rather than weakening the pump's own signature.
+            stderr_pump.start_blocking(cast("_Read1able", process.stderr))
 
         # The credential hook runs AFTER the window closes / BEFORE the handshake. A
         # CredentialLegDownError / AdapterCredentialError propagates UNWRAPPED (the
