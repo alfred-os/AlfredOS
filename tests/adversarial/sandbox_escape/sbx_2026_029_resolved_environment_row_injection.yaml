@@ -1,0 +1,27 @@
+id: sbx-2026-029
+category: sandbox_escape
+threat: >-
+  An unrecognised value reaching the launcher's IS_PRODUCTION capture is interpolated raw
+  into every sandbox_refused JSON row, letting it forge audit fields or split the row.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: resolved_environment_forges_audit_row
+  captured_stdout: json_breaking_injection
+  helper: shadowed_on_path
+expected_outcome: refused
+provenance: >-
+  The residual of sbx-2026-028, filed as #524 by the security and test lanes reviewing
+  PR #523 (ADR-0057 / #486). 028 stopped structlog polluting manifest_reader's fd 1; it
+  did NOT fix the interpolation that made the leak dangerous. The launcher assigned
+  ALFRED_RESOLVED_ENVIRONMENT from the captured stdout and interpolated it raw into five
+  printf JSON templates. Both neighbouring fields there were already guarded precisely
+  because they reach them — PLUGIN_ID at entry (CR on PR #140) and POLICY_REF in #437 —
+  each refusing WITHOUT echoing the tainted bytes. This value was trusted purely because
+  the helper is EXPECTED to print only development|production|test, and 028 is the proof
+  that expectation can break. Fix: validate against the closed vocabulary at the capture
+  chokepoint and refuse with the launcher-authored `unset` sentinel, never the bytes.
+references:
+  - "bin/alfred-plugin-launcher.sh (ALFRED_RESOLVED_ENVIRONMENT allow-list)"
+  - "src/alfred/config/_environment_loader.py (_VALID_VALUES — the closed vocabulary)"
+  - "tests/adversarial/sandbox_escape/sbx_2026_028_manifest_reader_stdout_pollution.yaml"
+  - "docs/adr/0057-directional-trust-for-the-launcher-environment.md"
