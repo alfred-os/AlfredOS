@@ -88,8 +88,12 @@ must use a trusted source.
 
 - **A new attack SURFACE, even though the value domain is closed.** The launcher now opens and
   parses an attacker-writable file it previously never touched: a python-dotenv parse over
-  adversary bytes, and a blocking `open()` with no timeout (a `mkfifo .env` wedges the read;
-  the boot probe is bounded, the spawn path is not).
+  adversary bytes. The blocking-read half of this is MITIGATED — `_read_dotenv` opens once
+  with `O_NONBLOCK`, validates the resulting file DESCRIPTOR with `fstat` (not the path, so
+  there is no check-then-open race), and refuses anything that is not a regular file. A
+  `mkfifo .env` therefore returns immediately instead of wedging every subsequent spawn
+  (measured: 31s, killed by an external timeout, vs 1.9s). The dotenv PARSE over adversary
+  bytes remains, bounded only by python-dotenv's own robustness.
 - **A new runtime DoS primitive — not the pre-existing one.** Corrupting `.env` previously
   affected only the DAEMON AT BOOT, because the launcher never read it. It now denies every
   subsequent spawn of an already-running daemon, live, with no restart. Measured: garbage →
