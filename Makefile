@@ -17,6 +17,7 @@
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
         check format-check lint-check typecheck strict-declarations-lint tag-t3-check test test-unit test-integration test-smoke test-e2e test-adversarial test-perf \
+        i18n-check i18n-fix coverage-unit coverage-gates-unit coverage-gates \
         docs-check wiki-check
 
 help: ## Show this help.
@@ -104,6 +105,66 @@ test-integration: ## Run integration tests only (needs Docker for testcontainers
 
 test: test-unit test-integration ## Run unit + integration (matches what CI runs).
 
+# ──────────────────────────────────────────────────────────────
+# i18n catalog drift (#474)
+# ──────────────────────────────────────────────────────────────
+# CLAUDE.md's i18n hard rule #4 makes catalog drift a release blocker, and
+# pr-validate-python.yml is its ONLY enforcement — `make check` never ran it.
+# The trap it catches is not a changed message: editing ANY file containing a
+# `t()` call moves the catalog's `#:` source references, so the catalog goes
+# stale without a single string changing. That is exactly how PR #529 tripped it.
+# Commands mirror pr-validate-python.yml verbatim, including
+# `--ignore-pot-creation-date` (without it the timestamp alone reports drift).
+i18n-check: ## Verify the i18n catalog is not stale (CLAUDE.md i18n hard rule #4).
+	uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
+	@if ! uv run pybabel update --check -i /tmp/alfred.pot -d locale -D alfred \
+			--no-fuzzy-matching --ignore-pot-creation-date; then \
+		echo "::error::i18n catalog drift. Run: make i18n-fix && commit the diff."; \
+		exit 1; \
+	fi
+
+i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call (mutates).
+	uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
+	uv run pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching
+	uv run pybabel compile -d locale -D alfred --statistics
+
+# ──────────────────────────────────────────────────────────────
+# Per-module 100% coverage gates (#474)
+# ──────────────────────────────────────────────────────────────
+# `make check` claimed "identical to CI" while running NONE of CI's 47
+# per-module `--fail-under=100` gates. That is the rule CLAUDE.md calls hard —
+# every security boundary at 100% line+branch — and locally none of it was
+# enforced. PR #529 passed `make check` and then failed CI's "Gateway kernel
+# trust-boundary 100%" gate on one partial branch; that is the gap, observed.
+#
+# The gate list is DERIVED from .github/workflows/ci.yml by
+# scripts/run_coverage_gates.py — never restated here. A hand-copied list is a
+# second source of truth that drifts silently (#422); deriving it means a gate
+# added to CI is enforced locally the same day.
+#
+# Two datasets, because CI has two gate-bearing jobs and they are NOT
+# interchangeable: the `python` job's 25 gates read unit-only coverage, and the
+# `coverage-gates` job's 22 read combined unit+integration. Running a combined
+# gate against unit-only data reports false failures, so each target builds the
+# dataset its gates expect.
+
+coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates read.
+	uv run pytest tests/unit -q --cov=src/alfred --cov-report= --cov-fail-under=0
+
+coverage-gates-unit: coverage-unit ## Run the 25 unit-tier 100% gates from ci.yml.
+	python3 scripts/run_coverage_gates.py --job python --min-gates 20
+
+# ORDER IS LOAD-BEARING: the unit gates must read unit-ONLY data. Combined data
+# is a superset, so running them after the integration append would let a module
+# covered solely by integration tests pass locally and fail CI's `python` job —
+# a false negative in exactly the direction that wastes a CI round-trip. So:
+# unit data -> unit gates -> append integration -> combined gates, in one pass
+# (no re-running the unit tier twice).
+coverage-gates: coverage-gates-unit ## Run every per-module 100% gate CI runs (needs Docker).
+	uv run pytest tests/integration -q -m "not real_llm" \
+		--cov=src/alfred --cov-append --cov-report= --cov-fail-under=0
+	python3 scripts/run_coverage_gates.py --job coverage-gates --min-gates 18
+
 test-smoke: ## Run smoke tests against a running stack (requires `docker compose up`).
 	@if [ -d tests/smoke ]; then \
 		uv run pytest tests/smoke -q -m "not real_llm"; \
@@ -173,7 +234,12 @@ tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(Tagge
 		echo "::notice::no src/alfred/ yet — skipping tag-t3-check"; \
 	fi
 
-check: format-check lint-check typecheck strict-declarations-lint tag-t3-check test ## Verify everything (identical to CI). No mutations.
+# `check` runs the gates CI runs that are reproducible on a dev box. It is NOT
+# the whole of CI: the arm64/WSL/Windows legs, the privileged bwrap legs, the
+# adversarial suite and CodeQL live only in CI. It previously claimed to be
+# "identical to CI" while running NONE of the 47 per-module 100% coverage
+# gates (#474) — an overclaim that cost a CI round-trip on PR #529.
+check: format-check lint-check typecheck strict-declarations-lint tag-t3-check i18n-check coverage-gates ## Verify what CI verifies locally (see comment). No mutations.
 
 # ──────────────────────────────────────────────────────────────
 # Docs link + anchor checker (PR E, plan task 8)
