@@ -25,8 +25,12 @@ hookpoint, then raises a typed exception):
    (``token_user_mismatch`` — the token is authoritative, closure 11).
 7. Refuse if the bound ``User`` is soft-deleted (``user_revoked``).
 
-A 250ms hard timeout wraps the whole pipeline via ``asyncio.wait_for``
-(err-008) so the resolver never hangs a CLI command silently. All deps
+A 250ms hard timeout wraps the RESOLUTION pipeline via ``asyncio.wait_for``
+(err-008) so the resolver never hangs a CLI command silently. Establishing
+the database connection happens BEFORE that budget starts
+(:meth:`DefaultOperatorSessionResolver._warm_connection`, #527): the budget
+bounds how long resolving may take, and charging a cold TCP connect + auth to
+it refused legitimate operators against a loaded or remote Postgres. All deps
 are injected (arch-3): no global state.
 """
 
@@ -39,6 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
+import structlog
 from sqlalchemy import select
 
 from alfred.audit.audit_row_schemas import OPERATOR_SESSION_REFUSED_FIELDS
@@ -68,7 +73,15 @@ from alfred.identity.operator_session import (
 from alfred.memory.models import OperatorSession as OperatorSessionRow
 from alfred.security._hkdf import HKDF_PRK_FLOOR
 
+log = structlog.get_logger(__name__)
+
 _REFUSED_HOOKPOINT = "operator.session.refused"
+
+# Ceiling on establishing the pooled connection BEFORE the resolution budget
+# starts (#527). Generous — it bounds a cold TCP connect + Postgres auth against a
+# possibly remote, TLS-terminated server, not any resolution work. Exceeding it is
+# not fatal: the pipeline runs anyway and fails with its own typed error.
+_WARM_CONNECTION_TIMEOUT_S: float = 5.0
 
 # Maps a file-load / machine-id failure exception type to its closed-vocab
 # audit ``reason``. These refusals fire BEFORE a valid ``OperatorSessionFile``
@@ -138,14 +151,49 @@ class DefaultOperatorSessionResolver:
         """Return the canonical ``User.id`` (stringified) of the operator.
 
         Raises a typed ``OperatorSession*`` exception on any refusal, and
-        ``OperatorSessionTimeout`` if the pipeline exceeds 250ms.
+        ``OperatorSessionTimeout`` if the RESOLUTION exceeds 250ms.
         """
+        await self._warm_connection()
         try:
             return await asyncio.wait_for(self._resolve_inner(), timeout=self._hard_timeout_s)
         except TimeoutError as exc:
             raise OperatorSessionTimeout(
                 f"operator-session resolution exceeded {self._hard_timeout_s}s",
             ) from exc
+
+    async def _warm_connection(self) -> None:
+        """Acquire a pooled connection BEFORE the 250ms budget starts (#527).
+
+        err-008's 250ms is a bound on how long RESOLUTION may take, so the resolver
+        can never hang a CLI command silently. It was also, accidentally, a bound on
+        establishing the database connection: ``_resolve_inner`` reaches the DB via
+        ``session_scope()``, and ``memory/db.py`` builds the engine with no
+        ``pool_pre_ping`` and no prewarm. Both production call sites
+        (``cli/operator_session.py``, ``cli/supervisor.py``) invoke the resolver as
+        the FIRST database work in the process on a fresh ``asyncio.run`` loop, so
+        the pool is always cold and the TCP connect plus Postgres auth landed inside
+        the window. A few milliseconds against a local container; enough to blow the
+        budget against a loaded, remote or TLS-terminated one — and the failure mode
+        is a REFUSAL, so a legitimate operator is denied.
+
+        This is not extra work, it is the same connection the pipeline will use,
+        moved out of the timed region. The resolution logic remains hard-bounded.
+
+        **Best-effort, never raises.** If the database is genuinely down the warm
+        fails and the pipeline runs anyway, producing exactly the error it produced
+        before this existed. Surfacing a new error type here would break the CLI's
+        refusal arms, which are typed on the ``OperatorSession*`` hierarchy — and a
+        warm failure is never itself the diagnosis (hard rule #7: it is logged, not
+        swallowed).
+        """
+        try:
+            async with asyncio.timeout(_WARM_CONNECTION_TIMEOUT_S), self._session_scope():
+                pass
+        except Exception as exc:
+            log.warning(
+                "identity.operator_session.connection_warm_failed",
+                error_class=type(exc).__name__,
+            )
 
     async def _resolve_inner(self) -> str:
         session = await self._load_or_emit_fileless()
