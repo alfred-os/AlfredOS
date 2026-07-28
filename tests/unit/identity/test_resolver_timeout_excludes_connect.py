@@ -37,7 +37,9 @@ from typing import Any
 import pytest
 
 from alfred.identity._resolver import DefaultOperatorSessionResolver
-from alfred.identity.operator_session import OperatorSessionTimeout
+from alfred.identity.operator_session import (
+    OperatorSessionTimeout,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,10 +103,16 @@ class _FakeResult:
 
 
 class _Broker:
-    async def get(self, _name: str) -> str:
-        return "x" * 64
+    """``BrokerLike.get`` is SYNCHRONOUS (`_session_protocols.py`), and
+    `_read_pepper_or_emit_fileless` calls `.get(...).encode("utf-8")` directly.
 
-    async def get_secret(self, _name: str) -> str:
+    Declaring this `async def` would return a coroutine and raise
+    `AttributeError: 'coroutine' object has no attribute 'encode'` the moment a
+    test reached that path. The cases here stub `_resolve_inner`, so none does
+    today — which is exactly how a double drifts from the contract unnoticed.
+    """
+
+    def get(self, _name: str) -> str:
         return "x" * 64
 
 

@@ -77,25 +77,25 @@ log = structlog.get_logger(__name__)
 
 _REFUSED_HOOKPOINT = "operator.session.refused"
 
-# Ceiling on establishing the pooled connection BEFORE the resolution budget
-# starts (#527). Deliberately the SAME as the resolution budget, so the resolver's
-# worst case is 2x250ms = 500ms rather than unbounded-ish.
-#
-# A generous warm ceiling (the first attempt used 5s) inverts err-008: its whole
-# purpose is that the resolver fails FAST rather than hanging a CLI command, and a
-# 5s warm in front of a 250ms budget makes the worst case 20x worse for exactly the
-# pathological database err-008 exists to protect against. The integration suite's
-# `test_resolver_hard_timeout` asserts the whole call returns in <0.6s and caught
-# precisely that.
-#
-# Exceeding this is not fatal: the pipeline runs anyway and fails with its own
-# typed error.
-_WARM_CONNECTION_TIMEOUT_S: float = 0.250
-
 # err-008's PRODUCTION resolution budget. Production never overrides it; the
 # constructor parameter exists so a test can state which property it exercises
 # (see ``DefaultOperatorSessionResolver.__init__``).
 _DEFAULT_HARD_TIMEOUT_S: Final[float] = 0.250
+
+# Ceiling on establishing the pooled connection BEFORE the resolution budget starts
+# (#527). DERIVED from the budget, not a second 0.250 literal, so the documented
+# "worst case is 2x the budget" invariant cannot drift when one of them changes.
+#
+# The value is a genuine trade-off and it does NOT fix every case. A warm that is
+# cancelled still leaves the pipeline to connect inside its own 250ms, so a connect
+# that legitimately needs longer than this ceiling is still refused — see the
+# residual recorded on #527. Widening the ceiling is not free: err-008 exists so the
+# resolver fails FAST rather than hanging a CLI command, and an earlier 5s ceiling
+# put a 5-second wait in front of a 250ms budget, making the worst case 20x worse
+# for exactly the pathological database the rule protects against
+# (``test_resolver_hard_timeout`` caught it). Picking the right ceiling is a policy
+# question about acceptable operator-CLI latency, which #527 still owns.
+_WARM_CONNECTION_TIMEOUT_S: Final[float] = _DEFAULT_HARD_TIMEOUT_S
 
 # Maps a file-load / machine-id failure exception type to its closed-vocab
 # audit ``reason``. These refusals fire BEFORE a valid ``OperatorSessionFile``
@@ -198,6 +198,15 @@ class DefaultOperatorSessionResolver:
 
         This is not extra work, it is the same connection the pipeline will use,
         moved out of the timed region. The resolution logic remains hard-bounded.
+
+        **It narrows the window, it does not close it.** A connect that needs longer
+        than ``_WARM_CONNECTION_TIMEOUT_S`` is cancelled here and then has to happen
+        inside the resolution budget anyway, so the slowest databases are still
+        refused. Buying those cases means widening the ceiling, which directly costs
+        err-008's fail-fast guarantee — a policy question #527 still owns. What this
+        does buy is the band between "fast enough to have been fine" and "slower than
+        the whole budget", which is where a contended runner or a modest network hop
+        actually lands.
 
         **Best-effort, never raises.** If the database is genuinely down the warm
         fails and the pipeline runs anyway, producing exactly the error it produced
