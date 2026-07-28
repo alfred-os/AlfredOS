@@ -28,9 +28,9 @@ at 250ms. Only the connection setup moves outside it.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,29 +49,40 @@ _COLD_CONNECT_DELAY_S = 0.6
 
 
 class _SlowFirstConnectScope:
-    """A ``session_scope`` whose FIRST acquisition is slow, like a cold pool.
+    """A ``session_scope`` whose FIRST STATEMENT is slow, like a cold pool.
 
-    Models exactly the production shape: establishing the connection costs real
-    time once, then the pooled connection is fast for every later scope.
+    Fidelity matters here and cost a CI round-trip. ``async_sessionmaker`` builds
+    the session LAZILY: entering the scope touches no connection at all, and the
+    pool is not hit until the first statement executes. An earlier version of this
+    double slept on scope ENTRY, which made a warm that only entered the scope look
+    like it worked — while in production it warmed nothing and CI still timed out.
+
+    So the delay lives on the first ``execute``, which is where the real connect,
+    auth and SQLAlchemy one-time setup actually happen.
     """
 
     def __init__(self, *, rows: dict[str, tuple[int, datetime | None]]) -> None:
         self._rows = rows
         self.acquisitions = 0
+        self.statements = 0
 
     @asynccontextmanager
     async def __call__(self) -> AsyncIterator[Any]:
         self.acquisitions += 1
-        if self.acquisitions == 1:
-            await asyncio.sleep(_COLD_CONNECT_DELAY_S)
-        yield _FakeDb(self._rows)
+        yield _FakeDb(self._rows, self)
 
 
 class _FakeDb:
-    def __init__(self, rows: dict[str, tuple[int, datetime | None]]) -> None:
+    def __init__(
+        self, rows: dict[str, tuple[int, datetime | None]], scope: _SlowFirstConnectScope
+    ) -> None:
         self._rows = rows
+        self._scope = scope
 
     async def execute(self, *_args: object, **_kwargs: object) -> Any:
+        self._scope.statements += 1
+        if self._scope.statements == 1:
+            await asyncio.sleep(_COLD_CONNECT_DELAY_S)
         return _FakeResult(next(iter(self._rows.values()), None))
 
 
@@ -146,7 +157,8 @@ async def test_a_cold_connection_does_not_consume_the_resolution_budget(
     resolver = _resolver(scope, tmp_path / "session")
 
     async def _pipeline_that_hits_the_db() -> str:
-        async with resolver._session_scope():
+        async with resolver._session_scope() as db:
+            await db.execute(None)
             return "42"
 
     resolver._resolve_inner = _pipeline_that_hits_the_db  # type: ignore[method-assign]
@@ -154,9 +166,9 @@ async def test_a_cold_connection_does_not_consume_the_resolution_budget(
     resolved = await resolver.resolve()
 
     assert resolved == "42"
-    assert scope.acquisitions >= 2, (
-        "expected a warm acquisition plus the pipeline's own; the connection was "
-        "never warmed outside the budget"
+    assert scope.statements >= 2, (
+        "expected the warm to EXECUTE a statement plus the pipeline's own. Entering "
+        "the scope is not enough — async_sessionmaker is lazy and warms nothing."
     )
 
 
@@ -205,10 +217,54 @@ async def test_warming_never_masks_a_real_failure(tmp_path: Path) -> None:
     scope = _ExplodingScope()
     resolver = _resolver(scope, tmp_path / "missing" / "session")  # type: ignore[arg-type]
 
-    with pytest.raises(Exception) as caught:  # noqa: B017, PT011 - the TYPE is the assertion
+    with pytest.raises(Exception) as caught:
         await resolver.resolve()
 
     # The file-missing refusal still wins; the dead DB does not become the error.
     assert not isinstance(caught.value, OSError), (
         "a failed warm leaked out and replaced the pipeline's own refusal"
+    )
+
+
+async def test_a_pathological_database_still_fails_fast(tmp_path: Path) -> None:
+    """The warm must not inflate the worst case err-008 exists to bound.
+
+    err-008's purpose is that the resolver fails FAST rather than hanging a CLI
+    command. A generous warm ceiling inverts that: my first attempt used 5s, which
+    put a 5s wait in front of a 250ms budget — 20x worse for exactly the
+    pathological database the rule protects against. The integration suite's
+    `test_resolver_hard_timeout` caught it via its <0.6s assertion; this pins the
+    property at the unit tier too, where it is cheap to run.
+
+    Worst case is warm + resolution, both bounded by the same constant.
+    """
+
+    class _WedgedScope:
+        @asynccontextmanager
+        async def __call__(self) -> AsyncIterator[Any]:
+            yield _WedgedDb()
+
+    class _WedgedDb:
+        async def execute(self, *_a: object, **_k: object) -> Any:
+            await asyncio.sleep(30)  # never returns within any sane budget
+            raise AssertionError("unreachable")
+
+    resolver = _resolver(_WedgedScope(), tmp_path / "session")  # type: ignore[arg-type]
+
+    async def _pipeline_that_hits_the_db() -> str:
+        async with resolver._session_scope() as db:
+            await db.execute(None)
+            return "unreachable"
+
+    resolver._resolve_inner = _pipeline_that_hits_the_db  # type: ignore[method-assign]
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(OperatorSessionTimeout):
+        await resolver.resolve()
+    elapsed = loop.time() - started
+
+    assert elapsed < 0.6, (
+        f"resolver took {elapsed:.2f}s against a wedged database — the warm ceiling "
+        "has been widened and err-008's fail-fast guarantee is weakened"
     )
