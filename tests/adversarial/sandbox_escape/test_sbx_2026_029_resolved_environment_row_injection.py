@@ -83,7 +83,11 @@ def _fake_helper(tmp_path: Path, stdout_payload: str) -> Path:
 
 
 def _run_launcher(
-    tmp_path: Path, stdout_payload: str, *, with_manifest: bool = False
+    tmp_path: Path,
+    stdout_payload: str,
+    *,
+    with_manifest: bool = False,
+    fake_uname: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bindir = _fake_helper(tmp_path, stdout_payload)
     if with_manifest:
@@ -99,6 +103,7 @@ def _run_launcher(
         env={
             "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             "ALFRED_PLUGIN_MANIFEST_PATH": str(tmp_path / "manifest.toml"),
+            **({"FAKE_UNAME": fake_uname} if fake_uname is not None else {}),
         },
         check=False,
         timeout=60,
@@ -176,12 +181,19 @@ def test_a_recognised_environment_completes_the_launch(tmp_path: Path, environme
     all, so the case passed without the guard ever having accepted anything. A zero
     exit is the direct acceptance assertion — the launcher ran the argv.
 
-    `production` is excluded because it legitimately refuses on a non-Linux host
-    (`uid_separation_unavailable`, the #486 keystone) and on a non-root Linux host
-    (`runuser_unavailable`); it gets its own case below, which asserts acceptance
-    through the audit row instead.
+    ``FAKE_UNAME=Darwin`` is what makes that zero exit PORTABLE, and it is the
+    repo's sanctioned mechanism for it (the launcher ships the shim for the cross-OS
+    CI matrix, devops-2). Without it the Linux branch UID-drops via ``runuser`` to
+    the ``alfred-quarantine`` account, so the result depends on whether the RUNNER
+    provisions that user and whether the suite runs as root — the CI root leg failed
+    with `runuser: user alfred-quarantine does not exist`, which says nothing about
+    the environment gate under test. The macOS branch execs directly, so the exit
+    code reflects the gate and nothing else.
+
+    The override cannot weaken this: it is IGNORED when ``IS_PRODUCTION`` is true,
+    which is the #486 keystone, so ``production`` still needs the separate case below.
     """
-    result = _run_launcher(tmp_path, environment, with_manifest=True)
+    result = _run_launcher(tmp_path, environment, with_manifest=True, fake_uname="Darwin")
 
     assert result.returncode == 0, (
         f"the launcher refused the legitimate environment {environment!r} instead of "
@@ -195,10 +207,23 @@ def test_production_is_accepted_and_propagated_even_when_the_host_refuses(
 ) -> None:
     """`production` must be ACCEPTED by the environment gate on every host.
 
-    It may still be refused downstream — that is the point of the #486 keystone — so
-    a zero exit is not portable here. Acceptance is proved instead by the refusal row
-    carrying the real `production` value: a value the gate had rejected could never
-    reach that field, which is hard-coded to the `unset` sentinel on the refusal path.
+    It cannot use the deterministic trick the other two values use: ``FAKE_UNAME`` is
+    IGNORED once ``IS_PRODUCTION`` is true (the #486 keystone), which is precisely
+    the property that stops a test override unlocking the unsandboxed branch on a
+    production host. So the downstream behaviour here is genuinely host-dependent:
+
+    * macOS -> refuses `uid_separation_unavailable`, row carries `production`;
+    * Linux non-root -> refuses `runuser_unavailable`, row carries `production`;
+    * Linux root -> reaches the UID-drop and fails on host provisioning
+      (`runuser: user alfred-quarantine does not exist`) with NO JSON row at all.
+      That is what broke the first version of this case on CI.
+
+    Every one of those outcomes is DOWNSTREAM of the gate, so each is proof the gate
+    accepted the value — the rejection path exits immediately with one row whose
+    `environment` is the hard-coded `unset` sentinel and never reaches any of them.
+    The assertion therefore requires at least one such marker to be observed rather
+    than settling for "no rejection seen", which would pass on a run that produced
+    nothing at all.
     """
     result = _run_launcher(tmp_path, "production", with_manifest=True)
 
@@ -206,8 +231,12 @@ def test_production_is_accepted_and_propagated_even_when_the_host_refuses(
     assert not any(r.get("reason") == "environment_unrecognised" for r in rows), (
         f"the gate refused the legitimate `production` value: {result.stderr!r}"
     )
-    if result.returncode != 0:
-        assert any(r.get("environment") == "production" for r in rows), (
-            "a downstream refusal did not carry the accepted environment, so this "
-            f"case cannot prove the gate accepted it: {rows!r}"
-        )
+
+    launched = result.returncode == 0
+    row_carries_value = any(r.get("environment") == "production" for r in rows)
+    reached_uid_drop = "runuser" in result.stderr
+    assert launched or row_carries_value or reached_uid_drop, (
+        "no evidence the gate accepted `production` — expected a completed launch, a "
+        "downstream refusal row carrying the value, or the UID-drop stage, and saw "
+        f"none of them: rc={result.returncode} stderr={result.stderr!r}"
+    )
