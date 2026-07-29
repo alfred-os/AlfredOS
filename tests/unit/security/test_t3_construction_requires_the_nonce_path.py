@@ -204,3 +204,57 @@ def test_a_missing_caller_frame_does_not_turn_a_refusal_into_a_crash(
     refusals = [e for e in logs if e["event"] == "security.t3_boundary.refused"]
     assert len(refusals) == 1
     assert refusals[0]["caller_module_unverified"] == "<unknown>"
+
+
+class _SpoofT3(T3):
+    """A T3 subclass wearing T3's name — outside the closed tier model (PRD §7.1)."""
+
+    name = "T3"
+
+
+def test_a_t3_subclass_cannot_dodge_the_gate_via_model_construct() -> None:
+    """``tier is T3`` was an IDENTITY check, so a subclass walked straight past it.
+
+    `model_construct` and `model_copy` skip `_validate_tier`, so the guard added here
+    was the ONLY runtime check on those seams — and guarding just the T3 identity
+    left the closed tier model unenforced on exactly them. `class Spoof(T3)` was
+    admitted silently: no refusal, no log, no exception.
+    """
+    with _expect_refusal():
+        TaggedContent[T3].model_construct(
+            content="untrusted", source="test", tier=_SpoofT3, metadata={}
+        )
+
+
+def test_a_t3_subclass_cannot_dodge_the_gate_via_model_copy() -> None:
+    """The same hole on the copy seam."""
+    lower = TaggedContent[T2](content="ok", source="test", tier=T2, metadata={})
+    with _expect_refusal():
+        lower.model_copy(update={"tier": _SpoofT3})
+
+
+def test_an_unapproved_tier_is_refused_on_the_unvalidated_seams() -> None:
+    """The closed tier model (PRD §7.1) must hold on the seams that skip validation.
+
+    Broader than the T3 case: ANY tier outside the approved set has to be refused
+    here, because these seams never reach the pydantic validator that normally
+    enforces it.
+    """
+
+    class _Rogue(T2):
+        name = "T9"
+
+    with _expect_refusal():
+        TaggedContent[T2].model_construct(content="x", source="test", tier=_Rogue, metadata={})
+
+
+def test_model_construct_without_a_tier_defers_to_pydantic() -> None:
+    """An ABSENT tier is not an inadmissible one — do not refuse it here.
+
+    `model_construct` may legitimately omit a field, and pydantic owns required-field
+    handling. Raising on `None` would turn a pydantic concern into a spurious
+    security refusal and pollute the audit stream with non-events.
+    """
+    built = TaggedContent[T2].model_construct(content="fine", source="test")
+
+    assert built.content == "fine"
