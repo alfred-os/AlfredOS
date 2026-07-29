@@ -38,10 +38,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from alfred.audit.log import AuditWriter
 from alfred.bootstrap.nonce_factory import _NONCE_LOCK
-from alfred.security import tiers as _tiers
-from alfred.security.tiers import CapabilityGateNonce
 from alfred.identity import IdentityVersionCounter, NullRateLimiter
 from alfred.memory.models import Base
+from alfred.security import tiers as _tiers
+from alfred.security.tiers import CapabilityGateNonce
 
 
 @pytest.fixture(autouse=True)
@@ -153,6 +153,7 @@ def audit_buffer(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any
 # exactly what CLAUDE.md hard rule #2 forbids — bypassing the capability layer in a
 # test rather than using a fixture grant. Without a shared fixture the next author
 # who needs a T3 object has no honest option.
+
 
 @pytest.fixture
 def authorized_t3_nonce() -> Iterator[CapabilityGateNonce]:

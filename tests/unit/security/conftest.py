@@ -28,7 +28,6 @@ import pytest
 
 from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.security import tiers as _tiers
-from alfred.security.tiers import CapabilityGateNonce
 
 
 @pytest.fixture
