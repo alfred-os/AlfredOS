@@ -10,6 +10,7 @@ per-process nonce token — see ``CapabilityGateNonce`` and spec §3.2.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import Any, Protocol, overload, runtime_checkable
 
 import structlog
@@ -104,6 +105,30 @@ class CapabilityGateNonce:
 # of the bootstrap-registered capability into the public function
 # signature.
 _AUTHORIZED_T3_NONCE: CapabilityGateNonce | None = None
+
+# #518: the nonce gate lived in ``tag_t3_with_nonce`` alone, so the MODEL never
+# asked whether the caller held it. Seven constructions could therefore mint a
+# T3-tagged object without ever passing the gate — bare keyword, ``model_construct``,
+# ``model_validate``, ``model_validate_json``, ``model_copy(update=...)``, a renamed
+# import, and a non-literal generic argument. A static detector can only catch the
+# shapes it was taught; this closes the whole class at runtime.
+#
+# A ContextVar, not a module flag: the core is async, and a flag would leak
+# authorisation across concurrently-running tasks. Set (and reset) exclusively around
+# the single authorised construction at the end of ``tag_t3_with_nonce``.
+_T3_CONSTRUCTION_AUTHORIZED: ContextVar[bool] = ContextVar(
+    "alfred_t3_construction_authorized", default=False
+)
+
+
+def _refuse_unauthorized_t3(tier: object) -> None:
+    """Raise unless a T3 construction is happening inside the authorised path.
+
+    Non-T3 tiers are untouched — the invariant is specifically that the untrusted
+    tier cannot be minted off the capability gate (spec §3.2).
+    """
+    if tier is T3 and not _T3_CONSTRUCTION_AUTHORIZED.get():
+        raise ValueError(t("security.t3_construction_unauthorized"))
 
 _log_t3 = structlog.get_logger(__name__)
 
@@ -251,7 +276,45 @@ class TaggedContent[TierT: TrustTier](BaseModel):
                         expected=expected_tier.name,
                     )
                 )
+        # #518: the nonce gate is a property of the TIER, not of one function, so it
+        # is enforced here — where every validating construction passes — rather than
+        # only in ``tag_t3_with_nonce``. ``model_construct`` and ``model_copy`` skip
+        # validation by design and are guarded separately.
+        #
+        # LAST, deliberately. When a wire payload claims T3 against a T2-expecting
+        # consumer both this and the cross-tier guard above apply, and the cross-tier
+        # message is the more useful one — it names both tiers and identifies the
+        # laundering attack (spec §3.5). Checking first would shadow that diagnostic
+        # with a generic "unauthorized construction" for an attack the corpus has a
+        # dedicated case for.
+        _refuse_unauthorized_t3(value)
         return value
+
+    @classmethod
+    def model_construct(
+        cls, _fields_set: set[str] | None = None, **values: Any
+    ) -> TaggedContent[TierT]:
+        """Guarded ``model_construct`` (#518).
+
+        Pydantic's ``model_construct`` skips validation ENTIRELY — it exists to build
+        a model from data already known to be valid. That makes it the sharpest of the
+        seven bypasses: the field validator above never runs. Re-checking here keeps
+        the invariant true for every construction route, not merely the validating ones.
+        """
+        _refuse_unauthorized_t3(values.get("tier"))
+        return super().model_construct(_fields_set, **values)
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Any:
+        """Guarded ``model_copy`` (#518).
+
+        ``model_copy`` does not re-validate, so ``update={"tier": T3}`` silently
+        upgraded a lower-tier object to untrusted. The most plausible accident of the
+        seven — an author copies an object and edits the tier, never touching a
+        function the gate protects.
+        """
+        if update is not None:
+            _refuse_unauthorized_t3(update.get("tier"))
+        return super().model_copy(update=dict(update) if update else None, deep=deep)
 
     @model_serializer(mode="plain")
     def _serialize_with_tier_name(self) -> dict[str, Any]:
@@ -456,9 +519,16 @@ def tag_t3_with_nonce(
             attempted_tier="T3",
         )
         raise ValueError(t("security.tag_t3_unauthorized", caller=caller_module_unverified))
-    return TaggedContent[T3](
-        content=content,
-        source=source,
-        tier=T3,
-        metadata=dict(metadata),
-    )
+    # The sole authorised T3 construction (#518). The token is set immediately around
+    # it and reset in ``finally``, so an exception mid-construction cannot leave a
+    # context authorised for later unrelated work.
+    token = _T3_CONSTRUCTION_AUTHORIZED.set(True)
+    try:
+        return TaggedContent[T3](
+            content=content,
+            source=source,
+            tier=T3,
+            metadata=dict(metadata),
+        )
+    finally:
+        _T3_CONSTRUCTION_AUTHORIZED.reset(token)

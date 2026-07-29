@@ -23,7 +23,7 @@ import datetime
 
 from alfred.plugins.content_store_base import ContentStoreBase, InMemoryContentStore
 from alfred.security.quarantine import ContentHandle
-from alfred.security.tiers import T3, TaggedContent
+from alfred.security.tiers import T3, CapabilityGateNonce, TaggedContent, tag_t3_with_nonce
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -38,13 +38,19 @@ def _make_handle(handle_id: str, source_url: str = "https://example.com") -> Con
     )
 
 
-def _make_tagged(content: str = "test content") -> TaggedContent[T3]:
-    # Tests construct TaggedContent[T3] directly to exercise the store
-    # contract. The production tag_t3_with_nonce path is exercised by
-    # tests/unit/security/test_tag_t3_capability_gate.py and is out of
-    # scope here — this module tests storage round-trip behaviour, not
-    # the T3 tagging gate.
-    return TaggedContent[T3](content=content, source="test", tier=T3, metadata={})
+def _make_tagged(nonce: CapabilityGateNonce, content: str = "test content") -> TaggedContent[T3]:
+    """Build a T3 object through the SANCTIONED path (#518).
+
+    This used to construct ``TaggedContent[T3](...)`` directly, on the grounds that
+    the store contract — not the tagging gate — was under test. That is exactly the
+    bypass CLAUDE.md hard rule #2 forbids ("even in tests, do not stub it to always
+    allow; use a fixture grant"), and #518 makes it impossible: T3 is now
+    unconstructable off the nonce path at runtime, not merely discouraged.
+
+    The ``authorized_t3_nonce`` fixture lives in ``tests/unit/conftest.py`` so every
+    unit test has an honest route to a T3 object.
+    """
+    return tag_t3_with_nonce(content, "test", caller_token=nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +58,12 @@ def _make_tagged(content: str = "test content") -> TaggedContent[T3]:
 # ---------------------------------------------------------------------------
 
 
-def test_put_and_get_round_trip_preserves_tagged_content() -> None:
+def test_put_and_get_round_trip_preserves_tagged_content(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
     store = InMemoryContentStore()
     handle = _make_handle("round-trip-uuid")
-    tagged = _make_tagged("hello world")
+    tagged = _make_tagged(authorized_t3_nonce, "hello world")
     store.put(handle, tagged)
     retrieved = store.get(handle.id)
     # rvw-004 fix: get() returns the SAME TaggedContent[T3] wrapper that
@@ -68,10 +76,10 @@ def test_get_missing_returns_none() -> None:
     assert store.get("nonexistent") is None
 
 
-def test_delete_removes_entry() -> None:
+def test_delete_removes_entry(authorized_t3_nonce: CapabilityGateNonce) -> None:
     store = InMemoryContentStore()
     handle = _make_handle("del-uuid")
-    store.put(handle, _make_tagged())
+    store.put(handle, _make_tagged(authorized_t3_nonce))
     store.delete(handle.id)
     assert store.get(handle.id) is None
 
@@ -84,23 +92,25 @@ def test_delete_missing_is_idempotent() -> None:
     assert store.get("never-existed") is None
 
 
-def test_multiple_handles_isolated() -> None:
+def test_multiple_handles_isolated(authorized_t3_nonce: CapabilityGateNonce) -> None:
     store = InMemoryContentStore()
     h1 = _make_handle("uuid-1")
     h2 = _make_handle("uuid-2")
-    t1 = _make_tagged("first")
-    t2 = _make_tagged("second")
+    t1 = _make_tagged(authorized_t3_nonce, "first")
+    t2 = _make_tagged(authorized_t3_nonce, "second")
     store.put(h1, t1)
     store.put(h2, t2)
     assert store.get(h1.id) is t1
     assert store.get(h2.id) is t2
 
 
-def test_put_overwrites_previous_value_for_same_id() -> None:
+def test_put_overwrites_previous_value_for_same_id(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
     store = InMemoryContentStore()
     handle = _make_handle("same-id")
-    first = _make_tagged("first")
-    second = _make_tagged("second")
+    first = _make_tagged(authorized_t3_nonce, "first")
+    second = _make_tagged(authorized_t3_nonce, "second")
     store.put(handle, first)
     store.put(handle, second)
     assert store.get(handle.id) is second
