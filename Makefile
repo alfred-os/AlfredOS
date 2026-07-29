@@ -152,7 +152,7 @@ coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates r
 	uv run pytest tests/unit -q --cov=src/alfred --cov-report= --cov-fail-under=0
 
 coverage-gates-unit: coverage-unit ## Run the 25 unit-tier 100% gates from ci.yml.
-	python3 scripts/run_coverage_gates.py --job python --min-gates 20
+	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 20
 
 # ORDER IS LOAD-BEARING: the unit gates must read unit-ONLY data. Combined data
 # is a superset, so running them after the integration append would let a module
@@ -163,7 +163,7 @@ coverage-gates-unit: coverage-unit ## Run the 25 unit-tier 100% gates from ci.ym
 coverage-gates: coverage-gates-unit ## Run every per-module 100% gate CI runs (needs Docker).
 	uv run pytest tests/integration -q -m "not real_llm" \
 		--cov=src/alfred --cov-append --cov-report= --cov-fail-under=0
-	python3 scripts/run_coverage_gates.py --job coverage-gates --min-gates 18
+	uv run python3 scripts/run_coverage_gates.py --job coverage-gates --min-gates 18
 
 test-smoke: ## Run smoke tests against a running stack (requires `docker compose up`).
 	@if [ -d tests/smoke ]; then \
