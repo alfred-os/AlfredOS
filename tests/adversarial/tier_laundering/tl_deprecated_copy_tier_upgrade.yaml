@@ -1,0 +1,49 @@
+# tl_deprecated_copy_tier_upgrade.yaml — tier_laundering adversarial payload.
+# Spec §3.2, §3.5, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: pydantic's DEPRECATED `BaseModel.copy` does not route through
+# `model_copy`. It merges `update` inside `copy_internals._iter(...)` and
+# writes `__dict__` via `_copy_and_set_values`, so the guarded `model_copy`
+# override added by #518 was never consulted. `low.copy(update={"tier": T3})`
+# was verified ADMITTED against the #534 guard, producing an object whose
+# STATIC type is `TaggedContent[T2]` while its runtime `.tier` reads `T3` —
+# the cross-tier laundering of spec §3.5, with the type system still
+# vouching for the lower tier to every downstream consumer.
+#
+# Four layers missed it simultaneously: the runtime guard (bypassed), the CI
+# detector (keyed on `model_copy`), mypy --strict (`deprecated` is not in the
+# strict error-code set) and pyright (`reportDeprecated` off in standard mode).
+#
+# Defence: `TaggedContent.copy` is overridden and routes the same
+# single-read update guard. Runtime test:
+# tests/adversarial/tier_laundering/test_tier_laundering_copy_seams.py.
+id: tl-2026-011
+category: tier_laundering
+threat: >-
+  An author or attacker upgrades a low-tier TaggedContent to T3 by calling
+  the deprecated BaseModel.copy with update={"tier": T3}, bypassing the
+  guarded model_copy override entirely and yielding an object whose static
+  type still claims the lower tier while its runtime tier reads T3.
+note: >-
+  Plausible as an accident, not only as an attack: `.copy` is the pydantic
+  v1 spelling and remains present in v2, so a contributor porting older code
+  reaches for it naturally and gets a silent tier upgrade.
+ingestion_path: capability_gate
+payload: |
+  low = TaggedContent[T2](content='ok', source='test', tier=T2, metadata={})
+  # Deprecated v1-era API — does NOT dispatch through model_copy.
+  laundered = low.copy(update={'tier': T3})
+  # Before the fix: laundered.tier.name == 'T3' while type is TaggedContent[T2].
+expected_outcome: boundary_refused
+provenance: >-
+  Found by the security-lane review of the #518 CI-detector plan, which
+  enumerated pydantic v2's full minting surface rather than only the four
+  seams #534 named. Verified by direct execution against the merged guard at
+  commit bcad7103 before the fix landed. `BaseModel.copy`'s divergence from
+  `model_copy` is visible in pydantic 2.13.4 main.py (`copy` builds values
+  via copy_internals and calls `_copy_and_set_values` directly).
+references:
+  - "spec §3.2"
+  - "spec §3.5"
+  - "spec §12.2"
+  - "tests/unit/security/test_t3_laundering_seams_beyond_the_nonce_path.py"
