@@ -69,12 +69,13 @@ def test_every_category_directory_has_readme(
 # undocumented payload fails immediately, while the existing debt stays visible instead
 # of being silently tolerated by a weaker check. Shrink this list, never grow it —
 # a new entry here should be a review conversation, not a convenience.
-_README_UNDOCUMENTED_BACKLOG: frozenset[str] = frozenset(
+_README_BACKLOG_BASELINE: frozenset[str] = frozenset(
     {
         "cap-2026-001", "cap-2026-002", "cap-2026-003", "cap-2026-004",
         "cap-2026-005", "cap-2026-006", "cap-2026-007", "cap-2026-008",
         "cap-2026-009", "cap-2026-010", "cap-2026-011", "cap-2026-012",
-        "cib-2026-007", "de-2026-017", "de-2026-018", "de-2026-019",
+        "cib-2026-006", "cib-2026-007", "de-2026-017", "de-2026-018",
+        "de-2026-019",
         "de-2026-020", "dlp-2026-001", "hk-2026-001", "hk-2026-002",
         "hk-2026-003", "hk-2026-004", "hk-2026-005", "hk-2026-006",
         "pi-2026-001", "pi-2026-002", "pi-2026-003", "pi-2026-004",
@@ -86,6 +87,12 @@ _README_UNDOCUMENTED_BACKLOG: frozenset[str] = frozenset(
         "tl-2026-009",
     }
 )  # fmt: skip
+
+# The live allow-list. Starts equal to the baseline above and may only ever SHRINK —
+# `test_the_readme_backlog_can_only_shrink` enforces it. A prose comment saying "shrink,
+# never grow" is not a gate; this epic has repeatedly shipped exactly that shape
+# (CodeRabbit).
+_README_UNDOCUMENTED_BACKLOG: frozenset[str] = _README_BACKLOG_BASELINE
 
 
 def _source_filename(corpus_root: Path, payload: AdversarialPayload) -> str | None:
@@ -116,11 +123,22 @@ def _is_documented(corpus_root: Path, payload: AdversarialPayload) -> bool:
     readme = corpus_root / payload.category / "README.md"
     if not readme.is_file():
         return False
-    text = readme.read_text(encoding="utf-8")
-    if payload.id in text:
+    # Only markdown TABLE ROWS count — the coverage matrix. Searching the whole file let
+    # prose, a cross-reference in another row's narrative, or a code sample satisfy the
+    # gate, so a payload could read as documented without ever having a matrix row
+    # (CodeRabbit).
+    rows = [
+        line
+        for line in readme.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("|")
+    ]
+    if not rows:
+        return False
+    matrix = "\n".join(rows)
+    if payload.id in matrix:
         return True
     filename = _source_filename(corpus_root, payload)
-    return filename is not None and filename in text
+    return filename is not None and filename in matrix
 
 
 def test_every_new_payload_appears_in_its_category_readme(
@@ -143,6 +161,20 @@ def test_every_new_payload_appears_in_its_category_readme(
     assert not orphans, (
         f"payloads missing from their category README coverage matrix: {orphans}. "
         "Add a matrix row naming the attack vector and the owning PR/task."
+    )
+
+
+def test_the_readme_backlog_can_only_shrink() -> None:
+    """A new undocumented payload must not be waved through by extending the allow-list.
+
+    The backlog exists to carry PRE-EXISTING debt. Growing it converts the gate into a
+    rubber stamp one line at a time, which is the failure mode an enumerated allow-list is
+    supposed to prevent.
+    """
+    added = sorted(_README_UNDOCUMENTED_BACKLOG - _README_BACKLOG_BASELINE)
+    assert not added, (
+        f"ids added to the README allow-list: {added}. The backlog may only shrink — "
+        "give the payload a coverage-matrix row instead of an exemption."
     )
 
 

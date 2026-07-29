@@ -339,10 +339,16 @@ class AnyTaggedContent(Protocol):
 
 # Names a subclass must not redefine: each is a tier guard, and pydantic rebinds
 # validator targets BY NAME off the subclass MRO, so redefining one replaces the parent's
-# check inside the parent's own slot. The mangled spelling is included explicitly —
-# ``_TaggedContent__enforce_tier_invariant`` is what Python produces for
-# ``__enforce_tier_invariant`` inside this class, and a namespace can plant that string
-# directly. Kept as data next to the class so adding a guard means adding it here.
+# check inside the parent's own slot. Kept as data next to the class so adding a guard
+# means adding it here — ``test_the_guard_name_set_covers_every_guard_on_the_class``
+# reds if one is added to the class but not to this set.
+#
+# NO name-mangled entry: an earlier revision guarded a
+# ``_TaggedContent__enforce_tier_invariant`` model validator, which a namespace could
+# defeat by planting that literal string. ``model_post_init`` superseded it — it fires on
+# strictly more paths, including inside ``BaseModel.model_construct`` — so the mangled
+# name is now inert because the validator it named no longer EXISTS, not because it is
+# listed here. Do not re-add it; that would imply a guard that is not there.
 _TIER_GUARD_NAMES: frozenset[str] = frozenset(
     {
         "_validate_tier",
@@ -412,14 +418,14 @@ class TaggedContent[TierT: TrustTier](BaseModel):
         Zero subclasses exist in ``src/``, ``tests/`` or ``plugins/``, so this costs
         nothing today.
 
-        TWO conditions, because either alone leaves a hole:
+        TWO conditions, because the module check alone leaves a hole:
 
         * a foreign defining module — the ordinary case;
-        * a namespace that redefines any tier guard, EVEN from this module. A namespace
-          forging ``__module__`` passes the module check, and one planting the literal
-          ``_TaggedContent__enforce_tier_invariant`` also defeats layer B (name mangling
-          hides the syntax, not the resulting string). Refusing any subclass that
-          redefines a guard closes both, so neither is left as a documented live bypass.
+        * a namespace that redefines any name in :data:`_TIER_GUARD_NAMES`, EVEN from this
+          module. A namespace forging ``__module__`` passes the module check, so without
+          this second condition it could still shadow ``_validate_tier`` or
+          ``model_post_init`` and disable enforcement. Refusing the redefinition closes
+          it, rather than leaving it as a documented live bypass.
         """
         super().__init_subclass__(**kwargs)
         shadowed_guards = sorted(_TIER_GUARD_NAMES & set(vars(cls)))

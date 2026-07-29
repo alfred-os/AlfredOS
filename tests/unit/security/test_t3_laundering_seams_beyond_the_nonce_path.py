@@ -43,6 +43,7 @@ Every generic-typed consumer downstream treats it as authenticated-user content.
 from __future__ import annotations
 
 import pickle
+import re
 import sys
 import types
 import warnings
@@ -55,7 +56,8 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic.errors import PydanticUserError
 from pydantic.warnings import PydanticDeprecatedSince20
 
-import alfred.security.tiers as tiers_module
+from alfred.i18n import t as _t
+from alfred.security import tiers as tiers_module
 from alfred.security.tiers import T2, T3, TaggedContent, TrustTier, tag_t3_with_nonce
 
 _T3_PAYLOAD: dict[str, Any] = {"content": "untrusted", "source": "test", "tier": T3}
@@ -71,6 +73,15 @@ class _Envelope(BaseModel):
     """Carries a T3 field so nested validation is exercised, not just top-level."""
 
     payload: TaggedContent[T3]
+
+
+# Expected refusal text derived from the CATALOG, never hardcoded prose: asserting on
+# rendered English couples every test to catalog wording and to the active locale, so a
+# translator or a reworded msgstr reds the security suite for no security reason
+# (CodeRabbit). Deriving keeps BY-MESSAGE discrimination without that coupling.
+_CROSS_TIER_MSG: str = re.escape(_t("security.tier_mismatch", got="T3", expected="T2"))
+_NONCE_REFUSAL_MSG: str = re.escape("security.t3_construction_unauthorized")
+_TIER_NOT_SELECTABLE_MSG: str = re.escape(_t("security.tagged_content_tier_not_selectable")[:40])
 
 
 def _expect_refusal() -> pytest.RaisesExc[Exception]:
@@ -113,13 +124,13 @@ def test_deprecated_copy_cannot_upgrade_the_tier() -> None:
     runs here", not the guard it is named for.
     """
     # Parameterised receiver: the cross-tier guard owns this diagnostic (spec §3.5).
-    with pytest.raises(ValueError, match=r"declared 'T3' but parser expects 'T2'"):
+    with pytest.raises(ValueError, match=_CROSS_TIER_MSG):
         _lower().copy(update={"tier": T3})
 
     # Unparameterised receiver: no generic to cross-check, so the nonce guard is the
     # only thing standing between the caller and a minted T3.
     unparametrised = TaggedContent.model_construct(content="ok", source="test", tier=T2)
-    with pytest.raises(ValueError, match=r"security\.t3_construction_unauthorized"):
+    with pytest.raises(ValueError, match=_NONCE_REFUSAL_MSG):
         unparametrised.copy(update={"tier": T3})
 
 
@@ -179,17 +190,17 @@ def test_a_lying_update_mapping_cannot_split_the_guard() -> None:
     nonce guard deleted, because the cross-tier check fires first on a parameterised
     receiver.
     """
-    with pytest.raises(ValueError, match=r"declared 'T3' but parser expects 'T2'"):
+    with pytest.raises(ValueError, match=_CROSS_TIER_MSG):
         _lower().model_copy(update=_LyingUpdate())
 
     unparametrised = TaggedContent.model_construct(content="ok", source="test", tier=T2)
-    with pytest.raises(ValueError, match=r"security\.t3_construction_unauthorized"):
+    with pytest.raises(ValueError, match=_NONCE_REFUSAL_MSG):
         unparametrised.model_copy(update=_LyingUpdate())
 
 
 def test_a_lying_update_mapping_cannot_split_the_deprecated_guard() -> None:
     """The same single-read discipline on the deprecated API."""
-    with pytest.raises(ValueError, match=r"declared 'T3' but parser expects 'T2'"):
+    with pytest.raises(ValueError, match=_CROSS_TIER_MSG):
         _lower().copy(update=_LyingUpdate())
 
 
@@ -249,7 +260,7 @@ def test_a_cross_tier_refusal_still_leaves_a_forensic_record() -> None:
     ):
         with (
             structlog.testing.capture_logs() as logs,
-            pytest.raises(ValueError, match=r"declared 'T3' but parser expects 'T2'"),
+            pytest.raises(ValueError, match=_CROSS_TIER_MSG),
         ):
             attempt()
 
@@ -272,9 +283,9 @@ def test_an_explicit_tier_none_update_is_refused(authorized_t3_nonce: object) ->
     """
     tagged = tag_t3_with_nonce("untrusted", "test", caller_token=authorized_t3_nonce)  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match=r"may not drop the `tier` field"):
+    with pytest.raises(ValueError, match=_TIER_NOT_SELECTABLE_MSG):
         tagged.model_copy(update={"tier": None})
-    with pytest.raises(ValueError, match=r"may not drop the `tier` field"):
+    with pytest.raises(ValueError, match=_TIER_NOT_SELECTABLE_MSG):
         tagged.copy(update={"tier": None})
 
     # Floor: an update that does not mention the tier is ordinary use.
@@ -366,10 +377,10 @@ def test_deprecated_copy_cannot_narrow_the_tier_away() -> None:
     provenance the object exists to carry was gone — a tagged-content value with no tag
     is not a narrower view, it is an untagged payload.
     """
-    with pytest.raises(ValueError, match=r"may not drop the `tier` field"):
+    with pytest.raises(ValueError, match=_TIER_NOT_SELECTABLE_MSG):
         _lower().copy(exclude={"tier"})
 
-    with pytest.raises(ValueError, match=r"may not drop the `tier` field"):
+    with pytest.raises(ValueError, match=_TIER_NOT_SELECTABLE_MSG):
         _lower().copy(include={"content"})
 
     # Floor: a narrowing that KEEPS the tier is ordinary use and must stay ordinary.
@@ -398,7 +409,7 @@ def test_the_tier_selector_guard_reads_both_set_and_dict_forms(
 ) -> None:
     """Both selector spellings, both directions — so the guard cannot be half-right."""
     if drops_tier:
-        with pytest.raises(ValueError, match=r"may not drop the `tier` field"):
+        with pytest.raises(ValueError, match=_TIER_NOT_SELECTABLE_MSG):
             _lower().copy(**kwargs)
     else:
         assert _lower().copy(**kwargs).tier is T2, f"{label} should have kept the tier"
@@ -421,11 +432,14 @@ def test_a_subclass_of_tagged_content_cannot_be_defined() -> None:
     Pydantic rebinds validator targets by name off the subclass MRO, so ANY subclass
     is a lever on the guard. There are zero legitimate subclasses in ``src/``,
     ``tests/`` or ``plugins/``, so refusing them costs nothing and removes the lever.
+
+    Spelled via ``type(...)`` rather than a ``class`` statement: creation raises, so a
+    ``class`` statement binds a name nothing can ever read (CodeQL 629). Both spellings
+    route through the same metaclass, and ``__init_subclass__`` fires identically for each
+    — verified — so this loses no coverage.
     """
     with pytest.raises(TypeError, match="subclass"):
-
-        class _Kid(TaggedContent[T3]):  # pyright: ignore[reportUnusedClass]
-            pass
+        type("_Kid", (TaggedContent[T3],), {})
 
 
 def test_a_forged_class_name_does_not_get_past_layer_a() -> None:
@@ -493,10 +507,10 @@ def test_a_subclass_redefining_any_tier_guard_is_refused(guard: str) -> None:
     Both subclass residuals are closed here rather than documented:
 
     * a namespace forging ``__module__`` passes the module check;
-    * planting the literal ``_TaggedContent__enforce_tier_invariant`` defeats layer B,
-      because name mangling hides the SYNTAX and not the resulting string.
+    * a namespace forging ``__module__`` passes the module check, so without the
+      guard-name condition it could still shadow ``_validate_tier`` or ``model_post_init``.
 
-    Refusing any subclass that redefines a guard closes both at once. Parametrised over
+    Refusing the redefinition closes it. Parametrised over
     every name in ``_TIER_GUARD_NAMES`` so adding a guard without adding it to that set
     fails here.
     """
@@ -585,16 +599,31 @@ def test_no_seam_dispatches_its_guard_through_any_shadowable_attribute() -> None
         # constructor with a no-op returning None raises nothing but also mints nothing,
         # so the adversary gains nothing. Requiring a raise flagged that as a hole;
         # requiring no T3 object is the real invariant.
-        try:
-            built = planted.model_construct(
-                content="untrusted", source="test", tier=T3, metadata={}
+        #
+        # ALL THREE seams per plant, not just model_construct: a shadow that disables the
+        # copy seams while leaving construct intact would otherwise pass (CodeRabbit).
+        base = planted.model_construct(content="ok", source="test", tier=T2, metadata={})
+        # Loop variables bound as defaults: the lambdas are consumed in the same
+        # iteration, but late binding here is the kind of latent hazard ruff B023 exists
+        # for and a future edit could make it real.
+        for seam, mint in (
+            (
+                "model_construct",
+                lambda cls=planted: cls.model_construct(
+                    content="untrusted", source="test", tier=T3, metadata={}
+                ),
+            ),
+            ("model_copy", lambda obj=base: obj.model_copy(update={"tier": T3})),
+            ("copy", lambda obj=base: obj.copy(update={"tier": T3})),
+        ):
+            try:
+                built = mint()
+            except (ValidationError, ValueError):
+                continue
+            assert getattr(built, "tier", None) is not T3, (
+                f"shadowing {name!r} yielded a T3-tagged object via {seam} — that seam is "
+                "dispatching its guard through a class attribute a subclass owns"
             )
-        except (ValidationError, ValueError):
-            continue
-        assert getattr(built, "tier", None) is not T3, (
-            f"shadowing {name!r} yielded a T3-tagged object off the nonce path — that "
-            "seam is dispatching its guard through a class attribute a subclass owns"
-        )
 
     assert swept, (
         f"none of {guardable} could be shadowed, so the sweep asserted nothing; "
@@ -640,7 +669,7 @@ def test_layer_b_still_refuses_when_the_field_validator_is_absent() -> None:
     smuggled = TaggedContent.model_construct(content="ok", source="test", tier=T2)
     object.__setattr__(smuggled, "tier", T3)  # the residual: bypasses every seam
 
-    with pytest.raises(ValueError, match=r"security\.t3_construction_unauthorized"):
+    with pytest.raises(ValueError, match=_NONCE_REFUSAL_MSG):
         smuggled.model_post_init(None)
 
 
@@ -653,7 +682,7 @@ def test_unbound_base_model_construct_is_refused() -> None:
     ``model_post_init`` replaced the name-mangled model validator, which this route
     walked straight past.
     """
-    with pytest.raises(ValueError, match=r"security\.t3_construction_unauthorized"):
+    with pytest.raises(ValueError, match=_NONCE_REFUSAL_MSG):
         BaseModel.model_construct.__func__(  # type: ignore[attr-defined]
             TaggedContent[T3], content="untrusted", source="test", tier=T3
         )

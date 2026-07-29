@@ -19,10 +19,10 @@ import importlib.util
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+import alfred.security.tiers as tiers_module
 from alfred.security.tiers import T2, T3, TaggedContent
 from tests.adversarial.payload_schema import AdversarialPayload
 
@@ -51,11 +51,18 @@ def _deprecation_is_not_the_assertion() -> Iterator[None]:
 def _payload(
     corpus_payloads: tuple[AdversarialPayload, ...], payload_id: str
 ) -> AdversarialPayload:
-    """Fetch a corpus entry by id, failing loudly if the corpus drifted."""
+    """Fetch a corpus entry by id, failing loudly if the corpus drifted.
+
+    Raises rather than calling ``pytest.fail``: that helper is ``NoReturn``, but CodeQL
+    does not model it and read the fall-through as an implicit ``return None`` mixed with
+    an explicit return (CodeQL 628).
+    """
     for entry in corpus_payloads:
         if entry.id == payload_id:
             return entry
-    pytest.fail(f"corpus entry {payload_id!r} missing — the payload and its test have drifted")
+    raise AssertionError(
+        f"corpus entry {payload_id!r} missing — the payload and its test have drifted"
+    )
 
 
 def _lower() -> TaggedContent[T2]:
@@ -93,13 +100,15 @@ def test_tl_2026_012_subclass_validator_shadow_cannot_launder_the_tier(
     assert entry.expected_outcome == "boundary_refused"
     assert not entry.out_of_scope, "tl-2026-012 is a CLOSED seam; it must not be out_of_scope"
 
-    # Layer A: the subclass cannot even be defined.
+    # Layer A: the subclass cannot even be defined. Spelled via ``type(...)`` because
+    # creation raises, so a ``class`` statement would bind a name nothing can read
+    # (CodeQL 630); both spellings go through the same metaclass.
     with pytest.raises(TypeError, match="subclass"):
-
-        class _Shadow(TaggedContent[T3]):  # pyright: ignore[reportUnusedClass]
-            @classmethod
-            def _validate_tier(cls, value: Any) -> Any:
-                return value
+        type(
+            "_Shadow",
+            (TaggedContent[T3],),
+            {"_validate_tier": classmethod(lambda cls, value: value)},
+        )
 
     # A forged non-identifier class name is NOT a way in — layer A keys on the defining
     # module, which pydantic guarantees for a genuine parametrisation.
@@ -109,7 +118,10 @@ def test_tl_2026_012_subclass_validator_shadow_cannot_launder_the_tier(
     # Forging ``__module__`` past the module check is ALSO refused: layer A's second
     # condition rejects any subclass redefining a tier guard, whatever module it claims.
     # Both residuals review identified are closed, not documented.
-    for guard in ("_validate_tier", "model_post_init", "model_construct", "model_copy", "copy"):
+    # Iterate the REAL set rather than a hardcoded tuple: a hardcoded list silently omits
+    # a guard (this one missed `_resolve_tier_from_wire`) and cannot cover future additions.
+    assert tiers_module._TIER_GUARD_NAMES, "the guard set is empty — this sweep would be vacuous"
+    for guard in sorted(tiers_module._TIER_GUARD_NAMES):
         with pytest.raises(TypeError, match=r"redefines trust-tier guard"):
             type(
                 "ShadowForged",
@@ -146,6 +158,7 @@ def test_tl_2026_012_subclass_validator_shadow_cannot_launder_the_tier(
 
 _RESIDUAL_SPELLINGS = """\
 from pydantic import BaseModel
+import alfred.security.tiers as tiers_module
 from alfred.security.tiers import T2, T3, TaggedContent
 
 low = TaggedContent[T2](content="ok", source="test", tier=T2, metadata={})
