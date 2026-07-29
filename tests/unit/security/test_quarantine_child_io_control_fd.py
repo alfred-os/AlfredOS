@@ -51,7 +51,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import alfred.security.quarantine_child_io as qcio
+from alfred.security import quarantine_child_io as qcio
 from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,

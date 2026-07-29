@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 import structlog.testing
 
-import alfred.comms_mcp.daemon_runtime as daemon_runtime_mod
+from alfred.comms_mcp import daemon_runtime as daemon_runtime_mod
 from alfred.comms_mcp.daemon_runtime import (
     QuarantineMaxTokensInvalidError,
     _resolve_quarantine_model_config,

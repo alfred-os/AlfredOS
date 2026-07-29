@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-import alfred.cli.daemon._daemon_control_client as client_mod
+from alfred.cli.daemon import _daemon_control_client as client_mod
 from alfred.cli.daemon._daemon_control_client import (
     DaemonControlAuthError,
     DaemonControlError,

@@ -18,7 +18,7 @@ import asyncio
 import pytest
 from typer.testing import CliRunner
 
-import alfred.cli.main as main_mod
+from alfred.cli import main as main_mod
 from alfred.cli.main import app
 from alfred.gateway.client_listener import _GATEWAY_ADAPTER_ID
 

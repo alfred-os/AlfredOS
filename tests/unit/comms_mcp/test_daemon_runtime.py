@@ -32,8 +32,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import alfred.comms_mcp.daemon_runtime as daemon_runtime_mod
 from alfred.bootstrap.nonce_factory import _NONCE_LOCK
+from alfred.comms_mcp import daemon_runtime as daemon_runtime_mod
 from alfred.comms_mcp.bootstrap import CommsBodyExtraction, CommsExtractorBridge
 from alfred.comms_mcp.daemon_runtime import (
     CommsAdapterCrashedHookInvoker,

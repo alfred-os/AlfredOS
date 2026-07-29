@@ -45,9 +45,9 @@ from typing import Any
 import pytest
 import yaml
 
-import alfred.security.quarantine_child_io as child_io_mod
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd
 from alfred.plugins.sandbox_policy import read_policy_toml
+from alfred.security import quarantine_child_io as child_io_mod
 from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import spawn_quarantine_child_io
 from tests.adversarial.payload_schema import AdversarialPayload

@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import alfred.egress.control_fd_broker as cfb
+from alfred.egress import control_fd_broker as cfb
 from alfred.egress.control_fd_broker import ControlFdBrokerError, broker_connected_sockets
 from alfred.security.quarantine_child_io import QuarantineChildSpawnError, _SubprocessChildIO
 

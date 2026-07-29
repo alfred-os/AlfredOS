@@ -6,7 +6,7 @@ import importlib
 
 import pytest
 
-import alfred.comms_mcp.classifier_registry as registry_mod
+from alfred.comms_mcp import classifier_registry as registry_mod
 from alfred.comms_mcp.classifier_registry import (
     UnknownClassifierError,
     get_classifier,
