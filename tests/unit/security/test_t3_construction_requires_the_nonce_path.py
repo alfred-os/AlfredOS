@@ -22,6 +22,7 @@ without it, refusing every construction would satisfy the file.
 from __future__ import annotations
 
 import pytest
+import structlog
 from pydantic import ValidationError
 
 from alfred.security.tiers import T2, T3, TaggedContent, tag_t3_with_nonce
@@ -149,3 +150,57 @@ def test_a_t3_object_can_still_be_copied_by_an_authorised_holder(
 
     assert copied.tier is T3
     assert copied.source == "relabelled"
+
+
+def test_a_refused_construction_leaves_a_forensic_log_line() -> None:
+    """A security refusal must be OBSERVABLE, not just raised (hard rule #7).
+
+    The sibling `caller_token` gate in `tag_t3_with_nonce` emits
+    `security.t3_boundary.refused` with a forensic caller label. These seams close
+    the closer class of bypasses, so a refusal here that left nothing in the log
+    would be an incident-response gap: a bad actor tripping `model_construct` would
+    get a clean `ValueError` and no record.
+
+    Asserted via `structlog.testing.capture_logs` — structlog does not land in
+    `caplog`, so a caplog-based assertion here would be vacuous.
+    """
+    with structlog.testing.capture_logs() as logs, _expect_refusal():
+        TaggedContent[T3].model_construct(**_PAYLOAD)
+
+    refusals = [e for e in logs if e["event"] == "security.t3_boundary.refused"]
+    assert len(refusals) == 1, f"the refusal left no forensic record: {logs}"
+    assert refusals[0]["attempted_tier"] == "T3"
+    assert refusals[0]["gate"] == "construction"
+    assert refusals[0]["log_level"] == "warning"
+
+
+def test_an_authorised_construction_logs_no_refusal() -> None:
+    """The vacuity floor for the log assertion above: it must not always fire."""
+    with structlog.testing.capture_logs() as logs:
+        TaggedContent[T2](content="fine", source="test", tier=T2, metadata={})
+
+    assert not [e for e in logs if e["event"] == "security.t3_boundary.refused"]
+
+
+def test_a_missing_caller_frame_does_not_turn_a_refusal_into_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The forensic label is best-effort; the REFUSAL is the security outcome.
+
+    `sys._getframe(2)` raises `ValueError` when the stack is shallower than asked.
+    That must degrade the label to `<unknown>`, never replace a clean refusal with an
+    unrelated exception type the callers' arms do not expect.
+    """
+    import sys as _sys
+
+    def _no_frame(_depth: int) -> object:
+        raise ValueError("call stack is not deep enough")
+
+    monkeypatch.setattr(_sys, "_getframe", _no_frame)
+
+    with structlog.testing.capture_logs() as logs, _expect_refusal():
+        TaggedContent[T3].model_construct(**_PAYLOAD)
+
+    refusals = [e for e in logs if e["event"] == "security.t3_boundary.refused"]
+    assert len(refusals) == 1
+    assert refusals[0]["caller_module_unverified"] == "<unknown>"
