@@ -115,6 +115,7 @@ drift is a release-blocker.
 | SCM_RIGHTS control-fd coax/forgery on the dormant reachability-broker mechanism | #340 PR2a (`sbx-2026-015`) — `control_fd` default-`False` dormancy invariant + `recv_passed_fd`'s exactly-one-fd envelope (ADR-0050) |
 | Forged `supervisor.plugin.sandbox_stub_used` row on inherited launcher stderr from a live, exec'd child | #436 (`sbx-2026-019`) — `parse_launcher_refusal_rows`'s event-only gate drops every stub_used line unconditionally; deliberately NOT persisted (D4), not kernel-observable |
 | `plugin_id` charset injection / anti-echo into an emitted launcher row | #435 D2 (`sbx-2026-020`) — charset gate fires before any JSON-emitting branch; tainted bytes never echoed, only the `<invalid>` sentinel, not kernel-observable |
+| Unrecognised `ALFRED_RESOLVED_ENVIRONMENT` interpolated raw into every `sandbox_refused` JSON row, forging audit fields or splitting the row | #524 (`sbx-2026-029`) — value validated against the closed environment set before it reaches the row; an unrecognised value yields the `unset` sentinel, not kernel-observable |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
