@@ -68,8 +68,16 @@ def _iter_gates(workflow: dict[str, object], job_id: str) -> list[Gate]:
         # coverage gates" step runs pytest and a gate in one block), so scan the
         # whole block rather than taking the first match.
         run = " ".join(str(step.get("run", "")).split())
+        # Scan only the segment SINCE THE PREVIOUS gate, not from the start of the
+        # block. Searching from the start made a gate with no `--include` of its own
+        # inherit the PREVIOUS gate's include and silently measure the wrong module
+        # (verified: a second `coverage report --fail-under=75` in the same block
+        # picked up the first gate's `--include`). A gate whose own segment carries no
+        # include is not a per-module gate and is skipped (CodeRabbit).
+        prev_end = 0
         for match in _GATE_RE.finditer(run):
-            segment = run[: match.end()]
+            segment = run[prev_end : match.end()]
+            prev_end = match.end()
             includes = _INCLUDE_RE.findall(segment)
             if not includes:
                 continue
@@ -83,9 +91,27 @@ def _iter_gates(workflow: dict[str, object], job_id: str) -> list[Gate]:
     return gates
 
 
+def _gate_target_present(path: str) -> bool:
+    """True when ``path`` — a literal OR a glob — matches something in this tree.
+
+    ``Path("src/alfred/security/*").exists()`` is False: there is no file literally
+    named ``*``. So a glob-bearing gate was reported as "skipped — files absent",
+    i.e. PASSED, without ever running. Measured: 3 of CI's 48 gates carry a glob,
+    including ``src/alfred/security/*`` — the 100%-coverage gate on the trust
+    boundary. A gate that skips while reporting green is the exact paper-gate class
+    #474 exists to eliminate, so this bug sat inside its own fix (CodeRabbit).
+    """
+    if any(ch in path for ch in "*?["):
+        # Patterns are relative to the repo root, which is where both CI and the
+        # Makefile targets invoke this from. ``next(..., None)`` avoids materialising
+        # the whole match list just to ask "any?".
+        return next(Path().glob(path), None) is not None
+    return Path(path).exists()
+
+
 def _run_gate(gate: Gate) -> tuple[bool, str]:
     """Return ``(passed, output)``. A gate whose files are all absent is skipped."""
-    if not any(Path(p).exists() for p in gate.paths):
+    if not any(_gate_target_present(p) for p in gate.paths):
         return True, "skipped — none of its files exist in this tree"
     argv = [
         "uv",

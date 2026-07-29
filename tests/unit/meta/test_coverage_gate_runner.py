@@ -102,3 +102,96 @@ def test_the_makefile_floors_match_the_ones_pinned_here(workflow: dict[str, Any]
     makefile = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     assert f"--job python --min-gates {_MIN_UNIT_GATES}" in makefile
     assert f"--job coverage-gates --min-gates {_MIN_COMBINED_GATES}" in makefile
+
+
+# ---------------------------------------------------------------------------
+# A gate that SKIPS while reporting green is the paper-gate shape this whole PR
+# exists to eliminate — so the runner's own skip logic needs pinning. Both cases
+# below were live bugs found by CodeRabbit review of this PR.
+# ---------------------------------------------------------------------------
+
+
+def test_a_glob_bearing_gate_is_not_treated_as_absent() -> None:
+    """``--include='src/alfred/security/*'`` must RUN, not skip.
+
+    ``Path("src/alfred/security/*").exists()`` is False — there is no file literally
+    named ``*`` — so the original existence check reported every glob-bearing gate as
+    "skipped, files absent", i.e. PASSED, without running it. Measured against CI: 3 of
+    48 gates carry a glob, and one of them is ``src/alfred/security/*``, the 100%
+    line-and-branch gate on the trust boundary.
+
+    A silent skip inside the fix for silent skips. Pinned in both directions so neither
+    the glob branch nor the literal branch can regress.
+    """
+    runner = _load_runner()
+
+    assert runner._gate_target_present("src/alfred/security/*"), (
+        "a glob matching real files is being reported as absent — the gate would skip "
+        "and report PASS without ever running"
+    )
+    assert runner._gate_target_present("src/alfred/security/tiers.py"), (
+        "the literal-path branch regressed"
+    )
+    assert not runner._gate_target_present("src/alfred/definitely_not_a_module/*"), (
+        "a glob matching nothing must still be absent, or every gate runs against an "
+        "empty file set and trivially passes"
+    )
+
+
+def test_a_gate_without_its_own_include_does_not_inherit_the_previous_one() -> None:
+    """Each gate's ``--include`` must come from its OWN command, not an earlier one.
+
+    The scan searched from the start of the ``run:`` block, so a second
+    ``coverage report --fail-under=N`` with no ``--include`` of its own picked up the
+    PREVIOUS gate's include and silently measured the wrong module — passing or failing
+    on a file it was never meant to check.
+    """
+    runner = _load_runner()
+    block = (
+        "uv run coverage report --include='src/alfred/a.py' --fail-under=100 "
+        "&& uv run coverage report --fail-under=75"
+    )
+    workflow = {"jobs": {"j": {"steps": [{"name": "s", "run": block}]}}}
+
+    gates = runner._iter_gates(workflow, "j")
+
+    assert [(g.include, g.threshold) for g in gates] == [("src/alfred/a.py", 100)], (
+        "the include-less gate was kept and inherited the previous gate's --include"
+    )
+
+
+def test_two_gates_in_one_block_are_both_found_when_each_has_an_include() -> None:
+    """The vacuity floor for the fix above: it must not drop legitimate gates.
+
+    Narrowing the scan window could easily have made a multi-gate ``run:`` block yield
+    only its first gate — which is how the runner ends up gating less than it claims.
+    """
+    runner = _load_runner()
+    block = (
+        "uv run coverage report --include='src/alfred/a.py' --fail-under=100 "
+        "&& uv run coverage report --include='src/alfred/b.py' --fail-under=90"
+    )
+    workflow = {"jobs": {"j": {"steps": [{"name": "s", "run": block}]}}}
+
+    gates = runner._iter_gates(workflow, "j")
+
+    assert [(g.include, g.threshold) for g in gates] == [
+        ("src/alfred/a.py", 100),
+        ("src/alfred/b.py", 90),
+    ]
+
+
+def test_every_real_ci_gate_target_is_present_in_this_tree() -> None:
+    """No CI gate may silently skip when run locally against a full checkout.
+
+    The end-to-end statement of the two bugs above: if any gate's targets read as
+    absent here, ``make check`` reports it green having measured nothing.
+    """
+    runner = _load_runner()
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    gates = runner._iter_gates(workflow, "python") + runner._iter_gates(workflow, "coverage-gates")
+    assert gates, "no gates parsed — the assertion below would be vacuous"
+
+    absent = [g.include for g in gates if not any(runner._gate_target_present(p) for p in g.paths)]
+
+    assert not absent, f"these CI gates would skip while reporting PASS locally: {absent}"
