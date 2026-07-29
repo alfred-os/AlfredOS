@@ -1,0 +1,91 @@
+# tl_base_dispatch_and_raw_state_write.yaml — tier_laundering payload.
+# Spec §3.2, §3.5, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack, two spellings of one idea — reach the field state without going
+# through any method the model can override:
+#
+#   BaseModel.copy(obj, update={'tier': T3})              # unbound base dispatch
+#   BaseModel.model_copy(obj, update={'tier': T3})
+#   object.__setattr__(obj, 'tier', T3)                   # raw state write
+#   obj.__dict__['tier'] = T3
+#
+# Verified ADMITTED against the guard as merged. One spelling was closed during
+# the follow-on: BaseModel.model_construct.__func__(cls, ...) is now REFUSED,
+# because pydantic invokes cls.model_post_init from inside the base
+# implementation, so a guard there catches a path that skips every override.
+# The spellings listed above REMAIN admitted. This entry records that honestly
+# rather than letting the closed sibling entries imply full runtime coverage.
+#
+# WHY runtime cannot close THESE: the copy paths build the result through
+# `_copy_and_set_values` / `__dict__.update`, which reach neither the class
+# overrides nor `model_post_init`; `object.__setattr__` and a direct `__dict__`
+# write never pass through `__setattr__`, so `frozen=True` does not see them.
+# No runtime seam is left for these spellings, so the defence has to be
+# authoring-time. Each was checked individually rather than assumed — the
+# `model_construct` sibling turned out to BE closable.
+#
+# Sharpness note: raw `object.__setattr__` on a frozen pydantic model is an
+# ESTABLISHED idiom in this repo (plugins/web_fetch/allowlist.py,
+# plugins/web_fetch/fetch_dispatcher.py, hooks/context.py), so a contributor
+# copying the local pattern onto a TaggedContent gets a silent T3 mint with
+# no refusal, no log and no exception. That is what makes the CI detector
+# release-blocking rather than advisory.
+id: tl-2026-013
+category: tier_laundering
+threat: >-
+  An attacker or a careless refactor writes the tier field directly —
+  object.__setattr__, a __dict__ write, or an unbound BaseModel.model_copy /
+  model_construct call — producing an object whose static type claims a low
+  tier while its runtime tier reads T3, with no method left for the model to
+  guard.
+note: >-
+  Recorded as out_of_scope for the RUNTIME layer, and currently undefended at
+  the authoring layer too — see the rationale. The spellings are statically
+  visible, so a detector CAN reach them, but `object.__setattr__` itself has
+  legitimate uses under the scan root, so the rule must key on the written
+  attribute ("tier") rather than on the call.
+ingestion_path: capability_gate
+payload: |
+  low = TaggedContent[T2](content='ok', source='test', tier=T2, metadata={})
+  # Neither line passes through any TaggedContent method:
+  object.__setattr__(low, 'tier', T3)
+  laundered = BaseModel.model_copy(low, update={'tier': T3})
+expected_outcome: boundary_refused
+out_of_scope: true
+out_of_scope_rationale: >-
+  Not defensible at runtime for the spellings listed, and — stated plainly —
+  NOT YET defended at the authoring layer either. BaseModel.copy /
+  BaseModel.model_copy on an existing instance build the result through
+  _copy_and_set_values / __dict__.update, reaching neither the overrides nor
+  model_post_init (verified across all six dispatch shapes); object.__setattr__
+  and __setstate__ never traverse __setattr__, so ConfigDict(frozen=True)
+  cannot observe them. NOTE the sibling spelling
+  BaseModel.model_construct.__func__(cls, ...) WAS closable and is now refused —
+  pydantic invokes cls.model_post_init from inside the base implementation — so
+  "unbound dispatch" is not uniformly unclosable and each spelling was checked
+  individually. This is the spec §3.2 class of
+  limit already acknowledged for arbitrary code execution inside the
+  privileged orchestrator. Enforcement has to move to the authoring layer,
+  which is where CLAUDE.md hard rule #3 is written — but
+  scripts/check_tag_t3.py models NONE of these spellings today (verified: a
+  file containing all of them scans clean, with a positive control proving the
+  file was scanned). Adding them is the #518 detector follow-up, and the rule
+  must key on the "tier" attribute rather than refusing object.__setattr__
+  outright, because that call is an established idiom under the scan root
+  (plugins/web_fetch/allowlist.py, plugins/web_fetch/fetch_dispatcher.py,
+  hooks/context.py). Two nearby spellings (obj.__dict__["tier"] = ... and
+  BaseModel.model_copy, which does copied.__dict__.update(update)) ARE
+  interceptable via a guarded instance __dict__; that is deliberately not
+  done, because it breaks pydantic's own __copy__ while object.__setattr__
+  and __setstate__ stay open regardless, so the residual would not close.
+provenance: >-
+  Found by the security-lane review of the #518 CI-detector plan and verified
+  by direct execution against the merged guard at commit bcad7103, both
+  before and after the follow-on hardening — the post-fix probe confirms
+  these remain admitted while every closed seam refuses.
+references:
+  - "spec §3.2"
+  - "spec §3.5"
+  - "spec §12.2"
+  - "scripts/check_tag_t3.py"
+  - "tests/unit/security/test_t3_laundering_seams_beyond_the_nonce_path.py"

@@ -1,0 +1,74 @@
+# tl_tagged_content_subclass_validator_shadow.yaml — tier_laundering payload.
+# Spec §3.2, §3.5, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: pydantic v2 rebinds `@field_validator` targets BY NAME off the
+# subclass MRO (`Decorator.build` -> `get_attribute_from_bases`). So a
+# subclass of `TaggedContent` that defines a plain `_validate_tier` REPLACES
+# the parent's guard inside the parent's own registered validator slot. The
+# same holds for the unvalidated seams, which dispatched their guard through
+# `cls._assert_tier_admissible` — an attribute the subclass owns.
+#
+# Verified ADMITTED against the #534 guard, on all three routes:
+#   class Shadow(TaggedContent[T3]) with permissive _validate_tier
+#     -> Shadow(tier=T3) constructed, no refusal, no log, no exception
+#   shadowed _assert_tier_admissible -> model_construct(tier=T3) admitted
+#   shadowed _assert_tier_admissible -> model_copy(update={"tier": T3}) admitted
+#
+# This is the same defect class as commit bcad7103 ("a T3 SUBCLASS walked
+# past the guard") one level out: that closed subclassing of the TIER, this
+# is subclassing of the MODEL.
+#
+# Defence, two layers: `__init_subclass__` refuses any subclass whose
+# `__module__` is not `alfred.security.tiers` (closing the class rather than
+# the individual holes), and behind it a NAME-MANGLED
+# `@model_validator(mode="after")` plus module-level guard dispatch that no
+# subclass attribute lookup can intercept.
+#
+# Layer A keys on the defining MODULE, not the class name: pydantic's
+# `_generics.create_generic_submodel` builds a parametrisation with
+# `namespace = {"__module__": origin.__module__}`, so a genuine
+# `TaggedContent[T3]` always reports the origin module wherever it is written.
+# An earlier revision also required a non-identifier class name, which was
+# strictly WEAKER — it admitted `type("evil[x]", (TaggedContent,), {})`.
+#
+# Runtime test: tests/unit/security/test_t3_laundering_seams_beyond_the_nonce_path.py.
+id: tl-2026-012
+category: tier_laundering
+threat: >-
+  An attacker subclasses TaggedContent and redefines _validate_tier or
+  _assert_tier_admissible permissively; pydantic rebinds the validator by
+  name off the subclass MRO, so the subclass's no-op replaces the trust-tier
+  guard in the parent's own validator slot and T3 is minted freely.
+note: >-
+  Both residuals identified during review are CLOSED, not accepted. Layer A
+  refuses a subclass on two independent conditions: a foreign defining module,
+  and a namespace redefining ANY name in `_TIER_GUARD_NAMES` even from this
+  module. That second condition closes (1) a namespace forging `__module__` to
+  "alfred.security.tiers", which passes the module check, and (2) planting the
+  literal `_TaggedContent__enforce_tier_invariant`, which defeats the
+  name-mangled validator because mangling hides the syntax and not the
+  resulting string. Neither is left as a documented live bypass.
+ingestion_path: capability_gate
+payload: |
+  class Shadow(TaggedContent[T3]):
+      @classmethod
+      def _validate_tier(cls, value):   # same name -> replaces the parent guard
+          return value
+  # Before the fix: constructed successfully with .tier.name == 'T3'.
+  Shadow(content='untrusted', source='attack', tier=T3, metadata={})
+expected_outcome: boundary_refused
+provenance: >-
+  Found by the security-lane review of the #518 CI-detector plan. The
+  name-based validator rebinding is pydantic v2 documented behaviour
+  (_internal/_decorators.py Decorator.build uses get_attribute_from_bases,
+  which walks the MRO). Verified by direct execution against the merged
+  guard at commit bcad7103 before the fix landed, including the
+  discriminator probe showing a pydantic parametrisation reports
+  origin=None at __init_subclass__ time and is separable from a user
+  subclass only by whether the class name is a valid identifier.
+references:
+  - "spec §3.2"
+  - "spec §3.5"
+  - "spec §12.2"
+  - "PRD §7.1"
+  - "tests/unit/security/test_t3_laundering_seams_beyond_the_nonce_path.py"
