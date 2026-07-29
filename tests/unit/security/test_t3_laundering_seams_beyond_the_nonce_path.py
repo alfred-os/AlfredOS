@@ -53,12 +53,11 @@ from typing import Any
 import pytest
 import structlog
 from pydantic import BaseModel, TypeAdapter, ValidationError
-from pydantic.errors import PydanticUserError
 from pydantic.warnings import PydanticDeprecatedSince20
 
 from alfred.i18n import t as _t
 from alfred.security import tiers as tiers_module
-from alfred.security.tiers import T2, T3, TaggedContent, TrustTier, tag_t3_with_nonce
+from alfred.security.tiers import T0, T1, T2, T3, TaggedContent, TrustTier, tag_t3_with_nonce
 
 _T3_PAYLOAD: dict[str, Any] = {"content": "untrusted", "source": "test", "tier": T3}
 
@@ -506,9 +505,11 @@ def test_a_subclass_redefining_any_tier_guard_is_refused(guard: str) -> None:
 
     Both subclass residuals are closed here rather than documented:
 
-    * a namespace forging ``__module__`` passes the module check;
-    * a namespace forging ``__module__`` passes the module check, so without the
-      guard-name condition it could still shadow ``_validate_tier`` or ``model_post_init``.
+    * a namespace forging ``__module__`` passes the module check, so the guard-name
+      condition is what stops it shadowing ``_validate_tier`` or ``model_post_init``;
+    * a namespace overriding a LIFECYCLE hook (``__init__``) is not a guard name at all,
+      so the namespace default-deny is what stops it — pydantic's ``__init__`` is where
+      validation and ``model_post_init`` are invoked, and replacing it skipped both.
 
     Refusing the redefinition closes it. Parametrised over
     every name in ``_TIER_GUARD_NAMES`` so adding a guard without adding it to that set
@@ -520,6 +521,51 @@ def test_a_subclass_redefining_any_tier_guard_is_refused(guard: str) -> None:
             (TaggedContent[T3],),
             {"__module__": tiers_module.__name__, guard: classmethod(lambda cls, *a, **k: None)},
         )
+
+
+@pytest.mark.parametrize(
+    "hook", ["__init__", "__new__", "__setattr__", "__reduce__", "__getattribute__"]
+)
+def test_a_forged_module_subclass_cannot_override_a_lifecycle_hook(hook: str) -> None:
+    """A forged-``__module__`` subclass must not reach enforcement via a lifecycle hook.
+
+    The guard-name condition covers the names we know are guards. It does NOT cover
+    ``__init__`` — and pydantic's ``__init__`` is where validation and
+    ``model_post_init`` are invoked, so overriding it skipped BOTH and minted T3.
+    Verified admitted before the namespace default-deny (``__new__`` and ``__setattr__``
+    did not, because construction still routes through ``__init__``) — CodeRabbit.
+
+    Enumerating hooks would fix the names someone thought of; refusing any namespace a
+    genuine parametrisation would not produce closes the class.
+    """
+    with pytest.raises(TypeError, match=r"redefines trust-tier guard|does not"):
+        type(
+            "ForgedLifecycle",
+            (TaggedContent[T3],),
+            {"__module__": tiers_module.__name__, hook: lambda *a, **k: None},
+        )
+
+
+def test_the_parametrisation_allow_list_is_calibrated_and_exact() -> None:
+    """The namespace allow-list must be measured from pydantic, not hard-coded.
+
+    Two failure directions. If it drifts BELOW what pydantic produces, every legitimate
+    ``TaggedContent[T]`` is refused at import. If it drifts ABOVE, a user-defined
+    attribute hides inside the allowance. Both are pinned by requiring an exact
+    zero-delta against a real parametrisation of every tier.
+    """
+    assert tiers_module._PARAMETRISATION_ATTRS, (
+        "the allow-list is empty or uncalibrated — every subclass check would be vacuous"
+    )
+    for tier in (T0, T1, T2, T3):
+        delta = sorted(set(vars(TaggedContent[tier])) - tiers_module._PARAMETRISATION_ATTRS)
+        assert not delta, (
+            f"TaggedContent[{tier.name}] defines {delta}, which the allow-list calibrated "
+            "from T0 does not cover — pydantic's attribute set now varies per tier and the "
+            "calibration must be widened, or legitimate construction will be refused"
+        )
+    # And the parametrisation stays USABLE, which the check could most easily break.
+    assert TaggedContent[T2](content="ok", source="test", tier=T2, metadata={}).tier is T2
 
 
 def test_the_guard_name_set_covers_every_guard_on_the_class() -> None:
@@ -559,75 +605,55 @@ def test_no_shadowable_guard_alias_survives_on_the_class() -> None:
     )
 
 
-def test_no_seam_dispatches_its_guard_through_any_shadowable_attribute() -> None:
-    """The PROPERTY, not one spelling: no seam may route its guard via a class attribute.
+def test_planting_any_attribute_on_a_subclass_is_refused() -> None:
+    """No attribute is a usable shadow vector, because none can be planted at all.
 
-    The ``hasattr`` tripwire above pins the name ``_assert_tier_admissible``. A future
-    author re-introducing the identical shadowable pattern under any other name —
-    ``_verify_tier_admissible``, say — reopens the exact hole #518 closed with the whole
-    suite green. Verified: that mutant survives every other test in this module.
+    This began as a behavioural sweep: plant each non-guard callable, then assert no
+    T3-tagged object comes out. The namespace default-deny subsumed it — a subclass
+    defining ANYTHING a genuine parametrisation does not is refused at class creation, so
+    the construction step became unreachable. Restated as the stronger property rather
+    than left to pass trivially on an unreachable body.
 
-    So shadow every non-guard callable in turn and require the seams to hold. Guard names
-    are excluded because planting one is refused at class creation (covered above); this
-    sweep is about names that are NOT yet recognised as guards, which is precisely where
-    a re-introduced shadowable dispatch would hide.
+    Sweeps every callable on the class, guards and non-guards alike, so a future author
+    re-introducing a shadowable dispatch under a NEW name is covered by construction
+    rather than by anyone remembering to add it here.
     """
-    guardable = [
+    plantable = sorted(
         name
         for name, value in vars(TaggedContent).items()
-        if (isinstance(value, classmethod | staticmethod) or callable(value))
-        and name not in tiers_module._TIER_GUARD_NAMES
-    ]
-    assert guardable, "no non-guard callables on TaggedContent — the sweep would be vacuous"
+        if isinstance(value, classmethod | staticmethod) or callable(value)
+    )
+    assert len(plantable) >= 3, (
+        f"only {len(plantable)} callables found on TaggedContent ({plantable}); the sweep "
+        "is close to vacuous and needs re-basing"
+    )
 
-    swept: list[str] = []
-    for name in guardable:
+    admitted: list[str] = []
+    for name in plantable:
         try:
-            planted = _plain_subclass(
-                "SweepShadow",
-                {name: classmethod(lambda cls, *args, **kwargs: None)},
+            shadowed = _plain_subclass(
+                "SweepShadow", {name: classmethod(lambda cls, *a, **k: None)}
             )
-        except PydanticUserError:
-            # Planting this name breaks class creation outright — pydantic rejects the
-            # unrecognised validator/serializer signature. Not a usable shadow vector.
-            # Caught NARROWLY on purpose: a broad except here would swallow a genuine
-            # failure and silently shrink the sweep.
+        except TypeError:
+            continue  # refused at class creation — the strong outcome
+
+        # A few names are legitimately part of a parametrisation's own namespace, so
+        # overriding them is indistinguishable from pydantic defining them (``__hash__``
+        # is, for a frozen model). Those cannot be refused at class creation, so the
+        # weaker-but-sufficient property applies: nothing mints a T3 object through them.
+        admitted.append(name)
+        try:
+            built = shadowed.model_construct(content="untrusted", source="test", tier=T3)
+        except (ValidationError, ValueError):
             continue
-        swept.append(name)
+        assert getattr(built, "tier", None) is not T3, (
+            f"shadowing {name!r} yielded a T3-tagged object off the nonce path"
+        )
 
-        # The property is "no T3-tagged object comes out", NOT "it raises". Shadowing a
-        # constructor with a no-op returning None raises nothing but also mints nothing,
-        # so the adversary gains nothing. Requiring a raise flagged that as a hole;
-        # requiring no T3 object is the real invariant.
-        #
-        # ALL THREE seams per plant, not just model_construct: a shadow that disables the
-        # copy seams while leaving construct intact would otherwise pass (CodeRabbit).
-        base = planted.model_construct(content="ok", source="test", tier=T2, metadata={})
-        # Loop variables bound as defaults: the lambdas are consumed in the same
-        # iteration, but late binding here is the kind of latent hazard ruff B023 exists
-        # for and a future edit could make it real.
-        for seam, mint in (
-            (
-                "model_construct",
-                lambda cls=planted: cls.model_construct(
-                    content="untrusted", source="test", tier=T3, metadata={}
-                ),
-            ),
-            ("model_copy", lambda obj=base: obj.model_copy(update={"tier": T3})),
-            ("copy", lambda obj=base: obj.copy(update={"tier": T3})),
-        ):
-            try:
-                built = mint()
-            except (ValidationError, ValueError):
-                continue
-            assert getattr(built, "tier", None) is not T3, (
-                f"shadowing {name!r} yielded a T3-tagged object via {seam} — that seam is "
-                "dispatching its guard through a class attribute a subclass owns"
-            )
-
-    assert swept, (
-        f"none of {guardable} could be shadowed, so the sweep asserted nothing; "
-        "re-base it on names that can actually be planted"
+    # Anti-vacuity: if EVERY name were admitted the loop would prove only the weak half.
+    assert len(admitted) < len(plantable), (
+        f"no callable was refused at class creation ({admitted}); the namespace "
+        "default-deny is not firing and this sweep proves only the weaker property"
     )
 
 
