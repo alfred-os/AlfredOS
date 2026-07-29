@@ -18,11 +18,11 @@
 # past the guard") one level out: that closed subclassing of the TIER, this
 # is subclassing of the MODEL.
 #
-# Defence, two layers: `__init_subclass__` refuses any subclass whose
-# `__module__` is not `alfred.security.tiers` (closing the class rather than
-# the individual holes), and behind it a NAME-MANGLED
-# `@model_validator(mode="after")` plus module-level guard dispatch that no
-# subclass attribute lookup can intercept.
+# Defence, two layers: `__init_subclass__` refuses a subclass whose `__module__`
+# is not `alfred.security.tiers` OR whose namespace redefines any name in
+# `_TIER_GUARD_NAMES` (closing the class rather than the individual holes), and
+# behind it `model_post_init` plus module-level guard dispatch that no subclass
+# attribute lookup can intercept.
 #
 # Layer A keys on the defining MODULE, not the class name: pydantic's
 # `_generics.create_generic_submodel` builds a parametrisation with
@@ -43,11 +43,14 @@ note: >-
   Both residuals identified during review are CLOSED, not accepted. Layer A
   refuses a subclass on two independent conditions: a foreign defining module,
   and a namespace redefining ANY name in `_TIER_GUARD_NAMES` even from this
-  module. That second condition closes (1) a namespace forging `__module__` to
-  "alfred.security.tiers", which passes the module check, and (2) planting the
-  literal `_TaggedContent__enforce_tier_invariant`, which defeats the
-  name-mangled validator because mangling hides the syntax and not the
-  resulting string. Neither is left as a documented live bypass.
+  module. The second closes a namespace that forges `__module__` to
+  "alfred.security.tiers" and then shadows `_validate_tier` or
+  `model_post_init`. A third residual disappeared rather than being guarded:
+  planting the literal `_TaggedContent__enforce_tier_invariant` defeated the
+  name-mangled validator that once held layer B, but `model_post_init`
+  superseded that validator (it fires on strictly more paths, including inside
+  `BaseModel.model_construct`), so the mangled name is inert because the
+  validator no longer EXISTS — not because it is listed in the guard set.
 ingestion_path: capability_gate
 payload: |
   class Shadow(TaggedContent[T3]):
@@ -64,8 +67,12 @@ provenance: >-
   which walks the MRO). Verified by direct execution against the merged
   guard at commit bcad7103 before the fix landed, including the
   discriminator probe showing a pydantic parametrisation reports
-  origin=None at __init_subclass__ time and is separable from a user
-  subclass only by whether the class name is a valid identifier.
+  origin=None at __init_subclass__ time. The shipped discriminator is the
+  defining MODULE: `_generics.create_generic_submodel` builds a
+  parametrisation with `namespace = {"__module__": origin.__module__}`, so it
+  always reports the origin module. An earlier revision keyed on whether the
+  class name was a valid identifier; that was strictly weaker (it admitted
+  `type("evil[x]", (TaggedContent,), {})`) and was replaced.
 references:
   - "spec §3.2"
   - "spec §3.5"
