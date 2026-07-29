@@ -106,6 +106,9 @@ class CapabilityGateNonce:
 # signature.
 _AUTHORIZED_T3_NONCE: CapabilityGateNonce | None = None
 
+# Defined above its first use in ``_refuse_unauthorized_t3`` below.
+_log_t3 = structlog.get_logger(__name__)
+
 # #518: the nonce gate lived in ``tag_t3_with_nonce`` alone, so the MODEL never
 # asked whether the caller held it. Seven constructions could therefore mint a
 # T3-tagged object without ever passing the gate — bare keyword, ``model_construct``,
@@ -126,12 +129,39 @@ def _refuse_unauthorized_t3(tier: object) -> None:
 
     Non-T3 tiers are untouched — the invariant is specifically that the untrusted
     tier cannot be minted off the capability gate (spec §3.2).
+
+    Emits ``security.t3_boundary.refused`` before raising, mirroring the sibling
+    ``caller_token`` gate in :func:`tag_t3_with_nonce`. A refusal in a security path
+    with no observable signal is a silent failure (hard rule #7) and an
+    incident-response gap: these seams close the CLOSER class of bypasses, so a bug
+    or a bad actor tripping ``model_construct(tier=T3)`` would otherwise get a clean
+    ``ValueError`` and leave nothing in the audit stream.
+
+    The caller label is FORENSIC ONLY and deliberately unverified — spec §3.2 is
+    explicit that frame introspection is forgeable via ``sys.modules`` manipulation,
+    so it must never influence the allow/deny decision. The gate is the ContextVar
+    check; this is only so a reviewer can see *something* about the call site.
     """
-    if tier is T3 and not _T3_CONSTRUCTION_AUTHORIZED.get():
-        raise ValueError(t("security.t3_construction_unauthorized"))
+    if tier is not T3 or _T3_CONSTRUCTION_AUTHORIZED.get():
+        return
+    import sys
 
-
-_log_t3 = structlog.get_logger(__name__)
+    # sys._getframe is "private" but stable CPython API; the use is forensic-only.
+    # Frame 2, not 1: frame 1 is the pydantic seam that called this helper, so the
+    # useful label is its caller. Best-effort — a missing frame must not turn a
+    # refusal into a crash, since the refusal itself is the security outcome.
+    try:
+        frame = sys._getframe(2)
+        caller_module_unverified = frame.f_globals.get("__name__", "<unknown>")
+    except ValueError:
+        caller_module_unverified = "<unknown>"
+    _log_t3.warning(
+        "security.t3_boundary.refused",
+        caller_module_unverified=caller_module_unverified,
+        attempted_tier="T3",
+        gate="construction",
+    )
+    raise ValueError(t("security.t3_construction_unauthorized"))
 
 
 def _set_authorized_t3_nonce(nonce: CapabilityGateNonce | None) -> None:
@@ -305,7 +335,9 @@ class TaggedContent[TierT: TrustTier](BaseModel):
         _refuse_unauthorized_t3(values.get("tier"))
         return super().model_construct(_fields_set, **values)
 
-    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Any:
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> TaggedContent[TierT]:
         """Guarded ``model_copy`` (#518).
 
         ``model_copy`` does not re-validate, so ``update={"tier": T3}`` silently
