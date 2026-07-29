@@ -37,6 +37,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from alfred.audit.log import AuditWriter
+from alfred.bootstrap.nonce_factory import _NONCE_LOCK
+from alfred.security import tiers as _tiers
+from alfred.security.tiers import CapabilityGateNonce
 from alfred.identity import IdentityVersionCounter, NullRateLimiter
 from alfred.memory.models import Base
 
@@ -137,3 +140,40 @@ def audit_buffer(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any
 
     monkeypatch.setattr(AuditWriter, "append", _capture)
     yield buffer
+
+
+# ---------------------------------------------------------------------------
+# T3 capability gate (#518)
+# ---------------------------------------------------------------------------
+# Promoted from ``tests/unit/security/conftest.py`` so the SANCTIONED path to a
+# T3-tagged object is available to every unit test, not just the security ones.
+#
+# It has to be: #518 made T3 unconstructable off the nonce path at runtime, and the
+# one test file that had been building ``TaggedContent[T3](...)`` directly was doing
+# exactly what CLAUDE.md hard rule #2 forbids — bypassing the capability layer in a
+# test rather than using a fixture grant. Without a shared fixture the next author
+# who needs a T3 object has no honest option.
+
+@pytest.fixture
+def authorized_t3_nonce() -> Iterator[CapabilityGateNonce]:
+    """Install a fresh ``CapabilityGateNonce`` as the authorised slot.
+
+    Yields the nonce object so tests can pass it as ``caller_token``.
+    The previous slot value (typically ``None`` or the bootstrap-set
+    nonce) is restored on teardown — no leaked global state between
+    tests. CR-138 finding #10.
+
+    Acquires :data:`alfred.bootstrap.nonce_factory._NONCE_LOCK` for the
+    save/install and the restore so the fixture stays race-safe against
+    a parallel bootstrap path that might run in the same process during
+    multi-threaded test scenarios (CR-138 round-2 finding #3).
+    """
+    with _NONCE_LOCK:
+        previous = _tiers._AUTHORIZED_T3_NONCE
+        nonce = CapabilityGateNonce()
+        _tiers._set_authorized_t3_nonce(nonce)
+    try:
+        yield nonce
+    finally:
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(previous)

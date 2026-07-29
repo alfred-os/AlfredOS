@@ -32,31 +32,6 @@ from alfred.security.tiers import CapabilityGateNonce
 
 
 @pytest.fixture
-def authorized_t3_nonce() -> Iterator[CapabilityGateNonce]:
-    """Install a fresh ``CapabilityGateNonce`` as the authorised slot.
-
-    Yields the nonce object so tests can pass it as ``caller_token``.
-    The previous slot value (typically ``None`` or the bootstrap-set
-    nonce) is restored on teardown — no leaked global state between
-    tests. CR-138 finding #10.
-
-    Acquires :data:`alfred.bootstrap.nonce_factory._NONCE_LOCK` for the
-    save/install and the restore so the fixture stays race-safe against
-    a parallel bootstrap path that might run in the same process during
-    multi-threaded test scenarios (CR-138 round-2 finding #3).
-    """
-    with _NONCE_LOCK:
-        previous = _tiers._AUTHORIZED_T3_NONCE
-        nonce = CapabilityGateNonce()
-        _tiers._set_authorized_t3_nonce(nonce)
-    try:
-        yield nonce
-    finally:
-        with _NONCE_LOCK:
-            _tiers._set_authorized_t3_nonce(previous)
-
-
-@pytest.fixture
 def clean_t3_nonce_slot() -> Iterator[None]:
     """Force ``_AUTHORIZED_T3_NONCE`` to ``None`` for the duration of the test.
 

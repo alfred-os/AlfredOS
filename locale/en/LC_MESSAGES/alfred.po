@@ -3483,6 +3483,17 @@ msgstr ""
 msgid "security.tier_unknown_wire"
 msgstr "Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
 
+#: src/alfred/security/tiers.py
+msgid "security.t3_construction_unauthorized"
+msgstr ""
+"security.t3_construction_unauthorized: refused to build a T3-tagged object "
+"outside tag_t3_with_nonce(). T3 marks untrusted external content, so it may "
+"only be created by the capability-gated path that verifies the per-process "
+"nonce (spec 3.2). Call tag_t3_with_nonce(content, source, "
+"caller_token=<injected nonce>) instead of constructing TaggedContent "
+"directly, and in tests take the authorized_t3_nonce fixture rather than "
+"bypassing the gate."
+
 #: src/alfred/security/tiers.py:458
 msgid "security.tag_t3_unauthorized"
 msgstr ""
