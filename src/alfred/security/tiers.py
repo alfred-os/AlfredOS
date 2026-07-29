@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
-from typing import Any, Protocol, overload, runtime_checkable
+from typing import Any, Protocol, cast, overload, runtime_checkable
 
 import structlog
 from pydantic import (
@@ -142,7 +142,11 @@ def _refuse_unauthorized_t3(tier: object) -> None:
     so it must never influence the allow/deny decision. The gate is the ContextVar
     check; this is only so a reviewer can see *something* about the call site.
     """
-    if tier is not T3 or _T3_CONSTRUCTION_AUTHORIZED.get():
+    # ``issubclass``, not ``is``: ``class Spoof(T3)`` is still the untrusted tier for
+    # every practical purpose, and an identity check would have waved it through.
+    # ``isinstance(tier, type)`` first because ``issubclass`` raises on a non-class,
+    # and a bad value must reach the approved-tier check below rather than crash here.
+    if not (isinstance(tier, type) and issubclass(tier, T3)) or _T3_CONSTRUCTION_AUTHORIZED.get():
         return
     import sys
 
@@ -332,7 +336,7 @@ class TaggedContent[TierT: TrustTier](BaseModel):
         seven bypasses: the field validator above never runs. Re-checking here keeps
         the invariant true for every construction route, not merely the validating ones.
         """
-        _refuse_unauthorized_t3(values.get("tier"))
+        cls._assert_tier_admissible(values.get("tier"))
         return super().model_construct(_fields_set, **values)
 
     def model_copy(
@@ -345,9 +349,26 @@ class TaggedContent[TierT: TrustTier](BaseModel):
         seven — an author copies an object and edits the tier, never touching a
         function the gate protects.
         """
-        if update is not None:
-            _refuse_unauthorized_t3(update.get("tier"))
+        if update is not None and "tier" in update:
+            type(self)._assert_tier_admissible(update["tier"])
         return super().model_copy(update=dict(update) if update else None, deep=deep)
+
+    @classmethod
+    def _assert_tier_admissible(cls, tier: object) -> None:
+        """Run the full tier admissibility check outside the pydantic validator (#518).
+
+        ``model_construct`` and ``model_copy`` skip validation by design, so
+        :meth:`_validate_tier` never sees their values. Guarding only the T3
+        authorisation there left the CLOSED tier model (PRD §7.1) unenforced on
+        exactly those seams: ``class Spoof(T3)`` passed as ``tier=`` was admitted
+        silently — no refusal, no log, no exception.
+
+        Delegating to the same validator keeps ONE source of truth. A narrower
+        bespoke check here is what created the hole in the first place.
+        """
+        if tier is None:
+            return  # field absent — pydantic's own required-field handling applies
+        cls._validate_tier(cast("type[TrustTier]", tier))
 
     @model_serializer(mode="plain")
     def _serialize_with_tier_name(self) -> dict[str, Any]:
