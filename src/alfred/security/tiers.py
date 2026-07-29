@@ -349,6 +349,12 @@ class AnyTaggedContent(Protocol):
 # strictly more paths, including inside ``BaseModel.model_construct`` — so the mangled
 # name is now inert because the validator it named no longer EXISTS, not because it is
 # listed here. Do not re-add it; that would imply a guard that is not there.
+# Attribute names a GENUINE pydantic parametrisation of TaggedContent defines. Calibrated
+# at import from a real parametrisation (below the class body) rather than hard-coded, so
+# it tracks pydantic's own set across versions instead of drifting against it. ``None``
+# until then, because the calibrating parametrisation must itself be admitted.
+_PARAMETRISATION_ATTRS: frozenset[str] | None = None
+
 _TIER_GUARD_NAMES: frozenset[str] = frozenset(
     {
         "_validate_tier",
@@ -418,14 +424,28 @@ class TaggedContent[TierT: TrustTier](BaseModel):
         Zero subclasses exist in ``src/``, ``tests/`` or ``plugins/``, so this costs
         nothing today.
 
-        TWO conditions, because the module check alone leaves a hole:
+        THREE conditions, because each earlier one leaves a hole the next closes:
 
-        * a foreign defining module — the ordinary case;
-        * a namespace that redefines any name in :data:`_TIER_GUARD_NAMES`, EVEN from this
-          module. A namespace forging ``__module__`` passes the module check, so without
-          this second condition it could still shadow ``_validate_tier`` or
-          ``model_post_init`` and disable enforcement. Refusing the redefinition closes
-          it, rather than leaving it as a documented live bypass.
+        1. **A foreign defining module** — the ordinary case.
+        2. **A namespace redefining a name in :data:`_TIER_GUARD_NAMES`**, EVEN from this
+           module. A namespace forging ``__module__`` passes condition 1, so without this
+           it could still shadow ``_validate_tier`` or ``model_post_init``. Checked first
+           of the two namespace rules so guard shadowing gets its own precise diagnostic
+           rather than the generic one below.
+        3. **A namespace defining ANYTHING a genuine parametrisation does not** — the
+           catch-all. Conditions 1-2 together still admitted a forged-``__module__``
+           subclass that overrode ``__init__``: pydantic's ``__init__`` is where
+           validation and ``model_post_init`` are invoked, so replacing it skipped both
+           and minted T3 (verified admitted; ``__new__`` and ``__setattr__`` did NOT,
+           because construction still routes through ``__init__``).
+
+           Enumerating lifecycle hooks would have fixed the three names someone thought
+           of. Default-denying the namespace closes the class — including hooks nobody
+           has thought of yet, which is the failure mode this epic keeps hitting.
+
+           The allow-list is CALIBRATED at import from a real parametrisation rather than
+           hard-coded, so it tracks pydantic's own attribute set instead of drifting
+           against it.
         """
         super().__init_subclass__(**kwargs)
         shadowed_guards = sorted(_TIER_GUARD_NAMES & set(vars(cls)))
@@ -437,6 +457,18 @@ class TaggedContent[TierT: TrustTier](BaseModel):
                     guards=", ".join(shadowed_guards),
                 )
             )
+        # ``None`` while this module is still initialising: the calibrating
+        # parametrisation below the class body has to be admitted to be measured.
+        if _PARAMETRISATION_ATTRS is not None:
+            user_defined = sorted(set(vars(cls)) - _PARAMETRISATION_ATTRS)
+            if user_defined:
+                raise TypeError(
+                    t(
+                        "security.tagged_content_namespace_refused",
+                        subclass=cls.__name__,
+                        attributes=", ".join(user_defined),
+                    )
+                )
         if cls.__module__ != __name__:
             raise TypeError(
                 t(
@@ -612,6 +644,12 @@ class TaggedContent[TierT: TrustTier](BaseModel):
                 )
             data = {**data, "tier": resolved}
         return data
+
+
+# Calibrate the namespace allow-list from a real parametrisation — AFTER the class body,
+# BEFORE any other subclass exists. T0 is arbitrary; every tier yields the same attribute
+# set (verified for all four). `test_the_parametrisation_allow_list_is_calibrated` pins it.
+_PARAMETRISATION_ATTRS = frozenset(vars(TaggedContent[T0]))
 
 
 def _guard_tier_value(owner: type[BaseModel], tier: object) -> None:
