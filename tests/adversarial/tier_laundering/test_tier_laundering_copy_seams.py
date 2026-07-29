@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-import alfred.security.tiers as tiers_module
+from alfred.security import tiers as tiers_module
 from alfred.security.tiers import T2, T3, TaggedContent
 from tests.adversarial.payload_schema import AdversarialPayload
 
@@ -158,7 +158,7 @@ def test_tl_2026_012_subclass_validator_shadow_cannot_launder_the_tier(
 
 _RESIDUAL_SPELLINGS = """\
 from pydantic import BaseModel
-import alfred.security.tiers as tiers_module
+from alfred.security import tiers as tiers_module
 from alfred.security.tiers import T2, T3, TaggedContent
 
 low = TaggedContent[T2](content="ok", source="test", tier=T2, metadata={})
