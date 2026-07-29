@@ -130,6 +130,7 @@ def _refuse_unauthorized_t3(tier: object) -> None:
     if tier is T3 and not _T3_CONSTRUCTION_AUTHORIZED.get():
         raise ValueError(t("security.t3_construction_unauthorized"))
 
+
 _log_t3 = structlog.get_logger(__name__)
 
 
