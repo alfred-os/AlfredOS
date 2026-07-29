@@ -30,9 +30,9 @@ import pytest
 import structlog.testing
 
 import alfred.security.quarantine_child.__main__ as child_main
-import alfred.security.quarantine_child_io as qcio
 from alfred.audit.launcher_refusal import SandboxRefusalRow
 from alfred.hooks import HookRegistry, get_registry, set_registry
+from alfred.security import quarantine_child_io as qcio
 from alfred.security.quarantine_child._handshake import HELLO_FRAME, READY_FRAME
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,

@@ -32,9 +32,9 @@ import anyio
 import httpx
 import pytest
 
-import alfred.security.quarantine_child.brokered_egress as be
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd_nonblocking
 from alfred.providers.base import ProviderCapability, ProviderUnavailableError
+from alfred.security.quarantine_child import brokered_egress as be
 from alfred.security.quarantine_child.brokered_egress import (
     BrokeredProviderSource,
     InvalidAttemptBudgetError,

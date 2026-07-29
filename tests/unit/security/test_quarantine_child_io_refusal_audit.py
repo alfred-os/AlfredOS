@@ -18,8 +18,8 @@ import os
 
 import pytest
 
-import alfred.security.quarantine_child_io as child_io_mod
 from alfred.audit.launcher_refusal import SandboxRefusalRow
+from alfred.security import quarantine_child_io as child_io_mod
 from alfred.security.quarantine_child_io import (
     QuarantineChildSpawnError,
     _SubprocessChildIO,

@@ -31,10 +31,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-import alfred.security.quarantine_child_io as child_io_mod
-import alfred.security.quarantine_transport as transport_mod
 from alfred.egress.control_fd_broker import ControlFdBrokerError
 from alfred.plugins.transport import ControlResult
+from alfred.security import quarantine_child_io as child_io_mod
+from alfred.security import quarantine_transport as transport_mod
 from alfred.security.quarantine import ContentHandle
 from alfred.security.quarantine_child_io import _SubprocessChildIO
 from alfred.security.quarantine_transport import (

@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-import alfred.cli.daemon._daemon_control_server as server_mod
+from alfred.cli.daemon import _daemon_control_server as server_mod
 from alfred.cli.daemon._daemon_control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     STATUS_QUERY_METHOD,

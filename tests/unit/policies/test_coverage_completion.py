@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-import alfred.policies.watcher as watcher_mod
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+from alfred.policies import watcher as watcher_mod
 from alfred.policies.snapshot_ref import (
     PolicySnapshotHistoryWriter,
     _diff_keys,

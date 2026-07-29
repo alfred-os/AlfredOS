@@ -25,7 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 import alfred.cli.daemon._boot_audit as _boot_audit
-import alfred.cli.daemon._commands as _daemon_commands
+from alfred.cli.daemon import _commands as _daemon_commands
 from alfred.cli.daemon import daemon_app
 from alfred.cli.daemon._commands import LifecycleBroadcaster
 from alfred.comms_mcp.protocol import (
