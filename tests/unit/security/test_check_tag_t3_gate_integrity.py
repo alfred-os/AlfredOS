@@ -257,11 +257,14 @@ def test_an_in_repo_symlink_named_test_py_is_not_exempt(tmp_path: Path) -> None:
     finally:
         if link.is_symlink() or link.exists():
             link.unlink()
-        try:
+        # Best-effort tidy-up: rmdir raises if another test's fixture is still
+        # in the same directory, or if build/ is not empty. Leaving the empty
+        # directory behind is harmless — the gate derives its scan set from git,
+        # and build/ is gitignored — so a failure here must not mask the
+        # assertion that ran above.
+        with contextlib.suppress(OSError):
             link_dir.rmdir()
             link_dir.parent.rmdir()
-        except OSError:
-            pass
 
 
 def test_a_real_out_of_repo_tmp_path_fixture_is_still_exempt(tmp_path: Path) -> None:
