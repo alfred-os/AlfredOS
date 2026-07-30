@@ -18,11 +18,21 @@
 # past the guard") one level out: that closed subclassing of the TIER, this
 # is subclassing of the MODEL.
 #
-# Defence, two layers: `__init_subclass__` refuses a subclass whose `__module__`
-# is not `alfred.security.tiers` OR whose namespace redefines any name in
-# `_TIER_GUARD_NAMES` (closing the class rather than the individual holes), and
-# behind it `model_post_init` plus module-level guard dispatch that no subclass
-# attribute lookup can intercept.
+# Defence. Layer A (`__init_subclass__`) refuses a subclass on any of THREE
+# conditions — each closes a hole the previous one leaves:
+#   1. the defining `__module__` is not `alfred.security.tiers`;
+#   2. the namespace redefines a name in `_TIER_GUARD_NAMES` — a forged
+#      `__module__` passes (1), so this stops it shadowing `_validate_tier` or
+#      `model_post_init`;
+#   3. the namespace defines ANYTHING a genuine parametrisation does not. (1) and
+#      (2) together still admitted a forged-`__module__` subclass overriding
+#      `__init__`, which is where pydantic runs validation AND `model_post_init`,
+#      so replacing it skipped both and minted T3 (verified admitted; `__new__`
+#      and `__setattr__` did not, because construction still routes through
+#      `__init__`). The allow-list is calibrated at import from a real
+#      parametrisation, so it tracks pydantic rather than drifting against it.
+# Layer B behind it is `model_post_init` plus module-level guard dispatch that no
+# subclass attribute lookup can intercept.
 #
 # Layer A keys on the defining MODULE, not the class name: pydantic's
 # `_generics.create_generic_submodel` builds a parametrisation with

@@ -19,6 +19,7 @@ regressions.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import yaml
@@ -67,9 +68,14 @@ def test_every_category_directory_has_readme(
 # Payloads that predate this gate and are not yet named in their category README.
 # ENUMERATED, not date-gated or count-gated: an explicit allow-list means any NEW
 # undocumented payload fails immediately, while the existing debt stays visible instead
-# of being silently tolerated by a weaker check. Shrink this list, never grow it —
-# a new entry here should be a review conversation, not a convenience.
-_README_BACKLOG_BASELINE: frozenset[str] = frozenset(
+# of being silently tolerated by a weaker check.
+#
+# It may only ever SHRINK, and that is ENFORCED by the digest pin below rather than
+# asserted in prose. An earlier revision kept a second `_README_BACKLOG_BASELINE` name
+# aliased to this same frozenset and compared the two — set difference against itself,
+# always empty, so the shrink test could never fire. A gate written to prevent silent
+# exemptions that was itself structurally incapable of failing (CodeRabbit).
+_README_UNDOCUMENTED_BACKLOG: frozenset[str] = frozenset(
     {
         "cap-2026-001", "cap-2026-002", "cap-2026-003", "cap-2026-004",
         "cap-2026-005", "cap-2026-006", "cap-2026-007", "cap-2026-008",
@@ -88,11 +94,13 @@ _README_BACKLOG_BASELINE: frozenset[str] = frozenset(
     }
 )  # fmt: skip
 
-# The live allow-list. Starts equal to the baseline above and may only ever SHRINK —
-# `test_the_readme_backlog_can_only_shrink` enforces it. A prose comment saying "shrink,
-# never grow" is not a gate; this epic has repeatedly shipped exactly that shape
-# (CodeRabbit).
-_README_UNDOCUMENTED_BACKLOG: frozenset[str] = _README_BACKLOG_BASELINE
+# Digest of the sorted allow-list above. Pinned rather than derived from the same literal:
+# any ADDITION changes the digest, so growing the list forces a deliberate edit to a
+# constant whose test says it must only shrink — visible in review instead of silent.
+# `_EXPECTED_BACKLOG_COUNT` is redundant with the digest but names the drift direction in
+# the failure message, which a bare hash mismatch cannot.
+_EXPECTED_BACKLOG_COUNT: int = 50
+_EXPECTED_BACKLOG_SHA256: str = "7c8c8bde4a6c9cb45f669caf14792f012e5c7cee42b9b402ccf666be3e9171fe"
 
 
 def _source_filename(corpus_root: Path, payload: AdversarialPayload) -> str | None:
@@ -167,14 +175,32 @@ def test_every_new_payload_appears_in_its_category_readme(
 def test_the_readme_backlog_can_only_shrink() -> None:
     """A new undocumented payload must not be waved through by extending the allow-list.
 
-    The backlog exists to carry PRE-EXISTING debt. Growing it converts the gate into a
-    rubber stamp one line at a time, which is the failure mode an enumerated allow-list is
-    supposed to prevent.
+    The backlog carries PRE-EXISTING debt. Growing it converts the gate into a rubber
+    stamp one line at a time — the failure mode an enumerated allow-list exists to
+    prevent.
+
+    Pinned by DIGEST, not by comparing the set to a second name for itself: the previous
+    revision did exactly that (`_README_BACKLOG_BASELINE` was an alias of this frozenset),
+    so the difference was always empty and the test could not fail. Any addition changes
+    the digest and reds here.
+
+    Honest limit: a determined author can update the digest alongside the addition. That
+    is a two-place edit naming this constant, which shows up in review — as opposed to a
+    silent one-line exemption. Shrinking legitimately also requires updating the pin, and
+    the failure message says which direction moved.
     """
-    added = sorted(_README_UNDOCUMENTED_BACKLOG - _README_BACKLOG_BASELINE)
-    assert not added, (
-        f"ids added to the README allow-list: {added}. The backlog may only shrink — "
-        "give the payload a coverage-matrix row instead of an exemption."
+    ids = sorted(_README_UNDOCUMENTED_BACKLOG)
+    digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
+
+    assert len(ids) <= _EXPECTED_BACKLOG_COUNT, (
+        f"the README allow-list GREW from {_EXPECTED_BACKLOG_COUNT} to {len(ids)} entries. "
+        "It may only shrink — give the payload a coverage-matrix row, not an exemption."
+    )
+    assert digest == _EXPECTED_BACKLOG_SHA256, (
+        f"the README allow-list changed ({len(ids)} entries, digest {digest[:12]}…). "
+        f"If you REMOVED an entry, update _EXPECTED_BACKLOG_COUNT to {len(ids)} and "
+        f"_EXPECTED_BACKLOG_SHA256 to {digest}. If you ADDED one, don't — document the "
+        "payload in its category README instead."
     )
 
 
