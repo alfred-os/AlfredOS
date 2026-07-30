@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -390,17 +391,96 @@ def _scan_file(path: Path) -> list[str]:
     return _scan_text(text, path)
 
 
+class EmptyScanRootError(RuntimeError):
+    """A directory argument yielded no Python files.
+
+    Not an ordinary violation: it means the gate was pointed somewhere it
+    cannot gate. Raised rather than returned so no caller can mistake it for
+    a clean result.
+    """
+
+
+def _git_tracked_python_files(directory: Path) -> list[Path] | None:
+    """Return the tracked ``.py`` files under ``directory``.
+
+    ``None`` means **git could not answer** (not a checkout, git absent, or a
+    non-zero exit). An empty list means **git answered: nothing tracked here** —
+    the distinction is load-bearing, see :func:`_collect_paths`.
+
+    ``git ls-files`` is DEFAULT-DENY where an exclusion list is
+    enumerate-and-hope: a file that is not tracked cannot land in a PR, and
+    gitignored trees (the vendored ``plugins/alfred_tui/.venv`` — 856 of that
+    tree's 895 ``.py`` files) disappear without anyone maintaining a list of
+    directory names to skip.
+
+    It also removes the filesystem traversal that let a symlinked package
+    directory hide its whole subtree: ``Path.rglob`` does not recurse a
+    symlinked directory met mid-walk. Tracked files are listed under their own
+    real paths regardless of what links point at them.
+    """
+    try:
+        # S603/S607: literal argv, no shell, no user-controlled executable. The
+        # two codes are reported on DIFFERENT lines — S603 on the call, S607 on
+        # the argv list — so a single combined noqa suppresses neither.
+        proc = subprocess.run(  # noqa: S603
+            ["git", "ls-files", "-z", "--", str(directory)],  # noqa: S607
+            capture_output=True,
+            check=False,
+            cwd=_REPO_ROOT,
+        )
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    names = proc.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+    return [_REPO_ROOT / n for n in names if n.endswith(".py")]
+
+
 def _collect_paths(argv: list[str]) -> list[Path]:
-    """Expand the CLI arg list into a flat list of ``.py`` paths to scan."""
+    """Expand the CLI arg list into a flat list of ``.py`` paths to scan.
+
+    Explicit FILE arguments are returned unconditionally — the unit suite
+    plants untracked fixtures in ``tmp_path`` and passes them by path, and
+    swallowing those would make every one of those tests vacuous.
+
+    Directory arguments inside the repo are derived from ``git ls-files``.
+    **An in-repo directory git reports as empty RAISES rather than falling
+    back to traversal**: falling back there would re-scan exactly the
+    gitignored trees the derivation exists to exclude.
+    """
     if not argv:
-        return list(Path("src/alfred").rglob("*.py"))
+        argv = ["src/alfred"]
     paths: list[Path] = []
     for arg in argv:
         candidate = Path(arg)
-        if candidate.is_dir():
-            paths.extend(candidate.rglob("*.py"))
-        else:
+        if not candidate.is_dir():
             paths.append(candidate)
+            continue
+
+        found: list[Path] | None = None
+        resolved = candidate.resolve(strict=False)
+        if resolved.is_relative_to(_REPO_ROOT):
+            found = _git_tracked_python_files(candidate)
+
+        if found is None:
+            # Out-of-repo directory (test fixtures), or git could not answer.
+            # recurse_symlinks=True is required: without it a symlinked package
+            # met MID-WALK is skipped silently, which is the bypass this change
+            # exists to close.
+            found = list(candidate.rglob("*.py", recurse_symlinks=True))
+
+        # PER-DIRECTORY floor. The aggregate census in main() cannot catch an
+        # empty scan root: ``src/alfred plugins`` yielding 293 + 0 still clears
+        # a 250-file floor while gating zero plugin files. ``git ls-files``
+        # exits 0 with empty output for an ignored, absent or submodule path,
+        # so this is the only place that failure becomes visible.
+        if not found:
+            raise EmptyScanRootError(
+                f"{arg}: no Python files found. The gate refuses to treat an "
+                f"empty scan root as clean — check the path, and check whether "
+                f"it is gitignored."
+            )
+        paths.extend(found)
     return paths
 
 
