@@ -14,12 +14,19 @@ The ``_scan_text`` seam plus in-process calls are what make the 100% gate in
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation needs elevation on the blocking windows-latest unit leg",
+)
 
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 _SCRIPT: Path = _REPO_ROOT / "scripts" / "check_tag_t3.py"
@@ -234,10 +241,7 @@ def test_a_directory_argument_cannot_poison_the_files_beneath_it() -> None:
     )
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="symlink creation needs elevation on the blocking windows-latest unit leg",
-)
+@_NEEDS_SYMLINKS
 def test_an_in_repo_symlink_named_test_py_is_not_exempt(tmp_path: Path) -> None:
     """Bypass 4: ``path.name`` read the LINK, ``resolved`` read the TARGET.
 
@@ -303,3 +307,149 @@ def test_a_path_segment_merely_containing_tests_is_not_exempt() -> None:
     """
     assert check_tag_t3._is_exempt(Path("src/alfred/contests/foo.py")) is False
     assert check_tag_t3._is_exempt(Path("src/alfred/tests_helpers/foo.py")) is False
+
+
+# ---------------------------------------------------------------------------
+# Bypass 3 (#537): Path.rglob does not recurse a symlinked directory met
+# mid-walk. Collection now derives from `git ls-files`, which removes the
+# traversal entirely for in-repo directories.
+# ---------------------------------------------------------------------------
+
+
+@_NEEDS_SYMLINKS
+def test_a_symlinked_package_directory_does_not_hide_its_subtree(tmp_path: Path) -> None:
+    """Bypass 3: Path.rglob skips a symlinked directory met MID-WALK.
+
+    The link must sit INSIDE the scanned root, not BE the scanned root.
+    ``rglob`` DOES follow a symlink passed as the walk root, so a fixture that
+    scans the link directly passes against the unfixed script — measured by the
+    review fleet. The real bug is a link encountered during traversal.
+    """
+    root = tmp_path / "root"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "ordinary.py").write_text("x = 1\n", encoding="utf-8")
+
+    hidden = tmp_path / "outside"
+    hidden.mkdir()
+    (hidden / "launder.py").write_text(
+        "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n", encoding="utf-8"
+    )
+
+    (root / "pkg" / "linked").symlink_to(hidden, target_is_directory=True)
+
+    collected = check_tag_t3._collect_paths([str(root)])
+
+    assert any(p.name == "launder.py" for p in collected), (
+        f"a symlinked directory met mid-walk hid its subtree: {collected}"
+    )
+
+
+def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> None:
+    """The DIFFERENTIAL oracle: git's answer, not a hard-coded count.
+
+    A live ``== 293`` assertion is vacuous on a clean CI checkout, because the
+    856-file delta comes entirely from ``plugins/alfred_tui/.venv``, which is
+    gitignored and created by no workflow — so there rglob and git agree and
+    the test passes whichever implementation is in place. Asserting AGAINST git
+    directly pins the behaviour on every runner.
+    """
+    expected = {
+        _REPO_ROOT / line
+        for line in subprocess.run(
+            ["git", "ls-files", "--", "src/alfred"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=_REPO_ROOT,
+        ).stdout.splitlines()
+        if line.endswith(".py")
+    }
+
+    assert set(check_tag_t3._collect_paths(["src/alfred"])) == expected
+    assert len(expected) >= 250, "sanity: the census floor must be satisfiable"
+
+
+def test_git_derivation_excludes_a_gitignored_file_a_traversal_would_find() -> None:
+    """Pins the .venv exclusion WITHOUT depending on a .venv existing.
+
+    ``plugins/alfred_tui/.venv`` is gitignored and no workflow creates it, so a
+    CI runner sees 39 files either way and a count-based assertion proves
+    nothing. This plants a gitignored file of its own, so the assertion means
+    the same thing on every machine.
+    """
+    ignored_dir = _REPO_ROOT / "build" / "synthetic-537-ignored"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    planted = ignored_dir / "vendored.py"
+    try:
+        planted.write_text(
+            "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n", encoding="utf-8"
+        )
+
+        # Precondition: git really does ignore it, or the test proves nothing.
+        assert (
+            subprocess.run(  # noqa: S603
+                ["git", "check-ignore", "-q", str(planted)],  # noqa: S607
+                check=False,
+                cwd=_REPO_ROOT,
+            ).returncode
+            == 0
+        ), "fixture is not gitignored — the test would be vacuous"
+
+        # Precondition: a traversal WOULD find it, or there is nothing to exclude.
+        traversed = {p.resolve() for p in (_REPO_ROOT / "build").rglob("*.py")}
+        assert planted.resolve() in traversed, (
+            "rglob does not see the fixture — the test would be vacuous"
+        )
+
+        # git answers EMPTY (not "could not answer") for a fully-ignored tree.
+        assert check_tag_t3._git_tracked_python_files(Path("build")) == []
+    finally:
+        planted.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            ignored_dir.rmdir()
+
+
+def test_an_in_repo_directory_with_no_tracked_python_refuses_rather_than_traversing() -> None:
+    """`git ls-files` exits 0 with EMPTY output for an ignored/absent path.
+
+    Falling back to rglob there would re-scan exactly the gitignored trees the
+    git derivation exists to exclude — so an in-repo root git reports empty
+    must RAISE. Distinguishing 'git answered empty' ([]) from 'git could not
+    answer' (None) is what makes that possible.
+
+    The aggregate census cannot catch this: `src/alfred plugins` yielding
+    293 + 0 still clears a 250-file floor while gating zero plugin files.
+    """
+    ignored_dir = _REPO_ROOT / "build" / "synthetic-537-empty"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with pytest.raises(check_tag_t3.EmptyScanRootError):
+            check_tag_t3._collect_paths(["build"])
+    finally:
+        with contextlib.suppress(OSError):
+            ignored_dir.rmdir()
+
+
+def test_a_multi_root_scan_still_succeeds_when_every_root_is_populated() -> None:
+    """Negative twin for the per-directory floor: the real invocation works."""
+    collected = check_tag_t3._collect_paths(["src/alfred", "plugins"])
+
+    assert collected
+    assert not any(".venv" in p.parts for p in collected), (
+        "the vendored plugins/alfred_tui/.venv reached the scan set"
+    )
+
+
+def test_an_explicit_file_argument_is_scanned_even_if_untracked(tmp_path: Path) -> None:
+    """Positive control: file args bypass the git derivation entirely.
+
+    The unit suite plants untracked fixtures and passes them by path; if the
+    git derivation swallowed those, every subprocess test would go vacuous.
+    """
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n", encoding="utf-8"
+    )
+
+    assert check_tag_t3._collect_paths([str(planted)]) == [planted]
+    assert check_tag_t3._scan_file(planted)
