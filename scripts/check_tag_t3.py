@@ -363,21 +363,25 @@ def _scan_text(text: str, path: Path) -> list[str]:
         # REPORT it instead of passing it.
         return [f"{path}:{exc.lineno or 1}: {_UNPARSEABLE_MESSAGE}", f"  {exc.msg}"]
 
-    if tree is not None:
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            lineno = node.lineno
-            snippet = lines[lineno - 1].rstrip() if 0 <= lineno - 1 < len(lines) else ""
-            if _is_tag_t3_call(node):
-                violations.append(f"{path}:{lineno}: {_TAG_T3_MESSAGE}")
-                violations.append(f"  {snippet}")
-            if _is_cast_tagged_content_call(node):
-                violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
-                violations.append(f"  {snippet}")
-            if _is_tagged_content_t3_subscript_call(node):
-                violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
-                violations.append(f"  {snippet}")
+    # No ``if tree is not None`` guard: the SyntaxError arm above RETURNS, so
+    # ``tree`` is always a parsed module here. The guard was a leftover from the
+    # shape where an unparseable file set ``tree = None`` and fell through — it
+    # became unreachable when that became a violation, and an unreachable branch
+    # is a coverage hole that a pragma would hide rather than fix.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        lineno = node.lineno
+        snippet = lines[lineno - 1].rstrip() if 0 <= lineno - 1 < len(lines) else ""
+        if _is_tag_t3_call(node):
+            violations.append(f"{path}:{lineno}: {_TAG_T3_MESSAGE}")
+            violations.append(f"  {snippet}")
+        if _is_cast_tagged_content_call(node):
+            violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
+            violations.append(f"  {snippet}")
+        if _is_tagged_content_t3_subscript_call(node):
+            violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
+            violations.append(f"  {snippet}")
 
     for lineno, line in enumerate(lines, 1):
         if _TYPE_IGNORE_PATTERN.search(line):

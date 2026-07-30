@@ -136,10 +136,10 @@ jobs:
         run: uv run ruff format --check .
       - name: Mypy (strict)
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
-        run: uv run mypy --strict src/
+        run: uv run mypy --strict src/ scripts/check_tag_t3.py
       - name: Pyright
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
-        run: uv run pyright src/
+        run: uv run pyright src/ scripts/check_tag_t3.py
       - name: Unit tests + coverage gates
         if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
         # Two gates here:
@@ -157,8 +157,20 @@ jobs:
         # no-ops on a branch where the hooks subsystem hasn't landed yet —
         # mirrors the unit-test step's guard discipline.
         run: |
-          uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing --cov-fail-under=75
+          uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report=term-missing --cov-fail-under=75
           uv run coverage report --include='src/alfred/security/*' --fail-under=100
+      - name: check_tag_t3 detector 100% line+branch coverage
+        # #537: the gate that enforces CLAUDE.md security rule #3 was itself
+        # under NO coverage gate and NO type-checker — measured 0%, because the
+        # whole suite was subprocess-based and subprocess records nothing
+        # without COVERAGE_PROCESS_START. The in-process _scan_text seam is what
+        # makes this gate possible. `--include` names a single file, so the six
+        # other scripts in the dataset do not affect this threshold.
+        if: steps.check.outputs.has_py == 'true'
+        run: |
+          uv run coverage report \
+            --include='scripts/check_tag_t3.py' \
+            --fail-under=100
       - name: Hooks subsystem 100% line+branch coverage
         # Slice 2.5 PR-A's ``src/alfred/hooks/`` is a trust boundary in its
         # own right — the capability gate (sec-007), the re-entry bypass
@@ -830,10 +842,10 @@ jobs:
         run: uv run ruff format --check .
       - name: Mypy (strict)
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
-        run: uv run mypy --strict src/
+        run: uv run mypy --strict src/ scripts/check_tag_t3.py
       - name: Pyright
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
-        run: uv run pyright src/
+        run: uv run pyright src/ scripts/check_tag_t3.py
       - name: Unit tests (arm64 — no coverage gate)
         if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
         # `--cov-fail-under=0` overrides `[tool.coverage.report] fail_under = 75`
@@ -959,7 +971,7 @@ jobs:
         # Linux `python` job runs mypy on a Linux runner so it matches by
         # default; here we make the platform explicit so every runner checks the
         # same target.
-        run: uv run mypy --strict --platform linux src/
+        run: uv run mypy --strict --platform linux src/ scripts/check_tag_t3.py
       - name: Pyright (Linux target)
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
         # `--pythonplatform Linux` is pyright's equivalent of mypy's
@@ -968,7 +980,7 @@ jobs:
         # runner OS, not just Linux. Pyright defaults `pythonPlatform` to the
         # HOST OS, so without this the macOS/Windows legs would diverge from the
         # Linux `pyright` job.
-        run: uv run pyright --pythonplatform Linux src/
+        run: uv run pyright --pythonplatform Linux src/ scripts/check_tag_t3.py
       # Unit suite on the non-Linux legs (#246). The Testcontainers-backed unit
       # files are module-marked `pytest.mark.docker` and the root-conftest
       # collection hook SKIPS them cleanly when no Docker daemon is reachable
