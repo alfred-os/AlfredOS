@@ -96,6 +96,19 @@ _UNDECODABLE_MESSAGE: str = (
 _UNPARSEABLE_MESSAGE: str = "file does not parse — the gate cannot scan it. Fix the syntax error."
 _UNREADABLE_MESSAGE: str = "file could not be read — the gate cannot scan it."
 
+# Assert-RAN floor (#245, #514). ``_collect_paths([])`` resolves the default
+# root relative to CWD, so an argument-less run from the wrong directory
+# scanned 0 files, exited 0 and printed nothing — a required check reporting
+# green while gating nothing. Nothing invoked it that way, which is exactly
+# why it would have gone unnoticed: a green-reporting no-op waiting for a
+# caller. A test-side census cannot catch this, because the failure mode IS
+# the caller.
+#
+# 293 tracked ``.py`` files live under ``src/alfred`` today; 250 leaves
+# headroom for deletions without leaving room for the gate to go vacuous.
+_DEFAULT_SCAN_ROOT: str = "src/alfred"
+_MIN_SCANNED_FILES: int = 250
+
 # Authorised non-test homes — resolved to absolute paths inside THIS repo
 # at import time. CR-138 finding #11: suffix matching (``endswith``) was
 # bypassable by any file whose path happened to end with the same
@@ -448,12 +461,24 @@ def _collect_paths(argv: list[str]) -> list[Path]:
     back to traversal**: falling back there would re-scan exactly the
     gitignored trees the derivation exists to exclude.
     """
-    if not argv:
-        argv = ["src/alfred"]
+    default_root = not argv
+    if default_root:
+        argv = [_DEFAULT_SCAN_ROOT]
     paths: list[Path] = []
     for arg in argv:
         candidate = Path(arg)
         if not candidate.is_dir():
+            if default_root:
+                # The DEFAULT root is resolved relative to CWD, so an
+                # argument-less run from the wrong directory used to scan 0
+                # files and exit 0. Treating a missing default root as an
+                # ordinary file argument would report it as an unreadable
+                # FILE, which describes the symptom rather than the fault.
+                raise EmptyScanRootError(
+                    f"{arg}: no Python files found — the default scan root does "
+                    f"not exist relative to the current directory. Run the gate "
+                    f"from the repository root, or pass an explicit path."
+                )
             paths.append(candidate)
             continue
 
@@ -485,8 +510,35 @@ def _collect_paths(argv: list[str]) -> list[Path]:
 
 
 def main(argv: list[str]) -> int:
+    """Return 0 clean, 1 violations found, 2 the gate could not run.
+
+    Exit 2 is deliberately distinct from 1: a caller must be able to tell
+    "the gate failed" from "the gate never gated anything".
+    """
+    try:
+        paths = sorted(_collect_paths(argv))
+    except EmptyScanRootError as exc:
+        print(f"check_tag_t3: {exc}", file=sys.stderr)
+        return 2
+
+    # The AGGREGATE census. The per-directory floor in `_collect_paths` catches
+    # a root that yields zero files; this catches a directory scan that
+    # resolved somewhere unexpected but non-empty. Explicit file arguments are
+    # how the unit suite plants fixtures, so they are exempt — holding those to
+    # a 250-file floor would red every one of them.
+    scanned_a_directory = not argv or any(Path(a).is_dir() for a in argv)
+    if scanned_a_directory and len(paths) < _MIN_SCANNED_FILES:
+        print(
+            f"check_tag_t3: scanned {len(paths)} files, expected at least "
+            f"{_MIN_SCANNED_FILES}. The gate is not reaching the source tree "
+            f"(wrong working directory, or the scan root moved) — refusing to "
+            f"report success while gating nothing.",
+            file=sys.stderr,
+        )
+        return 2
+
     all_violations: list[str] = []
-    for path in sorted(_collect_paths(argv)):
+    for path in paths:
         all_violations.extend(_scan_file(path))
 
     if all_violations:
