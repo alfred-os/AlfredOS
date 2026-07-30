@@ -115,66 +115,62 @@ _APPROVED_PATHS: frozenset[Path] = frozenset(
     }
 )
 
-# Test paths are always exempt. Tests assert the patterns the gate forbids.
+# Test trees are exempt: tests assert the patterns the gate forbids.
+# Matched as a resolved PATH COMPONENT, never as a substring of the raw
+# string. Two bugs lived in the old substring-on-raw-string form (#537):
 #
-# CR-138 round-2 finding #1: the previous ``test_[^/]+\.py$`` pattern
-# exempted ANY file whose basename started with ``test_`` regardless of
-# location. A non-test file at ``src/alfred/foo/test_bypass.py`` would
-# have slipped through the gate. The fix narrows the basename
-# exemption to paths OUTSIDE the repo root (``tmp_path`` fixtures and
-# similar) — in-repo ``test_*.py`` files must live under ``tests/`` to
-# be exempt by directory, not by name alone.
-_TEST_PATTERNS: tuple[re.Pattern[str], ...] = (re.compile(r"(^|/)tests/"),)
+#   * ``tests/../src/alfred/foo.py`` was exempt while ``src/alfred/foo.py``
+#     was not — the same file. A DIRECTORY argument poisoned everything
+#     beneath it, and it needed no absolute path, so it was reachable from
+#     the production invocation (``Makefile`` and CI both pass relative
+#     paths). This is #428's ``/lib64/../etc`` class on the exemption axis.
+#   * a checkout under any ancestor directory named ``tests`` made the whole
+#     gate vacuous for absolute-path invocations.
+#
+# Resolving first fixes both: the component check runs on the real location.
+_TEST_DIR_NAME: str = "tests"
 
 
 def _is_exempt(path: Path) -> bool:
     """Return True if ``path`` is allowed to contain the disallowed patterns.
 
-    Exempt set:
-      * any path under a ``tests/`` directory (regex on string form,
-        because test files can live in ``tmp_path`` for fixtures
-        whose path includes a ``/tests/`` segment),
-      * any ``test_*.py`` file whose **resolved absolute path is OUTSIDE
-        this repo** — this covers ``tmp_path`` test fixtures the unit
-        suite plants under e.g. ``/private/var/folders/.../test_foo.py``.
-        In-repo ``test_*.py`` files (basename-only match) are NOT exempt;
-        they must live under ``tests/`` to qualify.
-      * the explicit authorised homes in ``_APPROVED_PATHS`` — matched
-        by resolved absolute-path equality, not suffix. A file outside
-        this repo that happens to end with ``src/alfred/security/tiers.py``
-        is NOT exempt.
-    """
-    # Normalise to forward slashes so the regex checks work the same on
-    # POSIX and (theoretically) Windows checkouts.
-    path_str = str(path).replace("\\", "/")
-    for pat in _TEST_PATTERNS:
-        if pat.search(path_str):
-            return True
+    **Resolve first, then match.** Every exemption decision is made against
+    the resolved absolute path, so ``..`` traversal and symlinks cannot
+    present one identity to the matcher and another to the reader.
 
-    # Resolve the path to an absolute realpath (follows symlinks,
-    # collapses ``..``). Compare against the pre-resolved approved set.
-    # Resolution may fail for paths that do not exist on disk (the
-    # script can be passed a deleted file from a stale arg list); in
-    # that case the file cannot be the real authorised home, so fall
-    # through to "not exempt".
+    Exempt set:
+      * the explicit authorised homes in ``_APPROVED_PATHS``, by resolved
+        absolute-path equality — a file outside this repo that merely ends
+        with ``src/alfred/security/tiers.py`` is NOT exempt;
+      * any path under this repo's own ``tests/`` tree, matched by resolved
+        path COMPONENTS relative to the repo root. CR-138 round-2 finding #1
+        still holds: an in-repo ``test_*.py`` outside ``tests/`` is not
+        exempt, so an attacker cannot ship ``src/alfred/foo/test_bypass.py``;
+      * any ``test_*.py`` whose **resolved** path is outside this repo — the
+        ``tmp_path`` fixtures the unit suite plants. Keyed on
+        ``resolved.name``, NOT ``path.name``: an in-repo symlink named
+        ``test_bypass.py`` pointing at an out-of-repo file previously
+        satisfied the basename check with the LINK and the location check
+        with the TARGET.
+    """
     try:
         resolved = path.resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # A path we cannot resolve is not one of the known-good homes.
+        # ValueError is NOT redundant: an embedded NUL raises ValueError,
+        # not OSError, on every supported platform.
         return False
 
-    # Out-of-repo ``test_*.py`` fixtures (tmp_path planted files etc.)
-    # are exempt — they are genuine test artefacts the suite creates to
-    # exercise the gate. In-repo ``test_*.py`` files outside ``tests/``
-    # are NOT exempt: this would be an attacker shipping a file named
-    # ``test_bypass.py`` under ``src/`` to dodge the grep gate.
-    if (
-        path.name.startswith("test_")
-        and path.suffix == ".py"
-        and not resolved.is_relative_to(_REPO_ROOT)
-    ):
+    if resolved in _APPROVED_PATHS:
         return True
 
-    return resolved in _APPROVED_PATHS
+    if resolved.is_relative_to(_REPO_ROOT):
+        # In-repo: exempt only by living under the repo's own tests/ tree.
+        return _TEST_DIR_NAME in resolved.relative_to(_REPO_ROOT).parts
+
+    # Out-of-repo: the tmp_path fixture exemption. Keyed on the RESOLVED name
+    # so a symlink cannot borrow a test_* basename it does not own.
+    return resolved.name.startswith("test_") and resolved.suffix == ".py"
 
 
 def _call_name(node: ast.Call) -> str | None:

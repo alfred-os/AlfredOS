@@ -15,8 +15,11 @@ The ``_scan_text`` seam plus in-process calls are what make the 100% gate in
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 _SCRIPT: Path = _REPO_ROOT / "scripts" / "check_tag_t3.py"
@@ -177,3 +180,126 @@ def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Pat
 
     noisy = [v for p in paths for v in _collection_failures_in(p)]
     assert noisy == [], noisy
+
+
+# ---------------------------------------------------------------------------
+# Bypasses 2 and 4 (#537): the exemption matched the RAW path string before
+# resolving, so `..` traversal and symlinks could present one identity to the
+# matcher and another to the reader.
+# ---------------------------------------------------------------------------
+
+
+def test_dotdot_traversal_cannot_launder_a_src_file_into_exemption() -> None:
+    """Bypass 2: the exemption regex ran on the RAW string, before resolve().
+
+    ``tests/../src/alfred/...`` and ``src/alfred/...`` are the same file. One
+    was exempt and one was not. Works with RELATIVE paths, so it is reachable
+    from the production invocation (`Makefile` and CI both pass `src/alfred`).
+    This is #428's `/lib64/../etc` traversal class on the exemption axis.
+
+    The subject MUST be a non-exempt file. An equality assertion over
+    ``tiers.py`` would be satisfied by 'both True' — it is exempt via
+    _APPROVED_PATHS — and so passes against the UNFIXED script. Measured.
+    """
+    direct = Path("src/alfred/orchestrator/core.py")
+    laundered = Path("tests/../src/alfred/orchestrator/core.py")
+
+    assert direct.resolve() == laundered.resolve(), "precondition: same file"
+    assert check_tag_t3._is_exempt(direct) is False, "precondition: not exempt"
+    assert check_tag_t3._is_exempt(laundered) is False, (
+        "a `..` hop through tests/ bought exemption for a src file"
+    )
+
+
+def test_dotdot_traversal_preserves_a_legitimate_exemption() -> None:
+    """The negative twin: hardening must not break a real approved home."""
+    direct = Path("src/alfred/security/tiers.py")
+    laundered = Path("tests/../src/alfred/security/tiers.py")
+
+    assert check_tag_t3._is_exempt(direct) is True
+    assert check_tag_t3._is_exempt(laundered) is True
+
+
+def test_a_directory_argument_cannot_poison_the_files_beneath_it() -> None:
+    """The traversal's real blast radius: one arg exempts a whole subtree.
+
+    `_is_exempt` was called per-file with the raw prefix still attached, so
+    `check_tag_t3.py tests/../src/alfred` exempted all 293 files at once.
+    """
+    poisoned = check_tag_t3._collect_paths(["tests/../src/alfred"])
+
+    assert poisoned, "precondition: the traversal path still collects files"
+    assert not all(check_tag_t3._is_exempt(p) for p in poisoned), (
+        "every file under the traversed directory was exempt"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation needs elevation on the blocking windows-latest unit leg",
+)
+def test_an_in_repo_symlink_named_test_py_is_not_exempt(tmp_path: Path) -> None:
+    """Bypass 4: ``path.name`` read the LINK, ``resolved`` read the TARGET.
+
+    The live direction is an IN-repo link pointing OUT of the repo, because
+    _is_exempt requires ``not resolved.is_relative_to(_REPO_ROOT)``. Round 1
+    recorded this backwards; getting the direction wrong makes the regression
+    test pass vacuously.
+    """
+    target = tmp_path / "payload.py"
+    target.write_text(
+        "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n", encoding="utf-8"
+    )
+
+    link_dir = _REPO_ROOT / "build" / "synthetic-537-symlink"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "test_bypass.py"
+    try:
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(target)
+
+        assert check_tag_t3._is_exempt(link) is False, (
+            "an in-repo file named test_*.py is exempt only under tests/; a "
+            "symlink must not buy exemption by pointing out of the repo"
+        )
+        assert check_tag_t3._scan_file(link), "the link's content must be scanned"
+    finally:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        try:
+            link_dir.rmdir()
+            link_dir.parent.rmdir()
+        except OSError:
+            pass
+
+
+def test_a_real_out_of_repo_tmp_path_fixture_is_still_exempt(tmp_path: Path) -> None:
+    """Negative twin for the symlink hardening.
+
+    The unit suite plants violating ``test_*.py`` fixtures under ``tmp_path``
+    and relies on them being exempt. Keying the basename check on
+    ``resolved.name`` must not break that.
+    """
+    fixture = tmp_path / "test_fixture_plant.py"
+    fixture.write_text(
+        "from alfred.security.tiers import tag, T3\nx = tag(T3, 'fixture')\n", encoding="utf-8"
+    )
+
+    assert check_tag_t3._is_exempt(fixture) is True
+    assert check_tag_t3._scan_file(fixture) == []
+
+
+def test_a_directory_literally_named_tests_is_still_exempt() -> None:
+    """Negative floor: the legitimate exemption must survive the hardening."""
+    assert check_tag_t3._is_exempt(Path("tests/unit/security/test_tag_t3_capability_gate.py"))
+
+
+def test_a_path_segment_merely_containing_tests_is_not_exempt() -> None:
+    """Component matching, not substring: 'contests/' must not be exempt.
+
+    The old regex was ``(^|/)tests/`` which is already anchored, so this is a
+    forward guard against a re-widening to a bare substring check.
+    """
+    assert check_tag_t3._is_exempt(Path("src/alfred/contests/foo.py")) is False
+    assert check_tag_t3._is_exempt(Path("src/alfred/tests_helpers/foo.py")) is False
