@@ -337,6 +337,12 @@ class AnyTaggedContent(Protocol):
     def metadata(self) -> Mapping[str, Any]: ...
 
 
+# Attribute names a GENUINE pydantic parametrisation of TaggedContent defines. Calibrated
+# at import from a real parametrisation (below the class body) rather than hard-coded, so
+# it tracks pydantic's own set across versions instead of drifting against it. ``None``
+# until then, because the calibrating parametrisation must itself be admitted.
+_PARAMETRISATION_ATTRS: frozenset[str] | None = None
+
 # Names a subclass must not redefine: each is a tier guard, and pydantic rebinds
 # validator targets BY NAME off the subclass MRO, so redefining one replaces the parent's
 # check inside the parent's own slot. Kept as data next to the class so adding a guard
@@ -349,12 +355,6 @@ class AnyTaggedContent(Protocol):
 # strictly more paths, including inside ``BaseModel.model_construct`` — so the mangled
 # name is now inert because the validator it named no longer EXISTS, not because it is
 # listed here. Do not re-add it; that would imply a guard that is not there.
-# Attribute names a GENUINE pydantic parametrisation of TaggedContent defines. Calibrated
-# at import from a real parametrisation (below the class body) rather than hard-coded, so
-# it tracks pydantic's own set across versions instead of drifting against it. ``None``
-# until then, because the calibrating parametrisation must itself be admitted.
-_PARAMETRISATION_ATTRS: frozenset[str] | None = None
-
 _TIER_GUARD_NAMES: frozenset[str] = frozenset(
     {
         "_validate_tier",
