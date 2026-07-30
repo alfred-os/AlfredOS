@@ -53,12 +53,12 @@ pre-push:
         - merge
         - rebase
     "3-mypy":
-      run: 'if [ -d src ]; then uv run mypy --strict src; else echo "::notice::no src/ yet — skipping mypy"; fi'
+      run: 'if [ -d src ]; then uv run mypy --strict src scripts/check_tag_t3.py; else echo "::notice::no src/ yet — skipping mypy"; fi'
       skip:
         - merge
         - rebase
     "4-pyright":
-      run: 'if [ -d src ]; then uv run pyright src; else echo "::notice::no src/ yet — skipping pyright"; fi'
+      run: 'if [ -d src ]; then uv run pyright src scripts/check_tag_t3.py; else echo "::notice::no src/ yet — skipping pyright"; fi'
       skip:
         - merge
         - rebase

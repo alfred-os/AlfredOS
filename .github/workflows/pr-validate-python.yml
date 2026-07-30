@@ -218,7 +218,7 @@ jobs:
         run: uv sync --dev
       - name: Run mypy --strict
         if: steps.srccheck.outputs.has_source == 'true'
-        run: uv run mypy --strict src
+        run: uv run mypy --strict src scripts/check_tag_t3.py
 
   # ─────────────────────────────────────────────────────────────
   # Job 4: pyright
@@ -276,7 +276,7 @@ jobs:
         run: uv sync --dev
       - name: Run pyright
         if: steps.srccheck.outputs.has_source == 'true'
-        run: uv run pyright src
+        run: uv run pyright src scripts/check_tag_t3.py
 
   # The previous "Pytest" job here ran `pytest tests/unit tests/integration
   # -q` WITHOUT coverage. It showed engineers a green "Pytest" check on
