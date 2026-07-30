@@ -49,6 +49,7 @@ If no arguments are given, scans ``src/alfred/`` recursively.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -169,22 +170,52 @@ def _is_exempt(path: Path) -> bool:
     """
     try:
         resolved = path.resolve(strict=False)
+        # ``absolute()`` + ``normpath`` are pure-lexical and consult the same cwd
+        # ``resolve()`` does, so they cannot fail once it has succeeded. They
+        # share this guard rather than carrying an unreachable one of their own.
+        lexical = Path(os.path.normpath(path.absolute()))
     except (OSError, RuntimeError, ValueError):
         # A path we cannot resolve is not one of the known-good homes.
         # ValueError is NOT redundant: an embedded NUL raises ValueError,
         # not OSError, on every supported platform.
         return False
 
-    if resolved in _APPROVED_PATHS:
+    # Lexical normalisation collapses ``..`` WITHOUT following symlinks. Both
+    # views are needed because they answer different questions:
+    #
+    #   * ``..`` traversal is a pure string problem  -> normalise lexically.
+    #   * a symlink is a filesystem fact             -> resolve().
+    #
+    # Deciding on the RESOLVED path alone was a regression: a tracked symlink at
+    # ``src/alfred/security/loader.py`` pointing into ``tests/`` bought exemption
+    # for production code (measured rc=0 where the previous gate reported rc=1).
+    # Deciding on the LEXICAL path alone reopens the ``..`` traversal. Both ends
+    # of a symlink are author-controlled, so a path is exempt only when BOTH
+    # views agree that it is — the stricter of the two always wins.
+    return _view_is_exempt(lexical) and _view_is_exempt(resolved)
+
+
+def _view_is_exempt(candidate: Path) -> bool:
+    """Exemption verdict for ONE absolute view of a path. See :func:`_is_exempt`.
+
+    ``candidate`` must already be absolute and free of ``..`` segments.
+    """
+    if candidate in _APPROVED_PATHS:
         return True
 
-    if resolved.is_relative_to(_REPO_ROOT):
-        # In-repo: exempt only by living under the repo's own tests/ tree.
-        return _TEST_DIR_NAME in resolved.relative_to(_REPO_ROOT).parts
+    if candidate.is_relative_to(_REPO_ROOT):
+        # In-repo: exempt only by living under the repo's own TOP-LEVEL tests/
+        # tree. Matching ``tests`` at any depth exempted production code —
+        # ``src/alfred/security/tests/bypass.py`` is importable as
+        # ``alfred.security.tests.bypass`` and was exempt. That hole predates
+        # this gate's rewrite but the scan root now includes ``plugins/`` too,
+        # so it is closed here rather than carried forward.
+        parts = candidate.relative_to(_REPO_ROOT).parts
+        return bool(parts) and parts[0] == _TEST_DIR_NAME
 
-    # Out-of-repo: the tmp_path fixture exemption. Keyed on the RESOLVED name
-    # so a symlink cannot borrow a test_* basename it does not own.
-    return resolved.name.startswith("test_") and resolved.suffix == ".py"
+    # Out-of-repo: the tmp_path fixture exemption. Keyed on this view's own
+    # basename so a symlink cannot borrow a ``test_*`` name it does not own.
+    return candidate.name.startswith("test_") and candidate.suffix == ".py"
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -408,6 +439,23 @@ def _scan_file(path: Path) -> list[str]:
     return _scan_text(text, path)
 
 
+def _warn_git_unavailable(directory: Path, why: str) -> None:
+    """Announce a degradation to filesystem traversal on stderr.
+
+    Every other "the gate could not do the thing it claims" condition here is
+    loud; this one was mute. Falling back to ``rglob`` restores the traversal
+    this gate exists to remove — it scans a superset so it cannot hide a
+    violation, but the operator should know the default-deny derivation is not
+    the one that ran.
+    """
+    print(
+        f"check_tag_t3: {directory}: {why} — falling back to filesystem "
+        f"traversal. The git-derived scan set (which honours .gitignore) is NOT "
+        f"in effect for this path.",
+        file=sys.stderr,
+    )
+
+
 class EmptyScanRootError(RuntimeError):
     """A directory argument yielded no Python files.
 
@@ -440,17 +488,40 @@ def _git_tracked_python_files(directory: Path) -> list[Path] | None:
         # two codes are reported on DIFFERENT lines — S603 on the call, S607 on
         # the argv list — so a single combined noqa suppresses neither.
         proc = subprocess.run(  # noqa: S603
-            ["git", "ls-files", "-z", "--", str(directory)],  # noqa: S607
+            # --cached lists the index; --others adds files that are NOT yet
+            # tracked; --exclude-standard keeps .gitignore honoured so the
+            # default-deny property survives. Without --others a brand-new file
+            # was invisible to a directory scan until it was `git add`ed —
+            # measured: an untracked src/alfred file containing
+            # TaggedContent[T3](...) scanned rc=0, while the previous rglob gate
+            # reported rc=1. CI is unaffected (it scans a committed merge ref),
+            # so the loss was entirely in the local `make check` loop, which is
+            # exactly where an author needs the gate to speak.
+            [  # noqa: S607 — git is resolved from PATH by design; no user input
+                "git",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                str(directory),
+            ],
             capture_output=True,
             check=False,
             cwd=_REPO_ROOT,
         )
     except (OSError, ValueError):
+        _warn_git_unavailable(directory, "git could not be executed")
         return None
     if proc.returncode != 0:
+        _warn_git_unavailable(directory, f"git exited {proc.returncode}")
         return None
     names = proc.stdout.decode("utf-8", errors="surrogateescape").split("\0")
-    return [_REPO_ROOT / n for n in names if n.endswith(".py")]
+    # --cached also lists index entries whose working-tree file is gone (a
+    # deletion that has not been staged). Those cannot contain a violation, and
+    # reporting them as unreadable would be noise rather than a finding.
+    return [p for n in names if n.endswith(".py") if (p := _REPO_ROOT / n).is_file()]
 
 
 def _collect_paths(argv: list[str]) -> list[Path]:

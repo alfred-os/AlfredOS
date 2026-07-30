@@ -227,20 +227,6 @@ def test_dotdot_traversal_preserves_a_legitimate_exemption() -> None:
     assert check_tag_t3._is_exempt(laundered) is True
 
 
-def test_a_directory_argument_cannot_poison_the_files_beneath_it() -> None:
-    """The traversal's real blast radius: one arg exempts a whole subtree.
-
-    `_is_exempt` was called per-file with the raw prefix still attached, so
-    `check_tag_t3.py tests/../src/alfred` exempted all 293 files at once.
-    """
-    poisoned = check_tag_t3._collect_paths(["tests/../src/alfred"])
-
-    assert poisoned, "precondition: the traversal path still collects files"
-    assert not all(check_tag_t3._is_exempt(p) for p in poisoned), (
-        "every file under the traversed directory was exempt"
-    )
-
-
 @_NEEDS_SYMLINKS
 def test_an_in_repo_symlink_named_test_py_is_not_exempt(tmp_path: Path) -> None:
     """Bypass 4: ``path.name`` read the LINK, ``resolved`` read the TARGET.
@@ -662,3 +648,156 @@ def test_git_unavailable_falls_back_to_traversal(monkeypatch: pytest.MonkeyPatch
 
     assert collected, "the rglob fallback found nothing"
     assert any(p.name == "check_tag_t3.py" for p in collected)
+
+
+# ---------------------------------------------------------------------------
+# PR #540 review findings. Each regression below was reproduced against the
+# first revision of this branch before being fixed.
+# ---------------------------------------------------------------------------
+
+
+@_NEEDS_SYMLINKS
+def test_a_symlink_from_src_into_tests_does_not_buy_exemption(tmp_path: Path) -> None:
+    """sec-001: deciding exemption on the RESOLVED path alone was a regression.
+
+    A tracked symlink at src/alfred/security/loader.py pointing into tests/
+    resolved to a tests/ path and was exempt, so any production file could be
+    laundered by pointing it at the test tree. Measured rc=0 where the previous
+    gate reported rc=1. Both ends of a symlink are author-controlled, so the
+    LEXICAL view must agree before anything is exempt.
+    """
+    link_dir = _REPO_ROOT / "build" / "synthetic-540-symlink-into-tests"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "loader.py"
+    target = _REPO_ROOT / "tests" / "unit" / "security" / "test_tag_t3_capability_gate.py"
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target)
+
+        assert check_tag_t3._is_exempt(link) is False, (
+            "a symlink pointing into tests/ bought exemption for a non-test path"
+        )
+    finally:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        with contextlib.suppress(OSError):
+            link_dir.rmdir()
+
+
+def test_a_nested_directory_named_tests_does_not_exempt_production_code() -> None:
+    """sec-002: only the repo's TOP-LEVEL tests/ tree is exempt.
+
+    ``src/alfred/security/tests/bypass.py`` is importable as
+    ``alfred.security.tests.bypass`` and was exempt because ``tests`` appeared
+    anywhere in the path components. The scan root now includes plugins/, so
+    the same hole would have widened.
+    """
+    assert check_tag_t3._is_exempt(Path("src/alfred/security/tests/bypass.py")) is False
+    assert check_tag_t3._is_exempt(Path("plugins/alfred_discord/tests/bypass.py")) is False
+    # The real top-level tree stays exempt — the negative twin.
+    assert (
+        check_tag_t3._is_exempt(Path("tests/unit/security/test_check_tag_t3_subscript.py")) is True
+    )
+
+
+def test_an_untracked_new_file_is_still_scanned() -> None:
+    """err-001: ``git ls-files`` without --others lists only the INDEX.
+
+    A brand-new file was invisible to a directory scan until it was ``git
+    add``ed — measured: an untracked src/alfred file containing
+    TaggedContent[T3](...) scanned rc=0. CI was unaffected (it scans a committed
+    merge ref), so the loss was entirely in the local ``make check`` loop, which
+    is exactly where an author needs the gate to speak.
+    """
+    planted = _REPO_ROOT / "src" / "alfred" / "zz_540_untracked_probe.py"
+    try:
+        planted.write_text(
+            "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n", encoding="utf-8"
+        )
+        # Precondition: genuinely untracked, or the test proves nothing.
+        tracked = subprocess.run(  # noqa: S603
+            ["git", "ls-files", "--error-unmatch", str(planted)],  # noqa: S607
+            capture_output=True,
+            check=False,
+            cwd=_REPO_ROOT,
+        )
+        assert tracked.returncode != 0, "fixture is tracked — the test would be vacuous"
+
+        collected = check_tag_t3._collect_paths(["src/alfred"])
+        assert planted in collected, "an untracked new file was not scanned"
+    finally:
+        planted.unlink(missing_ok=True)
+
+
+def test_a_gitignored_file_is_still_excluded_despite_others() -> None:
+    """The negative twin for --others: --exclude-standard must still apply.
+
+    Adding --others without --exclude-standard would have scanned the vendored
+    plugins/alfred_tui/.venv — 856 files — undoing the whole derivation.
+    """
+    ignored_dir = _REPO_ROOT / "build" / "synthetic-540-ignored"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    planted = ignored_dir / "vendored.py"
+    try:
+        planted.write_text("x = 1\n", encoding="utf-8")
+        assert (
+            subprocess.run(  # noqa: S603
+                ["git", "check-ignore", "-q", str(planted)],  # noqa: S607
+                check=False,
+                cwd=_REPO_ROOT,
+            ).returncode
+            == 0
+        ), "fixture is not gitignored — the test would be vacuous"
+
+        assert check_tag_t3._git_tracked_python_files(Path("build")) == []
+    finally:
+        planted.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            ignored_dir.rmdir()
+
+
+def test_the_directory_scan_set_is_git_derived_not_a_traversal() -> None:
+    """test-002: replaces an oracle that only pinned path FORM.
+
+    The previous differential test compared against ``git ls-files`` output and
+    so re-ran the implementation's own predicate; swapping the derivation for an
+    absolute-path rglob left it green on any checkout without the vendored
+    .venv — i.e. every CI runner. This pins the SET difference using a
+    gitignored fixture, which exists on every machine.
+    """
+    ignored_dir = _REPO_ROOT / "build" / "synthetic-540-setdiff"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    planted = ignored_dir / "traversal_only.py"
+    try:
+        planted.write_text("x = 1\n", encoding="utf-8")
+
+        traversed = {p.resolve() for p in (_REPO_ROOT / "build").rglob("*.py")}
+        assert planted.resolve() in traversed, "rglob cannot see the fixture — vacuous"
+
+        collected = {p.resolve() for p in check_tag_t3._collect_paths(["src/alfred"])}
+        assert planted.resolve() not in collected
+        # And the git-derived set for build/ is empty, where rglob finds one.
+        assert check_tag_t3._git_tracked_python_files(Path("build")) == []
+    finally:
+        planted.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            ignored_dir.rmdir()
+
+
+def test_a_directory_argument_with_dotdot_does_not_exempt_its_files() -> None:
+    """test-001: the previous version of this test passed against unfixed code.
+
+    `_collect_paths` normalises `tests/../src/alfred` via git before `_is_exempt`
+    ever sees a path, so asserting over its output could not detect the bug.
+    Call `_is_exempt` on the RAW traversal spelling directly instead.
+    """
+    raw = Path("tests/../src/alfred/orchestrator/core.py")
+
+    assert raw.resolve().is_file(), "precondition: the traversal names a real file"
+    assert check_tag_t3._is_exempt(raw) is False, "a `..` hop through tests/ exempted a src file"
+    # Positive control: the same shape against a genuinely exempt file.
+    assert (
+        check_tag_t3._is_exempt(Path("tests/../tests/unit/security/test_t3_derived_data.py"))
+        is True
+    )
