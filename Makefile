@@ -143,7 +143,7 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 # added to CI is enforced locally the same day.
 #
 # Two datasets, because CI has two gate-bearing jobs and they are NOT
-# interchangeable: the `python` job's 25 gates read unit-only coverage, and the
+# interchangeable: the `python` job's 26 gates read unit-only coverage, and the
 # `coverage-gates` job's 22 read combined unit+integration. Running a combined
 # gate against unit-only data reports false failures, so each target builds the
 # dataset its gates expect.
@@ -151,8 +151,8 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates read.
 	uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report= --cov-fail-under=0
 
-coverage-gates-unit: coverage-unit ## Run the 25 unit-tier 100% gates from ci.yml.
-	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 20
+coverage-gates-unit: coverage-unit ## Run the 26 unit-tier 100% gates from ci.yml.
+	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 26
 
 # ORDER IS LOAD-BEARING: the unit gates must read unit-ONLY data. Combined data
 # is a superset, so running them after the integration append would let a module
@@ -163,7 +163,7 @@ coverage-gates-unit: coverage-unit ## Run the 25 unit-tier 100% gates from ci.ym
 coverage-gates: coverage-gates-unit ## Run every per-module 100% gate CI runs (needs Docker).
 	uv run pytest tests/integration -q -m "not real_llm" \
 		--cov=src/alfred --cov-append --cov-report= --cov-fail-under=0
-	uv run python3 scripts/run_coverage_gates.py --job coverage-gates --min-gates 18
+	uv run python3 scripts/run_coverage_gates.py --job coverage-gates --min-gates 22
 
 test-smoke: ## Run smoke tests against a running stack (requires `docker compose up`).
 	@if [ -d tests/smoke ]; then \
@@ -238,7 +238,7 @@ tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(Tagge
 # `check` runs the gates CI runs that are reproducible on a dev box. It is NOT
 # the whole of CI: the arm64/WSL/Windows legs, the privileged bwrap legs, the
 # adversarial suite and CodeQL live only in CI. It previously claimed to be
-# "identical to CI" while running NONE of the 47 per-module 100% coverage
+# "identical to CI" while running NONE of the 48 per-module 100% coverage
 # gates (#474) — an overclaim that cost a CI round-trip on PR #529.
 check: format-check lint-check typecheck strict-declarations-lint tag-t3-check i18n-check coverage-gates ## Verify what CI verifies locally (see comment). No mutations.
 
