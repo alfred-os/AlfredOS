@@ -1411,19 +1411,48 @@ Expected: `rc=0`. Check `$?` directly — piping through `tail` masks it.
 
 For each of the five bypasses, revert the fix in the working tree, confirm the matching test **reds**, then restore. A fix whose test still passes when reverted is decorative.
 
-| Revert | Must red |
-| --- | --- |
-| `_UNDECODABLE_MESSAGE` arm → `return []` | `test_latin1_source_is_a_violation_not_a_silent_pass` |
-| `SyntaxError` arm → `tree = None` | `test_unparseable_source_is_a_violation` |
-| `OSError` arm → `return []` | `test_unreadable_file_is_a_violation` |
-| `_is_exempt` → match before resolve | `test_dotdot_traversal_cannot_launder_a_src_file_into_exemption` **and** `test_a_directory_argument_cannot_poison_the_files_beneath_it` |
-| `resolved.name` → `path.name` | `test_an_in_repo_symlink_named_test_py_is_not_exempt` |
-| drop `ValueError` from the resolve arm | `test_is_exempt_returns_false_for_an_unresolvable_path` |
-| `rglob(..., recurse_symlinks=True)` → default | `test_a_symlinked_package_directory_does_not_hide_its_subtree` |
-| `_git_tracked_python_files` → always `None` | `test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory` **and** `test_collect_paths_excludes_an_ignored_tree_a_traversal_would_find` |
-| `return tracked or None` → `return tracked` | `test_every_directory_argument_must_yield_at_least_one_file` |
-| drop the per-directory `EmptyScanRootError` | `test_every_directory_argument_must_yield_at_least_one_file` |
-| `_MIN_SCANNED_FILES` → `0` | `test_main_fails_loudly_when_it_scans_nothing` |
+**Executed 2026-07-30. Every row below was run: revert, confirm red, restore.**
+
+| Revert | Must red | Result |
+| --- | --- | --- |
+| `_UNDECODABLE_MESSAGE` arm → `return []` | `test_latin1_source_is_a_violation_not_a_silent_pass` | killed |
+| `SyntaxError` arm → `tree = None` | `test_unparseable_source_is_a_violation` | killed |
+| `OSError` arm → `return []` | `test_unreadable_path_is_a_violation` | killed |
+| `_is_exempt` → match before resolve | `test_dotdot_traversal_cannot_launder_a_src_file_into_exemption` **and** `test_a_directory_argument_cannot_poison_the_files_beneath_it` | killed (both) |
+| `resolved.name` → `path.name` | `test_an_in_repo_symlink_named_test_py_is_not_exempt` | killed |
+| drop `ValueError` from the resolve arm | `test_is_exempt_returns_false_for_an_unresolvable_path` | killed |
+| `rglob(..., recurse_symlinks=True)` → default | `test_a_symlinked_package_directory_does_not_hide_its_subtree` | killed |
+| `_git_tracked_python_files` → always `None` | the differential, gitignored **and** multi-root tests | killed (3) |
+| `return tracked` → `return tracked or None` | `test_git_derivation_excludes_a_gitignored_file_a_traversal_would_find` | killed |
+| drop the per-directory `EmptyScanRootError` | `test_an_in_repo_directory_with_no_tracked_python_refuses_rather_than_traversing` | killed |
+| drop `main`'s `EmptyScanRootError` handler | both empty-root tests | killed (2) |
+| `_MIN_SCANNED_FILES` → `0` | `test_the_configured_census_floor_actually_rejects_a_small_scan` | killed — see below |
+| `exclude_also` → `exclude_lines` | the **existing** `src/alfred/security/*` 100% gate | killed (`rc=2`, 100% → 96%) |
+
+**One mutant initially SURVIVED, and the fix is the lesson.** `_MIN_SCANNED_FILES → 0` left
+`test_main_refuses_a_directory_scan_that_is_implausibly_small` green, because that test
+`monkeypatch`es the constant — it pins the census *mechanism* while saying nothing about the
+shipped value, so the census could have been disabled in production with no test noticing.
+`test_the_configured_census_floor_actually_rejects_a_small_scan` scans `scripts/` under the
+**real** constant and kills it. A monkeypatched constant is never a pin on that constant.
+
+## Corrections made during implementation
+
+Recorded here because the plan is the artifact a future reader trusts.
+
+1. **`None` and `[]` must mean different things in `_git_tracked_python_files`.** The plan's
+   `return tracked or None` conflated "git answered: nothing tracked" with "git could not
+   answer", so an in-repo directory git reports as empty fell back to `rglob` — re-scanning
+   exactly the gitignored trees the derivation exists to exclude. `None` now means git
+   failed; `[]` means git answered empty, and an empty in-repo root raises.
+2. **`S603` and `S607` are reported on different lines** (the call, and the argv list), so
+   the single combined `# noqa: S603,S607` the review recommended suppresses neither.
+3. **Reaching 100% removed dead code rather than adding a pragma.** The `if tree is not None`
+   guard in `_scan_text` became unreachable when the `SyntaxError` arm started returning.
+4. **The plan's repo-wide floor was itself vacuous** — its message constants sat inside a
+   comprehension's `if` clause, which never evaluates on a clean tree, so the floor passed
+   while the constants did not exist. It now reads them eagerly, asserts the census, and
+   carries a positive control.
 
 **Every row must be executed, not reasoned.** Three of this plan's original rows were false — the named test passed against the unfixed code — and the fleet caught them only because it ran them. A row whose test still passes after the revert means the test is vacuous, not that the fix is safe.
 
