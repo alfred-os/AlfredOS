@@ -227,9 +227,13 @@ test-perf: ## Run the release-blocking hook-dispatch perf gate (host-load-sensit
 strict-declarations-lint: ## #119 SEC-Med-1: `strict_declarations=False` MUST NOT appear in src/.
 	python3 scripts/check_strict_declarations.py
 
-tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(TaggedContent[ uses in src/.
+# #541: the scan roots live in the script (`_DEFAULT_SCAN_ROOTS`), NOT here.
+# Passing them on the command line meant dropping one was a one-word edit that
+# no gate could see — and it silently stopped gating 39 first-party plugin
+# files. There is no argument left to drop.
+tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(TaggedContent[ uses.
 	@if [ -d src/alfred ]; then \
-		python3 scripts/check_tag_t3.py src/alfred plugins; \
+		python3 scripts/check_tag_t3.py; \
 	else \
 		echo "::error::no src/alfred/ — the gate cannot run"; \
 		exit 1; \

@@ -147,7 +147,13 @@ def test_a_real_utf8_file_still_scans_normally(tmp_path: Path) -> None:
 def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Path) -> None:
     """Non-vacuity floor: this change must cost zero false positives.
 
-    Measured at plan time: 0 unparseable, 0 unreadable across 293 files.
+    Measured at plan time: 0 unparseable, 0 unreadable across 293 files;
+    re-measured after #541 across the 332 files of BOTH declared roots.
+
+    #541: was ``_collect_paths(["src/alfred"])``. A partial in-repo directory
+    scan is now refused at runtime, so this asserts over the production
+    argument-less shape — which is also the wider tree, so the floor got
+    stronger rather than weaker.
 
     THREE separate anti-vacuity devices, because the obvious form of this test
     is green on a detector that does nothing:
@@ -182,7 +188,7 @@ def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Pat
     )
 
     # Device 2 — census.
-    paths = check_tag_t3._collect_paths(["src/alfred"])
+    paths = check_tag_t3._collect_paths([])
     assert len(paths) >= 250, f"scanned implausibly few files: {len(paths)}"
 
     noisy = [v for p in paths for v in _collection_failures_in(p)]
@@ -341,11 +347,17 @@ def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> 
     gitignored and created by no workflow — so there rglob and git agree and
     the test passes whichever implementation is in place. Asserting AGAINST git
     directly pins the behaviour on every runner.
+
+    #541: the scanned side was ``["src/alfred"]``, now refused as a partial
+    in-repo directory scan. Both sides move to the argument-less production
+    shape, and the git side is derived from ``_DEFAULT_SCAN_ROOTS`` rather than
+    a second hard-coded root list — a literal ``src/alfred plugins`` here would
+    keep passing if the constant were narrowed.
     """
     expected = {
         _REPO_ROOT / line
-        for line in subprocess.run(
-            ["git", "ls-files", "--", "src/alfred"],  # noqa: S607
+        for line in subprocess.run(  # noqa: S603 — literal git argv; the roots are our own constant
+            ["git", "ls-files", "--", *check_tag_t3._DEFAULT_SCAN_ROOTS],  # noqa: S607
             capture_output=True,
             text=True,
             check=True,
@@ -354,7 +366,7 @@ def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> 
         if line.endswith(".py")
     }
 
-    assert set(check_tag_t3._collect_paths(["src/alfred"])) == expected
+    assert set(check_tag_t3._collect_paths([])) == expected
     assert len(expected) >= 250, "sanity: the census floor must be satisfiable"
 
 
@@ -408,12 +420,24 @@ def test_an_in_repo_directory_with_no_tracked_python_refuses_rather_than_travers
 
     The aggregate census cannot catch this: `src/alfred plugins` yielding
     293 + 0 still clears a 250-file floor while gating zero plugin files.
+
+    #541 ORACLE INDEPENDENCE. ``build`` is also a partial in-repo directory
+    scan, so the new root invariant raises here too — and if this test keyed
+    only on the base exception type, deleting the per-directory floor it
+    exists to guard would leave it GREEN (measured: it does). It therefore
+    discriminates twice: on the message, and on the concrete subclass.
     """
     ignored_dir = _REPO_ROOT / "build" / "synthetic-537-empty"
     ignored_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with pytest.raises(check_tag_t3.EmptyScanRootError):
+        with pytest.raises(
+            check_tag_t3.EmptyScanRootError, match="no Python files found"
+        ) as excinfo:
             check_tag_t3._collect_paths(["build"])
+        assert not isinstance(excinfo.value, check_tag_t3.PartialScanRootError), (
+            "the per-directory floor did not fire — the root-coverage invariant "
+            "raised instead, and this guard would be passing on the wrong error"
+        )
     finally:
         with contextlib.suppress(OSError):
             ignored_dir.rmdir()
@@ -494,10 +518,15 @@ def test_main_refuses_a_directory_scan_that_is_implausibly_small(
     The per-directory floor only catches ZERO files. A scan root that resolved
     somewhere unexpected but non-empty would clear it, so main keeps an
     aggregate floor as well.
+
+    #541: was ``main(["src/alfred"])``, now refused as a partial in-repo
+    directory scan before the census is ever reached. Driving the census from
+    the production argument-less shape keeps this a test of the MECHANISM
+    (the shipped value is pinned separately, below).
     """
     monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 100_000)
 
-    rc = check_tag_t3.main(["src/alfred"])
+    rc = check_tag_t3.main([])
 
     assert rc == 2
     err = capsys.readouterr().err
@@ -505,7 +534,7 @@ def test_main_refuses_a_directory_scan_that_is_implausibly_small(
 
 
 def test_the_configured_census_floor_actually_rejects_a_small_scan(
-    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins the REAL ``_MIN_SCANNED_FILES`` value, not a monkeypatched one.
 
@@ -514,16 +543,31 @@ def test_the_configured_census_floor_actually_rejects_a_small_scan(
     about the shipped value — measured: setting the real constant to 0 left
     that test green, which would disable the census in production silently.
 
-    ``scripts/`` holds a handful of tracked ``.py`` files, comfortably under any
-    sane floor, so this reds if the constant is ever lowered to nothing.
+    #541: was ``main(["scripts"])``, now refused as a partial in-repo directory
+    scan before the census runs. The small root moves into
+    ``_DEFAULT_SCAN_ROOTS`` instead, so the run is argument-less and LEGAL
+    while still scanning far too few files. ``scripts/`` holds 7 tracked
+    ``.py`` files against the shipped floor of 250, so this reds if the
+    constant is ever lowered to nothing.
+
+    Patching the ROOTS rather than the FLOOR is what keeps this a value pin:
+    ``_MIN_SCANNED_FILES`` is read at its shipped value. It is also the only
+    remaining route to the census branch at all — with the root invariant in
+    place, every legal directory scan covers both roots and clears 250.
     """
-    assert check_tag_t3.main(["scripts"]) == 2
+    monkeypatch.setattr(check_tag_t3, "_DEFAULT_SCAN_ROOTS", ("scripts",))
+
+    assert check_tag_t3.main([]) == 2
     assert "expected at least" in capsys.readouterr().err
 
 
 def test_main_returns_zero_on_the_real_tree() -> None:
-    """Positive twin: the census must not red the real invocation."""
-    assert check_tag_t3.main(["src/alfred"]) == 0
+    """Positive twin: the census must not red the real invocation.
+
+    #541: was ``main(["src/alfred"])``. That is now a refused partial scan, so
+    this asserts the shape production actually uses — no arguments at all.
+    """
+    assert check_tag_t3.main([]) == 0
 
 
 def test_main_still_returns_one_for_a_real_violation(tmp_path: Path) -> None:
@@ -644,7 +688,14 @@ def test_git_derivation_returns_none_when_git_cannot_answer(
 
 
 def test_git_unavailable_falls_back_to_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The fallback arm for an in-repo directory when git cannot answer."""
+    """The fallback arm for an in-repo directory when git cannot answer.
+
+    #541: ``scripts`` alone is now a partial in-repo directory scan. The arm
+    under test needs an IN-repo directory (an out-of-repo one never consults
+    git at all), so the root set is narrowed to match the argument rather than
+    the argument widened away from the branch it exists to reach.
+    """
+    monkeypatch.setattr(check_tag_t3, "_DEFAULT_SCAN_ROOTS", ("scripts",))
     monkeypatch.setattr(check_tag_t3, "_git_tracked_python_files", lambda _d: None)
 
     collected = check_tag_t3._collect_paths(["scripts"])
@@ -727,7 +778,8 @@ def test_an_untracked_new_file_is_still_scanned() -> None:
         )
         assert tracked.returncode != 0, "fixture is tracked — the test would be vacuous"
 
-        collected = check_tag_t3._collect_paths(["src/alfred"])
+        # #541: was ``["src/alfred"]``, now a refused partial in-repo scan.
+        collected = check_tag_t3._collect_paths([])
         assert planted in collected, "an untracked new file was not scanned"
     finally:
         planted.unlink(missing_ok=True)
@@ -778,7 +830,8 @@ def test_the_directory_scan_set_is_git_derived_not_a_traversal() -> None:
         traversed = {p.resolve() for p in (_REPO_ROOT / "build").rglob("*.py")}
         assert planted.resolve() in traversed, "rglob cannot see the fixture — vacuous"
 
-        collected = {p.resolve() for p in check_tag_t3._collect_paths(["src/alfred"])}
+        # #541: was ``["src/alfred"]``, now a refused partial in-repo scan.
+        collected = {p.resolve() for p in check_tag_t3._collect_paths([])}
         assert planted.resolve() not in collected
         # And the git-derived set for build/ is empty, where rglob finds one.
         assert check_tag_t3._git_tracked_python_files(Path("build")) == []
@@ -814,10 +867,16 @@ def test_a_relative_directory_argument_works_from_a_subdirectory(
     From ``src/``, ``check_tag_t3.py alfred`` made ``git ls-files -- alfred``
     list 0 entries and the gate refused with "check whether it is gitignored"
     for a 293-file tree. Fails closed, but diagnoses the wrong fault.
+
+    #541: ``["alfred"]`` alone is now a refused partial in-repo scan, so the
+    second root is named the way a caller in ``src/`` would have to name it —
+    ``../plugins``. That makes this a stronger test than it was: the root
+    invariant compares RESOLVED paths, so it also proves a relative spelling
+    from a subdirectory satisfies the coverage check rather than tripping it.
     """
     monkeypatch.chdir(_REPO_ROOT / "src")
 
-    collected = check_tag_t3._collect_paths(["alfred"])
+    collected = check_tag_t3._collect_paths(["alfred", "../plugins"])
 
     assert len(collected) >= 250, f"a relative arg from a subdirectory collected {len(collected)}"
     assert all(p.is_absolute() for p in collected)
@@ -830,9 +889,133 @@ def test_a_nonexistent_scan_root_is_reported_as_such(
 
     ``check_tag_t3.py src/alfred nosuchdir`` exited 1 with "file could not be
     read" — the code meaning "violations found", for a mistyped scan root.
+
+    #541 ORACLE INDEPENDENCE: this argv is ALSO a partial in-repo directory
+    scan, so an unqualified ``pytest.raises(EmptyScanRootError)`` would be
+    satisfied by the root invariant firing after the missing-path branch was
+    deleted. ``match=`` keeps it pinned to the branch it is about.
     """
-    with pytest.raises(check_tag_t3.EmptyScanRootError):
+    with pytest.raises(check_tag_t3.EmptyScanRootError, match="no such file or directory"):
         check_tag_t3._collect_paths(["src/alfred", "definitely-not-a-real-path"])
 
     assert check_tag_t3.main(["src/alfred", "definitely-not-a-real-path"]) == 2
     assert "no such file or directory" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# #541: the SCRIPT owns its scan roots. #537 widened the gate to
+# `src/alfred plugins` by editing two invocation strings; dropping `plugins`
+# from either was a one-word edit that stopped gating 39 first-party plugin
+# files and the 250-file census could not see it (src/alfred alone is 293).
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_scan_covers_every_required_root() -> None:
+    """#541: the script — not the caller — decides what gets gated.
+
+    Asserts the CONSTANT, without monkeypatching it — a monkeypatched constant
+    is never a pin on that constant (#537). Several cases above DO monkeypatch
+    ``_DEFAULT_SCAN_ROOTS`` to reach a branch; this is the one that does not,
+    so narrowing the shipped tuple reds here whatever those do.
+    """
+    assert check_tag_t3._DEFAULT_SCAN_ROOTS == ("src/alfred", "plugins")
+
+
+def test_the_default_scan_really_reaches_both_roots() -> None:
+    """The constant is only worth pinning if it drives the real scan.
+
+    Anti-vacuity companion to the case above: proves an argument-less run
+    collects files from BOTH roots, rather than the constant being inert.
+    """
+    collected = check_tag_t3._collect_paths([])
+    parts = {p.relative_to(check_tag_t3._REPO_ROOT).parts[0] for p in collected}
+
+    assert {"src", "plugins"} <= parts, (
+        f"an argument-less scan reached only {sorted(parts)} — the default "
+        f"roots are not driving the scan"
+    )
+    assert len(collected) >= 300, f"expected the combined census, got {len(collected)}"
+
+
+def test_a_partial_in_repo_directory_scan_is_refused_at_runtime() -> None:
+    """The RUNTIME layer, independent of any call-site pin.
+
+    The pin in ``tests/unit/meta/test_gate_surfaces_are_pinned.py`` is LEXICAL
+    and review defeated it lexically: a backslash line-continuation split the
+    argv across lines and slipped ``src/alfred`` through with ``plugins``
+    dropped — measured against real ``make``, ``plugins/`` ungated, rc=0. This
+    layer survives that, and survives every test in this repo being deleted.
+
+    ``PartialScanRootError`` — not the base ``EmptyScanRootError``: "pointed at
+    less than everything" is a different fault from "pointed at nothing", and
+    sharing one type collapsed the base class's own regression oracle.
+    """
+    with pytest.raises(check_tag_t3.PartialScanRootError, match="does not cover every declared"):
+        check_tag_t3._collect_paths(["src/alfred"])
+
+    # The message must NAME the missing root; "a scan was refused" is not an
+    # actionable diagnostic for a caller that thinks it passed everything.
+    with pytest.raises(check_tag_t3.PartialScanRootError, match=r"missing \['src/alfred'\]"):
+        check_tag_t3._collect_paths(["plugins"])
+
+    # And through the exit contract: rc=2 ("the gate could not run"), not 1
+    # ("violations found") and certainly not 0.
+    assert check_tag_t3.main(["src/alfred"]) == 2
+
+
+def test_an_out_of_repo_directory_fixture_is_exempt_from_the_root_invariant(
+    tmp_path: Path,
+) -> None:
+    """Pins the NARROWING deliberately, so a future widening reds here.
+
+    The invariant is scoped to IN-REPO directory arguments. Un-narrowing it to
+    every directory argument was measured to red 11 pre-existing tests across
+    two files — every ``tmp_path`` tree the suite plants and scans, none of
+    which says anything about production, which only ever scans in-repo paths.
+    """
+    fixture = tmp_path / "tree"
+    fixture.mkdir()
+    (fixture / "ordinary.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert check_tag_t3._collect_paths([str(fixture)]) == [fixture / "ordinary.py"]
+
+
+def test_the_file_argument_residual_is_not_closed_by_this_layer() -> None:
+    """CHARACTERISATION of a MEASURED residual — read the docstring, not the name.
+
+    The module docstring must not claim "no invocation can gate a subset",
+    because an invocation that enumerates explicit FILE paths still can:
+    passing the 293 tracked ``src/alfred/**.py`` files individually exits 0
+    with ``plugins`` never scanned. Extending the invariant to cover it would
+    have to refuse in-repo file arguments outright, which is the single-file
+    developer invocation and the shape three pre-existing tests use.
+
+    What closes it instead is the call-site pin in
+    ``tests/unit/meta/test_gate_surfaces_are_pinned.py``, which requires every
+    invocation site to pass NO arguments at all — so the enumeration cannot be
+    written at a call site in the first place. This test exists so that the
+    residual is a recorded fact rather than an assumption: if someone closes
+    it at this layer, this reds and they delete it deliberately.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "src/alfred"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    ).stdout.splitlines()
+    src_files = [line for line in tracked if line.endswith(".py")]
+    assert len(src_files) >= 250, "precondition: the enumeration must be the real tree"
+
+    collected = check_tag_t3._collect_paths(src_files)
+
+    # Top-level component only: `src/alfred/plugins/` is a DIFFERENT tree from
+    # the `plugins/` scan root, and a substring test would confuse the two.
+    assert {p.parts[0] for p in collected} == {"src"}, (
+        "a file enumeration reached the top-level plugins/ root — the residual "
+        "this documents is closed, so delete this test and correct the docstring"
+    )
+    assert check_tag_t3.main(src_files) == 0, (
+        "the enumeration no longer exits 0 — the residual is closed at this "
+        "layer, so delete this test and correct the module docstring"
+    )
