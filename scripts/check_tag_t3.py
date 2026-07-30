@@ -73,6 +73,28 @@ _TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE: str = (
     "tag_t3_with_nonce() with injected nonce (spec §3.2, sec-S3-002)"
 )
 
+# Read-surface failures. These are VIOLATIONS, not silent passes (#537):
+# a file the gate cannot read is a file the gate is not gating, and Python's
+# import machinery is far more permissive than this reader.
+#
+# A ``# -*- coding: latin-1 -*-`` header (PEP 263) makes
+# ``read_text(encoding="utf-8")`` raise ``UnicodeDecodeError`` while the module
+# imports and executes perfectly. Measured: the gate returned rc=0 for a file
+# that constructed ``TaggedContent[T3]`` — one header line defeated every rule
+# here, current and proposed. The same swallow hid a file carrying a real
+# violation alongside a ``SyntaxError``, and made every "must PASS" floor in
+# the suite vacuously green on text that was never parsed.
+#
+# Three DISTINCT strings so a test for one cannot be satisfied by another
+# firing. Measured false-positive cost across the scan root: 0 unparseable,
+# 0 unreadable.
+_UNDECODABLE_MESSAGE: str = (
+    "file is not valid UTF-8 — the gate cannot read it but Python can execute "
+    "it (PEP 263 coding declaration). Re-encode as UTF-8."
+)
+_UNPARSEABLE_MESSAGE: str = "file does not parse — the gate cannot scan it. Fix the syntax error."
+_UNREADABLE_MESSAGE: str = "file could not be read — the gate cannot scan it."
+
 # Authorised non-test homes — resolved to absolute paths inside THIS repo
 # at import time. CR-138 finding #11: suffix matching (``endswith``) was
 # bypassable by any file whose path happened to end with the same
@@ -323,12 +345,13 @@ def _scan_text(text: str, path: Path) -> list[str]:
 
     try:
         tree = ast.parse(text, filename=str(path))
-    except SyntaxError:
-        # A file the parser cannot read is not a violation: ruff / mypy /
-        # the test suite will catch it. We do NOT fall back to the legacy
-        # per-line regex here — silently accepting a syntactically broken
-        # file is safer than scanning a half-parsed view of it.
-        tree = None
+    except SyntaxError as exc:
+        # A file the parser cannot read is a file this gate is not gating.
+        # Returning early skips the line-based suppression pass, which is
+        # correct: a half-parsed view of a broken file is exactly what the
+        # previous comment here warned against — the difference is that we now
+        # REPORT it instead of passing it.
+        return [f"{path}:{exc.lineno or 1}: {_UNPARSEABLE_MESSAGE}", f"  {exc.msg}"]
 
     if tree is not None:
         for node in ast.walk(tree):
@@ -364,11 +387,10 @@ def _scan_file(path: Path) -> list[str]:
         return []
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # Unreadable files are not violations — the type-checker / linter
-        # will catch them elsewhere. This script is for grep-level patterns
-        # only.
-        return []
+    except UnicodeDecodeError:
+        return [f"{path}:1: {_UNDECODABLE_MESSAGE}", "  <undecodable>"]
+    except OSError as exc:
+        return [f"{path}:1: {_UNREADABLE_MESSAGE}", f"  {exc.strerror or exc}"]
     return _scan_text(text, path)
 
 
