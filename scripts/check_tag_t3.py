@@ -292,8 +292,22 @@ def _is_cast_tagged_content_call(node: ast.Call) -> bool:
     return False
 
 
-def _scan_file(path: Path) -> list[str]:
-    """Return a list of violation messages for ``path``. Empty list = clean.
+def _scan_text(text: str, path: Path) -> list[str]:
+    """Return violation messages for ``text``, attributed to ``path``.
+
+    Pure: performs no filesystem access and applies no exemption — ``path`` is
+    a label for the messages, not something this function reads.
+
+    Split out of :func:`_scan_file` (#537) for two reasons:
+
+    1. Tests can feed *mutated real source* under its REAL path. A ``tmp_path``
+       copy of this script would recompute ``_REPO_ROOT`` from ``__file__`` and
+       silently invert every exemption, so a copy-based test measures the
+       wrong tree while still passing.
+    2. It lets the suite run the scanner in-process, which is what makes a
+       100%-coverage gate on this file achievable at all: a ``subprocess`` run
+       records nothing without ``COVERAGE_PROCESS_START``, and the pre-existing
+       suites are entirely subprocess-based (measured: 0% coverage).
 
     Two-pass scan:
 
@@ -305,16 +319,6 @@ def _scan_file(path: Path) -> list[str]:
        scan.
     """
     violations: list[str] = []
-    if _is_exempt(path):
-        return violations
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # Unreadable files are not violations — the type-checker / linter
-        # will catch them elsewhere. This script is for grep-level patterns
-        # only.
-        return violations
-
     lines = text.splitlines()
 
     try:
@@ -348,6 +352,24 @@ def _scan_file(path: Path) -> list[str]:
             violations.append(f"  {line.rstrip()}")
 
     return violations
+
+
+def _scan_file(path: Path) -> list[str]:
+    """Return a list of violation messages for ``path``. Empty list = clean.
+
+    Applies the exemption, reads the source, and delegates the scanning to
+    :func:`_scan_text`.
+    """
+    if _is_exempt(path):
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # Unreadable files are not violations — the type-checker / linter
+        # will catch them elsewhere. This script is for grep-level patterns
+        # only.
+        return []
+    return _scan_text(text, path)
 
 
 def _collect_paths(argv: list[str]) -> list[Path]:
