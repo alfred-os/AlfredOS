@@ -25,11 +25,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _RUNNER = _REPO_ROOT / "scripts" / "run_coverage_gates.py"
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-# The floors the Makefile targets pass. Deliberately a little below the counts at
-# the time of writing (25 / 22) so ordinary gate churn does not fail the build,
-# while a collapse to zero — the failure that matters — still does.
-_MIN_UNIT_GATES = 20
-_MIN_COMBINED_GATES = 18
+# Pinned to the EXACT counts measured 2026-07-30 (26 unit / 22 combined). They
+# were 20 / 18 — slack "so ordinary gate churn does not fail the build" — and
+# #541 is the bill for that slack: deleting the `check_tag_t3` gate step from
+# ci.yml left 25 gates, still clear of 20, so this suite stayed green while a
+# 100%-coverage gate on a security detector silently stopped existing.
+#
+# A floor is the right shape, set in the wrong place. `_iter_gates` is asserted
+# with `>=`, so ADDING a gate still passes and only REMOVING one fails. The cost
+# is that a deliberate removal must edit these constants — which is exactly the
+# reviewable signal that was missing.
+#
+# NOTE these floors are enforced in CI by THIS TEST, not by the Makefile:
+# `scripts/run_coverage_gates.py` is invoked by no workflow (verified), so the
+# `--min-gates` argument is a local-only signal. The CI teeth are here, inside
+# the required `Python (lint, types, unit)` check.
+_MIN_UNIT_GATES = 26
+_MIN_COMBINED_GATES = 22
 
 
 def _load_runner() -> Any:
