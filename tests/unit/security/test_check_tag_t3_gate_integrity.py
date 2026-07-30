@@ -549,3 +549,116 @@ def test_main_still_returns_one_for_a_real_violation(tmp_path: Path) -> None:
     )
 
     assert check_tag_t3.main([str(bad)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Coverage completion (#537 Task 7). The rule branches below are exercised by
+# the pre-existing subprocess suites, which record ZERO coverage. These call
+# the same code in-process so the 100% gate is reachable without weakening it.
+# ---------------------------------------------------------------------------
+
+
+def test_is_exempt_returns_false_for_an_unresolvable_path() -> None:
+    """The exception arm of _is_exempt's resolve().
+
+    An embedded NUL raises ValueError — NOT OSError or RuntimeError. Catching
+    only those two leaves this arm uncovered AND lets the exception escape, so
+    the gate would crash on a malformed argument.
+    """
+    assert check_tag_t3._is_exempt(Path("bad\x00path.py")) is False
+
+
+def test_unreadable_path_is_a_violation(tmp_path: Path) -> None:
+    """The OSError arm of _scan_file — reading a directory as a file."""
+    a_directory = tmp_path / "not_a_file.py"
+    a_directory.mkdir()
+
+    violations = check_tag_t3._scan_file(a_directory)
+
+    assert violations
+    assert check_tag_t3._UNREADABLE_MESSAGE in violations[0]
+
+
+def test_qualified_and_unresolvable_call_shapes(tmp_path: Path) -> None:
+    """_arg_name's Attribute and fall-through arms, and tag() with no args."""
+    label = tmp_path / "shapes.py"
+
+    qualified = check_tag_t3._scan_text("import tiers\nx = tiers.tag(tiers.T3, 'p')\n", label)
+    assert any(check_tag_t3._TAG_T3_MESSAGE in v for v in qualified)
+
+    # tag() with no positional args, and a non-Name/Attribute first arg.
+    assert check_tag_t3._scan_text("tag()\n", label) == []
+    assert check_tag_t3._scan_text("tag(1, 'p')\n", label) == []
+    # A call whose func is neither Name nor Attribute (a lambda call).
+    assert check_tag_t3._scan_text("(lambda: None)()\n", label) == []
+
+
+def test_subscript_construction_slice_variants(tmp_path: Path) -> None:
+    """The T3 / quoted-"T3" / benign / non-constant slice branches."""
+    label = tmp_path / "slices.py"
+    msg = check_tag_t3._TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE
+
+    assert any(msg in v for v in check_tag_t3._scan_text("TaggedContent[T3](x)\n", label))
+    assert any(msg in v for v in check_tag_t3._scan_text('TaggedContent["T3"](x)\n', label))
+    # Benign tier and a non-T3 string must NOT trip.
+    assert check_tag_t3._scan_text("TaggedContent[T2](x)\n", label) == []
+    assert check_tag_t3._scan_text('TaggedContent["T2"](x)\n', label) == []
+    # Non-Name, non-Constant slice, and a non-Subscript callee.
+    assert check_tag_t3._scan_text("TaggedContent[1](x)\n", label) == []
+    assert check_tag_t3._scan_text("Other[T3](x)\n", label) == []
+
+
+def test_cast_bypass_and_type_ignore_suppression(tmp_path: Path) -> None:
+    """The cast rule's arms and the line-based suppression rule."""
+    label = tmp_path / "casts.py"
+
+    cast_msg = check_tag_t3._CAST_TAGGED_CONTENT_MESSAGE
+    assert any(
+        cast_msg in v for v in check_tag_t3._scan_text("cast(TaggedContent[T2], x)\n", label)
+    )
+    assert any(
+        cast_msg in v for v in check_tag_t3._scan_text('cast("TaggedContent[T2]", x)\n', label)
+    )
+    # cast() with no args, a non-subscript non-constant arg, and a plain string.
+    assert check_tag_t3._scan_text("cast()\n", label) == []
+    assert check_tag_t3._scan_text("cast(x, y)\n", label) == []
+    assert check_tag_t3._scan_text('cast("int", y)\n', label) == []
+
+    suppressed = check_tag_t3._scan_text(
+        "x: TaggedContent = y  # type: ignore[assignment]\n", label
+    )
+    assert any(check_tag_t3._TYPE_IGNORE_MESSAGE in v for v in suppressed)
+
+
+def test_git_derivation_returns_none_when_git_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both 'git could not answer' arms: an exception, and a non-zero exit.
+
+    None must mean 'could not answer' so the caller falls back, while [] means
+    'answered: nothing tracked' so the caller refuses. Conflating them would
+    let an empty in-repo root fall back to a traversal of gitignored trees.
+    """
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise OSError("git not found")
+
+    monkeypatch.setattr(check_tag_t3.subprocess, "run", _raise)
+    assert check_tag_t3._git_tracked_python_files(Path("src/alfred")) is None
+
+    class _Failed:
+        returncode = 128
+        stdout = b""
+
+    monkeypatch.setattr(check_tag_t3.subprocess, "run", lambda *a, **k: _Failed())
+    assert check_tag_t3._git_tracked_python_files(Path("src/alfred")) is None
+
+
+def test_git_unavailable_falls_back_to_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fallback arm for an in-repo directory when git cannot answer."""
+    monkeypatch.setattr(check_tag_t3, "_git_tracked_python_files", lambda _d: None)
+
+    collected = check_tag_t3._collect_paths(["scripts"])
+
+    assert collected, "the rglob fallback found nothing"
+    assert any(p.name == "check_tag_t3.py" for p in collected)

@@ -214,6 +214,20 @@ omit = ["src/alfred/memory/migrations/*"]
 show_missing = true
 skip_covered = false
 fail_under = 75
+# ``exclude_also`` APPENDS to coverage's DEFAULT_EXCLUDE; ``exclude_lines``
+# REPLACES it. Verified in coverage/config.py: ``exclude_list`` is seeded from
+# ``DEFAULT_EXCLUDE[:]``, ``report:exclude_lines`` maps onto ``exclude_list``,
+# and only ``report:exclude_also`` is appended (``exclude_list += exclude_also``).
+# Using ``exclude_lines`` here would silently un-exclude 66 ``# pragma: no cover``
+# and 63 ``if TYPE_CHECKING:`` blocks plus every ``...`` stub across src/alfred —
+# breaking the ``--include='src/alfred/security/*' --fail-under=100`` gate in
+# ci.yml, i.e. an UNRELATED trust-boundary gate, with no mention of this change.
+exclude_also = [
+    # The CLI entry point cannot execute under an in-process test run. Needed by
+    # the scripts/check_tag_t3.py 100% gate (#537); there is no other
+    # unreachable-by-construction code in the gated set.
+    'if __name__ == .__main__.:',
+]
 # Per-package 100% gates are enforced by a second `coverage report --include=... --fail-under=100`
 # invocation in CI (see Task 17). pytest --cov-fail-under only takes one threshold value.
 # CLAUDE.md hard rule: every security boundary must have 100% line+branch coverage.
@@ -361,7 +375,7 @@ extend-immutable-calls = [
 # mypy misses (especially data-flow narrowing). See docs/python-conventions.md.
 pythonVersion = "3.14"
 typeCheckingMode = "standard"
-include = ["src"]
+include = ["src", "scripts/check_tag_t3.py"]
 exclude = ["src/alfred/memory/migrations"]
 # ``alfred.cli.main._chat_main`` imports ``alfred_tui.cohost`` (ADR-0031 Shape A:
 # the foreground TUI's in-process dial-and-co-host). ``alfred_tui`` is the TUI

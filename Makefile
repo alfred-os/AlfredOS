@@ -80,7 +80,7 @@ format-check: ## Verify formatting (ruff format --check, no mutation).
 
 typecheck: ## Run both type-checkers (mypy --strict + pyright).
 	@if [ -d src ]; then \
-		uv run mypy --strict src && uv run pyright src; \
+		uv run mypy --strict src scripts/check_tag_t3.py && uv run pyright src scripts/check_tag_t3.py; \
 	else \
 		echo "::notice::no src/ yet — skipping typecheck"; \
 	fi
@@ -149,7 +149,7 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 # dataset its gates expect.
 
 coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates read.
-	uv run pytest tests/unit -q --cov=src/alfred --cov-report= --cov-fail-under=0
+	uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report= --cov-fail-under=0
 
 coverage-gates-unit: coverage-unit ## Run the 25 unit-tier 100% gates from ci.yml.
 	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 20
