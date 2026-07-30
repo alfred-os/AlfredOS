@@ -229,9 +229,10 @@ strict-declarations-lint: ## #119 SEC-Med-1: `strict_declarations=False` MUST NO
 
 tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(TaggedContent[ uses in src/.
 	@if [ -d src/alfred ]; then \
-		python3 scripts/check_tag_t3.py src/alfred; \
+		python3 scripts/check_tag_t3.py src/alfred plugins; \
 	else \
-		echo "::notice::no src/alfred/ yet — skipping tag-t3-check"; \
+		echo "::error::no src/alfred/ — the gate cannot run"; \
+		exit 1; \
 	fi
 
 # `check` runs the gates CI runs that are reproducible on a dev box. It is NOT

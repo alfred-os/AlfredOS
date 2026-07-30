@@ -341,7 +341,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Run check_tag_t3.py against src/alfred
+      - name: Run check_tag_t3.py against src/alfred and plugins
         if: steps.srccheck.outputs.has_source == 'true'
         # stdlib-only script; no uv sync required. Releases-blocking per
         # spec §3.7-3.8 — only `security/tiers.py` and `security/
@@ -349,7 +349,7 @@ jobs:
         # TaggedContent[...]` is a type-erasure bypass that discards
         # provenance. The script exits 1 with violation messages on any
         # non-approved file containing those patterns.
-        run: python3 scripts/check_tag_t3.py src/alfred
+        run: python3 scripts/check_tag_t3.py src/alfred plugins
 
   # -----------------------------------------------------------------
   # Job 7: i18n catalog drift
