@@ -15,6 +15,7 @@
 - The script stays **stdlib-only** — CI invokes it without `uv sync` (`pr-validate-python.yml:352`), and the "Check for Python source files" guard at `pr-validate-python.yml:319` exists precisely so no provisioning is needed.
 - Python 3.14+, PEP 604 unions (`X | Y`), PEP 585 built-in generics. Never `Optional[X]` or `typing.List`.
 - **Commit subjects must NOT read `fix: #536`.** The repo's conventional-commit gate mandates `#NNN` after the colon, and GitHub parses `fix: #NNN` as a closing reference — that is how #518 closed twice with its work undone. Use `fix: #537 …`; reference the epic as `Refs #536` in the body only.
+- **All eight tasks must land in ONE PR.** Every `fix: #537` subject below closes #537 on merge, which is correct only while the PR carries the whole step. **If any task is split into its own PR** — the review fleet argued for splitting Task 7 — then the partial PR's subjects must use a non-closing type (`refactor:`/`test:`/`build:`/`chore:`) and only the PR that completes the step may say `fix:`. Shipping a partial `fix: #537` is the #518 failure, in the plan that opens by warning about it.
 - `make check` before every push. Check `$?` directly — `make … | tail` masks the exit code.
 - Every operator-facing string in `src/alfred/` goes through `t()`. **This script is exempt**: `scripts/` is outside `[tool.babel] input_dirs` and the script imports no i18n. Do not add `t()` calls here.
 
@@ -57,10 +58,12 @@ Two more silent-pass surfaces in the same family, closed by the same work: a non
 Everything else depends on this. A `tmp_path` **copy** of the script recomputes `_REPO_ROOT` from `__file__` and silently **inverts every exemption** (measured), so tests must import the real script and feed it text.
 
 **Files:**
+
 - Modify: `scripts/check_tag_t3.py:295-350` (split `_scan_file`)
 - Create: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
+
 - Consumes: nothing.
 - Produces:
   - `_scan_text(text: str, path: Path) -> list[str]` — pure; runs the AST and line passes over `text`, attributing violations to `path`. Does **not** consult `_is_exempt` and does **not** read the filesystem.
@@ -225,10 +228,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 Measured false-positive cost across the scan root: **0 unparseable, 0 unreadable files.**
 
 **Files:**
+
 - Modify: `scripts/check_tag_t3.py` (`_scan_file`, plus three new message constants)
 - Modify: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
+
 - Consumes: `_scan_text`, `_scan_file` from Task 1.
 - Produces: `_UNPARSEABLE_MESSAGE`, `_UNREADABLE_MESSAGE`, `_UNDECODABLE_MESSAGE` — three **distinct** strings, so a test for one cannot be satisfied by another firing.
 
@@ -281,10 +286,15 @@ def test_a_real_utf8_file_still_scans_normally(tmp_path: Path) -> None:
     every file for every reason.
     """
     ok = tmp_path / "ordinary.py"
+    # encoding="utf-8" is REQUIRED. Path.write_text defaults to the locale
+    # encoding, which on the blocking windows-latest unit leg is cp1252 — the
+    # file would be written as non-UTF-8 and this positive twin would assert
+    # the exact opposite of what it means to.
     ok.write_text(
         "# comment with a real unicode char: é\n"
         "from alfred.security.tiers import tag, T3\n"
-        "x = tag(T3, 'payload')\n"
+        "x = tag(T3, 'payload')\n",
+        encoding="utf-8",
     )
 
     violations = check_tag_t3._scan_file(ok)
@@ -382,7 +392,7 @@ Expected: `rc=0`. If this reds, a real file in the tree is unreadable or unparse
 
 ```bash
 git add scripts/check_tag_t3.py tests/unit/security/test_check_tag_t3_gate_integrity.py
-git commit -m "fix: #537 an unreadable or unparseable file is a violation, not a pass
+git commit -m "fix: #537 treat an unreadable or unparseable file as a violation
 
 A '# -*- coding: latin-1 -*-' header makes read_text(encoding='utf-8') raise
 while Python imports and executes the module perfectly. Measured: the gate
@@ -410,10 +420,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 Separately, `path.name` (`:149`) reads the **link** while `resolved.is_relative_to` (`:151`) reads the **target**, so an in-repo `test_*.py` symlinked to an out-of-repo file is exempt.
 
 **Files:**
+
 - Modify: `scripts/check_tag_t3.py:105-155` (`_TEST_PATTERNS`, `_is_exempt`)
 - Modify: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
+
 - Consumes: `_scan_file` from Task 2.
 - Produces: `_is_exempt(path: Path) -> bool` — same signature, resolved-first semantics. `_TEST_PATTERNS` is **deleted** and replaced by component matching.
 
@@ -427,28 +439,48 @@ def test_dotdot_traversal_cannot_launder_a_src_file_into_exemption() -> None:
     was exempt and one was not. Works with RELATIVE paths, so it is reachable
     from the production invocation (`Makefile` and CI both pass `src/alfred`).
     This is #428's `/lib64/../etc` traversal class on the exemption axis.
-    """
-    direct = Path("src/alfred/security/tiers.py")
-    laundered = Path("tests/../src/alfred/security/tiers.py")
 
-    assert direct.resolve() == laundered.resolve(), "precondition: same file"
-    assert check_tag_t3._is_exempt(direct) == check_tag_t3._is_exempt(laundered)
-
-
-def test_dotdot_traversal_on_a_non_exempt_file_stays_non_exempt() -> None:
-    """The positive control for the test above.
-
-    ``tiers.py`` is exempt by _APPROVED_PATHS, so equality alone could be
-    satisfied by 'both exempt'. This asserts a file that must NOT be exempt
-    stays non-exempt through the same traversal.
+    The subject MUST be a non-exempt file. An equality assertion over
+    ``tiers.py`` would be satisfied by 'both True' — it is exempt via
+    _APPROVED_PATHS — and so passes against the UNFIXED script. Measured.
     """
     direct = Path("src/alfred/orchestrator/core.py")
     laundered = Path("tests/../src/alfred/orchestrator/core.py")
 
-    assert check_tag_t3._is_exempt(direct) is False
-    assert check_tag_t3._is_exempt(laundered) is False
+    assert direct.resolve() == laundered.resolve(), "precondition: same file"
+    assert check_tag_t3._is_exempt(direct) is False, "precondition: not exempt"
+    assert check_tag_t3._is_exempt(laundered) is False, (
+        "a `..` hop through tests/ bought exemption for a src file"
+    )
 
 
+def test_dotdot_traversal_preserves_a_legitimate_exemption() -> None:
+    """The negative twin: hardening must not break a real approved home."""
+    direct = Path("src/alfred/security/tiers.py")
+    laundered = Path("tests/../src/alfred/security/tiers.py")
+
+    assert check_tag_t3._is_exempt(direct) is True
+    assert check_tag_t3._is_exempt(laundered) is True
+
+
+def test_a_directory_argument_cannot_poison_the_files_beneath_it() -> None:
+    """The traversal's real blast radius: one arg exempts a whole subtree.
+
+    `_is_exempt` was called per-file with the raw prefix still attached, so
+    `check_tag_t3.py tests/../src/alfred` exempted all 293 files at once.
+    """
+    poisoned = check_tag_t3._collect_paths(["tests/../src/alfred"])
+
+    assert poisoned, "precondition: the traversal path still collects files"
+    assert not all(check_tag_t3._is_exempt(p) for p in poisoned), (
+        "every file under the traversed directory was exempt"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation needs elevation on the blocking windows-latest unit leg",
+)
 def test_an_in_repo_symlink_named_test_py_is_not_exempt(tmp_path: Path) -> None:
     """Bypass 4: ``path.name`` read the LINK, ``resolved`` read the TARGET.
 
@@ -541,8 +573,10 @@ def _is_exempt(path: Path) -> bool:
     """
     try:
         resolved = path.resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         # A path we cannot resolve is not one of the known-good homes.
+        # ValueError is NOT redundant: an embedded NUL raises ValueError, not
+        # OSError, on every supported platform. Verified.
         return False
 
     if resolved in _APPROVED_PATHS:
@@ -568,7 +602,7 @@ Expected: PASS. **`test_check_tag_t3_script_exempts_out_of_repo_tmp_path_test_fi
 
 ```bash
 git add scripts/check_tag_t3.py tests/unit/security/test_check_tag_t3_gate_integrity.py
-git commit -m "fix: #537 exemptions resolve before they match
+git commit -m "fix: #537 resolve paths before matching exemptions
 
 _is_exempt ran the tests/ regex on the RAW path string and only resolved
 afterwards, so 'tests/../src/alfred/foo.py' was exempt while
@@ -609,60 +643,127 @@ The fix that closes this **also** solves the `plugins/` widening problem and rep
 Tracked symlinks in the repo today: **zero**.
 
 **Files:**
+
 - Modify: `scripts/check_tag_t3.py:353-364` (`_collect_paths`)
 - Modify: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
+
 - Consumes: `_is_exempt` from Task 3.
 - Produces: `_collect_paths(argv: list[str]) -> list[Path]` — same signature. Directory arguments **inside the repo** expand via `git ls-files`; directory arguments **outside** the repo expand via `rglob` (test fixtures); explicit file arguments are returned as-is, unconditionally.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-def test_a_symlinked_package_directory_does_not_hide_its_subtree(tmp_path: Path) -> None:
-    """Bypass 3: Path.rglob does not recurse symlinked directories.
+import sys
 
-    Measured on the real script: a symlinked package under src/alfred made the
-    scanner enumerate ['src/alfred/__init__.py'] instead of the tree, rc=0.
-    Deriving from git ls-files removes the traversal entirely — the target
-    files are tracked under their own real paths, so they are listed.
+import pytest
+
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation needs elevation on the blocking windows-latest unit leg",
+)
+
+
+@_NEEDS_SYMLINKS
+def test_a_symlinked_package_directory_does_not_hide_its_subtree(tmp_path: Path) -> None:
+    """Bypass 3: Path.rglob skips a symlinked directory met MID-WALK.
+
+    The link must sit INSIDE the scanned root, not BE the scanned root.
+    ``rglob`` does follow a symlink passed as the walk root, so a fixture that
+    scans the link directly passes against the unfixed script — measured. The
+    real bug is a link encountered during traversal.
     """
-    real_pkg = tmp_path / "realpkg"
-    real_pkg.mkdir()
-    (real_pkg / "launder.py").write_text(
+    root = tmp_path / "root"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "ordinary.py").write_text("x = 1\n")
+
+    hidden = tmp_path / "outside"
+    hidden.mkdir()
+    (hidden / "launder.py").write_text(
         "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n"
     )
 
-    link = tmp_path / "linked"
-    link.symlink_to(real_pkg, target_is_directory=True)
+    (root / "pkg" / "linked").symlink_to(hidden, target_is_directory=True)
 
-    collected = check_tag_t3._collect_paths([str(link)])
+    collected = check_tag_t3._collect_paths([str(root)])
 
     assert any(p.name == "launder.py" for p in collected), (
-        f"the symlinked directory hid its subtree: {collected}"
+        f"a symlinked directory met mid-walk hid its subtree: {collected}"
     )
 
 
-def test_collect_paths_uses_git_for_an_in_repo_directory() -> None:
-    """The scan root matches git's view, so gitignored trees are excluded."""
-    collected = check_tag_t3._collect_paths(["src/alfred"])
+def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory(
+    tmp_path: Path,
+) -> None:
+    """The DIFFERENTIAL oracle: git's answer, not a hard-coded count.
 
-    assert len(collected) == 293, (
-        f"expected the 293 tracked .py files under src/alfred, got {len(collected)}"
-    )
-    assert all(p.suffix == ".py" for p in collected)
-
-
-def test_collect_paths_excludes_the_vendored_venv_under_plugins() -> None:
-    """plugins/ holds 39 first-party files and 856 under a gitignored .venv.
-
-    An exclusion LIST would have to enumerate '.venv', 'site-packages', and
-    whatever the next vendored tree is called. git ls-files is default-deny.
+    A live ``== 293`` assertion is vacuous on a clean CI checkout, because the
+    856-file delta comes entirely from ``plugins/alfred_tui/.venv``, which is
+    gitignored and created by no workflow — so there rglob and git agree and the
+    test passes whichever implementation is in place. Asserting AGAINST git
+    directly pins the behaviour on every runner.
     """
-    collected = check_tag_t3._collect_paths(["plugins"])
+    expected = {
+        _REPO_ROOT / line
+        for line in subprocess.run(
+            ["git", "ls-files", "--", "src/alfred"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=_REPO_ROOT,
+        ).stdout.splitlines()
+        if line.endswith(".py")
+    }
 
-    assert len(collected) == 39, f"expected 39 tracked .py files, got {len(collected)}"
-    assert not any(".venv" in p.parts for p in collected)
+    assert set(check_tag_t3._collect_paths(["src/alfred"])) == expected
+    assert len(expected) >= 250, "sanity: the census floor must be satisfiable"
+
+
+def test_collect_paths_excludes_an_ignored_tree_a_traversal_would_find(
+    tmp_path: Path,
+) -> None:
+    """Pins the .venv exclusion WITHOUT depending on a .venv existing.
+
+    ``plugins/alfred_tui/.venv`` is gitignored and no workflow creates it, so a
+    CI runner sees 39 files either way. This plants a gitignored directory of
+    its own, so the assertion means the same thing on every machine.
+    """
+    ignored = _REPO_ROOT / "build" / "synthetic-537-ignored"
+    ignored.mkdir(parents=True, exist_ok=True)
+    planted = ignored / "vendored.py"
+    try:
+        planted.write_text("from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n")
+
+        # Precondition: git really does ignore it, or the test proves nothing.
+        ignored_by_git = subprocess.run(
+            ["git", "check-ignore", "-q", str(planted)],
+            check=False,
+            cwd=_REPO_ROOT,
+        )
+        assert ignored_by_git.returncode == 0, "fixture is not gitignored — test is vacuous"
+
+        collected = check_tag_t3._collect_paths(["build"])
+
+        assert planted not in collected, "a gitignored file reached the scan set"
+    finally:
+        planted.unlink(missing_ok=True)
+        try:
+            ignored.rmdir()
+        except OSError:
+            pass
+
+
+def test_every_directory_argument_must_yield_at_least_one_file() -> None:
+    """`git ls-files` exits 0 with EMPTY output for an ignored/absent path.
+
+    The aggregate census cannot catch that: `src/alfred plugins` yielding 293+0
+    still clears a 250 floor while gating zero plugin files. Each directory
+    argument therefore carries its own floor of one.
+    """
+    assert check_tag_t3._collect_paths(["src/alfred", "plugins"])
+    with pytest.raises(check_tag_t3.EmptyScanRootError):
+        check_tag_t3._collect_paths(["src/alfred", "build"])
 
 
 def test_an_explicit_file_argument_is_scanned_even_if_untracked(tmp_path: Path) -> None:
@@ -686,6 +787,15 @@ Expected: FAIL — the symlink test finds no `launder.py`; the `plugins` test co
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
+class EmptyScanRootError(RuntimeError):
+    """A directory argument yielded no Python files.
+
+    Not an ordinary violation: it means the gate was pointed somewhere it
+    cannot gate. Raised rather than returned so it cannot be mistaken for a
+    clean result by any caller.
+    """
+
+
 def _git_tracked_python_files(directory: Path) -> list[Path] | None:
     """Return the tracked ``.py`` files under ``directory``, or None if unavailable.
 
@@ -703,7 +813,7 @@ def _git_tracked_python_files(directory: Path) -> list[Path] | None:
     caller can fall back rather than silently scanning nothing.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 — literal argv, no shell, no user input
+        proc = subprocess.run(  # noqa: S603,S607 — literal argv, no shell, no user input
             ["git", "ls-files", "-z", "--", str(directory)],
             capture_output=True,
             check=False,
@@ -714,7 +824,13 @@ def _git_tracked_python_files(directory: Path) -> list[Path] | None:
     if proc.returncode != 0:
         return None
     names = proc.stdout.decode("utf-8", errors="surrogateescape").split("\0")
-    return [_REPO_ROOT / n for n in names if n.endswith(".py")]
+    tracked = [_REPO_ROOT / n for n in names if n.endswith(".py")]
+    # `git ls-files` exits 0 with EMPTY output for a path that is gitignored,
+    # absent, or inside a submodule — so returncode alone never detects the
+    # cases this function's fallback exists for. An empty result is
+    # indistinguishable from "git could not answer", so report it as such and
+    # let the caller fall back rather than silently scanning nothing.
+    return tracked or None
 
 
 def _collect_paths(argv: list[str]) -> list[Path]:
@@ -733,20 +849,34 @@ def _collect_paths(argv: list[str]) -> list[Path]:
             paths.append(candidate)
             continue
         resolved = candidate.resolve(strict=False)
+        found: list[Path] | None = None
         if resolved.is_relative_to(_REPO_ROOT):
-            tracked = _git_tracked_python_files(candidate)
-            if tracked is not None:
-                paths.extend(tracked)
-                continue
-        # Out-of-repo directory (test fixtures), or git unavailable. rglob with
-        # symlink recursion ON, since the git default-deny is not in play here.
-        paths.extend(candidate.rglob("*.py", recurse_symlinks=True))
+            found = _git_tracked_python_files(candidate)
+        if found is None:
+            # Out-of-repo directory (test fixtures), or git could not answer.
+            # rglob with symlink recursion ON: without it a symlinked package
+            # met MID-WALK is skipped silently, which is bypass 3.
+            found = list(candidate.rglob("*.py", recurse_symlinks=True))
+        # PER-DIRECTORY floor. The aggregate census in main() cannot catch an
+        # empty scan root: `src/alfred plugins` yielding 293 + 0 still clears a
+        # 250-file floor while gating zero plugin files. `git ls-files` exits 0
+        # with empty output for an ignored, absent or submodule path, so this
+        # is the only place that failure becomes visible.
+        if not found:
+            raise EmptyScanRootError(
+                f"{arg}: no Python files found. The gate refuses to treat an "
+                f"empty scan root as clean — check the path, and check whether "
+                f"it is gitignored."
+            )
+        paths.extend(found)
     return paths
 ```
 
 Add `import subprocess` to the import block.
 
-> `recurse_symlinks=True` is the Python 3.13+ `rglob` parameter. It is safe on the fallback path because that path only runs for out-of-repo fixture directories — inside the repo, git is authoritative and no traversal happens at all.
+> `recurse_symlinks=True` is the Python 3.13+ `rglob` parameter. It matters on the fallback path: without it a symlinked package met **mid-walk** is skipped silently. Inside the repo git is authoritative and no traversal happens at all.
+
+> **`# noqa: S603,S607`, not `S603` alone.** Verified with the repo's rule set: `["git", …]` is a partial executable path, which is `S607` (`start-process-with-partial-path`). A bare `S603` suppression leaves an `S607` error *and* earns an "unused `noqa` directive" warning, so `ruff check .` fails two ways.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -759,6 +889,7 @@ Expected: PASS, all tests including the pre-existing suite.
 python3 scripts/check_tag_t3.py src/alfred; echo "src rc=$?"
 python3 scripts/check_tag_t3.py plugins; echo "plugins rc=$?"
 ```
+
 Expected: `src rc=0` and `plugins rc=0`. `plugins` was measured clean under today's rules at plan time; if it reds, read the violation — it is a real finding, not a reason to narrow the scan root.
 
 - [ ] **Step 6: Commit**
@@ -797,10 +928,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 A test-side census is not sufficient: the failure mode is a *caller*, and the caller is what the census must be inside.
 
 **Files:**
+
 - Modify: `scripts/check_tag_t3.py` (`main`)
 - Modify: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
+
 - Consumes: `_collect_paths` from Task 4.
 - Produces: `main(argv: list[str]) -> int` — now returns `2` (distinct from `1` = violations found) when the scan set is implausibly small. `_MIN_SCANNED_FILES: int = 250`.
 
@@ -861,11 +994,17 @@ Rewrite `main`:
 
 ```python
 def main(argv: list[str]) -> int:
-    paths = sorted(_collect_paths(argv))
+    try:
+        paths = sorted(_collect_paths(argv))
+    except EmptyScanRootError as exc:
+        print(f"check_tag_t3: {exc}", file=sys.stderr)
+        return 2
 
-    # The census applies to DIRECTORY scans only. Explicit file arguments are
-    # how the unit suite plants fixtures — holding those to a 250-file floor
-    # would red every one of them.
+    # The aggregate census applies to DIRECTORY scans only. Explicit file
+    # arguments are how the unit suite plants fixtures — holding those to a
+    # 250-file floor would red every one of them. The PER-DIRECTORY floor in
+    # `_collect_paths` is what catches an individually-empty root; this one
+    # catches a default scan root that resolved somewhere unexpected.
     scanned_a_directory = not argv or any(Path(a).is_dir() for a in argv)
     if scanned_a_directory and len(paths) < _MIN_SCANNED_FILES:
         print(
@@ -899,13 +1038,14 @@ Expected: PASS.
 ```bash
 cd /tmp && python3 "$OLDPWD/scripts/check_tag_t3.py"; echo "rc=$?"; cd -
 ```
+
 Expected: `rc=2` with the diagnostic on stderr. Before this task the same command printed nothing and returned 0.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/check_tag_t3.py tests/unit/security/test_check_tag_t3_gate_integrity.py
-git commit -m "fix: #537 the gate refuses to report success while gating nothing
+git commit -m "fix: #537 refuse to report success while gating nothing
 
 _collect_paths([]) resolves src/alfred relative to CWD, so an argument-less run
 from any other directory scanned 0 files, exited 0 and printed nothing. Nothing
@@ -932,10 +1072,12 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 25 first-party plugin files import `alfred`, including `plugins/alfred_discord/inbound_emitter.py` — a real ingestion boundary currently outside the gate. Task 4 already made this safe: `git ls-files` yields 39 tracked `.py` files, not the 895 `rglob` would walk.
 
 **Files:**
+
 - Modify: `Makefile:231-236`
 - Modify: `.github/workflows/pr-validate-python.yml:344-352`
 
 **Interfaces:**
+
 - Consumes: `_collect_paths` from Task 4, `main` from Task 5.
 - Produces: nothing new.
 
@@ -944,20 +1086,23 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ```bash
 python3 scripts/check_tag_t3.py src/alfred plugins; echo "rc=$?"
 ```
+
 Expected: `rc=0`. If it reds, stop and read the violation — a real first-party finding, not a reason to skip this task.
 
 - [ ] **Step 2: Update the Makefile target**
 
 Replace `Makefile:231-236`:
 
+> **Indentation in the two `makefile` blocks below is shown as spaces** so the repo's `Markdown lint` required check (MD010/no-hard-tabs) passes. Make requires a literal **TAB** at the start of every recipe line — type a tab, do not paste spaces, or the target dies with `missing separator`.
+
 ```makefile
 tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(TaggedContent[ uses.
-	@if [ -d src/alfred ]; then \
-		python3 scripts/check_tag_t3.py src/alfred plugins; \
-	else \
-		echo "::error::no src/alfred/ — the gate cannot run"; \
-		exit 1; \
-	fi
+    @if [ -d src/alfred ]; then \
+    python3 scripts/check_tag_t3.py src/alfred plugins; \
+    else \
+    echo "::error::no src/alfred/ — the gate cannot run"; \
+    exit 1; \
+    fi
 ```
 
 > The `else` branch flips from a `::notice::` + silent pass to a hard failure. `src/alfred` is permanent; "not there" now means the invocation is broken, not that there is nothing to check — the same fail-closed reasoning `pr-validate-python.yml:337` already applies in CI.
@@ -982,13 +1127,14 @@ And extend the step's `name` at `:344`:
 make tag-t3-check; echo "make rc=$?"
 python3 -c "import yaml,pathlib; yaml.safe_load(pathlib.Path('.github/workflows/pr-validate-python.yml').read_text())" && echo "workflow parses"
 ```
+
 Expected: `make rc=0` and `workflow parses`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add Makefile .github/workflows/pr-validate-python.yml
-git commit -m "fix: #537 gate first-party plugins/, not just src/alfred
+git commit -m "build: #537 gate first-party plugins/, not just src/alfred
 
 25 first-party plugin files import alfred, including
 plugins/alfred_discord/inbound_emitter.py — a real ingestion boundary that has
@@ -1013,17 +1159,20 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 `scripts/check_tag_t3.py` is under **no** coverage gate and **no** type-checker. Measured today: **0%** coverage (120/120 statements, 66 branches missed) because the entire existing suite is `subprocess.run`, which records nothing without `COVERAGE_PROCESS_START`. `mypy --strict` and `pyright` both scope to `src` (`Makefile:83`, `[tool.pyright] include = ["src"]`) and both pass on the script today.
 
 **Verified mechanics** (these were measured, not assumed):
+
 - `--cov=scripts/check_tag_t3.py` **does not work** — coverage treats it as a module name and warns `Module scripts/check_tag_t3.py was never imported`, collecting nothing.
 - `--cov=scripts` (directory form) **does** work — it traced the script to 69% from just the 4 in-process adversarial tests.
 - `scripts/run_coverage_gates.py` derives its gate list from `.github/workflows/ci.yml` by regex (`coverage report … --include='…' --fail-under=N`) and runs `coverage report` against whatever `.coverage` already exists. So adding the step to `ci.yml` wires it into `make check` automatically — no second source of truth.
 - There is **no** `exclude_lines` config in `pyproject.toml`, so `if __name__ == "__main__":` is unreachable in-process and `--fail-under=100` reds without one.
 
 **Files:**
+
 - Modify: `pyproject.toml` (`[tool.coverage.report] exclude_lines`, `[tool.pyright] include`)
 - Modify: `.github/workflows/ci.yml` (the gate step)
 - Modify: `Makefile:81-83` (typecheck target)
 
 **Interfaces:**
+
 - Consumes: the in-process suite from Tasks 1-5.
 - Produces: nothing new in the script.
 
@@ -1033,6 +1182,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 uv run pytest tests/unit/security/test_check_tag_t3_gate_integrity.py -q \
   --cov=scripts --cov-report=term-missing --cov-fail-under=0 2>&1 | grep check_tag_t3
 ```
+
 Record the percentage and the missing-line list. Every uncovered line must gain a test in Step 2 — do not lower the threshold to fit the tests.
 
 - [ ] **Step 2: Add tests for the uncovered lines**
@@ -1041,8 +1191,12 @@ Write one test per uncovered branch reported in Step 1, in `test_check_tag_t3_ga
 
 ```python
 def test_is_exempt_returns_false_for_an_unresolvable_path() -> None:
-    """The OSError/RuntimeError arm of _is_exempt's resolve()."""
-    # A path with a NUL byte cannot be resolved on any supported platform.
+    """The exception arm of _is_exempt's resolve().
+
+    An embedded NUL raises ValueError — NOT OSError or RuntimeError. Catching
+    only those two leaves this arm uncovered AND lets the exception escape,
+    so 100% is unreachable and the gate crashes on a malformed argument.
+    """
     assert check_tag_t3._is_exempt(Path("bad\x00path.py")) is False
 
 
@@ -1077,13 +1231,31 @@ def test_unreadable_file_is_a_violation(tmp_path: Path) -> None:
 In `pyproject.toml` under `[tool.coverage.report]`:
 
 ```toml
-exclude_lines = [
+exclude_also = [
     # The CLI entry point cannot execute under an in-process test run. Excluded
     # rather than pragma'd so the exclusion is auditable in one place; there is
     # no other unreachable-by-construction code in the gated set.
     'if __name__ == .__main__.:',
 ]
 ```
+
+> **`exclude_also`, NOT `exclude_lines` — this is load-bearing.** Verified in `coverage/config.py`: `exclude_list` is initialised to `DEFAULT_EXCLUDE[:]`, `report:exclude_lines` maps onto `exclude_list` (**replacing** it), and only `report:exclude_also` appends (`self.exclude_list += self.exclude_also`). `DEFAULT_EXCLUDE` is `['#\s*(pragma|PRAGMA)[:\s]?\s*(no|NO)\s*(cover|COVER)', '…\.\.\.\s*(#|$)', 'if (typing\.)?TYPE_CHECKING:']`.
+>
+> Using `exclude_lines` here would silently un-exclude **66 `# pragma: no cover`** and **63 `if TYPE_CHECKING:`** blocks plus every `...` stub across `src/alfred` — including `security/dlp.py`, which sits under the existing `--include='src/alfred/security/*' --fail-under=100` gate at `ci.yml:161`. The failure would surface as an unrelated trust-boundary gate breaking, which is the worst possible way to learn it.
+
+- [ ] **Step 3b: Prove the default excludes survived**
+
+```bash
+uv run python -c "
+from coverage.config import CoverageConfig
+c = CoverageConfig(); c.from_file('pyproject.toml', our_file=True)
+print('pragma default present:', any('pragma' in r for r in c.exclude_list))
+print('TYPE_CHECKING default present:', any('TYPE_CHECKING' in r for r in c.exclude_list))
+print('our entry present:', any('__main__' in r for r in c.exclude_list))
+"
+```
+
+Expected: all three `True`. If the first two are `False`, `exclude_lines` was used instead of `exclude_also` — fix it before going further, because the existing `security/*` gate is now broken.
 
 - [ ] **Step 4: Verify 100% is reached**
 
@@ -1092,6 +1264,7 @@ uv run pytest tests/unit/security/test_check_tag_t3_gate_integrity.py -q \
   --cov=scripts --cov-report=term-missing --cov-fail-under=0 2>&1 | grep check_tag_t3
 uv run coverage report --include='scripts/check_tag_t3.py' --fail-under=100; echo "gate rc=$?"
 ```
+
 Expected: `100%` and `gate rc=0`. If short, return to Step 2 — **do not** lower the threshold.
 
 - [ ] **Step 5: Wire the gate into `ci.yml`**
@@ -1113,7 +1286,12 @@ Add a step to the `python` job, immediately after the existing security-glob gat
             --fail-under=100
 ```
 
-> **Note for the implementer:** the `--cov-fail-under=75` whole-tree floor in the same job is computed over *all* collected data, so adding `--cov=scripts` pulls in six other scripts at 0%. Step 6 measures whether that stays above the floor; if it does not, scope the pytest `--cov` to keep the floor honest rather than lowering it.
+The gate reports against whatever `.coverage` already exists, so the **dataset must include the script**. Both invocations that build it need `--cov=scripts`:
+
+- `.github/workflows/ci.yml:160` — `uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report=term-missing --cov-fail-under=75`
+- **`Makefile:152`** — the same addition.
+
+> **Missing the Makefile line breaks `make check`.** `scripts/run_coverage_gates.py` derives its gate list from `ci.yml`, so the new gate appears locally the moment it lands in the workflow — but it runs `coverage report` against the local `.coverage`, which `Makefile:152` builds `--cov=src/alfred` only. Executed: `coverage report --include='scripts/check_tag_t3.py' --fail-under=100` against such a dataset prints `No data to report.` and exits 1. The gate fails locally while passing in CI — the inverse of the usual drift, and the reason this bullet is spelled out rather than left to "and wire it up".
 
 - [ ] **Step 6: Confirm the whole-tree floor survives**
 
@@ -1130,7 +1308,7 @@ Expected: TOTAL above 75%. If a future change ever brings it close, do **not** l
 `Makefile:83`:
 
 ```makefile
-		uv run mypy --strict src scripts/check_tag_t3.py && uv run pyright src scripts/check_tag_t3.py; \
+    uv run mypy --strict src scripts/check_tag_t3.py && uv run pyright src scripts/check_tag_t3.py; \
 ```
 
 `pyproject.toml`:
@@ -1140,12 +1318,27 @@ Expected: TOTAL above 75%. If a future change ever brings it close, do **not** l
 include = ["src", "scripts/check_tag_t3.py"]
 ```
 
+**And every CI invocation** — a Makefile-only change is a local-only gate. An explicit path argument on the command line **overrides** `[tool.pyright] include`, so the six CI call sites keep checking `src/` alone unless they are updated too:
+
+```bash
+grep -n "mypy --strict\|pyright " .github/workflows/ci.yml
+```
+
+Expected at `ci.yml:139,142,833,836,962,971`. Each must gain `scripts/check_tag_t3.py` alongside `src`. Verify none was missed:
+
+```bash
+grep -n "mypy --strict\|pyright " .github/workflows/ci.yml Makefile | grep -v check_tag_t3
+```
+
+Expected: **no output**. Any line still listing only `src` is a call site the widening did not reach.
+
 - [ ] **Step 8: Verify both type-checkers pass**
 
 ```bash
 uv run mypy --strict src scripts/check_tag_t3.py
 uv run pyright src scripts/check_tag_t3.py
 ```
+
 Expected: `Success: no issues found` and `0 errors, 0 warnings`.
 
 - [ ] **Step 9: Verify the gate runner picks it up**
@@ -1153,13 +1346,14 @@ Expected: `Success: no issues found` and `0 errors, 0 warnings`.
 ```bash
 uv run python scripts/run_coverage_gates.py --job python --min-gates 1 2>&1 | grep -i check_tag_t3
 ```
+
 Expected: the new gate appears in the runner's list. If it does not, the `run:` block's shape does not match `_GATE_RE` — fix the YAML, not the runner.
 
 - [ ] **Step 10: Commit**
 
 ```bash
 git add pyproject.toml .github/workflows/ci.yml Makefile tests/unit/security/test_check_tag_t3_gate_integrity.py
-git commit -m "fix: #537 put the detector under a coverage gate and both type-checkers
+git commit -m "fix: #537 close five ways to defeat the check_tag_t3 gate entirely
 
 The script that enforces CLAUDE.md security rule #3 was itself under no
 coverage gate and no type-checker. Measured: 0% — 120/120 statements and 66
@@ -1192,6 +1386,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ```bash
 uv run pytest tests/adversarial/tier_laundering/test_tier_laundering_copy_seams.py -q
 ```
+
 Expected: PASS, all 4 tests.
 
 `test_tl_2026_013_is_currently_undefended_at_the_authoring_layer_too` asserts the detector scans the `tl-2026-013` residual spellings **clean**. This step adds no rule that catches them, so it *should* still pass — but it changes exemption handling, error handling and collection, so **confirm rather than assume**. If it now fails, something in this PR became a rule, which is out of scope: find it and move it to #538.
@@ -1201,6 +1396,7 @@ Expected: PASS, all 4 tests.
 ```bash
 uv run pytest tests/unit/security tests/adversarial -q
 ```
+
 Expected: PASS. The adversarial suite is release-blocking and several of its tests invoke this script by subprocess.
 
 - [ ] **Step 3: Run the full quality bar**
@@ -1208,6 +1404,7 @@ Expected: PASS. The adversarial suite is release-blocking and several of its tes
 ```bash
 make check; echo "make check rc=$?"
 ```
+
 Expected: `rc=0`. Check `$?` directly — piping through `tail` masks it.
 
 - [ ] **Step 4: Mutation sweep — prove each fix is load-bearing**
@@ -1217,12 +1414,23 @@ For each of the five bypasses, revert the fix in the working tree, confirm the m
 | Revert | Must red |
 | --- | --- |
 | `_UNDECODABLE_MESSAGE` arm → `return []` | `test_latin1_source_is_a_violation_not_a_silent_pass` |
-| `_is_exempt` → match before resolve | `test_dotdot_traversal_cannot_launder_a_src_file_into_exemption` |
+| `SyntaxError` arm → `tree = None` | `test_unparseable_source_is_a_violation` |
+| `OSError` arm → `return []` | `test_unreadable_file_is_a_violation` |
+| `_is_exempt` → match before resolve | `test_dotdot_traversal_cannot_launder_a_src_file_into_exemption` **and** `test_a_directory_argument_cannot_poison_the_files_beneath_it` |
 | `resolved.name` → `path.name` | `test_an_in_repo_symlink_named_test_py_is_not_exempt` |
-| `_git_tracked_python_files` → always `None` | `test_collect_paths_excludes_the_vendored_venv_under_plugins` |
+| drop `ValueError` from the resolve arm | `test_is_exempt_returns_false_for_an_unresolvable_path` |
+| `rglob(..., recurse_symlinks=True)` → default | `test_a_symlinked_package_directory_does_not_hide_its_subtree` |
+| `_git_tracked_python_files` → always `None` | `test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory` **and** `test_collect_paths_excludes_an_ignored_tree_a_traversal_would_find` |
+| `return tracked or None` → `return tracked` | `test_every_directory_argument_must_yield_at_least_one_file` |
+| drop the per-directory `EmptyScanRootError` | `test_every_directory_argument_must_yield_at_least_one_file` |
 | `_MIN_SCANNED_FILES` → `0` | `test_main_fails_loudly_when_it_scans_nothing` |
 
-Then mutate in the **widening** direction: set `_MIN_SCANNED_FILES = 100000` and confirm `test_main_returns_zero_on_the_real_tree` reds. A floor that only ever fires one way is half a gate.
+**Every row must be executed, not reasoned.** Three of this plan's original rows were false — the named test passed against the unfixed code — and the fleet caught them only because it ran them. A row whose test still passes after the revert means the test is vacuous, not that the fix is safe.
+
+Then mutate in the **widening** direction:
+
+- `_MIN_SCANNED_FILES = 100000` → `test_main_returns_zero_on_the_real_tree` must red.
+- `exclude_also` → `exclude_lines` → Step 3b's assertion must red, and `coverage report --include='src/alfred/security/*' --fail-under=100` must red. A floor that only fires one way is half a gate.
 
 - [ ] **Step 5: Push and open the PR**
 
