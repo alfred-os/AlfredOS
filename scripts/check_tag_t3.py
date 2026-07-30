@@ -543,6 +543,8 @@ def _collect_paths(argv: list[str]) -> list[Path]:
     for arg in argv:
         candidate = Path(arg)
         if not candidate.is_dir():
+            # Order matters: the default-root case gets the more specific,
+            # more actionable message, so it is tested first.
             if default_root:
                 # The DEFAULT root is resolved relative to CWD, so an
                 # argument-less run from the wrong directory used to scan 0
@@ -554,13 +556,28 @@ def _collect_paths(argv: list[str]) -> list[Path]:
                     f"not exist relative to the current directory. Run the gate "
                     f"from the repository root, or pass an explicit path."
                 )
+            if not candidate.exists():
+                # Neither a directory nor a file. Falling through to the file
+                # branch reported it as an unreadable FILE (rc=1, the code that
+                # means "violations found") — the wrong exit code and the wrong
+                # diagnosis for a mistyped scan root.
+                raise EmptyScanRootError(
+                    f"{arg}: no such file or directory — the gate cannot scan it."
+                )
             paths.append(candidate)
             continue
 
         found: list[Path] | None = None
         resolved = candidate.resolve(strict=False)
         if resolved.is_relative_to(_REPO_ROOT):
-            found = _git_tracked_python_files(candidate)
+            # Pass the REPO-RELATIVE path, not the caller's spelling.
+            # ``_git_tracked_python_files`` runs git with ``cwd=_REPO_ROOT``, so a
+            # relative argument that is valid in the caller's directory resolves
+            # against the wrong base: from ``src/``, ``check_tag_t3.py alfred``
+            # made git list 0 entries and the gate refused with "check whether it
+            # is gitignored" for a 293-file tree. Fails closed, but diagnoses the
+            # wrong fault.
+            found = _git_tracked_python_files(resolved.relative_to(_REPO_ROOT))
 
         if found is None:
             # Out-of-repo directory (test fixtures), or git could not answer.
