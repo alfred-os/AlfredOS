@@ -801,3 +801,35 @@ def test_a_directory_argument_with_dotdot_does_not_exempt_its_files() -> None:
         check_tag_t3._is_exempt(Path("tests/../tests/unit/security/test_t3_derived_data.py"))
         is True
     )
+
+
+def test_a_relative_directory_argument_works_from_a_subdirectory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CodeRabbit: git runs with cwd=_REPO_ROOT, so the caller's spelling misresolves.
+
+    From ``src/``, ``check_tag_t3.py alfred`` made ``git ls-files -- alfred``
+    list 0 entries and the gate refused with "check whether it is gitignored"
+    for a 293-file tree. Fails closed, but diagnoses the wrong fault.
+    """
+    monkeypatch.chdir(_REPO_ROOT / "src")
+
+    collected = check_tag_t3._collect_paths(["alfred"])
+
+    assert len(collected) >= 250, f"a relative arg from a subdirectory collected {len(collected)}"
+    assert all(p.is_absolute() for p in collected)
+
+
+def test_a_nonexistent_scan_root_is_reported_as_such(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ops-003: a missing directory fell through to the FILE branch.
+
+    ``check_tag_t3.py src/alfred nosuchdir`` exited 1 with "file could not be
+    read" — the code meaning "violations found", for a mistyped scan root.
+    """
+    with pytest.raises(check_tag_t3.EmptyScanRootError):
+        check_tag_t3._collect_paths(["src/alfred", "definitely-not-a-real-path"])
+
+    assert check_tag_t3.main(["src/alfred", "definitely-not-a-real-path"]) == 2
+    assert "no such file or directory" in capsys.readouterr().err
