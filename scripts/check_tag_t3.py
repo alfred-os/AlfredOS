@@ -43,7 +43,18 @@ Usage:
 
     python scripts/check_tag_t3.py [file_or_dir ...]
 
-If no arguments are given, scans ``src/alfred/`` recursively.
+If no arguments are given, scans every root declared in
+``_DEFAULT_SCAN_ROOTS`` (``src/alfred`` and ``plugins``). An in-repo
+DIRECTORY scan that does not cover all of them is refused at runtime — the
+roots live here, not at the call sites (#541).
+
+That runtime refusal covers directory arguments only. An invocation that
+enumerates explicit FILE paths can still gate a subset (measured: the 293
+tracked ``src/alfred/**.py`` files passed individually exit 0 with
+``plugins`` unscanned). What closes THAT is the call-site pin in
+``tests/unit/meta/test_gate_surfaces_are_pinned.py``, which requires every
+invocation site to pass no arguments at all. Neither layer is complete on
+its own; see :func:`_collect_paths` for the split.
 """
 
 from __future__ import annotations
@@ -97,17 +108,37 @@ _UNDECODABLE_MESSAGE: str = (
 _UNPARSEABLE_MESSAGE: str = "file does not parse — the gate cannot scan it. Fix the syntax error."
 _UNREADABLE_MESSAGE: str = "file could not be read — the gate cannot scan it."
 
+# THE GATE OWNS ITS SCAN ROOTS (#541). They used to live in the two
+# invocation strings (``Makefile`` and ``pr-validate-python.yml``), so
+# dropping ``plugins`` from either one was a one-word edit that stopped
+# gating 39 first-party plugin files — including
+# ``plugins/alfred_discord/inbound_emitter.py``, a real ingestion boundary —
+# while the census (293 for ``src/alfred`` alone, floor 250) still passed.
+#
+# Raising the census was considered and rejected: at 300 it sits 7 files
+# above the ``src/alfred`` count, and that tree grew +19 files in 23 days, so
+# the guard would have stopped working within about a week. A count is a
+# proxy for "both roots were gated"; the runtime invariant in
+# :func:`_collect_paths` is the property itself.
+#
+# Callers now pass NO arguments, so there is no root to drop. Changing what
+# is gated means editing this tuple — in a file under a 100% coverage gate,
+# mypy --strict and pyright, pinned by a test that does not monkeypatch it.
+_DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("src/alfred", "plugins")
+
 # Assert-RAN floor (#245, #514). ``_collect_paths([])`` resolves the default
-# root relative to CWD, so an argument-less run from the wrong directory
+# roots relative to CWD, so an argument-less run from the wrong directory
 # scanned 0 files, exited 0 and printed nothing — a required check reporting
 # green while gating nothing. Nothing invoked it that way, which is exactly
 # why it would have gone unnoticed: a green-reporting no-op waiting for a
 # caller. A test-side census cannot catch this, because the failure mode IS
 # the caller.
 #
-# 293 tracked ``.py`` files live under ``src/alfred`` today; 250 leaves
-# headroom for deletions without leaving room for the gate to go vacuous.
-_DEFAULT_SCAN_ROOT: str = "src/alfred"
+# For the WRONG-DIRECTORY case only. 332 tracked ``.py`` files live under the
+# two roots today (293 + 39); 250 leaves headroom for deletions without
+# leaving room for the gate to go vacuous. Unchanged at 250 by #541 — it is
+# not, and never was, a check that every root was supplied; that is what
+# ``_DEFAULT_SCAN_ROOTS`` plus the runtime invariant are for.
 _MIN_SCANNED_FILES: int = 250
 
 # Authorised non-test homes — resolved to absolute paths inside THIS repo
@@ -465,6 +496,25 @@ class EmptyScanRootError(RuntimeError):
     """
 
 
+class PartialScanRootError(EmptyScanRootError):
+    """An in-repo directory scan covered only SOME of ``_DEFAULT_SCAN_ROOTS``.
+
+    A DISTINCT type, not a reuse of the parent (#541). The parent means "the
+    gate was pointed at nothing"; this means "the gate was pointed at less
+    than everything" — a different fault with a different remedy.
+
+    Sharing one type collapsed a real oracle: with the per-directory floor in
+    :func:`_collect_paths` deleted, ``_collect_paths(["build"])`` raised the
+    partial-coverage error instead and the guard's dedicated regression test
+    still passed. Tests must therefore discriminate with ``match=`` (and, for
+    the parent, an ``isinstance`` exclusion) rather than on the base type.
+
+    Subclasses ``EmptyScanRootError`` on purpose: :func:`main` already turns
+    that into exit 2 ("the gate could not run"), which is the correct exit
+    contract here too.
+    """
+
+
 def _git_tracked_python_files(directory: Path) -> list[Path] | None:
     """Return the tracked ``.py`` files under ``directory``.
 
@@ -535,11 +585,15 @@ def _collect_paths(argv: list[str]) -> list[Path]:
     **An in-repo directory git reports as empty RAISES rather than falling
     back to traversal**: falling back there would re-scan exactly the
     gitignored trees the derivation exists to exclude.
+
+    Finally, an in-repo DIRECTORY scan must cover every root in
+    ``_DEFAULT_SCAN_ROOTS`` or it raises :class:`PartialScanRootError`.
     """
     default_root = not argv
     if default_root:
-        argv = [_DEFAULT_SCAN_ROOT]
+        argv = list(_DEFAULT_SCAN_ROOTS)
     paths: list[Path] = []
+    in_repo_directory_args: set[Path] = set()
     for arg in argv:
         candidate = Path(arg)
         if not candidate.is_dir():
@@ -570,6 +624,10 @@ def _collect_paths(argv: list[str]) -> list[Path]:
         found: list[Path] | None = None
         resolved = candidate.resolve(strict=False)
         if resolved.is_relative_to(_REPO_ROOT):
+            # Recorded here rather than in a second pass so the runtime
+            # invariant below reuses this exact in-repo verdict — a separate
+            # walk would be a second predicate that could drift from this one.
+            in_repo_directory_args.add(resolved)
             # Pass the REPO-RELATIVE path, not the caller's spelling.
             # ``_git_tracked_python_files`` runs git with ``cwd=_REPO_ROOT``, so a
             # relative argument that is valid in the caller's directory resolves
@@ -598,6 +656,45 @@ def _collect_paths(argv: list[str]) -> list[Path]:
                 f"it is gitignored."
             )
         paths.extend(found)
+
+    # RUNTIME INVARIANT (#541). The call-site pin is a LEXICAL layer, and
+    # review defeated it lexically: a backslash line-continuation split the
+    # argv across lines and slipped `src/alfred` through with `plugins`
+    # dropped — proved against real `make`, `plugins/` ungated, rc=0. So the
+    # property holds at RUNTIME too, where no amount of shell quoting reaches
+    # it: an in-repo DIRECTORY scan must cover every declared root.
+    #
+    # TWO exemptions, both deliberate:
+    #
+    #   * OUT-OF-REPO directories. The unit suite plants `tmp_path` trees and
+    #     scans them by path. Holding a fixture directory to THIS repo's root
+    #     set would red every one of those tests while saying nothing about
+    #     production, which only ever scans in-repo paths.
+    #   * Explicit FILE arguments. `check_tag_t3.py path/to/one.py` is the
+    #     single-file developer invocation and the shape every fixture-based
+    #     test uses.
+    #
+    # The second exemption is a MEASURED RESIDUAL, not a closed hole: passing
+    # the 293 tracked `src/alfred/**.py` files individually exits 0 with
+    # `plugins` never scanned. This layer cannot see that. What closes it is
+    # the call-site pin in `tests/unit/meta/test_gate_surfaces_are_pinned.py`,
+    # which requires every invocation site to pass NO arguments at all — so
+    # the enumeration cannot be written at a call site in the first place.
+    # Neither layer is complete alone: the pin covers arguments of ANY shape
+    # but only at the call sites it searches; the invariant covers directory
+    # subsetting from ANYWHERE, including a call site nobody has pinned yet.
+    if in_repo_directory_args:
+        missing = [
+            root
+            for root in _DEFAULT_SCAN_ROOTS
+            if (_REPO_ROOT / root).resolve(strict=False) not in in_repo_directory_args
+        ]
+        if missing:
+            raise PartialScanRootError(
+                f"directory scan does not cover every declared root: missing "
+                f"{missing}. The roots are declared in _DEFAULT_SCAN_ROOTS; a "
+                f"caller may not gate a subset of them."
+            )
     return paths
 
 

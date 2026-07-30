@@ -424,24 +424,29 @@ def test_check_tag_t3_script_rejects_synthetic_suffix_attack(tmp_path: Path) -> 
 
 
 def test_check_tag_t3_script_clean_on_real_src_tree() -> None:
-    """The script returns 0 when scanning the actual ``src/alfred/`` tree.
+    """The script returns 0 when scanning its own declared scan roots.
 
     This is the load-bearing assertion: shipping CI runs the script against
     the real source tree. If any non-approved file ever contains a
     ``tag(T3,`` or ``cast(TaggedContent[`` line, this test fires.
+
+    #541: the argument was ``src/alfred``, which the script now refuses as a
+    partial in-repo directory scan (the roots live in ``_DEFAULT_SCAN_ROOTS``,
+    not at call sites). Passing none is both the production invocation and the
+    wider tree — ``plugins/`` is covered here now, where it was not before.
     """
     import subprocess
     import sys
 
     result = subprocess.run(
-        [sys.executable, "scripts/check_tag_t3.py", "src/alfred"],
+        [sys.executable, "scripts/check_tag_t3.py"],
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
         check=False,
     )
     assert result.returncode == 0, (
-        f"Expected 0 on real src/alfred tree; got {result.returncode}.\n"
+        f"Expected 0 on the declared scan roots; got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 

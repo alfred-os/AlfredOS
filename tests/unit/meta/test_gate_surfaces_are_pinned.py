@@ -314,3 +314,133 @@ def test_the_two_gate_oracles_agree(ci_workflow: dict[str, Any], ci_workflow_raw
         "the raw view found NO --include= specs in the `python` job — this pin is gating nothing"
     )
     assert derived <= raw, f"runner saw gates absent from the raw text: {derived - raw}"
+
+
+# ---------------------------------------------------------------------------
+# #541: the gate's scan roots belong to the SCRIPT, not to its call sites.
+# #537 widened the gate to `src/alfred plugins` by editing two invocation
+# strings; dropping `plugins` from either was a one-word edit that stopped
+# gating 39 first-party plugin files and no gate could see it.
+# ---------------------------------------------------------------------------
+
+# Files that may invoke the gate. DERIVED, not enumerated: an earlier draft
+# hard-coded two paths, so a third call site added anywhere else was pinned by
+# nothing. These roots are every place this repo actually invokes anything —
+# widening further is not free, because the plan and design docs under `docs/`
+# quote the OLD `check_tag_t3.py src/alfred plugins` invocation as prose and
+# would red the pin for describing history.
+_INVOCATION_SEARCH_ROOTS: tuple[str, ...] = (
+    "Makefile",
+    "lefthook.yml",
+    ".github/workflows",
+    "bin",
+    "scripts",
+)
+
+# The gate script itself is searched-but-excluded, deliberately (#541). Its
+# module docstring carries a `Usage: python scripts/check_tag_t3.py
+# [file_or_dir ...]` line, which the regex below matches with a non-empty
+# argv — so without this the pin could never pass, and worse, an edit to the
+# script's own documentation could break or satisfy a pin about its CALLERS.
+_GATE_SCRIPT: Path = (_REPO_ROOT / "scripts" / "check_tag_t3.py").resolve()
+
+# The argv capture must consume BACKSLASH CONTINUATIONS. A class of
+# `[^\n;&|]` looks like it does and does NOT: it is tried before the
+# alternation, matches the backslash itself, and the match ends at the newline
+# having never seen the wrapped line — so splitting the invocation across lines
+# slipped a scan root past the pin entirely (measured against real `make`, with
+# `plugins/` ungated and rc=0). Excluding `\` from the class is what lets the
+# `\\\n` alternative fire and keep reading.
+_INVOCATION_RE = re.compile(r"python3?\s+scripts/check_tag_t3\.py((?:[^\n;&|\\]|\\\n)*)")
+
+
+def _invocation_sites() -> list[tuple[Path, str]]:
+    """Every (file, argv) pair invoking the gate anywhere in the repo."""
+    found: list[tuple[Path, str]] = []
+    for root in _INVOCATION_SEARCH_ROOTS:
+        target = _REPO_ROOT / root
+        if target.is_file():
+            candidates = [target]
+        elif target.is_dir():
+            candidates = [p for p in target.rglob("*") if p.is_file()]
+        else:
+            # A root that does not exist is skipped rather than asserted on:
+            # the anti-vacuity floor below is what notices if the search set
+            # has stopped finding anything.
+            continue
+        for path in candidates:
+            if path.resolve() == _GATE_SCRIPT:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            found.extend((path, argv) for argv in _INVOCATION_RE.findall(text))
+    return found
+
+
+def test_no_invocation_overrides_the_scripts_own_scan_roots() -> None:
+    """Call sites must pass NO roots, so the script's tuple is authoritative.
+
+    A call site that names roots re-opens #541: dropping one becomes a one-word
+    edit again and the script's constant becomes decorative. Derived rather
+    than enumerated so a NEW call site is covered the day it is added.
+
+    This is the LEXICAL layer. It is the only one that can see an invocation
+    enumerating explicit FILE paths (which the script's runtime invariant
+    cannot refuse without breaking the single-file developer invocation) — and
+    it is also the layer a shell can be written around, which is why the
+    script carries a runtime invariant as well.
+    """
+    for path, argv in _invocation_sites():
+        assert not argv.strip().rstrip("\\").strip(), (
+            f"{path.relative_to(_REPO_ROOT)}: `check_tag_t3.py{argv}` passes "
+            f"explicit scan roots. The roots belong in _DEFAULT_SCAN_ROOTS so "
+            f"they cannot be dropped at a call site (#541)."
+        )
+
+
+def test_the_invocation_pin_is_not_vacuous() -> None:
+    """Anti-vacuity floor: a rename must not make this pin gate nothing.
+
+    Without it, renaming the script or restructuring the Makefile leaves
+    `_invocation_sites()` empty and the assertion above passes over an empty
+    list — the paper-gate shape, inside the pin meant to prevent it.
+
+    Names the two call sites that must exist as a FLOOR (not as the search
+    set): the excluding of the gate script's own text is a deliberate blind
+    spot, and a floor of `>= 2` alone would be satisfied if that exclusion
+    ever grew to swallow a real caller.
+    """
+    sites = _invocation_sites()
+    seen = {p.relative_to(_REPO_ROOT).as_posix() for p, _ in sites}
+
+    assert len(sites) >= 2, (
+        f"expected at least the Makefile and workflow invocations, found "
+        f"{[(str(p.relative_to(_REPO_ROOT)), a) for p, a in sites]}"
+    )
+    assert {"Makefile", ".github/workflows/pr-validate-python.yml"} <= seen, (
+        f"a known call site is no longer visible to this pin; saw {sorted(seen)}"
+    )
+
+
+def test_the_invocation_regex_reads_through_a_backslash_continuation() -> None:
+    """Mutation-test the guard itself: the regex must SEE a wrapped argv.
+
+    A detector that cannot see the real bypass is a paper gate. `[^\\n;&|]`
+    (no `\\` exclusion) matches the backslash, ends at the newline and reports
+    an EMPTY argv for the line below — i.e. reports "clean" for the exact
+    invocation the pin exists to refuse. Asserted on synthetic text so this
+    holds whatever the Makefile currently says.
+    """
+    wrapped = "\t\tpython3 scripts/check_tag_t3.py \\\n\t\t\tsrc/alfred; \\\n"
+
+    captured = _INVOCATION_RE.findall(wrapped)
+
+    assert len(captured) == 1, f"the invocation was not matched at all: {captured}"
+    assert "src/alfred" in captured[0], (
+        f"the regex stopped at the continuation and captured {captured[0]!r} — a "
+        f"wrapped invocation would slip a scan root past the pin (#541)"
+    )
+    # Negative twin: the shipped argument-less form must still read as empty.
+    assert _INVOCATION_RE.findall("\t\tpython3 scripts/check_tag_t3.py; \\\n") == [""]
