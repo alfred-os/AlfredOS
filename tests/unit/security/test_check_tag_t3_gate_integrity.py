@@ -453,3 +453,99 @@ def test_an_explicit_file_argument_is_scanned_even_if_untracked(tmp_path: Path) 
 
     assert check_tag_t3._collect_paths([str(planted)]) == [planted]
     assert check_tag_t3._scan_file(planted)
+
+
+# ---------------------------------------------------------------------------
+# Bypass 5 (#537): `_collect_paths([])` resolves `src/alfred` relative to CWD,
+# so an argument-less run from elsewhere scanned 0 files and exited 0.
+# ---------------------------------------------------------------------------
+
+
+def test_main_refuses_an_empty_scan_root_instead_of_reporting_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 2 is distinct from 1 so a caller can tell 'the gate failed' from
+    'the gate could not run'. Without the handler EmptyScanRootError escapes as
+    an unhandled traceback, which is loud but is not a usable exit contract.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    rc = check_tag_t3.main([str(empty)])
+
+    assert rc == 2, "scanning zero files must not report success"
+    err = capsys.readouterr().err
+    assert "no Python files found" in err
+    assert "Traceback" not in err, "the error must be reported, not raised"
+
+
+def test_main_refuses_when_the_default_scan_root_is_not_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The actual bypass: an argument-less run from the wrong directory.
+
+    Before #537 this scanned 0 files and returned 0 with no diagnostic. Task 2
+    already made it fail closed via the unreadable-file rule, but the message
+    ('src/alfred:1: file could not be read') described a file, not the real
+    fault. The census names the actual problem.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    rc = check_tag_t3.main([])
+
+    assert rc == 2
+    assert "no Python files found" in capsys.readouterr().err
+
+
+def test_main_refuses_a_directory_scan_that_is_implausibly_small(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The aggregate census: a populated-but-tiny scan root is still suspect.
+
+    The per-directory floor only catches ZERO files. A scan root that resolved
+    somewhere unexpected but non-empty would clear it, so main keeps an
+    aggregate floor as well.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 100_000)
+
+    rc = check_tag_t3.main(["src/alfred"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "expected at least" in err
+
+
+def test_the_configured_census_floor_actually_rejects_a_small_scan(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pins the REAL ``_MIN_SCANNED_FILES`` value, not a monkeypatched one.
+
+    ``test_main_refuses_a_directory_scan_that_is_implausibly_small`` patches the
+    constant, so it proves the census MECHANISM works while saying nothing
+    about the shipped value — measured: setting the real constant to 0 left
+    that test green, which would disable the census in production silently.
+
+    ``scripts/`` holds a handful of tracked ``.py`` files, comfortably under any
+    sane floor, so this reds if the constant is ever lowered to nothing.
+    """
+    assert check_tag_t3.main(["scripts"]) == 2
+    assert "expected at least" in capsys.readouterr().err
+
+
+def test_main_returns_zero_on_the_real_tree() -> None:
+    """Positive twin: the census must not red the real invocation."""
+    assert check_tag_t3.main(["src/alfred"]) == 0
+
+
+def test_main_still_returns_one_for_a_real_violation(tmp_path: Path) -> None:
+    """A single planted file is below the census floor but must still red as 1.
+
+    The census applies to DIRECTORY scans, not explicit file args — otherwise
+    every fixture-based test in the suite would start returning 2.
+    """
+    bad = tmp_path / "bad.py"
+    bad.write_text(
+        "from alfred.security.tiers import tag, T3\nx = tag(T3, 'p')\n", encoding="utf-8"
+    )
+
+    assert check_tag_t3.main([str(bad)]) == 1
