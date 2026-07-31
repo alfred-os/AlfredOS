@@ -301,6 +301,22 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
         "interpreter exit instead of being abandoned"
     )
 
+    # Capturing at CREATION buys exactness but gives up one thing the old
+    # thread-table scan got for free: a thread that was built and never started
+    # would not have appeared in `enumerate()` at all. Now it would sit in
+    # `bind_threads` looking fine, and the regression would surface only as
+    # `RuntimeError: cannot join thread before it is started` out of the join
+    # below — a true failure with an inscrutable message (#550 review, test-002).
+    #
+    # `ident` is None until `start()` runs. Reading it for None-ness is safe in
+    # a way COMPARING idents is not: the recycling that caused #532 makes an
+    # ident useless as an identity, but "has one at all" is still exactly the
+    # started/not-started bit.
+    assert worker.ident is not None, (
+        "the bind thread was constructed but never started — the seam builds it "
+        "and walks away, so nothing else would notice"
+    )
+
     worker.join(_RETURN_DEADLINE_S)
     assert not worker.is_alive(), "the unparked bind thread never finished"
     assert not thread_errors, f"the late completion signal escaped its thread: {thread_errors!r}"
