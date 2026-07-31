@@ -20,6 +20,9 @@ actually responsible for.
 
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +32,41 @@ from typer.testing import CliRunner
 from alfred.cli.daemon import daemon_app
 from alfred.cli.daemon._healthcheck import healthcheck_daemon
 from alfred.observability.metrics_server import CORE_METRICS_DEFAULT_PORT
+
+# The boot seam's source. Its structlog event names are string literals at their
+# call sites and are not exported as constants, so there is nothing to import.
+_COMMANDS_SOURCE: Path = Path(__file__).resolve().parents[4] / "src/alfred/cli/daemon/_commands.py"
+
+
+def _metrics_seam_boot_events() -> set[str]:
+    """Every ``daemon.boot.*`` event emitted by the core-metrics seam.
+
+    Scoped BY FUNCTION rather than by matching ``metrics`` in the event name.
+    The name-matching version had a hole, found by mutating it: renaming an
+    event to something without ``metrics`` in it dropped the event out of the
+    checked set entirely — and that is precisely the case where the operator's
+    ``daemon.boot.metrics_*`` pointer stops covering it, so the check evaporated
+    exactly when it was needed.
+
+    Parsed with ``ast`` rather than grepped, so a string in a comment or
+    docstring cannot be mistaken for an emitted event.
+    """
+    tree = ast.parse(_COMMANDS_SOURCE.read_text(encoding="utf-8"))
+    events: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if "core_metrics_server" not in node.name:
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Constant)
+                and isinstance(inner.value, str)
+                and inner.value.startswith("daemon.boot.")
+            ):
+                events.add(inner.value)
+    return events
+
 
 # A minimal but VALID core exposition: a `# HELP`/`# TYPE` declaration for an ``alfred_``
 # family. Since #482 P4, "healthy" means the body actually IS the core's exposition, not
@@ -275,6 +313,21 @@ def test_unreachable_message_points_at_an_actionable_next_step(
 
     In the spirit of the bad-port message, it names a command to run and the boot warning to
     look for, while keeping the "data plane may still be serving" reassurance.
+
+    The pointer must be the `daemon.boot.metrics_*` CLASS, not a list of names
+    (#552 review, err-001/core-001). This message is what an operator sees when
+    the exposition is down — including when it is down for the #551 reason — and
+    it used to name `metrics_bind_failed` / `metrics_bad_port`, neither of which
+    that path emits. They would grep two strings, find neither, and conclude
+    nothing was logged, on the one failure where the log line is the only
+    evidence.
+
+    The previous assertion was `bind_failed in message or bad_port in message`,
+    which is doubly weak: an `or` passes while one name is missing, and neither
+    name has anything to do with the events added since. So this asserts the
+    prefix is present AND that every event the boot path can emit is covered by
+    it — derived from the module, so a sixth event cannot silently fall outside
+    the operator's instructions.
     """
     monkeypatch.setenv("ALFRED_CORE_METRICS_PORT", "9465")
     echoed = _capture_echo(monkeypatch)
@@ -285,7 +338,34 @@ def test_unreachable_message_points_at_an_actionable_next_step(
         healthcheck_daemon()
     message = echoed[0]
     assert "alfred daemon status" in message
-    assert "metrics_bind_failed" in message or "metrics_bad_port" in message
+    # The ORACLE comes from the message, the DATA from the source — two
+    # independent places. Deriving both from the same regex would be
+    # tautological: any event matched by a `daemon\.boot\.metrics_` pattern
+    # trivially starts with that prefix, so the assertion could not fail.
+    #
+    # Here, narrowing the copy back to a specific name (say
+    # `daemon.boot.metrics_bind_failed`) makes the extracted pointer stop
+    # matching the OTHER events the seam emits, and this reds.
+    pointers = re.findall(r"`(daemon\.boot\.[a-z_]*)\*?`", message)
+    assert pointers, (
+        f"the unreachable copy names no `daemon.boot.*` event to grep for; got {message!r}"
+    )
+
+    metrics_events = _metrics_seam_boot_events()
+    assert len(metrics_events) >= 4, (
+        f"expected the seam's several boot events, found {sorted(metrics_events)} — the "
+        f"derivation is broken, so the coverage assertion below would be vacuous"
+    )
+
+    uncovered = sorted(
+        event
+        for event in metrics_events
+        if not any(event.startswith(pointer) for pointer in pointers)
+    )
+    assert not uncovered, (
+        f"the message tells the operator to look for {pointers}, which does not cover "
+        f"{uncovered} — they would grep, find nothing, and conclude the daemon logged nothing"
+    )
 
 
 def test_help_names_the_port_env_and_default() -> None:
