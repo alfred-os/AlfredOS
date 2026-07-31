@@ -29,6 +29,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType
 
@@ -132,6 +133,42 @@ def test_a_grep_error_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture
         assert "grep returned rc=" in capsys.readouterr().err
     finally:
         unreadable.chmod(0o700)
+
+
+@_NEEDS_GREP
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
+def test_a_fifo_in_the_scan_tree_does_not_hang_the_gate(tmp_path: Path) -> None:
+    """The #546 shape in the SIBLING gate: `grep -r` reads a FIFO and blocks.
+
+    Found while fixing #546 in `check_tag_t3.py` and confirmed by probe, not
+    by reading the manual: `grep -rnE` over a tree containing a FIFO blocks
+    forever on BOTH the BSD grep this repo's macOS `make check` uses and the
+    GNU grep on the CI leg. `--devices=skip` is honoured by both.
+
+    Exposure is the LOCAL `make check` path, not CI — git cannot track a FIFO,
+    so a fresh CI checkout has none. That is the same exposure class as #546's
+    traversal arm, and it is why this is a real bug rather than a theoretical
+    one: the gate that hangs is the one a developer runs before pushing.
+
+    Bounded on a daemon thread for the reason spelled out in the #546 suite —
+    an unbounded call does not fail on regression, it hangs the runner.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "fine.py").write_text("registry = HookRegistry()\n", encoding="utf-8")
+    os.mkfifo(src / "hang.py")
+
+    module = _load_script(tmp_path)
+    result: list[int] = []
+    worker = threading.Thread(target=lambda: result.append(module.main()), daemon=True)
+    worker.start()
+    worker.join(timeout=10.0)
+
+    assert not worker.is_alive(), (
+        "the guard blocked on a FIFO in the scan tree — `make check` hangs with "
+        "no diagnosis instead of reporting a verdict"
+    )
+    assert result == [0], f"a tree whose only real file is clean must pass; got {result}"
 
 
 def test_an_unlaunchable_grep_fails_closed(
