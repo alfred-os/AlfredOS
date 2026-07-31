@@ -349,15 +349,23 @@ def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> 
     directly pins the behaviour on every runner.
 
     #541: the scanned side was ``["src/alfred"]``, now refused as a partial
-    in-repo directory scan. Both sides move to the argument-less production
-    shape, and the git side is derived from ``_DEFAULT_SCAN_ROOTS`` rather than
-    a second hard-coded root list — a literal ``src/alfred plugins`` here would
-    keep passing if the constant were narrowed.
+    in-repo directory scan, so both sides move to the argument-less production
+    shape.
+
+    The git side names the roots LITERALLY and must stay that way. A first cut
+    derived them from ``_DEFAULT_SCAN_ROOTS``, on the reasoning that a literal
+    would drift — but that makes both sides of the oracle move together, which
+    is this repo's tautological-oracle trap: **measured, that version SURVIVES
+    the M5 mutation** (narrow the constant to ``("src/alfred",)`` and the test
+    stays green, because the expectation narrows with it). A literal is an
+    independent oracle, so M5 kills here as well as at the constant pin. If a
+    third root is ever added, this list is a deliberate second edit — that is
+    the cost of independence, and it is the right way round.
     """
     expected = {
         _REPO_ROOT / line
-        for line in subprocess.run(  # noqa: S603 — literal git argv; the roots are our own constant
-            ["git", "ls-files", "--", *check_tag_t3._DEFAULT_SCAN_ROOTS],  # noqa: S607
+        for line in subprocess.run(
+            ["git", "ls-files", "--", "src/alfred", "plugins"],  # noqa: S607
             capture_output=True,
             text=True,
             check=True,

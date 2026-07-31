@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -323,18 +324,34 @@ def test_the_two_gate_oracles_agree(ci_workflow: dict[str, Any], ci_workflow_raw
 # gating 39 first-party plugin files and no gate could see it.
 # ---------------------------------------------------------------------------
 
-# Files that may invoke the gate. DERIVED, not enumerated: an earlier draft
-# hard-coded two paths, so a third call site added anywhere else was pinned by
-# nothing. These roots are every place this repo actually invokes anything —
-# widening further is not free, because the plan and design docs under `docs/`
-# quote the OLD `check_tag_t3.py src/alfred plugins` invocation as prose and
-# would red the pin for describing history.
-_INVOCATION_SEARCH_ROOTS: tuple[str, ...] = (
-    "Makefile",
-    "lefthook.yml",
-    ".github/workflows",
-    "bin",
-    "scripts",
+# DEFAULT-DENY on location: search the WHOLE repo and subtract a short, pinned
+# list of categories — do not enumerate the places a call site is allowed to
+# live. An earlier revision of this file enumerated five roots
+# (`Makefile`, `lefthook.yml`, `.github/workflows`, `bin`, `scripts`), which
+# left `.pre-commit-config.yaml`, `ops/`, `docker/` and a `justfile` unsearched:
+# an invocation planted in any of them was gated by neither this pin nor the
+# script's runtime invariant. That is the enumerate-vs-default-deny trap this
+# whole branch exists to close, reproduced inside the guard (#518's lesson).
+#
+# The file set comes from `git ls-files --cached --others --exclude-standard`,
+# the same derivation the gate itself uses: it is default-deny (a file git
+# ignores cannot land in a PR), it includes untracked-but-not-ignored NEW files
+# (`--others`; without it a brand-new call site is invisible until `git add` —
+# #540 err-001), and it never walks `.venv`/`node_modules`. Measured: 1763
+# files in 0.39s.
+_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    # Prose that quotes historical invocations. `docs/superpowers/plans/*` carry
+    # `check_tag_t3.py src/alfred plugins` as a record of what #537 did; the pin
+    # must not red a document for describing history. Measured: 15 matches here.
+    "docs/",
+    # Plan/brief working material — same reason. Gitignored in this checkout, so
+    # excluded explicitly rather than by accident of another repo's .gitignore.
+    ".superpowers/",
+    # The suite drives the gate with fixture ARGUMENTS by design — that is the
+    # single-file path this pin's sibling layer deliberately exempts — so test
+    # files are not "call sites" in the sense meant here. This file in
+    # particular must contain the pattern in order to test its own regex.
+    "tests/",
 )
 
 # The gate script itself is searched-but-excluded, deliberately (#541). Its
@@ -354,28 +371,36 @@ _GATE_SCRIPT: Path = (_REPO_ROOT / "scripts" / "check_tag_t3.py").resolve()
 _INVOCATION_RE = re.compile(r"python3?\s+scripts/check_tag_t3\.py((?:[^\n;&|\\]|\\\n)*)")
 
 
+def _searched_files() -> list[Path]:
+    """Every repo file this pin reads, default-deny minus ``_EXCLUDED_PREFIXES``.
+
+    ``check=True``: if git cannot answer, this raises rather than returning an
+    empty list. A silent empty answer here would make every assertion below
+    vacuously true — the paper-gate shape, inside the pin meant to prevent it.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],  # noqa: S607
+        capture_output=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    ).stdout.decode("utf-8", errors="surrogateescape")
+    return [
+        path
+        for name in listed.split("\0")
+        if name and not name.startswith(_EXCLUDED_PREFIXES)
+        if (path := _REPO_ROOT / name).is_file() and path.resolve() != _GATE_SCRIPT
+    ]
+
+
 def _invocation_sites() -> list[tuple[Path, str]]:
     """Every (file, argv) pair invoking the gate anywhere in the repo."""
     found: list[tuple[Path, str]] = []
-    for root in _INVOCATION_SEARCH_ROOTS:
-        target = _REPO_ROOT / root
-        if target.is_file():
-            candidates = [target]
-        elif target.is_dir():
-            candidates = [p for p in target.rglob("*") if p.is_file()]
-        else:
-            # A root that does not exist is skipped rather than asserted on:
-            # the anti-vacuity floor below is what notices if the search set
-            # has stopped finding anything.
+    for path in _searched_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
             continue
-        for path in candidates:
-            if path.resolve() == _GATE_SCRIPT:
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            found.extend((path, argv) for argv in _INVOCATION_RE.findall(text))
+        found.extend((path, argv) for argv in _INVOCATION_RE.findall(text))
     return found
 
 
@@ -412,6 +437,20 @@ def test_the_invocation_pin_is_not_vacuous() -> None:
     spot, and a floor of `>= 2` alone would be satisfied if that exclusion
     ever grew to swallow a real caller.
     """
+    # Measured: 465 files survive _EXCLUDED_PREFIXES today (296 src/, 45
+    # plugins/, 38 .rulesync/, 26 top-level, 19 .github/, 11 config/, 11 ops/,
+    # 9 scripts/, 4 bin/, 3 docker/, …). The floor is the count that would
+    # notice a whole category disappearing, not a number pulled from the air —
+    # the exact exclusion tuple is pinned by
+    # `test_the_invocation_search_is_default_deny_over_the_repo`, which is the
+    # precise guard; this is the blunt one behind it.
+    searched = len(_searched_files())
+    assert searched > 300, (
+        f"the default-deny file set collapsed to {searched} files — git "
+        f"answered, but a category-sized chunk stopped surviving "
+        f"_EXCLUDED_PREFIXES, so this pin is searching a fraction of the repo"
+    )
+
     sites = _invocation_sites()
     seen = {p.relative_to(_REPO_ROOT).as_posix() for p, _ in sites}
 
@@ -444,3 +483,33 @@ def test_the_invocation_regex_reads_through_a_backslash_continuation() -> None:
     )
     # Negative twin: the shipped argument-less form must still read as empty.
     assert _INVOCATION_RE.findall("\t\tpython3 scripts/check_tag_t3.py; \\\n") == [""]
+
+
+def test_the_invocation_search_is_default_deny_over_the_repo() -> None:
+    """The exclusion list is SHORT, PINNED, and must not grow to hide a finding.
+
+    The allow-list is "the whole repo"; these three prefixes are the only
+    subtractions, and each is justified at its definition. Pinning them makes
+    adding a fourth — say `ops/`, to silence a real invocation planted there —
+    a visible, deliberate edit rather than a one-word fix to a red test. That
+    one-word fix is exactly how the previous five-root enumeration came to leave
+    `.pre-commit-config.yaml`, `ops/`, `docker/` and `justfile` unsearched.
+    """
+    assert _EXCLUDED_PREFIXES == ("docs/", ".superpowers/", "tests/")
+
+
+def test_previously_unsearched_locations_are_now_searched() -> None:
+    """Anti-vacuity for the widening itself: name places the old roots missed.
+
+    A default-deny claim is worth nothing unless something that used to be
+    invisible is now visible. These are real tracked files outside the five
+    roots the earlier revision enumerated.
+    """
+    searched = {p.relative_to(_REPO_ROOT).as_posix() for p in _searched_files()}
+
+    for previously_missed in ("docker-compose.yaml", "pyproject.toml", "lefthook.yml"):
+        assert previously_missed in searched, (
+            f"{previously_missed} is not in the searched set — an invocation "
+            f"planted there would be gated by neither layer (#541)"
+        )
+    assert any(p.startswith("ops/") for p in searched), "ops/ is unsearched"
