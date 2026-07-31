@@ -52,6 +52,13 @@ _RETURN_DEADLINE_S = 2.0
 # rather than as a hung run.
 _WEDGE_CEILING_S = 10.0
 
+# The name the seam gives its bind worker. Stated once so the capture below and
+# the production code cannot drift into silently matching nothing (#532): a
+# capture that filters on a stale name records zero threads, and the assertion
+# that exactly one was created is what turns that into a loud failure rather
+# than an inscrutable one.
+_BIND_THREAD_NAME = "alfred-core-metrics-bind"
+
 
 @pytest.fixture(autouse=True)
 def _stub_core_metrics_server() -> None:
@@ -207,6 +214,21 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
     unwedges (if it ever does). ``call_soon_threadsafe`` on a closed loop raises
     ``RuntimeError``, and unhandled in a bare thread that surfaces as a spurious traceback on
     the operator's console minutes after a boot that already logged its timeout and moved on.
+
+    The worker is captured AT CREATION rather than recovered afterwards by diffing the
+    thread table (#532). ``Thread.ident`` is explicitly recyclable — on macOS it is the
+    thread's stack base address, handed straight to the next thread — so the old
+    ``t.ident not in before`` filter rejected the real worker whenever a thread that was
+    alive at the snapshot exited before the bind thread started, and ``next()`` raised a
+    bare ``StopIteration``. The donor was this file's own preceding test, whose parked bind
+    thread is released in a ``finally`` and takes a moment to die; load widens that window,
+    which is why it only ever failed on the loaded macOS runner. Measured: the recycling
+    reproduces 5/5 in isolation, and the flake reproduced at 1/32 on main and 1/32 on a
+    branch that does not touch this file.
+
+    Capturing the object is exact, cannot be defeated by ident reuse, and additionally
+    asserts the "bounded to ONE such thread per boot" property the seam's docstring claims
+    — which nothing previously checked.
     """
     monkeypatch.setattr(cmd, "_CORE_METRICS_START_TIMEOUT_S", 0.05)
     release = threading.Event()
@@ -217,17 +239,36 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
         release.wait(_WEDGE_CEILING_S)
 
     monkeypatch.setattr(cmd, "_start_core_metrics_server", _wedged)
-    before = {t.ident for t in threading.enumerate()}
+
+    bind_threads: list[threading.Thread] = []
+    real_thread_cls = threading.Thread
+
+    def _capturing_thread(*args: object, **kwargs: object) -> threading.Thread:
+        """Build the real thread, keeping a handle on the bind worker.
+
+        Filters on the name the seam sets, so an unrelated thread created by the
+        loop's own machinery during ``asyncio.run`` cannot be mistaken for it.
+        """
+        thread = real_thread_cls(*args, **kwargs)  # type: ignore[arg-type]
+        if kwargs.get("name") == _BIND_THREAD_NAME:
+            bind_threads.append(thread)
+        return thread
+
+    # Patched on the `threading` module itself, which is the same object
+    # `_commands` resolves `threading.Thread` against — `cmd.threading` would be
+    # reaching through a module for an attribute it does not export (mypy
+    # attr-defined). Same idiom as the `excepthook` patch above.
+    monkeypatch.setattr(threading, "Thread", _capturing_thread)
     try:
         asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))
-        # Identify the worker while it is still parked — after the release it may be gone.
-        worker = next(
-            t
-            for t in threading.enumerate()
-            if t.name == "alfred-core-metrics-bind" and t.ident not in before
-        )
     finally:
         release.set()  # the loop is now closed: its completion signal has no home
+
+    assert len(bind_threads) == 1, (
+        f"expected exactly one {_BIND_THREAD_NAME!r} thread per boot — the seam documents "
+        f"that bound explicitly; got {bind_threads!r}"
+    )
+    worker = bind_threads[0]
     worker.join(_RETURN_DEADLINE_S)
     assert not worker.is_alive(), "the unparked bind thread never finished"
     assert not thread_errors, f"the late completion signal escaped its thread: {thread_errors!r}"
