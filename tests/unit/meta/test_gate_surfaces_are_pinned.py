@@ -423,6 +423,12 @@ _ALLOWED_GATE_JOB_KEYS: frozenset[str] = frozenset(
 # not restated here.
 _REQUIRED_CHECKS_SECTION: str = "## Currently required"
 
+# Job-key cell of a row that lives in the PENDING table and must therefore
+# never appear in the Currently-required derivation. It is a tombstone row, so
+# it is stable in a way a live pending row is not — the previous sentinel was a
+# live row and #544 promoted it out from under this test.
+_PENDING_SECTION_SENTINEL: str = "_(superseded)_"
+
 # The anti-vacuity floor for the derivation. It may WIDEN silently (that is the
 # point); it may not NARROW. Named as a floor, not as the search set — a
 # derivation that collapsed to these four would still be wrong, which is what
@@ -716,6 +722,13 @@ def test_the_required_check_manifest_parses_to_real_job_keys() -> None:
     than pass, so this cannot go silently green — but a manifest that parsed to
     a huge set of junk WOULD, so pin the shape: the derived keys must include
     the jobs the floor names and must not include the table header.
+
+    The section-split sentinel was `strict-declarations-lint` until #544
+    promoted it to Currently-required, at which point the assertion it anchored
+    would have been asserting the opposite of the truth. Its replacement is the
+    tombstone row that still sits in the Pending table — and it is checked for
+    PRESENCE first, because a sentinel that quietly stops existing turns the
+    assertion below into one that cannot tell a working split from a broken one.
     """
     keys = _currently_required_job_keys()
 
@@ -724,10 +737,19 @@ def test_the_required_check_manifest_parses_to_real_job_keys() -> None:
         f"the job keys this pin reads; got {sorted(keys)}"
     )
     assert "Job key" not in keys, "the table header leaked into the parsed key set"
-    assert "strict-declarations-lint" not in keys, (
-        "strict-declarations-lint is listed as PENDING required, not currently "
-        "required — the section split is not working, so `needs` edges would be "
-        "validated against the wrong table (#544 promotes it)"
+
+    document = _REQUIRED_CHECKS_DOC.read_text(encoding="utf-8")
+    _, _, pending = document.partition("\n## Pending required")
+    assert _PENDING_SECTION_SENTINEL in pending, (
+        f"the section-split sentinel {_PENDING_SECTION_SENTINEL!r} is no longer in "
+        f"{_REQUIRED_CHECKS_DOC.name}'s Pending table, so the assertion below can "
+        f"no longer distinguish a working section split from a broken one. Point "
+        f"it at a row that is still there."
+    )
+    assert _PENDING_SECTION_SENTINEL not in keys, (
+        f"{_PENDING_SECTION_SENTINEL!r} comes from the PENDING table, so the "
+        f"section split is not working and `needs` edges would be validated "
+        f"against the wrong table"
     )
 
 
