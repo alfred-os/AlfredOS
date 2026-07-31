@@ -132,3 +132,36 @@ def test_a_grep_error_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture
         assert "grep returned rc=" in capsys.readouterr().err
     finally:
         unreadable.chmod(0o700)
+
+
+def test_an_unlaunchable_grep_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#543 review, err-003: the LAUNCH can fail, and it is not one of the arms.
+
+    `check=False` suppresses `CalledProcessError` for a non-zero grep exit; it
+    does nothing about the OS refusing to start the child. Reproduced by
+    running the script with `grep` stripped from PATH: a raw
+    `FileNotFoundError` traceback escaped instead of the documented
+    "FAIL: grep …" diagnostic, so the docstring's claim that the three
+    `returncode` arms were exhaustive and fail-closed was false.
+
+    `subprocess.run` is substituted rather than PATH being mangled, so the
+    case runs identically on the Windows unit leg (which has no POSIX grep and
+    skips every `_NEEDS_GREP` sibling) — this arm is about the launch, not
+    about grep's behaviour, so it needs no grep. `OSError` not
+    `FileNotFoundError`: a non-executable binary on PATH raises
+    `PermissionError`, and both must land in the same fail-closed arm.
+    """
+    module = _load_script(tmp_path)
+    (tmp_path / "src").mkdir()
+
+    def _refuse_to_launch(*args: object, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", "grep")
+
+    monkeypatch.setattr(module.subprocess, "run", _refuse_to_launch)
+
+    assert module.main() == 1, "an unlaunchable grep must fail closed, not report clean"
+    err = capsys.readouterr().err
+    assert "grep could not be executed" in err
+    assert "Permission denied" in err
