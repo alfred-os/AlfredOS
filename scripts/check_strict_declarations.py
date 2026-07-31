@@ -124,6 +124,21 @@ def main() -> int:
     # A `stat`-based refusal has neither problem: it is loud, and it behaves
     # identically on every platform, so the test that pins it can fail
     # anywhere. `rglob` only stats — it cannot block on the FIFO it is finding.
+    #
+    # WHAT THIS PRE-SCAN CANNOT DO (#549 review). It is a whole-tree walk that
+    # finishes before `grep` starts, so the window between them is far wider
+    # than the `stat`/`open` gap `check_tag_t3.py` documents on a single path.
+    # A file swapped from regular to a FIFO inside that window reaches `grep`
+    # unclassified — and on BSD grep that is the original hang, restored.
+    #
+    # So `--devices=skip` goes BACK ON, as a second layer rather than the only
+    # one. Everything above still holds against it as a PRIMARY guard: silent,
+    # and untestable on the GNU runner. Behind a loud pre-scan neither applies
+    # — the pre-scan supplies the diagnosis and the portable, pinnable
+    # behaviour, and the flag only ever acts on a path that appeared after the
+    # walk. It downgrades that residual from "the gate hangs with no output" to
+    # "one file created mid-scan went unread", which is the better failure of
+    # the two and the only one that leaves the operator a working gate.
     strays = sorted(
         path
         for path in src_dir.rglob("*")
@@ -144,7 +159,10 @@ def main() -> int:
     # only caller. The findings are doc-level FPs for this guard.
     try:
         res = subprocess.run(  # noqa: S603
-            ["grep", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
+            # `--devices=skip` is the SECOND layer only — see the pre-scan
+            # above for why it must never be the first. It bounds the
+            # pre-scan-to-grep race, nothing else.
+            ["grep", "--devices=skip", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
             capture_output=True,
             text=True,
             check=False,

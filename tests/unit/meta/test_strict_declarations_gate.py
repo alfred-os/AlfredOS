@@ -65,6 +65,37 @@ def test_the_real_src_tree_is_clean() -> None:
     assert _load_script().main() == 0
 
 
+def test_the_grep_invocation_keeps_its_second_layer_flag() -> None:
+    """`--devices=skip` bounds the pre-scan-to-grep race (#549 review).
+
+    The loud `stat` pre-scan is the primary guard and is pinned behaviourally
+    by `test_a_fifo_in_the_scan_tree_is_refused_loudly` — measured: deleting it
+    reds that case in ~4s on every platform, flag present or not. The flag is
+    the SECOND layer, covering only a path that turns non-regular in the window
+    between the tree walk and `grep`. Deleting it therefore breaks nothing any
+    behavioural test can observe: measured, the whole file stays green.
+
+    So it is pinned LEXICALLY, and the limits of that are worth stating rather
+    than discovering later. A source-text assertion cannot prove the flag has
+    any runtime effect, cannot prove `grep` honours it on this host, and would
+    not notice the invocation being restructured to build its argv elsewhere.
+    It closes exactly one failure mode — someone deleting a flag that looks
+    redundant because no test complained — and that is the one that happened.
+    Simulating the race properly would mean swapping a file between the walk
+    and the subprocess, which buys a flaky test for a residual already
+    documented as accepted.
+    """
+    source = _SCRIPT.read_text(encoding="utf-8")
+
+    assert '"--devices=skip"' in source, (
+        "scripts/check_strict_declarations.py no longer passes --devices=skip to "
+        "grep. It is defence-in-depth for the window between the non-regular-file "
+        "pre-scan and grep: a path swapped to a FIFO in that window reaches grep "
+        "unclassified, and on BSD grep that is the #546 hang restored. Removing it "
+        "is safe only if the race is closed some other way — say so here if it is."
+    )
+
+
 @_NEEDS_GREP
 def test_a_planted_occurrence_is_reported(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
