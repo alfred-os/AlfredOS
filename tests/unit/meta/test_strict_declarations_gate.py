@@ -137,21 +137,30 @@ def test_a_grep_error_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture
 
 @_NEEDS_GREP
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
-def test_a_fifo_in_the_scan_tree_does_not_hang_the_gate(tmp_path: Path) -> None:
-    """The #546 shape in the SIBLING gate: `grep -r` reads a FIFO and blocks.
+def test_a_fifo_in_the_scan_tree_is_refused_loudly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The #546 shape in the SIBLING gate — and the PR-#549 correction of it.
 
-    Found while fixing #546 in `check_tag_t3.py` and confirmed by probe, not
-    by reading the manual: `grep -rnE` over a tree containing a FIFO blocks
-    forever on BOTH the BSD grep this repo's macOS `make check` uses and the
-    GNU grep on the CI leg. `--devices=skip` is honoured by both.
+    Two things were wrong with the first fix, `grep --devices=skip`, and this
+    test is written so that BOTH stay dead.
 
-    Exposure is the LOCAL `make check` path, not CI — git cannot track a FIFO,
-    so a fresh CI checkout has none. That is the same exposure class as #546's
-    traversal arm, and it is why this is a real bug rather than a theoretical
-    one: the gate that hangs is the one a developer runs before pushing.
+    It was SILENT. `--devices=skip` declines to read the FIFO and says nothing:
+    rc=1, empty output, `main` returns 0 and prints `OK:` for a tree it did not
+    fully scan. The original assertion here was `result == [0]` — it pinned the
+    silence as correct. So this asserts rc=1 AND that the offending path is
+    NAMED, which is what an operator needs to act.
 
-    Bounded on a daemon thread for the reason spelled out in the #546 suite —
-    an unbounded call does not fail on regression, it hangs the runner.
+    It was a PAPER GATE on the runner that matters. "Both greps hang without
+    the flag" was measured on BSD and asserted for GNU; re-probed on real
+    `ubuntu:24.04`, GNU grep 3.11 returns rc=1 with AND without it. Removing
+    the flag would have gone green on the CI leg — #245/#514, inside the very
+    epic that exists to kill that shape. A `stat`-based refusal behaves
+    identically on every platform, so this test can fail anywhere.
+
+    Still bounded on a daemon thread: cheap insurance, and it keeps the failure
+    mode a FAILURE rather than a hung runner if the refusal is ever removed on
+    a BSD host.
     """
     src = tmp_path / "src"
     src.mkdir()
@@ -168,7 +177,14 @@ def test_a_fifo_in_the_scan_tree_does_not_hang_the_gate(tmp_path: Path) -> None:
         "the guard blocked on a FIFO in the scan tree — `make check` hangs with "
         "no diagnosis instead of reporting a verdict"
     )
-    assert result == [0], f"a tree whose only real file is clean must pass; got {result}"
+    assert result == [1], (
+        f"a tree the gate could not fully scan must FAIL, not report OK; got {result}"
+    )
+    err = capsys.readouterr().err
+    assert "hang.py" in err, (
+        f"the refusal must NAME the file it could not read, or the operator "
+        f"cannot act on it; got {err!r}"
+    )
 
 
 def test_an_unlaunchable_grep_fails_closed(

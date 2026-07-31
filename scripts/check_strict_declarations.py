@@ -101,21 +101,50 @@ def main() -> int:
         print(f"FAIL: {src_dir} does not exist", file=sys.stderr)
         return 1
 
+    # #546, and the PR-#549 review that corrected it. A non-regular file under
+    # `src/` is refused HERE, in Python, before grep is invoked at all.
+    #
+    # The first attempt was `grep --devices=skip`, and it was wrong twice over.
+    #
+    # It made the gate SILENT. `--devices=skip` does not report the file it
+    # declines to read: rc=1, empty output, and `main` prints "OK: no
+    # strict_declarations=False in src/" for a tree it did not fully scan.
+    # This script's own docstring calls a silently-skipped lint the same shape
+    # as the regression it guards against, and the sibling gate
+    # (`check_tag_t3.py`) REPORTS an unreadable path as a violation. One flag
+    # would have left two sibling gates with opposite philosophies.
+    #
+    # And it was a PAPER GATE on the runner that matters. The claim that "both
+    # greps hang without the flag" was measured on BSD grep only and asserted
+    # for GNU. Re-probed on real `ubuntu:24.04`: GNU grep 3.11 returns rc=1
+    # with AND without the flag — it already skips a FIFO reached by recursion.
+    # So the regression test could not fail on the CI leg, and removing the
+    # flag would have gone green there (#245/#514).
+    #
+    # A `stat`-based refusal has neither problem: it is loud, and it behaves
+    # identically on every platform, so the test that pins it can fail
+    # anywhere. `rglob` only stats — it cannot block on the FIFO it is finding.
+    strays = sorted(
+        path
+        for path in src_dir.rglob("*")
+        if not path.is_dir() and not path.is_file()  # follows symlinks; S_ISREG underneath
+    )
+    if strays:
+        print(
+            f"FAIL: {len(strays)} non-regular file(s) under {src_dir} — the gate "
+            f"cannot read them, and refuses to report a tree it did not fully "
+            f"scan as clean: " + ", ".join(str(p) for p in strays),
+            file=sys.stderr,
+        )
+        return 1
+
     # S603/S607: ``grep`` is intentionally invoked by PATH lookup with a
     # hard-coded argv (regex literal + repo-resolved src/ path). No untrusted
     # input flows through this subprocess; the security stage's CI is the
     # only caller. The findings are doc-level FPs for this guard.
     try:
         res = subprocess.run(  # noqa: S603
-            # `--devices=skip`: without it, `grep -r` OPENS a FIFO in the tree
-            # and blocks forever, so the gate never returns a verdict and
-            # `make check` hangs with no diagnosis — the #546 defect, in this
-            # sibling gate. Probed on both greps that matter here (BSD on
-            # macOS, GNU on the CI leg); both hang without the flag and both
-            # honour it. Git cannot track a FIFO, so the exposure is the local
-            # pre-push loop rather than CI — which is exactly where a gate
-            # going silent costs the most.
-            ["grep", "--devices=skip", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
+            ["grep", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
             capture_output=True,
             text=True,
             check=False,
