@@ -297,6 +297,22 @@ def iter_markdown_files(roots: Iterable[Path], exclude: Iterable[Path]) -> Itera
         for path in root.rglob("*.md"):
             if any(part in _DEFAULT_SKIP_DIRS for part in path.parts):
                 continue
+            # #546 (found by the PR-#549 review as the THIRD copy of the same
+            # defect). `rglob` yields whatever matches the glob, including a
+            # FIFO named `*.md`, and `read_text` on one blocks forever — this
+            # gate would hang with no diagnosis until CI killed the job. The
+            # `root.is_file()` test above only screens paths passed EXPLICITLY;
+            # everything reached by traversal arrived unchecked.
+            #
+            # Skipped rather than reported, unlike the two sibling gates, and
+            # the asymmetry is deliberate: those two are enforcing a SECURITY
+            # rule where an unscanned file is an ungated file, whereas this one
+            # checks that markdown links resolve. A FIFO named `*.md` has no
+            # links to break, so refusing the run would fail the build for a
+            # thing that cannot carry the defect. `is_file()` follows symlinks,
+            # so a real markdown file behind a link is still yielded.
+            if not path.is_file():
+                continue
             # Exclude if the path lives under any excluded subtree.
             path_resolved = path.resolve()
             if any(
