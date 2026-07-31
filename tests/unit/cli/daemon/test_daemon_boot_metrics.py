@@ -22,6 +22,7 @@ import asyncio
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from unittest.mock import patch
 
@@ -241,24 +242,43 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
     monkeypatch.setattr(cmd, "_start_core_metrics_server", _wedged)
 
     bind_threads: list[threading.Thread] = []
-    real_thread_cls = threading.Thread
 
-    def _capturing_thread(*args: object, **kwargs: object) -> threading.Thread:
-        """Build the real thread, keeping a handle on the bind worker.
+    class _CapturingThread(threading.Thread):
+        """A real ``Thread`` that records itself when it is the bind worker.
 
-        Filters on the name the seam sets, so an unrelated thread created by the
-        loop's own machinery during ``asyncio.run`` cannot be mistaken for it.
+        A SUBCLASS rather than a factory function, so the substituted
+        ``threading.Thread`` remains a type: ``isinstance`` checks and anything
+        else that treats it as a class keep working while it is patched in, and
+        the construction needs no ``type: ignore``. The base is resolved at
+        class-definition time, before the patch, so this cannot recurse.
+
+        Filters on the name the seam sets, so a thread created by the loop's own
+        machinery during ``asyncio.run`` is not mistaken for the worker.
         """
-        thread = real_thread_cls(*args, **kwargs)  # type: ignore[arg-type]
-        if kwargs.get("name") == _BIND_THREAD_NAME:
-            bind_threads.append(thread)
-        return thread
+
+        def __init__(
+            self,
+            group: None = None,
+            target: Callable[..., object] | None = None,
+            name: str | None = None,
+            args: Iterable[object] = (),
+            kwargs: Mapping[str, object] | None = None,
+            *,
+            daemon: bool | None = None,
+        ) -> None:
+            # The real signature, spelled out, rather than `*args/**kwargs` —
+            # `Thread.__init__` is not typed to accept them and mypy --strict
+            # rejects the forwarding. Being explicit also means a future change
+            # to the seam's construction call is type-checked here.
+            super().__init__(group, target, name, args, kwargs, daemon=daemon)
+            if name == _BIND_THREAD_NAME:
+                bind_threads.append(self)
 
     # Patched on the `threading` module itself, which is the same object
     # `_commands` resolves `threading.Thread` against — `cmd.threading` would be
     # reaching through a module for an attribute it does not export (mypy
     # attr-defined). Same idiom as the `excepthook` patch above.
-    monkeypatch.setattr(threading, "Thread", _capturing_thread)
+    monkeypatch.setattr(threading, "Thread", _CapturingThread)
     try:
         asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))
     finally:
@@ -269,6 +289,18 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
         f"that bound explicitly; got {bind_threads!r}"
     )
     worker = bind_threads[0]
+
+    # `daemon=True` is load-bearing and, until this test held a real handle on
+    # the worker, nothing asserted it: dropping it from the seam passed all 12
+    # cases here (#550 review, core-002). Without it the interpreter JOINS the
+    # parked bind thread at exit, so a wedged bind stops being "the boot walks
+    # away" and becomes a hung process shutdown — the precise failure the seam
+    # spawns a bare thread to avoid.
+    assert worker.daemon, (
+        "the bind worker is not a daemon thread — a parked bind would then wedge "
+        "interpreter exit instead of being abandoned"
+    )
+
     worker.join(_RETURN_DEADLINE_S)
     assert not worker.is_alive(), "the unparked bind thread never finished"
     assert not thread_errors, f"the late completion signal escaped its thread: {thread_errors!r}"
