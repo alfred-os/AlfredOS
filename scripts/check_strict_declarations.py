@@ -107,7 +107,15 @@ def main() -> int:
     # only caller. The findings are doc-level FPs for this guard.
     try:
         res = subprocess.run(  # noqa: S603
-            ["grep", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
+            # `--devices=skip`: without it, `grep -r` OPENS a FIFO in the tree
+            # and blocks forever, so the gate never returns a verdict and
+            # `make check` hangs with no diagnosis — the #546 defect, in this
+            # sibling gate. Probed on both greps that matter here (BSD on
+            # macOS, GNU on the CI leg); both hang without the flag and both
+            # honour it. Git cannot track a FIFO, so the exposure is the local
+            # pre-push loop rather than CI — which is exactly where a gate
+            # going silent costs the most.
+            ["grep", "--devices=skip", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
             capture_output=True,
             text=True,
             check=False,
