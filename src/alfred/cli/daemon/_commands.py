@@ -589,11 +589,35 @@ async def _start_core_metrics_server_bounded(boot_id: str) -> None:
             with suppress(RuntimeError):
                 loop.call_soon_threadsafe(finished.set)
 
-    threading.Thread(
-        target=_bind_then_signal,
-        name="alfred-core-metrics-bind",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=_bind_then_signal,
+            name="alfred-core-metrics-bind",
+            daemon=True,
+        ).start()
+    except RuntimeError as exc:
+        # #551. `Thread.start()` raises RuntimeError when the process cannot
+        # create one — a container `pids` cgroup limit, an RLIMIT_NPROC ceiling,
+        # memory pressure. Unguarded, that propagated out of `_start_async`, and
+        # `start_daemon` catches only `_BootRefusedError` / `DaemonPidFileError`,
+        # so the daemon died at boot with a raw, boot_id-less traceback.
+        #
+        # Every OTHER failure here is loud-and-continue and boot-correlated (bad
+        # port, failed bind, unexpected seam error, wedged bind) because this
+        # docstring's whole claim is that a metrics failure must never be
+        # boot-fatal. The one mode nobody guarded was also the one most likely
+        # to fire in the constrained container this ships in.
+        #
+        # RETURN, do not fall through: `finished` is set only by the thread that
+        # did not start, so awaiting it would burn the full timeout and then
+        # report `metrics_start_timeout` — the wrong diagnosis (a bind that
+        # wedged) for a bind that never began.
+        log.warning(
+            "daemon.boot.metrics_start_unavailable",
+            boot_id=boot_id,
+            error=repr(exc),
+        )
+        return
 
     try:
         await asyncio.wait_for(finished.wait(), timeout=_CORE_METRICS_START_TIMEOUT_S)
