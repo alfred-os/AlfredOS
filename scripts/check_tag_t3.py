@@ -173,8 +173,16 @@ _DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("src/alfred", "plugins")
 #     real copy of this repo holds 332 files under the two roots, so any decoy
 #     of realistic size cleared it. A count was the wrong instrument — it has a
 #     margin, and the margin was widening. The property itself now lives in
-#     :func:`_collect_paths`: on the argument-less path, at least one collected
-#     file must resolve INSIDE this repo. That has no margin to erode.
+#     :func:`_collect_paths`: on the argument-less path, EVERY declared root
+#     must resolve INSIDE this repo.
+#
+#     Stated over a SAMPLE of the collected files instead — "at least one
+#     collected file resolves inside" — it had a margin after all, and #548
+#     review found it: ``rglob`` runs with ``recurse_symlinks=True``, so a
+#     decoy holding ONE link to any real repo ``.py`` file satisfied the
+#     ``any(...)``. Measured rc=0, 261 files collected, 1 inside this repo and
+#     260 decoy files carrying every verdict. The root form is what the
+#     paragraph above always claimed; only the code was weaker.
 #   * A GUTTED in-repo tree: both roots present and covered, but mass-deleted
 #     below the floor. This is what the floor still catches, and all it
 #     catches.
@@ -873,14 +881,37 @@ def _collect_paths(argv: list[str]) -> list[Path]:
     # repo or it is gating nothing. Explicit arguments are untouched — the unit
     # suite plants `tmp_path` trees and scans them by path, and out-of-repo
     # fixtures are the whole point of that path.
-    if default_root and not any(p.resolve(strict=False).is_relative_to(_REPO_ROOT) for p in paths):
-        raise EmptyScanRootError(
-            f"an argument-less scan collected {len(paths)} files and NONE of "
-            f"them is inside {_REPO_ROOT} — the default roots resolved to a "
-            f"different tree (a wrong checkout, or a scratch copy). Refusing to "
-            f"report success while gating nothing. Run the gate from the "
-            f"repository root."
-        )
+    #
+    # Asserted on the ROOTS, not on a sample of the COLLECTED FILES (#548
+    # review, sec-001). The predicate here was
+    # `any(p.resolve().is_relative_to(_REPO_ROOT) for p in paths)`, satisfied by
+    # ONE collected file — and `rglob` above runs with `recurse_symlinks=True`,
+    # so a decoy carrying a single link into this repo measured rc=0 with 260
+    # decoy files supplying every verdict. EVERY root or none of them: that form
+    # cannot be bought with one link, and it does not depend on what the walk
+    # happened to reach.
+    #
+    # `argv` IS `_DEFAULT_SCAN_ROOTS` on this path (rebound above), so this
+    # names the roots that were actually scanned rather than re-reading the
+    # constant — a monkeypatched tuple reaches this check like any other.
+    #
+    # What it does NOT cover, stated so the next reader does not have to
+    # measure it: an in-repo root whose every tracked file is a symlink out of
+    # the repo. Reaching that needs TRACKED symlinks, and in-repo directory sets
+    # are derived from `git ls-files` under `_REPO_ROOT`; it is not the wrong-
+    # checkout shape this guard exists for.
+    if default_root:
+        outside = [
+            root for root in argv if not Path(root).resolve(strict=False).is_relative_to(_REPO_ROOT)
+        ]
+        if outside:
+            raise EmptyScanRootError(
+                f"an argument-less scan collected {len(paths)} files and its "
+                f"declared roots {outside} do NOT resolve inside {_REPO_ROOT} "
+                f"— they resolved to a different tree (a wrong checkout, or a "
+                f"scratch copy). Refusing to report success while gating "
+                f"nothing. Run the gate from the repository root."
+            )
     return paths
 
 

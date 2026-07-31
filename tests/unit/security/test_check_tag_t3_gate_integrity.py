@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import importlib.util
+import itertools
 import re
 import subprocess
 import sys
@@ -53,6 +54,45 @@ assert check_tag_t3._REPO_ROOT == _REPO_ROOT, (
     f"loaded script computed _REPO_ROOT={check_tag_t3._REPO_ROOT!r}, "
     f"expected {_REPO_ROOT!r} — exemption tests would be inverted"
 )
+
+
+@pytest.fixture(autouse=True)
+def _pin_cwd_to_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the CWD for EVERY test in this module (#548 review, test-001/test-003).
+
+    ``_collect_paths`` resolves ``_DEFAULT_SCAN_ROOTS`` and every relative
+    argument against the AMBIENT working directory, and this suite passes
+    repo-relative paths throughout — ``_collect_paths([])``, ``_is_exempt(
+    Path("src/alfred/..."))``, ``_collect_paths(["src/alfred"])``. Run pytest
+    from anywhere but the repository root and those tests red for a reason
+    unrelated to the property each one characterises: measured from ``src/``,
+    **18 of 63 failed**, several on the wrong exception type
+    (``EmptyScanRootError`` where the test pins ``PartialScanRootError``).
+
+    AUTOUSE rather than a parameter on the three sites review named, because 18
+    is not 3 and the next repo-relative test would join them silently. Tests
+    that need a different directory still call ``monkeypatch.chdir`` in their
+    own body — the fixture runs first, so their choice wins, and ``monkeypatch``
+    restores in reverse order at teardown.
+    """
+    monkeypatch.chdir(_REPO_ROOT)
+
+
+def test_the_cwd_pin_is_autouse() -> None:
+    """Disarming the fixture must RED, not silently restore 18 fragile tests.
+
+    Asserting ``Path.cwd() == _REPO_ROOT`` instead would be vacuous exactly
+    where it matters: CI runs pytest from the repository root, so it passes
+    whether or not the fixture exists. This asserts the MECHANISM — deleting
+    the fixture is a NameError at collection, and dropping ``autouse=True``
+    reds here.
+    """
+    marker = _pin_cwd_to_repo_root._fixture_function_marker
+    assert marker.autouse is True, (
+        "the CWD pin is no longer autouse — every repo-relative test in this "
+        "module silently depends on pytest's working directory again"
+    )
+
 
 # THE collection-failure messages — the ones that mean "this file was not
 # gated". Read EAGERLY, at import: an absent constant fails collection of the
@@ -108,9 +148,22 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         f"enumerate: {sorted(declared - findings - set(_COLLECTION_FAILURE_MESSAGES))}. "
         f"Every floor that asserts one is ABSENT is blind to it until it is added."
     )
-    assert len(set(_COLLECTION_FAILURE_MESSAGES)) == len(_COLLECTION_FAILURE_MESSAGES), (
-        "two collection-failure messages are the same string — a test for one "
-        "would be satisfied by the other firing"
+    # CONTAINMENT, not equality (#548 review, test-002). Both readers match with
+    # `message in violation`, so a message that is a strict SUBSTRING of a
+    # sibling is satisfied by that sibling firing — two distinct strings, an
+    # equality check still green, and the floors mutually satisfiable. The
+    # near miss is live: `_UNSCANNABLE_MESSAGE` and `_UNSCANNABLE_PATH_MESSAGE`
+    # share a prefix and neither contains the other. `permutations` subsumes
+    # the equality case, because a duplicate is contained in its twin.
+    overlapping = [
+        (shorter, longer)
+        for shorter, longer in itertools.permutations(_COLLECTION_FAILURE_MESSAGES, 2)
+        if shorter in longer
+    ]
+    assert not overlapping, (
+        f"a collection-failure message is contained in another: {overlapping} — "
+        f"both readers match by substring, so a test for the shorter one would "
+        f"be satisfied by the longer one firing"
     )
 
 
@@ -248,15 +301,21 @@ def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Pat
     THREE separate anti-vacuity devices, because the obvious form of this test
     is green on a detector that does nothing:
 
-    1. The message constants are read EAGERLY into ``collection_failures``.
-       Referenced only inside the comprehension's ``if`` clause they are never
-       evaluated on a clean tree — measured: this floor passed while the
-       constants did not exist at all.
+    1. The message constants are read EAGERLY — at MODULE IMPORT, into
+       ``_COLLECTION_FAILURE_MESSAGES``. Referenced only inside the
+       comprehension's ``if`` clause they are never evaluated on a clean tree —
+       measured: this floor passed while the constants did not exist at all.
+       Since #543 moved the tuple to module scope an absent constant fails
+       COLLECTION of this whole module, which is louder than the
+       ``AttributeError`` the previous per-test tuple raised (#548 review,
+       doc-001: the prose here still described the per-test form).
     2. A census assertion, so a floor that scanned nothing cannot pass.
     3. A positive control planted in ``tmp_path`` and scanned by the SAME
        predicate, proving the filter can actually distinguish.
     """
-    # Device 1 — eager read. An AttributeError here is the point.
+    # Device 1 — the eager read lives at module scope now, so this is a plain
+    # rebind and cannot itself raise. The device is STRONGER there: an absent
+    # constant fails collection of the module rather than one test.
     collection_failures = _COLLECTION_FAILURE_MESSAGES
 
     def _collection_failures_in(path: Path) -> list[str]:
@@ -459,6 +518,43 @@ def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> 
         ).stdout.splitlines()
         if line.endswith(".py")
     }
+
+    # PRECONDITION, asserted rather than assumed (#548 review, test-004).
+    # `_collect_paths` derives its set from `git ls-files --cached --others
+    # --exclude-standard`, so it includes UNTRACKED files by design; this oracle
+    # lists the INDEX only. The equality below is therefore a clean-tree
+    # statement, and two ordinary situations break it without a defect: a
+    # developer's scratch `.py` under either root, and
+    # `test_an_untracked_new_file_is_still_scanned`, which plants
+    # `src/alfred/zz_540_untracked_probe.py` and is visible here under parallel
+    # execution. Adding `--others` to the oracle is the WRONG repair — it would
+    # re-run the implementation's own predicate and collapse the independence
+    # the docstring above exists to protect. State the precondition instead, so
+    # the test diagnoses itself rather than reporting an opaque set difference.
+    untracked_query = [
+        "git",
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--",
+        "src/alfred",
+        "plugins",
+    ]
+    untracked = [
+        line
+        for line in subprocess.run(  # noqa: S603
+            untracked_query,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=_REPO_ROOT,
+        ).stdout.splitlines()
+        if line.endswith(".py")
+    ]
+    assert not untracked, (
+        f"untracked .py files under the scan roots make this equality oracle "
+        f"inapplicable — it lists the index, `_collect_paths` does not: {untracked}"
+    )
 
     assert set(check_tag_t3._collect_paths([])) == expected
     assert len(expected) >= 250, "sanity: the census floor must be satisfiable"
@@ -1166,7 +1262,16 @@ _PATHOLOGICAL_SOURCES: tuple[tuple[str, str], ...] = (
 
 # The one shape that behaved identically on every build measured, so it can
 # carry the assertions that need a guaranteed trip.
-_ALWAYS_UNSCANNABLE: str = "not " * 20000 + "x\n"
+#
+# DERIVED from the tuple, not restated (#548 review, test-005). Three tests
+# depend on the two staying identical — one asserts the PREMISE for this
+# constant, one reads the tuple, one writes this constant to a fixture — so a
+# repeat count tuned in a single copy would leave the premise test passing for
+# one string while the parametrised set exercised another, and the anti-vacuity
+# link between them would be gone. Lines 146-152 already state the rule: every
+# enumeration moves together, or the set is only as complete as its shortest
+# copy.
+_ALWAYS_UNSCANNABLE: str = dict(_PATHOLOGICAL_SOURCES)["unary-not-chain"]
 
 
 def test_the_portable_pathological_source_defeats_the_syntaxerror_arm() -> None:
@@ -1463,6 +1568,9 @@ def test_the_detector_fence_does_not_swallow_a_walk_level_fault(
 # ---------------------------------------------------------------------------
 
 
+_DECOY_REFUSAL: str = "do NOT resolve inside"
+
+
 def _build_decoy_tree(root: Path, files_per_root: int) -> Path:
     """A tree that LOOKS like this repo: both declared roots, clean content."""
     for scan_root in check_tag_t3._DEFAULT_SCAN_ROOTS:
@@ -1494,15 +1602,53 @@ def test_a_large_out_of_repo_decoy_tree_is_refused(
     )
     monkeypatch.chdir(decoy)
 
-    with pytest.raises(check_tag_t3.EmptyScanRootError, match="NONE of them is inside"):
+    with pytest.raises(check_tag_t3.EmptyScanRootError, match=_DECOY_REFUSAL):
         check_tag_t3._collect_paths([])
 
     assert check_tag_t3.main([]) == 2
     err = capsys.readouterr().err
-    assert "NONE of them is inside" in err
+    assert _DECOY_REFUSAL in err
     assert "expected at least" not in err, (
         "the CENSUS fired, not the repo-root check — this decoy is too small "
         "to prove anything about the hole sec-002 measured"
+    )
+
+
+@_NEEDS_SYMLINKS
+def test_one_in_repo_symlink_does_not_buy_a_decoy_tree_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#548 review, sec-001: the decoy check sampled COLLECTED FILES, so one link passed it.
+
+    The predicate was ``any(p.resolve().is_relative_to(_REPO_ROOT) for p in
+    paths)`` — satisfied by a SINGLE collected file. ``_collect_paths`` reaches
+    an out-of-repo directory through ``rglob(..., recurse_symlinks=True)``, so
+    one link out of the decoy into any real repository ``.py`` file made the
+    ``any(...)`` true while 260 decoy files supplied every verdict. Measured
+    against the pre-fix script: ``rc=0``, 261 collected, 1 inside this repo.
+
+    The census cannot catch it either — 261 clears the 250-file floor — which is
+    why this asserts the ROOT refusal fired and not the count. Sized above
+    ``_MIN_SCANNED_FILES`` for exactly that reason.
+    """
+    decoy = _build_decoy_tree(tmp_path / "wrong-checkout", files_per_root=130)
+    link = decoy / check_tag_t3._DEFAULT_SCAN_ROOTS[0] / "zz_in_repo_link.py"
+    link.symlink_to(_REPO_ROOT / "src" / "alfred" / "__init__.py")
+
+    # Precondition: the link really does resolve into this repo, or the test
+    # proves nothing about the bypass it characterises.
+    assert link.resolve().is_relative_to(_REPO_ROOT), "the link does not reach this repo"
+    monkeypatch.chdir(decoy)
+
+    with pytest.raises(check_tag_t3.EmptyScanRootError, match=_DECOY_REFUSAL):
+        check_tag_t3._collect_paths([])
+
+    assert check_tag_t3.main([]) == 2
+    err = capsys.readouterr().err
+    assert _DECOY_REFUSAL in err
+    assert "expected at least" not in err, (
+        "the CENSUS fired, not the root check — 261 files clear the floor, so "
+        "this decoy proves nothing unless the root refusal is what spoke"
     )
 
 
