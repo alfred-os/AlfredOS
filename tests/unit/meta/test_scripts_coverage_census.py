@@ -14,17 +14,13 @@ This is the #423 mechanism: gate on the ALLOW-LIST, not the calendar. A new
 
 from __future__ import annotations
 
-import importlib.util
 import tomllib
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-import yaml
-
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
-_CI_WORKFLOW: Path = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _PYPROJECT: Path = _REPO_ROOT / "pyproject.toml"
-_RUNNER: Path = _REPO_ROOT / "scripts" / "run_coverage_gates.py"
 _SCRIPTS_DIR: Path = _REPO_ROOT / "scripts"
 
 # The ONE directory exempt from the census, and it must name the SAME root as
@@ -34,7 +30,7 @@ _VENDOR_DIR: Path = _SCRIPTS_DIR / "vendor"
 _VENDOR_OMIT_ENTRY: str = "scripts/vendor/**"
 
 
-def _gated_script_paths() -> set[str]:
+def _gated_script_paths(runner: ModuleType, ci_workflow: dict[str, Any]) -> set[str]:
     """Scripts carrying a coverage gate of ANY threshold, derived from ci.yml.
 
     Deliberately not `threshold == 100`. The census exists to ensure every
@@ -45,15 +41,17 @@ def _gated_script_paths() -> set[str]:
     Only the `python` job is scanned: it is the job whose gates read the
     unit-only dataset that `--cov=scripts` populates. The `coverage-gates` job
     reads combined unit+integration data and holds no scripts/ gate.
+
+    Takes the loaded runner and parsed workflow as ARGUMENTS (#548 review,
+    rev-001). This was the third copy of the
+    ``spec_from_file_location``/``module_from_spec``/``exec_module`` dance plus
+    its own inline ``yaml.safe_load``; the shared session fixtures in
+    ``conftest.py`` removed the other two, and leaving this one behind left the
+    #543 rev-002 de-duplication incomplete.
     """
-    spec = importlib.util.spec_from_file_location("run_coverage_gates", _RUNNER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
     return {
         path
-        for gate in module._iter_gates(workflow, "python")
+        for gate in runner._iter_gates(ci_workflow, "python")
         for path in gate.paths
         if path.startswith("scripts/")
     }
@@ -96,9 +94,15 @@ def _measured_script_paths() -> set[str]:
     }
 
 
-def test_every_script_is_either_gated_or_explicitly_omitted() -> None:
+def test_every_script_is_either_gated_or_explicitly_omitted(
+    runner: ModuleType, ci_workflow: dict[str, Any]
+) -> None:
     """The #423 rule. A new script has no silent third state."""
-    unclassified = _measured_script_paths() - _gated_script_paths() - _omitted_script_paths()
+    unclassified = (
+        _measured_script_paths()
+        - _gated_script_paths(runner, ci_workflow)
+        - _omitted_script_paths()
+    )
 
     assert not unclassified, (
         f"these scripts/ files are measured by `--cov=scripts` but are neither "
@@ -109,10 +113,12 @@ def test_every_script_is_either_gated_or_explicitly_omitted() -> None:
     )
 
 
-def test_the_two_classifications_do_not_overlap() -> None:
+def test_the_two_classifications_do_not_overlap(
+    runner: ModuleType, ci_workflow: dict[str, Any]
+) -> None:
     """A file cannot be both gated and omitted — `omit` wins, so the gate would
     measure an empty set and pass vacuously. A paper gate with extra steps."""
-    both = _gated_script_paths() & _omitted_script_paths()
+    both = _gated_script_paths(runner, ci_workflow) & _omitted_script_paths()
 
     assert not both, (
         f"{sorted(both)} are both gated in ci.yml and omitted in pyproject.toml. "
@@ -120,17 +126,19 @@ def test_the_two_classifications_do_not_overlap() -> None:
     )
 
 
-def test_the_census_is_not_vacuous() -> None:
+def test_the_census_is_not_vacuous(runner: ModuleType, ci_workflow: dict[str, Any]) -> None:
     """Anti-vacuity floor: an empty set on any side makes the two assertions
     above pass while checking nothing."""
     assert _measured_script_paths(), "no scripts/*.py found — the census is empty"
-    assert _gated_script_paths(), "no scripts/ coverage gates found in ci.yml"
+    assert _gated_script_paths(runner, ci_workflow), "no scripts/ coverage gates found in ci.yml"
     assert _omitted_script_paths(), "no scripts/ omit entries found in pyproject.toml"
 
 
-def test_the_gate_enforcing_scripts_are_gated_not_omitted() -> None:
+def test_the_gate_enforcing_scripts_are_gated_not_omitted(
+    runner: ModuleType, ci_workflow: dict[str, Any]
+) -> None:
     """Naming these means moving either into `omit` is a failing edit."""
-    gated = _gated_script_paths()
+    gated = _gated_script_paths(runner, ci_workflow)
 
     for script in ("scripts/run_coverage_gates.py", "scripts/check_strict_declarations.py"):
         assert script in gated, (
