@@ -98,9 +98,15 @@ _TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE: str = (
 # violation alongside a ``SyntaxError``, and made every "must PASS" floor in
 # the suite vacuously green on text that was never parsed.
 #
-# FOUR DISTINCT strings so a test for one cannot be satisfied by another
+# FIVE DISTINCT strings so a test for one cannot be satisfied by another
 # firing. Measured false-positive cost across the scan root: 0 unparseable,
 # 0 unreadable, 0 unscannable.
+#
+# The fifth exists because ONE string used to cover both the parser arm in
+# :func:`_scan_text` and the path arm in :func:`_scan_file`, so it had to
+# suggest two remedies ("Simplify the file, or fix the path") of which the
+# wrong one was always half the advice (#543 review, dx-003). Splitting them
+# matches the ``_UNPARSEABLE``/``_UNREADABLE`` pair already here.
 _UNDECODABLE_MESSAGE: str = (
     "file is not valid UTF-8 — the gate cannot read it but Python can execute "
     "it (PEP 263 coding declaration). Re-encode as UTF-8."
@@ -108,8 +114,21 @@ _UNDECODABLE_MESSAGE: str = (
 _UNPARSEABLE_MESSAGE: str = "file does not parse — the gate cannot scan it. Fix the syntax error."
 _UNREADABLE_MESSAGE: str = "file could not be read — the gate cannot scan it."
 _UNSCANNABLE_MESSAGE: str = (
-    "file could not be scanned — the parser or the reader failed on it. "
-    "Simplify the file, or fix the path."
+    "file could not be scanned — the parser failed on its CONTENT. Simplify the file."
+)
+_UNSCANNABLE_PATH_MESSAGE: str = (
+    "file could not be scanned — the reader failed on its PATH, before any "
+    "content was read. Fix the path."
+)
+
+# NOT a collection-failure message: this one says the GATE is broken, not the
+# file (#543 review, err-001). It travels on :class:`GateInternalError`, which
+# `main` turns into exit 2 ("the gate could not run") rather than exit 1
+# ("violations found") — the distinction the exit contract exists for.
+_GATE_INTERNAL_MESSAGE: str = (
+    "the gate's own detector raised while scanning this file. This is a BUG IN "
+    "check_tag_t3.py, not a finding in the file. The scan is abandoned: no "
+    "file's verdict is trustworthy while a detector predicate is faulting."
 )
 
 # THE GATE OWNS ITS SCAN ROOTS (#541). They used to live in the two
@@ -144,21 +163,27 @@ _DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("src/alfred", "plugins")
 #     branch in ``_collect_paths`` raises first — measured rc=2 with the
 #     specific "the default scan root does not exist relative to the current
 #     directory" message, which is a better diagnosis than a count ever was.
-#   * A DECOY TREE still lands here, and only here. Run from a directory that
-#     happens to contain ``src/alfred`` and ``plugins`` of its own — a wrong
-#     checkout, a scratch copy — and both roots resolve OUTSIDE this repo, so
-#     the root invariant exempts them by design (it is scoped to in-repo
-#     directories). Measured: 2 files scanned, rc=2, caught by this floor
-#     alone. The narrowing that makes the invariant tractable is precisely
-#     what keeps this constant load-bearing.
+#   * A DECOY TREE **no longer lands here at all** (#543 review, sec-002).
+#     The text this replaces claimed a decoy was "caught by this floor alone.
+#     Measured: 2 files scanned, rc=2" — true of a 2-file decoy and FALSE of a
+#     realistic one. Security review built a 260-file clean decoy, reached
+#     through an in-repo symlink so both roots resolved OUTSIDE the repo and
+#     the runtime invariant exempted them by design, and measured **rc=0 with
+#     zero bytes of src/alfred or plugins scanned**: the floor is 250 and a
+#     real copy of this repo holds 332 files under the two roots, so any decoy
+#     of realistic size cleared it. A count was the wrong instrument — it has a
+#     margin, and the margin was widening. The property itself now lives in
+#     :func:`_collect_paths`: on the argument-less path, at least one collected
+#     file must resolve INSIDE this repo. That has no margin to erode.
 #   * A GUTTED in-repo tree: both roots present and covered, but mass-deleted
-#     below the floor.
+#     below the floor. This is what the floor still catches, and all it
+#     catches.
 #
 # 332 tracked ``.py`` files live under the two roots today (293 + 39); 250
 # leaves headroom for deletions without leaving room for the gate to go
-# vacuous. Unchanged at 250 by #541 — it is not, and never was, a check that
-# every root was supplied; that is what ``_DEFAULT_SCAN_ROOTS`` plus the
-# runtime invariant are for.
+# vacuous. Unchanged at 250 by #541 and #543 — it is not, and never was, a
+# check that every root was supplied, nor (as of #543) the decoy defence; that
+# is what ``_DEFAULT_SCAN_ROOTS`` plus the two runtime invariants are for.
 _MIN_SCANNED_FILES: int = 250
 
 # Authorised non-test homes — resolved to absolute paths inside THIS repo
@@ -406,6 +431,28 @@ def _is_cast_tagged_content_call(node: ast.Call) -> bool:
     return False
 
 
+class GateInternalError(RuntimeError):
+    """A DETECTOR PREDICATE raised. The gate is broken, not the file.
+
+    #543 review (err-001). ``_scan_text``'s ``except Exception`` wrapped the
+    whole scan body, the three ``_is_*`` predicates included, so an
+    ``AttributeError`` in the gate's own logic reported as an unscannable
+    FILE at exit 1 ("violations found") on a completely clean file —
+    indistinguishable from a real T3-laundering finding. Measured, on a file
+    with no ``tag``/``cast``/subscript pattern in it at all.
+
+    The three predicates do constant work — ``isinstance`` checks and
+    attribute reads on one already-parsed node, no recursion, no I/O — so
+    they cannot be made to raise by any INPUT. Anything they raise is a
+    defect, and `main` reports it as exit 2, "the gate could not run".
+
+    ``ast.parse`` and ``ast.walk`` stay OUTSIDE this fence deliberately: both
+    are genuinely input-driven (a 20 000-deep ``not`` chain raises
+    ``MemoryError`` from the parser), and misfiling those as gate defects
+    would be the same confusion in the other direction.
+    """
+
+
 def _scan_text(text: str, path: Path) -> list[str]:
     """Return violation messages for ``text``, attributed to ``path``.
 
@@ -432,9 +479,16 @@ def _scan_text(text: str, path: Path) -> list[str]:
        comments are discarded by the parser, so they need the line-based
        scan.
 
-    **Never raises** (short of ``BaseException``): a scan failure becomes a
-    reported violation rather than an exception that aborts ``main``'s loop and
-    leaves every later file unscanned (#542). See the ``except Exception`` arm.
+    **Never raises for an INPUT fault** (short of ``BaseException``): a scan
+    failure becomes a reported violation rather than an exception that aborts
+    ``main``'s loop and leaves every later file unscanned (#542). See the
+    ``except Exception`` arm.
+
+    The one exception is :class:`GateInternalError`, raised when a DETECTOR
+    PREDICATE faults. That is not an input fault and aborting is correct for
+    it: the gate is broken, so no later file's verdict would mean anything.
+    ``main`` reports it as exit 2, never as exit 1 — which is precisely the
+    difference #542 was about (it exited 1, "violations found", naming none).
     """
     violations: list[str] = []
     try:
@@ -460,13 +514,28 @@ def _scan_text(text: str, path: Path) -> list[str]:
                 continue
             lineno = node.lineno
             snippet = lines[lineno - 1].rstrip() if 0 <= lineno - 1 < len(lines) else ""
-            if _is_tag_t3_call(node):
+            # THE DETECTOR, fenced off from the input-driven arms around it.
+            # These three do constant work on an already-parsed node, so an
+            # exception here is a bug in this file — not a property of the
+            # scanned source. Without the fence it reported as an unscannable
+            # FILE at exit 1, i.e. as a T3-laundering finding in a clean file
+            # (#543 review, err-001). The `for` statement stays outside: it is
+            # `ast.walk` advancing, which IS input-driven.
+            try:
+                tag_t3 = _is_tag_t3_call(node)
+                cast_tagged = _is_cast_tagged_content_call(node)
+                subscript_t3 = _is_tagged_content_t3_subscript_call(node)
+            except Exception as exc:
+                raise GateInternalError(
+                    f"{path}:{lineno}: {_GATE_INTERNAL_MESSAGE} {type(exc).__name__}: {exc}"
+                ) from exc
+            if tag_t3:
                 violations.append(f"{path}:{lineno}: {_TAG_T3_MESSAGE}")
                 violations.append(f"  {snippet}")
-            if _is_cast_tagged_content_call(node):
+            if cast_tagged:
                 violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
                 violations.append(f"  {snippet}")
-            if _is_tagged_content_t3_subscript_call(node):
+            if subscript_t3:
                 violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
                 violations.append(f"  {snippet}")
 
@@ -474,6 +543,13 @@ def _scan_text(text: str, path: Path) -> list[str]:
             if _TYPE_IGNORE_PATTERN.search(line):
                 violations.append(f"{path}:{lineno}: {_TYPE_IGNORE_MESSAGE}")
                 violations.append(f"  {line.rstrip()}")
+    except GateInternalError:
+        # ORDER IS LOAD-BEARING. `GateInternalError` is an `Exception`, so the
+        # broad arm below would swallow it and re-file the gate's own defect as
+        # an unscannable input file at exit 1 — the exact confusion the fence
+        # above exists to remove (#543 review, err-001). Re-raise so `main`
+        # reports exit 2, "the gate could not run".
+        raise
     except Exception as exc:
         # ``ast.parse`` raises more than ``SyntaxError``, and WHICH exception
         # depends on the interpreter BUILD. Measured on two CPython 3.14.6
@@ -520,9 +596,11 @@ def _scan_file(path: Path) -> list[str]:
     Applies the exemption, reads the source, and delegates the scanning to
     :func:`_scan_text`.
 
-    **Never raises** (short of ``BaseException``), for the same reason
-    :func:`_scan_text` does not: a read failure this function lets escape aborts
-    ``main``'s loop and silently un-gates every later file (#542).
+    **Never raises for an INPUT fault** (short of ``BaseException``), for the
+    same reason :func:`_scan_text` does not: a read failure this function lets
+    escape aborts ``main``'s loop and silently un-gates every later file
+    (#542). :class:`GateInternalError` from the delegate propagates by design —
+    see :func:`_scan_text`.
     """
     if _is_exempt(path):
         return []
@@ -542,7 +620,11 @@ def _scan_file(path: Path) -> list[str]:
         # ``_scan_text``'s, a per-file failure cannot reach it, so a backstop
         # there would be unreachable — a coverage hole on a file that must
         # stay at 100%.
-        return [f"{path}:1: {_UNSCANNABLE_MESSAGE}", f"  {type(exc).__name__}: {exc}"]
+        #
+        # Its own message (#543 review, dx-003): this arm only ever fires on a
+        # PATH the reader could not open, never on content, so it must not
+        # suggest simplifying the file.
+        return [f"{path}:1: {_UNSCANNABLE_PATH_MESSAGE}", f"  {type(exc).__name__}: {exc}"]
     return _scan_text(text, path)
 
 
@@ -766,11 +848,39 @@ def _collect_paths(argv: list[str]) -> list[Path]:
             if (_REPO_ROOT / root).resolve(strict=False) not in in_repo_directory_args
         ]
         if missing:
+            # The remedy, not just the diagnosis (#543 review, dx-001).
+            # ``check_tag_t3.py src/alfred`` — the documented pre-#541 usage,
+            # and the most natural manual invocation — now exits 2 here, and
+            # the old message named an internal constant a first-time
+            # contributor would have to read the source to act on.
             raise PartialScanRootError(
                 f"directory scan does not cover every declared root: missing "
-                f"{missing}. The roots are declared in _DEFAULT_SCAN_ROOTS; a "
-                f"caller may not gate a subset of them."
+                f"{missing}. A caller may not gate a subset of them. Fix: run "
+                f"`python3 scripts/check_tag_t3.py` with NO arguments to scan "
+                f"every declared root ({', '.join(_DEFAULT_SCAN_ROOTS)}), or "
+                f"pass all of them explicitly. To change WHAT is gated, edit "
+                f"_DEFAULT_SCAN_ROOTS in this script (#541)."
             )
+
+    # THE DECOY DEFENCE (#543 review, sec-002). An argument-less run whose
+    # roots all resolve OUTSIDE this repo is a wrong checkout or a scratch copy
+    # — and it is exempt from the invariant above by design, because that one
+    # is scoped to in-repo directories. The aggregate census in `main` was
+    # documented as covering this and does not: a 260-file decoy clears a
+    # 250-file floor and exits 0 having gated nothing (measured).
+    #
+    # A property, not a count: the run is argument-less, so it is gating THIS
+    # repo or it is gating nothing. Explicit arguments are untouched — the unit
+    # suite plants `tmp_path` trees and scans them by path, and out-of-repo
+    # fixtures are the whole point of that path.
+    if default_root and not any(p.resolve(strict=False).is_relative_to(_REPO_ROOT) for p in paths):
+        raise EmptyScanRootError(
+            f"an argument-less scan collected {len(paths)} files and NONE of "
+            f"them is inside {_REPO_ROOT} — the default roots resolved to a "
+            f"different tree (a wrong checkout, or a scratch copy). Refusing to "
+            f"report success while gating nothing. Run the gate from the "
+            f"repository root."
+        )
     return paths
 
 
@@ -779,6 +889,19 @@ def main(argv: list[str]) -> int:
 
     Exit 2 is deliberately distinct from 1: a caller must be able to tell
     "the gate failed" from "the gate never gated anything".
+
+    THREE routes to exit 2, all of them "the gate could not run":
+
+    * :class:`EmptyScanRootError` (and its :class:`PartialScanRootError`
+      subclass) — the gate was pointed at nothing, at less than everything,
+      or at a tree that is not this repo;
+    * the aggregate census below;
+    * :class:`GateInternalError` — a detector predicate faulted. #543 review
+      (err-001) found that arriving here as exit 1, so a broken predicate
+      read as "violations found" on files that were clean.
+
+    Exit 1 therefore means what it says: every listed line is a finding in a
+    file, not a fault in the gate.
     """
     try:
         paths = sorted(_collect_paths(argv))
@@ -803,8 +926,15 @@ def main(argv: list[str]) -> int:
         return 2
 
     all_violations: list[str] = []
-    for path in paths:
-        all_violations.extend(_scan_file(path))
+    try:
+        for path in paths:
+            all_violations.extend(_scan_file(path))
+    except GateInternalError as exc:
+        # NOT exit 1. Whatever was collected before the fault is discarded on
+        # purpose: a faulting detector means no file's verdict is trustworthy,
+        # including the ones that came back clean. Exit 2 says exactly that.
+        print(f"check_tag_t3: {exc}", file=sys.stderr)
+        return 2
 
     if all_violations:
         print("check_tag_t3: violations found:", file=sys.stderr)

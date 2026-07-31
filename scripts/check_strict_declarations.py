@@ -47,9 +47,10 @@ target is not a gate.
 Exit codes:
 * 0 — clean (no occurrences in ``src/``)
 * 1 — at least one occurrence (with file:line:content reported), OR
-  ``grep`` itself failed (rc >= 2: unreadable path, encoding issue).
-  We fail closed on the error arm: a silently-skipped lint is the same
-  shape as a SEC-Med-1 regression slipping past CI.
+  ``grep`` itself failed (rc >= 2: unreadable path, encoding issue), OR
+  ``grep`` could not be EXECUTED at all (absent from ``PATH``, not
+  executable). We fail closed on both error arms: a silently-skipped lint
+  is the same shape as a SEC-Med-1 regression slipping past CI.
 """
 
 from __future__ import annotations
@@ -74,13 +75,23 @@ spacing changes.
 def main() -> int:
     """Return 0 if the assignment is absent from ``src/``, 1 otherwise.
 
-    The three exit arms (CR-TR-2 hardening):
+    The FOUR exit arms (CR-TR-2 hardening; the fourth from #543 review,
+    err-003):
 
     * ``rc == 0`` — ``grep`` matched at least one line; a SEC-Med-1
       regression. Print the matches and fail.
     * ``rc == 1`` — ``grep`` matched nothing; the clean path.
     * ``rc >= 2`` — ``grep`` errored (unreadable path, encoding issue,
       etc.). Fail closed so a silently-skipped lint never ships green.
+    * the process never STARTED — ``grep`` absent from ``PATH`` or not
+      executable. ``check=False`` suppresses ``CalledProcessError`` for a
+      non-zero exit; it does nothing about the OS refusing to launch the
+      child, which raises ``OSError`` before any ``returncode`` exists.
+      The docstring used to call the first three exhaustive and reproduction
+      showed a raw ``FileNotFoundError`` traceback escaping instead — the CI
+      job pins ``ubuntu-latest`` where ``grep`` is always present, so the
+      exposure was the local ``make check`` path getting a crash rather than
+      the documented diagnostic.
     """
     # Anchored to the repository root so the check runs the same way
     # from CI (cwd = repo root) and from a dev shell (cwd = anywhere).
@@ -94,12 +105,21 @@ def main() -> int:
     # hard-coded argv (regex literal + repo-resolved src/ path). No untrusted
     # input flows through this subprocess; the security stage's CI is the
     # only caller. The findings are doc-level FPs for this guard.
-    res = subprocess.run(  # noqa: S603
-        ["grep", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        res = subprocess.run(  # noqa: S603
+            ["grep", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        # The launch itself failed — no `returncode` was ever produced, so
+        # none of the three arms below can fire. Caught as the CLASS, not as
+        # `FileNotFoundError`: `PermissionError` (a non-executable `grep` on
+        # PATH) and `NotADirectoryError` reach here too, and enumerating the
+        # ones we thought of is the #518 mistake.
+        print(f"FAIL: grep could not be executed: {exc}", file=sys.stderr)
+        return 1
     if res.returncode == 0:
         # Matches found — a SEC-Med-1 regression.
         print(

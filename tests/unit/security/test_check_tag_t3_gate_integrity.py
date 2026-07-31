@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +53,65 @@ assert check_tag_t3._REPO_ROOT == _REPO_ROOT, (
     f"loaded script computed _REPO_ROOT={check_tag_t3._REPO_ROOT!r}, "
     f"expected {_REPO_ROOT!r} — exemption tests would be inverted"
 )
+
+# THE collection-failure messages — the ones that mean "this file was not
+# gated". Read EAGERLY, at import: an absent constant fails collection of the
+# whole module, which is louder than the AttributeError the previous
+# per-test tuple relied on.
+#
+# ONE tuple, two readers (#543 review, err-002). It used to be written out
+# twice, the second copy listed three of four, and the comment above the first
+# claimed both listed all four — so a regression that spuriously reported an
+# ordinary file as `_UNREADABLE` passed the site named as its backstop.
+# `test_every_collection_failure_message_is_enumerated` keeps the tuple honest
+# against the module rather than against this comment.
+_COLLECTION_FAILURE_MESSAGES: tuple[str, ...] = (
+    check_tag_t3._UNPARSEABLE_MESSAGE,
+    check_tag_t3._UNREADABLE_MESSAGE,
+    check_tag_t3._UNDECODABLE_MESSAGE,
+    check_tag_t3._UNSCANNABLE_MESSAGE,
+    check_tag_t3._UNSCANNABLE_PATH_MESSAGE,
+)
+
+
+def test_every_collection_failure_message_is_enumerated() -> None:
+    """DEFAULT-DENY the enumeration: derive the set, do not restate it.
+
+    An enumeration only closes what it enumerates (#518). Both readers of
+    `_COLLECTION_FAILURE_MESSAGES` are floors that assert a message is ABSENT,
+    so a message missing from the tuple is invisible to both — the exact shape
+    err-002 found live. Deriving the expected set from the module's own
+    `_*_MESSAGE` constants means a SIXTH message reds here on the day it lands
+    instead of quietly widening the blind spot.
+
+    The two exclusions are named, not pattern-matched: `_TAG_T3_MESSAGE`,
+    `_CAST_TAGGED_CONTENT_MESSAGE`, `_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE` and
+    `_TYPE_IGNORE_MESSAGE` are FINDINGS (the file was gated and failed), and
+    `_GATE_INTERNAL_MESSAGE` says the GATE is broken — it never reaches a
+    violation list at all, it travels on `GateInternalError` to exit 2.
+    """
+    findings = {
+        check_tag_t3._TAG_T3_MESSAGE,
+        check_tag_t3._CAST_TAGGED_CONTENT_MESSAGE,
+        check_tag_t3._TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE,
+        check_tag_t3._TYPE_IGNORE_MESSAGE,
+        check_tag_t3._GATE_INTERNAL_MESSAGE,
+    }
+    declared = {
+        value
+        for name, value in vars(check_tag_t3).items()
+        if name.endswith("_MESSAGE") and isinstance(value, str)
+    }
+
+    assert declared - findings == set(_COLLECTION_FAILURE_MESSAGES), (
+        f"the module declares collection-failure messages this tuple does not "
+        f"enumerate: {sorted(declared - findings - set(_COLLECTION_FAILURE_MESSAGES))}. "
+        f"Every floor that asserts one is ABSENT is blind to it until it is added."
+    )
+    assert len(set(_COLLECTION_FAILURE_MESSAGES)) == len(_COLLECTION_FAILURE_MESSAGES), (
+        "two collection-failure messages are the same string — a test for one "
+        "would be satisfied by the other firing"
+    )
 
 
 def test_scan_text_reports_a_violation_without_touching_the_filesystem() -> None:
@@ -141,8 +201,6 @@ def test_a_real_utf8_file_still_scans_normally(tmp_path: Path) -> None:
     violations = check_tag_t3._scan_file(ok)
 
     assert any(check_tag_t3._TAG_T3_MESSAGE in v for v in violations)
-    assert not any(check_tag_t3._UNDECODABLE_MESSAGE in v for v in violations)
-    assert not any(check_tag_t3._UNPARSEABLE_MESSAGE in v for v in violations)
     # test-005, SECOND site. The plan named only the zero-false-positive floor
     # below; this enumeration is the other place a collection-failure message
     # can hide. A reviewer injected the fourth-message regression and this twin
@@ -150,7 +208,19 @@ def test_a_real_utf8_file_still_scans_normally(tmp_path: Path) -> None:
     # unnoticed here. Every enumeration of the collection-failure messages has
     # to move together or the set of them is only as complete as its shortest
     # copy.
-    assert not any(check_tag_t3._UNSCANNABLE_MESSAGE in v for v in violations)
+    #
+    # #543 review (err-002): the floor below carried a comment claiming "both
+    # must list all four" while THIS site listed three — `_UNREADABLE_MESSAGE`
+    # was never checked here, before or after the PR that wrote the comment.
+    # Measured: injecting a spurious `_UNREADABLE_MESSAGE` into `_scan_file`'s
+    # output for an ordinary readable file left this test green. Derived from
+    # the shared tuple now, so the two sites cannot drift again — and the
+    # tuple's own completeness is what `test_every_collection_failure_message_
+    # is_enumerated` asserts against the module.
+    for message in _COLLECTION_FAILURE_MESSAGES:
+        assert not any(message in v for v in violations), (
+            f"an ordinary file was reported with {message!r}"
+        )
 
 
 def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Path) -> None:
@@ -162,8 +232,13 @@ def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Pat
 
     The tuple ENUMERATES the collection-failure messages, so a message missing
     from it is invisible to this floor (test-005): a real file that started
-    failing that way would leave the floor green. The other enumeration lives
-    in ``test_a_real_utf8_file_still_scans_normally``; both must list all four.
+    failing that way would leave the floor green. #543 review (err-002): the
+    two enumeration sites are now ONE shared tuple
+    (``_COLLECTION_FAILURE_MESSAGES``) read by both this floor and
+    ``test_a_real_utf8_file_still_scans_normally``, because the previous
+    comment here claimed both listed all four while the other listed three.
+    ``test_every_collection_failure_message_is_enumerated`` derives the set
+    from the module so the tuple cannot fall behind a new message either.
 
     #541: was ``_collect_paths(["src/alfred"])``. A partial in-repo directory
     scan is now refused at runtime, so this asserts over the production
@@ -182,12 +257,7 @@ def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Pat
        predicate, proving the filter can actually distinguish.
     """
     # Device 1 — eager read. An AttributeError here is the point.
-    collection_failures = (
-        check_tag_t3._UNPARSEABLE_MESSAGE,
-        check_tag_t3._UNREADABLE_MESSAGE,
-        check_tag_t3._UNDECODABLE_MESSAGE,
-        check_tag_t3._UNSCANNABLE_MESSAGE,
-    )
+    collection_failures = _COLLECTION_FAILURE_MESSAGES
 
     def _collection_failures_in(path: Path) -> list[str]:
         return [
@@ -958,7 +1028,23 @@ def test_the_default_scan_really_reaches_both_roots() -> None:
         f"an argument-less scan reached only {sorted(parts)} — the default "
         f"roots are not driving the scan"
     )
-    assert len(collected) >= 300, f"expected the combined census, got {len(collected)}"
+    # #543 review (test-002): this was `>= 300` against a measured 332 — a
+    # 7-file margin over `src/alfred` alone (293), i.e. the identical eroding
+    # margin this PR WITHDREW the `_MIN_SCANNED_FILES` 250->300 raise for,
+    # reproduced inside the test written to replace it. `src/alfred` grew +19
+    # files in 23 days, so it would have stopped discriminating within weeks.
+    #
+    # Margin-free replacement: every declared root must contribute at least
+    # one file. That is the property `>= 300` was proxying for, it cannot be
+    # overtaken by growth in either root, and it is strictly stronger — a
+    # `plugins`-shaped root that emptied would red here and would NOT have red
+    # at 300 once `src/alfred` passed it on its own.
+    for root in check_tag_t3._DEFAULT_SCAN_ROOTS:
+        contributed = [p for p in collected if p.is_relative_to(check_tag_t3._REPO_ROOT / root)]
+        assert contributed, (
+            f"the argument-less scan collected {len(collected)} files and NONE "
+            f"from {root!r} — that root is declared but contributes nothing"
+        )
 
 
 def test_a_partial_in_repo_directory_scan_is_refused_at_runtime() -> None:
@@ -1219,4 +1305,235 @@ def test_a_nul_byte_path_is_reported_not_raised(tmp_path: Path) -> None:
     """
     violations = check_tag_t3._scan_file(tmp_path / "nul\x00name.py")
     assert violations, "an unreadable path must be reported, not silently clean"
-    assert check_tag_t3._UNSCANNABLE_MESSAGE in violations[0]
+    # #543 review (dx-003): the PATH arm has its own message now. Asserting the
+    # CONTENT one here would pass on a regression that routed a path failure
+    # through the parser arm, and vice versa.
+    assert check_tag_t3._UNSCANNABLE_PATH_MESSAGE in violations[0]
+    assert check_tag_t3._UNSCANNABLE_MESSAGE not in violations[0]
+
+
+# ---------------------------------------------------------------------------
+# #543 review, err-001: a fault in the GATE must not read as a finding in the
+# FILE. `_scan_text`'s `except Exception` wrapped the detector predicates too,
+# so an injected AttributeError in `_is_tag_t3_call` reported a completely
+# clean file as an unscannable "violation" at rc=1 — the exit code that means
+# "someone laundered T3", for a file containing no such thing.
+# ---------------------------------------------------------------------------
+
+
+def _clean_source() -> str:
+    """Source with no tag / cast / subscript / type-ignore pattern in it."""
+    return "def hello():\n    return foo(1, 2)\n"
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    ["_is_tag_t3_call", "_is_cast_tagged_content_call", "_is_tagged_content_t3_subscript_call"],
+)
+def test_a_faulting_detector_predicate_raises_instead_of_reporting_a_violation(
+    monkeypatch: pytest.MonkeyPatch, predicate: str
+) -> None:
+    """All THREE predicates, because the fence has to cover all three.
+
+    Parametrised rather than written once against `_is_tag_t3_call`: a fence
+    around one predicate and not its siblings would pass a single-predicate
+    test while leaving two thirds of the detector misfiled.
+    """
+
+    def _buggy(node: ast.Call) -> bool:
+        raise AttributeError(f"simulated internal bug in {predicate}")
+
+    monkeypatch.setattr(check_tag_t3, predicate, _buggy)
+
+    with pytest.raises(
+        check_tag_t3.GateInternalError, match=re.escape("BUG IN check_tag_t3.py")
+    ) as caught:
+        check_tag_t3._scan_text(_clean_source(), Path("src/alfred/totally_clean_file.py"))
+
+    # The ORIGINAL fault must survive, or a maintainer reads "the gate broke"
+    # with no way to find out how.
+    assert isinstance(caught.value.__cause__, AttributeError)
+    assert predicate in str(caught.value.__cause__)
+
+
+def test_a_faulting_detector_exits_two_not_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The end-to-end statement of err-001, at the exit-code contract.
+
+    rc=1 means "violations found" and a caller is entitled to read every line
+    it printed as a real finding. A faulting detector is the OTHER thing —
+    "the gate could not run" — which `main` already spells rc=2 for an empty
+    scan root, and now spells for this.
+
+    Driven through `main` on a real file so the exit contract, not just the
+    exception, is what is pinned.
+    """
+    clean = tmp_path / "ordinary.py"
+    clean.write_text(_clean_source(), encoding="utf-8")
+
+    def _buggy(node: ast.Call) -> bool:
+        raise AttributeError("simulated internal bug")
+
+    monkeypatch.setattr(check_tag_t3, "_is_tag_t3_call", _buggy)
+
+    rc = check_tag_t3.main([str(clean)])
+
+    err = capsys.readouterr().err
+    assert rc == 2, "a gate-internal fault must not report as 'violations found'"
+    assert check_tag_t3._GATE_INTERNAL_MESSAGE in err
+    assert "AttributeError" in err
+    assert check_tag_t3._UNSCANNABLE_MESSAGE not in err, (
+        "the gate defect was still filed as an unscannable FILE — the broad "
+        "arm swallowed GateInternalError, i.e. the handler order regressed"
+    )
+
+
+def test_an_input_fault_is_still_a_violation_and_still_exits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The NEGATIVE twin. Narrowing must not turn #542 back on.
+
+    #542's defect was an input-driven parser fault ABORTING the scan loop, so
+    later files went unscanned while the gate exited 1 naming nothing. The
+    err-001 fix deliberately introduces an abort — for gate faults only — and
+    this is the case that proves it did not leak onto the input path: the
+    pathological file is still reported, the LATER file is still scanned, and
+    the exit code is still 1, not 2.
+    """
+    bad = tmp_path / "aaa_pathological.py"
+    bad.write_text(_ALWAYS_UNSCANNABLE, encoding="utf-8")
+    later = tmp_path / "zzz_violation.py"
+    later.write_text("tag(T3, payload)\n", encoding="utf-8")
+
+    rc = check_tag_t3.main([str(bad), str(later)])
+
+    err = capsys.readouterr().err
+    assert rc == 1, "an input fault must stay 'violations found', not become 'gate broken'"
+    assert check_tag_t3._UNSCANNABLE_MESSAGE in err
+    assert check_tag_t3._TAG_T3_MESSAGE in err, "the later file went unscanned — #542 is back"
+    assert check_tag_t3._GATE_INTERNAL_MESSAGE not in err
+
+
+class _AstWithExplodingWalk:
+    """The real ``ast`` module in every respect EXCEPT ``walk``.
+
+    Substituted for the SCRIPT's own module-global ``ast`` name, never for the
+    stdlib module itself. Patching `check_tag_t3.ast.walk` — i.e. reaching
+    through to the shared stdlib object — was measured to take pytest's own
+    traceback machinery down with it (`_pytest._code.source` calls `ast.walk`
+    while rendering a failure), turning any real failure in this file into an
+    INTERNALERROR that reports nothing. A double must model the real object
+    without becoming it.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(ast, name)
+
+    def walk(self, tree: ast.AST) -> object:
+        raise RecursionError("simulated deep-nesting fault from the walker")
+
+
+def test_the_detector_fence_does_not_swallow_a_walk_level_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ast.walk` stays OUTSIDE the fence: it is input-driven, not a predicate.
+
+    Misfiling a walk-level fault as a gate defect is the same confusion in the
+    other direction — a pathological FILE would report as "check_tag_t3.py is
+    broken" and send the reader to the wrong repository entirely. Widening the
+    fence to cover the walk is a one-line edit and this is what refuses it.
+    """
+    monkeypatch.setattr(check_tag_t3, "ast", _AstWithExplodingWalk())
+
+    violations = check_tag_t3._scan_text(_clean_source(), Path("src/alfred/deep.py"))
+
+    assert any(check_tag_t3._UNSCANNABLE_MESSAGE in v for v in violations), (
+        "a walk-level fault stopped being reported as an unscannable FILE"
+    )
+    assert not any(check_tag_t3._GATE_INTERNAL_MESSAGE in v for v in violations)
+
+
+# ---------------------------------------------------------------------------
+# #543 review, sec-002: a REALISTIC decoy tree. The `_MIN_SCANNED_FILES`
+# comment claimed a wrong checkout was "caught by this floor alone. Measured:
+# 2 files scanned, rc=2" — true at 2 files, and measured FALSE at 260: the
+# floor is 250, a real copy of this repo holds 332 under the two roots, and a
+# decoy of realistic size exited 0 having scanned nothing.
+# ---------------------------------------------------------------------------
+
+
+def _build_decoy_tree(root: Path, files_per_root: int) -> Path:
+    """A tree that LOOKS like this repo: both declared roots, clean content."""
+    for scan_root in check_tag_t3._DEFAULT_SCAN_ROOTS:
+        directory = root / scan_root
+        directory.mkdir(parents=True)
+        for index in range(files_per_root):
+            (directory / f"mod_{index:04d}.py").write_text("x = 1\n", encoding="utf-8")
+    return root
+
+
+def test_a_large_out_of_repo_decoy_tree_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The measured hole: 260 clean files cleared the 250-file census at rc=0.
+
+    Both roots exist and are populated, so the per-directory floor passes;
+    both resolve OUTSIDE this repo, so the root invariant exempts them by
+    design; and the aggregate census only counts. The count was the wrong
+    instrument. `_collect_paths` now asserts the PROPERTY — an argument-less
+    run is gating THIS repo or it is gating nothing.
+
+    Sized deliberately ABOVE `_MIN_SCANNED_FILES` so a regression that deletes
+    the new check cannot be masked by the census firing instead.
+    """
+    decoy = _build_decoy_tree(tmp_path / "wrong-checkout", files_per_root=130)
+    assert 130 * len(check_tag_t3._DEFAULT_SCAN_ROOTS) > check_tag_t3._MIN_SCANNED_FILES, (
+        "the decoy is small enough for the census to catch — the test would "
+        "pass without the check it exists for"
+    )
+    monkeypatch.chdir(decoy)
+
+    with pytest.raises(check_tag_t3.EmptyScanRootError, match="NONE of them is inside"):
+        check_tag_t3._collect_paths([])
+
+    assert check_tag_t3.main([]) == 2
+    err = capsys.readouterr().err
+    assert "NONE of them is inside" in err
+    assert "expected at least" not in err, (
+        "the CENSUS fired, not the repo-root check — this decoy is too small "
+        "to prove anything about the hole sec-002 measured"
+    )
+
+
+def test_the_decoy_check_does_not_red_an_out_of_repo_fixture_scan(tmp_path: Path) -> None:
+    """The exemption the new check must NOT break: explicit arguments.
+
+    The unit suite plants `tmp_path` trees and scans them by path — that is
+    the single-file / fixture path, and holding it to "must be inside this
+    repo" would red every one of those tests while saying nothing about
+    production, which only ever runs argument-less.
+    """
+    fixture = tmp_path / "out_of_repo.py"
+    fixture.write_text("x = 1\n", encoding="utf-8")
+
+    assert check_tag_t3._collect_paths([str(fixture)]) == [fixture]
+    assert check_tag_t3._collect_paths([str(tmp_path)]) == [fixture]
+
+
+def test_a_partial_scan_refusal_names_the_remedy() -> None:
+    """#543 review, dx-001: the message must say what to DO.
+
+    `check_tag_t3.py src/alfred` is the documented pre-#541 usage and the most
+    natural manual invocation; it now exits 2. The old message named what was
+    missing and cited the internal `_DEFAULT_SCAN_ROOTS` symbol, leaving a
+    first-time contributor to read the source to learn that the fix is to drop
+    the argument.
+    """
+    with pytest.raises(check_tag_t3.PartialScanRootError) as caught:
+        check_tag_t3._collect_paths(["src/alfred"])
+
+    message = str(caught.value)
+    assert "with NO arguments" in message, "the message does not state the remedy"
+    for root in check_tag_t3._DEFAULT_SCAN_ROOTS:
+        assert root in message, f"the message does not name the root {root!r} to pass instead"
