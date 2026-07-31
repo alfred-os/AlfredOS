@@ -24,8 +24,12 @@ can delete, swap, or disarm with nothing saying a word:
   take, or it is refused, whatever the fragment is called. A separate check
   refuses any `defaults.run.shell` override at workflow or job level, since
   that changes the failure semantics of every step underneath it (including
-  this one, and — per review — Task 9's planned two-invocations-in-one-step
-  design, which depends on `-e` to stop at the first failure).
+  this one). Review raised it against a planned two-`coverage report`-
+  invocations-in-one-step design that would have DEPENDED on `-e` to stop at
+  the first failure; #543 shipped one gate per step instead, so no gate step
+  depends on `-e` today. The refusal stays — a defence that is currently
+  belt-and-braces is the cheap half of not having to re-derive this when the
+  next multi-command step lands.
 
 **Two oracles per assertion.** Each surface is checked once against the
 parsed/derived view and once against the raw file text. A pin reusing only
@@ -54,7 +58,16 @@ _RUNNER: Path = _REPO_ROOT / "scripts" / "run_coverage_gates.py"
 # Coverage gates that must exist in ci.yml's `python` job BY NAME, as
 # (include-spec, threshold). The count floor catches a net loss; this catches
 # a swap, which keeps the count intact.
-_REQUIRED_COVERAGE_GATES: tuple[tuple[str, int], ...] = (("scripts/check_tag_t3.py", 100),)
+_REQUIRED_COVERAGE_GATES: tuple[tuple[str, int], ...] = (
+    ("scripts/check_tag_t3.py", 100),
+    # #543: the other two gate-enforcing scripts. `run_coverage_gates.py` runs
+    # all 48 per-module gates (#474 is the incident: it was skipping 3 of them,
+    # including the trust boundary); `check_strict_declarations.py` enforces
+    # #119 SEC-Med-1. Both were measured-but-ungated after #537's `--cov=scripts`
+    # widened the dataset without widening the gates.
+    ("scripts/run_coverage_gates.py", 100),
+    ("scripts/check_strict_declarations.py", 100),
+)
 
 # `if:` conditions a gate step may carry, NORMALISED. `steps.check.outputs.has_py`
 # is the `python` job's fail-closed source probe (id `check`, hardened in #517).
@@ -74,7 +87,25 @@ _APPROVED_GATE_CONDITIONS: frozenset[str] = frozenset({"steps.check.outputs.has_
 # anything else, whatever it is called.
 _ALLOWED_GATE_STEP_KEYS: frozenset[str] = frozenset({"name", "if", "run"})
 
-_GATE_STEP_NAMES: tuple[str, ...] = ("check_tag_t3 detector 100% line+branch coverage",)
+# ONE STEP PER GATE, and the order must match `_REQUIRED_COVERAGE_GATES` above.
+#
+# #543's brief proposed a single step holding BOTH new `coverage report`
+# invocations. That shape cannot be pinned by this file without widening
+# `_approved_run_line_patterns` from "the three lines this gate is allowed to be"
+# to a union over several gates — an allow-list that no longer constrains WHICH
+# include pairs with WHICH threshold on a per-line basis. It would also make the
+# step depend on bash's implicit `-e` to stop at the first failing invocation,
+# which is precisely the dependency
+# `test_the_python_job_defaults_do_not_relax_error_handling` below exists to
+# defend. Splitting into one gate per step removes the dependency instead of
+# guarding it, keeps this mapping 1:1, and names the regressing script in the
+# step title. The pin was not weakened to fit the step; the step was shaped to
+# fit the pin.
+_GATE_STEP_NAMES: tuple[str, ...] = (
+    "check_tag_t3 detector 100% line+branch coverage",
+    "run_coverage_gates runner 100% line+branch coverage",
+    "check_strict_declarations guard 100% line+branch coverage",
+)
 
 # Per-step (include, threshold), keyed by the SAME name pinned in _GATE_STEP_NAMES.
 # `zip(..., strict=True)` is deliberate: if a future task extends one tuple without
@@ -268,14 +299,19 @@ def test_the_python_job_defaults_do_not_relax_error_handling(ci_workflow: dict[s
     ``bash --noprofile --norc -eo pipefail {0}`` on ``ubuntu-latest`` — a
     non-zero exit anywhere in the block is fatal. `defaults.run.shell` at
     WORKFLOW or JOB level silently swaps that default for every step
-    underneath it, including this gate. It would not defeat today's single-
-    line-tail step (its `--fail-under=100` line is already last, so its own
-    exit code is the step's exit code regardless of `-e`) — but security
-    review flagged it as defeating Task 9's planned design of chaining two
-    `coverage report` invocations in one `run:` block, where a non-fatal
-    middle failure would be masked by a later success without `-e` to stop
-    execution at the first one. Refuse ANY override rather than trying to
-    classify which replacement shells still fail loud.
+    underneath it, including these gates.
+
+    It defeats no gate step as they stand: every one is a single
+    `coverage report` invocation whose `--fail-under=N` line is last, so the
+    gate's own exit code IS the step's exit code whatever shell runs it.
+    Security review raised it against #543's originally-planned design of
+    chaining two `coverage report` invocations into one `run:` block, where a
+    failing FIRST invocation would be masked by a passing second one with no
+    `-e` to stop execution. #543 shipped one gate per step, which removes that
+    dependency rather than guarding it — but the refusal stays, because the
+    next multi-command step to land would otherwise reintroduce the hole
+    silently. Refuse ANY override rather than trying to classify which
+    replacement shells still fail loud.
     """
     workflow_shell = (ci_workflow.get("defaults") or {}).get("run", {}).get("shell")
     assert workflow_shell is None, (

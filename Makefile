@@ -131,7 +131,7 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 # ──────────────────────────────────────────────────────────────
 # Per-module 100% coverage gates (#474)
 # ──────────────────────────────────────────────────────────────
-# `make check` claimed "identical to CI" while running NONE of CI's 47
+# `make check` claimed "identical to CI" while running NONE of CI's 50
 # per-module `--fail-under=100` gates. That is the rule CLAUDE.md calls hard —
 # every security boundary at 100% line+branch — and locally none of it was
 # enforced. PR #529 passed `make check` and then failed CI's "Gateway kernel
@@ -143,7 +143,7 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 # added to CI is enforced locally the same day.
 #
 # Two datasets, because CI has two gate-bearing jobs and they are NOT
-# interchangeable: the `python` job's 26 gates read unit-only coverage, and the
+# interchangeable: the `python` job's 28 gates read unit-only coverage, and the
 # `coverage-gates` job's 22 read combined unit+integration. Running a combined
 # gate against unit-only data reports false failures, so each target builds the
 # dataset its gates expect.
@@ -151,8 +151,8 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates read.
 	uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report= --cov-fail-under=0
 
-coverage-gates-unit: coverage-unit ## Run the 26 unit-tier 100% gates from ci.yml.
-	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 26
+coverage-gates-unit: coverage-unit ## Run the 28 unit-tier 100% gates from ci.yml.
+	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 28
 
 # ORDER IS LOAD-BEARING: the unit gates must read unit-ONLY data. Combined data
 # is a superset, so running them after the integration append would let a module
@@ -242,7 +242,7 @@ tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(Tagge
 # `check` runs the gates CI runs that are reproducible on a dev box. It is NOT
 # the whole of CI: the arm64/WSL/Windows legs, the privileged bwrap legs, the
 # adversarial suite and CodeQL live only in CI. It previously claimed to be
-# "identical to CI" while running NONE of the 48 per-module 100% coverage
+# "identical to CI" while running NONE of the 50 per-module 100% coverage
 # gates (#474) — an overclaim that cost a CI round-trip on PR #529.
 check: format-check lint-check typecheck strict-declarations-lint tag-t3-check i18n-check coverage-gates ## Verify what CI verifies locally (see comment). No mutations.
 

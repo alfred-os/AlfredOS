@@ -208,7 +208,54 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src/alfred"]
-omit = ["src/alfred/memory/migrations/*"]
+omit = [
+    "src/alfred/memory/migrations/*",
+    # #543. `--cov=scripts` (added by #537 so check_tag_t3.py could carry a 100%
+    # gate) pulled all seven scripts/ files into the measurement. Three are gated
+    # at 100% in ci.yml's `python` job; these four are not gate-enforcing code
+    # and are omitted rather than left to inflate the whole-tree floor at 0%.
+    #
+    # Measured 2026-07-30 on the full unit dataset:
+    #
+    #   docs_check.py             27% — docs link/anchor checker; a failure is a
+    #                                   broken doc link, not an unenforced gate.
+    #   gen_alfred_seccomp.py     37% — one-shot generator whose output is
+    #                                   committed and reviewed on its merits.
+    #   quarantine_spawn_probe.py  0% — operator diagnostic, never on a gate
+    #                                   path; nothing in CI depends on it.
+    #   validate_devin_wiki.py    94% — exercised end-to-end by
+    #                                   tests/unit/test_devin_wiki_validator.py.
+    #                                   This is the real trade: at 94% it has
+    #                                   genuine coverage today, so omitting it
+    #                                   means a regression to 20% goes unseen.
+    #                                   Omitted rather than ratcheted because a
+    #                                   non-100 threshold is a different kind of
+    #                                   promise than #543 asks for. The census
+    #                                   accepts a gate at ANY threshold, so
+    #                                   ratcheting it later needs only a ci.yml
+    #                                   step.
+    #
+    # This list is an ALLOW-LIST, not a snapshot:
+    # tests/unit/meta/test_scripts_coverage_census.py fails when a scripts/ file
+    # is neither gated nor named here, so a new script cannot silently join the
+    # 75% floor at 0% (#423 — gate on the allow-list, not the calendar).
+    "scripts/docs_check.py",
+    "scripts/gen_alfred_seccomp.py",
+    "scripts/quarantine_spawn_probe.py",
+    "scripts/validate_devin_wiki.py",
+    # Vendored third-party code under scripts/vendor/. The census filters it out
+    # of the MEASURED set, but nothing stopped `--cov=scripts` measuring it — so
+    # a vendored file would drag the whole-tree floor with no owner and no gate.
+    # Excluded at source rather than only in the test.
+    #
+    # `**`, not `*`, is written deliberately even though coverage's own matcher
+    # makes them equivalent here: measured against the installed coverage,
+    # `GlobMatcher(["scripts/vendor/*"])` DOES match `scripts/vendor/pkg/mod.py`
+    # (its `*` crosses separators, unlike fnmatch). `**` states the any-depth
+    # intent in the pattern instead of relying on that, and matches the census's
+    # own any-depth exclusion so the two sides describe the same set.
+    "scripts/vendor/**",
+]
 
 [tool.coverage.report]
 show_missing = true
