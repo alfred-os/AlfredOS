@@ -127,6 +127,13 @@ def test_every_collection_failure_message_is_enumerated() -> None:
     `_*_MESSAGE` constants means a SIXTH message reds here on the day it lands
     instead of quietly widening the blind spot.
 
+    Scope, since #546 added a sibling naming class (#549 review, rev-002): the
+    derivation keys on the `_MESSAGE` suffix, so `_NOT_A_REGULAR_FILE_REASON`
+    is deliberately outside it — a REASON is the second line under a message,
+    not a sixth message. Anything that is genuinely a new collection-failure
+    MESSAGE must carry the `_MESSAGE` suffix to be seen here; naming one
+    `_REASON` to dodge this test would defeat it silently.
+
     The two exclusions are named, not pattern-matched: `_TAG_T3_MESSAGE`,
     `_CAST_TAGGED_CONTENT_MESSAGE`, `_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE` and
     `_TYPE_IGNORE_MESSAGE` are FINDINGS (the file was gated and failed), and
@@ -435,6 +442,46 @@ def test_a_real_out_of_repo_tmp_path_fixture_is_still_exempt(tmp_path: Path) -> 
 
     assert check_tag_t3._is_exempt(fixture) is True
     assert check_tag_t3._scan_file(fixture) == []
+
+
+@_NEEDS_SYMLINKS
+def test_a_symlink_to_a_regular_file_is_scanned_not_refused(tmp_path: Path) -> None:
+    """The non-regular-file guard must FOLLOW symlinks (#549 review, sec-004).
+
+    `stat()` follows; `lstat()` does not, and a symlink's own `st_mode` is
+    `S_IFLNK`, never `S_IFREG`. So `path.lstat()` would refuse every symlinked
+    source file as "not a regular file" — reporting it unreadable instead of
+    reading its contents, and silently un-gating whatever it points at.
+
+    That mutant SURVIVED all 68 tests in this file. The existing symlink cases
+    assert only that `_scan_file(link)` returns SOMETHING truthy, which a
+    refusal message satisfies just as well as a finding does — so nothing
+    distinguished "scanned the target" from "declined to open the link". This
+    repo has fought the symlink surface repeatedly (#537 bypass 3, #540), and
+    under `lstat` the gate would exit 1 on a symlinked violation for the wrong
+    reason, inviting a maintainer to "fix" it with an exemption.
+
+    Asserts the T3 FINDING specifically, and asserts no collection-failure
+    message is present — the two halves are what make it a scan rather than a
+    refusal.
+    """
+    target = tmp_path / "real_source.py"
+    target.write_text(
+        "from alfred.security.tiers import tag, T3\nx = tag(T3, 'laundered')\n", encoding="utf-8"
+    )
+    link = tmp_path / "via_link.py"
+    link.symlink_to(target)
+
+    violations = check_tag_t3._scan_file(link)
+
+    assert any(check_tag_t3._TAG_T3_MESSAGE in v for v in violations), (
+        f"the symlink's TARGET was never scanned — the guard is not following "
+        f"symlinks, so a symlinked source file is refused rather than gated; "
+        f"got {violations}"
+    )
+    assert not any(msg in v for v in violations for msg in _COLLECTION_FAILURE_MESSAGES), (
+        f"the link was reported as unreadable instead of scanned; got {violations}"
+    )
 
 
 def test_a_directory_literally_named_tests_is_still_exempt() -> None:
@@ -795,7 +842,14 @@ def test_is_exempt_returns_false_for_an_unresolvable_path() -> None:
 
 
 def test_unreadable_path_is_a_violation(tmp_path: Path) -> None:
-    """The OSError arm of _scan_file — reading a directory as a file."""
+    """The OSError arm of _scan_file, reached via a directory.
+
+    It used to reach that arm by letting `read_text` raise `IsADirectoryError`.
+    Since #546 the `S_ISREG` guard refuses the directory FIRST and raises into
+    the same arm, so the arm and the message are unchanged but the route is
+    not — keeping the old wording would describe a path the code no longer
+    takes (#549 review, doc-002).
+    """
     a_directory = tmp_path / "not_a_file.py"
     a_directory.mkdir()
 
@@ -827,11 +881,23 @@ def _scan_file_within_deadline(path: Path, timeout: float = 10.0) -> list[str]:
     holds interpreter exit, and the deadline is generous relative to the work
     (a real scan of one file is sub-millisecond) so it cannot flake on a
     loaded runner.
+
+    A worker that RAISES is reported WITH its exception (#549 review, test-003).
+    The first version asserted only that ``result`` was non-empty, so a
+    ``_scan_file`` that raised failed with a message naming nothing and the
+    actual cause was lost — a diagnosis gap in the helper every other case here
+    depends on.
     """
     result: list[list[str]] = []
-    worker = threading.Thread(
-        target=lambda: result.append(check_tag_t3._scan_file(path)), daemon=True
-    )
+    failure: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.append(check_tag_t3._scan_file(path))
+        except BaseException as exc:  # surfaced on the main thread below
+            failure.append(exc)
+
+    worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     worker.join(timeout)
 
@@ -839,7 +905,9 @@ def _scan_file_within_deadline(path: Path, timeout: float = 10.0) -> list[str]:
         f"_scan_file blocked on {path.name} — the gate hangs until its CI job "
         f"timeout and reports nothing"
     )
-    assert result, "the worker returned no result"
+    if failure:
+        raise AssertionError(f"_scan_file raised on {path.name}: {failure[0]!r}") from failure[0]
+    assert result, "the worker neither returned nor raised"
     return result[0]
 
 

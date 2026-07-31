@@ -97,7 +97,7 @@ lefthook install
 
 **Lefthook runs (no Docker needed):** `ruff format --check`, `ruff check`, `mypy --strict`, `pyright`, `pytest tests/unit -q`.
 
-**CI also runs (require Docker / fuller scope):** `pytest tests/integration` against testcontainers Postgres, plus the `i18n catalog drift` gate (required since 2026-06-24) and the `tag(T3)` grep gate.
+**CI also runs (require Docker / fuller scope):** `pytest tests/integration` against testcontainers Postgres, plus the `i18n catalog drift` gate (required since 2026-06-24), the `tag(T3)` grep gate, and the `strict_declarations lint` gate (required since 2026-07-31).
 
 So lefthook ≠ CI: lefthook catches the fast failures locally; CI is the source of truth. Don't habituate to `LEFTHOOK=0` — the local gate exists for a reason. CLAUDE.md hard rule #8 (no hook-bypass via `--no-verify`) applies in spirit here.
 
@@ -112,6 +112,10 @@ Every PR to `main` runs required status gates. See [`docs/ci/required-checks.md`
 - `Pytest` — `tests/unit tests/integration -q` (smoke and adversarial run on a separate schedule)
 - `tag(T3) grep gate` — `scripts/check_tag_t3.py`, CLAUDE.md hard rule #3
 - `i18n catalog drift` — `pybabel extract`/`update --check`/`compile`, hard rule #4
+- `strict_declarations lint` — `scripts/check_strict_declarations.py`, #119 SEC-Med-1. Required
+  since 2026-07-31 ([#544](https://github.com/alfred-os/AlfredOS/issues/544)). Until #543 wired
+  it into this workflow it ran in **no** CI job at all — its own docstring claimed `make check`
+  covered it, and no workflow runs `make check`.
 
 All are FAIL-CLOSED as of [#514](https://github.com/alfred-os/AlfredOS/issues/514): the source
 probe exits 1 rather than skipping, because a probe finding nothing means the probe broke. They

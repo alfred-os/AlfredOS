@@ -790,6 +790,19 @@ def _git_tracked_python_files(directory: Path) -> list[Path] | None:
     # --cached also lists index entries whose working-tree file is gone (a
     # deletion that has not been staged). Those cannot contain a violation, and
     # reporting them as unreadable would be noise rather than a finding.
+    #
+    # `is_file()` is S_ISREG-following-symlinks, so this ALSO drops a tracked
+    # path whose working-tree entry has become non-regular — the shape
+    # `_scan_file` now refuses LOUDLY (#546). The asymmetry is deliberate and
+    # narrow (#549 review, sec-001): git cannot store a FIFO, so the only way
+    # to reach it is a local working tree where someone replaced a tracked file
+    # with one, and this arm cannot tell that apart from the staged-deletion
+    # case it exists for — both present as "in the index, not a regular file
+    # on disk". Refusing here would fail the gate on an ordinary unstaged
+    # deletion, which is a far more common state than a hand-planted FIFO.
+    # A file swapped for a FIFO is therefore silently unscanned on this path
+    # and reported on the other two; the census in `main` is what notices if
+    # enough of them disappear.
     return [p for n in names if n.endswith(".py") if (p := _REPO_ROOT / n).is_file()]
 
 
