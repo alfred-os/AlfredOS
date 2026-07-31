@@ -578,6 +578,14 @@ def _scan_text(text: str, path: Path) -> list[str]:
         # sys.setrecursionlimit. CI uses ``uv python install 3.14``, so
         # RecursionError is live there even when a dev box never sees it.
         #
+        # CONSEQUENCE FOR FUTURE TESTS (#545): "CPython 3.14.6" does not name
+        # an environment. A test that asserts a SPECIFIC exception type out of
+        # ``ast.parse`` is asserting a property of the BUILD, so it passes on
+        # one runner and fails on another for reasons no version pin explains.
+        # Assert the reported OUTCOME (a violation, this arm's message) rather
+        # than the exception class, or skip on the builds where the input does
+        # not trip the guard.
+        #
         # Uncaught, these escaped ``_scan_text``, escaped ``main``, and killed
         # the process with a traceback — exit 1, the code that means
         # "violations found", for a file that was never scanned. Worse, they
