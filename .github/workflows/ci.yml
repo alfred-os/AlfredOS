@@ -174,10 +174,13 @@ jobs:
       - name: run_coverage_gates runner 100% line+branch coverage
         # #543: #537's `--cov=scripts` pulled all seven scripts into the coverage
         # dataset and gated exactly ONE (the step above). This script is itself
-        # gate-enforcing — it runs all 48 per-module gates — so a bug in it
+        # gate-enforcing — it runs all 50 per-module gates (28 in this `python`
+        # job plus 22 in `coverage-gates`; re-measured from `_iter_gates`
+        # against the ci.yml this comment ships in, because the two gate steps
+        # BELOW AND ABOVE this line are two of the 50) — so a bug in it
         # silently un-enforces every one of them. That is not hypothetical: #474
-        # exists because this runner was skipping 3 of 48, including the
-        # `src/alfred/security/*` trust-boundary gate. Measured 50%.
+        # exists because this runner was skipping 3 of the 48 that existed then,
+        # including the `src/alfred/security/*` trust-boundary gate. Measured 50%.
         #
         # ONE GATE PER STEP, deliberately, rather than chaining this and the
         # check_strict_declarations gate into a single `run:` block:
