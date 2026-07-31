@@ -60,8 +60,10 @@ its own; see :func:`_collect_paths` for the split.
 from __future__ import annotations
 
 import ast
+import errno
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -120,6 +122,13 @@ _UNSCANNABLE_PATH_MESSAGE: str = (
     "file could not be scanned — the reader failed on its PATH, before any "
     "content was read. Fix the path."
 )
+
+# The REASON line under `_UNREADABLE_MESSAGE` for a non-regular file (#546),
+# where every other cause supplies the OS's own `strerror`. Deliberately NOT
+# named `*_MESSAGE`: `test_every_collection_failure_message_is_enumerated`
+# derives the collection-failure set from names with that suffix, and this is
+# a reason under an existing message, not a sixth message.
+_NOT_A_REGULAR_FILE_REASON: str = "not a regular file"
 
 # NOT a collection-failure message: this one says the GATE is broken, not the
 # file (#543 review, err-001). It travels on :class:`GateInternalError`, which
@@ -613,6 +622,32 @@ def _scan_file(path: Path) -> list[str]:
     if _is_exempt(path):
         return []
     try:
+        # #546. `open()` on a FIFO for reading BLOCKS until a writer arrives,
+        # and nothing here ever writes — so `read_text` on a FIFO named `*.py`
+        # never returns and the gate hangs until CI kills the job, reporting
+        # no diagnosis at all. Measured at exit 124 on both paths that reach
+        # here: an explicit file argument, and the `rglob` traversal fallback
+        # past the census floor. A character device (`/dev/zero`) is the same
+        # shape with a different ending — an unbounded read instead of a
+        # blocked one.
+        #
+        # DEFAULT-DENY the class, not the two shapes we thought of (#518): a
+        # regular file is the only thing this gate can scan, so everything
+        # else is refused by construction. `stat()` does not open the path, so
+        # it cannot block on the very FIFO it is classifying — probed, not
+        # assumed.
+        #
+        # Raised into the arm below rather than returned separately, and that
+        # is deliberate on TWO counts. It is genuinely the same fault the arm
+        # already reports — a path the reader cannot open — so it must give
+        # the operator the same message. And a separate `return` would strand
+        # `read_text`'s own OSError arm: a directory (its only portable
+        # trigger, and what `test_unreadable_path_is_a_violation` uses) would
+        # stop reaching it, leaving EACCES as the sole cover — untriggerable
+        # on the root runners, which reds the required 100% branch gate on
+        # this file. One funnel keeps both sides of the new branch covered.
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise OSError(errno.EINVAL, _NOT_A_REGULAR_FILE_REASON)
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return [f"{path}:1: {_UNDECODABLE_MESSAGE}", "  <undecodable>"]
