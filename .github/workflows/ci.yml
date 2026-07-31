@@ -171,6 +171,51 @@ jobs:
           uv run coverage report \
             --include='scripts/check_tag_t3.py' \
             --fail-under=100
+      - name: run_coverage_gates runner 100% line+branch coverage
+        # #543: #537's `--cov=scripts` pulled all seven scripts into the coverage
+        # dataset and gated exactly ONE (the step above). This script is itself
+        # gate-enforcing — it runs all 48 per-module gates — so a bug in it
+        # silently un-enforces every one of them. That is not hypothetical: #474
+        # exists because this runner was skipping 3 of 48, including the
+        # `src/alfred/security/*` trust-boundary gate. Measured 50%.
+        #
+        # ONE GATE PER STEP, deliberately, rather than chaining this and the
+        # check_strict_declarations gate into a single `run:` block:
+        #
+        #   * a failure names the script that regressed, from the step name
+        #     alone, without opening the log;
+        #   * two `coverage report` invocations in one block would depend on
+        #     bash's implicit `-e` to stop at the first failure — a dependency
+        #     tests/unit/meta/test_gate_surfaces_are_pinned.py then has to
+        #     defend, since any `defaults.run.shell` override at workflow or job
+        #     level silently removes it. One invocation per step means the gate's
+        #     own exit code IS the step's exit code, whatever shell runs it;
+        #   * that same pin default-denies each gate step's `run:` content
+        #     against a per-step (include, threshold) allow-list. One gate per
+        #     step keeps that 1:1 and needs no widening of the allowed shapes.
+        if: steps.check.outputs.has_py == 'true'
+        run: |
+          uv run coverage report \
+            --include='scripts/run_coverage_gates.py' \
+            --fail-under=100
+      - name: check_strict_declarations guard 100% line+branch coverage
+        # #543: this script enforces #119 SEC-Med-1 —
+        # `HookRegistry(strict_declarations=False)` must not appear in src/ —
+        # and was measured at 0%. Until earlier in this same PR gave it a
+        # `strict-declarations-lint` job in pr-validate-python.yml it ran in no
+        # CI job at all, so gating its coverage first would have been the deeper
+        # paper gate: proving the tests of a guard that never executes.
+        #
+        # The remaining four scripts/ files are explicitly omitted in
+        # pyproject.toml with per-file reasons and measured percentages, and
+        # tests/unit/meta/test_scripts_coverage_census.py fails if a scripts/
+        # file appears that is neither gated here nor omitted there (#423 — gate
+        # on the allow-list, not the calendar).
+        if: steps.check.outputs.has_py == 'true'
+        run: |
+          uv run coverage report \
+            --include='scripts/check_strict_declarations.py' \
+            --fail-under=100
       - name: Hooks subsystem 100% line+branch coverage
         # Slice 2.5 PR-A's ``src/alfred/hooks/`` is a trust boundary in its
         # own right — the capability gate (sec-007), the re-entry bypass

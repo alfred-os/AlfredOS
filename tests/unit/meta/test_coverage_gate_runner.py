@@ -42,7 +42,11 @@ _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 # `scripts/run_coverage_gates.py` is invoked by no workflow (verified), so the
 # `--min-gates` argument is a local-only signal. The CI teeth are here, inside
 # the required `Python (lint, types, unit)` check.
-_MIN_UNIT_GATES = 26
+# 2026-07-30, later in the same PR: #543 added two more unit-tier gates
+# (scripts/run_coverage_gates.py, scripts/check_strict_declarations.py), so the
+# `python` job's count moved 26 -> 28. Derived, not stated: `_iter_gates` over
+# ci.yml reports 28 / 22. The combined job is untouched.
+_MIN_UNIT_GATES = 28
 _MIN_COMBINED_GATES = 22
 
 
