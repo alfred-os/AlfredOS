@@ -645,6 +645,16 @@ def _scan_file(path: Path) -> list[str]:
         # it cannot block on the very FIFO it is classifying — probed, not
         # assumed.
         #
+        # WHAT THIS GUARD CANNOT DO: `stat` and `open` are two syscalls, so a
+        # path swapped between them is still read as whatever it became. That
+        # residual is accepted rather than closed. It needs write access to
+        # the tree mid-scan (which already defeats a gate that reads the tree
+        # it is gating), and its worst outcome is the ORIGINAL hang, not a
+        # missed T3 violation — the security property this file exists for is
+        # unaffected either way. Closing it would mean opening with
+        # `O_NONBLOCK` and re-checking the fd, which is POSIX-only and would
+        # red the Windows unit leg for no gain in the property that matters.
+        #
         # Raised into the arm below rather than returned separately, and that
         # is deliberate on TWO counts. It is genuinely the same fault the arm
         # already reports — a path the reader cannot open — so it must give
