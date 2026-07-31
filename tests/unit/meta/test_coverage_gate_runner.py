@@ -14,14 +14,13 @@ They fail loudly if the workflow's shape drifts away from what the runner parses
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
-import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _RUNNER = _REPO_ROOT / "scripts" / "run_coverage_gates.py"
@@ -49,18 +48,11 @@ _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _MIN_UNIT_GATES = 28
 _MIN_COMBINED_GATES = 22
 
-
-def _load_runner() -> Any:
-    spec = importlib.util.spec_from_file_location("run_coverage_gates", _RUNNER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.fixture(scope="module")
-def workflow() -> dict[str, Any]:
-    return yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+# `runner`, `ci_workflow` and `ci_workflow_raw` come from
+# `tests/unit/meta/conftest.py` (#543 review, rev-002). The loader and the
+# yaml fixture were byte-identical here and in
+# `test_gate_surfaces_are_pinned.py`; CLAUDE.md says refactor on the second
+# duplication, and this was the second.
 
 
 def test_the_runner_script_exists() -> None:
@@ -73,15 +65,14 @@ def test_the_runner_script_exists() -> None:
     [("python", _MIN_UNIT_GATES), ("coverage-gates", _MIN_COMBINED_GATES)],
 )
 def test_runner_still_finds_the_gates_in_each_ci_job(
-    workflow: dict[str, Any], job_id: str, minimum: int
+    runner: ModuleType, ci_workflow: dict[str, Any], job_id: str, minimum: int
 ) -> None:
     """THE non-vacuity case: the parser must still see CI's gates.
 
     If the workflow starts writing its coverage steps differently, this fails here
     rather than letting `make check` pass while enforcing nothing.
     """
-    runner = _load_runner()
-    gates = runner._iter_gates(workflow, job_id)
+    gates = runner._iter_gates(ci_workflow, job_id)
     assert len(gates) >= minimum, (
         f"runner extracted only {len(gates)} gates from ci.yml job {job_id!r} "
         f"(floor {minimum}). The workflow's gate shape likely changed, so "
@@ -90,13 +81,12 @@ def test_runner_still_finds_the_gates_in_each_ci_job(
 
 
 def test_every_extracted_gate_has_a_threshold_and_real_paths(
-    workflow: dict[str, Any],
+    runner: ModuleType, ci_workflow: dict[str, Any]
 ) -> None:
     """A gate that parsed but points nowhere would run vacuously and pass."""
-    runner = _load_runner()
     gates = [
-        *runner._iter_gates(workflow, "python"),
-        *runner._iter_gates(workflow, "coverage-gates"),
+        *runner._iter_gates(ci_workflow, "python"),
+        *runner._iter_gates(ci_workflow, "coverage-gates"),
     ]
     for gate in gates:
         assert gate.threshold > 0, f"{gate.name}: non-positive threshold"
@@ -111,7 +101,7 @@ def test_every_extracted_gate_has_a_threshold_and_real_paths(
             )
 
 
-def test_the_makefile_floors_match_the_ones_pinned_here(workflow: dict[str, Any]) -> None:
+def test_the_makefile_floors_match_the_ones_pinned_here() -> None:
     """The Makefile's --min-gates values are the runtime half of this guard.
 
     Pinning them in both places is deliberate: this test would still pass if
@@ -129,7 +119,7 @@ def test_the_makefile_floors_match_the_ones_pinned_here(workflow: dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def test_a_glob_bearing_gate_is_not_treated_as_absent() -> None:
+def test_a_glob_bearing_gate_is_not_treated_as_absent(runner: ModuleType) -> None:
     """``--include='src/alfred/security/*'`` must RUN, not skip.
 
     ``Path("src/alfred/security/*").exists()`` is False — there is no file literally
@@ -141,8 +131,6 @@ def test_a_glob_bearing_gate_is_not_treated_as_absent() -> None:
     A silent skip inside the fix for silent skips. Pinned in both directions so neither
     the glob branch nor the literal branch can regress.
     """
-    runner = _load_runner()
-
     assert runner._gate_target_present("src/alfred/security/*"), (
         "a glob matching real files is being reported as absent — the gate would skip "
         "and report PASS without ever running"
@@ -156,7 +144,9 @@ def test_a_glob_bearing_gate_is_not_treated_as_absent() -> None:
     )
 
 
-def test_a_gate_without_its_own_include_does_not_inherit_the_previous_one() -> None:
+def test_a_gate_without_its_own_include_does_not_inherit_the_previous_one(
+    runner: ModuleType,
+) -> None:
     """Each gate's ``--include`` must come from its OWN command, not an earlier one.
 
     The scan searched from the start of the ``run:`` block, so a second
@@ -164,7 +154,6 @@ def test_a_gate_without_its_own_include_does_not_inherit_the_previous_one() -> N
     PREVIOUS gate's include and silently measured the wrong module — passing or failing
     on a file it was never meant to check.
     """
-    runner = _load_runner()
     block = (
         "uv run coverage report --include='src/alfred/a.py' --fail-under=100 "
         "&& uv run coverage report --fail-under=75"
@@ -178,13 +167,14 @@ def test_a_gate_without_its_own_include_does_not_inherit_the_previous_one() -> N
     )
 
 
-def test_two_gates_in_one_block_are_both_found_when_each_has_an_include() -> None:
+def test_two_gates_in_one_block_are_both_found_when_each_has_an_include(
+    runner: ModuleType,
+) -> None:
     """The vacuity floor for the fix above: it must not drop legitimate gates.
 
     Narrowing the scan window could easily have made a multi-gate ``run:`` block yield
     only its first gate — which is how the runner ends up gating less than it claims.
     """
-    runner = _load_runner()
     block = (
         "uv run coverage report --include='src/alfred/a.py' --fail-under=100 "
         "&& uv run coverage report --include='src/alfred/b.py' --fail-under=90"
@@ -199,15 +189,17 @@ def test_two_gates_in_one_block_are_both_found_when_each_has_an_include() -> Non
     ]
 
 
-def test_every_real_ci_gate_target_is_present_in_this_tree() -> None:
+def test_every_real_ci_gate_target_is_present_in_this_tree(
+    runner: ModuleType, ci_workflow: dict[str, Any]
+) -> None:
     """No CI gate may silently skip when run locally against a full checkout.
 
     The end-to-end statement of the two bugs above: if any gate's targets read as
     absent here, ``make check`` reports it green having measured nothing.
     """
-    runner = _load_runner()
-    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
-    gates = runner._iter_gates(workflow, "python") + runner._iter_gates(workflow, "coverage-gates")
+    gates = runner._iter_gates(ci_workflow, "python") + runner._iter_gates(
+        ci_workflow, "coverage-gates"
+    )
     assert gates, "no gates parsed — the assertion below would be vacuous"
 
     absent = [g.include for g in gates if not any(runner._gate_target_present(p) for p in g.paths)]
@@ -220,50 +212,50 @@ def test_every_real_ci_gate_target_is_present_in_this_tree() -> None:
 #
 # `_run_gate` and `main` — the halves that decide whether a gate RUNS and
 # whether the run FAILS — had no coverage at all. A bug in either silently
-# un-enforces all 48 per-module gates, which is not hypothetical: #474 exists
-# because this runner was skipping 3 of 48, including the trust-boundary
+# un-enforces all 50 per-module gates (28 in ci.yml's `python` job + 22 in
+# `coverage-gates`, re-measured from `_iter_gates` against the ci.yml THIS PR
+# ships — the count moved 48 -> 50 when #543 added its own two gate steps).
+# That is not hypothetical: #474 exists because this runner was skipping 3 of
+# the 48 that existed then, including the trust-boundary
 # `src/alfred/security/*` gate.
 # ---------------------------------------------------------------------------
 
 
-def test_a_non_dict_step_is_skipped_rather_than_crashing() -> None:
+def test_a_non_dict_step_is_skipped_rather_than_crashing(runner: ModuleType) -> None:
     """A `steps:` entry that is not a mapping must not break extraction.
 
     YAML permits a bare string or null in a sequence, and `_iter_gates`
     guards with `if not isinstance(step, dict): continue`. Nothing exercised
     that line, leaving the file at 98% and the #543 gate red on its own PR.
     """
-    module = _load_runner()
     workflow = {"jobs": {"python": {"steps": [None, "a bare string", {"run": "echo hi"}]}}}
 
-    assert module._iter_gates(workflow, "python") == []
+    assert runner._iter_gates(workflow, "python") == []
 
 
-def test_a_gate_whose_files_are_all_absent_is_skipped_without_running() -> None:
+def test_a_gate_whose_files_are_all_absent_is_skipped_without_running(
+    runner: ModuleType,
+) -> None:
     """`_run_gate` must not shell out for a gate with nothing to measure."""
-    module = _load_runner()
-
-    passed, output = module._run_gate(
-        module.Gate(name="ghost", include="src/alfred/does_not_exist.py", threshold=100)
+    passed, output = runner._run_gate(
+        runner.Gate(name="ghost", include="src/alfred/does_not_exist.py", threshold=100)
     )
 
     assert passed is True
     assert "skipped" in output
 
 
-def test_a_glob_that_matches_nothing_is_treated_as_absent() -> None:
+def test_a_glob_that_matches_nothing_is_treated_as_absent(runner: ModuleType) -> None:
     """The other arm of `_gate_target_present`: a glob with no matches."""
-    module = _load_runner()
-
-    assert module._gate_target_present("src/alfred/no_such_dir_*/*.py") is False
-    assert module._gate_target_present("src/alfred/security/*") is True
+    assert runner._gate_target_present("src/alfred/no_such_dir_*/*.py") is False
+    assert runner._gate_target_present("src/alfred/security/*") is True
 
 
 @pytest.mark.parametrize(
     ("child_rc", "expect_pass"), [(0, 1), (1, 0)], ids=["child-ok", "child-fails"]
 )
 def test_a_gate_that_shells_out_reports_the_child_verdict(
-    monkeypatch: pytest.MonkeyPatch, child_rc: int, expect_pass: int
+    runner: ModuleType, monkeypatch: pytest.MonkeyPatch, child_rc: int, expect_pass: int
 ) -> None:
     """`_run_gate` passes/fails on the child's returncode and keeps its output.
 
@@ -275,17 +267,16 @@ def test_a_gate_that_shells_out_reports_the_child_verdict(
     Parametrised on ints, not bools — ruff FBT001 forbids boolean positional
     parameters and it applies to tests/.
     """
-    module = _load_runner()
-    gate = module.Gate(name="real", include="scripts/run_coverage_gates.py", threshold=100)
+    gate = runner.Gate(name="real", include="scripts/run_coverage_gates.py", threshold=100)
     seen: list[list[str]] = []
 
     def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
         return subprocess.CompletedProcess(argv, child_rc, "TOTAL 42%\n", "boom\n")
 
-    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(runner.subprocess, "run", _fake_run)
 
-    passed, output = module._run_gate(gate)
+    passed, output = runner._run_gate(gate)
 
     assert passed is bool(expect_pass)
     assert "TOTAL 42%" in output
@@ -295,19 +286,21 @@ def test_a_gate_that_shells_out_reports_the_child_verdict(
 
 
 def test_main_refuses_when_the_workflow_is_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """No ci.yml — exit 2, not a green no-op."""
-    module = _load_runner()
-    monkeypatch.setattr(module, "_CI_WORKFLOW", tmp_path / "absent.yml")
+    monkeypatch.setattr(runner, "_CI_WORKFLOW", tmp_path / "absent.yml")
     monkeypatch.setattr(sys, "argv", ["run_coverage_gates.py", "--job", "python"])
 
-    assert module.main() == 2
+    assert runner.main() == 2
     assert "not found" in capsys.readouterr().err
 
 
 def test_main_refuses_when_too_few_gates_were_extracted(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    runner: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The #245 non-vacuity floor: gating nothing must exit 2, not 0.
 
@@ -317,29 +310,26 @@ def test_main_refuses_when_too_few_gates_were_extracted(
     missing-file reason, i.e. pass while never reaching the floor at all. The
     stderr assertion distinguishes the two, and this pin removes the ambiguity.
     """
-    module = _load_runner()
-    monkeypatch.setattr(module, "_CI_WORKFLOW", _CI_WORKFLOW)
+    monkeypatch.setattr(runner, "_CI_WORKFLOW", _CI_WORKFLOW)
     monkeypatch.setattr(
         sys, "argv", ["run_coverage_gates.py", "--job", "python", "--min-gates", "9999"]
     )
 
-    assert module.main() == 2
+    assert runner.main() == 2
     assert "gating nothing" in capsys.readouterr().err
 
 
-def test_main_refuses_an_unknown_job() -> None:
+def test_main_refuses_an_unknown_job(runner: ModuleType, ci_workflow: dict[str, Any]) -> None:
     """A renamed CI job must fail loudly, not extract zero gates and pass."""
-    module = _load_runner()
-    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
-
     with pytest.raises(SystemExit):
-        module._iter_gates(workflow, "no-such-job")
+        runner._iter_gates(ci_workflow, "no-such-job")
 
 
 @pytest.mark.parametrize(
     ("gate_verdict", "expected_rc"), [(1, 0), (0, 1)], ids=["all-pass", "one-fails"]
 )
 def test_main_returns_the_aggregate_verdict(
+    runner: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     gate_verdict: int,
@@ -351,13 +341,12 @@ def test_main_returns_the_aggregate_verdict(
     aggregation over the REAL gate list from ci.yml without spawning dozens of
     `uv run coverage report` children. Int parameters, not bools (FBT001).
     """
-    module = _load_runner()
     passes = bool(gate_verdict)
-    monkeypatch.setattr(module, "_CI_WORKFLOW", _CI_WORKFLOW)
-    monkeypatch.setattr(module, "_run_gate", lambda gate: (passes, "" if passes else "TOTAL 1%"))
+    monkeypatch.setattr(runner, "_CI_WORKFLOW", _CI_WORKFLOW)
+    monkeypatch.setattr(runner, "_run_gate", lambda gate: (passes, "" if passes else "TOTAL 1%"))
     monkeypatch.setattr(sys, "argv", ["run_coverage_gates.py", "--job", "python"])
 
-    assert module.main() == expected_rc
+    assert runner.main() == expected_rc
 
     captured = capsys.readouterr()
     if passes:
@@ -366,7 +355,9 @@ def test_main_returns_the_aggregate_verdict(
         assert "coverage gate(s) FAILED" in captured.err
 
 
-def test_a_segment_carrying_several_includes_uses_the_gates_own_last_one() -> None:
+def test_a_segment_carrying_several_includes_uses_the_gates_own_last_one(
+    runner: ModuleType,
+) -> None:
     """`include=includes[-1]` — the LAST `--include` in the gate's own segment.
 
     Plan review measured this half of `_iter_gates` unpinned: mutating
@@ -391,8 +382,6 @@ def test_a_segment_carrying_several_includes_uses_the_gates_own_last_one() -> No
        agree with the tool it is modelling, or the gate list says one module
        and the child measures another.
     """
-    runner = _load_runner()
-
     preceded = (
         "uv run coverage html --include='src/alfred/html_only/*' "
         "&& uv run coverage report --include='src/alfred/a.py' --fail-under=100"

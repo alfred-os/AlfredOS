@@ -38,22 +38,49 @@ to catch — this repo has shipped a tautological oracle twice. The raw-text
 oracle is scoped to the `python` job's own text (a second #541 correction):
 searching the whole file would let a same-named, same-shaped gate living in
 a DIFFERENT job satisfy a pin meant for `python`.
+
+**The JOB axis (#543 review, sec-001/test-001).** The first version of this
+file default-denied the STEP's key set and left the JOB's enumerated: it read
+`jobs.python.continue-on-error` and `jobs.python.defaults.run.shell` and
+nothing else. A measured mutation put `jobs.python.if: false` in ci.yml and
+SURVIVED every assertion here — GitHub scores a skipped job as a PASSING
+required check, so `Python (lint, types, unit)` stayed green with all 28
+gates, `--include='src/alfred/security/*' --fail-under=100` among them, never
+executed. That is the #514 paper-gate shape one level above the step the pin
+defended. The scope half was the same mistake: the check ran against ci.yml's
+`python` job only, so `tag-t3-grep` (the required check enforcing CLAUDE.md
+hard rule #3) and this PR's own new `strict-declarations-lint` job had NO
+disarm guard of any kind — deleting, `if: false`-ing or `|| true`-ing the
+latter each left all 174 tests green.
+
+Both halves are closed the same way the step axis was, one level up:
+DEFAULT-DENY the job's KEY SET, and DERIVE the job list rather than
+enumerating it. `_gate_bearing_jobs()` walks every workflow and picks out the
+jobs that actually run a gate — a `scripts/check_*.py` invocation or a
+`coverage report --fail-under=100` — so a NEW gate job is pinned the day it
+lands, without an edit here. `test_the_gate_bearing_job_derivation_is_not_vacuous`
+is the anti-vacuity floor: the derivation may widen, never silently narrow.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import re
 import subprocess
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 import yaml
 
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
-_CI_WORKFLOW: Path = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
-_RUNNER: Path = _REPO_ROOT / "scripts" / "run_coverage_gates.py"
+_WORKFLOWS_DIR: Path = _REPO_ROOT / ".github" / "workflows"
+_CI_WORKFLOW: Path = _WORKFLOWS_DIR / "ci.yml"
+_REQUIRED_CHECKS_DOC: Path = _REPO_ROOT / "docs" / "ci" / "required-checks.md"
+
+# `runner`, `ci_workflow` and `ci_workflow_raw` come from
+# `tests/unit/meta/conftest.py` (#543 review, rev-002) — the loader and the
+# yaml fixture were byte-identical here and in `test_coverage_gate_runner.py`.
 
 # Coverage gates that must exist in ci.yml's `python` job BY NAME, as
 # (include-spec, threshold). The count floor catches a net loss; this catches
@@ -61,10 +88,14 @@ _RUNNER: Path = _REPO_ROOT / "scripts" / "run_coverage_gates.py"
 _REQUIRED_COVERAGE_GATES: tuple[tuple[str, int], ...] = (
     ("scripts/check_tag_t3.py", 100),
     # #543: the other two gate-enforcing scripts. `run_coverage_gates.py` runs
-    # all 48 per-module gates (#474 is the incident: it was skipping 3 of them,
-    # including the trust boundary); `check_strict_declarations.py` enforces
-    # #119 SEC-Med-1. Both were measured-but-ungated after #537's `--cov=scripts`
-    # widened the dataset without widening the gates.
+    # all 50 per-module gates — 28 in ci.yml's `python` job plus 22 in
+    # `coverage-gates`, re-measured from `_iter_gates` against the ci.yml this
+    # PR ships (the count moved 48 -> 50 when #543 added its own two gate
+    # steps, so this comment is self-referential and must be re-measured, not
+    # copied). #474 is the incident: the runner was skipping 3 of the 48 that
+    # existed then, including the trust boundary. `check_strict_declarations.py`
+    # enforces #119 SEC-Med-1. Both were measured-but-ungated after #537's
+    # `--cov=scripts` widened the dataset without widening the gates.
     ("scripts/run_coverage_gates.py", 100),
     ("scripts/check_strict_declarations.py", 100),
 )
@@ -118,25 +149,6 @@ _APPROVED_RUN_SHAPES: dict[str, tuple[str, int]] = dict(
 _JOB_HEADER_RE: re.Pattern[str] = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
 
 
-def _load_runner() -> Any:
-    """Import ``scripts/run_coverage_gates.py`` — a script, not a package."""
-    spec = importlib.util.spec_from_file_location("run_coverage_gates", _RUNNER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.fixture(scope="module")
-def ci_workflow() -> dict[str, Any]:
-    return yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
-
-
-@pytest.fixture(scope="module")
-def ci_workflow_raw() -> str:
-    return _CI_WORKFLOW.read_text(encoding="utf-8")
-
-
 def _python_job_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     return [s for s in workflow["jobs"]["python"]["steps"] if isinstance(s, dict)]
 
@@ -161,10 +173,10 @@ def _job_raw_text(full_text: str, job_id: str) -> str:
 
 @pytest.mark.parametrize(("include", "threshold"), _REQUIRED_COVERAGE_GATES)
 def test_the_gate_is_visible_to_the_runner(
-    ci_workflow: dict[str, Any], include: str, threshold: int
+    runner: ModuleType, ci_workflow: dict[str, Any], include: str, threshold: int
 ) -> None:
     """Oracle 1 — the DERIVED view: `run_coverage_gates.py` extracts it."""
-    gates = _load_runner()._iter_gates(ci_workflow, "python")
+    gates = runner._iter_gates(ci_workflow, "python")
     matching = [g for g in gates if g.include == include]
     assert matching, (
         f"no coverage gate with --include='{include}' in ci.yml's `python` job. "
@@ -342,15 +354,381 @@ def test_the_approved_condition_is_a_real_probe(ci_workflow: dict[str, Any]) -> 
     )
 
 
-def test_the_two_gate_oracles_agree(ci_workflow: dict[str, Any], ci_workflow_raw: str) -> None:
+def test_the_two_gate_oracles_agree(
+    runner: ModuleType, ci_workflow: dict[str, Any], ci_workflow_raw: str
+) -> None:
     """Anti-vacuity floor: both views must SEE something, in the SAME job, and agree."""
-    derived = {g.include for g in _load_runner()._iter_gates(ci_workflow, "python")}
+    derived = {g.include for g in runner._iter_gates(ci_workflow, "python")}
     raw = set(re.findall(r"--include='([^']+)'", _job_raw_text(ci_workflow_raw, "python")))
     assert derived, "the runner extracted NO gates — this pin is gating nothing"
     assert raw, (
         "the raw view found NO --include= specs in the `python` job — this pin is gating nothing"
     )
     assert derived <= raw, f"runner saw gates absent from the raw text: {derived - raw}"
+
+
+# ---------------------------------------------------------------------------
+# THE JOB AXIS (#543 review — sec-001 High, test-001 High).
+#
+# The step-key allow-list above stops at the step. `jobs.<job>.if: false`
+# skips the whole JOB, GitHub scores a skipped job as a PASSING required
+# check, and every assertion in this file stays green — measured, on the
+# shipped ci.yml, against these very assertion functions. Same gap on the
+# scope axis: nothing here read `pr-validate-python.yml` at all, so the
+# `tag-t3-grep` job (CLAUDE.md hard rule #3) and `strict-declarations-lint`
+# (#119 SEC-Med-1, added by this PR to fix its own discovery that the guard
+# ran in no workflow) could be deleted, `if: false`-d or `|| true`-d with all
+# 174 tests green.
+#
+# Adding `if` to a refusal list would repeat #518's mistake one level up, so
+# the job's KEY SET is default-denied exactly as the step's is, and the job
+# LIST is DERIVED — every workflow, every job, keep the ones that actually run
+# a gate. A new gate job is pinned the day it lands.
+# ---------------------------------------------------------------------------
+
+# A job bears a gate if one of its steps RUNS one. Matched against the step's
+# own `run:` text with whitespace collapsed, in two shapes:
+#
+#   * a gate SCRIPT executed. Command position is load-bearing: `uv run mypy
+#     --strict src scripts/check_tag_t3.py` names the same file as a
+#     TYPE-CHECK TARGET, in four other jobs, and is not a gate invocation.
+#     `test_the_derivation_distinguishes_running_a_gate_from_naming_one`
+#     mutation-tests exactly that distinction.
+#   * a 100% coverage gate. `--cov-fail-under=` (pytest's whole-tree floor)
+#     cannot match: it carries a single dash before `fail-under`.
+_GATE_SCRIPT_RUN_RE: re.Pattern[str] = re.compile(
+    r"(?:^|[\s;&|])python3?\s+scripts/"
+    r"(?:check_tag_t3|check_strict_declarations|run_coverage_gates)\.py"
+)
+_COVERAGE_GATE_RUN_RE: re.Pattern[str] = re.compile(r"coverage\s+report\b[^\n]*?--fail-under=100\b")
+
+# Keys a gate-bearing JOB may carry — DEFAULT-DENY, the step allow-list's twin.
+#
+# `if` and `continue-on-error` are the two known disarms and both fall out of
+# this without being named; so do `defaults` (a `run.shell` override drops
+# bash's implicit `-e`), `env`, `container`, `services`, `strategy` (a matrix
+# that expands to nothing runs no job) and whatever the next one turns out to
+# be. Measured against the four derived jobs: this is exactly the union of the
+# keys they carry today, so the list constrains rather than describes.
+_ALLOWED_GATE_JOB_KEYS: frozenset[str] = frozenset(
+    {"name", "runs-on", "timeout-minutes", "permissions", "steps", "needs"}
+)
+
+# `needs` IS a disarm vector — a dependency that never succeeds skips the
+# dependent job, which reports as a pass. It cannot be refused outright
+# (`coverage-gates` legitimately needs the job that builds its coverage
+# corpus), so it is bounded instead: every dependency must itself be a
+# CURRENTLY REQUIRED check. A dependency that fails then reds its own required
+# check, so the skip can never be silent. Derived from the tracked manifest,
+# not restated here.
+_REQUIRED_CHECKS_SECTION: str = "## Currently required"
+
+# The anti-vacuity floor for the derivation. It may WIDEN silently (that is the
+# point); it may not NARROW. Named as a floor, not as the search set — a
+# derivation that collapsed to these four would still be wrong, which is what
+# `test_the_derivation_distinguishes_running_a_gate_from_naming_one` covers.
+_GATE_BEARING_JOB_FLOOR: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("ci.yml", "python"),
+        ("ci.yml", "coverage-gates"),
+        ("pr-validate-python.yml", "tag-t3-grep"),
+        ("pr-validate-python.yml", "strict-declarations-lint"),
+    }
+)
+
+# For a job whose gate is a SCRIPT: the exact `run:` line and the exact `if:`
+# it is allowed to carry. The same DEFAULT-DENY the coverage-gate steps get
+# from `_approved_run_line_patterns` — `|| true`, `|| exit 0`, a leading `!`,
+# a trailing `&` and every fragment nobody has thought of are refused by shape.
+# A gate-script job MISSING from this mapping fails too: adding one is a
+# deliberate edit here, not an omission that passes.
+_APPROVED_GATE_SCRIPT_STEPS: dict[tuple[str, str], tuple[str, str]] = {
+    ("pr-validate-python.yml", "tag-t3-grep"): (
+        "python3 scripts/check_tag_t3.py",
+        "steps.srccheck.outputs.has_source == 'true'",
+    ),
+    ("pr-validate-python.yml", "strict-declarations-lint"): (
+        "python3 scripts/check_strict_declarations.py",
+        "steps.srccheck.outputs.has_source == 'true'",
+    ),
+}
+
+_STEP_ID_IN_CONDITION_RE: re.Pattern[str] = re.compile(r"steps\.([A-Za-z0-9_-]+)\.outputs\.")
+
+
+def _workflow_files() -> list[Path]:
+    """Every workflow file, derived — not a list of the ones we remembered."""
+    return sorted(p for p in _WORKFLOWS_DIR.iterdir() if p.suffix in {".yml", ".yaml"})
+
+
+def _job_steps(job: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
+    """``(step, whitespace-collapsed run text)`` for each mapping step."""
+    steps = job.get("steps") or []
+    return [
+        (step, " ".join(str(step.get("run", "")).split()))
+        for step in steps
+        if isinstance(step, dict)
+    ]
+
+
+def _gate_bearing_jobs() -> dict[tuple[str, str], dict[str, Any]]:
+    """``(workflow filename, job id) -> job`` for every job that RUNS a gate."""
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in _workflow_files():
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_id, job in (document.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            if any(
+                _GATE_SCRIPT_RUN_RE.search(run) or _COVERAGE_GATE_RUN_RE.search(run)
+                for _step, run in _job_steps(job)
+            ):
+                found[(path.name, str(job_id))] = job
+    return found
+
+
+_GATE_BEARING_JOBS: dict[tuple[str, str], dict[str, Any]] = _gate_bearing_jobs()
+_GATE_SCRIPT_JOBS: dict[tuple[str, str], dict[str, Any]] = {
+    ref: job
+    for ref, job in _GATE_BEARING_JOBS.items()
+    if any(_GATE_SCRIPT_RUN_RE.search(run) for _step, run in _job_steps(job))
+}
+
+
+def _job_params(refs: dict[tuple[str, str], dict[str, Any]]) -> list[Any]:
+    return [pytest.param(ref, id=f"{ref[0]}::{ref[1]}") for ref in sorted(refs)]
+
+
+def _currently_required_job_keys() -> frozenset[str]:
+    """Job keys from ``docs/ci/required-checks.md``'s Currently-required table.
+
+    Column 3 of a five-column table. Rationale cells contain escaped pipes
+    (``\\|``), which only ever SPLIT INTO MORE cells, never fewer — so a
+    minimum cell count is a safe row filter and column 3 stays column 3.
+    """
+    _, _, after = _REQUIRED_CHECKS_DOC.read_text(encoding="utf-8").partition(
+        _REQUIRED_CHECKS_SECTION
+    )
+    assert after, f"{_REQUIRED_CHECKS_DOC} has no {_REQUIRED_CHECKS_SECTION!r} section"
+    section = after.split("\n## ", 1)[0]
+    keys: set[str] = set()
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) < 7:  # leading empty + 5 columns + trailing empty
+            continue
+        job_key = cells[3].strip("`")
+        if job_key and job_key != "Job key" and set(job_key) != {"-"}:
+            keys.add(job_key)
+    return frozenset(keys)
+
+
+@pytest.mark.parametrize("job_ref", _job_params(_GATE_BEARING_JOBS))
+def test_a_gate_bearing_job_cannot_be_disarmed(job_ref: tuple[str, str]) -> None:
+    """DEFAULT-DENY the job's KEY SET — the step allow-list, one level up.
+
+    `jobs.<job>.if: false` (or any never-true expression) skips the job, and a
+    skipped job is a PASSING required status check, so every gate inside it
+    goes unrun while this file stays green. Measured on ci.yml's `python`:
+    that mutation SURVIVED all four assertion functions here before this test
+    existed. `continue-on-error: true` at job level is the same shape.
+
+    Neither is named. The job may carry the keys a gate job legitimately needs
+    and nothing else — so the NEXT disarm mechanism has to get past an
+    allow-list too, rather than past a list of the ones already known (#518).
+    """
+    job = _GATE_BEARING_JOBS[job_ref]
+
+    unexpected = sorted(set(job) - _ALLOWED_GATE_JOB_KEYS)
+    assert not unexpected, (
+        f"{job_ref[0]} job {job_ref[1]!r} carries unexpected key(s) {unexpected}. "
+        f"Only {sorted(_ALLOWED_GATE_JOB_KEYS)} are allowed on a job that runs a "
+        f"gate: `if` and `continue-on-error` make the whole job advisory (a "
+        f"SKIPPED job is a PASSING required check), and `defaults`/`env`/"
+        f"`strategy`/`container` can each change whether its steps gate. If the "
+        f"new key is legitimate, add it here deliberately (#543 sec-001)."
+    )
+
+    dependencies = job.get("needs") or []
+    if isinstance(dependencies, str):
+        dependencies = [dependencies]
+    required = _currently_required_job_keys()
+    for dependency in dependencies:
+        assert dependency in required, (
+            f"{job_ref[0]} job {job_ref[1]!r} needs {dependency!r}, which is not a "
+            f"currently-required check in {_REQUIRED_CHECKS_DOC.name}. A dependency "
+            f"that fails SKIPS this job, and a skipped job passes — so a `needs` "
+            f"edge is only safe while the dependency's own failure blocks the "
+            f"merge on its own account."
+        )
+
+
+@pytest.mark.parametrize("job_ref", _job_params(_GATE_SCRIPT_JOBS))
+def test_a_gate_script_step_cannot_be_disarmed(job_ref: tuple[str, str]) -> None:
+    """DEFAULT-DENY the `run:` content of a gate-SCRIPT step.
+
+    `test_a_gate_step_cannot_be_disarmed` gives ci.yml's coverage-gate steps
+    this treatment; the two `pr-validate-python.yml` jobs that invoke a gate
+    script had nothing. Appending `|| true` to `strict-declarations-lint`'s
+    `run:` block was measured green across all 174 tests.
+
+    A gate-script job absent from `_APPROVED_GATE_SCRIPT_STEPS` fails here
+    rather than passing unpinned — the mapping is an allow-list, so a new
+    gate-script job is a deliberate entry, not a silent omission.
+    """
+    job = _GATE_SCRIPT_JOBS[job_ref]
+    assert job_ref in _APPROVED_GATE_SCRIPT_STEPS, (
+        f"{job_ref[0]} job {job_ref[1]!r} runs a gate script but has no approved "
+        f"shape in _APPROVED_GATE_SCRIPT_STEPS. Add one deliberately — an "
+        f"unpinned gate job can be disarmed with `|| true` and nothing says a "
+        f"word (#543 test-001)."
+    )
+    approved_run, approved_condition = _APPROVED_GATE_SCRIPT_STEPS[job_ref]
+
+    invocations = [step for step, run in _job_steps(job) if _GATE_SCRIPT_RUN_RE.search(run)]
+    assert len(invocations) == 1, (
+        f"{job_ref[0]} job {job_ref[1]!r} has {len(invocations)} gate-script steps; "
+        f"the pin maps exactly one shape per job"
+    )
+    step = invocations[0]
+
+    unexpected = sorted(set(step) - _ALLOWED_GATE_STEP_KEYS)
+    assert not unexpected, (
+        f"{job_ref[0]} job {job_ref[1]!r}'s gate step carries unexpected key(s) "
+        f"{unexpected}; only {sorted(_ALLOWED_GATE_STEP_KEYS)} are allowed"
+    )
+
+    condition = _normalise_condition(step.get("if", ""))
+    assert condition == approved_condition, (
+        f"{job_ref[0]} job {job_ref[1]!r}'s gate step has if: {condition!r} "
+        f"(normalised), not the approved {approved_condition!r}"
+    )
+
+    run_lines = [line.strip() for line in str(step.get("run", "")).splitlines()]
+    body = [line for line in run_lines if line and not line.startswith("#")]
+    assert body == [approved_run], (
+        f"{job_ref[0]} job {job_ref[1]!r}'s gate step run: is {body!r}, not exactly "
+        f"[{approved_run!r}]. Appending `|| true`, `|| exit 0`, a trailing `&`, a "
+        f"leading `!` or any other fragment is refused by default, not pattern-"
+        f"matched away (#543 test-001)."
+    )
+
+
+@pytest.mark.parametrize("job_ref", _job_params(_APPROVED_GATE_SCRIPT_STEPS))
+def test_the_approved_gate_script_condition_is_a_real_probe(job_ref: tuple[str, str]) -> None:
+    """Anti-vacuity: the approved `if:` must name a step that EXISTS.
+
+    The twin of `test_the_approved_condition_is_a_real_probe` for the
+    pr-validate jobs. Approving a condition that references a nonexistent step
+    id pins a guard that is always false — the failure the pin exists to
+    prevent, reproduced inside the pin.
+
+    The probe's own fail-closed body (`exit 1` when it finds nothing) is
+    pinned separately by `tests/unit/test_workflow_invariants.py`.
+    """
+    _, approved_condition = _APPROVED_GATE_SCRIPT_STEPS[job_ref]
+    referenced = _STEP_ID_IN_CONDITION_RE.findall(approved_condition)
+    assert referenced, f"the approved condition {approved_condition!r} names no step output"
+
+    job = _GATE_SCRIPT_JOBS[job_ref]
+    ids = {str(step.get("id")) for step, _run in _job_steps(job) if step.get("id")}
+    for step_id in referenced:
+        assert step_id in ids, (
+            f"{job_ref[0]} job {job_ref[1]!r} has no step with id {step_id!r}, which "
+            f"the approved gate condition references. Step ids present: {sorted(ids)}"
+        )
+
+
+@pytest.mark.parametrize(
+    "workflow_name", sorted({ref[0] for ref in _GATE_BEARING_JOB_FLOOR | set(_GATE_BEARING_JOBS)})
+)
+def test_no_gate_bearing_workflow_relaxes_the_default_shell(workflow_name: str) -> None:
+    """DEFAULT-DENY at WORKFLOW level, for every file that hosts a gate.
+
+    `test_the_python_job_defaults_do_not_relax_error_handling` covers ci.yml
+    only. `defaults.run.shell` at the top of `pr-validate-python.yml` would
+    replace bash's implicit `-e` for `tag-t3-grep` and
+    `strict-declarations-lint` alike, with nothing reading it.
+    """
+    path = _WORKFLOWS_DIR / workflow_name
+    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    shell = (document.get("defaults") or {}).get("run", {}).get("shell")
+    assert shell is None, (
+        f"{workflow_name} sets a workflow-level defaults.run.shell ({shell!r}), "
+        f"which overrides bash's implicit -e for every step in every job, "
+        f"including the gates. Remove it, or update this pin deliberately (#543)."
+    )
+
+
+def test_the_gate_bearing_job_derivation_is_not_vacuous() -> None:
+    """The derivation may widen silently; it may NOT narrow.
+
+    Without this, renaming a job, restructuring a `run:` block or breaking the
+    regex leaves `_GATE_BEARING_JOBS` empty and every parametrised case above
+    collects ZERO tests — a pin that gates nothing and reports green, which is
+    the #245 shape inside the guard meant to close it.
+
+    The floor names the jobs carrying CLAUDE.md hard rule #3 (`tag-t3-grep`),
+    #119 SEC-Med-1 (`strict-declarations-lint`) and the two coverage-gate
+    hosts, so losing any ONE of them reds — a bare count would not.
+    """
+    derived = set(_GATE_BEARING_JOBS)
+    assert derived >= _GATE_BEARING_JOB_FLOOR, (
+        f"gate-bearing jobs the derivation no longer sees: "
+        f"{sorted(_GATE_BEARING_JOB_FLOOR - derived)}. Found: {sorted(derived)}"
+    )
+    stale = sorted(set(_APPROVED_GATE_SCRIPT_STEPS) - set(_GATE_SCRIPT_JOBS))
+    assert not stale, (
+        f"_APPROVED_GATE_SCRIPT_STEPS pins {stale}, which the derivation no longer "
+        f"finds — the allow-list is describing jobs that have moved or gone"
+    )
+
+
+def test_the_derivation_distinguishes_running_a_gate_from_naming_one() -> None:
+    """Mutation-test the derivation regexes on synthetic text.
+
+    A detector that cannot see the real shape is a paper gate, and the two
+    near-misses here are both REAL lines in these workflows: `mypy --strict src
+    scripts/check_tag_t3.py` type-checks the gate script in four other jobs,
+    and `pytest --cov-fail-under=75` is the whole-tree floor that is
+    deliberately not a per-module gate. Widening either regex to match them
+    would pull unrelated jobs under a job-key allow-list they do not fit, and
+    the fix would look like relaxing the allow-list.
+    """
+    assert _GATE_SCRIPT_RUN_RE.search("python3 scripts/check_tag_t3.py")
+    assert _GATE_SCRIPT_RUN_RE.search("python3 scripts/check_strict_declarations.py")
+    assert _GATE_SCRIPT_RUN_RE.search("uv run python3 scripts/run_coverage_gates.py --job python")
+    assert not _GATE_SCRIPT_RUN_RE.search("uv run mypy --strict src scripts/check_tag_t3.py")
+    assert not _GATE_SCRIPT_RUN_RE.search("uv run pyright src scripts/check_tag_t3.py")
+
+    assert _COVERAGE_GATE_RUN_RE.search(
+        "uv run coverage report --include='src/alfred/security/*' --fail-under=100"
+    )
+    assert not _COVERAGE_GATE_RUN_RE.search(
+        "uv run pytest tests/unit -q --cov=src/alfred --cov-fail-under=100"
+    )
+    assert not _COVERAGE_GATE_RUN_RE.search("uv run coverage report --fail-under=75")
+
+
+def test_the_required_check_manifest_parses_to_real_job_keys() -> None:
+    """Anti-vacuity for the `needs` closure above.
+
+    An empty or mis-parsed manifest makes `dependency in required` fail rather
+    than pass, so this cannot go silently green — but a manifest that parsed to
+    a huge set of junk WOULD, so pin the shape: the derived keys must include
+    the jobs the floor names and must not include the table header.
+    """
+    keys = _currently_required_job_keys()
+
+    assert {"python", "integration", "tag-t3-grep"} <= keys, (
+        f"{_REQUIRED_CHECKS_DOC.name}'s Currently-required table no longer yields "
+        f"the job keys this pin reads; got {sorted(keys)}"
+    )
+    assert "Job key" not in keys, "the table header leaked into the parsed key set"
+    assert "strict-declarations-lint" not in keys, (
+        "strict-declarations-lint is listed as PENDING required, not currently "
+        "required — the section split is not working, so `needs` edges would be "
+        "validated against the wrong table (#544 promotes it)"
+    )
 
 
 # ---------------------------------------------------------------------------
