@@ -233,6 +233,59 @@ def test_a_late_unwedging_bind_never_raises_into_its_own_thread(
     assert not thread_errors, f"the late completion signal escaped its thread: {thread_errors!r}"
 
 
+def test_an_unstartable_bind_thread_does_not_kill_the_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#551: the ONE metrics failure mode that was boot-fatal.
+
+    ``Thread.start()`` raises ``RuntimeError("can't start new thread")`` when the
+    process cannot create one — a container ``pids`` cgroup limit, an
+    ``RLIMIT_NPROC`` ceiling, memory pressure. Nothing caught it: it propagated
+    out of ``_start_async``, and ``start_daemon`` catches only
+    ``_BootRefusedError`` and ``DaemonPidFileError``, so the daemon died at boot
+    with a raw, ``boot_id``-less traceback.
+
+    That contradicted every other failure in this seam. A bad port, a failed
+    bind, an unexpected seam error and a wedged bind are all loud-and-continue
+    and boot-correlated; the docstring is explicit that a metrics failure must
+    never be boot-fatal. The one mode nobody guarded is also the one most likely
+    to appear in the constrained container the daemon actually ships in.
+
+    Asserts the boot CONTINUES, that the failure is boot-correlated, and — via
+    the elapsed budget and the absent timeout event — that it returns
+    IMMEDIATELY rather than falling through to wait out a completion signal no
+    thread will ever send.
+    """
+
+    class _UnstartableThread(threading.Thread):
+        """A real Thread whose ``start`` fails the way a pids-capped host fails."""
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading, "Thread", _UnstartableThread)
+
+    started_at = time.monotonic()
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))  # must NOT raise
+    elapsed = time.monotonic() - started_at
+
+    unavailable = [e for e in logs if e["event"] == "daemon.boot.metrics_start_unavailable"]
+    assert len(unavailable) == 1, f"expected one loud unavailable warning, got {logs!r}"
+    assert unavailable[0]["boot_id"] == _BOOT_ID
+    assert "can't start new thread" in unavailable[0]["error"]
+
+    # It returned via the new arm, not by waiting out the deadline: no timeout
+    # event, and fast. Without both, an implementation that logged the warning
+    # and then still awaited `finished` would pass on the warning alone.
+    assert not [e for e in logs if e["event"] == "daemon.boot.metrics_start_timeout"], (
+        "the seam waited for a completion signal from a thread that never started"
+    )
+    assert elapsed < _RETURN_DEADLINE_S, (
+        f"boot took {elapsed:.2f}s after an unstartable bind — it must give up at once"
+    )
+
+
 def test_bind_thread_converts_an_unexpected_seam_error_to_a_structured_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
