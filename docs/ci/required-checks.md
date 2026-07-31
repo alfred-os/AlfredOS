@@ -73,6 +73,7 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 | Check name | Workflow | Job key | Rationale | Promote after |
 | --- | --- | --- | --- | --- |
 | ~~`i18n catalog freshness`~~ | _(never authored)_ | _(superseded)_ | **Superseded** by `i18n catalog drift` (`pr-validate-python.yml` job `i18n-catalog`), now in "Currently required" above — it already runs `pybabel extract` + `update --check` + `compile` on every PR. The separately-planned `pr-validate-i18n.yml` workflow is obsolete; no need to author it. | — (closed, see `i18n catalog drift`) |
+| `strict_declarations lint` | `.github/workflows/pr-validate-python.yml` | `strict-declarations-lint` | #119 SEC-Med-1. Added by the #543 follow-up because the guard previously ran in NO workflow — its docstring claimed CI ran `make check`, which no workflow does, so a SEC-Med-1 regression could land with every check green. | Promote via `gh api` once it has one green run (author-gating-workflow Step 4), then move this row to "Currently required". Until then it reports but does not block. |
 
 _(`promtool (alert rules)` was promoted from here to "Currently required" above on 2026-07-01 after PR #355's first green run — no longer pending.)_
 

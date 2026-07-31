@@ -31,9 +31,18 @@ False positives (e.g. the literal inside a docstring example) are
 surfaced as the lint failing — the correct disposition is either
 deleting the example or restating the example without the literal.
 
-Wired into ``make check`` via the ``strict-declarations-lint`` target.
-CI runs ``make check``, so this guard fires on every PR without
-additional workflow changes.
+Two callers:
+
+* ``make check`` via the ``strict-declarations-lint`` target (local).
+* the ``strict-declarations-lint`` job in
+  ``.github/workflows/pr-validate-python.yml`` (CI).
+
+The CI job was added in the #543 follow-up. Until then this docstring
+claimed "CI runs ``make check``, so this guard fires on every PR" — which
+was false: no workflow runs ``make check`` and none referenced this script,
+so a SEC-Med-1 regression could land with every check green. Do not remove
+the workflow job on the strength of the ``make check`` wiring; the local
+target is not a gate.
 
 Exit codes:
 * 0 — clean (no occurrences in ``src/``)
