@@ -275,6 +275,18 @@ def test_an_unstartable_bind_thread_does_not_kill_the_boot(
     assert unavailable[0]["boot_id"] == _BOOT_ID
     assert "can't start new thread" in unavailable[0]["error"]
 
+    # LEVEL, not just presence (#552 review, test-001 — a surviving mutant:
+    # `log.warning` -> `log.info` passed every other assertion here). The level
+    # is the whole operator-facing point of this arm: an `info` line is below
+    # default verbosity, so the one record explaining a metrics-less daemon
+    # would not appear in `docker compose logs alfred-core` at all — and the
+    # healthcheck message tells the operator to look there.
+    assert unavailable[0]["log_level"] == "warning", (
+        f"the unavailable record must be a warning, not {unavailable[0]['log_level']!r} — "
+        f"below warning it is invisible at default verbosity, and this line is the only "
+        f"evidence the exposition never started"
+    )
+
     # It returned via the new arm, not by waiting out the deadline: no timeout
     # event, and fast. Without both, an implementation that logged the warning
     # and then still awaited `finished` would pass on the warning alone.
@@ -284,6 +296,36 @@ def test_an_unstartable_bind_thread_does_not_kill_the_boot(
     assert elapsed < _RETURN_DEADLINE_S, (
         f"boot took {elapsed:.2f}s after an unstartable bind — it must give up at once"
     )
+
+
+def test_a_non_runtime_error_from_thread_start_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #551 guard stays NARROW — it absorbs OS refusal, not everything.
+
+    #552 review, test-002: a surviving mutant. Widening `except RuntimeError` to
+    `except Exception` passed every other case here, because nothing exercised
+    the boundary. The width is a real property: `RuntimeError` from
+    `Thread.start()` means the OS refused to make a thread, which this seam is
+    designed to shrug off. Anything else escaping that call is a bug in the
+    seam or the interpreter, and absorbing it would turn a boot-time defect into
+    a warning nobody reads — the failure mode this whole PR exists to avoid, in
+    reverse.
+
+    `MemoryError` is the concrete case named in the guard's own comment as
+    deliberately NOT caught, so it is the honest one to pin: a process that
+    cannot allocate a thread stack has a fault this seam has no business
+    swallowing.
+    """
+
+    class _MemoryStarvedThread(threading.Thread):
+        def start(self) -> None:
+            raise MemoryError("cannot allocate thread stack")
+
+    monkeypatch.setattr(threading, "Thread", _MemoryStarvedThread)
+
+    with pytest.raises(MemoryError):
+        asyncio.run(cmd._start_core_metrics_server_bounded(_BOOT_ID))
 
 
 def test_bind_thread_converts_an_unexpected_seam_error_to_a_structured_warning(
