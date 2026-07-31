@@ -596,11 +596,20 @@ async def _start_core_metrics_server_bounded(boot_id: str) -> None:
             daemon=True,
         ).start()
     except RuntimeError as exc:
-        # #551. `Thread.start()` raises RuntimeError when the process cannot
-        # create one — a container `pids` cgroup limit, an RLIMIT_NPROC ceiling,
-        # memory pressure. Unguarded, that propagated out of `_start_async`, and
-        # `start_daemon` catches only `_BootRefusedError` / `DaemonPidFileError`,
-        # so the daemon died at boot with a raw, boot_id-less traceback.
+        # #551. `Thread.start()` raises RuntimeError when the OS refuses to
+        # create the thread — a container `pids` cgroup limit or an
+        # RLIMIT_NPROC ceiling. Unguarded, that propagated out of
+        # `_start_async`, and `start_daemon` catches only `_BootRefusedError` /
+        # `DaemonPidFileError`, so the daemon died at boot with a raw,
+        # boot_id-less traceback.
+        #
+        # SCOPE, stated so the comment does not outrun the code (#552 review,
+        # core-003): this catches RuntimeError, which is the OS-refusal class
+        # plus "can't create new thread at interpreter shutdown". A MemoryError
+        # from thread-stack allocation is NOT caught and is deliberately left
+        # to propagate — a process that cannot allocate a thread stack has a
+        # fault this seam has no business absorbing, and the earlier wording
+        # ("memory pressure") implied a guarantee that is not here.
         #
         # Every OTHER failure here is loud-and-continue and boot-correlated (bad
         # port, failed bind, unexpected seam error, wedged bind) because this
