@@ -379,6 +379,29 @@ jobs:
   # `check_strict_declarations.py` is not scoped to `src/alfred` the way
   # `check_tag_t3.py`'s `_DEFAULT_SCAN_ROOTS` is — it scans the whole of
   # `src/`, so the presence probe has to match.
+  #
+  # #548 review asked for the probe to be extracted into a shared script or
+  # composite action, on the reasoning that two copies of a fail-closed
+  # security probe drift independently. DECLINED, because the drift it names is
+  # already gated — and the shape is SEVEN copies in this file, not two, plus
+  # more in ci.yml/nightly.yml, so it is a repo-wide idiom rather than a
+  # two-site duplication. Both properties are pinned by DERIVED, default-deny
+  # invariants in `tests/unit/test_workflow_invariants.py` that enumerate no
+  # file list and no job list:
+  #
+  #   * `test_no_pipe_into_an_early_exit_reader` — over every shell file. A
+  #     copy regressed to the #514 `find … | grep -q` SIGPIPE shape reds,
+  #     naming file and line. Measured on this job's probe.
+  #   * `test_presence_probes_fail_closed` — over every `has_*` probe in every
+  #     workflow. A copy that lost its `exit 1` reds, naming job and step.
+  #     Measured on this job's probe.
+  #
+  # What a stale copy CAN carry is stale PROSE, which is documentation, not the
+  # gate. Against that, a composite action puts an indirection layer plus its
+  # own `outputs:` plumbing between a required check and its fail-closed
+  # behaviour — new machinery in the one place where "the gate could not run"
+  # must stay legible. Revisit if the invariants above are ever weakened to a
+  # curated list.
   # -----------------------------------------------------------------
   strict-declarations-lint:
     name: strict_declarations lint
