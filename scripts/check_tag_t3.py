@@ -129,16 +129,32 @@ _DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("src/alfred", "plugins")
 # Assert-RAN floor (#245, #514). ``_collect_paths([])`` resolves the default
 # roots relative to CWD, so an argument-less run from the wrong directory
 # scanned 0 files, exited 0 and printed nothing — a required check reporting
-# green while gating nothing. Nothing invoked it that way, which is exactly
-# why it would have gone unnoticed: a green-reporting no-op waiting for a
-# caller. A test-side census cannot catch this, because the failure mode IS
-# the caller.
+# green while gating nothing. A test-side census cannot catch that, because
+# the failure mode IS the caller.
 #
-# For the WRONG-DIRECTORY case only. 332 tracked ``.py`` files live under the
-# two roots today (293 + 39); 250 leaves headroom for deletions without
-# leaving room for the gate to go vacuous. Unchanged at 250 by #541 — it is
-# not, and never was, a check that every root was supplied; that is what
-# ``_DEFAULT_SCAN_ROOTS`` plus the runtime invariant are for.
+# WHAT IT STILL GUARDS, corrected after #541 (the earlier text here claimed
+# "the WRONG-DIRECTORY case only", which measurement contradicts):
+#
+#   * The PLAIN wrong-directory run no longer reaches this floor. From
+#     ``/tmp``, ``src/alfred`` is not a directory, so the missing-default-root
+#     branch in ``_collect_paths`` raises first — measured rc=2 with the
+#     specific "the default scan root does not exist relative to the current
+#     directory" message, which is a better diagnosis than a count ever was.
+#   * A DECOY TREE still lands here, and only here. Run from a directory that
+#     happens to contain ``src/alfred`` and ``plugins`` of its own — a wrong
+#     checkout, a scratch copy — and both roots resolve OUTSIDE this repo, so
+#     the root invariant exempts them by design (it is scoped to in-repo
+#     directories). Measured: 2 files scanned, rc=2, caught by this floor
+#     alone. The narrowing that makes the invariant tractable is precisely
+#     what keeps this constant load-bearing.
+#   * A GUTTED in-repo tree: both roots present and covered, but mass-deleted
+#     below the floor.
+#
+# 332 tracked ``.py`` files live under the two roots today (293 + 39); 250
+# leaves headroom for deletions without leaving room for the gate to go
+# vacuous. Unchanged at 250 by #541 — it is not, and never was, a check that
+# every root was supplied; that is what ``_DEFAULT_SCAN_ROOTS`` plus the
+# runtime invariant are for.
 _MIN_SCANNED_FILES: int = 250
 
 # Authorised non-test homes — resolved to absolute paths inside THIS repo
