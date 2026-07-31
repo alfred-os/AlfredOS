@@ -860,10 +860,17 @@ def test_unreadable_path_is_a_violation(tmp_path: Path) -> None:
 
 
 def _make_fifo(path: Path) -> None:
+    """Create a FIFO at ``path`` — the shape that BLOCKS an unguarded reader."""
     os.mkfifo(path)
 
 
 def _make_directory(path: Path) -> None:
+    """Create a directory at ``path`` — non-regular, but it does not block.
+
+    The second half of the class test. A FIFO alone cannot distinguish
+    default-denying every non-regular file from closing the one shape #546
+    named; a directory reaches the same guard by a different route.
+    """
     path.mkdir()
 
 
@@ -892,6 +899,12 @@ def _scan_file_within_deadline(path: Path, timeout: float = 10.0) -> list[str]:
     failure: list[BaseException] = []
 
     def _run() -> None:
+        """Run the scan, capturing EITHER outcome for the main thread.
+
+        ``BaseException`` deliberately: an exception left to escape a bare
+        thread is swallowed by ``threading.excepthook`` and the case fails with
+        a message naming nothing.
+        """
         try:
             result.append(check_tag_t3._scan_file(path))
         except BaseException as exc:  # surfaced on the main thread below
