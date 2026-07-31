@@ -505,18 +505,20 @@ def _job_params(refs: dict[tuple[str, str], dict[str, Any]]) -> list[Any]:
     return [pytest.param(ref, id=f"{ref[0]}::{ref[1]}") for ref in sorted(refs)]
 
 
-def _currently_required_job_keys() -> frozenset[str]:
-    """Job keys from ``docs/ci/required-checks.md``'s Currently-required table.
+def _parse_job_keys(section: str) -> frozenset[str]:
+    """Job keys from one markdown section's five-column table.
 
     Column 3 of a five-column table. Rationale cells contain escaped pipes
     (``\\|``), which only ever SPLIT INTO MORE cells, never fewer — so a
     minimum cell count is a safe row filter and column 3 stays column 3.
+
+    Factored out of :func:`_currently_required_job_keys` so the Pending table
+    can be parsed by the SAME code (#549 review, ops-003). The section-split
+    sentinel used to be located with a raw substring search while the
+    assertion it guards depends on the row PARSING — so reformatting the row
+    would keep the presence check green while quietly making the real
+    assertion vacuous. One parser, two callers, no such gap.
     """
-    _, _, after = _REQUIRED_CHECKS_DOC.read_text(encoding="utf-8").partition(
-        _REQUIRED_CHECKS_SECTION
-    )
-    assert after, f"{_REQUIRED_CHECKS_DOC} has no {_REQUIRED_CHECKS_SECTION!r} section"
-    section = after.split("\n## ", 1)[0]
     keys: set[str] = set()
     for line in section.splitlines():
         cells = [cell.strip() for cell in line.split("|")]
@@ -526,6 +528,18 @@ def _currently_required_job_keys() -> frozenset[str]:
         if job_key and job_key != "Job key" and set(job_key) != {"-"}:
             keys.add(job_key)
     return frozenset(keys)
+
+
+def _section_after(heading: str) -> str:
+    """The text of ``docs/ci/required-checks.md`` under ``heading``."""
+    _, _, after = _REQUIRED_CHECKS_DOC.read_text(encoding="utf-8").partition(heading)
+    assert after, f"{_REQUIRED_CHECKS_DOC} has no {heading!r} section"
+    return after.split("\n## ", 1)[0]
+
+
+def _currently_required_job_keys() -> frozenset[str]:
+    """Job keys from ``docs/ci/required-checks.md``'s Currently-required table."""
+    return _parse_job_keys(_section_after(_REQUIRED_CHECKS_SECTION))
 
 
 @pytest.mark.parametrize("job_ref", _job_params(_GATE_BEARING_JOBS))
@@ -738,13 +752,17 @@ def test_the_required_check_manifest_parses_to_real_job_keys() -> None:
     )
     assert "Job key" not in keys, "the table header leaked into the parsed key set"
 
-    document = _REQUIRED_CHECKS_DOC.read_text(encoding="utf-8")
-    _, _, pending = document.partition("\n## Pending required")
-    assert _PENDING_SECTION_SENTINEL in pending, (
-        f"the section-split sentinel {_PENDING_SECTION_SENTINEL!r} is no longer in "
-        f"{_REQUIRED_CHECKS_DOC.name}'s Pending table, so the assertion below can "
-        f"no longer distinguish a working section split from a broken one. Point "
-        f"it at a row that is still there."
+    # Located with the SAME parser the assertion below depends on, not a raw
+    # substring search (#549 review, ops-003). A substring hit proves only that
+    # the text exists somewhere; it does not prove the row still PARSES as a
+    # job-key cell — so reformatting the row would leave this green while
+    # `not in keys` became vacuously true.
+    pending_keys = _parse_job_keys(_section_after("## Pending required"))
+    assert _PENDING_SECTION_SENTINEL in pending_keys, (
+        f"the section-split sentinel {_PENDING_SECTION_SENTINEL!r} no longer parses "
+        f"out of {_REQUIRED_CHECKS_DOC.name}'s Pending table (got {sorted(pending_keys)}), "
+        f"so the assertion below can no longer distinguish a working section split "
+        f"from a broken one. Point it at a row that is still there."
     )
     assert _PENDING_SECTION_SENTINEL not in keys, (
         f"{_PENDING_SECTION_SENTINEL!r} comes from the PENDING table, so the "

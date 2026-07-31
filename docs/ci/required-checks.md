@@ -59,7 +59,9 @@ When you remove a required check: same flow in reverse — `gh api -X DELETE ...
 
 ## Pending required (workflow merged, awaiting `gh api POST .../contexts`)
 
-These checks are emitted by their workflow but not yet in the branch-protection required list. Per the [author-gating-workflow skill](../../.rulesync/skills/author-gating-workflow/SKILL.md) Step 4: after the workflow merges and runs at least once on a PR, append each name via `gh api`, then move the row to "Currently required" above with today's date.
+Checks emitted by their workflow but not yet in the branch-protection required list belong here. Per the [author-gating-workflow skill](../../.rulesync/skills/author-gating-workflow/SKILL.md) Step 4: after the workflow merges and runs at least once on a PR, append each name via `gh api`, then move the row to "Currently required" above with today's date.
+
+**There are currently no pending checks.** The table below holds a single tombstone row for a check that was never authored — see the note beneath it. The tombstone is not merely reader convenience: `tests/unit/meta/test_gate_surfaces_are_pinned.py` anchors `_PENDING_SECTION_SENTINEL` on its job-key cell to prove the Currently-required parser stops at this section boundary. **Deleting or reformatting that row will fail that test** (deliberately — it asserts the sentinel's presence first, so the pin cannot rot into a vacuous pass). If you remove it, repoint the sentinel in the same change.
 
 > **Maintainer directive [#321](https://github.com/alfred-os/AlfredOS/issues/321) (2026-06-24): promote all PR-gating checks to required — COMPLETE.** Phase 1 promoted the 8 checks that run on every PR and are blocking-capable (this **waived** the documented N≥3 soak gate on `Integration (privileged Linux, real spawn)` + `Adversarial corpus`). Phase 3 then made the remaining three requirable via workflow changes (PR #323) and promoted them — all now in "Currently required" above:
 >
@@ -75,7 +77,7 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 | --- | --- | --- | --- | --- |
 | ~~`i18n catalog freshness`~~ | _(never authored)_ | _(superseded)_ | **Superseded** by `i18n catalog drift` (`pr-validate-python.yml` job `i18n-catalog`), now in "Currently required" above — it already runs `pybabel extract` + `update --check` + `compile` on every PR. The separately-planned `pr-validate-i18n.yml` workflow is obsolete; no need to author it. | — (closed, see `i18n catalog drift`) |
 
-_(`promtool (alert rules)` was promoted from here to "Currently required" above on 2026-07-01 after PR #355's first green run — no longer pending. `strict_declarations lint` followed on 2026-07-31 per [#544](https://github.com/alfred-os/AlfredOS/issues/544) — no longer pending. This table is now empty of live rows; the one remaining entry is a tombstone kept for the reader who goes looking for the superseded workflow.)_
+_(`promtool (alert rules)` was promoted from here to "Currently required" above on 2026-07-01 after PR #355's first green run — no longer pending. `strict_declarations lint` followed on 2026-07-31 per [#544](https://github.com/alfred-os/AlfredOS/issues/544) — no longer pending.)_
 
 ### Pending required (promote after green) — arch breadth (#265, ADR-0034)
 
