@@ -18,9 +18,12 @@ import ast
 import contextlib
 import importlib.util
 import itertools
+import os
 import re
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -799,6 +802,111 @@ def test_unreadable_path_is_a_violation(tmp_path: Path) -> None:
     violations = check_tag_t3._scan_file(a_directory)
 
     assert violations
+    assert check_tag_t3._UNREADABLE_MESSAGE in violations[0]
+
+
+def _make_fifo(path: Path) -> None:
+    os.mkfifo(path)
+
+
+def _make_directory(path: Path) -> None:
+    path.mkdir()
+
+
+def _scan_file_within_deadline(path: Path, timeout: float = 10.0) -> list[str]:
+    """``_scan_file(path)``, but FAIL on a hang instead of reproducing it (#546).
+
+    Every caller feeds this a path that blocks forever when the guard is
+    absent, so a direct call does not fail the test — it hangs pytest. That is
+    not hypothetical: mutation-testing the guard by DELETING it hung the suite
+    until the harness killed it at five minutes, because one of these cases
+    was still calling ``_scan_file`` directly. A test that converts a bug into
+    a stalled CI job is worse than no test.
+
+    The worker is ``daemon=True`` so a thread left blocked in ``open()`` never
+    holds interpreter exit, and the deadline is generous relative to the work
+    (a real scan of one file is sub-millisecond) so it cannot flake on a
+    loaded runner.
+    """
+    result: list[list[str]] = []
+    worker = threading.Thread(
+        target=lambda: result.append(check_tag_t3._scan_file(path)), daemon=True
+    )
+    worker.start()
+    worker.join(timeout)
+
+    assert not worker.is_alive(), (
+        f"_scan_file blocked on {path.name} — the gate hangs until its CI job "
+        f"timeout and reports nothing"
+    )
+    assert result, "the worker returned no result"
+    return result[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
+@pytest.mark.parametrize(
+    ("make", "kind"),
+    [(_make_fifo, "fifo"), (_make_directory, "directory")],
+    ids=["fifo", "directory"],
+)
+def test_every_non_regular_file_is_refused_on_the_same_grounds(
+    tmp_path: Path, make: Callable[[Path], None], kind: str
+) -> None:
+    """#546: the guard default-denies the CLASS, not the shape that was reported.
+
+    This is the mutation the FIFO test alone cannot kill. Narrowing the guard
+    to ``if stat.S_ISFIFO(...)`` — closing only the shape #546 named — leaves
+    ``test_a_fifo_named_py_does_not_hang_the_gate`` green, because the FIFO is
+    still refused. The directory then falls through to ``read_text`` and is
+    reported by the OS as ``Is a directory``, so the REASON is what separates
+    default-deny from enumerate-and-hope; the message alone does not (both
+    arrive as ``_UNREADABLE_MESSAGE``). Measured: that mutation survives every
+    other test in this file.
+
+    Asserting the shared reason is not a tautological oracle — the test never
+    re-states the ``S_ISREG`` predicate, it asserts that two unrelated
+    non-regular types reach one verdict for one stated cause (#518).
+    """
+    target = tmp_path / f"{kind}.py"
+    make(target)
+
+    violations = _scan_file_within_deadline(target)
+
+    assert violations, f"a {kind} named *.py must be reported, not silently clean"
+    assert check_tag_t3._UNREADABLE_MESSAGE in violations[0]
+    assert check_tag_t3._NOT_A_REGULAR_FILE_REASON in violations[1], (
+        f"the {kind} was refused for some OTHER reason ({violations[1]!r}) — the "
+        f"guard is enumerating shapes rather than requiring a regular file"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: os.mkfifo")
+def test_a_fifo_named_py_does_not_hang_the_gate(tmp_path: Path) -> None:
+    """#546: `read_text` on a FIFO blocks FOREVER — the gate never returns.
+
+    ``open()`` on a FIFO for reading blocks until a writer arrives, and nothing
+    in the gate ever writes. Measured against the pre-fix script on both of the
+    two ways a FIFO reaches ``_scan_file``: an explicit ``check_tag_t3.py
+    hang.py`` argument, and the ``rglob`` traversal fallback (git unavailable /
+    out-of-repo directory) sized past the 250-file census floor. Both timed out
+    at exit 124 rather than reporting anything. CI would burn its whole job
+    timeout and report no diagnosis at all.
+
+    The assertion is bounded by ``_scan_file_within_deadline`` rather than a
+    direct call — see that helper for why the un-bounded form is actively
+    harmful.
+
+    The git-derived collection path is unaffected (a FIFO is not a tracked
+    file, and ``_git_tracked_python_files`` already filters on ``is_file()``) —
+    the fix belongs in ``_scan_file`` because that is where BOTH remaining
+    paths converge.
+    """
+    fifo = tmp_path / "hang.py"
+    os.mkfifo(fifo)
+
+    violations = _scan_file_within_deadline(fifo)
+
+    assert violations, "a path the gate cannot read must be reported, not silently clean"
     assert check_tag_t3._UNREADABLE_MESSAGE in violations[0]
 
 
