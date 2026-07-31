@@ -98,15 +98,19 @@ _TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE: str = (
 # violation alongside a ``SyntaxError``, and made every "must PASS" floor in
 # the suite vacuously green on text that was never parsed.
 #
-# Three DISTINCT strings so a test for one cannot be satisfied by another
+# FOUR DISTINCT strings so a test for one cannot be satisfied by another
 # firing. Measured false-positive cost across the scan root: 0 unparseable,
-# 0 unreadable.
+# 0 unreadable, 0 unscannable.
 _UNDECODABLE_MESSAGE: str = (
     "file is not valid UTF-8 — the gate cannot read it but Python can execute "
     "it (PEP 263 coding declaration). Re-encode as UTF-8."
 )
 _UNPARSEABLE_MESSAGE: str = "file does not parse — the gate cannot scan it. Fix the syntax error."
 _UNREADABLE_MESSAGE: str = "file could not be read — the gate cannot scan it."
+_UNSCANNABLE_MESSAGE: str = (
+    "file could not be scanned — the parser or the reader failed on it. "
+    "Simplify the file, or fix the path."
+)
 
 # THE GATE OWNS ITS SCAN ROOTS (#541). They used to live in the two
 # invocation strings (``Makefile`` and ``pr-validate-python.yml``), so
@@ -427,44 +431,85 @@ def _scan_text(text: str, path: Path) -> list[str]:
     2. Per-line regex for ``# type: ignore`` on a ``TaggedContent`` line —
        comments are discarded by the parser, so they need the line-based
        scan.
+
+    **Never raises** (short of ``BaseException``): a scan failure becomes a
+    reported violation rather than an exception that aborts ``main``'s loop and
+    leaves every later file unscanned (#542). See the ``except Exception`` arm.
     """
     violations: list[str] = []
-    lines = text.splitlines()
-
     try:
-        tree = ast.parse(text, filename=str(path))
-    except SyntaxError as exc:
-        # A file the parser cannot read is a file this gate is not gating.
-        # Returning early skips the line-based suppression pass, which is
-        # correct: a half-parsed view of a broken file is exactly what the
-        # previous comment here warned against — the difference is that we now
-        # REPORT it instead of passing it.
-        return [f"{path}:{exc.lineno or 1}: {_UNPARSEABLE_MESSAGE}", f"  {exc.msg}"]
+        lines = text.splitlines()
 
-    # No ``if tree is not None`` guard: the SyntaxError arm above RETURNS, so
-    # ``tree`` is always a parsed module here. The guard was a leftover from the
-    # shape where an unparseable file set ``tree = None`` and fell through — it
-    # became unreachable when that became a violation, and an unreachable branch
-    # is a coverage hole that a pragma would hide rather than fix.
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        lineno = node.lineno
-        snippet = lines[lineno - 1].rstrip() if 0 <= lineno - 1 < len(lines) else ""
-        if _is_tag_t3_call(node):
-            violations.append(f"{path}:{lineno}: {_TAG_T3_MESSAGE}")
-            violations.append(f"  {snippet}")
-        if _is_cast_tagged_content_call(node):
-            violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
-            violations.append(f"  {snippet}")
-        if _is_tagged_content_t3_subscript_call(node):
-            violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
-            violations.append(f"  {snippet}")
+        try:
+            tree = ast.parse(text, filename=str(path))
+        except SyntaxError as exc:
+            # A file the parser cannot read is a file this gate is not gating.
+            # Returning early skips the line-based suppression pass, which is
+            # correct: a half-parsed view of a broken file is exactly what the
+            # previous comment here warned against — the difference is that we
+            # now REPORT it instead of passing it.
+            return [f"{path}:{exc.lineno or 1}: {_UNPARSEABLE_MESSAGE}", f"  {exc.msg}"]
 
-    for lineno, line in enumerate(lines, 1):
-        if _TYPE_IGNORE_PATTERN.search(line):
-            violations.append(f"{path}:{lineno}: {_TYPE_IGNORE_MESSAGE}")
-            violations.append(f"  {line.rstrip()}")
+        # No ``if tree is not None`` guard: the SyntaxError arm above RETURNS, so
+        # ``tree`` is always a parsed module here. The guard was a leftover from the
+        # shape where an unparseable file set ``tree = None`` and fell through — it
+        # became unreachable when that became a violation, and an unreachable branch
+        # is a coverage hole that a pragma would hide rather than fix.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            lineno = node.lineno
+            snippet = lines[lineno - 1].rstrip() if 0 <= lineno - 1 < len(lines) else ""
+            if _is_tag_t3_call(node):
+                violations.append(f"{path}:{lineno}: {_TAG_T3_MESSAGE}")
+                violations.append(f"  {snippet}")
+            if _is_cast_tagged_content_call(node):
+                violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
+                violations.append(f"  {snippet}")
+            if _is_tagged_content_t3_subscript_call(node):
+                violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
+                violations.append(f"  {snippet}")
+
+        for lineno, line in enumerate(lines, 1):
+            if _TYPE_IGNORE_PATTERN.search(line):
+                violations.append(f"{path}:{lineno}: {_TYPE_IGNORE_MESSAGE}")
+                violations.append(f"  {line.rstrip()}")
+    except Exception as exc:
+        # ``ast.parse`` raises more than ``SyntaxError``, and WHICH exception
+        # depends on the interpreter BUILD. Measured on two CPython 3.14.6
+        # builds: ``"not " * 20000`` raises MemoryError("Parser stack
+        # overflowed") on both, while a 50 000-operand ``+`` chain raises
+        # RecursionError("Stack overflow (used 8144 kB) during compilation")
+        # on the uv/proto standalone build and parses CLEANLY on Homebrew.
+        # 3.14's stack guard trips on real C-stack bytes, not on
+        # sys.setrecursionlimit. CI uses ``uv python install 3.14``, so
+        # RecursionError is live there even when a dev box never sees it.
+        #
+        # Uncaught, these escaped ``_scan_text``, escaped ``main``, and killed
+        # the process with a traceback — exit 1, the code that means
+        # "violations found", for a file that was never scanned. Worse, they
+        # ABORTED THE SCAN LOOP, so every later file went unscanned with
+        # nothing reported (#542).
+        #
+        # Deliberately the CLASS, not a name list. Enumerating MemoryError and
+        # RecursionError closes the two shapes we happened to think of and
+        # leaves the next build-specific one open — the #518 guard-name-list
+        # mistake. The scope covers the whole scan, not just ``ast.parse``:
+        # ``splitlines``, ``ast.walk`` and the line pass can raise too, and an
+        # exception in any of them aborted the loop just as effectively.
+        #
+        # APPEND, never replace: by the time this fires the walk may already
+        # have found a real ``tag(T3, ...)``. Returning only the unscannable
+        # message would downgrade a T3-laundering finding into a vague one.
+        #
+        # ``KeyboardInterrupt`` and ``SystemExit`` derive from
+        # ``BaseException``, so they are NOT caught here and still interrupt
+        # the run.
+        #
+        # Not a silent-failure concession: the result is a reported violation,
+        # printed to stderr by ``main``, and the gate exits non-zero.
+        violations.append(f"{path}:1: {_UNSCANNABLE_MESSAGE}")
+        violations.append(f"  {type(exc).__name__}: {exc}")
 
     return violations
 
@@ -474,6 +519,10 @@ def _scan_file(path: Path) -> list[str]:
 
     Applies the exemption, reads the source, and delegates the scanning to
     :func:`_scan_text`.
+
+    **Never raises** (short of ``BaseException``), for the same reason
+    :func:`_scan_text` does not: a read failure this function lets escape aborts
+    ``main``'s loop and silently un-gates every later file (#542).
     """
     if _is_exempt(path):
         return []
@@ -483,6 +532,17 @@ def _scan_file(path: Path) -> list[str]:
         return [f"{path}:1: {_UNDECODABLE_MESSAGE}", "  <undecodable>"]
     except OSError as exc:
         return [f"{path}:1: {_UNREADABLE_MESSAGE}", f"  {exc.strerror or exc}"]
+    except Exception as exc:
+        # A path with an embedded NUL raises ``ValueError``, not ``OSError`` —
+        # measured, and the exact cause ``_is_exempt`` already catches
+        # ValueError for. The same input was handled by one function and
+        # escaped the next. Same class-not-names reasoning as ``_scan_text``.
+        #
+        # No third catch-all in ``main``'s loop: with this arm and
+        # ``_scan_text``'s, a per-file failure cannot reach it, so a backstop
+        # there would be unreachable — a coverage hole on a file that must
+        # stay at 100%.
+        return [f"{path}:1: {_UNSCANNABLE_MESSAGE}", f"  {type(exc).__name__}: {exc}"]
     return _scan_text(text, path)
 
 
