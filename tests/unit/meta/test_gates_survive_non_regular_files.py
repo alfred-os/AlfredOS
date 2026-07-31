@@ -145,11 +145,16 @@ def test_a_gate_script_returns_a_verdict_despite_a_fifo(
             f"within {_DEADLINE_SECONDS}s. In CI this burns the whole job timeout "
             f"and reports no diagnosis (#546)."
         )
-
-    assert completed.returncode in {0, 1, 2}, (
-        f"{script_name} exited {completed.returncode}, which is outside its "
-        f"documented exit contract\nstderr:\n{completed.stderr}"
-    )
+    else:
+        # In an `else`, not after the block: `pytest.fail` raises, so trailing
+        # code is unreachable — but only if the reader (and the analyser) knows
+        # that. CodeQL does not model it as NoReturn and flagged `completed` as
+        # possibly-unbound (py/uninitialized-local-variable, error). Structuring
+        # it so the binding cannot be missed is truer than suppressing the alert.
+        assert completed.returncode in {0, 1, 2}, (
+            f"{script_name} exited {completed.returncode}, which is outside its "
+            f"documented exit contract\nstderr:\n{completed.stderr}"
+        )
 
 
 def test_the_tree_reading_gate_census_is_complete() -> None:
