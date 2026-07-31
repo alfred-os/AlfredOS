@@ -901,13 +901,17 @@ def _scan_file_within_deadline(path: Path, timeout: float = 10.0) -> list[str]:
     def _run() -> None:
         """Run the scan, capturing EITHER outcome for the main thread.
 
-        ``BaseException`` deliberately: an exception left to escape a bare
-        thread is swallowed by ``threading.excepthook`` and the case fails with
-        a message naming nothing.
+        Catches ``Exception``, not ``BaseException``. The point is to surface a
+        BUG in ``_scan_file`` — which is an ``Exception`` — rather than let it
+        vanish into ``threading.excepthook`` and fail with a message naming
+        nothing. Widening to ``BaseException`` would additionally swallow
+        ``KeyboardInterrupt`` and ``SystemExit`` in the worker, which is the
+        exact behaviour ``_scan_file`` itself deliberately refuses (see its
+        ``except Exception`` arm), and CodeQL flags it as py/catch-base-exception.
         """
         try:
             result.append(check_tag_t3._scan_file(path))
-        except BaseException as exc:  # surfaced on the main thread below
+        except Exception as exc:  # surfaced on the main thread below
             failure.append(exc)
 
     worker = threading.Thread(target=_run, daemon=True)
