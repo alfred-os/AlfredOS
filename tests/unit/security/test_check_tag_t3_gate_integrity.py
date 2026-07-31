@@ -14,6 +14,7 @@ The ``_scan_text`` seam plus in-process calls are what make the 100% gate in
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.util
 import subprocess
@@ -142,13 +143,27 @@ def test_a_real_utf8_file_still_scans_normally(tmp_path: Path) -> None:
     assert any(check_tag_t3._TAG_T3_MESSAGE in v for v in violations)
     assert not any(check_tag_t3._UNDECODABLE_MESSAGE in v for v in violations)
     assert not any(check_tag_t3._UNPARSEABLE_MESSAGE in v for v in violations)
+    # test-005, SECOND site. The plan named only the zero-false-positive floor
+    # below; this enumeration is the other place a collection-failure message
+    # can hide. A reviewer injected the fourth-message regression and this twin
+    # SURVIVED — an ordinary file reported as unscannable would have gone
+    # unnoticed here. Every enumeration of the collection-failure messages has
+    # to move together or the set of them is only as complete as its shortest
+    # copy.
+    assert not any(check_tag_t3._UNSCANNABLE_MESSAGE in v for v in violations)
 
 
 def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Path) -> None:
     """Non-vacuity floor: this change must cost zero false positives.
 
     Measured at plan time: 0 unparseable, 0 unreadable across 293 files;
-    re-measured after #541 across the 332 files of BOTH declared roots.
+    re-measured after #541 across the 332 files of BOTH declared roots, and
+    again after #542 added the fourth message (0 unscannable).
+
+    The tuple ENUMERATES the collection-failure messages, so a message missing
+    from it is invisible to this floor (test-005): a real file that started
+    failing that way would leave the floor green. The other enumeration lives
+    in ``test_a_real_utf8_file_still_scans_normally``; both must list all four.
 
     #541: was ``_collect_paths(["src/alfred"])``. A partial in-repo directory
     scan is now refused at runtime, so this asserts over the production
@@ -171,6 +186,7 @@ def test_the_real_scan_root_has_no_unreadable_or_unparseable_files(tmp_path: Pat
         check_tag_t3._UNPARSEABLE_MESSAGE,
         check_tag_t3._UNREADABLE_MESSAGE,
         check_tag_t3._UNDECODABLE_MESSAGE,
+        check_tag_t3._UNSCANNABLE_MESSAGE,
     )
 
     def _collection_failures_in(path: Path) -> list[str]:
@@ -1027,3 +1043,180 @@ def test_the_file_argument_residual_is_not_closed_by_this_layer() -> None:
         "the enumeration no longer exits 0 — the residual is closed at this "
         "layer, so delete this test and correct the module docstring"
     )
+
+
+# ---------------------------------------------------------------------------
+# #542: `ast.parse` raises MORE than SyntaxError. Uncaught, the exception
+# escaped `_scan_text`, escaped `main`, killed the process with a traceback
+# (exit 1 — the code that means "violations found" — for a file that was never
+# scanned) and ABORTED THE SCAN LOOP, so every later file went unscanned with
+# nothing reported.
+# ---------------------------------------------------------------------------
+
+# REAL pathological input, never a mocked exception.
+#
+# WHICH exception `ast.parse` raises depends on the interpreter BUILD, not just
+# the source. Measured on two CPython 3.14.6 builds:
+#
+#   * `"not " * 20000`  -> MemoryError("Parser stack overflowed") on BOTH.
+#   * a 50 000-operand `+` chain -> RecursionError("Stack overflow (used
+#     8144 kB) during compilation") on the uv/proto standalone build, and
+#     PARSES CLEANLY on a Homebrew build of the identical version.
+#
+# CPython 3.14's stack guard trips on actual C-stack bytes consumed, not on
+# sys.setrecursionlimit. CI provisions Python with `uv python install 3.14`
+# (the standalone family), so RecursionError is live in CI even though a dev
+# box may never see it.
+#
+# Hence: assert the PROPERTY (nothing escapes `_scan_text`) across several
+# shapes rather than a specific exception type, which would make the suite
+# pass or fail on which python built the venv.
+_PATHOLOGICAL_SOURCES: tuple[tuple[str, str], ...] = (
+    ("unary-not-chain", "not " * 20000 + "x\n"),
+    ("unary-minus-chain", "-" * 20000 + "x\n"),
+    ("binop-chain", "x = " + "+".join(["1"] * 50000) + "\n"),
+    ("attribute-chain", "x = a" + ".b" * 50000 + "\n"),
+)
+
+# The one shape that behaved identically on every build measured, so it can
+# carry the assertions that need a guaranteed trip.
+_ALWAYS_UNSCANNABLE: str = "not " * 20000 + "x\n"
+
+
+def test_the_portable_pathological_source_defeats_the_syntaxerror_arm() -> None:
+    """Anti-vacuity premise for the cases below.
+
+    If a future CPython turned this into a SyntaxError, the existing arm
+    would handle it and the regressions below would pass for the wrong
+    reason. Assert the premise directly.
+    """
+    with pytest.raises(MemoryError):
+        ast.parse(_ALWAYS_UNSCANNABLE)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [pytest.param(source, id=label) for label, source in _PATHOLOGICAL_SOURCES],
+)
+def test_no_pathological_source_escapes_the_scanner(source: str) -> None:
+    """`_scan_text` must never raise, whatever the parser does with the input.
+
+    Build-agnostic by construction: a shape that parses cleanly on this
+    interpreter returns [] and still satisfies "did not raise". The floor
+    below guarantees the set is not ALL clean.
+    """
+    check_tag_t3._scan_text(source, Path("src/alfred/pathological.py"))
+
+
+def test_at_least_one_pathological_source_actually_trips_the_arm() -> None:
+    """Anti-vacuity floor for the parametrised case above.
+
+    Without this, an interpreter that parsed every shape cleanly would make
+    the whole set pass while exercising nothing — the paper-gate shape, in
+    the tests that exist to close it.
+
+    The message constant is read INSIDE the comprehension deliberately: the
+    outer `_scan_text` call is evaluated first, so on the unfixed script this
+    case reds with the real defect (the escaping parser exception) rather than
+    with an AttributeError for a constant that does not exist yet. It cannot go
+    vacuous either way — an absent constant raises as soon as any shape yields
+    a violation, and a set of shapes that yields none reds on `assert tripped`.
+    """
+    tripped = [
+        label
+        for label, source in _PATHOLOGICAL_SOURCES
+        if any(
+            check_tag_t3._UNSCANNABLE_MESSAGE in line
+            for line in check_tag_t3._scan_text(source, Path("src/alfred/p.py"))
+        )
+    ]
+    assert tripped, (
+        "no pathological shape reached the unscannable arm on this interpreter "
+        "— the parametrised case above is vacuous here"
+    )
+
+
+def test_a_pathological_file_does_not_abort_the_scan_of_later_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The substantive #542 defect: later files go unscanned, silently.
+
+    `main` sorts its paths, so `aaa_` is scanned first. Before the fix the
+    MemoryError aborted the loop and the real violation in `zzz_` was never
+    found — the gate would report a clean tree for a file that launders T3.
+
+    Explicit FILE arguments: they are exempt from the `_MIN_SCANNED_FILES`
+    census (directory scans only), and neither fixture may be named
+    `test_*.py` or the out-of-repo exemption would make both vacuously clean.
+    """
+    bad = tmp_path / "aaa_pathological.py"
+    bad.write_text(_ALWAYS_UNSCANNABLE, encoding="utf-8")
+    later = tmp_path / "zzz_violation.py"
+    later.write_text("tag(T3, payload)\n", encoding="utf-8")
+
+    rc = check_tag_t3.main([str(bad), str(later)])
+
+    err = capsys.readouterr().err
+    assert rc == 1, "an unscannable file plus a real violation must fail the gate"
+    assert check_tag_t3._UNSCANNABLE_MESSAGE in err, "the unscannable file was not reported"
+    assert check_tag_t3._TAG_T3_MESSAGE in err, (
+        "the violation in the LATER file was missed — the scan loop aborted, "
+        "which is the paper-gate shape #542 exists to close"
+    )
+
+
+def test_a_violation_survives_a_scan_failure_in_the_same_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection failure must not DISCARD findings already collected.
+
+    Widening the try-scope means an exception can fire AFTER the AST walk has
+    found real violations. Replacing them with a bare "unscannable" message
+    would downgrade a T3-laundering finding into a vague one — so the arm
+    appends rather than replaces.
+
+    **This pins an ORDERING property, and injects the fault at the seam.** A
+    mock is the right instrument HERE SPECIFICALLY, and nowhere else in this
+    section: the real-input cases above already prove the arm fires, so nothing
+    is being stood in for. What no input can express is firing it *after* the
+    walk has collected findings, because every reachable pathological shape
+    fails inside `ast.parse` — before `ast.walk` has run and before a single
+    violation exists to discard. A fixture-based version of this test could
+    therefore only ever assert the property it cannot reach.
+
+    An earlier draft did exactly that and **could never pass**:
+    `_TYPE_IGNORE_PATTERN` requires a literal `TaggedContent` on the line and
+    the fixture had none, so the test was red before its mutation as well as
+    after, and the mutation meant to guard this property reported a kill while
+    proving nothing.
+    """
+
+    class _Exploding:
+        """Stands in for `_TYPE_IGNORE_PATTERN` — the LAST step of the scan."""
+
+        def search(self, line: str) -> object:
+            raise RecursionError(f"injected post-walk fault on {line!r}")
+
+    monkeypatch.setattr(check_tag_t3, "_TYPE_IGNORE_PATTERN", _Exploding())
+    violations = check_tag_t3._scan_text("tag(T3, payload)\n", Path("src/alfred/mixed.py"))
+
+    assert any(check_tag_t3._TAG_T3_MESSAGE in line for line in violations), (
+        "the tag(T3, ...) finding collected BEFORE the fault was discarded — "
+        "the arm replaced rather than appended, downgrading a T3-laundering "
+        "finding into a vague 'unscannable' one"
+    )
+    assert any(check_tag_t3._UNSCANNABLE_MESSAGE in line for line in violations), (
+        "the scan failure itself was not reported"
+    )
+
+
+def test_a_nul_byte_path_is_reported_not_raised(tmp_path: Path) -> None:
+    """Twin gap: `read_text` raises ValueError, not OSError, on an embedded NUL.
+
+    `_is_exempt` already catches ValueError for exactly this cause and says
+    so, but `_scan_file`'s read arm caught only UnicodeDecodeError and
+    OSError — the same input handled by one function escaped the next.
+    """
+    violations = check_tag_t3._scan_file(tmp_path / "nul\x00name.py")
+    assert violations, "an unreadable path must be reported, not silently clean"
+    assert check_tag_t3._UNSCANNABLE_MESSAGE in violations[0]
