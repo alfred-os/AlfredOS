@@ -159,6 +159,12 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         check_tag_t3._BASEMODEL_VALUE_MESSAGE,
         check_tag_t3._ALIAS_BUDGET_MESSAGE,
         check_tag_t3._PRIVATE_SURFACE_MESSAGE,
+        # PR #553 security review. F1 added the bare-identifier carrier for the
+        # vehicle-NAME set; F3 added the pair that closes `__init__` re-entry, shaped
+        # like the `__setattr__` pair above (a call rule plus a one-position whitelist).
+        check_tag_t3._RAW_VEHICLE_NAME_MESSAGE,
+        check_tag_t3._RAW_INIT_SHAPE_MESSAGE,
+        check_tag_t3._RAW_INIT_ALIASED_MESSAGE,
     }
     declared = {
         value
@@ -187,6 +193,20 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         f"a collection-failure message is contained in another: {overlapping} — "
         f"both readers match by substring, so a test for the shorter one would "
         f"be satisfied by the longer one firing"
+    )
+    # THE SAME PROPERTY OVER EVERY MESSAGE, not just the collection-failure five.
+    # Most rule tests assert `MESSAGE in violation` too, so a finding message that is
+    # a substring of a sibling makes those tests mutually satisfiable — a rule could
+    # be deleted and its test would still pass on the longer sibling firing. Derived
+    # from `declared` so it covers messages nobody thought to enumerate.
+    shadowed = [
+        (shorter, longer)
+        for shorter, longer in itertools.permutations(sorted(declared), 2)
+        if shorter in longer
+    ]
+    assert not shadowed, (
+        f"a gate message is contained in another: {shadowed} — every test that "
+        f"matches by substring is then satisfiable by the wrong rule firing"
     )
 
 
