@@ -150,7 +150,7 @@ _GAP_ADDITIONS: tuple[str, ...] = (
     # canary/DLP-refusal row; DYNAMIC at the emit site (flows through the
     # _emit_extract_audit ``audit_result`` param, quarantine.py:807→1261), so the
     # static guard cannot see it. Manually audited + closed here.
-    # web.fetch tool dispatcher (plugins/web_fetch/fetch_dispatcher.py).
+    # web.fetch tool dispatcher (src/alfred/plugins/web_fetch/fetch_dispatcher.py).
     "dlp_scan_error",  # #134
     "domain_not_allowed",  # #134
     "internal_ip_refused",  # #134

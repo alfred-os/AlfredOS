@@ -300,7 +300,7 @@ def test_dynamic_result_sites_are_documented() -> None:
     * ``security/quarantine.py`` — the ``_emit_extract_audit`` ``audit_result``
       param carries closed-vocab literals; its ``post_stage_refused`` value
       (C1) is now in ``ck_audit_log_result`` (migration 0022).
-    * ``plugins/web_fetch/fetch_dispatcher.py`` — the G7-2.5 re-home (#333)
+    * ``src/alfred/plugins/web_fetch/fetch_dispatcher.py`` — the G7-2.5 re-home (#333)
       removed the only dynamic ``result=`` site (the plugin-payload-derived
       ``result=dlp_result`` once tracked as #326). The re-homed dispatcher emits
       ONLY literal ``result=`` values (ok / refused / quarantined /

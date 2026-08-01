@@ -43,12 +43,20 @@ installing a guarded ``dict`` subclass as the instance ``__dict__``; deliberatel
 done, because it breaks pydantic's own ``__copy__`` (which round-trips through
 ``__dict__`` assignment) while ``object.__setattr__`` stays open regardless.
 
-``scripts/check_tag_t3.py`` models none of these spellings today (verified — a file
-containing all of them scans clean, with a positive control proving it was scanned).
-Adding them is the #518 detector follow-up. The rule must key on the written ``"tier"``
-attribute rather than refusing ``object.__setattr__``, which is an established idiom
-here (``plugins/web_fetch/allowlist.py``, ``plugins/web_fetch/fetch_dispatcher.py``,
-``hooks/context.py``). Corpus ``tl-2026-013`` tracks the gap.
+``scripts/check_tag_t3.py`` refuses these spellings as of #538, and it is the ONLY
+enforcement layer they will ever have. An earlier revision of this paragraph prescribed
+keying the rule on the written ``"tier"`` attribute rather than refusing
+``object.__setattr__``, whose bare form is an established idiom here
+(``src/alfred/plugins/web_fetch/allowlist.py``,
+``src/alfred/plugins/web_fetch/fetch_dispatcher.py``, ``src/alfred/hooks/context.py``).
+That design is defeated BY CONSTRUCTION: ``object.__setattr__(obj, "__dict__", {"tier":
+T3})`` writes ``__dict__`` and never names ``tier`` at all. The shipped rules
+default-deny the VEHICLE and the CALL SHAPE instead — the vehicle dunders, ``vars()``,
+``__class__`` in store context, a vehicle name written as a folded string, the
+carrier-by-reference primitives, unbound ``BaseModel`` seam dispatch, and this module's
+own private surface — while the three live sites above stay clean because none of them
+writes a ``_TAGGED_STATE_FIELDS`` name. Corpus ``tl-2026-013`` carries the accepted
+residuals; the gate's module docstring carries the same list next to the rules.
 """
 
 from __future__ import annotations
