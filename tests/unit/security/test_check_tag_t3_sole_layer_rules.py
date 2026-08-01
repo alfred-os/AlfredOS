@@ -123,8 +123,8 @@ def test_enclosing_functions_matches_async_def_as_well_as_def() -> None:
     fmap = check_tag_t3._enclosing_functions(
         ast.parse("def sync_one():\n    a = 1\n\n\nasync def async_one():\n    b = 2\n")
     )
-    assert fmap[2] == "sync_one"
-    assert fmap[6] == "async_one", "async def unmapped — the walk matches ast.FunctionDef only"
+    assert fmap[2] == ("sync_one", 0)
+    assert fmap[6] == ("async_one", 0), "async def unmapped — the walk matches ast.FunctionDef only"
 
 
 def test_enclosing_functions_reports_the_innermost_function() -> None:
@@ -132,8 +132,33 @@ def test_enclosing_functions_reports_the_innermost_function() -> None:
     fmap = check_tag_t3._enclosing_functions(
         ast.parse("def outer():\n    def inner():\n        x = 1\n    y = 2\n")
     )
-    assert fmap[3] == "inner"
-    assert fmap[4] == "outer"
+    assert fmap[3] == ("inner", 1)
+    assert fmap[4] == ("outer", 0)
+
+
+def test_enclosing_functions_reports_the_depth_of_every_enclosing_scope() -> None:
+    """PR #553 SECURITY REVIEW, F4 — a CLASS body is a scope too.
+
+    The depth the ``(path, function)`` exemption needs is "is this def at MODULE
+    scope", not "how many ``def``s is it inside". A method of a module-level class is
+    nested one scope deep even though no function encloses it, so counting only
+    functions would hand a same-named METHOD the exemption a nested ``def`` is being
+    denied.
+    """
+    fmap = check_tag_t3._enclosing_functions(
+        ast.parse(
+            "def top():\n"
+            "    x = 1\n"
+            "class C:\n"
+            "    def method(self):\n"
+            "        y = 2\n"
+            "        def buried():\n"
+            "            z = 3\n"
+        )
+    )
+    assert fmap[2] == ("top", 0)
+    assert fmap[5] == ("method", 1), "a method of a module-level class is one scope deep"
+    assert fmap[7] == ("buried", 2)
 
 
 def test_enclosing_functions_leaves_module_scope_unmapped() -> None:
@@ -143,7 +168,7 @@ def test_enclosing_functions_leaves_module_scope_unmapped() -> None:
     """
     fmap = check_tag_t3._enclosing_functions(ast.parse("import os\n\n\ndef f():\n    x = 1\n"))
     assert 1 not in fmap
-    assert fmap[5] == "f"
+    assert fmap[5] == ("f", 0)
 
 
 def test_fold_str_folds_binop_and_fstring_but_not_computed_values() -> None:
@@ -422,6 +447,136 @@ def test_setattr_with_fewer_than_two_arguments_is_refused() -> None:
     ]
 
 
+def test_init_re_entry_on_a_foreign_object_is_refused() -> None:
+    """PR #553 SECURITY REVIEW, F3 — pydantic's ``__init__`` IS a raw-state write.
+
+    ``BaseModel.__init__`` calls ``validate_python(..., self_instance=self)``, which
+    writes the instance ``__dict__`` directly — the "never traverses ``__setattr__``"
+    class this whole rule set exists for. EXECUTED against a real
+    ``TaggedContent[T2]``: ``content`` was replaced with attacker text and ``source``
+    forged to ``operator.console``, and the gate returned rc=0.
+
+    BOTH dispatch forms are covered, and the bound one was not in the review's report:
+    ``low.__init__(content=…)`` re-enters the same initialiser with no positional
+    argument at all, so a rule that only read ``args[0]`` would have missed it. The
+    rule is receiver-BLIND for the same reason the ``__setattr__`` rules are.
+
+    The TIER is safe by a different mechanism and the twin below records it: the
+    cross-tier field validator refuses ``tier=T3`` on a ``TaggedContent[T2]`` with a
+    ``security.t3_boundary.refused`` audit row. This rule closes ``content`` and
+    ``source``, which nothing else did.
+    """
+    for label, source in {
+        "unbound-class-dispatch": (
+            'type(low).__init__(low, content=attacker, source="operator.console", tier=low.tier)\n'
+        ),
+        "bound-instance-dispatch": 'low.__init__(content=attacker, source="forged")\n',
+        "basemodel-dispatch": "BaseModel.__init__(low, content=attacker)\n",
+    }.items():
+        assert any(check_tag_t3._RAW_INIT_SHAPE_MESSAGE in m for m in _messages(source)), (
+            f"{label} was admitted"
+        )
+
+    # THE TWO LIVE SHAPES, both of which must stay clean. 62 `__init__` attribute nodes
+    # exist across both scan roots: 59 zero-argument `super()` and 3
+    # `AlfredError.__init__(self, …)` in `src/alfred/egress/errors.py`. Measured
+    # false-positive cost of this rule: ZERO.
+    assert (
+        check_tag_t3._scan_text(
+            "class C(B):\n    def __init__(self, **kw):\n        super().__init__(**kw)\n", _PROBE
+        )
+        == []
+    ), "positive twin: zero-argument super().__init__() is the ordinary constructor chain"
+    assert (
+        check_tag_t3._scan_text(
+            'class E(X):\n    def __init__(self, d):\n        AlfredError.__init__(self, t("k"))\n',
+            _PROBE,
+        )
+        == []
+    ), "positive twin: unbound dispatch onto `self` is the three live egress/errors.py sites"
+
+
+def test_only_the_zero_argument_super_spelling_is_admissible() -> None:
+    """The admissibility arm keys on ``super`` in the FAIL-CLOSED direction.
+
+    ``super(TaggedContent, low)`` names a FOREIGN object explicitly, so it must red —
+    the zero-argument form is the only one the compiler binds to the enclosing method's
+    own first parameter.
+
+    Rebinding the name makes the gate STRICTER, not weaker, which is why ``super`` needs
+    no row in ``test_every_keyed_identifier_is_alias_resolved``. MEASURED, not assumed:
+    ``_s = super`` followed by ``_s()`` raises ``RuntimeError: super(): __class__ cell
+    not found``, because the compiler only creates the ``__class__`` cell when it sees
+    the literal name ``super`` in the method body. The rebound spelling is dead at
+    runtime AND refused here.
+    """
+    assert any(
+        check_tag_t3._RAW_INIT_SHAPE_MESSAGE in m
+        for m in _messages("super(TaggedContent, low).__init__(content=attacker)\n")
+    ), "the two-argument super() form names a foreign object and was admitted"
+    assert any(
+        check_tag_t3._RAW_INIT_SHAPE_MESSAGE in m
+        for m in _messages(
+            "_s = super\nclass C(B):\n    def __init__(self):\n        _s().__init__()\n"
+        )
+    ), "a rebound super must fail CLOSED"
+    assert (
+        check_tag_t3._scan_text(
+            "class C(B):\n    def __init__(self):\n        super().__init__()\n", _PROBE
+        )
+        == []
+    ), "positive twin: the literal zero-argument spelling is the admissible one"
+
+
+def test_init_referenced_outside_call_position_is_refused() -> None:
+    """PR #553 F3, the alias half — the same ONE-POSITION WHITELIST ``__setattr__`` uses.
+
+    ``_f = type(low).__init__`` then ``_f(low, content=attacker)`` reaches the identical
+    write with no ``__init__`` node in ``Call.func`` position, so the shape rule above is
+    blind to it by construction. ``Call.func`` is the only admissible position; every
+    other one is the alias vehicle. Never an ancestor blacklist — that has to ENUMERATE
+    the bad positions.
+
+    Measured across both scan roots: all 62 ``__init__`` attribute nodes sit in
+    ``Call.func``, so this costs ZERO false positives.
+    """
+    assert _messages("_f = type(low).__init__\n_f(low, content=attacker)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_INIT_ALIASED_MESSAGE}"
+    ]
+    assert (
+        check_tag_t3._scan_text(
+            "class C(B):\n    def __init__(self):\n        super().__init__()\n", _PROBE
+        )
+        == []
+    ), "positive twin: a call-position __init__ must NOT trip the alias rule"
+
+
+# R2-E — PINNED HERE, AS SEPARATE LITERALS, module-level so the three tests that
+# need them share ONE copy (matching `_EXPECTED_SEAMS` / `_EXPECTED_PRIVATE_SURFACE`
+# below). Each enforcement test asserts the literal EQUALS the constant under test
+# first and then loops over the LITERAL — looping over the constant would remove the
+# member from the oracle at the same moment a mutation removes it from the rule.
+#
+# Three carriers reach these names and each needs its own loop: an `ast.Attribute`
+# node, a folded STRING, and a bare `ast.Name`.
+_EXPECTED_VEHICLE_ATTRS = frozenset(
+    {
+        "__dict__",
+        "__setstate__",
+        "__getstate__",
+        "__reduce__",
+        "__reduce_ex__",
+        "__new__",
+        "__mro__",
+        "__bases__",
+        "__doc__",
+    }
+)
+_EXPECTED_VEHICLE_NAMES = _EXPECTED_VEHICLE_ATTRS | frozenset(
+    {"__setattr__", "__delattr__", "__class__", "__init__"}
+)
+
+
 def test_vehicle_attributes_are_refused() -> None:
     """A02, A07 and the rest of the raw-state class, banned as VEHICLES."""
     for source in (
@@ -440,23 +595,12 @@ def test_vehicle_attributes_are_refused() -> None:
 def test_every_declared_vehicle_attribute_is_enforced() -> None:
     """R2-E/R2-H — pin the set as a literal HERE, then loop over the PINNED copy.
 
-    Three of the eight members were untested, so dropping them from the constant
-    survived the whole suite AND the real-tree scan. Looping over the constant under
-    test would not have caught it either: the mutation removes the member from the
-    oracle at the same time.
+    Three of the members were untested, so dropping them from the constant survived
+    the whole suite AND the real-tree scan. Looping over the constant under test would
+    not have caught it either: the mutation removes the member from the oracle at the
+    same time.
     """
-    expected = frozenset(
-        {
-            "__dict__",
-            "__setstate__",
-            "__getstate__",
-            "__reduce__",
-            "__reduce_ex__",
-            "__new__",
-            "__mro__",
-            "__bases__",
-        }
-    )
+    expected = _EXPECTED_VEHICLE_ATTRS
     assert expected == check_tag_t3._RAW_STATE_VEHICLE_ATTRS, (
         "the declared vehicle-attribute set moved; this oracle pins it"
     )
@@ -464,6 +608,69 @@ def test_every_declared_vehicle_attribute_is_enforced() -> None:
         assert _messages(f"x = obj.{attr}\n") == [
             f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_ATTR_MESSAGE}"
         ], f"vehicle attribute {attr!r} is declared but not enforced"
+
+
+def test_dunder_doc_hands_the_prose_exclusion_back_as_data() -> None:
+    """PR #553 SECURITY REVIEW, F1 — the premise under the prose exclusion was FALSE.
+
+    ``_prose_string_ids`` excludes a bare string statement from BOTH string-keyed rules
+    on the grounds that "a string that is a whole statement documents; a string anywhere
+    else is data". ``__doc__`` refutes that: it hands the very same string back in code
+    position, and ``__doc__`` was in no vehicle set. Both spellings below were EXECUTED
+    end to end — the first installed an attacker nonce and minted a genuine
+    ``TaggedContent[T3]``, the second relabelled a live T2 object.
+
+    The fix is not to stop excluding prose (that would readmit A17,
+    ``getattr(_t, "_set_authorized_t3_nonce")``) but to make the RETRIEVAL a vehicle.
+    Measured cost across both scan roots: ZERO ``__doc__`` nodes of any kind.
+    """
+    for label, source in {
+        "class-docstring-as-nonce-name": (
+            'class _Codec:\n    "_set_authorized_t3_nonce"\ngetattr(_t, _Codec.__doc__)(mine)\n'
+        ),
+        "function-docstring-as-vehicle-name": (
+            'def _c(): "__dict__"\ngetattr(low, _c.__doc__)["tier"] = T3\n'
+        ),
+    }.items():
+        assert any(check_tag_t3._RAW_VEHICLE_ATTR_MESSAGE in m for m in _messages(source)), (
+            f"{label} was admitted — the prose exclusion is still a data channel"
+        )
+    assert check_tag_t3._scan_text('class _Codec:\n    "an ordinary docstring"\n', _PROBE) == [], (
+        "positive twin: a docstring nobody reads back is still prose"
+    )
+
+
+def test_a_vehicle_name_reached_as_a_bare_identifier_is_refused() -> None:
+    """PR #553 SECURITY REVIEW, F1 — the THIRD carrier for the same name set.
+
+    A module's own docstring is bound to the bare identifier ``__doc__``, which is
+    neither an ``ast.Attribute`` (so the attribute arm is blind) nor a string constant
+    (so the folded-string arm is blind). A module docstring whose entire value is
+    ``_set_authorized_t3_nonce``, followed by ``getattr(_t, __doc__)(mine)``, is the
+    same F1 channel one level down — and the docstring is prose-excluded, so nothing
+    else can see it either.
+
+    Closed as a CARRIER rather than as the one name that has this spelling: every
+    member of the name set is refused in bare-identifier position. Measured cost across
+    both scan roots: ZERO bare ``ast.Name`` nodes carrying any of these ids.
+    """
+    assert _messages('"""_set_authorized_t3_nonce"""\ngetattr(_t, __doc__)(mine)\n') == [
+        f"{_PROBE}:2: {check_tag_t3._RAW_VEHICLE_NAME_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text("x = ordinary_identifier\n", _PROBE) == [], (
+        "positive twin: an ordinary bare name must NOT red"
+    )
+
+
+def test_every_declared_vehicle_name_is_enforced_as_a_bare_identifier() -> None:
+    """The bare-``Name`` carrier's completeness loop, over the PINNED literal."""
+    assert _EXPECTED_VEHICLE_NAMES == check_tag_t3._RAW_STATE_VEHICLE_NAMES, (
+        "the declared vehicle-NAME set moved; this oracle pins it"
+    )
+    for name in sorted(_EXPECTED_VEHICLE_NAMES):
+        assert _messages(f"x = {name}\n") == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_NAME_MESSAGE}"
+        ], f"vehicle name {name!r} is declared but not enforced as a bare identifier"
 
 
 def test_class_swap_is_refused_but_a_class_read_is_not() -> None:
@@ -544,21 +751,7 @@ def test_a_vehicle_named_only_as_a_string_is_refused() -> None:
     receiver-blind rules already cover the attribute form. Both halves are asserted
     here — the widening and the thing that must not widen with it.
     """
-    expected = frozenset(
-        {
-            "__dict__",
-            "__setstate__",
-            "__getstate__",
-            "__reduce__",
-            "__reduce_ex__",
-            "__new__",
-            "__mro__",
-            "__bases__",
-            "__setattr__",
-            "__delattr__",
-            "__class__",
-        }
-    )
+    expected = _EXPECTED_VEHICLE_NAMES
     assert expected == check_tag_t3._RAW_STATE_VEHICLE_NAMES, (
         "the declared vehicle-NAME set moved; this oracle pins it"
     )
@@ -569,6 +762,15 @@ def test_a_vehicle_named_only_as_a_string_is_refused() -> None:
     assert "__setattr__" not in check_tag_t3._RAW_STATE_VEHICLE_ATTRS, (
         "adding __setattr__ to the ATTRIBUTE set reds all three live benign sites"
     )
+    # PR #553 F3 — `__init__` joins the NAME set on the same precedent, and must stay out
+    # of the ATTRIBUTE set for the same reason: 62 live sites carry that attribute node.
+    assert "__init__" not in check_tag_t3._RAW_STATE_VEHICLE_ATTRS, (
+        "adding __init__ to the ATTRIBUTE set reds all 62 live super()/self sites"
+    )
+    assert any(
+        check_tag_t3._RAW_VEHICLE_STR_MESSAGE in m
+        for m in _messages('getattr(type(low), "__init__")(low, content=attacker)\n')
+    ), "the string spelling carries no attribute node, so the call rule cannot see it"
     assert check_tag_t3._scan_text('object.__setattr__(self, "metadata", v)\n', _PROBE) == []
     for name in sorted(expected):
         assert _messages(f'_A = "{name}"\n') == [
@@ -593,14 +795,44 @@ def test_a_raw_state_dunder_in_prose_stays_clean_with_a_positive_twin() -> None:
 
 
 def test_the_string_rule_matches_the_whole_name_not_a_substring() -> None:
-    """R2-H — the equality-to-containment WIDENING currently reds nothing.
+    """R2-H — the equality-to-containment WIDENING reds nothing in the tree today.
 
-    Relaxing ``folded in _RAW_STATE_VEHICLE_NAMES`` to "any member appears inside
-    ``folded``" kept the real-tree scan at rc=0 and every other floor green, because
-    no other fixture carries a vehicle name inside a longer string in CODE position.
+    PR #553 SECURITY REVIEW, F5 — the SECOND half of that claim was measurably wrong
+    and is corrected here and at the rule. "Admitting no new attack" is false: an
+    ``exec`` whose argument is a whole laundering statement scans clean under equality
+    and would red under containment. The exposure is small because ``ruff`` refuses
+    ``exec``/``eval`` independently (``S102``/``S307``, both verified by execution in
+    BOTH scan roots — ``select`` carries ``"S"``, only ``S101`` is ignored,
+    ``per-file-ignores`` covers ``tests/**`` only, and CI runs ``ruff check .``), but
+    the CLAIM is what invites a future author to keep equality on bad reasoning.
+
+    Equality STAYS: containment was measured as a widening with its own costs, and
+    ``exec``/``eval`` are out of this rule's reach either way. The two floors below pin
+    the residual so a switch to containment has to come and edit them.
     """
     assert check_tag_t3._scan_text('x = "reset the __dict__ mapping"\n', _PROBE) == []
+    assert (
+        check_tag_t3._scan_text(
+            "exec(\"object.__setattr__(low, '__dict__', {'tier': T3})\")\n", _PROBE
+        )
+        == []
+    ), "F5 residual moved: exec() is out of this rule's reach and ruff S102 is what refuses it"
     assert _messages('x = "__dict__"\n') == [f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"]
+
+
+def test_the_fold_residual_covers_the_vehicle_names_not_only_private_ones() -> None:
+    """PR #553 SECURITY REVIEW, F6 — the ``%``/``.format()``/``join()`` residual is GENERAL.
+
+    It was documented only against ``_set_authorized_t3_nonce``. It applies to
+    ``_RAW_STATE_VEHICLE_NAMES`` identically: ``"__dict%s" % "__"`` is assembled
+    entirely from literals and folds to ``None``, so the string arm never sees it.
+    The residual is the OPERATION, not the operands — pinned here so the documentation
+    and the behaviour cannot drift apart.
+    """
+    assert check_tag_t3._scan_text('getattr(low, "__dict%s" % "__")["tier"] = T3\n', _PROBE) == []
+    assert _messages('getattr(low, "__di" + "ct__")["tier"] = T3\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"
+    ], "positive twin: the `+` spelling IS folded, so this test is not vacuous"
 
 
 def test_carrier_by_reference_primitives_are_refused() -> None:
@@ -613,6 +845,10 @@ def test_carrier_by_reference_primitives_are_refused() -> None:
     """
     for source in (
         'import gc\ngc.get_referents(low)[0]["tier"] = T3\n',
+        # PR #553 F2: the unlisted sibling. `get_referrers` hands back an instance
+        # `__dict__` exactly as `get_referents` and `get_objects` do, and executed it
+        # relabelled a live object with the static type still reading T2.
+        'import gc\ngc.get_referrers(low)[0]["tier"] = T3\n',
         "import ctypes\nctypes.cast(id(low), ctypes.py_object)\n",
     ):
         assert any(check_tag_t3._RAW_CARRIER_MESSAGE in m for m in _messages(source)), (
@@ -633,11 +869,17 @@ def test_every_declared_carrier_primitive_is_enforced() -> None:
     ``ctypes.py_object`` appeared only as an ARGUMENT in its fixture, so dropping it
     from the constant survived the suite. Pin the set as a literal, then loop over the
     pinned copy with each primitive in the position the rule actually keys on.
+
+    PR #553 SECURITY REVIEW, F2 — ``gc.get_referrers`` joined the set. It is the
+    unlisted sibling of the two ``gc`` primitives that were already here and hands back
+    an instance ``__dict__`` exactly as they do; executed, it relabelled a live object
+    while its static type stayed ``TaggedContent[T2]``.
     """
     expected = frozenset(
         {
             ("gc", "get_referents"),
             ("gc", "get_objects"),
+            ("gc", "get_referrers"),
             ("ctypes", "py_object"),
             ("ctypes", "cast"),
             ("copyreg", "_reconstructor"),
@@ -954,6 +1196,18 @@ def test_every_keyed_identifier_is_alias_resolved() -> None:
             'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)',
         ),
         (
+            # PR #553 F3. Like `object` above, closed by RECEIVER-BLINDNESS: the rule
+            # never asks what the receiver is, so the three spellings differ only in
+            # how they name it and all three must red. The ADMISSIBILITY arm keys on
+            # `self` and on zero-argument `super` — both in the fail-CLOSED direction,
+            # where rebinding makes the gate stricter, so neither needs a row here
+            # (`test_only_the_zero_argument_super_spelling_is_admissible` proves it).
+            "__init__",
+            "type(low).__init__(low, content=attacker)",
+            "_t = type(low)\n_t.__init__(low, content=attacker)",
+            "from builtins import type as _ty\n_ty(low).__init__(low, content=attacker)",
+        ),
+        (
             "_set_authorized_t3_nonce",
             "_set_authorized_t3_nonce(mine)",
             "_reg = _set_authorized_t3_nonce\n_reg(mine)",
@@ -1180,6 +1434,47 @@ def test_nonce_factory_exemption_covers_async_def_too() -> None:
     assert _messages(not_exempt, _NONCE_FACTORY) == [
         f"{_NONCE_FACTORY}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
     ]
+
+
+def test_a_same_named_def_below_module_scope_does_not_inherit_the_exemption() -> None:
+    """PR #553 SECURITY REVIEW, F4 — the (path, function) key was defeatable by NESTING.
+
+    ``_enclosing_functions`` maps each line to its INNERMOST function, so a nested
+    ``def create_and_register_t3_nonce`` inside ``nonce_factory.py`` inherited the
+    exemption — defeating the exact property the (path, function) key was chosen for:
+    "a second function in this module could install any object it liked". The nested
+    def IS that second function, wearing the first one's name.
+
+    Closed with the discriminator ``_IMPORT_ONLY_EXEMPT_PATHS`` already uses: MODULE
+    SCOPE. A class body counts as a scope, so the method spelling is denied too — a
+    function-only depth count would have closed the ``def`` spelling and left that one.
+    """
+    nested = (
+        "def outer():\n"
+        "    def create_and_register_t3_nonce():\n"
+        "        _set_authorized_t3_nonce(attacker)\n"
+    )
+    assert _messages(nested, _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:3: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ], "a nested def inherited the module-level function's exemption"
+
+    method = (
+        "class Sneak:\n"
+        "    def create_and_register_t3_nonce(self):\n"
+        "        _set_authorized_t3_nonce(attacker)\n"
+    )
+    assert _messages(method, _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:3: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ], "a method of a module-level class inherited the exemption"
+
+    module_scope = (
+        "def create_and_register_t3_nonce():\n"
+        "    _set_authorized_t3_nonce(nonce)\n"
+        "    return nonce\n"
+    )
+    assert check_tag_t3._scan_text(module_scope, _NONCE_FACTORY) == [], (
+        "positive twin: the REAL module-scope function must stay exempt"
+    )
 
 
 def test_import_exemption_is_module_level_only() -> None:

@@ -70,9 +70,15 @@ WHAT THE #538 RULES CANNOT DO — accepted residuals, stated rather than claimed
   :func:`_fold_str` folds ``BinOp(Add)`` chains and literal-only ``JoinedStr``, so
   ``"_set_authorized%s" % "_t3_nonce"``, ``"_set_authorized{}".format("_t3_nonce")``
   and ``"".join([...])`` are assembled ENTIRELY from literals and all scan clean. The
-  residual is the OPERATION, not the operands.
-- **Carrier-by-reference beyond the six named primitives.** The vehicle set is a class
-  ban plus a named primitive list, not a proof of completeness.
+  residual is the OPERATION, not the operands — so it applies to EVERY name-keyed rule
+  that folds a string, ``_RAW_STATE_VEHICLE_NAMES`` included:
+  ``getattr(low, "__dict%s" % "__")["tier"] = T3`` scans clean for the same reason. It
+  used to be written down only against the ``tiers`` private surface, which read as a
+  property of that one set (PR #553 review, F6).
+- **Carrier-by-reference beyond the named primitives.** The vehicle set is a class ban
+  plus a named primitive list, not a proof of completeness. NO COUNT IS NAMED, and the
+  one that used to be here is why: it said "six" and PR #553 review found the seventh
+  (``gc.get_referrers``, the unlisted sibling of two listed ``gc`` primitives).
 - **A name-keyed collision.** Another module defining its own ``_log_t3`` reds
   benignly. Measured: zero today.
 - **``TaggedContent.model_construct(...)``** is refused at RUNTIME only; the seam rule
@@ -150,6 +156,16 @@ _TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE: str = (
 # `_o = object` and `from builtins import object as _o` all scanned clean. The review
 # fleet executed all three and minted T3. Hence receiver-BLIND matching on
 # `__setattr__`, and hence `_alias_names` on every other identifier a rule keys on.
+#
+# `__doc__` IS ONE OF THESE (PR #553 review, F1), and it is here for a reason the other
+# members do not share: it hands the PROSE EXCLUSION back as data. `_prose_string_ids`
+# excludes a bare string statement from both string-keyed rules on the premise that a
+# string in statement position documents rather than acts — and `__doc__` retrieves that
+# exact string in code position. Executed end to end: a class whose docstring IS
+# `_set_authorized_t3_nonce`, read back through `getattr(_t, _Codec.__doc__)`, installed
+# an attacker nonce and minted a genuine `TaggedContent[T3]`. The premise cannot be
+# repaired by excluding fewer strings (that readmits `getattr(_t, "…")`), so the
+# RETRIEVAL is the vehicle. Measured cost across both scan roots: ZERO `__doc__` nodes.
 _RAW_STATE_VEHICLE_ATTRS: frozenset[str] = frozenset(
     {
         "__dict__",
@@ -160,6 +176,7 @@ _RAW_STATE_VEHICLE_ATTRS: frozenset[str] = frozenset(
         "__new__",
         "__mro__",
         "__bases__",
+        "__doc__",
     }
 )
 
@@ -169,9 +186,29 @@ _RAW_STATE_VEHICLE_ATTRS: frozenset[str] = frozenset(
 # TaggedContent[T2] into T3. `__setattr__` must NOT join the attribute set: the three
 # live benign `object.__setattr__(...)` sites all carry that attribute node, and the
 # receiver-blind rules below already cover the attribute form.
+#
+# `__init__` joins on EXACTLY the `__setattr__` precedent (PR #553 review, F3), and for
+# exactly the same reasons in both directions. It must be here, because
+# `getattr(type(low), "__init__")(low, content=ATTACKER)` carries no attribute node and
+# the receiver-blind call rule cannot see it. It must NOT join the attribute set, because
+# 62 live sites carry that attribute node and the call rule already decides them on
+# shape.
 _RAW_STATE_VEHICLE_NAMES: frozenset[str] = _RAW_STATE_VEHICLE_ATTRS | frozenset(
-    {"__setattr__", "__delattr__", "__class__"}
+    {"__setattr__", "__delattr__", "__class__", "__init__"}
 )
+
+# Reaching PRIMITIVES that hand back an object's raw state (`_RAW_STATE_CARRIERS`) sit
+# below; this set has THREE carriers of its own and each needs its own arm in `_detect`:
+# an `ast.Attribute` node, a folded STRING, and a bare `ast.Name`.
+#
+# THE BARE NAME is not hypothetical padding (PR #553 review, F1). A module's own
+# docstring is bound to the identifier `__doc__` with no attribute node and no string
+# constant anywhere, so a module docstring reading `_set_authorized_t3_nonce` followed by
+# `getattr(_t, __doc__)(mine)` is the F1 channel one level further down — and the
+# docstring is prose-excluded, so the private-surface rule cannot see it either. Closed
+# as a CARRIER over the whole name set rather than as the one member that happens to have
+# this spelling today. Measured cost across both scan roots: ZERO bare `ast.Name` nodes
+# carrying any of these ids.
 
 # The `TaggedContent` state fields no `__setattr__` call may write, whatever its target.
 # `metadata` is deliberately ABSENT — `src/alfred/hooks/context.py:106` writes it on a
@@ -185,10 +222,19 @@ _TAGGED_STATE_FIELDS: frozenset[str] = frozenset({"tier", "content", "source"})
 # (`ctypes.CDLL` for libc in `supervisor/process_posture.py`, `gc.collect()` in
 # `fd3_key_delivery.py`) while this form costs ZERO. The class is "primitives that
 # hand back raw state", not "modules that happen to contain one".
+#
+# `gc.get_referrers` was the UNLISTED SIBLING of the two `gc` primitives already here
+# (PR #553 review, F2): same module, same class of return value — it hands back an
+# instance `__dict__` — and it was simply not thought of. Executed, it relabelled a live
+# object with the static type still reading `TaggedContent[T2]`. The lesson is the one
+# this whole comment block is about: a named-primitive list closes what it names, so it
+# has to be revisited every time somebody looks, and a member costing zero is never worth
+# leaving out. Measured cost of this one across both scan roots: ZERO sites.
 _RAW_STATE_CARRIERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("gc", "get_referents"),
         ("gc", "get_objects"),
+        ("gc", "get_referrers"),
         ("ctypes", "py_object"),
         ("ctypes", "cast"),
         ("copyreg", "_reconstructor"),
@@ -259,6 +305,19 @@ _RAW_VEHICLE_VARS_MESSAGE: str = (
 _RAW_VEHICLE_STR_MESSAGE: str = (
     "a raw-state vehicle named as a string in code position — getattr() and friends "
     "reach it without an attribute node. Use tag_t3_with_nonce()."
+)
+_RAW_VEHICLE_NAME_MESSAGE: str = (
+    "a raw-state vehicle bound to a bare identifier — a module docstring reaches "
+    "__doc__ this way, carrying neither an attribute node nor a string constant."
+)
+_RAW_INIT_SHAPE_MESSAGE: str = (
+    "__init__ re-entered on something other than `self` — pydantic writes the instance "
+    "mapping through validate_python(self_instance=...), so content and source are "
+    "replaced in place past frozen=True. Build the object you want instead."
+)
+_RAW_INIT_ALIASED_MESSAGE: str = (
+    "__init__ taken as a value rather than called — an alias defeats any rule keyed on "
+    "the call. Invoke it inline, on `self` or through zero-argument super()."
 )
 _RAW_SETATTR_SHAPE_MESSAGE: str = (
     "__setattr__ call whose target is not `self` or whose field name is computed, "
@@ -613,8 +672,17 @@ def _prose_string_ids(tree: ast.AST) -> frozenset[int]:
 
     WHY NOT exclude every string constant: ``getattr(_t, "_set_authorized_t3_nonce")``
     hides the name in a string ARGUMENT. Excluding all strings would admit it. The
-    discriminator is POSITION — a string that is a whole statement documents; a string
-    anywhere else is data the program uses.
+    discriminator is POSITION — a string that is a whole statement is not MATCHED here.
+
+    IT IS STILL REACHABLE AS DATA, and the earlier wording of this docstring denied it
+    (PR #553 review, F1). It claimed "a string anywhere else is data the program uses",
+    which reads as: prose cannot be used. False — ``__doc__`` hands the excluded string
+    straight back in code position, and the review executed both halves of that channel
+    (an attacker nonce installed from a class docstring; a live object's ``tier``
+    rewritten from a function docstring). What this function decides is only whether a
+    string is MATCHED, never whether it is inert. ``__doc__`` is therefore a member of
+    :data:`_RAW_STATE_VEHICLE_ATTRS` — the exclusion stays and the RETRIEVAL is banned,
+    because narrowing the exclusion instead would readmit the ``getattr`` spelling above.
 
     WHAT THIS CANNOT DO: a ``#`` comment is invisible to the parser, so a private name
     there is neither prose-excluded nor flagged. Correct (a comment cannot launder) but
@@ -629,8 +697,8 @@ def _prose_string_ids(tree: ast.AST) -> frozenset[int]:
     )
 
 
-def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
-    """Map every line to its INNERMOST enclosing function name.
+def _enclosing_functions(tree: ast.AST) -> dict[int, tuple[str, int]]:
+    """Map every line to its INNERMOST enclosing ``(function name, scope depth)``.
 
     Module-scope lines are ABSENT from the map, which is load-bearing: the
     module-level import exemption keys on ``.get(lineno) is None``.
@@ -641,11 +709,27 @@ def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
     ``def``. One tuple check also means the 332-file real-tree scan exercises both
     node types, so the branch cannot rot behind a fixture.
 
-    ``ast.walk`` is breadth-first, so a nested function is visited AFTER the function
-    containing it and correctly overwrites its parent's lines.
+    THE DEPTH IS WHY THIS IS A DFS RATHER THAN ``ast.walk`` (PR #553 review, F4). The
+    innermost mapping alone made the (path, function) exemption defeatable by NESTING: a
+    ``def create_and_register_t3_nonce`` written inside another function in
+    ``nonce_factory.py`` was mapped to that name and inherited the exemption — which is
+    precisely the property the (path, function) key was chosen to have ("a second
+    function in this module could install any object it liked"). The nested def IS that
+    second function, wearing the first one's name.
+
+    Depth counts ENCLOSING SCOPES, not enclosing functions, so ``class`` bodies count.
+    A method of a module-level class is depth 1: counting only functions would have
+    closed the nested-``def`` spelling and left the same-named METHOD open, which is the
+    enumerate-the-spelling mistake this file exists to stop repeating.
+
+    Pre-order DFS: a node is mapped BEFORE its children are pushed, so an inner function
+    always overwrites the lines of the one containing it — the same "innermost wins"
+    property ``ast.walk``'s breadth-first order gave, now with the depth in hand.
     """
-    mapping: dict[int, str] = {}
-    for node in ast.walk(tree):
+    mapping: dict[int, tuple[str, int]] = {}
+    stack: list[tuple[ast.AST, int]] = [(tree, 0)]
+    while stack:
+        node, depth = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # MEASURED, not assumed: the parser sets `end_lineno` on every function it
             # produces — 13 381 function defs across the 1 211 tracked `.py` files in
@@ -660,7 +744,18 @@ def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
             # by construction precisely what the no-pragma rule forbids exempting.
             assert node.end_lineno is not None
             for line in range(node.lineno, node.end_lineno + 1):
-                mapping[line] = node.name
+                mapping[line] = (node.name, depth)
+        # An `if`/`else` rather than a conditional expression, for the reason `_record`
+        # gives: `coverage.py` does not branch on a ternary, so writing it that way would
+        # hide an arm from this file's REQUIRED 100% branch gate. (Unlike `_record`'s,
+        # this one needs no `noqa: SIM108` — ruff does not raise it here — so adding one
+        # would itself red under RUF100.)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            child_depth = depth + 1
+        else:
+            child_depth = depth
+        for child in ast.iter_child_nodes(node):
+            stack.append((child, child_depth))
     return mapping
 
 
@@ -681,6 +776,12 @@ def _fold_str(node: ast.expr, depth: int = 0) -> str | None:
     and nothing else. ``"_set_authorized%s" % "_t3_nonce"``,
     ``"_set_authorized{}".format("_t3_nonce")`` and ``"".join([...])`` are assembled
     entirely from literals and all fold to ``None`` here.
+
+    THE SAME RESIDUAL APPLIES TO :data:`_RAW_STATE_VEHICLE_NAMES`, and it used to be
+    written down only against the private-surface names (PR #553 review, F6):
+    ``getattr(low, "__dict%s" % "__")["tier"] = T3`` scans clean for exactly this
+    reason. Every caller of this function inherits it — the residual is the OPERATION,
+    not the operands, so it is not a property of one name set.
 
     Deliberately NOT ``ast.literal_eval``: that evaluates tuples, dicts and numbers
     too, so it would answer a different question and raise on the common case.
@@ -819,6 +920,61 @@ def _is_benign_setattr_target(node: ast.Call) -> bool:
     if name.startswith("__") and name.endswith("__"):
         return False
     return name not in _TAGGED_STATE_FIELDS
+
+
+def _is_self_init_re_entry(node: ast.Call, receiver: ast.expr) -> bool:
+    """True when this ``__init__`` call provably re-enters ``self``, false otherwise.
+
+    THE SIBLING OF :func:`_is_benign_setattr_target`, and it exists for the same class of
+    write (PR #553 review, F3). ``BaseModel.__init__`` calls
+    ``validate_python(..., self_instance=self)``, which writes the instance mapping
+    DIRECTLY — it traverses no method the model can override, so ``frozen=True`` never
+    sees it. Executed against a real ``TaggedContent[T2]``:
+    ``type(low).__init__(low, content=ATTACKER, source="operator.console",
+    tier=low.tier)`` replaced the content and forged the provenance with the gate at
+    rc=0. The BOUND spelling ``low.__init__(content=…)`` reaches the identical write with
+    no positional argument at all, which is why admissibility is decided on the TARGET
+    rather than on the presence of arguments.
+
+    The tier is safe by a different mechanism, recorded here so nobody assumes this rule
+    carries it: the cross-tier field validator refuses ``tier=T3`` on a
+    ``TaggedContent[T2]`` and writes a ``security.t3_boundary.refused`` audit row
+    (verified by execution). ``content`` and ``source`` had nothing.
+
+    DEFAULT-DENY ON SHAPE, admissible only when the target is provably ``self``:
+
+    * a ZERO-ARGUMENT ``super()`` receiver. The compiler binds that form to the enclosing
+      method's own first parameter, so it cannot name a foreign object. ``super(C, obj)``
+      names one explicitly and is refused. A starred ``super(*pair)`` is refused with it
+      — any argument at all disqualifies the receiver. Keyword arguments do not need
+      excluding: ``super`` accepts none (``TypeError`` at runtime), so ``super(**kw)``
+      can only ever be the zero-argument form.
+    * otherwise ``args[0]`` is the bare name ``self`` — the unbound-dispatch-onto-self
+      idiom, live at three ``AlfredError.__init__(self, …)`` sites in
+      ``src/alfred/egress/errors.py``.
+
+    ``self`` and ``super`` are matched as LITERAL names, and unlike every other
+    identifier in this gate that is correct rather than a gap: they are keyed in the
+    ADMISSIBILITY direction, so rebinding either one makes the gate STRICTER. MEASURED,
+    not argued: ``_s = super`` followed by ``_s()`` raises ``RuntimeError: super():
+    __class__ cell not found``, because the compiler only creates the ``__class__`` cell
+    when it sees the literal name ``super`` in the method body. The rebound spelling is
+    dead at runtime and refused here anyway.
+
+    Measured false-positive cost across both scan roots: ZERO. All 62 ``__init__``
+    attribute nodes are calls, 59 through zero-argument ``super()`` and 3 onto ``self``.
+    """
+    if (
+        isinstance(receiver, ast.Call)
+        and isinstance(receiver.func, ast.Name)
+        and receiver.func.id == "super"
+        and not receiver.args
+    ):
+        return True
+    if not node.args:
+        return False
+    target = node.args[0]
+    return isinstance(target, ast.Name) and target.id == "self"
 
 
 def _carrier_bindings(tree: ast.AST) -> tuple[frozenset[tuple[str, str]], frozenset[str], bool]:
@@ -993,7 +1149,7 @@ def _private_surface_hit(
 
 
 def _private_surface_is_exempt(
-    node: ast.AST, resolved_path: Path, enclosing: dict[int, str]
+    node: ast.AST, resolved_path: Path, enclosing: dict[int, tuple[str, int]]
 ) -> bool:
     """Whether this private-surface reference is one of the authorised ones.
 
@@ -1014,8 +1170,22 @@ def _private_surface_is_exempt(
         # functionally path-only. `_enclosing_functions` leaves module-scope lines
         # ABSENT from the map, which is what `is None` reads.
         return enclosing.get(getattr(node, "lineno", 0)) is None
-    function = enclosing.get(getattr(node, "lineno", 0))
-    return function is not None and (resolved_path, function) in _FUNCTION_SCOPED_EXEMPTIONS
+    # MODULE SCOPE (depth 0) on this arm too, which is the SAME discriminator the import
+    # arm above uses (PR #553 review, F4). Without it the (path, function) key was
+    # defeatable by writing a second `def create_and_register_t3_nonce` INSIDE another
+    # function in the exempt file — `_enclosing_functions` maps a line to its innermost
+    # function, so the nested def inherited the exemption and could install any object it
+    # liked. Keying on the name alone made the narrowing cosmetic, exactly as the
+    # `ast.alias`-only version of the import arm was before it grew this same condition.
+    #
+    # ONE expression rather than an early `return False`: this predicate is called per
+    # hit, and a bare `and` chain adds no branch arc for the 100% gate to have to cover.
+    enclosed = enclosing.get(getattr(node, "lineno", 0))
+    return (
+        enclosed is not None
+        and enclosed[1] == 0
+        and (resolved_path, enclosed[0]) in _FUNCTION_SCOPED_EXEMPTIONS
+    )
 
 
 def _is_tag_t3_call(node: ast.Call) -> bool:
@@ -1162,7 +1332,7 @@ def _detect(
     carrier_names: frozenset[str],
     basemodel_names: frozenset[str],
     private_names: frozenset[str],
-    enclosing: dict[int, str],
+    enclosing: dict[int, tuple[str, int]],
     resolved: Path,
 ) -> list[str]:
     """Every rule's verdict on ONE already-parsed node, as a list of messages.
@@ -1204,8 +1374,19 @@ def _detect(
             # the four executed sec-001 spellings.
             if func.attr == "__setattr__" and not _is_benign_setattr_target(node):
                 messages.append(_RAW_SETATTR_SHAPE_MESSAGE)
+            # RECEIVER-BLIND for the same reason, and it has to be: the bound spelling
+            # `low.__init__(content=…)` and the unbound `type(low).__init__(low, …)`
+            # reach the identical write, so a rule that read the receiver would have to
+            # enumerate the ways of naming one.
+            if func.attr == "__init__" and not _is_self_init_re_entry(node, func.value):
+                messages.append(_RAW_INIT_SHAPE_MESSAGE)
             if (_arg_name(func.value), func.attr) in carrier_pairs:
                 messages.append(_RAW_CARRIER_MESSAGE)
+    if isinstance(node, ast.Name) and node.id in _RAW_STATE_VEHICLE_NAMES:
+        # THE THIRD CARRIER for the vehicle-name set. `__doc__` is a bare identifier in
+        # every module and class body, so the attribute arm and the folded-string arm are
+        # both blind to it — see `_RAW_STATE_VEHICLE_NAMES`.
+        messages.append(_RAW_VEHICLE_NAME_MESSAGE)
     if isinstance(node, ast.Attribute):
         if node.attr in _RAW_STATE_VEHICLE_ATTRS:
             messages.append(_RAW_VEHICLE_ATTR_MESSAGE)
@@ -1220,10 +1401,30 @@ def _detect(
         # widens the day a new one appears.
         if node.attr == "__setattr__" and id(node) not in call_func_ids:
             messages.append(_RAW_SETATTR_ALIASED_MESSAGE)
+        # THE SAME ONE-POSITION WHITELIST for `__init__` (PR #553 review, F3). Without
+        # it, `_f = type(low).__init__` followed by `_f(low, content=ATTACKER)` reaches
+        # the write with no `__init__` node in `Call.func` position at all, so the shape
+        # rule above is blind to it BY CONSTRUCTION. Measured: all 62 `__init__`
+        # attribute nodes across both scan roots sit in `Call.func`, so this costs zero.
+        if node.attr == "__init__" and id(node) not in call_func_ids:
+            messages.append(_RAW_INIT_ALIASED_MESSAGE)
     if isinstance(node, (ast.Constant, ast.BinOp, ast.JoinedStr)) and id(node) not in prose:
         # EQUALITY, not containment: a docstring or message that merely mentions a
         # vehicle name is prose about the rule, and widening this to containment reds
-        # nothing in the tree today while admitting no new attack.
+        # nothing in the tree today.
+        #
+        # THE REST OF THAT SENTENCE USED TO READ "while admitting no new attack", and
+        # that was measurably false (PR #553 review, F5). Containment WOULD catch at
+        # least one thing equality does not: `exec("object.__setattr__(low, '__dict__',
+        # {...})")` folds to one long string that equals no member, scans clean, and
+        # executes. Equality stays anyway — containment was measured as a widening with
+        # its own costs, and `exec`/`eval` are out of this rule's reach in any form: ruff
+        # `S102`/`S307` refuse them instead. Verified by execution in BOTH scan roots,
+        # not inferred from the config: `[tool.ruff.lint] select` carries `"S"` and
+        # ignores only `S101`, `per-file-ignores` covers `tests/**` only, and CI runs
+        # `ruff check .` so `plugins/` is inside it too. Naming the real defence matters
+        # more than the widening: the false claim is what would invite a future author to
+        # keep equality for a reason that does not hold.
         folded = _fold_str(node)
         if folded is not None and folded in _RAW_STATE_VEHICLE_NAMES:
             messages.append(_RAW_VEHICLE_STR_MESSAGE)
