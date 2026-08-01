@@ -28,11 +28,33 @@ that is never exercised leaves no trace.
 
 ### What was measured
 
-Issue #538 added nine new AST rules to the same gate — the raw-state-write vehicles
-(`__dict__`, `__setstate__`, `__reduce__`, `__class__` in store context, `vars()`,
-`X.__setattr__` receiver-blind, the vehicle name as a folded string, the carrier-by-
-reference primitives) and the `alfred.security.tiers` private surface. Running that full
-rule set over the file with its exemption removed:
+Issue #538 added a set of new AST rules to the same gate. **No count is named** — that is
+this file's convention and this paragraph is why: the sentence here said "nine", the
+PR #553 security review added three more, and the list it carried had never mentioned the
+`BaseModel`-seam rule at all. A count rots on the next edit; the list is the thing worth
+reading. The rules:
+
+- the raw-state vehicle as an **attribute** (`__dict__`, `__setstate__`, `__getstate__`,
+  `__reduce__`, `__reduce_ex__`, `__new__`, `__mro__`, `__bases__`, `__doc__`);
+- the same names as a **folded string**, a set deliberately wider than the attribute one
+  (`getattr(object, "__setattr__")(...)` carries no attribute node at all);
+- the same names as a **bare identifier**, which is how a module docstring reaches
+  `__doc__`;
+- `vars()`, alias-resolved;
+- `X.__setattr__(...)` **receiver-blind**, plus `__setattr__` referenced outside call
+  position;
+- `X.__init__(...)` re-entered on anything but `self`, plus `__init__` taken as a value;
+- `__class__` in **store or delete** context;
+- the **carrier-by-reference primitives** (`gc.get_referents`, `gc.get_objects`,
+  `gc.get_referrers`, `ctypes.py_object`, `ctypes.cast`, `copyreg._reconstructor`,
+  `copyreg.__newobj__`), module half alias-resolved and primitive half bound directly;
+- **unbound `BaseModel` seam dispatch** (`copy`, `model_copy`, `model_construct`,
+  `model_validate`, `model_validate_json` called with the CLASS as receiver);
+- the `alfred.security.tiers` **private surface**, default-deny over the whole surface;
+- an **alias-chain overflow** past the resolver's budget, reported as a fail-closed
+  violation rather than decided on an incomplete alias set.
+
+Running that full rule set over the file with its exemption removed:
 
 | Property | Measured |
 | --- | --- |

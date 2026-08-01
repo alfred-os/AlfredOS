@@ -2287,9 +2287,17 @@ Never `git add -A` — untracked rulesync outputs get swept in.
       `_RAW_CARRIER`, `_ALIAS_BUDGET`, `_BASEMODEL_VALUE`, `_PRIVATE_SURFACE` — all distinct,
       none a substring of another, all in the `findings` set. Listed by NAME rather than by
       count alone, so the checkbox cannot go stale the way a bare number does.
-- [ ] `test_every_keyed_identifier_is_alias_resolved` covers EVERY identifier any rule
-      keys on. Seven Criticals across two rounds were all this one shape; the meta-guard
-      is what closes the class rather than the ninth spelling.
+- [ ] The meta-guard covers every identifier any rule keys on **or declares it a
+      residual**, and the identifier set is DERIVED from the gate's own source rather
+      than hand-written. The earlier wording of this line claimed plain coverage, and
+      the test built to close the identifier-aliasing class had that class's own disease:
+      it enumerated its rows, so `copyreg` — keyed on by three rules — had none, and the
+      mutations that would have exposed it survived while the identical mutations on `gc`
+      and `ctypes` died. `test_every_identifier_the_gate_keys_on_is_rowed_or_declared_residual`
+      derives the set and requires a behavioural row in `_KEYED_IDENTIFIER_SPELLINGS` or
+      a stated reason in `_DECLARED_ALIAS_RESIDUALS`; `tag`/`cast`/`TaggedContent`/`T3`
+      are pre-existing residuals (#539's territory, NOT widened here) and are measured in
+      both directions so the declaration cannot outlive the fact.
 - [ ] `python3 scripts/check_tag_t3.py` exits 0 — **zero new exemptions**.
 - [ ] 100% line + branch coverage, no new pragmas, no unreachable branches.
 - [ ] `mypy --strict` + `pyright` clean; `ruff` clean; `markdownlint` clean.
