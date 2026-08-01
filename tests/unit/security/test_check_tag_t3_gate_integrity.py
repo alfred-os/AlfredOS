@@ -146,6 +146,17 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         check_tag_t3._TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE,
         check_tag_t3._TYPE_IGNORE_MESSAGE,
         check_tag_t3._GATE_INTERNAL_MESSAGE,
+        # #538 sole-layer rules. FINDINGS, not collection failures: each means the
+        # file WAS gated and failed, so neither reader of
+        # _COLLECTION_FAILURE_MESSAGES should see them.
+        check_tag_t3._RAW_VEHICLE_ATTR_MESSAGE,
+        check_tag_t3._RAW_VEHICLE_VARS_MESSAGE,
+        check_tag_t3._RAW_VEHICLE_STR_MESSAGE,
+        check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE,
+        check_tag_t3._RAW_SETATTR_ALIASED_MESSAGE,
+        check_tag_t3._RAW_CLASS_SWAP_MESSAGE,
+        check_tag_t3._RAW_CARRIER_MESSAGE,
+        check_tag_t3._ALIAS_BUDGET_MESSAGE,
     }
     declared = {
         value

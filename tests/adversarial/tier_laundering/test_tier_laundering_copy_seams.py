@@ -187,19 +187,18 @@ def test_tl_2026_013_residual_is_recorded_as_out_of_scope(
     assert (entry.out_of_scope_rationale or "").strip(), "an out-of-scope payload needs a rationale"
 
 
-def test_tl_2026_013_is_currently_undefended_at_the_authoring_layer_too(
+def test_tl_2026_013_is_now_defended_at_the_authoring_layer(
     tmp_path: Path,
 ) -> None:
-    """The residual's named fallback layer does NOT yet detect it — pinned, not asserted away.
+    """The residual's named fallback layer NOW detects it — #538 flipped this.
 
-    An earlier revision asserted ``"check_tag_t3" in rationale``: a substring check on
-    prose, which pins a spelling rather than a defence. Measured: a file containing all
-    five residual spellings scans CLEAN. So the honest status is "undefended at every
-    layer", and the rationale must not imply otherwise.
+    Was ``..._is_currently_undefended_at_the_authoring_layer_too``, asserting ``== 0``.
+    It was designed to FAIL when the #538 rules landed, and it did. The runtime still
+    cannot refuse these spellings — that half of ``tl-2026-013`` is unchanged and
+    ``out_of_scope`` stays ``true``. What changed is the authoring layer.
 
-    This follows the recorded-residuals precedent (``test_de_egress_recorded_residuals``).
-    It is expected to FAIL when the #518 detector rules land — that failure is the signal
-    to flip the assertion to ``== 1`` and update tl-2026-013, not a regression.
+    ``== 1``, not ``!= 0``: exit 2 means "the gate could not run", and a test that
+    accepts it would be green on a gate that scanned nothing.
     """
     probe = tmp_path / "residual_spellings.py"
     probe.write_text(_RESIDUAL_SPELLINGS)
@@ -213,8 +212,8 @@ def test_tl_2026_013_is_currently_undefended_at_the_authoring_layer_too(
         "paths, so the result below would be meaningless"
     )
 
-    assert check_tag_t3.main([str(probe)]) == 0, (
-        "scripts/check_tag_t3.py now flags the tl-2026-013 residual spellings. That is "
-        "the intended outcome of the #518 detector work — update this test to assert 1 "
-        "and rewrite tl-2026-013's out_of_scope_rationale to name the real defence."
+    assert check_tag_t3.main([str(probe)]) == 1, (
+        "scripts/check_tag_t3.py no longer flags the tl-2026-013 residual spellings. "
+        "The authoring layer is the ONLY enforcement layer these have, so a regression "
+        "here leaves them undefended everywhere."
     )

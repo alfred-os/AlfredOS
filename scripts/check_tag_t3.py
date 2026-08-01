@@ -88,6 +88,109 @@ _TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE: str = (
     "tag_t3_with_nonce() with injected nonce (spec §3.2, sec-S3-002)"
 )
 
+# ---------------------------------------------------------------------------
+# #538 — THE SOLE-LAYER RULES.
+#
+# The runtime CANNOT refuse these. Raw state writes never traverse any method the
+# model can override (`frozen=True` observes `__setattr__`, and none of these reach
+# it), so no seam is left to guard. The authoring layer is the ONLY enforcement layer
+# that can exist for them.
+#
+# DEFAULT-DENY THE VEHICLE OR THE SHAPE, NEVER ENUMERATE THE SPELLING. Round-2 probes
+# minted two genuine `TaggedContent[T3]` objects with attacker-controlled content from
+# a file that scanned clean under BOTH the merged detector AND a fully enumerated rule
+# set. The decisive spelling:
+#
+#     object.__setattr__(obj, "__dict__", {..., "tier": T3})
+#
+# An earlier constraints doc mandated "key on the written `tier` attribute, not on the
+# call". That rule cannot see this line BY CONSTRUCTION — the attribute written is
+# `__dict__`.
+#
+# AND THE SAME MISTAKE RECURRED INSIDE THE FIX: the first revision of these rules
+# matched the receiver as the bare identifier `object`, so `builtins.object.__setattr__`,
+# `_o = object` and `from builtins import object as _o` all scanned clean. The review
+# fleet executed all three and minted T3. Hence receiver-BLIND matching on
+# `__setattr__`, and hence `_alias_names` on every other identifier a rule keys on.
+_RAW_STATE_VEHICLE_ATTRS: frozenset[str] = frozenset(
+    {
+        "__dict__",
+        "__setstate__",
+        "__getstate__",
+        "__reduce__",
+        "__reduce_ex__",
+        "__new__",
+        "__mro__",
+        "__bases__",
+    }
+)
+
+# Vehicles when NAMED AS A STRING. DELIBERATELY WIDER than the attribute set above.
+# `getattr(object, "__setattr__")(low, "tier", T3)` produces NO `ast.Attribute` node at
+# all, so every attribute-keyed rule is blind to it — executed, it turned a
+# TaggedContent[T2] into T3. `__setattr__` must NOT join the attribute set: the three
+# live benign `object.__setattr__(...)` sites all carry that attribute node, and the
+# receiver-blind rules below already cover the attribute form.
+_RAW_STATE_VEHICLE_NAMES: frozenset[str] = _RAW_STATE_VEHICLE_ATTRS | frozenset(
+    {"__setattr__", "__delattr__", "__class__"}
+)
+
+# The `TaggedContent` state fields no `__setattr__` call may write, whatever its target.
+# `metadata` is deliberately ABSENT — `hooks/context.py:106` writes it on a `HookContext`,
+# an unrelated frozen dataclass sharing the field name. Banning it would red a legitimate
+# site for a name collision, and the residual cannot change `tier`, `content` or
+# `source`, so it can neither mint nor relabel T3.
+_TAGGED_STATE_FIELDS: frozenset[str] = frozenset({"tier", "content", "source"})
+
+# Reaching PRIMITIVES that hand back an object's raw state. Scoped to the primitive,
+# not the module: banning `gc` and `ctypes` outright costs two legitimate sites
+# (`ctypes.CDLL` for libc in `supervisor/process_posture.py`, `gc.collect()` in
+# `fd3_key_delivery.py`) while this form costs ZERO. The class is "primitives that
+# hand back raw state", not "modules that happen to contain one".
+_RAW_STATE_CARRIERS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("gc", "get_referents"),
+        ("gc", "get_objects"),
+        ("ctypes", "py_object"),
+        ("ctypes", "cast"),
+        ("copyreg", "_reconstructor"),
+        ("copyreg", "__newobj__"),
+    }
+)
+
+_RAW_VEHICLE_ATTR_MESSAGE: str = (
+    "raw-state vehicle attribute — reaches instance state without traversing any "
+    "method the model can guard. Use tag_t3_with_nonce()."
+)
+_RAW_VEHICLE_VARS_MESSAGE: str = (
+    "vars() exposes the instance mapping directly — the same unguarded reach as "
+    "__dict__. Use tag_t3_with_nonce()."
+)
+_RAW_VEHICLE_STR_MESSAGE: str = (
+    "a raw-state vehicle named as a string in code position — getattr() and friends "
+    "reach it without an attribute node. Use tag_t3_with_nonce()."
+)
+_RAW_SETATTR_SHAPE_MESSAGE: str = (
+    "__setattr__ call whose target is not `self` or whose field name is computed, "
+    "dunder or a TaggedContent state field — bypasses frozen=True and every tier guard."
+)
+_RAW_SETATTR_ALIASED_MESSAGE: str = (
+    "__setattr__ referenced outside direct-call position — an alias defeats any rule "
+    "keyed on the call. Call it inline on `self` with a literal field name."
+)
+_RAW_CLASS_SWAP_MESSAGE: str = (
+    "assignment to __class__ — retypes a live object past every constructor guard. "
+    "Build the right type instead."
+)
+_RAW_CARRIER_MESSAGE: str = (
+    "a carrier primitive that hands back an object's raw state mapping — reaches "
+    "instance state while naming no attribute. Use tag_t3_with_nonce()."
+)
+_ALIAS_BUDGET_MESSAGE: str = (
+    "alias chain deeper than the resolver's budget — the gate cannot decide what "
+    "these names are bound to. Simplify the aliasing."
+)
+
 # Read-surface failures. These are VIOLATIONS, not silent passes (#537):
 # a file the gate cannot read is a file the gate is not gating, and Python's
 # import machinery is far more permissive than this reader.
@@ -516,6 +619,128 @@ def _alias_names(tree: ast.AST, seed: str) -> tuple[frozenset[str], bool]:
     return frozenset(names), True
 
 
+def _record(violations: list[str], lines: list[str], path: Path, lineno: int, message: str) -> None:
+    """Append a violation MESSAGE line plus its source SNIPPET line.
+
+    Every rule reports the same two-line shape, so tests assert the returned list by
+    equality rather than by substring search. Factored out because nine rules repeating
+    the pair would be nine places for the shape to drift (#422: a shared helper fails
+    LOUD, N copies drift SILENTLY).
+
+    ``path`` travels as an argument because this repo forbids global state.
+
+    THE BOUNDS GUARD, and why it is an ``if``/``else`` rather than a conditional
+    expression: ``coverage.py`` does not branch on a ternary, so writing it that way
+    would hide the arm from this file's REQUIRED 100% branch gate — exempting by
+    construction exactly what the no-pragma rule forbids exempting. No ``_scan_text``
+    INPUT is known to reach the else arm (``str.splitlines`` splits on strictly more
+    separators than the tokenizer does, so the line list is never SHORTER than the
+    parser's line numbering). It stays anyway because nine rules share this helper, and
+    a finding must never become an ``IndexError`` that the broad ``except`` re-files as
+    an unscannable file — a real laundering finding downgraded to a vague one. It is
+    covered by a direct unit test rather than by a pragma.
+    """
+    # The SIM108 suppression below is DELIBERATE and load-bearing, not a style
+    # concession. `coverage.py` does not branch on a conditional expression, so ruff's
+    # suggested ternary would make the else arm invisible to this file's REQUIRED 100%
+    # branch gate — the no-pragma rule forbids exempting a branch, and a ternary
+    # exempts it silently.
+    if 0 <= lineno - 1 < len(lines):  # noqa: SIM108
+        snippet = lines[lineno - 1].rstrip()
+    else:
+        snippet = ""
+    violations.append(f"{path}:{lineno}: {message}")
+    violations.append(f"  {snippet}")
+
+
+def _is_benign_setattr_target(node: ast.Call) -> bool:
+    """True for the established frozen-dataclass idiom, false for every vehicle.
+
+    DEFAULT-DENY ON SHAPE. Admissible only when ALL of:
+
+    * ``args[1]`` folds to a plain string literal — a computed name cannot be read by
+      any lexical rule;
+    * that literal is not a dunder — those reach interpreter state, not a field;
+    * that literal is not in :data:`_TAGGED_STATE_FIELDS`. THIS IS THE CONDITION THAT
+      HOLDS. v1 denied only ``"tier"``, so ``object.__setattr__(low, "content",
+      ATTACKER)`` was admitted and EXECUTED to place raw attacker text inside a
+      T2-tagged object the privileged orchestrator is entitled to read, and
+      ``"source"`` forged audit provenance;
+    * ``args[0]`` is the bare name ``self``. This NARROWS the surface but proves
+      nothing on its own, and the comment here must not claim otherwise: an earlier
+      revision justified it with "reaching a TaggedContent as ``self`` requires
+      subclassing it, which ``__init_subclass__`` refuses at runtime". That is FALSE,
+      and was disproved by execution — ``def _apply(self, v): object.__setattr__(self,
+      "content", v)`` is a plain function whose first parameter merely happens to be
+      called ``self``. ``self`` is a naming convention, not a type.
+
+    A call with fewer than two arguments (``object.__setattr__(*parts)``) is refused
+    rather than admitted: a call this rule cannot read is a call it must not admit.
+
+    Three live sites depend on the admissible case and none may red:
+    ``hooks/context.py:106``, ``plugins/web_fetch/allowlist.py:139``,
+    ``plugins/web_fetch/fetch_dispatcher.py:219``. All three write ``self``. Measured
+    false-positive cost of this shape across both scan roots: ZERO.
+
+    ESCAPE HATCH, named so nobody invents one: a frozen dataclass that genuinely needs
+    a ``tier`` field and is NOT a ``TaggedContent`` should set it through its own
+    constructor, or the write belongs behind a named helper inside the already-exempt
+    ``security/tiers.py`` — not behind a loosened rule.
+    """
+    if len(node.args) < 2:
+        return False
+    target = node.args[0]
+    if not (isinstance(target, ast.Name) and target.id == "self"):
+        return False
+    name = _fold_str(node.args[1])
+    if name is None:
+        return False
+    if name.startswith("__") and name.endswith("__"):
+        return False
+    return name not in _TAGGED_STATE_FIELDS
+
+
+def _carrier_bindings(tree: ast.AST) -> tuple[frozenset[tuple[str, str]], frozenset[str], bool]:
+    """Resolve :data:`_RAW_STATE_CARRIERS` against ONE file's bindings.
+
+    Returns ``(qualified_pairs, direct_names, overflowed)``:
+
+    * ``qualified_pairs`` — every ``(module_alias, primitive)`` the file could spell as
+      an attribute call. The MODULE half is alias-resolved because keying on the literal
+      ``gc`` left ``import gc as _g`` and ``_g = gc`` scanning clean (fleet sec2-003).
+    * ``direct_names`` — primitives bound as bare ``Name``s by
+      ``from gc import get_referents``. No module identifier appears at that call site
+      at all, so no amount of receiver resolution can see it; it needs its own pass.
+      That pass runs ONCE over ``ast.ImportFrom`` rather than inside a per-carrier loop:
+      a ``break`` in the per-carrier form attributes the finding to whichever carrier
+      the loop happened to be on.
+    * ``overflowed`` — any module's alias chain exceeded
+      :data:`_ALIAS_RESOLUTION_BUDGET`, which the caller reports as a violation.
+
+    The ``from`` module is matched literally on purpose: Python has no syntax that
+    aliases the module name in ``from <module> import <name>``, so there is no
+    identifier to resolve on that side.
+    """
+    resolved: dict[str, frozenset[str]] = {}
+    overflowed = False
+    for module in sorted({module for module, _ in _RAW_STATE_CARRIERS}):
+        aliases, module_overflowed = _alias_names(tree, module)
+        resolved[module] = aliases
+        overflowed = overflowed or module_overflowed
+    pairs = frozenset(
+        (alias, primitive)
+        for module, primitive in _RAW_STATE_CARRIERS
+        for alias in resolved[module]
+    )
+    direct: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for imported in node.names:
+                if (node.module, imported.name) in _RAW_STATE_CARRIERS:
+                    direct.add(imported.asname or imported.name)
+    return pairs, frozenset(direct), overflowed
+
+
 def _is_tag_t3_call(node: ast.Call) -> bool:
     """``tag(T3, ...)`` — first positional arg is the identifier ``T3``.
 
@@ -610,20 +835,99 @@ def _is_cast_tagged_content_call(node: ast.Call) -> bool:
     return False
 
 
+def _detect(
+    node: ast.AST,
+    prose: frozenset[int],
+    call_func_ids: frozenset[int],
+    vars_names: frozenset[str],
+    carrier_pairs: frozenset[tuple[str, str]],
+    carrier_names: frozenset[str],
+) -> list[str]:
+    """Every rule's verdict on ONE already-parsed node, as a list of messages.
+
+    PURE and CONSTANT-WORK over its arguments, which is what lets ``_scan_text`` fence
+    the whole detector behind a single :class:`GateInternalError` rather than fencing
+    nine rules separately. The per-file maps are built by the CALLER, outside that
+    fence: a defect in one of them is a defect in the maps, not in the file, and
+    reporting it as an unscannable FILE at exit 1 is the #543 err-001 failure the fence
+    exists to prevent.
+
+    ``ast.AST`` rather than a narrower type: the caller walks every node, because three
+    of these rules key on ``ast.Attribute`` / ``ast.Constant`` rather than ``ast.Call``.
+    """
+    messages: list[str] = []
+    if isinstance(node, ast.Call):
+        if _is_tag_t3_call(node):
+            messages.append(_TAG_T3_MESSAGE)
+        if _is_cast_tagged_content_call(node):
+            messages.append(_CAST_TAGGED_CONTENT_MESSAGE)
+        if _is_tagged_content_t3_subscript_call(node):
+            messages.append(_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE)
+        func = node.func
+        if isinstance(func, ast.Name):
+            # `vars` and the directly-bound carrier primitives are BARE IDENTIFIERS, so
+            # both name sets arrive alias-resolved. `_v = vars` was the last identifier
+            # in this gate still matched as a literal, found by self-audit.
+            if func.id in vars_names:
+                messages.append(_RAW_VEHICLE_VARS_MESSAGE)
+            if func.id in carrier_names:
+                messages.append(_RAW_CARRIER_MESSAGE)
+        elif isinstance(func, ast.Attribute):
+            # RECEIVER-BLIND. The rule never asks who the receiver is, so there is no
+            # identifier left to rebind — that, not a wider alias set, is what closed
+            # the four executed sec-001 spellings.
+            if func.attr == "__setattr__" and not _is_benign_setattr_target(node):
+                messages.append(_RAW_SETATTR_SHAPE_MESSAGE)
+            if (_arg_name(func.value), func.attr) in carrier_pairs:
+                messages.append(_RAW_CARRIER_MESSAGE)
+    if isinstance(node, ast.Attribute):
+        if node.attr in _RAW_STATE_VEHICLE_ATTRS:
+            messages.append(_RAW_VEHICLE_ATTR_MESSAGE)
+        # `__class__` by CONTEXT, not by name: a class swap is a laundering vehicle and
+        # `exc.__class__.__name__` (live at hooks/invoke.py:1265) is an ordinary read.
+        # Banning the name costs a false positive; banning the store context costs zero.
+        if node.attr == "__class__" and isinstance(node.ctx, (ast.Store, ast.Del)):
+            messages.append(_RAW_CLASS_SWAP_MESSAGE)
+        # ONE-POSITION WHITELIST. `Call.func` is the ONLY admissible position for a
+        # `__setattr__` reference; every other position is the A05 alias vehicle. Never
+        # an ancestor blacklist — that must ENUMERATE the bad positions and silently
+        # widens the day a new one appears.
+        if node.attr == "__setattr__" and id(node) not in call_func_ids:
+            messages.append(_RAW_SETATTR_ALIASED_MESSAGE)
+    if isinstance(node, (ast.Constant, ast.BinOp, ast.JoinedStr)) and id(node) not in prose:
+        # EQUALITY, not containment: a docstring or message that merely mentions a
+        # vehicle name is prose about the rule, and widening this to containment reds
+        # nothing in the tree today while admitting no new attack.
+        folded = _fold_str(node)
+        if folded is not None and folded in _RAW_STATE_VEHICLE_NAMES:
+            messages.append(_RAW_VEHICLE_STR_MESSAGE)
+    return messages
+
+
 class GateInternalError(RuntimeError):
     """A DETECTOR PREDICATE raised. The gate is broken, not the file.
 
     #543 review (err-001). ``_scan_text``'s ``except Exception`` wrapped the
-    whole scan body, the three ``_is_*`` predicates included, so an
+    whole scan body, every ``_is_*`` predicate included, so an
     ``AttributeError`` in the gate's own logic reported as an unscannable
     FILE at exit 1 ("violations found") on a completely clean file —
     indistinguishable from a real T3-laundering finding. Measured, on a file
     with no ``tag``/``cast``/subscript pattern in it at all.
 
-    The three predicates do constant work — ``isinstance`` checks and
-    attribute reads on one already-parsed node, no recursion, no I/O — so
-    they cannot be made to raise by any INPUT. Anything they raise is a
-    defect, and `main` reports it as exit 2, "the gate could not run".
+    NO COUNT IS NAMED HERE ON PURPOSE. This docstring said "the three
+    predicates" while :func:`_detect` already dispatched more than three, and
+    a number in prose rots silently the next time a rule is added. The
+    property is about the KIND of work, not how many rules do it.
+
+    Every detector predicate does BOUNDED work on one already-parsed node —
+    ``isinstance`` checks, attribute reads, and ``_fold_str``'s recursion,
+    which is capped at :data:`_FOLD_MAX_DEPTH` precisely so that this claim
+    stays true (an unbounded fold would let a long ``+`` chain raise from
+    INSIDE the fence, and ``main`` would then discard every violation
+    collected so far — hiding a real laundering finding in an earlier file
+    behind a "the gate is broken" exit). No I/O, no unbounded recursion, so
+    no INPUT can make them raise. Anything they raise is a defect, and
+    `main` reports it as exit 2, "the gate could not run".
 
     ``ast.parse`` and ``ast.walk`` stay OUTSIDE this fence deliberately: both
     are genuinely input-driven (a 20 000-deep ``not`` chain raises
@@ -651,9 +955,11 @@ def _scan_text(text: str, path: Path) -> list[str]:
 
     Two-pass scan:
 
-    1. AST walk for ``tag(T3, ...)`` and ``cast(TaggedContent[...], ...)``
-       calls — multiline-safe by construction (the parser doesn't care
-       about line breaks inside a call).
+    1. AST walk over EVERY node, delegating to :func:`_detect` — the
+       ``tag(T3, ...)`` / ``cast(TaggedContent[...], ...)`` call patterns plus
+       the #538 raw-state-write vehicle rules, which key on ``ast.Attribute``
+       and ``ast.Constant`` rather than on ``ast.Call``. Multiline-safe by
+       construction (the parser doesn't care about line breaks inside a call).
     2. Per-line regex for ``# type: ignore`` on a ``TaggedContent`` line —
        comments are discarded by the parser, so they need the line-based
        scan.
@@ -688,40 +994,55 @@ def _scan_text(text: str, path: Path) -> list[str]:
         # shape where an unparseable file set ``tree = None`` and fell through — it
         # became unreachable when that became a violation, and an unreachable branch
         # is a coverage hole that a pragma would hide rather than fix.
+        #
+        # THE PER-FILE MAPS, built OUTSIDE the detector fence alongside `ast.parse`.
+        # They walk the tree, so they are input-driven in exactly the way `ast.parse`
+        # and `ast.walk` are; a fault in one is not a faulting PREDICATE, and reporting
+        # it as exit 2 "the gate is broken" would be the #543 err-001 confusion in the
+        # other direction.
+        prose = _prose_string_ids(tree)
+        # ONE-POSITION WHITELIST for `__setattr__`: `Call.func` is the only admissible
+        # position, and this is the set of node identities occupying it.
+        call_func_ids = frozenset(id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call))
+        vars_names, vars_overflow = _alias_names(tree, "vars")
+        carrier_pairs, carrier_names, carrier_overflow = _carrier_bindings(tree)
+
+        # FAIL CLOSED, and LOUDLY. A chain past the budget means the resolver cannot say
+        # what these names are bound to, so every alias-resolved rule below is deciding
+        # on an incomplete set. Attributed to line 1 because the overflow is a property
+        # of the FILE's alias graph, not of any single line.
+        if vars_overflow or carrier_overflow:
+            _record(violations, lines, path, 1, _ALIAS_BUDGET_MESSAGE)
+
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            lineno = node.lineno
-            snippet = lines[lineno - 1].rstrip() if 0 <= lineno - 1 < len(lines) else ""
+            # `getattr`, never `node.lineno`. `ast.walk` yields `ast.AST`, which carries
+            # no `lineno`; the previous code type-checked only because the
+            # `isinstance(node, ast.Call)` guard narrowed it, and that guard is gone —
+            # three of these rules key on `ast.Attribute` / `ast.Constant`. Measured:
+            # `mypy --strict` and `pyright` BOTH error on the attribute form, at 12
+            # required sites including the pre-push lefthook.
+            lineno = getattr(node, "lineno", 1)
             # THE DETECTOR, fenced off from the input-driven arms around it.
-            # These three do constant work on an already-parsed node, so an
-            # exception here is a bug in this file — not a property of the
-            # scanned source. Without the fence it reported as an unscannable
-            # FILE at exit 1, i.e. as a T3-laundering finding in a clean file
-            # (#543 review, err-001). The `for` statement stays outside: it is
+            # It does constant work on an already-parsed node, so an exception
+            # here is a bug in this file — not a property of the scanned
+            # source. Without the fence it reported as an unscannable FILE at
+            # exit 1, i.e. as a T3-laundering finding in a clean file (#543
+            # review, err-001). The `for` statement stays outside: it is
             # `ast.walk` advancing, which IS input-driven.
             try:
-                tag_t3 = _is_tag_t3_call(node)
-                cast_tagged = _is_cast_tagged_content_call(node)
-                subscript_t3 = _is_tagged_content_t3_subscript_call(node)
+                findings = _detect(
+                    node, prose, call_func_ids, vars_names, carrier_pairs, carrier_names
+                )
             except Exception as exc:
                 raise GateInternalError(
                     f"{path}:{lineno}: {_GATE_INTERNAL_MESSAGE} {type(exc).__name__}: {exc}"
                 ) from exc
-            if tag_t3:
-                violations.append(f"{path}:{lineno}: {_TAG_T3_MESSAGE}")
-                violations.append(f"  {snippet}")
-            if cast_tagged:
-                violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
-                violations.append(f"  {snippet}")
-            if subscript_t3:
-                violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
-                violations.append(f"  {snippet}")
+            for message in findings:
+                _record(violations, lines, path, lineno, message)
 
         for lineno, line in enumerate(lines, 1):
             if _TYPE_IGNORE_PATTERN.search(line):
-                violations.append(f"{path}:{lineno}: {_TYPE_IGNORE_MESSAGE}")
-                violations.append(f"  {line.rstrip()}")
+                _record(violations, lines, path, lineno, _TYPE_IGNORE_MESSAGE)
     except GateInternalError:
         # ORDER IS LOAD-BEARING. `GateInternalError` is an `Exception`, so the
         # broad arm below would swallow it and re-file the gate's own defect as
