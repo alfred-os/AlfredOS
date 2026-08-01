@@ -158,6 +158,7 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         check_tag_t3._RAW_CARRIER_MESSAGE,
         check_tag_t3._BASEMODEL_VALUE_MESSAGE,
         check_tag_t3._ALIAS_BUDGET_MESSAGE,
+        check_tag_t3._PRIVATE_SURFACE_MESSAGE,
     }
     declared = {
         value

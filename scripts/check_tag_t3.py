@@ -166,6 +166,50 @@ _BASEMODEL_SEAM_ATTRS: frozenset[str] = frozenset(
     {"copy", "model_copy", "model_construct", "model_validate", "model_validate_json"}
 )
 
+# THE PRIVATE SURFACE OF `alfred.security.tiers` — 21 module-level `_`-prefixed names.
+#
+# THE TWO BYPASSES NOTHING ELSE IN THE REPO CATCHES, and nothing else CAN:
+#
+#     _set_authorized_t3_nonce(mine)          # install an attacker nonce
+#     _T3_CONSTRUCTION_AUTHORIZED.set(True)   # flip the guard off wholesale
+#
+# These names ARE the T3 authorisation mechanism. A runtime guard that refused them
+# would refuse the bootstrap that installs the real nonce, so no such guard can exist.
+# The authoring layer is the ONLY enforcement layer available, which is why the ban is
+# DEFAULT-DENY over the whole private surface rather than an enumeration of the two
+# spellings an attacker happened to use.
+#
+# HARD-CODED, not derived at import: the gate runs under bare `python3` from the
+# Makefile with no venv and no `alfred` importable, so it cannot ask the module. It
+# also must not read `tiers.py` at import time — that would put filesystem I/O in this
+# module's import path. `_derive_tiers_private_surface` is the DRIFT GUARD that keeps
+# the hard-coded copy honest, and it is called from the test suite, never from here.
+_TIERS_PRIVATE_SURFACE: frozenset[str] = frozenset(
+    {
+        "_APPROVED_TIERS",
+        "_AUTHORIZED_T3_NONCE",
+        "_FORENSICALLY_OPAQUE_PACKAGES",
+        "_FORENSIC_FRAME_LIMIT",
+        "_MAX_FORENSIC_REPR",
+        "_PARAMETRISATION_ATTRS",
+        "_T3_CONSTRUCTION_AUTHORIZED",
+        "_TIER_GUARD_NAMES",
+        "_bounded_repr",
+        "_coerce_and_guard_update",
+        "_enforce_tier_admissible",
+        "_guard_tier_value",
+        "_is_forensically_opaque",
+        "_is_unauthorized_t3",
+        "_log_t3",
+        "_nearest_foreign_module",
+        "_record_unauthorized_t3_attempt",
+        "_refuse_if_tier_is_narrowed_away",
+        "_refuse_unauthorized_t3",
+        "_set_authorized_t3_nonce",
+        "_tier_by_name",
+    }
+)
+
 _RAW_VEHICLE_ATTR_MESSAGE: str = (
     "raw-state vehicle attribute — reaches instance state without traversing any "
     "method the model can guard. Use tag_t3_with_nonce()."
@@ -202,6 +246,11 @@ _BASEMODEL_VALUE_MESSAGE: str = (
 _ALIAS_BUDGET_MESSAGE: str = (
     "alias chain deeper than the resolver's budget — the gate cannot decide what "
     "these names are bound to. Simplify the aliasing."
+)
+_PRIVATE_SURFACE_MESSAGE: str = (
+    "a private name from alfred.security.tiers, named in code — that surface IS the "
+    "T3 authorisation mechanism, so no runtime guard can refuse a use of it. Take the "
+    "nonce from bootstrap and go through tag_t3_with_nonce()."
 )
 
 # Read-surface failures. These are VIOLATIONS, not silent passes (#537):
@@ -338,6 +387,25 @@ _APPROVED_PATHS: frozenset[Path] = frozenset(
         _REPO_ROOT / "src" / "alfred" / "security" / "quarantine.py",
     }
 )
+
+# THE ONLY LEGITIMATE CALLER of the private surface outside `tiers.py` itself.
+#
+# Narrowed to (path, FUNCTION), never path-only. `_set_authorized_t3_nonce` is a bare
+# `global` write with NO guard of its own — the idempotency check lives in
+# `create_and_register_t3_nonce`, its caller. A path-only exemption would therefore
+# leave the bypass wide open WITHIN the exempt file, which is the whole point of
+# narrowing it: a second function in this module could install any object it liked.
+_NONCE_FACTORY_PATH: Path = _REPO_ROOT / "src" / "alfred" / "bootstrap" / "nonce_factory.py"
+_FUNCTION_SCOPED_EXEMPTIONS: frozenset[tuple[Path, str]] = frozenset(
+    {(_NONCE_FACTORY_PATH, "create_and_register_t3_nonce")}
+)
+
+# The same file's MODULE-LEVEL import line, which sits outside the exempt function and
+# so cannot be covered by the (path, function) key. Scoped to `ast.alias` so a
+# module-level CALL still reds, and — see `_private_surface_is_exempt` — to MODULE
+# SCOPE, so a function-local aliased import does not inherit it. Without that second
+# condition the exemption is functionally path-only again, by a different route.
+_IMPORT_ONLY_EXEMPT_PATHS: frozenset[Path] = frozenset({_NONCE_FACTORY_PATH})
 
 # Test trees are exempt: tests assert the patterns the gate forbids.
 # Matched as a resolved PATH COMPONENT, never as a substring of the raw
@@ -756,6 +824,162 @@ def _carrier_bindings(tree: ast.AST) -> tuple[frozenset[tuple[str, str]], frozen
     return pairs, frozenset(direct), overflowed
 
 
+def _private_surface_names(tree: ast.AST) -> tuple[frozenset[str], bool]:
+    """Resolve :data:`_TIERS_PRIVATE_SURFACE` against ONE file's bindings.
+
+    Returns ``(names, overflowed)``, mirroring :func:`_carrier_bindings`.
+
+    R2-A, and it is the whole rule rather than a refinement of it: with
+    ``from alfred.security.tiers import _set_authorized_t3_nonce as _reg``, the CALL
+    ``_reg(mine)`` is the laundering and the import is only its setup. A rule that saw
+    the import alone would be closed by moving the import into a helper module. So the
+    asname is POISONED — every local name bound to a private name is itself private.
+
+    Fans :func:`_alias_names` out over the 21 seeds rather than adding a second
+    resolver: an identifier this gate keys on must be resolved by the ONE mechanism the
+    meta-guard test enumerates, or the next rebinding spelling walks straight through.
+    Measured cost of the fan-out across the 332 files under both scan roots: ~2s.
+    """
+    names: set[str] = set()
+    overflowed = False
+    for seed in sorted(_TIERS_PRIVATE_SURFACE):
+        resolved, seed_overflowed = _alias_names(tree, seed)
+        names |= resolved
+        overflowed = overflowed or seed_overflowed
+    return frozenset(names), overflowed
+
+
+def _binding_name(node: ast.AST) -> str | None:
+    """The single name ``node`` BINDS, or ``None`` if it binds nothing.
+
+    Used only by :func:`_derive_tiers_private_surface`. Keyed on the BINDING NODE, not
+    on the statement kind: R2-N measured that a six-arm statement walk
+    (``Assign``/``AnnAssign``/``TypeAlias``/``def``/``class`` plus recursion) misses
+    ``import _mod``, ``from m import y as _z``, ``for`` targets, ``with ... as``,
+    ``except ... as``, the walrus, all three ``match`` capture kinds, and — inside the
+    shape it claimed to cover — the ``_rest`` of ``_h, *_rest = ...``. Every one of
+    those reaches this function as a node whose kind names the binding directly.
+
+    ``ast.TypeAlias`` needs no arm of its own: its ``name`` field is an ``ast.Name``
+    in ``Store`` context, so the first arm already sees it.
+    """
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+        return node.id
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name
+    if isinstance(node, ast.alias):
+        # `import a.b.c` binds `a`, not `a.b.c`. `asname` wins when present.
+        return (node.asname or node.name).partition(".")[0]
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        return node.name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest
+    return None
+
+
+def _derive_tiers_private_surface(source: str) -> frozenset[str]:
+    """Every ``_``-prefixed non-dunder name ``source`` binds at MODULE level.
+
+    THE DRIFT GUARD for :data:`_TIERS_PRIVATE_SURFACE`, called from the test suite and
+    never from the gate — the gate must not read ``tiers.py`` at import time.
+
+    DEFAULT-DENY OVER BINDING SHAPES (R2-N). The walk descends through every node of
+    every module-level statement, so a name bound inside ``if TYPE_CHECKING:``, a
+    ``try``/``except``, a ``with`` or a ``match`` is collected exactly like one bound
+    at the top. It STOPS at a scope boundary — ``def``, ``async def``, ``class`` and
+    ``lambda`` contribute their own name and nothing from their body, because a name
+    bound in there belongs to that scope and is not part of the module's surface.
+
+    Iterative rather than recursive: this walks arbitrary parsed source, and a
+    recursive form would inherit the interpreter's stack limit on input it does not
+    control.
+
+    RESIDUAL: a comprehension's own target leaks into the result (it binds in the
+    comprehension's scope, not the module's). That over-collects, so it can only make
+    the drift guard FAIL LOUDLY and never silently under-cover; ``tiers.py`` has no
+    module-level comprehension binding a private name today.
+    """
+    bound: set[str] = set()
+    stack: list[ast.AST] = list(ast.parse(source).body)
+    while stack:
+        node = stack.pop()
+        name = _binding_name(node)
+        if name is not None and name.startswith("_") and not name.startswith("__"):
+            bound.add(name)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            stack.extend(ast.iter_child_nodes(node))
+    return frozenset(bound)
+
+
+def _private_surface_hit(
+    node: ast.AST,
+    prose: frozenset[int],
+    private_names: frozenset[str] = _TIERS_PRIVATE_SURFACE,
+) -> str | None:
+    """The private name ``node`` reaches, or ``None``. FOUR carriers.
+
+    ``ast.Name`` and ``ast.Attribute`` are the ordinary spellings
+    (``_set_authorized_t3_nonce(x)`` and ``_t._AUTHORIZED_T3_NONCE``). ``ast.alias``
+    covers BOTH halves of an import: the imported ``name``, and the ``asname``, which
+    nothing else reaches — every other alias fixture binds a name that is already
+    private, so the ``name`` check short-circuits first.
+
+    The fourth carrier is any expression :func:`_fold_str` resolves to a string in
+    NON-PROSE position. ``getattr(_t, "_set_authorized_t3_nonce")(mine)`` produces no
+    ``Name`` or ``Attribute`` node carrying the name at all, and
+    ``"_set_authorized" + "_t3_nonce"`` was executed by the review fleet to forge the
+    nonce end to end. Matched by CONTAINMENT, not equality, so the dotted spelling
+    ``"alfred.security.tiers._set_authorized_t3_nonce"`` is caught too.
+
+    ``private_names`` DEFAULTS to the module's own surface, and :func:`_scan_text`
+    passes the per-file ALIAS-RESOLVED superset instead. The default exists for callers
+    that have no tree in hand (the cardinality pin on ``nonce_factory.py``, which
+    asserts the two sets coincide for that file before relying on it).
+    """
+    if isinstance(node, ast.Name) and node.id in private_names:
+        return node.id
+    if isinstance(node, ast.Attribute) and node.attr in private_names:
+        return node.attr
+    if isinstance(node, ast.alias):
+        if node.name in private_names:
+            return node.name
+        if node.asname is not None and node.asname in private_names:
+            return node.asname
+    if isinstance(node, (ast.Constant, ast.BinOp, ast.JoinedStr)) and id(node) not in prose:
+        folded = _fold_str(node)
+        if folded is not None:
+            for candidate in sorted(private_names):
+                if candidate in folded:
+                    return candidate
+    return None
+
+
+def _private_surface_is_exempt(
+    node: ast.AST, resolved_path: Path, enclosing: dict[int, str]
+) -> bool:
+    """Whether this private-surface reference is one of the authorised ones.
+
+    NO COUNT IS NAMED, for the reason :class:`GateInternalError` gives: a number in
+    prose rots the next time the exempt set moves, and this one is pinned by a
+    cardinality test instead.
+
+    ``resolved_path`` is resolved ONCE by :func:`_scan_file` and passed down, so this
+    predicate — and :func:`_scan_text` around it — stays pure over its arguments. An
+    earlier revision called ``path.resolve()`` per hit inside ``_scan_text``; measured,
+    identical arguments then returned OPPOSITE verdicts depending on the process cwd
+    while the purity pin stayed green.
+    """
+    if isinstance(node, ast.alias) and resolved_path in _IMPORT_ONLY_EXEMPT_PATHS:
+        # MODULE SCOPE ONLY. Scoped to `ast.alias` so a module-level CALL still reds,
+        # and to module scope so a FUNCTION-LOCAL aliased import does not inherit the
+        # exemption — which it did in the first revision, making the whole thing
+        # functionally path-only. `_enclosing_functions` leaves module-scope lines
+        # ABSENT from the map, which is what `is None` reads.
+        return enclosing.get(getattr(node, "lineno", 0)) is None
+    function = enclosing.get(getattr(node, "lineno", 0))
+    return function is not None and (resolved_path, function) in _FUNCTION_SCOPED_EXEMPTIONS
+
+
 def _is_tag_t3_call(node: ast.Call) -> bool:
     """``tag(T3, ...)`` — first positional arg is the identifier ``T3``.
 
@@ -899,6 +1123,9 @@ def _detect(
     carrier_pairs: frozenset[tuple[str, str]],
     carrier_names: frozenset[str],
     basemodel_names: frozenset[str],
+    private_names: frozenset[str],
+    enclosing: dict[int, str],
+    resolved: Path,
 ) -> list[str]:
     """Every rule's verdict on ONE already-parsed node, as a list of messages.
 
@@ -909,8 +1136,10 @@ def _detect(
     reporting it as an unscannable FILE at exit 1 is the #543 err-001 failure the fence
     exists to prevent.
 
-    ``ast.AST`` rather than a narrower type: the caller walks every node, because three
-    of these rules key on ``ast.Attribute`` / ``ast.Constant`` rather than ``ast.Call``.
+    ``ast.AST`` rather than a narrower type: the caller walks every node, because rules
+    here key on ``ast.Attribute``, ``ast.Constant`` and ``ast.alias`` rather than on
+    ``ast.Call``. NO COUNT IS NAMED — this line said "three" and the private-surface
+    rule made it more on the next edit.
     """
     messages: list[str] = []
     if isinstance(node, ast.Call):
@@ -960,6 +1189,14 @@ def _detect(
         folded = _fold_str(node)
         if folded is not None and folded in _RAW_STATE_VEHICLE_NAMES:
             messages.append(_RAW_VEHICLE_STR_MESSAGE)
+    # THE SOLE-LAYER RULE. Keyed on the node rather than on `ast.Call`, because the
+    # name arrives on four different carriers and one of them (`ast.alias`) is not an
+    # expression at all. The exemption is consulted only AFTER a hit, so the authorised
+    # references in `nonce_factory.py` are the only thing it can admit — how many of
+    # them there are is pinned by a cardinality test, not written down here.
+    private_name = _private_surface_hit(node, prose, private_names)
+    if private_name is not None and not _private_surface_is_exempt(node, resolved, enclosing):
+        messages.append(_PRIVATE_SURFACE_MESSAGE)
     return messages
 
 
@@ -995,11 +1232,21 @@ class GateInternalError(RuntimeError):
     """
 
 
-def _scan_text(text: str, path: Path) -> list[str]:
+def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]:
     """Return violation messages for ``text``, attributed to ``path``.
 
-    Pure: performs no filesystem access and applies no exemption — ``path`` is
-    a label for the messages, not something this function reads.
+    PURE OVER ITS ARGUMENTS: performs no filesystem access. ``path`` is a label for
+    the messages; ``resolved`` is the exemption KEY, already resolved by
+    :func:`_scan_file` — this function never resolves anything itself. Omitting it
+    means "use ``path`` as given", which is what every direct caller in the suite does.
+
+    The split is load-bearing rather than tidy (R2-D). An earlier revision called
+    ``path.resolve()`` per hit in here; measured, identical ``(text, path)`` arguments
+    then returned OPPOSITE verdicts depending on the process cwd, while
+    ``test_scan_text_reports_a_violation_without_touching_the_filesystem`` — the pin
+    that exists to prevent exactly that — stayed green, because it asserts only that
+    a nonexistent path is not read. ``_scan_text`` applies path-keyed exemptions now;
+    what it does not do is decide for itself what the path IS.
 
     Split out of :func:`_scan_file` (#537) for two reasons:
 
@@ -1016,9 +1263,10 @@ def _scan_text(text: str, path: Path) -> list[str]:
 
     1. AST walk over EVERY node, delegating to :func:`_detect` — the
        ``tag(T3, ...)`` / ``cast(TaggedContent[...], ...)`` call patterns plus
-       the #538 raw-state-write vehicle rules, which key on ``ast.Attribute``
-       and ``ast.Constant`` rather than on ``ast.Call``. Multiline-safe by
-       construction (the parser doesn't care about line breaks inside a call).
+       the #538 raw-state-write vehicle and ``tiers``-private-surface rules,
+       which key on ``ast.Attribute``, ``ast.Constant`` and ``ast.alias``
+       rather than on ``ast.Call``. Multiline-safe by construction (the parser
+       doesn't care about line breaks inside a call).
     2. Per-line regex for ``# type: ignore`` on a ``TaggedContent`` line —
        comments are discarded by the parser, so they need the line-based
        scan.
@@ -1034,6 +1282,8 @@ def _scan_text(text: str, path: Path) -> list[str]:
     ``main`` reports it as exit 2, never as exit 1 — which is precisely the
     difference #542 was about (it exited 1, "violations found", naming none).
     """
+    if resolved is None:
+        resolved = path
     violations: list[str] = []
     try:
         lines = text.splitlines()
@@ -1066,6 +1316,10 @@ def _scan_text(text: str, path: Path) -> list[str]:
         vars_names, vars_overflow = _alias_names(tree, "vars")
         carrier_pairs, carrier_names, carrier_overflow = _carrier_bindings(tree)
         basemodel_names, basemodel_overflow = _alias_names(tree, "BaseModel")
+        private_names, private_overflow = _private_surface_names(tree)
+        # Module-scope lines are ABSENT from this map, which both private-surface
+        # exemption arms read as "module scope".
+        enclosing = _enclosing_functions(tree)
 
         # FAIL CLOSED, and LOUDLY. A chain past the budget means the resolver cannot say
         # what these names are bound to, so every alias-resolved rule below is deciding
@@ -1073,16 +1327,18 @@ def _scan_text(text: str, path: Path) -> list[str]:
         # of the FILE's alias graph, not of any single line.
         #
         # ONE condition over EVERY resolved seed, not one report per seed: an overflow
-        # means the FILE's alias graph is past the budget, and three copies of the same
-        # message on the same line would say the same thing three times.
-        if vars_overflow or carrier_overflow or basemodel_overflow:
+        # means the FILE's alias graph is past the budget, and one copy of the same
+        # message per seed on the same line would say the same thing over and over.
+        if vars_overflow or carrier_overflow or basemodel_overflow or private_overflow:
             _record(violations, lines, path, 1, _ALIAS_BUDGET_MESSAGE)
 
         for node in ast.walk(tree):
             # `getattr`, never `node.lineno`. `ast.walk` yields `ast.AST`, which carries
             # no `lineno`; the previous code type-checked only because the
             # `isinstance(node, ast.Call)` guard narrowed it, and that guard is gone —
-            # three of these rules key on `ast.Attribute` / `ast.Constant`. Measured:
+            # rules here key on `ast.Attribute`, `ast.Constant` and `ast.alias`. And
+            # `ast.alias` is why `getattr` still earns its keep past those two: it is
+            # not an `ast.expr` at all, so no narrowing covers it. Measured:
             # `mypy --strict` and `pyright` BOTH error on the attribute form, at 12
             # required sites including the pre-push lefthook.
             lineno = getattr(node, "lineno", 1)
@@ -1102,6 +1358,9 @@ def _scan_text(text: str, path: Path) -> list[str]:
                     carrier_pairs,
                     carrier_names,
                     basemodel_names,
+                    private_names,
+                    enclosing,
+                    resolved,
                 )
             except Exception as exc:
                 raise GateInternalError(
@@ -1219,6 +1478,20 @@ def _scan_file(path: Path) -> list[str]:
         # this file. One funnel keeps both sides of the new branch covered.
         if not stat.S_ISREG(path.stat().st_mode):
             raise OSError(errno.EINVAL, _NOT_A_REGULAR_FILE_REASON)
+        # RESOLVE ONCE, here, and hand the result to `_scan_text` (R2-D). The
+        # path-keyed private-surface exemptions must decide on the file's real
+        # identity, and doing it per hit inside `_scan_text` made identical
+        # arguments return opposite verdicts depending on the process cwd.
+        #
+        # DELIBERATELY INSIDE the existing try, with NO arm of its own. A guard
+        # written as `except (OSError, RuntimeError, ValueError): resolved = path`
+        # would be unreachable in practice — every input that makes `resolve` raise
+        # (an embedded NUL, most obviously) makes the `stat()` above raise first, so
+        # the arm could only ever be reached by monkeypatching `Path.resolve`. An
+        # unreachable branch is a design fault under this file's REQUIRED 100% gate,
+        # and a monkeypatch-only branch is a pragma wearing a different hat. Sharing
+        # the arms that already exist keeps both sides covered by real inputs.
+        resolved = path.resolve(strict=False)
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return [f"{path}:1: {_UNDECODABLE_MESSAGE}", "  <undecodable>"]
@@ -1239,7 +1512,7 @@ def _scan_file(path: Path) -> list[str]:
         # PATH the reader could not open, never on content, so it must not
         # suggest simplifying the file.
         return [f"{path}:1: {_UNSCANNABLE_PATH_MESSAGE}", f"  {type(exc).__name__}: {exc}"]
-    return _scan_text(text, path)
+    return _scan_text(text, path, resolved)
 
 
 def _warn_git_unavailable(directory: Path, why: str) -> None:

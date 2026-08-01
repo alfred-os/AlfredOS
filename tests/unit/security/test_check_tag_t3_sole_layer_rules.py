@@ -907,11 +907,18 @@ def test_every_keyed_identifier_is_alias_resolved() -> None:
     Two identifiers are resolved by DIFFERENT mechanisms, and the row does not care
     which — it asserts the OUTCOME, so it stays honest if a rule changes technique:
 
-    * ``vars``, ``gc``, ``ctypes`` and ``BaseModel`` go through :func:`_alias_names`;
+    * ``vars``, ``gc``, ``ctypes``, ``BaseModel`` and the ``tiers`` private surface go
+      through :func:`_alias_names`;
     * ``object`` is closed by RECEIVER-BLINDNESS instead. The ``__setattr__`` rules
       never ask who the receiver is, so no identifier is left to rebind. That is a
       STRONGER closure than resolution, not a missing one, and the row proves it
       behaviourally rather than trusting the claim.
+
+    THE ASSERTION IS LINE-KEYED, and it must be. Every row's LAST line is the USE, and
+    for the private-surface row the BINDING line reds on its own — so a bare "something
+    was flagged" assertion would pass on the import alone and prove nothing about
+    ``_reg(mine)``, which is the laundering. Keying on the use line makes all six rows
+    discriminate on the property they claim.
     """
     # (identifier, direct spelling, rebound spelling, import-aliased spelling)
     cases = [
@@ -945,14 +952,25 @@ def test_every_keyed_identifier_is_alias_resolved() -> None:
             '_o = object\n_o.__setattr__(low, "tier", T3)',
             'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)',
         ),
+        (
+            "_set_authorized_t3_nonce",
+            "_set_authorized_t3_nonce(mine)",
+            "_reg = _set_authorized_t3_nonce\n_reg(mine)",
+            "from alfred.security.tiers import _set_authorized_t3_nonce as _reg\n_reg(mine)",
+        ),
     ]
     for identifier, direct, rebound, aliased in cases:
-        assert _messages(direct + "\n"), (
-            f"{identifier}: the DIRECT spelling was not flagged — this probe never "
-            f"reached the rule, so the two below prove nothing"
-        )
-        assert _messages(rebound + "\n"), f"{identifier}: REBOUND spelling admitted"
-        assert _messages(aliased + "\n"), f"{identifier}: IMPORT-ALIASED spelling admitted"
+        for label, source in (
+            ("DIRECT", direct),
+            ("REBOUND", rebound),
+            ("IMPORT-ALIASED", aliased),
+        ):
+            use_line = source.count("\n") + 1
+            flagged = _messages(source + "\n")
+            assert any(f":{use_line}: " in message for message in flagged), (
+                f"{identifier}: the {label} spelling's USE (line {use_line}) was not "
+                f"flagged. Messages: {flagged}"
+            )
 
 
 def test_record_appends_a_message_and_a_snippet_and_tolerates_a_missing_line() -> None:
@@ -974,3 +992,474 @@ def test_record_appends_a_message_and_a_snippet_and_tolerates_a_missing_line() -
     assert violations == [f"{_PROBE}:2: msg", "  second"]
     check_tag_t3._record(violations, [], _PROBE, 1, "other")
     assert violations[2:] == [f"{_PROBE}:1: other", "  "]
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — the `alfred.security.tiers` private-surface default-deny.
+#
+# These two bypasses (`_set_authorized_t3_nonce(mine)` and
+# `_T3_CONSTRUCTION_AUTHORIZED.set(True)`) are the ONLY ones in the repo that no
+# runtime guard catches — and cannot catch, because they ARE the authorisation
+# mechanism. A guard that refused them would refuse the bootstrap that installs
+# the real nonce. The authoring layer is therefore the sole enforcement layer.
+# ---------------------------------------------------------------------------
+
+# R2-E — PINNED HERE, AS A SEPARATE LITERAL. Two INDEPENDENT oracles cover this
+# constant and they fail on different mutations:
+#
+#   * this literal catches an edit to `_TIERS_PRIVATE_SURFACE` alone;
+#   * `_derive_tiers_private_surface` (below) reads the REAL `tiers.py`, so it
+#     catches a name added to or removed from that module.
+#
+# Neither is tautological: the implementation is a HARD-CODED frozenset (the gate
+# runs under bare `python3` with no venv and no `alfred` importable, so it cannot
+# ask the module), and the derivation shares no predicate with it.
+_EXPECTED_PRIVATE_SURFACE = frozenset(
+    {
+        "_APPROVED_TIERS",
+        "_AUTHORIZED_T3_NONCE",
+        "_FORENSICALLY_OPAQUE_PACKAGES",
+        "_FORENSIC_FRAME_LIMIT",
+        "_MAX_FORENSIC_REPR",
+        "_PARAMETRISATION_ATTRS",
+        "_T3_CONSTRUCTION_AUTHORIZED",
+        "_TIER_GUARD_NAMES",
+        "_bounded_repr",
+        "_coerce_and_guard_update",
+        "_enforce_tier_admissible",
+        "_guard_tier_value",
+        "_is_forensically_opaque",
+        "_is_unauthorized_t3",
+        "_log_t3",
+        "_nearest_foreign_module",
+        "_record_unauthorized_t3_attempt",
+        "_refuse_if_tier_is_narrowed_away",
+        "_refuse_unauthorized_t3",
+        "_set_authorized_t3_nonce",
+        "_tier_by_name",
+    }
+)
+
+
+def test_import_aliased_nonce_setter_is_refused() -> None:
+    """A16 — the import alias hides the name from every rule keyed on the CALL.
+
+    R2-A: the aliased import POISONS the asname. Both lines red, and they must:
+    the import is the binding and ``_reg(mine)`` is the LAUNDERING CALL. A rule
+    that flagged only the import would be closed by moving the import into a
+    helper module, so the asname is resolved through the same per-file alias
+    environment every other rule in this gate now uses.
+    """
+    source = "from alfred.security.tiers import _set_authorized_t3_nonce as _reg\n_reg(mine)\n"
+    assert _messages(source) == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+        f"{_PROBE}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+    ]
+
+
+def test_an_import_asname_that_shadows_a_private_name_is_refused() -> None:
+    """R2-J — the ``asname`` SUB-ARM, which nothing else reaches.
+
+    Every other alias fixture in this file binds a name that is ALREADY private, so
+    the ``node.name`` check short-circuits and ``node.asname`` is never evaluated.
+    Here the imported name is innocent and the LOCAL spelling is the private one, so
+    only the asname arm can see it. Dropping that arm survives every other test.
+
+    Denying it is the name-keyed-collision residual pointing the safe way: a file
+    that binds ``_log_t3`` locally reads as tiers' ``_log_t3`` to every later reader.
+    """
+    assert _messages("from json import loads as _log_t3\n") == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text("from json import loads as _parse\n", _PROBE) == [], (
+        "positive twin: an ordinary asname must not red"
+    )
+
+
+def test_getattr_string_nonce_setter_is_refused() -> None:
+    """A17 — the name lives in a STRING, so no Name/Attribute node carries it.
+
+    This is why the prose exclusion must be position-based: excluding every string
+    constant would admit this line.
+    """
+    source = 'import alfred.security.tiers as _t\ngetattr(_t, "_set_authorized_t3_nonce")(mine)\n'
+    assert _messages(source) == [f"{_PROBE}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"]
+
+
+def test_a_private_name_assembled_by_binop_is_refused() -> None:
+    """FLEET FINDING sec-004 — executed end-to-end, this forged the nonce and minted a
+    fully legitimate TaggedContent[T3] for attacker content through the front door."""
+    source = 'getattr(_t, "_set_authorized" + "_t3_nonce")(mine)\n'
+    assert _messages(source) == [f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"]
+
+
+def test_private_surface_reached_through_an_attribute_is_refused() -> None:
+    """FLEET FINDING test-003 M10 — deleting the ``ast.Attribute`` arm survived v1."""
+    assert _messages("if _t._AUTHORIZED_T3_NONCE is not None:\n    pass\n") == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+
+
+def test_dotted_private_name_in_a_string_is_refused() -> None:
+    """The string arm matches by CONTAINMENT so the dotted spelling is caught.
+
+    Positive twin in the same test: a string that merely SHARES a prefix with a
+    private name must not red, or containment would be a licence to flag anything.
+    """
+    assert _messages('n = "alfred.security.tiers._set_authorized_t3_nonce"\n') == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text('n = "alfred.security.tiers.tag"\n', _PROBE) == []
+
+
+def test_context_var_authorisation_flip_is_refused() -> None:
+    """``_T3_CONSTRUCTION_AUTHORIZED.set(True)`` flips the guard off wholesale.
+
+    THE SECOND BYPASS NOTHING ELSE CATCHES. The runtime cannot refuse it: the
+    context var IS how an authorised mint says it is authorised, so a guard that
+    denied the write would deny ``tag_t3_with_nonce`` itself.
+    """
+    assert _messages("_T3_CONSTRUCTION_AUTHORIZED.set(True)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+
+
+def test_private_surface_named_only_in_prose_stays_clean_with_a_positive_twin() -> None:
+    """NEGATIVE FLOOR + TWIN. THREE live docstrings name these symbols:
+    ``cli/daemon/_failures.py:150``, ``hooks/invoke.py:407`` and ``:469``. The last is a
+    PEP-258 ATTRIBUTE docstring, which ``ast.get_docstring`` does not see."""
+    assert (
+        check_tag_t3._scan_text(
+            '"""Sets ``alfred.security.tiers._AUTHORIZED_T3_NONCE`` once at start."""\n', _PROBE
+        )
+        == []
+    )
+    assert (
+        check_tag_t3._scan_text(
+            'X = 1\n"""See :func:`alfred.security.tiers._tier_by_name`."""\n', _PROBE
+        )
+        == []
+    )
+    assert _messages('X = _tier_by_name("T3")\n') == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+
+
+def test_nonce_factory_is_exempt_inside_its_registration_function_only() -> None:
+    """(path, FUNCTION), never path-only, WITH the positive twin in the same test.
+
+    ``_set_authorized_t3_nonce`` (``tiers.py``) is a bare ``global`` write with NO
+    guard; the idempotency guard lives in the CALLER. A path-only exemption leaves the
+    bypass open WITHIN the exempt file — which is the whole point of narrowing it.
+    """
+    inside = (
+        "def create_and_register_t3_nonce():\n"
+        "    nonce = CapabilityGateNonce()\n"
+        "    _set_authorized_t3_nonce(nonce)\n"
+        "    return nonce\n"
+    )
+    assert check_tag_t3._scan_text(inside, _NONCE_FACTORY) == []
+
+    outside = "def some_other_helper():\n    _set_authorized_t3_nonce(attacker_nonce)\n"
+    assert _messages(outside, _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+
+
+def test_nonce_factory_exemption_covers_async_def_too() -> None:
+    """THE SILENT TRAP, WITH a twin so it cannot pass on a dead exemption.
+
+    A ``FunctionDef``-only enclosing walk maps nothing for ``async def``, so the first
+    body would red. Nothing else in the repo exercises the async half.
+    """
+    exempt = "async def create_and_register_t3_nonce():\n    _set_authorized_t3_nonce(nonce)\n"
+    assert check_tag_t3._scan_text(exempt, _NONCE_FACTORY) == []
+
+    not_exempt = "async def some_other_coro():\n    _set_authorized_t3_nonce(nonce)\n"
+    assert _messages(not_exempt, _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+
+
+def test_import_exemption_is_module_level_only() -> None:
+    """FLEET FINDING sec-005 — an ``ast.alias``-only exemption is still path-only.
+
+    A FUNCTION-LOCAL aliased import inside ``nonce_factory.py`` bought the exemption
+    under the first revision, which made the whole narrowing cosmetic. Requiring
+    module scope closes it for free.
+
+    The function-local case reds TWICE (R2-A): the aliased import binds the name and
+    ``_reg(attacker)`` uses it, and both are the laundering.
+    """
+    module_level = (
+        "from alfred.security.tiers import CapabilityGateNonce, _set_authorized_t3_nonce\n"
+    )
+    assert check_tag_t3._scan_text(module_level, _NONCE_FACTORY) == []
+
+    function_local = (
+        "def sneak():\n"
+        "    from alfred.security.tiers import _set_authorized_t3_nonce as _reg\n"
+        "    _reg(attacker)\n"
+    )
+    assert _messages(function_local, _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+        f"{_NONCE_FACTORY}:3: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+    ]
+
+
+def test_module_level_calls_in_nonce_factory_still_red() -> None:
+    """The import exemption is scoped to ``ast.alias``, so a module-level CALL reds."""
+    assert _messages("_set_authorized_t3_nonce(attacker_nonce)\n", _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ]
+
+
+def test_the_real_nonce_factory_file_scans_clean() -> None:
+    """THE REAL FILE under its REAL path — a fixture resembling it proves nothing.
+
+    R2-I: WITH THE POSITIVE TWIN it was missing. The bare floor passed for two
+    reasons it could not tell apart — the exemption working, and the rule being
+    absent. The twin renames the exempt function in the REAL source and asserts the
+    two in-function references then red, which proves the file is being scanned and
+    that the (path, FUNCTION) key is what keeps it clean.
+
+    ``_is_exempt`` is asserted False in the same test so this cannot pass because
+    ``nonce_factory.py`` quietly joined ``_APPROVED_PATHS``.
+    """
+    assert not check_tag_t3._is_exempt(_NONCE_FACTORY), (
+        "nonce_factory.py must NOT be blanket-exempt — this test would be vacuous"
+    )
+    assert check_tag_t3._scan_file(_NONCE_FACTORY) == []
+
+    real = _NONCE_FACTORY.read_text(encoding="utf-8")
+    renamed = real.replace(
+        "def create_and_register_t3_nonce(", "def create_and_register_t3_nonce_renamed("
+    )
+    assert renamed != real, "the exempt function's def line moved; this twin measures nothing"
+    assert _messages(renamed, _NONCE_FACTORY) == [
+        f"{_NONCE_FACTORY}:100: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+        f"{_NONCE_FACTORY}:108: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+    ], "renaming the exempt function must expose both in-function private references"
+
+
+def test_nonce_factory_holds_exactly_one_private_reference_and_one_alias() -> None:
+    """CARDINALITY PIN plus the ARGUMENT check the counts alone cannot make.
+
+    The exemption is keyed on a function NAME, so a second function in this file
+    renamed to ``create_and_register_t3_nonce`` would inherit it. Pinning the counts
+    means any new private-surface reference in this file reds here.
+
+    R2-M: the counts are defeated by swapping ONLY THE ARGUMENT of the exempt
+    ``_set_authorized_t3_nonce`` call — ``(hits, aliases)`` stays ``(3, 1)`` while an
+    attacker-held object becomes the authorised nonce (this was executed). So the pin
+    also asserts the argument is a name bound exactly once, to a bare
+    ``CapabilityGateNonce()`` construction.
+
+    RESIDUAL, stated rather than implied: this reads the argument SYNTACTICALLY. A
+    module-level rebind of the identifier ``CapabilityGateNonce`` in this file, or a
+    mutation of the constructed object between the two statements, is not checked —
+    the exemption still trusts ``nonce_factory.py``'s body to that degree.
+    """
+    tree = ast.parse(_NONCE_FACTORY.read_text(encoding="utf-8"))
+    prose = check_tag_t3._prose_string_ids(tree)
+
+    private_names, overflowed = check_tag_t3._private_surface_names(tree)
+    assert not overflowed
+    assert private_names == check_tag_t3._TIERS_PRIVATE_SURFACE, (
+        "nonce_factory.py binds a local ALIAS to a tiers private name, so the "
+        "two-argument _private_surface_hit calls below measure a narrower set than "
+        "the scanner does — pass the resolved set explicitly if this ever holds"
+    )
+
+    hits = [n for n in ast.walk(tree) if check_tag_t3._private_surface_hit(n, prose)]
+    aliases = [n for n in hits if isinstance(n, ast.alias)]
+    assert len(aliases) == 1, f"expected exactly one exempt import alias, got {len(aliases)}"
+    assert len(hits) == 3, (
+        f"nonce_factory.py private-surface references changed ({len(hits)} != 3). "
+        "Every one of them sits inside an exemption — justify the new reference or "
+        "move it out."
+    )
+
+    calls = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and check_tag_t3._arg_name(n.func) == "_set_authorized_t3_nonce"
+    ]
+    assert len(calls) == 1
+    call = calls[0]
+    assert not call.keywords and len(call.args) == 1
+    argument = call.args[0]
+    assert isinstance(argument, ast.Name)
+
+    bindings = [
+        stmt.value
+        for stmt in ast.walk(tree)
+        if isinstance(stmt, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == argument.id for t in stmt.targets)
+    ]
+    assert len(bindings) == 1, f"{argument.id!r} is bound {len(bindings)} times, expected once"
+    minted = bindings[0]
+    assert isinstance(minted, ast.Call)
+    assert check_tag_t3._arg_name(minted.func) == "CapabilityGateNonce"
+    assert not minted.args and not minted.keywords
+
+
+def test_scan_text_verdict_does_not_depend_on_the_working_directory() -> None:
+    """PURITY, asserted as the PROPERTY (fleet finding test-004).
+
+    An earlier revision resolved the path INSIDE ``_scan_text``; identical arguments
+    then returned opposite verdicts depending on cwd, while the existing purity pin
+    (``test_scan_text_reports_a_violation_without_touching_the_filesystem``) stayed
+    green — a guard whose docstring had silently become false.
+
+    THE FIXTURE IS AN EXEMPTION-SENSITIVE ONE, and it has to be. MEASURED: with a
+    module-level reference the verdict is "red" under BOTH cwds even with the
+    resolve put back inside ``_scan_text``, because a module-level line is outside
+    the (path, function) exemption either way — so that fixture asserts equality
+    between two verdicts the regression never disagreed about. The in-function form
+    is the one the exemption can admit, so it is the one whose verdict moves: from
+    the repo root it resolved to the real ``nonce_factory.py`` and returned CLEAN,
+    from ``/`` it resolved elsewhere and returned a violation.
+
+    Non-vacuous by construction: both verdicts are asserted NON-EMPTY, so the
+    equality cannot be satisfied by two empty lists.
+    """
+    import os
+
+    source = "def create_and_register_t3_nonce():\n    _set_authorized_t3_nonce(nonce)\n"
+    relative = Path("src/alfred/bootstrap/nonce_factory.py")
+    cwd = Path.cwd()
+    try:
+        os.chdir(_REPO_ROOT)
+        here = check_tag_t3._scan_text(source, relative)
+        os.chdir("/")
+        elsewhere = check_tag_t3._scan_text(source, relative)
+    finally:
+        os.chdir(cwd)
+    assert here == elsewhere
+    assert here == [
+        f"{relative}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+        "      _set_authorized_t3_nonce(nonce)",
+    ]
+
+
+def test_scan_text_keys_exemptions_on_the_resolved_path_it_is_given() -> None:
+    """R2-D — the ``resolved is None`` DEFAULT ARM, which is a branch under the gate.
+
+    ``_scan_file`` resolves once and passes the result down; every direct caller in
+    this suite omits it and gets "use ``path`` as given". Both arms are exercised
+    here, and the pair is what makes the default honest rather than incidental:
+    the SAME source is clean under the resolved key and reds without it.
+    """
+    inside = "def create_and_register_t3_nonce():\n    _set_authorized_t3_nonce(nonce)\n"
+    relative = Path("src/alfred/bootstrap/nonce_factory.py")
+
+    assert check_tag_t3._scan_text(inside, relative, _NONCE_FACTORY) == []
+    assert _messages(inside, relative) == [
+        f"{relative}:2: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ], "the default arm must key on `path` as given, NOT resolve it"
+
+
+def test_private_surface_constant_matches_the_real_tiers_module() -> None:
+    """DRIFT GUARD — derive the expected set, do not restate it.
+
+    Hard-coding keeps the gate free of import-time I/O (it runs under bare ``python3``
+    with no venv and no ``alfred`` importable); this test stops it drifting. A new
+    private module-level name in ``tiers.py`` reds HERE on the day it lands.
+
+    Two independent oracles, deliberately: ``_EXPECTED_PRIVATE_SURFACE`` is a literal
+    in this file, and the derivation reads the real module. Editing the constant reds
+    against the first; editing ``tiers.py`` reds against the second.
+    """
+    assert check_tag_t3._TIERS_PRIVATE_SURFACE == _EXPECTED_PRIVATE_SURFACE, (
+        "the declared private surface moved; this literal pins it independently"
+    )
+    derived = check_tag_t3._derive_tiers_private_surface(_TIERS.read_text(encoding="utf-8"))
+    assert derived == check_tag_t3._TIERS_PRIVATE_SURFACE, (
+        f"tiers.py's private surface drifted. "
+        f"Added: {sorted(derived - check_tag_t3._TIERS_PRIVATE_SURFACE)}. "
+        f"Removed: {sorted(check_tag_t3._TIERS_PRIVATE_SURFACE - derived)}."
+    )
+    assert len(derived) == 21, f"expected 21 private names, derived {len(derived)}"
+
+
+def test_the_private_surface_derivation_sees_every_binding_shape() -> None:
+    """ORACLE SELF-TEST. A drift guard that cannot see a shape silently under-covers.
+
+    R2-N: the earlier design enumerated SIX statement kinds and this fixture is built
+    to DISCRIMINATE against it. Every shape below the ``_g`` line is one that a
+    six-arm ``Assign``/``AnnAssign``/``TypeAlias``/``def``/``class``/recursion walk
+    misses — ``import``, ``from ... import ... as``, ``for``, ``with ... as``,
+    ``except ... as``, walrus, the three ``match`` capture kinds, and ``*_rest``.
+
+    The four EXCLUSIONS are the other half of the oracle: names bound inside a nested
+    ``def``, ``async def``, ``class`` or ``lambda`` belong to THAT scope, not to the
+    module, so a walk that does not stop at a scope boundary over-collects.
+    """
+    source = (
+        "import _mod\n"
+        "from m import y as _z\n"
+        "_a, _b = 1, 2\n"
+        "_h, *_rest = seq\n"
+        "_g: int = 1\n"
+        "type _Alias = int\n"
+        "if TYPE_CHECKING:\n"
+        "    _c = 3\n"
+        "if (_walrus := probe()):\n"
+        "    pass\n"
+        "try:\n"
+        "    def _d() -> None:\n"
+        "        _local_of_d = 1\n"
+        "except ImportError as _err:\n"
+        "    _e = None\n"
+        "for _i in items:\n"
+        "    pass\n"
+        "with ctx() as _w:\n"
+        "    pass\n"
+        "class _F:\n"
+        "    _class_attr = 1\n"
+        "async def _afn() -> None:\n"
+        "    _local_of_afn = 2\n"
+        "_lam = lambda: (_inner := 1)\n"
+        "match command:\n"
+        '    case {"k": _mval, **_mrest}:\n'
+        "        pass\n"
+        "    case [*_mstar]:\n"
+        "        pass\n"
+        "    case _mcap:\n"
+        "        pass\n"
+    )
+    derived = check_tag_t3._derive_tiers_private_surface(source)
+    assert derived == {
+        "_mod",
+        "_z",
+        "_a",
+        "_b",
+        "_h",
+        "_rest",
+        "_g",
+        "_Alias",
+        "_c",
+        "_walrus",
+        "_d",
+        "_err",
+        "_e",
+        "_i",
+        "_w",
+        "_F",
+        "_afn",
+        "_lam",
+        "_mval",
+        "_mrest",
+        "_mstar",
+        "_mcap",
+    }
+
+
+def test_the_private_surface_derivation_ignores_dunder_and_public_names() -> None:
+    """The filter, with both twins. ``from __future__ import annotations`` binds
+    ``__future__`` at module level and is the live reason the dunder arm exists."""
+    derived = check_tag_t3._derive_tiers_private_surface(
+        "from __future__ import annotations\npublic = 1\n__all__ = []\n_private = 2\n"
+    )
+    assert derived == {"_private"}
