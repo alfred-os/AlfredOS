@@ -60,7 +60,39 @@ other file now, and ``test_quarantine_scans_clean_without_its_exemption`` pins t
 Narrowing the exemption rather than deleting it would have left a live soft-landing
 zone in the one module that provably does not need one; deleting it means the day a
 line there does need it back, the build fails loudly and someone has to make that
-decision on the record instead of inheriting it.
+decision on the record instead of inheriting it. Recorded in
+``docs/adr/0058-single-approved-t3-authoring-home.md``.
+
+WHAT THE #538 RULES CANNOT DO — accepted residuals, stated rather than claimed closed:
+
+- **Cross-module re-export aliasing.** Both alias environments are per-file.
+- **A name assembled by any operation other than ``+`` or implicit concatenation.**
+  :func:`_fold_str` folds ``BinOp(Add)`` chains and literal-only ``JoinedStr``, so
+  ``"_set_authorized%s" % "_t3_nonce"``, ``"_set_authorized{}".format("_t3_nonce")``
+  and ``"".join([...])`` are assembled ENTIRELY from literals and all scan clean. The
+  residual is the OPERATION, not the operands.
+- **Carrier-by-reference beyond the six named primitives.** The vehicle set is a class
+  ban plus a named primitive list, not a proof of completeness.
+- **A name-keyed collision.** Another module defining its own ``_log_t3`` reds
+  benignly. Measured: zero today.
+- **``TaggedContent.model_construct(...)``** is refused at RUNTIME only; the seam rule
+  is receiver-scoped to ``BaseModel`` aliases.
+- **``object.__setattr__(self, "metadata", …)`` on a ``TaggedContent``.** ``metadata``
+  is deliberately NOT in ``_TAGGED_STATE_FIELDS``: ``src/alfred/hooks/context.py:106``
+  writes it on a ``HookContext``, an unrelated frozen dataclass that happens to share
+  the field name, so banning it would red a legitimate site for a name collision. The
+  residual cannot change ``tier``, ``content`` or ``source``, so it cannot mint or
+  relabel T3 — only alter auxiliary metadata.
+- **``self`` is a NAMING convention, not a type guarantee.** A plain function whose
+  first parameter is called ``self`` reaches the admissible branch with no subclass
+  involved. ``_TAGGED_STATE_FIELDS`` is what actually holds; the ``self`` check
+  narrows the surface but proves nothing on its own.
+
+THE ESCAPE HATCH, and it is the only one: a legitimate future need for one of these
+vehicles belongs behind a NAMED helper inside the already-exempt
+``security/tiers.py``, not behind a loosened rule here. A rule relaxed to admit one
+caller admits every caller that can spell the same shape, and the relaxation is
+invisible at every site that later depends on it.
 """
 
 from __future__ import annotations
@@ -142,10 +174,10 @@ _RAW_STATE_VEHICLE_NAMES: frozenset[str] = _RAW_STATE_VEHICLE_ATTRS | frozenset(
 )
 
 # The `TaggedContent` state fields no `__setattr__` call may write, whatever its target.
-# `metadata` is deliberately ABSENT — `hooks/context.py:106` writes it on a `HookContext`,
-# an unrelated frozen dataclass sharing the field name. Banning it would red a legitimate
-# site for a name collision, and the residual cannot change `tier`, `content` or
-# `source`, so it can neither mint nor relabel T3.
+# `metadata` is deliberately ABSENT — `src/alfred/hooks/context.py:106` writes it on a
+# `HookContext`, an unrelated frozen dataclass sharing the field name. Banning it would
+# red a legitimate site for a name collision, and the residual cannot change `tier`,
+# `content` or `source`, so it can neither mint nor relabel T3.
 _TAGGED_STATE_FIELDS: frozenset[str] = frozenset({"tier", "content", "source"})
 
 # Reaching PRIMITIVES that hand back an object's raw state. Scoped to the primitive,
@@ -767,8 +799,8 @@ def _is_benign_setattr_target(node: ast.Call) -> bool:
     rather than admitted: a call this rule cannot read is a call it must not admit.
 
     Three live sites depend on the admissible case and none may red:
-    ``hooks/context.py:106``, ``plugins/web_fetch/allowlist.py:139``,
-    ``plugins/web_fetch/fetch_dispatcher.py:219``. All three write ``self``. Measured
+    ``src/alfred/hooks/context.py:106``, ``src/alfred/plugins/web_fetch/allowlist.py:139``,
+    ``src/alfred/plugins/web_fetch/fetch_dispatcher.py:219``. All three write ``self``. Measured
     false-positive cost of this shape across both scan roots: ZERO.
 
     ESCAPE HATCH, named so nobody invents one: a frozen dataclass that genuinely needs

@@ -22,8 +22,8 @@ ONLY enforcement layer:
    It is designed to FAIL when these rules land. Flip its assertion and rewrite
    `tl_base_dispatch_and_raw_state_write.yaml`'s `out_of_scope_rationale`.
 2. **`object.__setattr__` must NOT be refused outright.** Six legitimate uses exist
-   under the scan root: `plugins/web_fetch/allowlist.py`,
-   `plugins/web_fetch/fetch_dispatcher.py`, `hooks/context.py`. The rule must key on
+   under the scan root: `src/alfred/plugins/web_fetch/allowlist.py`,
+   `src/alfred/plugins/web_fetch/fetch_dispatcher.py`, `src/alfred/hooks/context.py`. The rule must key on
    the written attribute being `"tier"`, not on the call.
 3. **New rules for the two runtime-unclosable shapes** (these are the highest-value
    rules in the PR, because nothing else can catch them):

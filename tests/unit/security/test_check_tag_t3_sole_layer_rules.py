@@ -381,9 +381,9 @@ def test_setattr_on_self_is_refused_for_a_dunder_or_a_computed_field_name() -> N
 def test_frozen_dataclass_post_init_idiom_stays_clean_with_a_positive_twin() -> None:
     """NEGATIVE FLOOR + POSITIVE TWIN in one invocation.
 
-    Three live sites depend on the clean half: ``hooks/context.py:106``,
-    ``plugins/web_fetch/allowlist.py:139``,
-    ``plugins/web_fetch/fetch_dispatcher.py:219``. Refusing ``object.__setattr__``
+    Three live sites depend on the clean half: ``src/alfred/hooks/context.py:106``,
+    ``src/alfred/plugins/web_fetch/allowlist.py:139``,
+    ``src/alfred/plugins/web_fetch/fetch_dispatcher.py:219``. Refusing ``object.__setattr__``
     outright reds all three.
 
     The twin swaps ONE token (``self`` -> ``low``) and must trip, which is what proves
@@ -1594,11 +1594,33 @@ def test_no_stale_claim_that_quarantine_is_an_authorised_home_survives() -> None
     """
     # POSITIVE TWIN FIRST, on the same predicate: an emptied qualifier or surface list
     # would make the repo-wide floor below pass vacuously.
-    claim = [
+    same_line = [
         "  # gate is release-blocking — only `security/tiers.py` and",
         "  # `security/" + _Q_PY + "` may call `tag(T3, ...)`, and `cast(",
     ]
-    assert _stale_claim_lines(claim) == [2], "the sweep no longer recognises the claim"
+    assert _stale_claim_lines(same_line) == [2], "the sweep no longer recognises the claim"
+
+    # SECOND POSITIVE TWIN, and it is the one that pins ``_SWEEP_WINDOW``. The
+    # qualifier sits a full SIX lines above the mention — the repo's measured
+    # line-wrap distance, transcribed from the module docstring this task edited.
+    # Without it the window can be narrowed to 0 and every test here still passes
+    # while the sweep goes blind to exactly the three claims R2-O names (measured:
+    # the ``_SWEEP_WINDOW = 0`` mutant survived the first draft of this test).
+    # A WIDER window still passes, which is intended — this is a floor, not a pin
+    # on the exact value.
+    wrapped = [
+        "Authorised callers (the EXACT list — keep in sync with the briefing):",
+        "",
+        "- ``src/alfred/security/tiers.py``      — the ``tag`` overload bodies",
+        "                                          (the home of the factory itself).",
+        "- ``tests/unit/security/**``            — tests assert the gate's behaviour",
+        "                                          using the same patterns.",
+        "- ``src/alfred/security/" + _Q_PY + "`` — the downgrade boundary.",
+    ]
+    assert _stale_claim_lines(wrapped) == [7], (
+        "the sweep no longer reaches a qualifier six lines from its mention — a "
+        "line-scoped sweep is blind to every claim inside check_tag_t3.py (R2-O)"
+    )
 
     # NEGATIVE TWINS: the two measured false-positive shapes the conjunction removes.
     assert (
