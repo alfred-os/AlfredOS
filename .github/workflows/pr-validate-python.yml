@@ -295,9 +295,10 @@ jobs:
   # Job 6: tag(T3, ...) grep gate (Slice-3 spec §3.7-3.8)
   # CLAUDE.md hard rule (security #3 + #5): the privileged orchestrator
   # never sees raw T3 content; tagging is the boundary primitive. The
-  # grep gate is release-blocking — only `security/tiers.py` and
-  # `security/quarantine.py` may call `tag(T3, ...)`, and `cast(
-  # TaggedContent[...]` is a type-erasure bypass that discards provenance.
+  # grep gate is release-blocking — only `security/tiers.py` may call
+  # `tag(T3, ...)` (SINGULAR since #538 deleted the second whole-file
+  # exemption), and `cast(TaggedContent[...]` is a type-erasure bypass
+  # that discards provenance.
   # `scripts/check_tag_t3.py` is the AST-based implementation; this job
   # wires it into CI as a standalone gating check so it can be promoted
   # to a required status independently of the other Python jobs.
@@ -344,11 +345,12 @@ jobs:
       - name: Run check_tag_t3.py over its own declared scan roots
         if: steps.srccheck.outputs.has_source == 'true'
         # stdlib-only script; no uv sync required. Releases-blocking per
-        # spec §3.7-3.8 — only `security/tiers.py` and `security/
-        # quarantine.py` may call `tag(T3, ...)`, and `cast(
-        # TaggedContent[...]` is a type-erasure bypass that discards
-        # provenance. The script exits 1 with violation messages on any
-        # non-approved file containing those patterns.
+        # spec §3.7-3.8 — only `security/tiers.py` may call
+        # `tag(T3, ...)` (SINGULAR since #538 deleted the second
+        # whole-file exemption), and `cast(TaggedContent[...]` is a
+        # type-erasure bypass that discards provenance. The script exits 1
+        # with violation messages on any non-approved file containing
+        # those patterns.
         #
         # #541: the scan roots live in the script (`_DEFAULT_SCAN_ROOTS`), NOT
         # here — passing them on the command line meant dropping one was a

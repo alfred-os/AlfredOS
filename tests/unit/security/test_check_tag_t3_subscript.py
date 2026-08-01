@@ -159,7 +159,7 @@ def test_clean_file_passes(tmp_path: Path) -> None:
     )
 
 
-def test_authorised_homes_are_exempt() -> None:
+def test_the_authorised_home_is_exempt() -> None:
     """The script tolerates the real ``src/alfred/security/tiers.py`` body.
 
     The file's ``tag_t3_with_nonce`` function legitimately constructs

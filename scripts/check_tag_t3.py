@@ -5,9 +5,8 @@ Invoked by ``make check`` and CI. Exits 0 if clean; exits 1 with violation
 messages if any non-approved file contains:
 
 - ``tag(T3, ...)``           — direct calls to the capability-gated factory
-                               from outside the two approved homes
-                               (``security/tiers.py`` and
-                               ``security/quarantine.py``).
+                               from outside the single approved home,
+                               ``security/tiers.py``.
 - ``TaggedContent[T3](...)`` — direct subscript construction that bypasses
                                the ``tag_t3_with_nonce`` capability gate.
                                The Pydantic field validator on ``tier`` does
@@ -34,8 +33,6 @@ Authorised callers (the EXACT list — keep in sync with the briefing):
 
 - ``src/alfred/security/tiers.py``      — the ``tag`` overload bodies
                                           (the home of the factory itself).
-- ``src/alfred/security/quarantine.py`` — the ``downgrade_to_orchestrator``
-                                          boundary that bridges T3 ➜ T3DerivedData.
 - ``tests/unit/security/**``            — tests assert the gate's behaviour
                                           using the same patterns.
 
@@ -55,6 +52,15 @@ tracked ``src/alfred/**.py`` files passed individually exit 0 with
 ``tests/unit/meta/test_gate_surfaces_are_pinned.py``, which requires every
 invocation site to pass no arguments at all. Neither layer is complete on
 its own; see :func:`_collect_paths` for the split.
+
+#538 deleted the second whole-file exemption. ``src/alfred/security/quarantine.py``
+carried one until the full rule set measured it dead: 0 violations across its 1634
+lines, 0 ``tag(`` calls, 0 ``TaggedContent`` constructions. It is scanned like every
+other file now, and ``test_quarantine_scans_clean_without_its_exemption`` pins that.
+Narrowing the exemption rather than deleting it would have left a live soft-landing
+zone in the one module that provably does not need one; deleting it means the day a
+line there does need it back, the build fails loudly and someone has to make that
+decision on the record instead of inheriting it.
 """
 
 from __future__ import annotations
@@ -368,24 +374,24 @@ _DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("src/alfred", "plugins")
 # is what ``_DEFAULT_SCAN_ROOTS`` plus the two runtime invariants are for.
 _MIN_SCANNED_FILES: int = 250
 
-# Authorised non-test homes — resolved to absolute paths inside THIS repo
-# at import time. CR-138 finding #11: suffix matching (``endswith``) was
-# bypassable by any file whose path happened to end with the same
-# segment (``/tmp/attacker/src/alfred/security/tiers.py`` would have
-# been exempt). Exact absolute-path equality against the real files in
-# this checkout closes that path.
+# The authorised non-test home — resolved to an absolute path inside THIS
+# repo at import time. SINGULAR since #538 (see the module docstring): the
+# second entry was measured dead and deleted rather than narrowed.
+#
+# CR-138 finding #11: suffix matching (``endswith``) was bypassable by any
+# file whose path happened to end with the same segment
+# (``/tmp/attacker/src/alfred/security/tiers.py`` would have been exempt).
+# Exact absolute-path equality against the real file in this checkout
+# closes that path.
 #
 # ``__file__`` resolves to ``<repo>/scripts/check_tag_t3.py``; the repo
 # root is two parents up. The script always runs against files in this
 # same checkout (CI invokes it with paths under the workspace), so any
-# path that does NOT resolve to one of these exact files is not the
-# real authorised home — even if it ends with the same segment.
+# path that does NOT resolve to that exact file is not the real
+# authorised home — even if it ends with the same segment.
 _REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 _APPROVED_PATHS: frozenset[Path] = frozenset(
-    {
-        _REPO_ROOT / "src" / "alfred" / "security" / "tiers.py",
-        _REPO_ROOT / "src" / "alfred" / "security" / "quarantine.py",
-    }
+    {_REPO_ROOT / "src" / "alfred" / "security" / "tiers.py"}
 )
 
 # THE ONLY LEGITIMATE CALLER of the private surface outside `tiers.py` itself.
@@ -431,7 +437,7 @@ def _is_exempt(path: Path) -> bool:
     present one identity to the matcher and another to the reader.
 
     Exempt set:
-      * the explicit authorised homes in ``_APPROVED_PATHS``, by resolved
+      * the explicit authorised home in ``_APPROVED_PATHS``, by resolved
         absolute-path equality — a file outside this repo that merely ends
         with ``src/alfred/security/tiers.py`` is NOT exempt;
       * any path under this repo's own ``tests/`` tree, matched by resolved
@@ -1012,10 +1018,10 @@ def _is_tagged_content_t3_subscript_call(node: ast.Call) -> bool:
     sec-S3-002: ``tag_t3_with_nonce`` checks the per-process nonce; the
     ``TaggedContent`` Pydantic field validator does NOT. A direct
     subscript-construction call therefore admits raw T3 content without
-    the gate. The two authorised homes (``security/tiers.py`` for the
-    ``tag_t3_with_nonce`` body, ``security/quarantine.py`` for the
-    boundary that bridges T3 → T3DerivedData) are exempted via
-    ``_APPROVED_PATHS``; everywhere else this pattern trips the gate.
+    the gate. The single authorised home — ``security/tiers.py``, for the
+    ``tag_t3_with_nonce`` body — is exempted via ``_APPROVED_PATHS``;
+    everywhere else this pattern trips the gate, including every other
+    module inside ``security/`` (#538).
 
     The call target ``func`` is an ``ast.Subscript`` whose ``value`` is
     the identifier ``TaggedContent`` (covering bare + qualified forms

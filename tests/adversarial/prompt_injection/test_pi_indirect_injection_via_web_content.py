@@ -71,8 +71,8 @@ def test_direct_tagged_content_t3_construction_refused_by_ci_grep_gate(
     past the runtime gate. The defence is the AST-based CI grep
     gate (sec-S3-002 / commit e839e08): the script walks every src/
     file and rejects the four subscript-construction shapes
-    (bare/qualified target x bare/qualified slice) outside the two
-    authorised homes.
+    (bare/qualified target x bare/qualified slice) outside the single
+    authorised home (#538 deleted the second one).
 
     This is the structural prerequisite for the indirect-injection
     defence: every byte the orchestrator sees that claims T3 origin

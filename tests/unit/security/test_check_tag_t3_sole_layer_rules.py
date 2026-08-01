@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1463,3 +1464,188 @@ def test_the_private_surface_derivation_ignores_dunder_and_public_names() -> Non
         "from __future__ import annotations\npublic = 1\n__all__ = []\n_private = 2\n"
     )
     assert derived == {"_private"}
+
+
+# ---------------------------------------------------------------------------
+# #538 Task 5 — the ``security/quarantine`` module's exemption is DELETED, and
+# every claim of it goes with it. Re-measured under the FULL rule set: 0
+# violations across 1634 lines, 0 ``tag(`` calls, 0 ``TaggedContent`` builds.
+#
+# The prose here deliberately spells that module WITHOUT its ``.py`` suffix:
+# ``test_no_stale_claim_...`` below sweeps every tracked file, this one
+# included, and a comment is exactly the shape it is hunting.
+# ---------------------------------------------------------------------------
+
+# Pinned as a literal in the TEST file, per R2-E: an oracle built by reading the
+# constant under test cannot tell a shrunk set from a grown one.
+_EXPECTED_APPROVED_PATHS = frozenset({_TIERS})
+
+
+def test_quarantine_is_no_longer_an_approved_path() -> None:
+    """The exemption is DELETED, not narrowed.
+
+    Narrowing keeps a live soft-landing zone inside the one module that provably does
+    not need one. Deletion means the day a line there DOES need it back, the build
+    fails loudly naming the decision.
+    """
+    assert _QUARANTINE not in check_tag_t3._APPROVED_PATHS
+    assert check_tag_t3._APPROVED_PATHS == _EXPECTED_APPROVED_PATHS
+
+
+def test_quarantine_scans_clean_without_its_exemption() -> None:
+    """THE PIN. The REAL file, the REAL path, the FULL rule set — no fixture, no copy.
+
+    ``assert not _is_exempt`` lives INSIDE this test on purpose (R2-I). Transcribed
+    onto ``main``, where the file is still exempt, ``_scan_file`` returns ``[]`` from
+    the exemption arm and the pin passes for the OPPOSITE reason it exists.
+    """
+    assert not check_tag_t3._is_exempt(_QUARANTINE)
+    assert check_tag_t3._scan_file(_QUARANTINE) == []
+
+
+def test_tiers_still_needs_its_whole_file_exemption() -> None:
+    """ANTI-VACUITY TWIN, discriminating on a #538 RULE.
+
+    A bare ``assert violations`` is satisfied by the PRE-EXISTING ``tag(T3`` rule, so
+    it passes with every #538 rule deleted and cannot tell a working detector from an
+    empty diff. Requiring a #538 message is what makes this an oracle for the pin
+    above: it proves the new rules are LIVE on this scan path.
+    """
+    assert _TIERS in check_tag_t3._APPROVED_PATHS
+    violations = check_tag_t3._scan_text(
+        _TIERS.read_text(encoding="utf-8"),
+        _REPO_ROOT / "src" / "alfred" / "security" / "TIERS_NOT_EXEMPT.py",
+    )
+    assert any(check_tag_t3._RAW_VEHICLE_VARS_MESSAGE in v for v in violations), (
+        "tiers.py yielded no #538 finding without its exemption — the new rules are "
+        "not live on this scan path, so the pin above proves nothing"
+    )
+
+
+# The invariant sweep's vocabulary. Kept as module constants so the positive twin
+# inside the test below runs the SAME predicate the repo-wide pass runs.
+#
+# PARAGRAPH-SCOPED, not line-scoped (R2-O). ``git grep`` decides one line at a time,
+# and every one of the three claims inside ``check_tag_t3.py`` — the primary edit
+# sites — wraps its qualifier onto a different line from its ``quarantine.py``
+# mention. A line-scoped sweep reports those three as clean.
+_SWEEP_QUALIFIERS: tuple[str, ...] = ("approv", "authoris", "authoriz", "may call")
+
+# The CONJUNCTION is what removes the noise a bare qualifier match produces. Measured
+# false positives from the qualifier alone: ``docs/subsystems/quarantine.md`` (a
+# "refusal-authorisation contract" sentence four lines above a ``T3DerivedData``
+# heading) and two ``authorized_t3_nonce`` FIXTURE PARAMETERS in
+# ``tests/adversarial/tier_laundering/``. None of the three names an authoring
+# surface; every real claim does.
+_SWEEP_SURFACE_TERMS: tuple[str, ...] = (
+    "_approved_paths",
+    "home",
+    "exempt",
+    "tag(t3",
+    "taggedcontent",
+)
+
+# Measured worst case in this repo is 4 (the gate module docstring's "Authorised
+# callers" header at ``check_tag_t3.py:33`` against its bullet at ``:37``); 6 carries
+# headroom without admitting any new match — 4, 6 and 8 all return the identical set.
+_SWEEP_WINDOW: int = 6
+
+# Dated design records, not live guidance. A plan or spec written before #538 is
+# CORRECT about the world it was written in; rewriting it would falsify the record.
+_SWEEP_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "docs/superpowers/plans/",
+    "docs/superpowers/specs/",
+)
+
+# R2-O's measured false positive, excluded BY PATH with its reason stated rather than
+# by tuning the window until it disappears: ``docs/runbooks/slice-3-operator-migration.md``
+# is a Markdown TABLE whose remediation column says "wait for reviewer approval" about
+# an unrelated ``alfred plugin grant`` flow, on the same physical line as a source
+# reference in another column. Nothing about that row concerns ``_APPROVED_PATHS``.
+_SWEEP_EXCLUDED_FILES: tuple[str, ...] = ("docs/runbooks/slice-3-operator-migration.md",)
+
+# Assembled at runtime so this file's own fixtures do not plant the literal the sweep
+# hunts for — the sweep scans every tracked file, this one included.
+_Q_PY: str = "quarantine" + ".py"
+
+
+def _stale_claim_lines(lines: list[str]) -> list[int]:
+    """1-based line numbers whose paragraph claims ``quarantine.py`` may author T3.
+
+    A "paragraph" is the mention line plus ``_SWEEP_WINDOW`` lines either side. A hit
+    needs BOTH an approval qualifier and an authoring-surface term inside that window.
+    """
+    found: list[int] = []
+    for index, line in enumerate(lines):
+        if _Q_PY not in line:
+            continue
+        window = "\n".join(lines[max(0, index - _SWEEP_WINDOW) : index + _SWEEP_WINDOW + 1]).lower()
+        if any(q in window for q in _SWEEP_QUALIFIERS) and any(
+            s in window for s in _SWEEP_SURFACE_TERMS
+        ):
+            found.append(index + 1)
+    return found
+
+
+def test_no_stale_claim_that_quarantine_is_an_authorised_home_survives() -> None:
+    """INVARIANT SWEEP. Deleting the exemption without deleting the claims leaves the
+    repo asserting a security invariant that is no longer true — including inside the
+    workflow that RUNS this gate, and inside a test that stays green while saying it.
+    """
+    # POSITIVE TWIN FIRST, on the same predicate: an emptied qualifier or surface list
+    # would make the repo-wide floor below pass vacuously.
+    claim = [
+        "  # gate is release-blocking — only `security/tiers.py` and",
+        "  # `security/" + _Q_PY + "` may call `tag(T3, ...)`, and `cast(",
+    ]
+    assert _stale_claim_lines(claim) == [2], "the sweep no longer recognises the claim"
+
+    # NEGATIVE TWINS: the two measured false-positive shapes the conjunction removes.
+    assert (
+        _stale_claim_lines(
+            [
+                "post-stage refusals — the refusal-authorisation contract is",
+                "pre-stage-only by design.",
+                "",
+                "### `T3DerivedData` (`src/alfred/security/" + _Q_PY + "`)",
+            ]
+        )
+        == []
+    )
+    assert (
+        _stale_claim_lines(
+            [
+                "    authorized_t3_nonce: CapabilityGateNonce,",
+                ") -> None:",
+                '    """The orchestrator-side strict data-shape guard (' + _Q_PY + ":1075)",
+                '    refuses a non-dict ``data`` rather than coercing it."""',
+            ]
+        )
+        == []
+    )
+
+    mentions = subprocess.run(
+        ["git", "grep", "-n", "-E", r"quarantine\.py"],  # noqa: S607
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.splitlines()
+    assert mentions, "git grep returned nothing — the sweep would pass vacuously"
+
+    candidates: dict[str, None] = {}
+    for mention in mentions:
+        rel = mention.split(":", 1)[0]
+        if rel.startswith(_SWEEP_EXCLUDED_PREFIXES) or rel in _SWEEP_EXCLUDED_FILES:
+            continue
+        candidates[rel] = None
+
+    live: list[str] = []
+    for rel in candidates:
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8", errors="replace")
+        live.extend(f"{rel}:{n}" for n in _stale_claim_lines(text.splitlines()))
+
+    assert live == [], (
+        "stale claims that the security/quarantine module is an authorised T3 home:\n"
+        + "\n".join(live)
+    )
