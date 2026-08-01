@@ -197,6 +197,14 @@ def test_fold_str_folds_binop_and_fstring_but_not_computed_values() -> None:
     assert fold("name") is None, "a bare name is not a literal"
     assert fold('"".join(parts)') is None, "a computed value must not fold"
     assert fold("1 + 2") is None, "non-str BinOp must not fold"
+    # THE `ast.Add` RESTRICTION, pinned (PR #553 review, T7). Dropping it — folding
+    # every `ast.BinOp` — survived the whole suite: the `%` residual fixture below
+    # uses `"__dict%s" % "__"`, which folds to `"__dict%s__"` and still equals no
+    # member, so the widening was invisible. Two string operands under a NON-Add
+    # operator is the shape that discriminates: it folds to a real member under the
+    # mutant and to None here. The widening is false-positive-only, but a rule that
+    # reds on `a % b` reds on prose nobody can predict.
+    assert fold('"__dict" % "__"') is None, "only `+` folds — a non-Add BinOp must not"
 
 
 def test_fold_str_gives_up_at_the_depth_bound_instead_of_recursing() -> None:
@@ -212,6 +220,13 @@ def test_fold_str_gives_up_at_the_depth_bound_instead_of_recursing() -> None:
     been bitten: a 50 000-operand chain raises RecursionError on the uv standalone
     build and parses cleanly on Homebrew), so a parse-based fixture would assert
     something no version pin explains.
+
+    PR #553 REVIEW, T3 — THE BOUND ITSELF WAS PINNED BY A TAUTOLOGICAL ORACLE. Every
+    assertion below used to open ``bound = _FOLD_MAX_DEPTH``, the constant under test,
+    so a retune moved the oracle with it: ``_FOLD_MAX_DEPTH = 2`` survived the whole
+    suite, and executed, a four-operand assembly of ``_set_authorized_t3_nonce`` then
+    scanned CLEAN — the round-2 nonce forge reopened with the suite green. The FLOOR and
+    the FIXED-SIZE fixtures below do not read the constant, so they cannot move with it.
     """
     bound = check_tag_t3._FOLD_MAX_DEPTH
 
@@ -219,19 +234,50 @@ def test_fold_str_gives_up_at_the_depth_bound_instead_of_recursing() -> None:
         source = " + ".join(f'"a{i}"' for i in range(operands))
         return check_tag_t3._fold_str(ast.parse(source, mode="eval").body)
 
+    # THE FLOOR. Independent of the constant: a bound this low makes every string-keyed
+    # rule blind to an ordinary hand-written `+` chain, which is the assembly the fold
+    # exists to see. 8 is well under the shipped 32 and well over anything an author
+    # would write, so it constrains a RETUNE without pinning the current value.
+    assert bound >= 8, (
+        f"_FOLD_MAX_DEPTH is {bound} — below ~8 a hand-written `+` chain folds to None "
+        f"and every string-keyed rule goes blind to an assembled name"
+    )
+    # FIXED SIZE, so this assertion cannot move with the constant. Six operands nest
+    # five BinOps; at the shipped bound they fold, at bound 2 they do not.
+    assert chain(6) == "a0a1a2a3a4a5", "a six-operand chain must fold at any sane bound"
+    # AND THE PROPERTY THE FLOOR IS FOR, end to end through the scanner: the executed
+    # round-2 forge assembles the nonce setter from four literals. Fixed size, no
+    # constant read.
+    assert _messages('getattr(_t, "_set" + "_authorized" + "_t3" + "_nonce")(mine)\n') == [
+        f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"
+    ], "a four-operand assembly of the nonce setter must still be seen"
+
     # A left-associative chain of N operands nests N-1 BinOps, so N == bound + 1
     # recurses to exactly `bound` and still folds. This is the positive twin: it proves
     # the bound is a CEILING and not a blanket refusal.
     assert chain(bound + 1) == "".join(f"a{i}" for i in range(bound + 1))
     assert chain(bound + 2) is None, "one operand past the bound must stop folding"
 
-    deep: ast.expr = ast.Constant(value="a")
+    # THE THREE RECURSION SITES, one hand-built spine each (PR #553 review, T5). The
+    # LEFT spine was the only one measured, so a mutant that increments depth on the
+    # left and not on the right or through `JoinedStr` survived every fixture in this
+    # file — and executed, the unbounded spine raises RecursionError from INSIDE
+    # `_scan_text`'s GateInternalError fence, which discards every violation collected
+    # so far and exits 2. That is the R2-L failure this bound exists to prevent,
+    # reachable through two spines nothing was watching.
+    left: ast.expr = ast.Constant(value="a")
+    right: ast.expr = ast.Constant(value="a")
+    nested: ast.expr = ast.Constant(value="a")
     for _ in range(2000):
-        deep = ast.BinOp(left=deep, op=ast.Add(), right=ast.Constant(value="b"))
-    assert check_tag_t3._fold_str(deep) is None, (
-        "an unbounded _fold_str raises RecursionError here, which the fence would "
-        "re-file as a gate defect and discard every violation found so far"
-    )
+        left = ast.BinOp(left=left, op=ast.Add(), right=ast.Constant(value="b"))
+        right = ast.BinOp(left=ast.Constant(value="b"), op=ast.Add(), right=right)
+        nested = ast.JoinedStr(values=[nested])
+    for spine, node in (("left", left), ("right", right), ("JoinedStr", nested)):
+        assert check_tag_t3._fold_str(node) is None, (
+            f"the {spine} recursion does not increment depth — an unbounded _fold_str "
+            f"raises RecursionError here, which the fence re-files as a gate defect and "
+            f"discards every violation found so far"
+        )
 
 
 def test_alias_names_reaches_a_fixed_point_in_reverse_order() -> None:
@@ -359,6 +405,12 @@ def test_setattr_shape_denies_every_tagged_content_field_target() -> None:
     ]
 
 
+# R2-E — PINNED HERE, SEPARATELY FROM THE IMPLEMENTATION, and at module level so the
+# residual declaration at the foot of this file can name the same literal rather than a
+# second copy of it.
+_EXPECTED_TAGGED_STATE_FIELDS = frozenset({"tier", "content", "source"})
+
+
 def test_setattr_denies_every_tagged_state_field_regardless_of_target() -> None:
     """Every member of ``_TAGGED_STATE_FIELDS``, with ``self`` AND a foreign target.
 
@@ -373,7 +425,7 @@ def test_setattr_denies_every_tagged_state_field_regardless_of_target() -> None:
     standing — and it is the condition that actually holds (``self`` is a naming
     convention, not a type).
     """
-    expected = frozenset({"tier", "content", "source"})
+    expected = _EXPECTED_TAGGED_STATE_FIELDS
     assert expected == check_tag_t3._TAGGED_STATE_FIELDS, (
         "the declared TaggedContent state fields moved; this oracle pins them"
     )
@@ -863,6 +915,22 @@ def test_carrier_by_reference_primitives_are_refused() -> None:
     )
 
 
+# R2-E — PINNED HERE, SEPARATELY FROM THE IMPLEMENTATION, and at module level for the
+# same reason as `_EXPECTED_TAGGED_STATE_FIELDS`: the residual declaration at the foot of
+# this file names this literal rather than restating its members a second time.
+_EXPECTED_CARRIERS = frozenset(
+    {
+        ("gc", "get_referents"),
+        ("gc", "get_objects"),
+        ("gc", "get_referrers"),
+        ("ctypes", "py_object"),
+        ("ctypes", "cast"),
+        ("copyreg", "_reconstructor"),
+        ("copyreg", "__newobj__"),
+    }
+)
+
+
 def test_every_declared_carrier_primitive_is_enforced() -> None:
     """R2-E/R2-H — four of the six were never exercised in ``Call.func`` position.
 
@@ -875,17 +943,7 @@ def test_every_declared_carrier_primitive_is_enforced() -> None:
     an instance ``__dict__`` exactly as they do; executed, it relabelled a live object
     while its static type stayed ``TaggedContent[T2]``.
     """
-    expected = frozenset(
-        {
-            ("gc", "get_referents"),
-            ("gc", "get_objects"),
-            ("gc", "get_referrers"),
-            ("ctypes", "py_object"),
-            ("ctypes", "cast"),
-            ("copyreg", "_reconstructor"),
-            ("copyreg", "__newobj__"),
-        }
-    )
+    expected = _EXPECTED_CARRIERS
     assert expected == check_tag_t3._RAW_STATE_CARRIERS, (
         "the declared carrier-primitive set moved; this oracle pins it"
     )
@@ -902,6 +960,13 @@ def test_carrier_module_is_matched_by_alias_not_by_the_bare_name() -> None:
     The direct-binding forms need their own pass over ``ast.ImportFrom``: they bind the
     PRIMITIVE as a bare ``Name``, so no module identifier appears at the call site at all.
 
+    PR #553 REVIEW, T4 — THE MULTI-NAME IMPORT. Every direct-binding fixture here used
+    to import exactly ONE name, so a pass that stopped after the first ``node.names``
+    entry survived the suite and the real-tree scan: ``from gc import collect,
+    get_referents`` bound only the benign ``collect`` and the carrier walked through.
+    Both direct rows below now import a benign name FIRST, so the loop has to reach past
+    it.
+
     (As with ``vars`` above, the plan attributes this row to Task 4's
     ``test_every_keyed_identifier_is_alias_resolved``; Task 2's rule carries its own
     behavioural oracle until that meta-test lands.)
@@ -909,8 +974,8 @@ def test_carrier_module_is_matched_by_alias_not_by_the_bare_name() -> None:
     for label, source in {
         "module-rebind": "import gc\n_g = gc\n_g.get_referents(low)\n",
         "import-alias": "import gc as _g\n_g.get_referents(low)\n",
-        "direct-binding": "from gc import get_referents\nget_referents(low)\n",
-        "direct-alias": "from gc import get_referents as _gr\n_gr(low)\n",
+        "direct-binding": "from gc import collect, get_referents\nget_referents(low)\n",
+        "direct-alias": "from gc import collect, get_referents as _gr\n_gr(low)\n",
     }.items():
         assert any(check_tag_t3._RAW_CARRIER_MESSAGE in m for m in _messages(source)), (
             f"{label} spelling was admitted"
@@ -931,6 +996,33 @@ def test_a_deeper_than_budget_alias_chain_is_reported_by_the_scanner() -> None:
     assert _messages(chain) == [f"{_PROBE}:1: {check_tag_t3._ALIAS_BUDGET_MESSAGE}"]
     assert check_tag_t3._scan_text("b = vars\n", _PROBE) == [], (
         "positive twin: an ordinary alias must NOT report overflow"
+    )
+
+
+def test_a_deeper_than_budget_carrier_chain_is_reported_by_the_scanner() -> None:
+    """PR #553 REVIEW, T1 — the ``carrier_overflow`` half of the fan-in was UNTESTED.
+
+    ``_scan_text`` reports the budget message when ANY of four flags is set, and only
+    two of the four (``vars``, ``BaseModel``) had a behavioural test. Measured: dropping
+    ``carrier_overflow`` from the fan-in, and separately breaking the accumulator in
+    :func:`_carrier_bindings` so it can never become True, BOTH survived the whole suite
+    AND the real-tree scan. Executed on the chain below, the shipped gate reports the
+    budget message and each mutant reports NOTHING AT ALL — a total silent fail-open on
+    the one input the budget exists to catch, in the layer that is the sole enforcement
+    layer.
+
+    Seeded on a CARRIER MODULE so this flag is the only one that can be set: no
+    assignment in the fixture sources ``vars``, ``BaseModel`` or a private name, so
+    ``_alias_names`` returns on its first iteration for all of those.
+    """
+    depth = check_tag_t3._ALIAS_RESOLUTION_BUDGET + 5
+    chain = "import gc\n" + "".join(f"a{i} = a{i - 1}\n" for i in range(depth, 0, -1))
+    chain += "a0 = gc\n"
+    # Line 1 whatever the fixture looks like: the overflow is a property of the FILE's
+    # alias graph, not of the line the deep chain happens to start on.
+    assert _messages(chain) == [f"{_PROBE}:1: {check_tag_t3._ALIAS_BUDGET_MESSAGE}"]
+    assert check_tag_t3._scan_text("import gc\nb = gc\n", _PROBE) == [], (
+        "positive twin: an ordinary carrier alias must NOT report overflow"
     )
 
 
@@ -1130,6 +1222,91 @@ def test_a_deeper_than_budget_basemodel_chain_is_reported_by_the_scanner() -> No
     )
 
 
+# THE META-GUARD'S BEHAVIOURAL TABLE. Identifier -> {label: source}, and every entry's
+# LAST line is the USE the row is about.
+#
+# A DICT PER IDENTIFIER, not three fixed columns (PR #553 review, T11). The fixed shape
+# forced one spelling per binding form and got two of them wrong: the `gc`/`ctypes`
+# "import-aliased" column held a plain `from X import Y` — no alias at all — and neither
+# had an assignment-rebind row, which is the spelling `_g = gc` that the fleet actually
+# executed. A variable-length dict lets each identifier carry every binding form Python
+# offers it, and `copyreg` carry the four its module and primitive halves need.
+#
+# `_DECLARED_ALIAS_RESIDUALS` at the foot of this file is the other half of the guard:
+# every identifier the gate keys on must appear in ONE of the two.
+_KEYED_IDENTIFIER_SPELLINGS: dict[str, dict[str, str]] = {
+    "BaseModel": {
+        "DIRECT": 'BaseModel.model_copy(low, update={"tier": T3})',
+        "REBOUND": '_B = BaseModel\n_B.model_copy(low, update={"tier": T3})',
+        "IMPORT-ALIASED": (
+            'from pydantic import BaseModel as _B\n_B.model_copy(low, update={"tier": T3})'
+        ),
+    },
+    "vars": {
+        "DIRECT": 'vars(obj)["tier"] = T3',
+        "REBOUND": '_v = vars\n_v(obj)["tier"] = T3',
+        "IMPORT-ALIASED": 'from builtins import vars as _v\n_v(obj)["tier"] = T3',
+    },
+    # The three carrier modules take FOUR spellings each: the module identifier can be
+    # rebound by assignment OR aliased at the import, and the PRIMITIVE can be bound
+    # directly by a `from` import with or without an alias — a form in which no module
+    # identifier appears at the call site at all.
+    "gc": {
+        "DIRECT": "import gc\ngc.get_referents(low)",
+        "REBOUND": "import gc\n_g = gc\n_g.get_referents(low)",
+        "MODULE-IMPORT-ALIASED": "import gc as _g\n_g.get_referents(low)",
+        "PRIMITIVE-IMPORT-ALIASED": "from gc import get_referents as _gr\n_gr(low)",
+    },
+    "ctypes": {
+        "DIRECT": "import ctypes\nctypes.cast(id(low), ctypes.py_object)",
+        "REBOUND": "import ctypes\n_c = ctypes\n_c.cast(id(low), _c.py_object)",
+        "MODULE-IMPORT-ALIASED": "import ctypes as _c\n_c.cast(id(low), _c.py_object)",
+        "PRIMITIVE-IMPORT-ALIASED": "from ctypes import py_object as _po\n_po(id(low))",
+    },
+    # PR #553 REVIEW, T2 — `copyreg` was keyed on by the gate with NO row at all, and the
+    # omission was a real gap rather than an oversight of form: with `gc` and `ctypes`
+    # rowed and `copyreg` not, exempting `copyreg` alone from module-alias resolution AND
+    # dropping its direct-import binding BOTH survived the whole suite, while the same
+    # two mutations on either sibling died. That asymmetry is what a hand-written table
+    # produces and what the derivation below now refuses.
+    "copyreg": {
+        "DIRECT": "import copyreg\ncopyreg._reconstructor(low, TaggedContent, None)",
+        "REBOUND": "import copyreg\n_cr = copyreg\n_cr._reconstructor(low, TaggedContent, None)",
+        "MODULE-IMPORT-ALIASED": (
+            "import copyreg as _cr\n_cr._reconstructor(low, TaggedContent, None)"
+        ),
+        "PRIMITIVE-IMPORT-ALIASED": (
+            "from copyreg import _reconstructor as _rc\n_rc(low, TaggedContent, None)"
+        ),
+    },
+    "object": {
+        "DIRECT": 'object.__setattr__(low, "tier", T3)',
+        "REBOUND": '_o = object\n_o.__setattr__(low, "tier", T3)',
+        "IMPORT-ALIASED": 'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)',
+    },
+    # PR #553 F3. Like `object` above, closed by RECEIVER-BLINDNESS: the rule never asks
+    # what the receiver is, so the spellings differ only in how they name it and all must
+    # red. The ADMISSIBILITY arm keys on `self` and on zero-argument `super` — both in the
+    # fail-CLOSED direction, where rebinding makes the gate stricter, so neither needs a
+    # row (`test_only_the_zero_argument_super_spelling_is_admissible` proves it, and both
+    # are declared residuals below).
+    "__init__": {
+        "DIRECT": "type(low).__init__(low, content=attacker)",
+        "REBOUND": "_t = type(low)\n_t.__init__(low, content=attacker)",
+        "IMPORT-ALIASED": (
+            "from builtins import type as _ty\n_ty(low).__init__(low, content=attacker)"
+        ),
+    },
+    "_set_authorized_t3_nonce": {
+        "DIRECT": "_set_authorized_t3_nonce(mine)",
+        "REBOUND": "_reg = _set_authorized_t3_nonce\n_reg(mine)",
+        "IMPORT-ALIASED": (
+            "from alfred.security.tiers import _set_authorized_t3_nonce as _reg\n_reg(mine)"
+        ),
+    },
+}
+
+
 def test_every_keyed_identifier_is_alias_resolved() -> None:
     """THE META-GUARD. Seven Criticals across two review rounds were ONE shape.
 
@@ -1160,66 +1337,25 @@ def test_every_keyed_identifier_is_alias_resolved() -> None:
     THE ASSERTION IS LINE-KEYED, and it must be. Every row's LAST line is the USE, and
     for the private-surface row the BINDING line reds on its own — so a bare "something
     was flagged" assertion would pass on the import alone and prove nothing about
-    ``_reg(mine)``, which is the laundering. Keying on the use line makes all six rows
-    discriminate on the property they claim.
+    ``_reg(mine)``, which is the laundering. Keying on the use line makes every row
+    discriminate on the property it claims.
+
+    THE TABLE IS NO LONGER THE WHOLE GUARD (PR #553 review, T2). A hand-written table is
+    an ENUMERATION, and this test — built to close the identifier-aliasing CLASS — had
+    that exact disease: ``copyreg`` was keyed on by the gate with no row at all, and the
+    mutations that would have caught it survived. What closes the class is
+    ``test_every_identifier_the_gate_keys_on_is_rowed_or_declared_residual``, which
+    DERIVES the identifier set from the gate's own source and requires each member to
+    appear here or in ``_DECLARED_ALIAS_RESIDUALS``. This test is what proves a row is
+    behaviourally true; that one is what proves no row is missing.
     """
-    # (identifier, direct spelling, rebound spelling, import-aliased spelling)
-    cases = [
-        (
-            "BaseModel",
-            'BaseModel.model_copy(low, update={"tier": T3})',
-            '_B = BaseModel\n_B.model_copy(low, update={"tier": T3})',
-            'from pydantic import BaseModel as _B\n_B.model_copy(low, update={"tier": T3})',
-        ),
-        (
-            "vars",
-            'vars(obj)["tier"] = T3',
-            '_v = vars\n_v(obj)["tier"] = T3',
-            'from builtins import vars as _v\n_v(obj)["tier"] = T3',
-        ),
-        (
-            "gc",
-            "import gc\ngc.get_referents(low)",
-            "import gc as _g\n_g.get_referents(low)",
-            "from gc import get_referents\nget_referents(low)",
-        ),
-        (
-            "ctypes",
-            "import ctypes\nctypes.cast(id(low), ctypes.py_object)",
-            "import ctypes as _c\n_c.cast(id(low), _c.py_object)",
-            "from ctypes import cast\ncast(id(low), py_object)",
-        ),
-        (
-            "object",
-            'object.__setattr__(low, "tier", T3)',
-            '_o = object\n_o.__setattr__(low, "tier", T3)',
-            'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)',
-        ),
-        (
-            # PR #553 F3. Like `object` above, closed by RECEIVER-BLINDNESS: the rule
-            # never asks what the receiver is, so the three spellings differ only in
-            # how they name it and all three must red. The ADMISSIBILITY arm keys on
-            # `self` and on zero-argument `super` — both in the fail-CLOSED direction,
-            # where rebinding makes the gate stricter, so neither needs a row here
-            # (`test_only_the_zero_argument_super_spelling_is_admissible` proves it).
-            "__init__",
-            "type(low).__init__(low, content=attacker)",
-            "_t = type(low)\n_t.__init__(low, content=attacker)",
-            "from builtins import type as _ty\n_ty(low).__init__(low, content=attacker)",
-        ),
-        (
-            "_set_authorized_t3_nonce",
-            "_set_authorized_t3_nonce(mine)",
-            "_reg = _set_authorized_t3_nonce\n_reg(mine)",
-            "from alfred.security.tiers import _set_authorized_t3_nonce as _reg\n_reg(mine)",
-        ),
-    ]
-    for identifier, direct, rebound, aliased in cases:
-        for label, source in (
-            ("DIRECT", direct),
-            ("REBOUND", rebound),
-            ("IMPORT-ALIASED", aliased),
-        ):
+    assert _KEYED_IDENTIFIER_SPELLINGS, "the behavioural table is empty — nothing is proven"
+    for identifier, spellings in _KEYED_IDENTIFIER_SPELLINGS.items():
+        assert "DIRECT" in spellings, (
+            f"{identifier}: no DIRECT spelling. That row is the POSITIVE CONTROL — "
+            f"without it a typo'd fixture matching nothing 'passes' on an absent rule"
+        )
+        for label, source in spellings.items():
             use_line = source.count("\n") + 1
             flagged = _messages(source + "\n")
             assert any(f":{use_line}: " in message for message in flagged), (
@@ -1294,6 +1430,70 @@ _EXPECTED_PRIVATE_SURFACE = frozenset(
         "_tier_by_name",
     }
 )
+
+
+def test_a_deeper_than_budget_private_surface_chain_is_reported_by_the_scanner() -> None:
+    """PR #553 REVIEW, T1 — the ``private_overflow`` half of the fan-in was UNTESTED.
+
+    The twin of ``test_a_deeper_than_budget_carrier_chain_...`` on the rule that is the
+    SOLE enforcement layer. Measured: dropping ``private_overflow`` from the fan-in, and
+    separately breaking the accumulator in :func:`_private_surface_names` so it can never
+    become True, both survived the whole suite AND the real-tree scan while leaving a
+    >budget chain seeded on ``_set_authorized_t3_nonce`` completely unflagged.
+
+    ASSERTED BY OCCURRENCE, not by list equality, and that is forced by the fixture: the
+    chain is seeded on a private name, so every level the resolver DID reach is itself
+    private and reds on its own line. The budget line is the property under test and it
+    is the only one asserted; the twin is what proves it is not always emitted.
+    """
+    depth = check_tag_t3._ALIAS_RESOLUTION_BUDGET + 5
+    chain = "".join(f"a{i} = a{i - 1}\n" for i in range(depth, 0, -1))
+    chain += "a0 = _set_authorized_t3_nonce\n"
+    budget = f"{_PROBE}:1: {check_tag_t3._ALIAS_BUDGET_MESSAGE}"
+    assert _messages(chain).count(budget) == 1, (
+        "a private-surface alias chain past the budget must fail CLOSED and say so"
+    )
+    assert budget not in _messages("a0 = _set_authorized_t3_nonce\n"), (
+        "positive twin: an ordinary private-surface reference must NOT report overflow"
+    )
+
+
+def test_every_declared_private_name_is_enforced_on_every_carrier() -> None:
+    """PR #553 REVIEW, T6 — the one pinned set with no loop-over-the-pinned-copy test.
+
+    Five of the six pinned sets in this file are enforced by a loop that asserts each
+    declared member actually reds. ``_TIERS_PRIVATE_SURFACE`` had only the two DRIFT
+    guards (this file's literal, and the derivation against the real ``tiers.py``), which
+    both compare SETS and neither of which asks whether a member is enforced. Measured:
+    narrowing the ``ast.Attribute`` arm to ``_AUTHORIZED_T3_NONCE`` alone, and the folded
+    -string arm to ``_set_authorized_t3_nonce`` alone, both survived the whole suite —
+    twenty of the twenty-one names silently reachable through two of the four carriers.
+
+    Looped over the PINNED literal, never over the constant under test (R2-E): a mutation
+    that shrinks ``_TIERS_PRIVATE_SURFACE`` shrinks a loop over it in the same edit.
+
+    Three carriers here; the fourth (``ast.alias``) is covered by
+    ``test_an_import_asname_that_shadows_a_private_name_is_refused``, which is the only
+    fixture that can reach the ``asname`` sub-arm.
+
+    THE FIXTURE IS A CALL ARGUMENT, not an assignment, and that is forced rather than
+    stylistic: ``x = _log_t3`` REBINDS, so ``x`` joins the alias set and the line reds
+    TWICE. Correct behaviour (R2-A poisons the asname for exactly this reason), but it
+    would make an equality assertion measure the aliasing rather than the carrier.
+    """
+    expected = _EXPECTED_PRIVATE_SURFACE
+    assert expected == check_tag_t3._TIERS_PRIVATE_SURFACE, (
+        "the declared private surface moved; this oracle pins it"
+    )
+    for name in sorted(expected):
+        for carrier, source in (
+            ("bare Name", f"use({name})\n"),
+            ("Attribute", f"use(_t.{name})\n"),
+            ("folded string", f'use("{name}")\n'),
+        ):
+            assert _messages(source) == [f"{_PROBE}:1: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}"], (
+                f"private name {name!r} is declared but not enforced as a {carrier}"
+            )
 
 
 def test_import_aliased_nonce_setter_is_refused() -> None:
@@ -1510,6 +1710,39 @@ def test_module_level_calls_in_nonce_factory_still_red() -> None:
     ]
 
 
+def _exempt_function_private_reference_lines(source: str) -> list[int]:
+    """Line numbers of the private-surface references inside the RENAMED exempt function.
+
+    The oracle for ``test_the_real_nonce_factory_file_scans_clean``'s positive twin,
+    and DELIBERATELY NOT the gate's own predicate (a tautological oracle passes through
+    broken code). This matches the pinned private names against the raw TEXT of the
+    function's body and excludes the function's own docstring, which names
+    ``_AUTHORIZED_T3_NONCE`` in prose that the gate is right not to flag.
+    """
+    tree = ast.parse(source)
+    exempt = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "create_and_register_t3_nonce_renamed"
+    ]
+    assert len(exempt) == 1, f"expected one renamed exempt function, found {len(exempt)}"
+    body = exempt[0]
+    assert body.end_lineno is not None
+    prose_lines: set[int] = set()
+    first = body.body[0]
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+        assert first.end_lineno is not None
+        prose_lines = set(range(first.lineno, first.end_lineno + 1))
+    lines = source.splitlines()
+    return [
+        lineno
+        for lineno in range(body.lineno, body.end_lineno + 1)
+        if lineno not in prose_lines
+        if any(private in lines[lineno - 1] for private in _EXPECTED_PRIVATE_SURFACE)
+    ]
+
+
 def test_the_real_nonce_factory_file_scans_clean() -> None:
     """THE REAL FILE under its REAL path — a fixture resembling it proves nothing.
 
@@ -1521,6 +1754,15 @@ def test_the_real_nonce_factory_file_scans_clean() -> None:
 
     ``_is_exempt`` is asserted False in the same test so this cannot pass because
     ``nonce_factory.py`` quietly joined ``_APPROVED_PATHS``.
+
+    PR #553 REVIEW, T9 — THE EXPECTED LINES ARE DERIVED FROM CONTENT, not written down.
+    They used to be the literals 100 and 108, so any edit ABOVE the exempt function —
+    a docstring line, an import — red this test with a message about the private surface
+    that had nothing to do with the change. Located instead by walking to the renamed
+    function and matching the pinned private names against the text of its body, with
+    its own docstring excluded (the docstring names ``_AUTHORIZED_T3_NONCE`` in prose,
+    which the gate correctly does not flag). Independent of the gate: a substring match
+    over ``_EXPECTED_PRIVATE_SURFACE`` shares no predicate with ``_private_surface_hit``.
     """
     assert not check_tag_t3._is_exempt(_NONCE_FACTORY), (
         "nonce_factory.py must NOT be blanket-exempt — this test would be vacuous"
@@ -1532,9 +1774,15 @@ def test_the_real_nonce_factory_file_scans_clean() -> None:
         "def create_and_register_t3_nonce(", "def create_and_register_t3_nonce_renamed("
     )
     assert renamed != real, "the exempt function's def line moved; this twin measures nothing"
+
+    exposed = _exempt_function_private_reference_lines(renamed)
+    assert len(exposed) == 2, (
+        f"expected exactly two in-function private-surface references in the renamed "
+        f"nonce factory, located {exposed} — the twin measures whichever it finds, so a "
+        f"change in that count is a change in what this test proves"
+    )
     assert _messages(renamed, _NONCE_FACTORY) == [
-        f"{_NONCE_FACTORY}:100: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
-        f"{_NONCE_FACTORY}:108: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}",
+        f"{_NONCE_FACTORY}:{lineno}: {check_tag_t3._PRIVATE_SURFACE_MESSAGE}" for lineno in exposed
     ], "renaming the exempt function must expose both in-function private references"
 
 
@@ -1762,6 +2010,330 @@ def test_the_private_surface_derivation_ignores_dunder_and_public_names() -> Non
 
 
 # ---------------------------------------------------------------------------
+# THE META-GUARD'S DEFAULT-DENY HALF (PR #553 review, T2).
+#
+# `test_every_keyed_identifier_is_alias_resolved` was built to close the
+# identifier-aliasing CLASS and had that class's own disease: it hand-wrote its rows and
+# derived nothing, so `copyreg` — an identifier three of the gate's rules key on — had no
+# row at all, and the two mutations that would have exposed it survived the whole suite
+# while the identical mutations on `gc` and `ctypes` died BECAUSE of that test.
+#
+# What follows derives the identifier set from the gate's OWN SOURCE. Every derived
+# identifier must then appear either in `_KEYED_IDENTIFIER_SPELLINGS` (a behavioural row)
+# or in `_DECLARED_ALIAS_RESIDUALS` (a stated reason). A rule that keys on a new
+# identifier reds this test on the day it lands, which is the shape the guard was always
+# supposed to have.
+# ---------------------------------------------------------------------------
+
+_GATE_SOURCE: str = _SCRIPT.read_text(encoding="utf-8")
+
+
+def _module_level_string_constants(tree: ast.Module) -> dict[str, frozenset[str]]:
+    """Module-level constant NAME -> every string literal anywhere inside its value.
+
+    Deliberately shape-blind about the value: a frozenset of names, a frozenset of
+    ``(module, primitive)`` tuples and a bare ``str`` all answer the same question here
+    ("what strings does this constant put in front of a rule"), and enumerating the
+    container shapes would be the mistake this whole file exists to stop repeating.
+    """
+    constants: dict[str, frozenset[str]] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            name, value = stmt.target.id, stmt.value
+        elif (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            name, value = stmt.targets[0].id, stmt.value
+        else:
+            continue
+        if value is None:
+            continue
+        literals = frozenset(
+            node.value
+            for node in ast.walk(value)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+        if literals:
+            constants[name] = literals
+    return constants
+
+
+def _loop_target_iterables(tree: ast.Module) -> dict[str, frozenset[str]]:
+    """Loop/comprehension target NAME -> the identifiers its iterable mentions.
+
+    ``_alias_names`` is called with a literal seed twice and with a LOOP VARIABLE twice
+    (``module`` over the carriers, ``seed`` over the private surface). Without this the
+    derivation would see two of the four seed sources and silently under-collect — the
+    failure direction that produces a missing row.
+    """
+    targets: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            mentioned = {n.id for n in ast.walk(node.iter) if isinstance(n, ast.Name)}
+            for bound in ast.walk(node.target):
+                if isinstance(bound, ast.Name):
+                    targets.setdefault(bound.id, set()).update(mentioned)
+    return {name: frozenset(names) for name, names in targets.items()}
+
+
+def _identifiers_the_gate_keys_on(source: str) -> dict[str, frozenset[str]]:
+    """Every identifier literal the gate decides on, mapped to WHERE it came from.
+
+    THREE collection channels, and each is a CLASS rather than a list of known sites:
+
+    * every string literal on either side of an ``==``/``!=``/``in``/``not in``
+      comparison — the shape ``_call_name(node) != "tag"`` and ``func.attr ==
+      "__setattr__"`` share;
+    * every string literal inside a module-level constant NAMED in such a comparison —
+      the shape ``node.attr in _RAW_STATE_VEHICLE_ATTRS`` uses, which carries no literal
+      of its own;
+    * every seed reaching :func:`_alias_names`, whether written as a literal or fanned
+      out of a constant through a loop variable.
+
+    It OVER-collects: a file suffix, a path segment and the ``__main__`` guard all arrive
+    here alongside real identifiers. That is the correct direction. An over-collected
+    entry costs one declared-residual line; an under-collected one costs a silent bypass,
+    which is what this guard exists to make impossible.
+
+    Fails LOUDLY on a seed shape it cannot resolve rather than skipping it — a
+    derivation that quietly returns a smaller set is a guard that quietly stops guarding.
+    """
+    tree = ast.parse(source)
+    constants = _module_level_string_constants(tree)
+    loops = _loop_target_iterables(tree)
+    derived: dict[str, set[str]] = {}
+
+    def record(identifier: str, provenance: str) -> None:
+        derived.setdefault(identifier, set()).add(provenance)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_alias_names"
+        ):
+            seed = node.args[1]
+            if isinstance(seed, ast.Constant) and isinstance(seed.value, str):
+                record(seed.value, "alias-seed-literal")
+                continue
+            feeding = [
+                name
+                for name in (loops.get(seed.id, frozenset()) if isinstance(seed, ast.Name) else ())
+                if name in constants
+            ]
+            assert feeding, (
+                f"scripts/check_tag_t3.py:{node.lineno}: _alias_names is seeded from a "
+                f"shape this derivation cannot resolve ({ast.dump(seed)[:60]}). Teach it "
+                f"that shape — a seed it cannot see is a rule this guard stops covering."
+            )
+            for constant in feeding:
+                for literal in constants[constant]:
+                    record(literal, f"alias-seed-via:{constant}")
+        if isinstance(node, ast.Compare):
+            if not all(isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn)) for op in node.ops):
+                continue
+            for side in (node.left, *node.comparators):
+                if isinstance(side, ast.Constant) and isinstance(side.value, str):
+                    record(side.value, "compare-literal")
+                elif isinstance(side, ast.Name) and side.id in constants:
+                    for literal in constants[side.id]:
+                        record(literal, f"compare-set:{side.id}")
+    return {identifier: frozenset(why) for identifier, why in derived.items()}
+
+
+# THE RESIDUALS, each with a stated reason. An entry here is a claim that the identifier
+# needs no alias-resolution row, and every claim names the mechanism that makes it true.
+_PRE_EXISTING_RESIDUAL: str = (
+    "PRE-EXISTING rule, NOT a #538 one, and #539's territory rather than this PR's. "
+    "`_call_name`'s docstring already records it: 'The import-rename attack "
+    "(`from … import tag as t; t(T3, x)`) remains out of scope.' Re-measured at PR #553 "
+    "and still accurate — `tag`/`cast`/`TaggedContent`/`T3` are matched bare by "
+    "`_call_name`/`_arg_name` with no alias environment, and "
+    "`test_the_pre_existing_call_rules_are_still_the_declared_residual` pins that so the "
+    "declaration cannot outlive the fact. Widening these rules here would be the "
+    "'relax one rule to admit one caller' mistake the gate's module docstring names."
+)
+_VEHICLE_NAME_RESIDUAL: str = (
+    "matched as an ATTRIBUTE name, a folded STRING or a bare `ast.Name` id — never as "
+    "the local BINDING of an import or an assignment, so there is no name to rebind on "
+    "the side the rule reads. The rules that read it are receiver-blind, and "
+    "`_RAW_STATE_VEHICLE_NAMES` is deliberately wider than the attribute set so the "
+    "getattr-string spelling (which carries no attribute node at all) is covered too. "
+    "Enforced member by member by `test_every_declared_vehicle_attribute_is_enforced`, "
+    "`test_every_declared_vehicle_name_is_enforced_as_a_bare_identifier` and "
+    "`test_a_vehicle_named_only_as_a_string_is_refused`."
+)
+_SEAM_ATTR_RESIDUAL: str = (
+    "the ATTRIBUTE half of `BaseModel.<seam>` — an attribute name, not a binding. The "
+    "RECEIVER is the rebindable half and it carries the `BaseModel` row. Enforced member "
+    "by member by `test_every_declared_seam_attribute_is_enforced`."
+)
+_TAGGED_FIELD_RESIDUAL: str = (
+    "the folded STRING field-name argument of `__setattr__`, decided in the "
+    "ADMISSIBILITY direction: a computed or unfoldable name is REFUSED, so no rebinding "
+    "can make the gate weaker. Enforced by "
+    "`test_setattr_denies_every_tagged_state_field_regardless_of_target`."
+)
+_CARRIER_PRIMITIVE_RESIDUAL: str = (
+    "the PRIMITIVE half of a carrier, matched at the IMPORT site as `imported.name` — "
+    "the one position Python offers no aliasing for (`from gc import X` has no syntax "
+    "that renames X on the module's side). What the rule STORES is `imported.asname or "
+    "imported.name`, so the rebindable half IS resolved, and the module half carries its "
+    "own row. Enforced by `test_every_declared_carrier_primitive_is_enforced` and by the "
+    "PRIMITIVE-IMPORT-ALIASED spelling in every carrier row."
+)
+_PRIVATE_SURFACE_RESIDUAL: str = (
+    "resolved through the SAME `_alias_names` fan-out as `_set_authorized_t3_nonce`, "
+    "which carries the row: `_private_surface_names` runs ONE resolver over the whole "
+    "surface in a loop, so there is no per-name mechanism left to test. Enforced member "
+    "by member on every carrier by "
+    "`test_every_declared_private_name_is_enforced_on_every_carrier`."
+)
+_ADMISSIBILITY_RESIDUAL: str = (
+    "keyed in the ADMISSIBILITY direction, so rebinding makes the gate STRICTER rather "
+    "than weaker. `_is_self_init_re_entry` records the measurement: a rebound `super` is "
+    "dead at runtime (`RuntimeError: super(): __class__ cell not found`) and refused here "
+    "anyway. Pinned by `test_only_the_zero_argument_super_spelling_is_admissible`."
+)
+_PATH_SEGMENT_RESIDUAL: str = (
+    "a PATH SEGMENT of `_APPROVED_PATHS`, compared as one resolved absolute `Path` "
+    "against another — not an identifier, and nothing in a source file can rebind it."
+)
+
+_DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
+    **dict.fromkeys(("tag", "TaggedContent", "T3"), _PRE_EXISTING_RESIDUAL),
+    **dict.fromkeys(sorted(_EXPECTED_VEHICLE_NAMES - {"__init__"}), _VEHICLE_NAME_RESIDUAL),
+    **dict.fromkeys(sorted(_EXPECTED_SEAMS), _SEAM_ATTR_RESIDUAL),
+    **dict.fromkeys(sorted(_EXPECTED_TAGGED_STATE_FIELDS), _TAGGED_FIELD_RESIDUAL),
+    **dict.fromkeys(
+        sorted({primitive for _, primitive in _EXPECTED_CARRIERS}), _CARRIER_PRIMITIVE_RESIDUAL
+    ),
+    **dict.fromkeys(
+        sorted(_EXPECTED_PRIVATE_SURFACE - {"_set_authorized_t3_nonce"}),
+        _PRIVATE_SURFACE_RESIDUAL,
+    ),
+    **dict.fromkeys(("self", "super"), _ADMISSIBILITY_RESIDUAL),
+    **dict.fromkeys(("src", "alfred", "security", "tiers.py"), _PATH_SEGMENT_RESIDUAL),
+    # `cast` reaches the derivation twice — as the pre-existing `cast(TaggedContent[…])`
+    # rule's literal AND as `ctypes.cast`, a carrier primitive. Written out rather than
+    # left to dict-merge order, because which reason survives that order is not a thing
+    # a reader should have to work out.
+    "cast": f"TWO ROLES. (1) {_PRE_EXISTING_RESIDUAL} (2) {_CARRIER_PRIMITIVE_RESIDUAL}",
+    ".py": (
+        "a FILE SUFFIX in `_view_is_exempt`'s out-of-repo `tmp_path` arm, not an "
+        "identifier. Pinned by `test_a_real_out_of_repo_tmp_path_fixture_is_still_exempt`."
+    ),
+    "__main__": "the module-main guard at the foot of the script. Not a rule at all.",
+    "TaggedContent[": (
+        "a SUBSTRING of the string-form generic inside a `cast(...)` argument "
+        '(`cast("TaggedContent[T2]", x)`), matched inside a string literal rather than '
+        "against an identifier. Pinned by `test_cast_bypass_and_type_ignore_suppression`."
+    ),
+    "tests": (
+        "a resolved path COMPONENT (`_TEST_DIR_NAME`), compared against "
+        "`candidate.relative_to(_REPO_ROOT).parts[0]` — a directory name, not an "
+        "identifier. Pinned by `test_a_path_segment_merely_containing_tests_is_not_exempt`."
+    ),
+    "create_and_register_t3_nonce": (
+        "the exempt FUNCTION's name, keyed in the ADMISSIBILITY direction: renaming it "
+        "makes the gate stricter, and `test_the_real_nonce_factory_file_scans_clean` does "
+        "exactly that rename and requires both in-function references to red."
+    ),
+}
+
+
+def test_the_pre_existing_call_rules_are_still_the_declared_residual() -> None:
+    """PR #553 REVIEW, T2 — MEASURE the residual, do not merely declare it.
+
+    ``tag``/``cast``/``TaggedContent``/``T3`` are declared in
+    ``_DECLARED_ALIAS_RESIDUALS`` as PRE-EXISTING un-alias-resolved rules on the strength
+    of ``_call_name``'s docstring. A declaration that nothing measures is a comment, and
+    this repo has already shipped one that had silently become false. So the residual is
+    asserted in BOTH directions: the direct spelling must red (the rules are live), and
+    the rebound and import-aliased spellings must NOT (the residual is real).
+
+    THIS TEST IS MEANT TO RED WHEN #539 CLOSES THESE RULES. That is the point: the
+    residual declaration above must not outlive the fact, and the failure message says so.
+    """
+    for label, source in {
+        "tag": "tag(T3, payload)\n",
+        "TaggedContent[T3]": "TaggedContent[T3](tier=T3, content=x)\n",
+        "cast": "cast(TaggedContent[T2], x)\n",
+    }.items():
+        assert _messages(source), f"the pre-existing {label} rule is not live at all"
+
+    for label, source in {
+        "tag rebound": "_t = tag\n_t(T3, payload)\n",
+        "tag import-aliased": ("from alfred.security.tiers import tag as _t\n_t(T3, payload)\n"),
+        "TaggedContent rebound": "_TC = TaggedContent\n_TC[T3](tier=T3, content=x)\n",
+        "T3 rebound": "_T = T3\nTaggedContent[_T](tier=_T, content=x)\n",
+        "cast rebound": "_c = cast\n_c(TaggedContent[T2], x)\n",
+    }.items():
+        assert check_tag_t3._scan_text(source, _PROBE) == [], (
+            f"the {label} spelling now REDS. That is a widening of a pre-existing rule "
+            f"(#539's territory) — good news, but _DECLARED_ALIAS_RESIDUALS still claims "
+            f"it is out of scope. Give the identifier a row in "
+            f"_KEYED_IDENTIFIER_SPELLINGS and delete the residual."
+        )
+
+
+def test_every_identifier_the_gate_keys_on_is_rowed_or_declared_residual() -> None:
+    """THE DEFAULT-DENY HALF OF THE META-GUARD (PR #553 review, T2).
+
+    Derives the identifier set from ``scripts/check_tag_t3.py`` itself and requires every
+    member to be EITHER behaviourally rowed in ``_KEYED_IDENTIFIER_SPELLINGS`` OR
+    declared in ``_DECLARED_ALIAS_RESIDUALS`` with a stated reason. An enumeration closes
+    what it enumerates; this closes the class.
+
+    FOUR assertions, and each catches a different way the guard could go quiet:
+
+    * ANCHORS — the derivation returning an empty or truncated set would satisfy the
+      coverage check vacuously, so known identifiers are required to be in it.
+    * DISJOINT — an identifier must not be both rowed and excused; that would let a row
+      rot behind its own residual.
+    * COVERED — the property itself.
+    * NO DEAD RESIDUALS — an excuse for an identifier no rule keys on any more is rot,
+      and deleting it is how the reason stays true of the code.
+    """
+    derived = _identifiers_the_gate_keys_on(_GATE_SOURCE)
+
+    for anchor in ("BaseModel", "vars", "gc", "ctypes", "copyreg", "_set_authorized_t3_nonce"):
+        assert anchor in derived, (
+            f"the derivation did not find {anchor!r}, which the gate demonstrably keys "
+            f"on — it is under-collecting and the coverage check below is vacuous"
+        )
+
+    rowed = frozenset(_KEYED_IDENTIFIER_SPELLINGS)
+    excused = frozenset(_DECLARED_ALIAS_RESIDUALS)
+    assert not rowed & excused, (
+        f"identifiers are both rowed and declared residual: {sorted(rowed & excused)}"
+    )
+
+    uncovered = {
+        identifier: sorted(why)
+        for identifier, why in sorted(derived.items())
+        if identifier not in rowed and identifier not in excused
+    }
+    assert not uncovered, (
+        f"the gate keys on identifiers the meta-guard neither rows nor excuses: "
+        f"{uncovered}. Add a row to _KEYED_IDENTIFIER_SPELLINGS proving all its binding "
+        f"spellings red, or an entry to _DECLARED_ALIAS_RESIDUALS stating why it needs "
+        f"none. `copyreg` sat in this gap through two review rounds."
+    )
+
+    dead = sorted(excused - frozenset(derived))
+    assert not dead, (
+        f"_DECLARED_ALIAS_RESIDUALS excuses identifiers no rule keys on any more: "
+        f"{dead}. Delete them — a reason nothing measures stops being true silently."
+    )
+    assert all(reason.strip() for reason in _DECLARED_ALIAS_RESIDUALS.values()), (
+        "every residual must state a REASON; an empty one is an undeclared bypass"
+    )
+
+
+# ---------------------------------------------------------------------------
 # #538 Task 5 — the ``security/quarantine`` module's exemption is DELETED, and
 # every claim of it goes with it. Re-measured under the FULL rule set: 0
 # violations across 1634 lines, 0 ``tag(`` calls, 0 ``TaggedContent`` builds.
@@ -1793,9 +2365,26 @@ def test_quarantine_scans_clean_without_its_exemption() -> None:
     ``assert not _is_exempt`` lives INSIDE this test on purpose (R2-I). Transcribed
     onto ``main``, where the file is still exempt, ``_scan_file`` returns ``[]`` from
     the exemption arm and the pin passes for the OPPOSITE reason it exists.
+
+    PR #553 REVIEW, T8 — AND THE POSITIVE TWIN, which the plan's own Global Constraint
+    requires of every negative floor and which this one was the last in the file to be
+    missing. ``assert not _is_exempt`` rules out the exemption arm but not the OTHER way
+    a bare ``== []`` goes green: the #538 rules being absent from this scan path
+    altogether. Appending one vehicle line to the real source and requiring it to red is
+    what tells those two apart.
     """
     assert not check_tag_t3._is_exempt(_QUARANTINE)
     assert check_tag_t3._scan_file(_QUARANTINE) == []
+
+    seeded = _QUARANTINE.read_text(encoding="utf-8") + 'vars(_probe)["tier"] = T3\n'
+    assert any(
+        check_tag_t3._RAW_VEHICLE_VARS_MESSAGE in v
+        for v in check_tag_t3._scan_text(seeded, _QUARANTINE)
+    ), (
+        "positive twin: quarantine.py yielded no #538 finding even with a vehicle line "
+        "appended — the rules are not live on this scan path, so the floor above proves "
+        "nothing"
+    )
 
 
 def test_tiers_still_needs_its_whole_file_exemption() -> None:
