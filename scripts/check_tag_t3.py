@@ -158,6 +158,14 @@ _RAW_STATE_CARRIERS: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
+# Seam methods that write field state when dispatched with the CLASS as receiver.
+# `copy` is pydantic v1's spelling and does NOT route through `model_copy` (it merges
+# `update` inside `copy_internals`); the `model_validate*` pair is included because a
+# wire round-trip is a construction path.
+_BASEMODEL_SEAM_ATTRS: frozenset[str] = frozenset(
+    {"copy", "model_copy", "model_construct", "model_validate", "model_validate_json"}
+)
+
 _RAW_VEHICLE_ATTR_MESSAGE: str = (
     "raw-state vehicle attribute — reaches instance state without traversing any "
     "method the model can guard. Use tag_t3_with_nonce()."
@@ -185,6 +193,11 @@ _RAW_CLASS_SWAP_MESSAGE: str = (
 _RAW_CARRIER_MESSAGE: str = (
     "a carrier primitive that hands back an object's raw state mapping — reaches "
     "instance state while naming no attribute. Use tag_t3_with_nonce()."
+)
+_BASEMODEL_VALUE_MESSAGE: str = (
+    "unbound BaseModel seam dispatch — builds field state through "
+    "_copy_and_set_values, reaching neither the class overrides nor model_post_init. "
+    "Call the seam on the INSTANCE, or use tag_t3_with_nonce()."
 )
 _ALIAS_BUDGET_MESSAGE: str = (
     "alias chain deeper than the resolver's budget — the gate cannot decide what "
@@ -623,9 +636,11 @@ def _record(violations: list[str], lines: list[str], path: Path, lineno: int, me
     """Append a violation MESSAGE line plus its source SNIPPET line.
 
     Every rule reports the same two-line shape, so tests assert the returned list by
-    equality rather than by substring search. Factored out because nine rules repeating
-    the pair would be nine places for the shape to drift (#422: a shared helper fails
-    LOUD, N copies drift SILENTLY).
+    equality rather than by substring search. Factored out because every rule repeating
+    the pair would be one more place for the shape to drift (#422: a shared helper fails
+    LOUD, N copies drift SILENTLY). NO COUNT IS NAMED HERE, for the reason
+    :class:`GateInternalError` gives: this text said "nine rules" and Task 3 made it ten
+    on the first edit after it was written.
 
     ``path`` travels as an argument because this repo forbids global state.
 
@@ -635,7 +650,7 @@ def _record(violations: list[str], lines: list[str], path: Path, lineno: int, me
     construction exactly what the no-pragma rule forbids exempting. No ``_scan_text``
     INPUT is known to reach the else arm (``str.splitlines`` splits on strictly more
     separators than the tokenizer does, so the line list is never SHORTER than the
-    parser's line numbering). It stays anyway because nine rules share this helper, and
+    parser's line numbering). It stays anyway because every rule shares this helper, and
     a finding must never become an ``IndexError`` that the broad ``except`` re-files as
     an unscannable file — a real laundering finding downgraded to a vague one. It is
     covered by a direct unit test rather than by a pragma.
@@ -835,6 +850,47 @@ def _is_cast_tagged_content_call(node: ast.Call) -> bool:
     return False
 
 
+def _is_unbound_basemodel_seam_call(node: ast.Call, basemodel_names: frozenset[str]) -> bool:
+    """``BaseModel.<seam>(obj, ...)`` — dispatch with the CLASS as receiver.
+
+    This is the original tl-2026-013 shape. Called on the class, the seam builds field
+    state through ``_copy_and_set_values`` and reaches neither the subclass overrides
+    nor ``model_post_init``, so a ``TaggedContent`` can be produced without the tier
+    ever passing a guard the runtime owns.
+
+    The receiver is collapsed with :func:`_arg_name`, which maps ``ast.Name`` and
+    ``ast.Attribute`` to the same identifier. A hand-rolled
+    ``isinstance(func.value, ast.Name)`` check saw only the bare spelling and missed
+    ``pydantic.BaseModel.model_copy(...)`` — the CR-138 round-2 finding #2 class this
+    very helper exists to close. Reusing ``_arg_name`` also means the two widenings
+    cannot drift apart.
+
+    RECEIVER-SCOPED on purpose: a receiver-blind rule flagging every ``model_copy``
+    reds ordinary pydantic instance use across the tree. Measured cost of this form:
+    ZERO sites in the 332 files under both scan roots.
+
+    Two shapes: ``BM.model_copy(obj, …)`` and ``BM.model_construct.__func__(cls, …)``,
+    the latter one hop further through the unbound function object — which skips every
+    override on the way in exactly as the first does.
+
+    WHAT THIS CANNOT DO: a cross-module re-export (``from x import BaseModel as Y`` in
+    module A, imported from A by module B) is invisible — the alias set is per-file.
+    ``TaggedContent.model_construct(...)`` is likewise not flagged here; it is refused
+    at RUNTIME. Both are recorded residuals, not oversights.
+    """
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if _arg_name(func.value) in basemodel_names and func.attr in _BASEMODEL_SEAM_ATTRS:
+        return True
+    receiver = func.value
+    return (
+        isinstance(receiver, ast.Attribute)
+        and _arg_name(receiver.value) in basemodel_names
+        and receiver.attr in _BASEMODEL_SEAM_ATTRS
+    )
+
+
 def _detect(
     node: ast.AST,
     prose: frozenset[int],
@@ -842,12 +898,13 @@ def _detect(
     vars_names: frozenset[str],
     carrier_pairs: frozenset[tuple[str, str]],
     carrier_names: frozenset[str],
+    basemodel_names: frozenset[str],
 ) -> list[str]:
     """Every rule's verdict on ONE already-parsed node, as a list of messages.
 
     PURE and CONSTANT-WORK over its arguments, which is what lets ``_scan_text`` fence
     the whole detector behind a single :class:`GateInternalError` rather than fencing
-    nine rules separately. The per-file maps are built by the CALLER, outside that
+    each rule separately. The per-file maps are built by the CALLER, outside that
     fence: a defect in one of them is a defect in the maps, not in the file, and
     reporting it as an unscannable FILE at exit 1 is the #543 err-001 failure the fence
     exists to prevent.
@@ -863,6 +920,8 @@ def _detect(
             messages.append(_CAST_TAGGED_CONTENT_MESSAGE)
         if _is_tagged_content_t3_subscript_call(node):
             messages.append(_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE)
+        if _is_unbound_basemodel_seam_call(node, basemodel_names):
+            messages.append(_BASEMODEL_VALUE_MESSAGE)
         func = node.func
         if isinstance(func, ast.Name):
             # `vars` and the directly-bound carrier primitives are BARE IDENTIFIERS, so
@@ -1006,12 +1065,17 @@ def _scan_text(text: str, path: Path) -> list[str]:
         call_func_ids = frozenset(id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call))
         vars_names, vars_overflow = _alias_names(tree, "vars")
         carrier_pairs, carrier_names, carrier_overflow = _carrier_bindings(tree)
+        basemodel_names, basemodel_overflow = _alias_names(tree, "BaseModel")
 
         # FAIL CLOSED, and LOUDLY. A chain past the budget means the resolver cannot say
         # what these names are bound to, so every alias-resolved rule below is deciding
         # on an incomplete set. Attributed to line 1 because the overflow is a property
         # of the FILE's alias graph, not of any single line.
-        if vars_overflow or carrier_overflow:
+        #
+        # ONE condition over EVERY resolved seed, not one report per seed: an overflow
+        # means the FILE's alias graph is past the budget, and three copies of the same
+        # message on the same line would say the same thing three times.
+        if vars_overflow or carrier_overflow or basemodel_overflow:
             _record(violations, lines, path, 1, _ALIAS_BUDGET_MESSAGE)
 
         for node in ast.walk(tree):
@@ -1031,7 +1095,13 @@ def _scan_text(text: str, path: Path) -> list[str]:
             # `ast.walk` advancing, which IS input-driven.
             try:
                 findings = _detect(
-                    node, prose, call_func_ids, vars_names, carrier_pairs, carrier_names
+                    node,
+                    prose,
+                    call_func_ids,
+                    vars_names,
+                    carrier_pairs,
+                    carrier_names,
+                    basemodel_names,
                 )
             except Exception as exc:
                 raise GateInternalError(
