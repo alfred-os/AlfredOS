@@ -13,6 +13,34 @@ docstring text.
 
 **Tech Stack:** Python 3.14+, `ast`, pytest. No new dependencies.
 
+## THE RECURRING FAILURE — read this before writing any rule
+
+Two review rounds produced **seven Critical bypasses, every one of the same shape**: a rule
+keyed on a **bare identifier that Python lets you rebind**. An eighth was then found by
+self-audit. The list, in order of discovery:
+
+| Round | Rule keyed on | Bypass |
+| --- | --- | --- |
+| 1 | identifier `object` | `builtins.object.__setattr__`, `_o = object`, `from builtins import object as _o`, `type(obj).__mro__[-1].__setattr__` |
+| 1 | field name `"tier"` only | `object.__setattr__(low, "content", ATTACKER)` |
+| 1 | five dunder names | `gc.get_referents(obj)` names none of them |
+| 1 | `ast.Constant` only | `"_set_authorized" + "_t3_nonce"` |
+| 1 | hand-rolled receiver `isinstance` | `pydantic.BaseModel.model_copy(...)` |
+| 2 | `_RAW_STATE_VEHICLE_ATTRS` as the only string set | `getattr(object, "__setattr__")(low, "tier", T3)` — **no `ast.Attribute` node at all** |
+| 2 | `args[0]` must be named `self` | `def _apply(self, v): object.__setattr__(self, "content", v)` — no subclass needed |
+| 2 | identifier `gc` / `ctypes` | `import gc as _g`, `from gc import get_referents` |
+| self-audit | identifier `vars` | `_v = vars; _v(obj)["tier"] = T3` |
+
+**The rule this produces, and it is binding on every rule in this plan:**
+
+> **Every bare identifier a rule keys on MUST be resolved through `_alias_names`, and a
+> meta-test must enumerate them.** An identifier is a *name*, and Python lets any name be
+> rebound. Matching one spelling of a name closes one spelling.
+
+Task 4 ships `test_every_keyed_identifier_is_alias_resolved` to enforce this, because the
+first seven of the nine rows above were each "fix the spelling" and each produced the next
+row. That test is the only thing in this plan that closes the CLASS.
+
 ## Revision history — this is v2
 
 v1 of this plan went through a six-reviewer fleet (security, test, architect, cross-cutting,
@@ -87,25 +115,39 @@ Executed against the 332 tracked `.py` files under `_DEFAULT_SCAN_ROOTS` (`src/a
 2. **`__class__` in STORE/DEL context only.** A class swap is a laundering vehicle; a
    `.__class__.__name__` read is not. Context discriminates at zero cost — `invoke.py:1265`
    stays clean.
-3. **`vars()`.** Cost 3 (all `tiers.py`).
+3. **`vars()`, receiver ALIAS-RESOLVED.** Cost 3 (all `tiers.py`). `_v = vars` and
+   `from builtins import vars as _v` both scanned clean until the self-audit; `vars` was the
+   last identifier in the file still matched as a literal.
 4. **`X.__setattr__` — RECEIVER-BLIND, one-position whitelist.** Any reference outside
    `Call.func` position is denied. **v1 matched only the bare identifier `object`**, so
    `builtins.object.__setattr__`, `_o = object`, `from builtins import object as _o` and
    `type(obj).__mro__[-1].__setattr__` all scanned clean and were executed to mint T3.
 5. **`__setattr__` call SHAPE** — admissible only when `args[0]` is the bare `Name` `self`
-   AND `args[1]` folds to a plain non-dunder string literal that is not `"tier"`. **v1 denied
-   only `"tier"`**, so `object.__setattr__(low, "content", ATTACKER)` was admitted — attacker
-   text inside a T2 object the orchestrator may read (hard rule #1 breach), and `"source"`
-   forged audit provenance. All three live frozen-dataclass sites write `self`.
-6. **Carrier-by-reference PRIMITIVES** — `gc.get_referents`, `gc.get_objects`,
-   `ctypes.py_object`, `ctypes.cast`, `copyreg._reconstructor`, `copyreg.__newobj__`.
+   AND `args[1]` folds to a plain non-dunder string literal that is **not in
+   `_TAGGED_STATE_FIELDS = {"tier", "content", "source"}`**. v1 denied only `"tier"`, so
+   `object.__setattr__(low, "content", ATTACKER)` was admitted — attacker text inside a T2
+   object the orchestrator may read (hard rule #1 breach) — and `"source"` forged audit
+   provenance. Round 2 then showed the `self` requirement alone is **not** a type guarantee:
+   `def _apply(self, v): object.__setattr__(self, "content", v)` needs no subclass, just a
+   parameter named `self`. Both conditions are kept (they compose), but the field ban is what
+   actually holds. Cost 0 — no live site writes any of the three.
+6. **Carrier-by-reference PRIMITIVES, module name ALIAS-RESOLVED** — `gc.get_referents`,
+   `gc.get_objects`, `ctypes.py_object`, `ctypes.cast`, `copyreg._reconstructor`,
+   `copyreg.__newobj__`, plus the `from gc import get_referents` direct-binding form.
    `gc.get_referents(obj)` hands back the instance mapping naming no vehicle. **Scoped to
    primitives, not modules**: a module ban costs 2 legitimate sites (`ctypes.CDLL` for libc in
    `supervisor/process_posture.py`, `gc.collect()` in `fd3_key_delivery.py`); the primitive
-   ban costs **0**.
-7. **Vehicle dunder / private name as a FOLDED string in code position.** `ast` folds
-   *implicit* concatenation but not `+`, so `"_set_authorized" + "_t3_nonce"` escaped v1 and
-   forged the nonce end-to-end. Fold `BinOp(Add)` chains and literal-only `JoinedStr`.
+   ban costs **0**. Keying on the literal `gc` left `import gc as _g` clean.
+7. **Vehicle name as a FOLDED string in code position**, over
+   `_RAW_STATE_VEHICLE_NAMES = _RAW_STATE_VEHICLE_ATTRS | {"__setattr__", "__delattr__",
+   "__class__"}`. **The string set is deliberately WIDER than the attribute set.**
+   `getattr(object, "__setattr__")(low, "tier", T3)` produces **no `ast.Attribute` node at
+   all**, so every attribute-keyed rule is blind to it; executed, it turned a
+   `TaggedContent[T2]` into T3. `__setattr__` must NOT be added to the attribute set — the
+   three live benign `object.__setattr__(...)` call sites all carry that attribute node, and
+   the dedicated receiver-blind rules already cover it. `ast` folds *implicit* concatenation
+   but not `+`, so `"_set_authorized" + "_t3_nonce"` escaped v1 and forged the nonce
+   end-to-end. Fold `BinOp(Add)` chains and literal-only `JoinedStr`.
 8. **Unbound `BaseModel` seam dispatch**, receiver collapsed by identifier. **v1 hand-rolled
    `isinstance` checks and missed `pydantic.BaseModel.model_copy(...)`** — the CR-138 round-2
    #2 class that `_arg_name` exists to close. Cost 0.
@@ -135,6 +177,16 @@ Executed against the 332 tracked `.py` files under `_DEFAULT_SCAN_ROOTS` (`src/a
   Measured: zero today.
 - **`TaggedContent.model_construct(...)`** is refused at RUNTIME only; the seam rule is
   receiver-scoped to `BaseModel` aliases.
+- **`object.__setattr__(self, "metadata", …)` on a `TaggedContent`.** `metadata` is
+  deliberately NOT in `_TAGGED_STATE_FIELDS`: `hooks/context.py:106` writes it on a
+  `HookContext`, an unrelated frozen dataclass that happens to share the field name. Banning
+  it would red a legitimate site for a name collision. The residual cannot change `tier`,
+  `content` or `source`, so it cannot mint or relabel T3 — it can only alter auxiliary
+  metadata. Named rather than silently accepted.
+- **`self` is a NAMING convention, not a type guarantee.** Round 2 proved a plain function
+  whose first parameter is called `self` reaches the admissible branch. `_TAGGED_STATE_FIELDS`
+  is what actually holds; the `self` check narrows the surface but proves nothing on its own,
+  and the code comment must not claim otherwise.
 
 ---
 
@@ -875,6 +927,21 @@ _RAW_STATE_VEHICLE_ATTRS: frozenset[str] = frozenset(
     }
 )
 
+# Vehicles when NAMED AS A STRING. DELIBERATELY WIDER than the attribute set above.
+# `getattr(object, "__setattr__")(low, "tier", T3)` produces NO `ast.Attribute` node at
+# all, so every attribute-keyed rule is blind to it — executed, it turned a
+# TaggedContent[T2] into T3. `__setattr__` must NOT join the attribute set: the three
+# live benign `object.__setattr__(...)` sites all carry that attribute node, and the
+# receiver-blind rules below already cover the attribute form.
+_RAW_STATE_VEHICLE_NAMES: frozenset[str] = _RAW_STATE_VEHICLE_ATTRS | frozenset(
+    {"__setattr__", "__delattr__", "__class__"}
+)
+
+# The `TaggedContent` state fields no `__setattr__` call may write, whatever its target.
+# `metadata` is deliberately ABSENT — `hooks/context.py:106` writes it on a `HookContext`,
+# an unrelated frozen dataclass sharing the field name. See "Accepted residuals".
+_TAGGED_STATE_FIELDS: frozenset[str] = frozenset({"tier", "content", "source"})
+
 # Reaching PRIMITIVES that hand back an object's raw state. Scoped to the primitive,
 # not the module: banning `gc` and `ctypes` outright costs two legitimate sites
 # (`ctypes.CDLL` for libc in `supervisor/process_posture.py`, `gc.collect()` in
@@ -947,16 +1014,21 @@ def _is_benign_setattr_target(node: ast.Call) -> bool:
 
     DEFAULT-DENY ON SHAPE. Admissible only when ALL of:
 
-    * ``args[0]`` is the bare name ``self`` — the discriminator the review fleet
-      forced. Without it, ``object.__setattr__(low, "content", ATTACKER)`` was
-      admitted and EXECUTED to place raw attacker text inside a T2-tagged object the
-      privileged orchestrator is entitled to read, and ``"source"`` forged audit
-      provenance. Reaching a `TaggedContent` as ``self`` requires subclassing it,
-      which ``__init_subclass__`` already refuses at runtime;
     * ``args[1]`` folds to a plain string literal — a computed name cannot be read by
       any lexical rule;
     * that literal is not a dunder — those reach interpreter state, not a field;
-    * that literal is not ``tier`` — the headline tl-2026-013 write.
+    * that literal is not in :data:`_TAGGED_STATE_FIELDS`. THIS IS THE CONDITION THAT
+      HOLDS. v1 denied only ``"tier"``, so ``object.__setattr__(low, "content",
+      ATTACKER)`` was admitted and EXECUTED to place raw attacker text inside a
+      T2-tagged object the privileged orchestrator is entitled to read, and
+      ``"source"`` forged audit provenance;
+    * ``args[0]`` is the bare name ``self``. This NARROWS the surface but proves
+      nothing on its own, and the comment here must not claim otherwise: an earlier
+      revision justified it with "reaching a TaggedContent as ``self`` requires
+      subclassing it, which ``__init_subclass__`` refuses at runtime". That is FALSE,
+      and was disproved by execution — ``def _apply(self, v): object.__setattr__(self,
+      "content", v)`` is a plain function whose first parameter merely happens to be
+      called ``self``. ``self`` is a naming convention, not a type.
 
     Three live sites depend on the admissible case and none may red:
     ``hooks/context.py:106``, ``plugins/web_fetch/allowlist.py:139``,
@@ -978,8 +1050,15 @@ def _is_benign_setattr_target(node: ast.Call) -> bool:
         return False
     if name.startswith("__") and name.endswith("__"):
         return False
-    return name != _TIER_FIELD
+    return name not in _TAGGED_STATE_FIELDS
 ```
+
+The carrier rule and the `vars()` rule both resolve their module/callable identifier
+through `_alias_names` — `import gc as _g`, `from builtins import vars as _v` and
+`from gc import get_referents` were all clean until they did. Build the direct-binding
+name set (`from <carrier> import <primitive>`) in ONE pass over `ast.ImportFrom`, not
+inside the per-carrier loop: a `break` inside that loop attributes the finding to
+whichever carrier the loop happened to be on.
 
 - [ ] **Step 4: Restructure the walk loop and add the rules**
 
@@ -1114,6 +1193,12 @@ real-tree scan.
 | `__class__` banned by name, ignoring ctx (WIDENING) | `test_class_swap_is_refused_but_a_class_read_is_not` |
 | drop `("gc", "get_referents")` **[fleet sec-003]** | `test_carrier_by_reference_primitives_are_refused` |
 | carriers banned by MODULE not primitive (WIDENING) | `test_carrier_by_reference_primitives_are_refused` |
+| `vars` matched as the literal `"vars"` **[self-audit]** | `test_every_keyed_identifier_is_alias_resolved` |
+| carrier module matched as a literal **[fleet sec2-003]** | `test_every_keyed_identifier_is_alias_resolved` |
+| `_RAW_STATE_VEHICLE_NAMES` = `_RAW_STATE_VEHICLE_ATTRS` **[fleet sec2-001]** | `test_a_vehicle_named_only_as_a_string_is_refused` |
+| `__setattr__` ADDED to the attribute set (WIDENING) | `test_a_vehicle_named_only_as_a_string_is_refused` |
+| `_TAGGED_STATE_FIELDS` reduced to `{"tier"}` **[fleet sec2-002]** | `test_setattr_denies_every_tagged_state_field_regardless_of_target` |
+| `metadata` ADDED to `_TAGGED_STATE_FIELDS` (WIDENING) | `test_frozen_dataclass_post_init_idiom_stays_clean_with_a_positive_twin` |
 
 - [ ] **Step 9: Commit**
 
@@ -1534,6 +1619,106 @@ def test_private_surface_constant_matches_the_real_tiers_module() -> None:
         f"Removed: {sorted(check_tag_t3._TIERS_PRIVATE_SURFACE - derived)}."
     )
     assert len(derived) == 21, f"expected 21 private names, derived {len(derived)}"
+
+
+def test_every_keyed_identifier_is_alias_resolved() -> None:
+    """THE META-GUARD. Seven Criticals across two review rounds were ONE shape.
+
+    Every one was a rule keyed on a bare identifier that Python lets you rebind:
+    ``object``, ``gc``, ``ctypes``, ``BaseModel``, ``vars``. Each was fixed as a
+    SPELLING and the next round found the next spelling. This test is the only thing
+    in the suite that closes the CLASS.
+
+    An identifier is a NAME. Any name can be rebound by assignment or by an import
+    alias. So for every identifier a rule keys on, all three spellings below must
+    produce the SAME verdict — and the direct form is the positive control proving
+    the probe reaches the rule at all.
+
+    Adding a rule that keys on a new identifier means adding a row HERE. If you cannot
+    write the row, the rule is not alias-resolved and it is bypassable.
+    """
+    cases = [
+        # (identifier, direct spelling, rebound spelling, import-aliased spelling)
+        (
+            "vars",
+            'vars(obj)["tier"] = T3',
+            '_v = vars\n_v(obj)["tier"] = T3',
+            'from builtins import vars as _v\n_v(obj)["tier"] = T3',
+        ),
+        (
+            "gc",
+            "import gc\ngc.get_referents(low)",
+            "import gc as _g\n_g.get_referents(low)",
+            "from gc import get_referents\nget_referents(low)",
+        ),
+        (
+            "ctypes",
+            "import ctypes\nctypes.cast(id(low), ctypes.py_object)",
+            "import ctypes as _c\n_c.cast(id(low), _c.py_object)",
+            "from ctypes import cast\ncast(id(low), py_object)",
+        ),
+        (
+            "BaseModel",
+            "BaseModel.model_copy(o, update=u)",
+            "_B = BaseModel\n_B.model_copy(o, update=u)",
+            "from pydantic import BaseModel as _B\n_B.model_copy(o, update=u)",
+        ),
+        (
+            "object",
+            'object.__setattr__(low, "tier", T3)',
+            '_o = object\n_o.__setattr__(low, "tier", T3)',
+            'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)',
+        ),
+    ]
+    for identifier, direct, rebound, aliased in cases:
+        assert _messages(direct + "\n"), (
+            f"{identifier}: the DIRECT spelling was not flagged — this probe never "
+            f"reached the rule, so the two below prove nothing"
+        )
+        assert _messages(rebound + "\n"), f"{identifier}: REBOUND spelling admitted"
+        assert _messages(aliased + "\n"), f"{identifier}: IMPORT-ALIASED spelling admitted"
+
+
+def test_a_vehicle_named_only_as_a_string_is_refused() -> None:
+    """The string vehicle set is WIDER than the attribute set, and must stay so.
+
+    ``getattr(object, "__setattr__")(low, "tier", T3)`` produces NO ``ast.Attribute``
+    node, so every attribute-keyed rule is blind to it. Executed, it turned a
+    TaggedContent[T2] into T3.
+
+    The twin below is why ``__setattr__`` must NOT join the ATTRIBUTE set: all three
+    live benign sites carry that attribute node.
+    """
+    assert _messages('getattr(object, "__setattr__")(low, "tier", T3)\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"
+    ]
+    assert _messages('getattr(object, "__set" + "attr__")(low, "tier", T3)\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text(
+        'object.__setattr__(self, "path_prefix", normalised)\n', _PROBE
+    ) == []
+    assert check_tag_t3._RAW_STATE_VEHICLE_ATTRS < check_tag_t3._RAW_STATE_VEHICLE_NAMES, (
+        "the string vehicle set must be a strict superset of the attribute set"
+    )
+
+
+def test_setattr_denies_every_tagged_state_field_regardless_of_target() -> None:
+    """``self`` is a NAMING CONVENTION, not a type guarantee.
+
+    Round 2 disproved the earlier justification by execution: a plain function whose
+    first parameter is called ``self`` reaches the admissible branch with no subclass
+    involved. ``_TAGGED_STATE_FIELDS`` is the condition that actually holds.
+    """
+    for field in sorted(check_tag_t3._TAGGED_STATE_FIELDS):
+        source = f'def _apply(self, v):\n    object.__setattr__(self, "{field}", v)\n'
+        assert _messages(source) == [
+            f"{_PROBE}:2: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+        ], f"field {field!r} admitted through a self-named parameter"
+    assert "metadata" not in check_tag_t3._TAGGED_STATE_FIELDS, (
+        "metadata is a documented residual — hooks/context.py:106 writes it on an "
+        "unrelated frozen dataclass; banning it reds a legitimate site"
+    )
 
 
 def test_the_private_surface_derivation_sees_every_binding_shape() -> None:
@@ -1977,6 +2162,9 @@ Never `git add -A` — untracked rulesync outputs get swept in.
       `_RAW_CARRIER`, `_ALIAS_BUDGET`, `_BASEMODEL_VALUE`, `_PRIVATE_SURFACE` — all distinct,
       none a substring of another, all in the `findings` set. Listed by NAME rather than by
       count alone, so the checkbox cannot go stale the way a bare number does.
+- [ ] `test_every_keyed_identifier_is_alias_resolved` covers EVERY identifier any rule
+      keys on. Seven Criticals across two rounds were all this one shape; the meta-guard
+      is what closes the class rather than the ninth spelling.
 - [ ] `python3 scripts/check_tag_t3.py` exits 0 — **zero new exemptions**.
 - [ ] 100% line + branch coverage, no new pragmas, no unreachable branches.
 - [ ] `mypy --strict` + `pyright` clean; `ruff` clean; `markdownlint` clean.
