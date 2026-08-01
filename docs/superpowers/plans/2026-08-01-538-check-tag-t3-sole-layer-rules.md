@@ -713,6 +713,12 @@ Each script MUST carry `assert new != s` — a mutation that silently stops matc
 turns "the mutant survived" into a false conclusion (that false alarm cost a session
 on #552).
 
+> **STAGE BEFORE YOU MUTATE.** At this point the implementation is still uncommitted,
+> so a bare `git checkout scripts/check_tag_t3.py` restores **HEAD** and destroys the
+> work you are testing. Run `git add scripts/check_tag_t3.py` FIRST, so `git checkout`
+> restores from the index, and verify with `sha256sum` after each trap. Found during
+> Task 1 implementation; applies to every mutation step in this plan.
+
 ```bash
 cd /Users/iandominey/projects/AlfredOS
 
@@ -1288,6 +1294,8 @@ python3 scripts/check_tag_t3.py; echo "real-tree rc=$? (MUST be 0)"
 
 - [ ] **Step 8: Mutation-test**
 
+Stage the file first — see the warning in Task 1 Step 5.
+
 Apply, confirm the NAMED test reds, revert. Every script carries `assert new != s`.
 The seven rows marked **[fleet]** are mutations that survived v1's suite AND the
 real-tree scan.
@@ -1492,6 +1500,8 @@ python3 scripts/check_tag_t3.py; echo "rc=$? (MUST be 0)"
 ```
 
 - [ ] **Step 5: Mutation-test**
+
+Stage the file first — see the warning in Task 1 Step 5.
 
 | Mutation | Must red |
 | --- | --- |
