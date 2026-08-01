@@ -267,3 +267,537 @@ def test_alias_names_reports_budget_exhaustion_instead_of_looping() -> None:
         ast.parse("from pydantic import BaseModel\nB = BaseModel\n"), "BaseModel"
     )
     assert shallow is False, "positive twin: an ordinary file must NOT report overflow"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — the raw-state-write vehicle ban.
+#
+# The runtime CANNOT refuse these spellings: a raw state write traverses no
+# method the model can override, so `frozen=True` never observes it. This gate
+# is the ONLY enforcement layer that exists for them, which is why every rule
+# below denies the VEHICLE or the SHAPE rather than an enumeration of spellings.
+# ---------------------------------------------------------------------------
+
+
+def test_a01_object_setattr_writing_dunder_dict_is_refused() -> None:
+    """A01 — the decisive spelling; round-2 minted a real TaggedContent[T3] with it.
+
+    A01 defeats the "key on the written ``tier`` attribute" rule BY CONSTRUCTION: the
+    attribute written is ``__dict__``. That is why the VEHICLE is banned, not the spelling.
+    """
+    source = 'object.__setattr__(obj, "__dict__", {"tier": T3})\n'
+    assert check_tag_t3._scan_text(source, _PROBE) == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}",
+        '  object.__setattr__(obj, "__dict__", {"tier": T3})',
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}",
+        '  object.__setattr__(obj, "__dict__", {"tier": T3})',
+    ]
+
+
+def test_setattr_receiver_is_matched_by_alias_not_by_the_bare_name_object() -> None:
+    """FLEET FINDING sec-001 — v1 matched only the identifier ``object``.
+
+    All four spellings below scanned CLEAN under v1 and were EXECUTED to mint genuine
+    TaggedContent[T3] objects with attacker-controlled content; one downgraded a real
+    tag_t3_with_nonce T3 to T2, putting raw untrusted text on the privileged plane.
+
+    What closes the class is RECEIVER-BLINDNESS, not a wider alias set: the rule never
+    asks who the receiver is, so there is no identifier left to rebind.
+    """
+    for label, source in {
+        "builtins": 'import builtins\nbuiltins.object.__setattr__(low, "tier", T3)\n',
+        "rebind": '_o = object\n_o.__setattr__(low, "tier", T3)\n',
+        "import-alias": 'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)\n',
+        "mro": 'type(low).__mro__[-1].__setattr__(low, "tier", T3)\n',
+    }.items():
+        assert any(check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE in m for m in _messages(source)), (
+            f"{label} spelling was admitted"
+        )
+
+
+def test_setattr_shape_denies_every_tagged_content_field_target() -> None:
+    """FLEET FINDING sec-002 — v1 denied only ``"tier"``.
+
+    ``object.__setattr__(low, "content", ATTACKER)`` was EXECUTED to place raw
+    attacker-controlled text inside a T2-tagged object the privileged orchestrator is
+    entitled to read — a hard-rule-#1 breach. ``"source"`` forged audit provenance.
+    """
+    assert _messages('object.__setattr__(low, "content", ATTACKER)\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+    ]
+    assert _messages('object.__setattr__(low, "source", "forged")\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+    ]
+    assert _messages('object.__setattr__(low, "tier", T3)\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+    ]
+
+
+def test_setattr_denies_every_tagged_state_field_regardless_of_target() -> None:
+    """Every member of ``_TAGGED_STATE_FIELDS``, with ``self`` AND a foreign target.
+
+    R2-E: the expected set is pinned as a SEPARATE LITERAL here and asserted equal to
+    the module constant FIRST. Looping over the constant under test is a tautological
+    oracle — removing ``"source"`` would remove it from the oracle too.
+
+    R2-G: the ``self`` cases are load-bearing. Every foreign-target fixture
+    short-circuits on the ``self`` check, so the FIELD arm is never reached by one and
+    the mutation row that names it would be attributed to a test that cannot
+    discriminate. With ``self`` as the target, the field ban is the only thing left
+    standing — and it is the condition that actually holds (``self`` is a naming
+    convention, not a type).
+    """
+    expected = frozenset({"tier", "content", "source"})
+    assert expected == check_tag_t3._TAGGED_STATE_FIELDS, (
+        "the declared TaggedContent state fields moved; this oracle pins them"
+    )
+    for field in sorted(expected):
+        assert _messages(f'object.__setattr__(self, "{field}", v)\n') == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+        ], f"self-targeted write to {field!r} was admitted"
+        assert _messages(f'object.__setattr__(low, "{field}", v)\n') == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+        ], f"foreign-targeted write to {field!r} was admitted"
+
+
+def test_setattr_on_self_is_refused_for_a_dunder_or_a_computed_field_name() -> None:
+    """R2-G — the DUNDER arm and the UNFOLDABLE arm, both reached through ``self``.
+
+    Without a self-target fixture the ``self`` check short-circuits first and neither
+    arm is ever evaluated, so the mutation rows that name them are scored by a test
+    that cannot see them. The positive twin is the benign idiom in the same shape.
+    """
+    assert _messages('object.__setattr__(self, "__dict__", v)\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}",
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}",
+    ]
+    assert _messages("object.__setattr__(self, computed, v)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text('object.__setattr__(self, "path_prefix", v)\n', _PROBE) == []
+
+
+def test_frozen_dataclass_post_init_idiom_stays_clean_with_a_positive_twin() -> None:
+    """NEGATIVE FLOOR + POSITIVE TWIN in one invocation.
+
+    Three live sites depend on the clean half: ``hooks/context.py:106``,
+    ``plugins/web_fetch/allowlist.py:139``,
+    ``plugins/web_fetch/fetch_dispatcher.py:219``. Refusing ``object.__setattr__``
+    outright reds all three.
+
+    The twin swaps ONE token (``self`` -> ``low``) and must trip, which is what proves
+    the clean text reached the rule at all rather than the rule being absent.
+    """
+    benign = 'object.__setattr__(self, "metadata", dict(self.metadata))\n'
+    assert check_tag_t3._scan_text(benign, _PROBE) == []
+    twin = 'object.__setattr__(low, "metadata", dict(self.metadata))\n'
+    assert _messages(twin) == [f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"]
+
+
+def test_setattr_outside_call_position_is_refused() -> None:
+    """A05 — aliasing the callable defeats every rule keyed on the CALL.
+
+    The one-position whitelist closes it: ``Call.func`` is the only admissible position.
+    Never an ancestor blacklist — that must ENUMERATE the bad positions and silently
+    widens the day a new one appears.
+    """
+    for source in (
+        "_osa = object.__setattr__\n",
+        "apply(object.__setattr__, obj, 'tier', T3)\n",
+        "def get():\n    return object.__setattr__\n",
+    ):
+        assert any(check_tag_t3._RAW_SETATTR_ALIASED_MESSAGE in m for m in _messages(source)), (
+            f"admitted: {source!r}"
+        )
+
+
+def test_setattr_with_fewer_than_two_arguments_is_refused() -> None:
+    """COVERAGE + SHAPE. ``object.__setattr__(*parts)`` supplies no readable target.
+
+    Default-deny: a call this rule cannot read is a call it must not admit.
+    """
+    assert _messages("object.__setattr__(*parts)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
+    ]
+
+
+def test_vehicle_attributes_are_refused() -> None:
+    """A02, A07 and the rest of the raw-state class, banned as VEHICLES."""
+    for source in (
+        'obj.__dict__.update({"tier": T3})\n',
+        'd = obj.__dict__\nd["tier"] = T3\n',
+        'obj.__setstate__({"tier": T3})\n',
+        "o = TaggedContent.__new__(TaggedContent[T3])\n",
+        "f, args = obj.__reduce__()\n",
+        "base = type(low).__mro__[-1]\n",
+    ):
+        assert any(check_tag_t3._RAW_VEHICLE_ATTR_MESSAGE in m for m in _messages(source)), (
+            f"admitted: {source!r}"
+        )
+
+
+def test_every_declared_vehicle_attribute_is_enforced() -> None:
+    """R2-E/R2-H — pin the set as a literal HERE, then loop over the PINNED copy.
+
+    Three of the eight members were untested, so dropping them from the constant
+    survived the whole suite AND the real-tree scan. Looping over the constant under
+    test would not have caught it either: the mutation removes the member from the
+    oracle at the same time.
+    """
+    expected = frozenset(
+        {
+            "__dict__",
+            "__setstate__",
+            "__getstate__",
+            "__reduce__",
+            "__reduce_ex__",
+            "__new__",
+            "__mro__",
+            "__bases__",
+        }
+    )
+    assert expected == check_tag_t3._RAW_STATE_VEHICLE_ATTRS, (
+        "the declared vehicle-attribute set moved; this oracle pins it"
+    )
+    for attr in sorted(expected):
+        assert _messages(f"x = obj.{attr}\n") == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_ATTR_MESSAGE}"
+        ], f"vehicle attribute {attr!r} is declared but not enforced"
+
+
+def test_class_swap_is_refused_but_a_class_read_is_not() -> None:
+    """``__class__`` discriminated by CONTEXT, not by name.
+
+    A class swap is a laundering vehicle; ``exc.__class__.__name__`` (live at
+    ``hooks/invoke.py:1265``) is an ordinary read. Banning the name costs a false
+    positive; banning the STORE/DEL context costs zero. ``del`` is included because
+    ``ast.Del`` is a separate context and was untested (R2-H).
+    """
+    assert _messages("low.__class__ = Evil\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_CLASS_SWAP_MESSAGE}"
+    ]
+    assert _messages("del obj.__class__\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_CLASS_SWAP_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text('t = {"x": exc.__class__.__name__}\n', _PROBE) == []
+
+
+def test_vars_is_refused_and_ordinary_getattr_is_not() -> None:
+    """A03 — ``vars(obj)`` returns the mapping ``__dict__`` does.
+
+    Twin floor: ``getattr(prev, field)`` is four live sites in
+    ``policies/snapshot_ref.py``. Banning non-literal ``getattr`` outright costs 7
+    false positives (measured); this rule does not do that.
+    """
+    assert _messages('vars(obj)["tier"] = T3\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_VARS_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text("prev_val = getattr(prev, field)\n", _PROBE) == []
+
+
+def test_vars_is_matched_by_alias_not_by_the_bare_name() -> None:
+    """SELF-AUDIT ROW — ``vars`` was the last identifier still matched as a literal.
+
+    ``_v = vars; _v(obj)["tier"] = T3`` scanned clean until the receiver was resolved
+    through ``_alias_names``. Every bare identifier a rule keys on is a NAME, and
+    Python lets any name be rebound; matching one spelling closes one spelling.
+
+    (The plan's mutation table attributes this row to Task 4's
+    ``test_every_keyed_identifier_is_alias_resolved`` meta-test. That test does not
+    exist yet, so the rule Task 2 ships carries its own behavioural oracle here.)
+    """
+    for label, source in {
+        "rebind": '_v = vars\n_v(obj)["tier"] = T3\n',
+        "import-alias": 'from builtins import vars as _v\n_v(obj)["tier"] = T3\n',
+    }.items():
+        assert any(check_tag_t3._RAW_VEHICLE_VARS_MESSAGE in m for m in _messages(source)), (
+            f"{label} spelling was admitted"
+        )
+
+
+def test_vehicle_dunder_named_as_a_folded_string_is_refused() -> None:
+    """A06 — ``getattr(obj, "__dict__")`` produces no ``ast.Attribute``.
+
+    The folded form is the fleet's sec-004 shape: ``ast`` folds implicit concatenation
+    but not ``+``.
+    """
+    for source in (
+        'getattr(obj, "__dict__")["tier"] = T3\n',
+        '_A = "__dict__"\n',
+        'getattr(obj, "__di" + "ct__")["tier"] = T3\n',
+    ):
+        assert any(check_tag_t3._RAW_VEHICLE_STR_MESSAGE in m for m in _messages(source)), (
+            f"admitted: {source!r}"
+        )
+
+
+def test_a_vehicle_named_only_as_a_string_is_refused() -> None:
+    """FLEET FINDING sec2-001 — the STRING set is DELIBERATELY WIDER than the attribute set.
+
+    ``getattr(object, "__setattr__")(low, "tier", T3)`` produces NO ``ast.Attribute``
+    node at all, so every attribute-keyed rule is blind to it; executed, it turned a
+    ``TaggedContent[T2]`` into T3.
+
+    ``__setattr__`` must NOT join the ATTRIBUTE set: the three live benign
+    ``object.__setattr__(self, ...)`` sites all carry that attribute node, and the
+    receiver-blind rules already cover the attribute form. Both halves are asserted
+    here — the widening and the thing that must not widen with it.
+    """
+    expected = frozenset(
+        {
+            "__dict__",
+            "__setstate__",
+            "__getstate__",
+            "__reduce__",
+            "__reduce_ex__",
+            "__new__",
+            "__mro__",
+            "__bases__",
+            "__setattr__",
+            "__delattr__",
+            "__class__",
+        }
+    )
+    assert expected == check_tag_t3._RAW_STATE_VEHICLE_NAMES, (
+        "the declared vehicle-NAME set moved; this oracle pins it"
+    )
+    assert expected > check_tag_t3._RAW_STATE_VEHICLE_ATTRS, (
+        "the string set must be a STRICT superset of the attribute set — collapsing "
+        "them reopens the getattr() spelling that carries no attribute node"
+    )
+    assert "__setattr__" not in check_tag_t3._RAW_STATE_VEHICLE_ATTRS, (
+        "adding __setattr__ to the ATTRIBUTE set reds all three live benign sites"
+    )
+    assert check_tag_t3._scan_text('object.__setattr__(self, "metadata", v)\n', _PROBE) == []
+    for name in sorted(expected):
+        assert _messages(f'_A = "{name}"\n') == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"
+        ], f"vehicle name {name!r} is declared but not enforced as a string"
+
+
+def test_a_raw_state_dunder_in_prose_stays_clean_with_a_positive_twin() -> None:
+    """WIDENING GUARD for the string rule (fleet finding arch-004/test-003 M1).
+
+    The real tree contains ZERO prose-position vehicle strings, so neither the
+    real-tree scan nor any other floor can kill a mutant that drops the prose
+    exclusion here. This test is the only thing that can.
+
+    R2-F: the docstring's ENTIRE value must BE a set member. The plan's original
+    fixture (``\"\"\"Explains ``obj.__dict__`` handling.\"\"\"``) folds to a whole
+    sentence, which never equals a member, so the prose exclusion was never consulted
+    and the mutant survived.
+    """
+    assert check_tag_t3._scan_text('"""__dict__"""\n', _PROBE) == []
+    assert _messages('x = "__dict__"\n') == [f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"]
+
+
+def test_the_string_rule_matches_the_whole_name_not_a_substring() -> None:
+    """R2-H — the equality-to-containment WIDENING currently reds nothing.
+
+    Relaxing ``folded in _RAW_STATE_VEHICLE_NAMES`` to "any member appears inside
+    ``folded``" kept the real-tree scan at rc=0 and every other floor green, because
+    no other fixture carries a vehicle name inside a longer string in CODE position.
+    """
+    assert check_tag_t3._scan_text('x = "reset the __dict__ mapping"\n', _PROBE) == []
+    assert _messages('x = "__dict__"\n') == [f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"]
+
+
+def test_carrier_by_reference_primitives_are_refused() -> None:
+    """FLEET FINDING sec-003 — ``gc.get_referents(obj)`` names no vehicle at all.
+
+    Scoped to the reaching PRIMITIVES, not to the modules: a module-scoped ban costs
+    two legitimate sites (``ctypes.CDLL`` for libc in ``supervisor/process_posture.py``,
+    ``gc.collect()`` in ``fd3_key_delivery.py``); the primitive ban costs ZERO.
+    Both live benign uses are the twin here.
+    """
+    for source in (
+        'import gc\ngc.get_referents(low)[0]["tier"] = T3\n',
+        "import ctypes\nctypes.cast(id(low), ctypes.py_object)\n",
+    ):
+        assert any(check_tag_t3._RAW_CARRIER_MESSAGE in m for m in _messages(source)), (
+            f"admitted: {source!r}"
+        )
+    assert check_tag_t3._scan_text("import gc\ngc.collect()\n", _PROBE) == []
+    assert (
+        check_tag_t3._scan_text(
+            'import ctypes\nlibc = ctypes.CDLL("libc.so.6", use_errno=True)\n', _PROBE
+        )
+        == []
+    )
+
+
+def test_every_declared_carrier_primitive_is_enforced() -> None:
+    """R2-E/R2-H — four of the six were never exercised in ``Call.func`` position.
+
+    ``ctypes.py_object`` appeared only as an ARGUMENT in its fixture, so dropping it
+    from the constant survived the suite. Pin the set as a literal, then loop over the
+    pinned copy with each primitive in the position the rule actually keys on.
+    """
+    expected = frozenset(
+        {
+            ("gc", "get_referents"),
+            ("gc", "get_objects"),
+            ("ctypes", "py_object"),
+            ("ctypes", "cast"),
+            ("copyreg", "_reconstructor"),
+            ("copyreg", "__newobj__"),
+        }
+    )
+    assert expected == check_tag_t3._RAW_STATE_CARRIERS, (
+        "the declared carrier-primitive set moved; this oracle pins it"
+    )
+    for module, primitive in sorted(expected):
+        assert _messages(f"import {module}\n{module}.{primitive}(low)\n") == [
+            f"{_PROBE}:2: {check_tag_t3._RAW_CARRIER_MESSAGE}"
+        ], f"carrier {module}.{primitive} is declared but not enforced"
+
+
+def test_carrier_module_is_matched_by_alias_not_by_the_bare_name() -> None:
+    """FLEET FINDING sec2-003 — ``import gc as _g`` scanned clean.
+
+    Four binding forms, three of which a rule keyed on the literal ``gc`` cannot see.
+    The direct-binding forms need their own pass over ``ast.ImportFrom``: they bind the
+    PRIMITIVE as a bare ``Name``, so no module identifier appears at the call site at all.
+
+    (As with ``vars`` above, the plan attributes this row to Task 4's
+    ``test_every_keyed_identifier_is_alias_resolved``; Task 2's rule carries its own
+    behavioural oracle until that meta-test lands.)
+    """
+    for label, source in {
+        "module-rebind": "import gc\n_g = gc\n_g.get_referents(low)\n",
+        "import-alias": "import gc as _g\n_g.get_referents(low)\n",
+        "direct-binding": "from gc import get_referents\nget_referents(low)\n",
+        "direct-alias": "from gc import get_referents as _gr\n_gr(low)\n",
+    }.items():
+        assert any(check_tag_t3._RAW_CARRIER_MESSAGE in m for m in _messages(source)), (
+            f"{label} spelling was admitted"
+        )
+    assert check_tag_t3._scan_text("from gc import collect\ncollect()\n", _PROBE) == []
+
+
+def test_a_deeper_than_budget_alias_chain_is_reported_by_the_scanner() -> None:
+    """R2-J — nothing else drives ``_ALIAS_BUDGET_MESSAGE`` out of ``_scan_text``.
+
+    ``_alias_names`` reports overflow, but until a chain deeper than the budget reaches
+    the scanner the emitting arc is uncovered and the fail-closed disposition is
+    untested end-to-end. Reported at line 1 because the overflow is a property of the
+    FILE's alias graph, not of any single line.
+    """
+    depth = check_tag_t3._ALIAS_RESOLUTION_BUDGET + 5
+    chain = "".join(f"a{i} = a{i - 1}\n" for i in range(depth, 0, -1)) + "a0 = vars\n"
+    assert _messages(chain) == [f"{_PROBE}:1: {check_tag_t3._ALIAS_BUDGET_MESSAGE}"]
+    assert check_tag_t3._scan_text("b = vars\n", _PROBE) == [], (
+        "positive twin: an ordinary alias must NOT report overflow"
+    )
+
+
+def test_a_deep_concatenation_chain_does_not_fault_the_detector_fence() -> None:
+    """R2-L — ``_fold_str`` runs INSIDE the fence, so an unbounded fold suppresses findings.
+
+    A ``GateInternalError`` here makes ``main`` exit 2 and DISCARD every violation
+    collected so far, so one pathological ``+`` chain would hide a real laundering
+    finding in an EARLIER file. The depth bound turns that into a local non-match.
+
+    The chain is parsed rather than hand-built (Task 1 covers the hand-built case), so
+    it is kept well inside the parser's own limits: a 50 000-operand chain raises
+    ``RecursionError`` from ``ast.parse`` on the uv standalone build and parses cleanly
+    on Homebrew, and asserting across that difference would pin the BUILD.
+
+    R2-I — THE POSITIVE TWIN IS LOAD-BEARING. Measured: without it this was the single
+    test in this file that PASSED against ``origin/main``, green for the OPPOSITE reason
+    it exists. A gate with no fold rule at all also returns ``[]`` for the deep chain,
+    so the floor alone cannot tell "the fold is bounded" from "there is no fold". The
+    twin folds a chain INSIDE the bound to a vehicle name and requires it to TRIP, which
+    is what proves the rule is present and reached before the floor is consulted.
+    """
+    assert _messages('x = "__di" + "ct" + "__"\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}"
+    ], "positive twin: the BinOp fold must be live, or the deep-chain floor proves nothing"
+
+    operands = 500
+    source = "x = " + " + ".join(f'"a{i}"' for i in range(operands)) + "\n"
+    assert check_tag_t3._scan_text(source, _PROBE) == []
+
+
+def test_every_keyed_identifier_is_alias_resolved() -> None:
+    """THE META-GUARD. Seven Criticals across two review rounds were ONE shape.
+
+    Every one was a rule keyed on a bare identifier that Python lets you rebind:
+    ``object``, ``gc``, ``ctypes``, ``BaseModel``, ``vars``. Each was fixed as a
+    SPELLING and the next round found the next spelling. This test is the only thing
+    in the suite that closes the CLASS rather than one member of it.
+
+    An identifier is a NAME. Any name can be rebound by assignment or by an import
+    alias. So for every identifier a rule keys on, all three spellings below must
+    produce the SAME verdict — and the direct form is the positive control proving the
+    probe reaches the rule at all. Without that control a row is vacuous: a typo'd
+    fixture that matches nothing would "pass" all three assertions on an absent rule.
+
+    Adding a rule that keys on a new identifier means adding a row HERE. If you cannot
+    write the row, the rule is not alias-resolved and it is bypassable.
+
+    Two identifiers are resolved by DIFFERENT mechanisms, and the row does not care
+    which — it asserts the OUTCOME, so it stays honest if a rule changes technique:
+
+    * ``vars``, ``gc`` and ``ctypes`` go through :func:`_alias_names`;
+    * ``object`` is closed by RECEIVER-BLINDNESS instead. The ``__setattr__`` rules
+      never ask who the receiver is, so no identifier is left to rebind. That is a
+      STRONGER closure than resolution, not a missing one, and the row proves it
+      behaviourally rather than trusting the claim.
+    """
+    # (identifier, direct spelling, rebound spelling, import-aliased spelling)
+    # Task 3 adds the BaseModel row.
+    cases = [
+        (
+            "vars",
+            'vars(obj)["tier"] = T3',
+            '_v = vars\n_v(obj)["tier"] = T3',
+            'from builtins import vars as _v\n_v(obj)["tier"] = T3',
+        ),
+        (
+            "gc",
+            "import gc\ngc.get_referents(low)",
+            "import gc as _g\n_g.get_referents(low)",
+            "from gc import get_referents\nget_referents(low)",
+        ),
+        (
+            "ctypes",
+            "import ctypes\nctypes.cast(id(low), ctypes.py_object)",
+            "import ctypes as _c\n_c.cast(id(low), _c.py_object)",
+            "from ctypes import cast\ncast(id(low), py_object)",
+        ),
+        (
+            "object",
+            'object.__setattr__(low, "tier", T3)',
+            '_o = object\n_o.__setattr__(low, "tier", T3)',
+            'from builtins import object as _o\n_o.__setattr__(low, "tier", T3)',
+        ),
+    ]
+    for identifier, direct, rebound, aliased in cases:
+        assert _messages(direct + "\n"), (
+            f"{identifier}: the DIRECT spelling was not flagged — this probe never "
+            f"reached the rule, so the two below prove nothing"
+        )
+        assert _messages(rebound + "\n"), f"{identifier}: REBOUND spelling admitted"
+        assert _messages(aliased + "\n"), f"{identifier}: IMPORT-ALIASED spelling admitted"
+
+
+def test_record_appends_a_message_and_a_snippet_and_tolerates_a_missing_line() -> None:
+    """``_record``'s bounds guard, exercised directly rather than through a ternary.
+
+    R2-K: written as a ternary, ``coverage.py`` does not branch on it, so the guard
+    would be invisible to this file's REQUIRED 100% branch gate — exempting by
+    construction exactly what the no-pragma rule forbids exempting. Written as an
+    ``if``/``else`` it is visible, and this is what covers the else arm.
+
+    No ``_scan_text`` INPUT is known to reach it (``str.splitlines`` splits on strictly
+    more separators than the tokenizer, so the line list is never shorter than the
+    parser's line numbering). It stays because nine rules share this helper and a
+    violation must never become an ``IndexError`` that re-files a real finding as an
+    unscannable file.
+    """
+    violations: list[str] = []
+    check_tag_t3._record(violations, ["first", "second  "], _PROBE, 2, "msg")
+    assert violations == [f"{_PROBE}:2: msg", "  second"]
+    check_tag_t3._record(violations, [], _PROBE, 1, "other")
+    assert violations[2:] == [f"{_PROBE}:1: other", "  "]
