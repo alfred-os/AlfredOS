@@ -181,7 +181,7 @@ argument for the second one.
 - `tests/unit/security/test_check_tag_t3_sole_layer_rules.py` — the four pins above
 - `.github/workflows/pr-validate-python.yml` — job `tag-t3-grep`, the release-blocking
   invocation
-- [ADR-0034](0034-tag-t3-nonce-capability-gate.md) — the per-process nonce that makes
-  `tag_t3_with_nonce` the only runtime path to a `TaggedContent[T3]`
+- [ADR-0028](0028-boot-time-authorized-t3-nonce-registration.md) — the per-process nonce that
+  makes `tag_t3_with_nonce` the only runtime path to a `TaggedContent[T3]`
 - `docs/superpowers/plans/2026-08-01-538-check-tag-t3-sole-layer-rules.md` — the measured
   baseline this decision rests on
