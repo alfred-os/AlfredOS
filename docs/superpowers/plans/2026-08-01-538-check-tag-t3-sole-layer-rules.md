@@ -190,6 +190,121 @@ Executed against the 332 tracked `.py` files under `_DEFAULT_SCAN_ROOTS` (`src/a
 
 ---
 
+## Round-2 findings — binding requirements, verify each by execution
+
+The round-2 fleet's three security Criticals are already folded into the rules above and
+re-measured (0 violations / 332 files, 19/19 corpus, 0 false positives). What follows are the
+remaining round-2 findings. **Each is a requirement on the implementer, not a suggestion**,
+and each was produced by execution against a full Tasks 1-5 implementation.
+
+### Determinate defects — the plan as written cannot be implemented until these are settled
+
+- **R2-A (test2-002). `test_import_exemption_is_module_level_only` is unsatisfiable as
+  written.** It expects messages at `:2` AND `:3`, but `_reg` is not a member of
+  `_TIERS_PRIVATE_SURFACE`, so only `:2` can fire — and it directly contradicts
+  `test_import_aliased_nonce_setter_is_refused`, which asserts the identical `_reg(...)` call
+  does NOT red. No implementation satisfies both.
+  **RESOLUTION: an aliased private import POISONS the asname.** Resolve private-surface names
+  through the same per-file alias environment every other rule now uses — this is the meta-guard
+  principle applied to the private-surface rule, and A16's whole point is that `_reg(mine)` is
+  the laundering CALL, not the import. Update
+  `test_import_aliased_nonce_setter_is_refused` to expect two messages (the binding and the
+  use), and add the row to `test_every_keyed_identifier_is_alias_resolved`.
+- **R2-B (test2-008 / sec2-006). `ruff check` FAILS on the plan's own snippet** —
+  `ARG001 Unused function argument: object_names`. Making `__setattr__` receiver-blind left
+  the `object` alias set vestigial. Delete `_alias_names(tree, "object")` and the `object_names`
+  parameter, and stop crediting `_alias_names` with closing sec-001 — receiver-blindness is what
+  closed it. `ruff check` is a required gate.
+- **R2-C (test2-011). Task 2 Step 4 lists the Task 3 and Task 4 rules inside `_detect`.** Read
+  literally that implements Tasks 3 and 4 in Task 2's commit, so their "run to verify failure"
+  steps cannot fail and their messages land before their `findings`-set registration. `_detect`
+  gains one rule per task; each task adds its own.
+- **R2-D (test2-013). `_scan_text`'s new signature is never specified**, yet 20+ tests call it
+  with two arguments and depend on path-keyed exemptions. Specify it:
+  `_scan_text(text: str, path: Path, resolved: Path | None = None)`, where `resolved is None`
+  means "use `path` as given". State that the default arm is what
+  `test_scan_text_verdict_does_not_depend_on_the_working_directory` exercises, and TEST it.
+
+### Test-adequacy defects — the mutation tables do not yet hold
+
+Run every mutation. **8 of the 35 rows in v2 survived their named test**, five of them rows
+this plan marks `[fleet]` and claims to have closed.
+
+- **R2-E (test2-005). `test_every_declared_seam_attribute_is_enforced` is a TAUTOLOGICAL
+  ORACLE** — it loops over `_BASEMODEL_SEAM_ATTRS`, the constant under test, so removing
+  `model_validate` removes it from the oracle too. This reproduces the project's own recorded
+  rule that an oracle must not reuse the implementation predicate, in the very test written to
+  close that mutation. **Pin every set as a separate literal in the TEST file, assert equality
+  with the module constant FIRST, then loop over the pinned literal.** Apply to
+  `_BASEMODEL_SEAM_ATTRS`, `_RAW_STATE_VEHICLE_ATTRS`, `_RAW_STATE_VEHICLE_NAMES`,
+  `_RAW_STATE_CARRIERS` and `_TAGGED_STATE_FIELDS`.
+- **R2-F (test2-006). The prose floor cannot kill its mutant.** The STR rule matches by
+  EQUALITY, and the fixture's docstring folds to a whole sentence, so the prose exclusion is
+  never consulted. Use a bare docstring whose entire value IS a set member:
+  `_scan_text('"""__dict__"""\n', _PROBE) == []`. That fixture is also the oracle for the
+  equality-to-containment widening in R2-H.
+- **R2-G (test2-004). Two rows are attributed to tests that cannot discriminate.** Every
+  non-benign `__setattr__` fixture targets `obj`/`low`, so the `self` check short-circuits and
+  the `name != tier` and dunder arms are never reached. Add self-target fixtures:
+  `object.__setattr__(self, "__dict__", v)` and `object.__setattr__(self, computed, v)`.
+- **R2-H (test2-010). 14 unlisted mutations survive the whole suite AND the real-tree scan.**
+  Untested: 3 of 8 `_RAW_STATE_VEHICLE_ATTRS` members; 4 of 6 `_RAW_STATE_CARRIERS`
+  (`ctypes.py_object` appears only as an argument in its fixture, never as `Call.func`);
+  `del obj.__class__`; `_fold_str`'s `JoinedStr` arm; three arms of the private-surface
+  derivation. **And a real WIDENING: changing the STR rule from equality to containment reds
+  nothing and keeps rc=0.** Loop-over-the-pinned-set tests close most of this.
+- **R2-I (test2-001). Vacuity is 4, and the DoD requires 0.**
+  `test_qualified_receiver_does_not_widen_to_ordinary_modules` and
+  `test_the_real_nonce_factory_file_scans_clean` are bare floors with no twin — a direct breach
+  of this plan's own Global Constraint. `test_quarantine_scans_clean_without_its_exemption`
+  passes on `main` for the OPPOSITE reason it exists (the file is still exempt there): move
+  `assert not _is_exempt(_QUARANTINE)` INTO it so it cannot pass via the exemption.
+- **R2-J (test2-003). Coverage is 98%, not 100%.** The named budget genuinely fixes v1's
+  unreachable arc inside `_alias_names`, but a NEW uncovered arc appears at the `_scan_text`
+  call site: nothing drives a >32-deep chain through the scanner, so `_ALIAS_BUDGET_MESSAGE` is
+  never emitted. Also uncovered: both `self`-target arms of `_is_benign_setattr_target`, and
+  the `asname` arm of the private-surface rule.
+- **R2-K (test2-012). Three assertions cannot discriminate**, and two of them are dead branches
+  reproduced as TERNARIES — which `coverage.py` does not branch on, so the required 100% gate is
+  structurally blind to them. That exempts by construction exactly what the Global Constraints
+  forbid exempting. Replace `fold('f"...")' is None or ... == "__dict__"` with the measured
+  outcome; drop `_enclosing_functions`' `end_lineno` ternary (`end_lineno` is never `None` for a
+  parsed `FunctionDef`) and `_record`'s `else ""` arm, or write inputs that reach them.
+
+### Design corrections
+
+- **R2-L (sec2-004). `_fold_str`'s recursion is input-driven but runs inside the `_detect`
+  fence**, so a ~2000-operand `+` chain raises `GateInternalError`; `main` then discards every
+  violation collected so far and exits 2, suppressing a real laundering finding in an earlier
+  file. Merge is still blocked, so this hides the DIAGNOSIS rather than the gate. Either bound
+  `_fold_str`'s depth explicitly and return `None` past the bound, or move it outside the fence
+  alongside `ast.parse`. Bounding is preferred — it keeps the fence meaning "gate defect".
+- **R2-M (sec2-005). The cardinality pin is defeated by swapping only the ARGUMENT** of the
+  single `_set_authorized_t3_nonce` call: `(hits, aliases)` stays `(3, 1)`, it sits inside the
+  `(path, function)` exemption, and it installs an attacker-held object as the authorised
+  nonce (executed). Strengthen the pin to compare the exempt call's ARGUMENT against the
+  expected `CapabilityGateNonce()` construction, or state plainly that the exemption trusts
+  `nonce_factory.py`'s body and that this is the residual.
+- **R2-N (test2-009). `_derive_tiers_private_surface` is documented DEFAULT-DENY but is an
+  enumeration of six statement kinds.** Measured module-level misses: `from m import y as _z`,
+  `import _mod`, `for` targets, `with ... as`, `except ... as`, walrus, match captures, and —
+  inside the shape the oracle claims to cover — `_h, *_rest = ...` misses `_rest`. **Use an
+  `ast.Name(ctx=Store)` walk per module-level statement**, which covers every shape and passes
+  the same oracle. Extend the oracle fixture so it DISCRIMINATES between the two designs.
+  (Good news, verified: the deeper walk still yields exactly 21 on the real `tiers.py`, so the
+  hard-coded constant is not broken on day one, and `ast.TypeAlias` behaves as assumed.)
+- **R2-O (test2-007). The Task 5 invariant sweep is blind to all three stale claims inside
+  `check_tag_t3.py`** — the plan's own primary edit sites — because the qualifier word is
+  line-wrapped and `git grep` is line-scoped. It also flags
+  `docs/runbooks/slice-3-operator-migration.md:651` ("wait for reviewer approval"), an unrelated
+  row, and is tripped by this plan's own prescribed replacement wording. Use a paragraph-scoped
+  search (`git grep -A2` or a small Python pass over the file text) and exclude the runbook by
+  path with a stated reason.
+- **R2-P (sec2-007). The `_fold_str` residual is understated.** `"_set_authorized%s" %
+  "_t3_nonce"`, `"_set_authorized{}".format("_t3_nonce")` and `"".join([...])` are assembled
+  ENTIRELY from literals and all scan clean. State the residual as "a name assembled by any
+  operation other than `+` or implicit concatenation", not "from non-literal parts".
+
 ## File structure
 
 | File | Change |
