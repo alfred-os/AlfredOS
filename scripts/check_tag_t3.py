@@ -354,6 +354,168 @@ def _arg_name(node: ast.expr) -> str | None:
     return None
 
 
+# Bounded, and deliberately INPUT-INDEPENDENT. A bound of `len(assignments) + 1`
+# makes the loop-exhaustion arc unreachable BY CONSTRUCTION — the fixed point always
+# converges first — and this file is under a REQUIRED 100% branch gate with no
+# pragmas allowed, so an unreachable arc is an unsatisfiable gate, not a safe
+# default. A fixed budget makes exhaustion a real outcome a test can reach, and the
+# honest disposition for it is a reported violation: the input is pathological, not
+# the gate (contrast `GateInternalError`, which means the gate itself is broken).
+_ALIAS_RESOLUTION_BUDGET: int = 32
+
+# `_fold_str` recurses once per nested operand, and it is called from inside
+# `_scan_text`'s `GateInternalError` fence, where an exception means "the GATE is
+# broken": `main` prints it, DISCARDS every violation collected so far and exits 2.
+# So an unbounded fold turns one pathological `+` chain (~2000 operands raises
+# RecursionError under the default limit) into the suppression of a real laundering
+# finding in an EARLIER file. Bounding here keeps the fence meaning what it says.
+#
+# Past the bound `_fold_str` returns None, which every caller reads as "not a string
+# literal". The cost is therefore local and one-directional: a name assembled by a
+# chain that deep is not matched, exactly as a name assembled by `%`, `.format()` or
+# `"".join()` is not matched — an already-stated residual, not a new class.
+#
+# Its OWN constant rather than a reuse of `_ALIAS_RESOLUTION_BUDGET`: one bounds a
+# fixed-point iteration over a file's assignments, the other bounds expression
+# nesting. Sharing a name would let a future retune of either silently move the other.
+_FOLD_MAX_DEPTH: int = 32
+
+
+def _prose_string_ids(tree: ast.AST) -> frozenset[int]:
+    """``id()`` of every string constant that is PROSE rather than code.
+
+    Prose is a **bare string expression statement**: a module, class or function
+    docstring, or a PEP-258 attribute docstring (a bare string after an assignment).
+    ``ast.get_docstring`` covers only the first three; ``src/alfred/hooks/invoke.py:466``
+    is the fourth shape and is a MEASURED false positive without it.
+
+    WHY NOT exclude every string constant: ``getattr(_t, "_set_authorized_t3_nonce")``
+    hides the name in a string ARGUMENT. Excluding all strings would admit it. The
+    discriminator is POSITION — a string that is a whole statement documents; a string
+    anywhere else is data the program uses.
+
+    WHAT THIS CANNOT DO: a ``#`` comment is invisible to the parser, so a private name
+    there is neither prose-excluded nor flagged. Correct (a comment cannot launder) but
+    a different mechanism from this one.
+    """
+    return frozenset(
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+
+def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
+    """Map every line to its INNERMOST enclosing function name.
+
+    Module-scope lines are ABSENT from the map, which is load-bearing: the
+    module-level import exemption keys on ``.get(lineno) is None``.
+
+    **Both ``def`` and ``async def``**, in ONE ``isinstance`` over the tuple. A walk
+    matching only ``ast.FunctionDef`` silently maps nothing for ``async def`` and no
+    test in this repo fails — the sole real (path, function) exemption is a plain
+    ``def``. One tuple check also means the 332-file real-tree scan exercises both
+    node types, so the branch cannot rot behind a fixture.
+
+    ``ast.walk`` is breadth-first, so a nested function is visited AFTER the function
+    containing it and correctly overwrites its parent's lines.
+    """
+    mapping: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # MEASURED, not assumed: the parser sets `end_lineno` on every function it
+            # produces — 13 381 function defs across the 1 211 tracked `.py` files in
+            # this repo, zero of them None. typeshed types it `int | None` because a
+            # HAND-BUILT node (constructed, never parsed) leaves it None, and this gate
+            # only ever sees `ast.parse` output.
+            #
+            # ASSERTED, not defaulted. An `x if x is not None else node.lineno` fallback
+            # would silently truncate the map on the one input that could reach it, and
+            # `coverage.py` does not branch on a conditional expression — so that dead
+            # arm would be invisible to this file's REQUIRED 100% branch gate, exempting
+            # by construction precisely what the no-pragma rule forbids exempting.
+            assert node.end_lineno is not None
+            for line in range(node.lineno, node.end_lineno + 1):
+                mapping[line] = node.name
+    return mapping
+
+
+def _fold_str(node: ast.expr, depth: int = 0) -> str | None:
+    """Constant-fold a string expression, or ``None`` if it is not a literal.
+
+    ``ast.parse`` folds IMPLICIT concatenation (``"a" "b"``) into one ``Constant`` but
+    leaves ``"a" + "b"`` as a ``BinOp``. Matching raw ``Constant`` nodes therefore
+    missed ``"_set_authorized" + "_t3_nonce"``, which the review fleet executed
+    end-to-end: it registered an attacker nonce and minted a fully legitimate
+    ``TaggedContent[T3]`` for attacker content through ``tag_t3_with_nonce``.
+
+    Recursion is bounded by ``_FOLD_MAX_DEPTH`` rather than by the input's own depth,
+    because this runs inside ``_scan_text``'s ``GateInternalError`` fence — see that
+    constant for why an unbounded fold suppresses findings in OTHER files.
+
+    RESIDUAL, stated rather than implied: this folds ``+`` and implicit concatenation
+    and nothing else. ``"_set_authorized%s" % "_t3_nonce"``,
+    ``"_set_authorized{}".format("_t3_nonce")`` and ``"".join([...])`` are assembled
+    entirely from literals and all fold to ``None`` here.
+
+    Deliberately NOT ``ast.literal_eval``: that evaluates tuples, dicts and numbers
+    too, so it would answer a different question and raise on the common case.
+    """
+    if depth > _FOLD_MAX_DEPTH:
+        return None
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_str(node.left, depth + 1)
+        right = _fold_str(node.right, depth + 1)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            folded = _fold_str(value, depth + 1)
+            if folded is None:
+                return None
+            parts.append(folded)
+        return "".join(parts)
+    return None
+
+
+def _alias_names(tree: ast.AST, seed: str) -> tuple[frozenset[str], bool]:
+    """Local names bound to ``seed``, to a fixed point. Returns (names, overflowed).
+
+    Two binding forms: ``from m import X as Y`` and a plain ``B = X`` rebind, including
+    chains. THE FIXED POINT IS PROVEN REQUIRED: with ``C = B`` written BEFORE
+    ``B = BaseModel``, a single pass yields ``{BaseModel, B}`` and misses ``C``. Source
+    order is the author's to choose, so a resolver that depends on it is one an attacker
+    controls.
+
+    Parameterised by ``seed`` because more than one rule needs it. v1 built this for
+    ``BaseModel`` only and matched every other identifier bare, so ``_g = gc``,
+    ``from gc import get_referents`` and ``_v = vars`` all scanned clean — and on the
+    ``object`` receiver, executed, they minted genuine T3 objects with attacker content.
+
+    RESIDUAL: the alias set is PER-FILE. A name re-exported through another module and
+    imported under its new spelling is not resolved here.
+    """
+    names = {seed}
+    assignments: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.alias) and node.name == seed and node.asname is not None:
+            names.add(node.asname)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments.append((target.id, node.value.id))
+    for _ in range(_ALIAS_RESOLUTION_BUDGET):
+        grown = {t for t, source in assignments if source in names} - names
+        if not grown:
+            return frozenset(names), False
+        names |= grown
+    return frozenset(names), True
+
+
 def _is_tag_t3_call(node: ast.Call) -> bool:
     """``tag(T3, ...)`` — first positional arg is the identifier ``T3``.
 
