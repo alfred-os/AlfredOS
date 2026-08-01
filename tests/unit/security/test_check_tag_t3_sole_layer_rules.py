@@ -719,6 +719,174 @@ def test_a_deep_concatenation_chain_does_not_fault_the_detector_fence() -> None:
     assert check_tag_t3._scan_text(source, _PROBE) == []
 
 
+# ---------------------------------------------------------------------------
+# Task 3 — unbound `BaseModel` seam dispatch.
+#
+# `BaseModel.model_copy(low, update={"tier": T3})` builds field state through
+# `_copy_and_set_values` with the CLASS as receiver, so it reaches neither the
+# subclass overrides nor `model_post_init`. That is the original tl-2026-013
+# shape, and no runtime guard sits on the path it takes.
+# ---------------------------------------------------------------------------
+
+# R2-E — PINNED HERE, SEPARATELY FROM THE IMPLEMENTATION. Looping over
+# `check_tag_t3._BASEMODEL_SEAM_ATTRS` would be a TAUTOLOGICAL ORACLE: removing
+# `model_validate` from the constant removes it from the oracle in the same edit, so
+# the mutation cannot be observed. MEASURED — that exact mutation SURVIVED the
+# loop-over-the-constant form. Assert equality against the module constant FIRST,
+# then loop over this copy.
+_EXPECTED_SEAMS = frozenset(
+    {"copy", "model_copy", "model_construct", "model_validate", "model_validate_json"}
+)
+
+
+def test_unbound_basemodel_seam_dispatch_is_refused() -> None:
+    """The original tl-2026-013 unbound-dispatch spellings, asserted by EQUALITY.
+
+    ``copy`` is pydantic v1's spelling and does NOT route through ``model_copy`` — it
+    merges ``update`` inside ``copy_internals`` — so both must be named.
+    """
+    assert _messages('BaseModel.model_copy(low, update={"tier": T3})\n') == [
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ]
+    assert _messages('BaseModel.copy(low, update={"tier": T3})\n') == [
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ]
+
+
+def test_qualified_basemodel_receiver_is_refused() -> None:
+    """FLEET FINDING test-005 — ``pydantic.BaseModel.model_copy(...)`` scanned CLEAN.
+
+    The first revision hand-rolled ``isinstance(func.value, ast.Name)`` on the receiver
+    and so saw only the bare spelling, reintroducing exactly the CR-138 round-2 finding
+    #2 class that :func:`_arg_name` exists to close. Collapsing the receiver with
+    ``_arg_name`` — the same helper the other widenings use — means the two cannot
+    drift apart.
+    """
+    source = 'import pydantic\npydantic.BaseModel.model_copy(low, update={"tier": T3})\n'
+    assert _messages(source) == [f"{_PROBE}:2: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"]
+
+
+def test_qualified_receiver_does_not_widen_to_ordinary_modules() -> None:
+    """NEGATIVE FLOOR + POSITIVE TWIN (R2-I).
+
+    Collapsing the receiver must not make every two-deep attribute call a finding.
+    The twin swaps ONE token in the second floor (``mod.helper`` -> ``pydantic.BaseModel``)
+    and must TRIP — without it this is a bare floor that a gate with no rule at all
+    satisfies, which is the shape R2-I counted four of.
+    """
+    assert check_tag_t3._scan_text("import os\np = os.path.join(a, b)\n", _PROBE) == []
+    assert check_tag_t3._scan_text("x = mod.helper.copy()\n", _PROBE) == []
+    assert _messages("import pydantic\nx = pydantic.BaseModel.copy(low)\n") == [
+        f"{_PROBE}:2: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ], "positive twin: the qualified receiver must still be collapsed and refused"
+
+
+def test_basemodel_dunder_func_dispatch_is_refused() -> None:
+    """``BaseModel.model_construct.__func__(cls, ...)`` — one hop further.
+
+    Dispatch through the unbound function object skips every override on the way in,
+    exactly as the two-level form does, and the receiver of the seam is one attribute
+    deeper. Asserted by EQUALITY: containment on element 0 is the shape that let a
+    mutant survive elsewhere in this suite.
+    """
+    source = "built = BaseModel.model_construct.__func__(TaggedContent[T3], tier=T3)\n"
+    assert _messages(source) == [f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"]
+
+
+def test_a_non_seam_attribute_below_the_basemodel_receiver_stays_clean() -> None:
+    """COVERAGE + SHAPE for the nested arm's OWN seam check.
+
+    ``BaseModel.model_fields.get(x)`` reaches the nested arm with a BaseModel receiver
+    and a non-seam middle attribute — the only shape that evaluates
+    ``receiver.attr in _BASEMODEL_SEAM_ATTRS`` to False. Without it the nested arm is
+    scored entirely by fixtures where the receiver check already decided the answer.
+    """
+    assert check_tag_t3._scan_text("v = BaseModel.model_fields.get(name)\n", _PROBE) == []
+    assert _messages("v = BaseModel.model_copy.__func__(low)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ], "positive twin: the same two-deep shape with a SEAM in the middle must trip"
+
+
+def test_import_aliased_basemodel_is_refused() -> None:
+    """A09 — ``from pydantic import BaseModel as BM``."""
+    source = "from pydantic import BaseModel as BM\nBM.model_copy(obj, update=u)\n"
+    assert _messages(source) == [f"{_PROBE}:2: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"]
+
+
+def test_every_declared_seam_attribute_is_enforced() -> None:
+    """R2-E — pin the set as a literal, then loop over the PINNED copy.
+
+    FLEET FINDING test-003 M2/M4: v1 tested ``copy``/``model_copy`` only, so dropping
+    ``model_validate`` / ``model_validate_json`` from the constant survived the suite.
+    The plan's replacement looped over ``_BASEMODEL_SEAM_ATTRS`` itself, which is the
+    project's own recorded "a test oracle must not reuse the implementation predicate"
+    failure — MEASURED: that mutation survived the loop-over-the-constant form too.
+    """
+    assert check_tag_t3._BASEMODEL_SEAM_ATTRS == _EXPECTED_SEAMS, (
+        "the declared BaseModel seam set moved; this oracle pins it independently"
+    )
+    for seam in sorted(_EXPECTED_SEAMS):
+        assert _messages(f"BaseModel.{seam}(low, update=u)\n") == [
+            f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+        ], f"seam {seam!r} is declared but not enforced"
+
+
+def test_a_non_seam_attribute_on_the_basemodel_receiver_stays_clean() -> None:
+    """NEGATIVE FLOOR + TWIN. The receiver alone must not be sufficient.
+
+    FLEET FINDING test-003 M4: a mutant ignoring ``_BASEMODEL_SEAM_ATTRS`` entirely
+    survived v1's suite, because every fixture named a seam.
+    """
+    assert check_tag_t3._scan_text("s = BaseModel.model_json_schema()\n", _PROBE) == []
+    assert _messages("s = BaseModel.model_construct()\n") == [
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ]
+
+
+def test_instance_model_copy_stays_clean_with_a_positive_twin() -> None:
+    """NEGATIVE FLOOR + TWIN. ``obj.model_copy(...)`` is the supported API.
+
+    THE RULE IS RECEIVER-SCOPED ON PURPOSE: a receiver-blind rule flagging every
+    ``model_copy`` reds ordinary pydantic instance use across the tree. Measured cost
+    of the receiver-scoped form: ZERO sites in 332 files.
+    """
+    assert check_tag_t3._scan_text('o = obj.model_copy(update={"a": 1})\n', _PROBE) == []
+    assert _messages('o = BaseModel.model_copy(update={"a": 1})\n') == [
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ]
+
+
+def test_basemodel_named_only_in_prose_stays_clean_with_a_positive_twin() -> None:
+    """NEGATIVE FLOOR + TWIN. ``tiers.py`` and ``quarantine.py`` docstrings name these
+    spellings repeatedly; measured, every textual ``BaseModel.<attr>`` hit under both
+    scan roots is prose and there are ZERO real accesses."""
+    assert (
+        check_tag_t3._scan_text(
+            '"""See ``BaseModel.model_copy(obj, update={"tier": T3})``."""\n', _PROBE
+        )
+        == []
+    )
+    assert _messages('BaseModel.model_copy(obj, update={"tier": T3})\n') == [
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+    ]
+
+
+def test_a_deeper_than_budget_basemodel_chain_is_reported_by_the_scanner() -> None:
+    """The BaseModel overflow flag must be FOLDED into the scanner's budget report.
+
+    Building the alias set and then dropping its ``overflowed`` half on the floor is a
+    silent fail-OPEN: every seam decision in the file is then made on an alias set the
+    resolver has already said is incomplete. Nothing else in the suite drives this arc —
+    the ``vars`` chain test reports overflow through a different flag.
+    """
+    depth = check_tag_t3._ALIAS_RESOLUTION_BUDGET + 5
+    chain = "".join(f"a{i} = a{i - 1}\n" for i in range(depth, 0, -1)) + "a0 = BaseModel\n"
+    assert _messages(chain) == [f"{_PROBE}:1: {check_tag_t3._ALIAS_BUDGET_MESSAGE}"]
+    assert check_tag_t3._scan_text("b = BaseModel\n", _PROBE) == [], (
+        "positive twin: an ordinary alias must NOT report overflow"
+    )
+
+
 def test_every_keyed_identifier_is_alias_resolved() -> None:
     """THE META-GUARD. Seven Criticals across two review rounds were ONE shape.
 
@@ -739,15 +907,20 @@ def test_every_keyed_identifier_is_alias_resolved() -> None:
     Two identifiers are resolved by DIFFERENT mechanisms, and the row does not care
     which — it asserts the OUTCOME, so it stays honest if a rule changes technique:
 
-    * ``vars``, ``gc`` and ``ctypes`` go through :func:`_alias_names`;
+    * ``vars``, ``gc``, ``ctypes`` and ``BaseModel`` go through :func:`_alias_names`;
     * ``object`` is closed by RECEIVER-BLINDNESS instead. The ``__setattr__`` rules
       never ask who the receiver is, so no identifier is left to rebind. That is a
       STRONGER closure than resolution, not a missing one, and the row proves it
       behaviourally rather than trusting the claim.
     """
     # (identifier, direct spelling, rebound spelling, import-aliased spelling)
-    # Task 3 adds the BaseModel row.
     cases = [
+        (
+            "BaseModel",
+            'BaseModel.model_copy(low, update={"tier": T3})',
+            '_B = BaseModel\n_B.model_copy(low, update={"tier": T3})',
+            'from pydantic import BaseModel as _B\n_B.model_copy(low, update={"tier": T3})',
+        ),
         (
             "vars",
             'vars(obj)["tier"] = T3',
@@ -792,7 +965,7 @@ def test_record_appends_a_message_and_a_snippet_and_tolerates_a_missing_line() -
 
     No ``_scan_text`` INPUT is known to reach it (``str.splitlines`` splits on strictly
     more separators than the tokenizer, so the line list is never shorter than the
-    parser's line numbering). It stays because nine rules share this helper and a
+    parser's line numbering). It stays because every rule shares this helper and a
     violation must never become an ``IndexError`` that re-files a real finding as an
     unscannable file.
     """
