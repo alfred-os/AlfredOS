@@ -342,13 +342,17 @@ def test_check_tag_t3_script_allows_clean_file(tmp_path: Path) -> None:
     )
 
 
-def test_check_tag_t3_script_exempts_real_authorised_homes() -> None:
-    """The authorised homes (tiers.py, quarantine.py) are exempt by resolved path.
+def test_check_tag_t3_script_exempts_real_authorised_home() -> None:
+    """The authorised home (tiers.py) is exempt by resolved path.
 
-    Per the PR-S3-1 briefing the authorised callers list is EXACTLY:
+    The authorised callers list is EXACTLY:
       - src/alfred/security/tiers.py   (the ``tag`` overload bodies)
-      - src/alfred/security/quarantine.py (the downgrade boundary)
       - tests/unit/security/**         (tests assert the gate's behaviour)
+
+    SINGULAR since #538. The PR-S3-1 briefing named a second entry, and this
+    docstring went on restating it as "EXACTLY" after the exemption was
+    deleted — while the test stayed green, because its body only ever
+    exercised ``tiers.py``.
 
     CR-138 finding #11 closed the suffix-based bypass: the script now
     matches against absolute, resolved paths inside this repo. This
