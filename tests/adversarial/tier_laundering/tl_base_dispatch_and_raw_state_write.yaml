@@ -86,27 +86,57 @@ out_of_scope_rationale: >-
   would not close — a runtime cost for no runtime property.
   WHAT THE AUTHORING LAYER NOW MODELS (#538, scripts/check_tag_t3.py, each
   rule default-deny on the vehicle or the shape rather than an enumeration of
-  spellings): the vehicle attributes __dict__ / __setstate__ / __getstate__ /
-  __reduce__ / __reduce_ex__ / __new__ / __mro__ / __bases__
-  (_RAW_VEHICLE_ATTR_MESSAGE); __class__ in store or delete context
+  spellings). THIS PARAGRAPH IS NOT MAINTAINED BY HAND: every rule named here
+  is checked against the gate's own constants and against the pinned literals
+  in tests/unit/security/test_check_tag_t3_sole_layer_rules.py by
+  test_the_corpus_record_matches_the_shipped_rule_set, in BOTH directions — a
+  rule that ships without landing here reds, and a rule named here that no
+  longer exists reds. It had drifted four times before that test existed.
+  The vehicle attributes __dict__ / __setstate__ / __getstate__ /
+  __reduce__ / __reduce_ex__ / __new__ / __mro__ / __bases__ / __doc__
+  (_RAW_VEHICLE_ATTR_MESSAGE) — __doc__ is here because it hands the PROSE
+  EXCLUSION back as data: a docstring whose whole value is a vehicle or
+  private name, read back through obj.__doc__, is a string in code position
+  that no string-keyed rule can see; __class__ in store or delete context
   (_RAW_CLASS_SWAP_MESSAGE); vars() with the receiver alias-resolved
-  (_RAW_VEHICLE_VARS_MESSAGE); any reference to __setattr__ outside
-  Call.func position, receiver-BLIND (_RAW_SETATTR_ALIASED_MESSAGE); the
-  __setattr__ call shape, admissible only when args[0] is the bare Name self
-  AND args[1] folds to a plain non-dunder literal outside
-  _TAGGED_STATE_FIELDS = {tier, content, source} (_RAW_SETATTR_SHAPE_MESSAGE);
-  a vehicle name written as a folded STRING in code position, over a set
-  deliberately wider than the attribute set (_RAW_VEHICLE_STR_MESSAGE) —
+  (_RAW_VEHICLE_VARS_MESSAGE); any reference to __setattr__, __delattr__ or
+  __init__ outside Call.func position, receiver-BLIND
+  (_RAW_SETATTR_ALIASED_MESSAGE / _RAW_DELATTR_ALIASED_MESSAGE /
+  _RAW_INIT_ALIASED_MESSAGE); the __setattr__ and __delattr__ call shapes,
+  which share one admissibility predicate because both put the target at
+  args[0] and the field name at args[1] — admissible only when args[0] is the
+  bare Name self AND args[1] folds to a plain non-dunder literal outside
+  _TAGGED_STATE_FIELDS = {tier, content, source} (_RAW_SETATTR_SHAPE_MESSAGE /
+  _RAW_DELATTR_SHAPE_MESSAGE); __init__ re-entered on anything but self or a
+  zero-argument super(), because pydantic writes the instance mapping through
+  validate_python(self_instance=...) (_RAW_INIT_SHAPE_MESSAGE); a vehicle name
+  written as a folded STRING in code position, over a set deliberately wider
+  than the attribute set — it also carries __setattr__ / __delattr__ /
+  __class__ / __init__ (_RAW_VEHICLE_STR_MESSAGE) —
   getattr(object, "__setattr__")(low, "tier", T3) produces no ast.Attribute
-  node at all, so every attribute-keyed rule is blind to it; the
+  node at all, so every attribute-keyed rule is blind to it; the same names as
+  a bare ast.Name id, which a module docstring reaches with neither an
+  attribute node nor a string constant (_RAW_VEHICLE_NAME_MESSAGE); the
   carrier-by-reference primitives gc.get_referents / gc.get_objects /
-  ctypes.py_object / ctypes.cast / copyreg._reconstructor / copyreg.__newobj__
+  gc.get_referrers / ctypes.py_object / ctypes.cast / copyreg._reconstructor /
+  copyreg.__newobj__
   with the module name alias-resolved (_RAW_CARRIER_MESSAGE); unbound
   BaseModel seam dispatch with the receiver collapsed by identifier
   (_BASEMODEL_VALUE_MESSAGE); and the alfred.security.tiers private surface in
   code position (_PRIVATE_SURFACE_MESSAGE). An alias chain deeper than the
   resolver's budget is reported rather than silently truncated
   (_ALIAS_BUDGET_MESSAGE).
+  WHAT __delattr__ DOES, since it is the newest member and the least obvious:
+  it is a laundering, not a crash. object.__delattr__(low, "tier") succeeds
+  where the ordinary del low.tier raises pydantic frozen_instance, and what it
+  leaves behind is a TaggedContent with no tag — measured on a genuine T3
+  holding attacker content, getattr(hot, "tier", None) is T3 then reads False
+  while repr(), dict() and model_copy() all succeed and silently omit the
+  field. tiers.py already refuses that exact end state on the two seams it CAN
+  observe (_refuse_if_tier_is_narrowed_away and the {"tier": None} erasure arm
+  of _coerce_and_guard_update, both citing the same getattr mechanism), so the
+  authoring rule applies the existing judgement to the seam no runtime guard
+  can reach.
   ACCEPTED RESIDUALS OF THE AUTHORING LAYER, stated rather than claimed
   closed. (1) Cross-module re-export aliasing — both alias environments are
   per-file. (2) A name assembled by any operation other than + or implicit
@@ -114,18 +144,22 @@ out_of_scope_rationale: >-
   so "_set_authorized%s" % "_t3_nonce", "_set_authorized{}".format("_t3_nonce")
   and "".join([...]) are assembled ENTIRELY from literals and all scan clean —
   the residual is the OPERATION, not the operands. (3) Carrier-by-reference
-  beyond the six named primitives: the vehicle set is a class ban plus a named
-  primitive list, not a proof of completeness. (4) A name-keyed collision —
+  beyond the named primitives: the vehicle set is a class ban plus a named
+  primitive list, not a proof of completeness. NO COUNT IS NAMED, and the one
+  that used to be here is why — it said "six" and the review found the seventh
+  (gc.get_referrers, the unlisted sibling of two listed gc primitives).
+  (4) A name-keyed collision —
   another module defining its own _log_t3 reds benignly; measured zero today.
   (5) TaggedContent.model_construct(...) is refused at RUNTIME only, because
   the seam rule is receiver-scoped to BaseModel aliases. (6)
-  object.__setattr__(self, "metadata", ...) on a TaggedContent: metadata is
+  object.__setattr__(self, "metadata", ...) and object.__delattr__(self,
+  "metadata") on a TaggedContent: metadata is
   deliberately NOT in _TAGGED_STATE_FIELDS, because
   src/alfred/hooks/context.py:106 writes it on a HookContext, an unrelated
   frozen dataclass that happens to share the field name — banning it would red
-  a legitimate site for a name collision. The residual cannot change tier,
-  content or source, so it cannot mint or relabel T3; it can only alter
-  auxiliary metadata. (7) self is a NAMING convention, not a type guarantee: a
+  a legitimate site for a name collision. The residual cannot change or remove
+  tier, content or source, so it cannot mint, relabel or untag T3; it can only
+  alter auxiliary metadata. (7) self is a NAMING convention, not a type guarantee: a
   plain function whose first parameter is called self reaches the admissible
   branch with no subclass involved. _TAGGED_STATE_FIELDS is what actually
   holds; the self check narrows the surface but proves nothing on its own.

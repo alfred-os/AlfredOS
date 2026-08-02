@@ -83,12 +83,13 @@ WHAT THE #538 RULES CANNOT DO — accepted residuals, stated rather than claimed
   benignly. Measured: zero today.
 - **``TaggedContent.model_construct(...)``** is refused at RUNTIME only; the seam rule
   is receiver-scoped to ``BaseModel`` aliases.
-- **``object.__setattr__(self, "metadata", …)`` on a ``TaggedContent``.** ``metadata``
-  is deliberately NOT in ``_TAGGED_STATE_FIELDS``: ``src/alfred/hooks/context.py:106``
-  writes it on a ``HookContext``, an unrelated frozen dataclass that happens to share
-  the field name, so banning it would red a legitimate site for a name collision. The
-  residual cannot change ``tier``, ``content`` or ``source``, so it cannot mint or
-  relabel T3 — only alter auxiliary metadata.
+- **``object.__setattr__(self, "metadata", …)`` and ``object.__delattr__(self,
+  "metadata")`` on a ``TaggedContent``.** ``metadata`` is deliberately NOT in
+  ``_TAGGED_STATE_FIELDS``: ``src/alfred/hooks/context.py:106`` writes it on a
+  ``HookContext``, an unrelated frozen dataclass that happens to share the field name,
+  so banning it would red a legitimate site for a name collision. The residual cannot
+  change or remove ``tier``, ``content`` or ``source``, so it cannot mint, relabel or
+  untag T3 — only alter auxiliary metadata.
 - **``self`` is a NAMING convention, not a type guarantee.** A plain function whose
   first parameter is called ``self`` reaches the admissible branch with no subclass
   involved. ``_TAGGED_STATE_FIELDS`` is what actually holds; the ``self`` check
@@ -193,6 +194,25 @@ _RAW_STATE_VEHICLE_ATTRS: frozenset[str] = frozenset(
 # the receiver-blind call rule cannot see it. It must NOT join the attribute set, because
 # 62 live sites carry that attribute node and the call rule already decides them on
 # shape.
+#
+# `__delattr__` SAT IN THIS SET WITH NO CALL-SHAPE RULE AND NO ALIAS RULE (PR #553
+# review, C1) — the third member of the `__setattr__`/`__init__` family, given only the
+# folded-string treatment, so `object.__delattr__(low, "tier")` and
+# `_d = object.__delattr__; _d(low, "tier")` both scanned clean. EXECUTED against a real
+# `TaggedContent[T2]` and a real `TaggedContent[T3]`: `frozen=True` does not observe it
+# (the ordinary `del low.tier` IS refused — pydantic raises `frozen_instance` — so this
+# is the sole-layer class exactly), and what it leaves behind is a laundering rather
+# than a crash. The tier field goes ABSENT, and `getattr(obj, "tier", fallback)` then
+# returns the fallback: measured `getattr(hot, "tier", None) is T3` -> False on a
+# genuine T3 object still carrying attacker content, with `repr()`, `dict()` and
+# `model_copy()` all succeeding and silently omitting the tag. `tiers.py` already
+# refuses that exact end state on the two seams it CAN reach — see
+# `_refuse_if_tier_is_narrowed_away` and the `{"tier": None}` erasure arm of
+# `_coerce_and_guard_update`, both of which cite the same `getattr` mechanism — so this
+# is not a new judgement about what counts as laundering, it is the same one on the seam
+# no runtime guard can observe. It stays OUT of the attribute set for the same reason
+# its two siblings do: the pair of rules below decides the attribute form on SHAPE, and
+# the string set has to stay wider than the attribute set for the getattr spelling.
 _RAW_STATE_VEHICLE_NAMES: frozenset[str] = _RAW_STATE_VEHICLE_ATTRS | frozenset(
     {"__setattr__", "__delattr__", "__class__", "__init__"}
 )
@@ -326,6 +346,15 @@ _RAW_SETATTR_SHAPE_MESSAGE: str = (
 _RAW_SETATTR_ALIASED_MESSAGE: str = (
     "__setattr__ referenced outside direct-call position — an alias defeats any rule "
     "keyed on the call. Call it inline on `self` with a literal field name."
+)
+_RAW_DELATTR_SHAPE_MESSAGE: str = (
+    "__delattr__ call whose target is not `self` or whose field name is computed, "
+    "dunder or a TaggedContent state field — removing the tag leaves a tagged object "
+    "with nothing to read, and getattr(obj, 'tier', fallback) then yields the fallback."
+)
+_RAW_DELATTR_ALIASED_MESSAGE: str = (
+    "__delattr__ taken as a value rather than called — an alias defeats any rule keyed "
+    "on the call. Invoke it inline, on `self`, naming a literal non-state field."
 )
 _RAW_CLASS_SWAP_MESSAGE: str = (
     "assignment to __class__ — retypes a live object past every constructor guard. "
@@ -875,8 +904,19 @@ def _record(violations: list[str], lines: list[str], path: Path, lineno: int, me
     violations.append(f"  {snippet}")
 
 
-def _is_benign_setattr_target(node: ast.Call) -> bool:
+def _is_benign_state_mutation_target(node: ast.Call) -> bool:
     """True for the established frozen-dataclass idiom, false for every vehicle.
+
+    SHARED BY ``__setattr__`` AND ``__delattr__`` (PR #553 review, C1), because the
+    question is character-for-character the same one: both put the TARGET at ``args[0]``
+    and the FIELD NAME at ``args[1]``, and everything this predicate reads lives in
+    those two positions. ``__setattr__``'s third argument is the value and ``__delattr__``
+    has none, neither of which changes admissibility. A second copy differing only in the
+    dunder it is called for is the #422 shape the rest of this file keeps naming — a
+    shared helper fails LOUD, N copies drift SILENTLY — and the drift here would be
+    silent in the worst direction: one of the two rules quietly admitting a shape the
+    other refuses. Named for the CLASS rather than for either dunder so the next member
+    of the family does not have to rename it.
 
     DEFAULT-DENY ON SHAPE. Admissible only when ALL of:
 
@@ -896,13 +936,16 @@ def _is_benign_setattr_target(node: ast.Call) -> bool:
       "content", v)`` is a plain function whose first parameter merely happens to be
       called ``self``. ``self`` is a naming convention, not a type.
 
-    A call with fewer than two arguments (``object.__setattr__(*parts)``) is refused
-    rather than admitted: a call this rule cannot read is a call it must not admit.
+    A call with fewer than two arguments (``object.__setattr__(*parts)``,
+    ``object.__delattr__(*parts)``) is refused rather than admitted: a call this rule
+    cannot read is a call it must not admit.
 
     Three live sites depend on the admissible case and none may red:
     ``src/alfred/hooks/context.py:106``, ``src/alfred/plugins/web_fetch/allowlist.py:139``,
     ``src/alfred/plugins/web_fetch/fetch_dispatcher.py:219``. All three write ``self``. Measured
-    false-positive cost of this shape across both scan roots: ZERO.
+    false-positive cost of this shape across both scan roots: ZERO on the ``__setattr__``
+    side, and ZERO on the ``__delattr__`` side for the stronger reason that the tree
+    holds no ``__delattr__`` node of ANY carrier — attribute, bare name or string.
 
     ESCAPE HATCH, named so nobody invents one: a frozen dataclass that genuinely needs
     a ``tier`` field and is NOT a ``TaggedContent`` should set it through its own
@@ -925,8 +968,11 @@ def _is_benign_setattr_target(node: ast.Call) -> bool:
 def _is_self_init_re_entry(node: ast.Call, receiver: ast.expr) -> bool:
     """True when this ``__init__`` call provably re-enters ``self``, false otherwise.
 
-    THE SIBLING OF :func:`_is_benign_setattr_target`, and it exists for the same class of
-    write (PR #553 review, F3). ``BaseModel.__init__`` calls
+    THE SIBLING OF :func:`_is_benign_state_mutation_target`, and it exists for the same
+    class of write (PR #553 review, F3). It is a SEPARATE function rather than a third
+    caller of that one because the admissibility question genuinely differs: ``__init__``
+    admits a zero-argument ``super()`` RECEIVER with no positional argument at all, and
+    it has no field-name argument to fold. ``BaseModel.__init__`` calls
     ``validate_python(..., self_instance=self)``, which writes the instance mapping
     DIRECTLY — it traverses no method the model can override, so ``frozen=True`` never
     sees it. Executed against a real ``TaggedContent[T2]``:
@@ -1372,8 +1418,23 @@ def _detect(
             # RECEIVER-BLIND. The rule never asks who the receiver is, so there is no
             # identifier left to rebind — that, not a wider alias set, is what closed
             # the four executed sec-001 spellings.
-            if func.attr == "__setattr__" and not _is_benign_setattr_target(node):
+            if func.attr == "__setattr__" and not _is_benign_state_mutation_target(node):
                 messages.append(_RAW_SETATTR_SHAPE_MESSAGE)
+            # THE THIRD MEMBER OF THE FAMILY, receiver-blind on the same grounds (PR #553
+            # review, C1). `__delattr__` was in the vehicle-NAME set — so the folded-string
+            # spelling red — but had neither of the two rules its siblings got, and both
+            # `object.__delattr__(low, "tier")` and the aliased `_d = object.__delattr__`
+            # scanned clean. REJECTED ALTERNATIVE, on the record because it is the shorter
+            # patch and someone will propose it again: adding `__delattr__` to
+            # `_RAW_STATE_VEHICLE_ATTRS` closes both spellings in one word and costs zero
+            # today (the tree holds no `__delattr__` node at all). It was not taken because
+            # it is a blanket ban with no admissible shape, so the day a frozen dataclass
+            # legitimately deletes one of its own non-state fields the only remedy is
+            # deleting the member — a wholesale relaxation, invisible at every site that
+            # then depends on it, which is the failure this module's docstring closes with.
+            # The pair below already carries the right escape hatch.
+            if func.attr == "__delattr__" and not _is_benign_state_mutation_target(node):
+                messages.append(_RAW_DELATTR_SHAPE_MESSAGE)
             # RECEIVER-BLIND for the same reason, and it has to be: the bound spelling
             # `low.__init__(content=…)` and the unbound `type(low).__init__(low, …)`
             # reach the identical write, so a rule that read the receiver would have to
@@ -1401,6 +1462,14 @@ def _detect(
         # widens the day a new one appears.
         if node.attr == "__setattr__" and id(node) not in call_func_ids:
             messages.append(_RAW_SETATTR_ALIASED_MESSAGE)
+        # THE SAME ONE-POSITION WHITELIST for `__delattr__` (PR #553 review, C1).
+        # `_d = object.__delattr__` followed by `_d(low, "tier")` puts no `__delattr__`
+        # node in `Call.func` position, so the shape rule above cannot see it BY
+        # CONSTRUCTION — measured, that spelling scanned clean while the equivalent
+        # `__setattr__` and `__init__` spellings both red. Measured cost: zero
+        # `__delattr__` attribute nodes exist across both scan roots, in any position.
+        if node.attr == "__delattr__" and id(node) not in call_func_ids:
+            messages.append(_RAW_DELATTR_ALIASED_MESSAGE)
         # THE SAME ONE-POSITION WHITELIST for `__init__` (PR #553 review, F3). Without
         # it, `_f = type(low).__init__` followed by `_f(low, content=ATTACKER)` reaches
         # the write with no `__init__` node in `Call.func` position at all, so the shape

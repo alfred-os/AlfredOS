@@ -165,6 +165,11 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         check_tag_t3._RAW_VEHICLE_NAME_MESSAGE,
         check_tag_t3._RAW_INIT_SHAPE_MESSAGE,
         check_tag_t3._RAW_INIT_ALIASED_MESSAGE,
+        # C1 completed the family: `__delattr__` had the folded-string treatment but
+        # neither of the two rules its siblings got, so `object.__delattr__(low, "tier")`
+        # and its aliased form both scanned clean.
+        check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE,
+        check_tag_t3._RAW_DELATTR_ALIASED_MESSAGE,
     }
     declared = {
         value

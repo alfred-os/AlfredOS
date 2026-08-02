@@ -1323,6 +1323,42 @@ real-tree scan.
 | `_TAGGED_STATE_FIELDS` reduced to `{"tier"}` **[fleet sec2-002]** | `test_setattr_denies_every_tagged_state_field_regardless_of_target` |
 | `metadata` ADDED to `_TAGGED_STATE_FIELDS` (WIDENING) | `test_frozen_dataclass_post_init_idiom_stays_clean_with_a_positive_twin` |
 
+**ADDENDUM — PR #553 review round 3 (`__delattr__`, C1).** Appended rather than folded
+into the rows above, because those rows are a dated record of what the design said at the
+time and rewriting them would falsify it. Two things moved:
+
+- `_is_benign_setattr_target` is now **`_is_benign_state_mutation_target`**. Every row
+  above naming the old spelling refers to this function. It was renamed, not forked, when
+  `__delattr__` became its second caller: both dunders put the target at `args[0]` and the
+  field name at `args[1]`, so the admissibility question is identical, and a second copy
+  is the #422 shape (a shared helper fails LOUD, N copies drift SILENTLY) with the drift
+  landing in the worst place — one rule quietly admitting a shape the other refuses.
+- `__delattr__` gained the pair `__setattr__` and `__init__` already had: a receiver-blind
+  call-shape rule and a one-position (`Call.func`) alias rule. It had been in
+  `_RAW_STATE_VEHICLE_NAMES` — so the folded-string form red — with neither of those, so
+  `object.__delattr__(low, "tier")` and `_d = object.__delattr__; _d(low, "tier")` both
+  scanned clean. Executed: the delete succeeds where `del low.tier` raises pydantic
+  `frozen_instance`, and it launders rather than crashes — the tag goes absent, so
+  `getattr(obj, "tier", fallback)` yields the fallback, which is the exact end state
+  `_refuse_if_tier_is_narrowed_away` and the `{"tier": None}` erasure arm of
+  `_coerce_and_guard_update` already refuse at runtime wherever they can see it.
+
+| Mutation (round 3) | Must red |
+| --- | --- |
+| delete the `__delattr__` call-shape rule | `test_delattr_on_a_foreign_object_is_refused` |
+| delete the `__delattr__` alias rule | `test_delattr_referenced_outside_call_position_is_refused` |
+| `__delattr__` rule keyed on a name that never occurs | `test_delattr_on_a_foreign_object_is_refused` |
+| drop `id(node) not in call_func_ids` from it (WIDENING) | `test_delattr_referenced_outside_call_position_is_refused` |
+| invert that whitelist so the rule fires on nothing | `test_delattr_referenced_outside_call_position_is_refused` |
+| fork the shared predicate onto a permissive private copy | `test_the_two_state_mutation_rules_share_one_admissibility_predicate` |
+| the `__delattr__` meta-guard row is deleted | `test_every_identifier_the_gate_keys_on_is_rowed_or_declared_residual` |
+| a new `_*_MESSAGE` ships without landing in the corpus record | `test_the_corpus_record_matches_the_shipped_rule_set` |
+| a new vehicle attribute / carrier ships unrecorded | `test_the_corpus_record_matches_the_shipped_rule_set` |
+| the corpus record names a rule the gate no longer has | `test_the_corpus_record_matches_the_shipped_rule_set` |
+| the `_alias_names` arity/keyword guard is removed | `test_the_alias_seed_derivation_fails_loudly_on_a_call_shape_it_cannot_read` |
+| the sweep decodes git output in text mode again | `test_the_sweep_decodes_git_output_as_utf8_not_as_the_platform_locale` |
+| the git-grep helper's empty-output guard is removed | `test_the_sweep_decodes_git_output_as_utf8_not_as_the_platform_locale` |
+
 - [ ] **Step 9: Commit**
 
 ```bash

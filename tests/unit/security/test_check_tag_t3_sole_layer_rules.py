@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO_ROOT / "scripts" / "check_tag_t3.py"
@@ -497,6 +500,172 @@ def test_setattr_with_fewer_than_two_arguments_is_refused() -> None:
     assert _messages("object.__setattr__(*parts)\n") == [
         f"{_PROBE}:1: {check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE}"
     ]
+
+
+def test_delattr_on_a_foreign_object_is_refused() -> None:
+    """PR #553 SECURITY REVIEW, C1 — the THIRD member of the family had no call rule.
+
+    ``__delattr__`` sat in ``_RAW_STATE_VEHICLE_NAMES``, so the folded-string spelling
+    red, but it had neither of the two rules ``__setattr__`` and ``__init__`` were both
+    given. Both of these scanned CLEAN before this fix.
+
+    WHAT IT DOES AT RUNTIME, executed against the real ``alfred.security.tiers`` rather
+    than argued. The ordinary path is already refused — ``del low.tier`` and
+    ``delattr(low, "tier")`` both raise pydantic's ``frozen_instance`` ValidationError —
+    while ``object.__delattr__(low, "tier")`` SUCCEEDS, which is the sole-layer class
+    exactly: the write traverses no method the model can override.
+
+    And what it leaves is a LAUNDERING, not a crash. Measured on a genuine
+    ``TaggedContent[T3]`` holding attacker content: the tag simply goes absent, so
+    ``getattr(hot, "tier", None) is T3`` reads False, ``getattr(hot, "tier", T0)``
+    reads T0, and ``repr()``, ``dict()`` and ``model_copy()`` all SUCCEED while silently
+    omitting the field. Only a direct ``.tier`` read raises. That end state is one
+    ``tiers.py`` already refuses wherever it can see it — ``_refuse_if_tier_is_narrowed_away``
+    (``copy(exclude={"tier"})``) and the ``{"tier": None}`` erasure arm of
+    ``_coerce_and_guard_update`` both cite the same ``getattr(obj, "tier", fallback)``
+    mechanism in their own docstrings — so this rule is not a new judgement about what
+    counts as laundering. It is the existing one, on the seam no runtime guard can reach.
+    """
+    for label, source in {
+        "unbound-foreign-target": 'object.__delattr__(low, "tier")\n',
+        "bound-instance-dispatch": 'low.__delattr__("tier")\n',
+        "type-dispatch-on-content": 'type(low).__delattr__(low, "content")\n',
+    }.items():
+        assert any(check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE in m for m in _messages(source)), (
+            f"{label} was admitted"
+        )
+
+    # POSITIVE TWIN, one token from the first fixture: the frozen-dataclass idiom on a
+    # non-state field must stay clean, or the rule is a blanket ban rather than a shape.
+    assert check_tag_t3._scan_text('object.__delattr__(self, "metadata")\n', _PROBE) == []
+
+
+def test_delattr_is_receiver_blind_like_its_two_siblings() -> None:
+    """The receiver is the rebindable half, so the rule must never read it.
+
+    ``object`` already carries a row in ``_KEYED_IDENTIFIER_SPELLINGS`` for the
+    ``__setattr__`` rules; this asserts the SAME closure holds for ``__delattr__``
+    rather than assuming the two rules share more than their shape. Every spelling names
+    the same receiver differently and every one must red.
+    """
+    for label, source in {
+        "DIRECT": 'object.__delattr__(low, "tier")\n',
+        "REBOUND": '_o = object\n_o.__delattr__(low, "tier")\n',
+        "IMPORT-ALIASED": 'from builtins import object as _o\n_o.__delattr__(low, "tier")\n',
+        "QUALIFIED": 'import builtins\nbuiltins.object.__delattr__(low, "tier")\n',
+    }.items():
+        assert any(check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE in m for m in _messages(source)), (
+            f"the {label} receiver spelling was admitted — the rule is reading the receiver"
+        )
+
+
+def test_delattr_denies_every_tagged_state_field_regardless_of_target() -> None:
+    """The FIELD arm, reached through ``__delattr__`` rather than through its sibling.
+
+    R2-G's discipline applies unchanged: with a foreign target the ``self`` check
+    short-circuits first, so the field ban is never evaluated and a mutation to it would
+    be scored by a fixture that cannot see it. The ``self`` cases are what discriminate.
+
+    Pinned against the same module-level literal the ``__setattr__`` test uses — the two
+    rules share :func:`_is_benign_state_mutation_target`, so they must share the oracle
+    for the set it reads, or the shared predicate can drift under one of them.
+    """
+    expected = _EXPECTED_TAGGED_STATE_FIELDS
+    assert expected == check_tag_t3._TAGGED_STATE_FIELDS, (
+        "the declared TaggedContent state fields moved; this oracle pins them"
+    )
+    for field in sorted(expected):
+        assert _messages(f'object.__delattr__(self, "{field}")\n') == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE}"
+        ], f"self-targeted DELETE of {field!r} was admitted"
+        assert _messages(f'object.__delattr__(low, "{field}")\n') == [
+            f"{_PROBE}:1: {check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE}"
+        ], f"foreign-targeted DELETE of {field!r} was admitted"
+
+
+def test_delattr_on_self_is_refused_for_a_dunder_or_a_computed_field_name() -> None:
+    """The DUNDER and UNFOLDABLE arms, both reached through ``self``.
+
+    Same shape as the ``__setattr__`` twin, and it must be asserted separately: these
+    two arms live in the shared predicate, but which RULE consults it is decided by the
+    ``func.attr`` comparison, and that comparison is the thing a mutant deletes.
+    """
+    assert _messages('object.__delattr__(self, "__dict__")\n') == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE}",
+        f"{_PROBE}:1: {check_tag_t3._RAW_VEHICLE_STR_MESSAGE}",
+    ]
+    assert _messages("object.__delattr__(self, computed)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE}"
+    ]
+    assert check_tag_t3._scan_text('object.__delattr__(self, "path_prefix")\n', _PROBE) == []
+
+
+def test_delattr_with_fewer_than_two_arguments_is_refused() -> None:
+    """``object.__delattr__(*parts)`` supplies no readable target — default-deny.
+
+    The starred form matters more here than for ``__setattr__``: a two-argument
+    ``__delattr__`` is the COMPLETE call, so ``*parts`` is the natural way to write one
+    whose field name no lexical rule can read.
+    """
+    assert _messages("object.__delattr__(*parts)\n") == [
+        f"{_PROBE}:1: {check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE}"
+    ]
+
+
+def test_delattr_referenced_outside_call_position_is_refused() -> None:
+    """PR #553 C1, the alias half — the ONE-POSITION WHITELIST its siblings both have.
+
+    ``_d = object.__delattr__`` then ``_d(low, "tier")`` puts no ``__delattr__`` node in
+    ``Call.func`` position, so the shape rule above is blind to it BY CONSTRUCTION. This
+    is the second of the two spellings the review reproduced as a MISS.
+
+    Measured across both scan roots: zero ``__delattr__`` attribute nodes exist in ANY
+    position, so this costs nothing.
+    """
+    for source in (
+        '_d = object.__delattr__\n_d(low, "tier")\n',
+        "apply(object.__delattr__, obj, 'tier')\n",
+        "def get():\n    return object.__delattr__\n",
+    ):
+        assert any(check_tag_t3._RAW_DELATTR_ALIASED_MESSAGE in m for m in _messages(source)), (
+            f"admitted: {source!r}"
+        )
+    assert check_tag_t3._scan_text('object.__delattr__(self, "metadata")\n', _PROBE) == [], (
+        "positive twin: a call-position __delattr__ on self must NOT trip the alias rule"
+    )
+
+
+def test_the_two_state_mutation_rules_share_one_admissibility_predicate() -> None:
+    """DRY, asserted rather than assumed (#422: N copies drift SILENTLY).
+
+    ``__setattr__`` and ``__delattr__`` put the TARGET at ``args[0]`` and the FIELD NAME
+    at ``args[1]``, so the admissibility question is identical and
+    :func:`_is_benign_state_mutation_target` answers it for both. If someone forks it,
+    the two rules can diverge on the same input without any test noticing — one of them
+    quietly admitting a shape the other refuses. This asserts the property directly: for
+    every fixture, the two rules agree on admissibility.
+    """
+    assert check_tag_t3._is_benign_state_mutation_target.__doc__, "the shared predicate vanished"
+    for name, admissible in (
+        ("metadata", True),
+        ("tier", False),
+        ("content", False),
+        ("source", False),
+        ("__dict__", False),
+    ):
+        set_clean = not any(
+            check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE in m
+            for m in _messages(f'object.__setattr__(self, "{name}", v)\n')
+        )
+        del_clean = not any(
+            check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE in m
+            for m in _messages(f'object.__delattr__(self, "{name}")\n')
+        )
+        assert set_clean is admissible and del_clean is admissible, (
+            f"the two rules disagree on {name!r}: __setattr__ clean={set_clean}, "
+            f"__delattr__ clean={del_clean}, expected {admissible} — the shared "
+            f"admissibility predicate has been forked"
+        )
 
 
 def test_init_re_entry_on_a_foreign_object_is_refused() -> None:
@@ -1296,6 +1465,16 @@ _KEYED_IDENTIFIER_SPELLINGS: dict[str, dict[str, str]] = {
         "IMPORT-ALIASED": (
             "from builtins import type as _ty\n_ty(low).__init__(low, content=attacker)"
         ),
+    },
+    # PR #553 C1. ROWED rather than left to `_VEHICLE_NAME_RESIDUAL`, on `__init__`'s
+    # precedent and for `__init__`'s reason: once an identifier acquires a CALL-SHAPE
+    # rule of its own, "matched as an attribute name, never as a binding" stops being
+    # the whole story about it, and a residual is a promise where a row is a measurement.
+    # The receiver is the rebindable half and all three spellings must red.
+    "__delattr__": {
+        "DIRECT": 'object.__delattr__(low, "tier")',
+        "REBOUND": '_o = object\n_o.__delattr__(low, "tier")',
+        "IMPORT-ALIASED": 'from builtins import object as _o\n_o.__delattr__(low, "tier")',
     },
     "_set_authorized_t3_nonce": {
         "DIRECT": "_set_authorized_t3_nonce(mine)",
@@ -2114,6 +2293,21 @@ def _identifiers_the_gate_keys_on(source: str) -> dict[str, frozenset[str]]:
             and isinstance(node.func, ast.Name)
             and node.func.id == "_alias_names"
         ):
+            # ARITY AND KEYWORD GUARD (PR #553 review, C4). `node.args[1]` was indexed
+            # blind, so `_alias_names(tree)` or `_alias_names(tree, seed=...)` raised
+            # IndexError — and the docstring above claims this function "fails LOUDLY on
+            # a seed shape it cannot resolve", which an IndexError is not. It names no
+            # file, no line and no remedy, and it reads as a bug in the test rather than
+            # as the gate having grown a shape the derivation cannot see. Same failure
+            # direction as the `assert feeding` below, so it gets the same actionable
+            # message.
+            assert len(node.args) == 2 and not node.keywords, (
+                f"scripts/check_tag_t3.py:{node.lineno}: _alias_names is CALLED in a "
+                f"shape this derivation cannot read ({len(node.args)} positional "
+                f"argument(s), keywords {sorted(kw.arg or '**' for kw in node.keywords)}). "
+                f"Teach it that shape — a seed it cannot see is a rule this guard stops "
+                f"covering."
+            )
             seed = node.args[1]
             if isinstance(seed, ast.Constant) and isinstance(seed.value, str):
                 record(seed.value, "alias-seed-literal")
@@ -2204,7 +2398,12 @@ _PATH_SEGMENT_RESIDUAL: str = (
 
 _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
     **dict.fromkeys(("tag", "TaggedContent", "T3"), _PRE_EXISTING_RESIDUAL),
-    **dict.fromkeys(sorted(_EXPECTED_VEHICLE_NAMES - {"__init__"}), _VEHICLE_NAME_RESIDUAL),
+    # `__init__` and `__delattr__` are EXCLUDED because each has a behavioural row above.
+    # The disjointness assertion in the meta-guard forbids being both, and a row is the
+    # stronger of the two: it measures the closure instead of asserting it.
+    **dict.fromkeys(
+        sorted(_EXPECTED_VEHICLE_NAMES - {"__init__", "__delattr__"}), _VEHICLE_NAME_RESIDUAL
+    ),
     **dict.fromkeys(sorted(_EXPECTED_SEAMS), _SEAM_ATTR_RESIDUAL),
     **dict.fromkeys(sorted(_EXPECTED_TAGGED_STATE_FIELDS), _TAGGED_FIELD_RESIDUAL),
     **dict.fromkeys(
@@ -2277,6 +2476,237 @@ def test_the_pre_existing_call_rules_are_still_the_declared_residual() -> None:
             f"it is out of scope. Give the identifier a row in "
             f"_KEYED_IDENTIFIER_SPELLINGS and delete the residual."
         )
+
+
+# ---------------------------------------------------------------------------
+# PR #553 REVIEW, C3 — THE CORPUS RECORD, DERIVED RATHER THAN TRANSCRIBED.
+#
+# `tl_base_dispatch_and_raw_state_write.yaml` and the `tl-2026-013` row of the corpus
+# README both enumerate the shipped rules BY HAND, and both had stopped at the pre-fix
+# set: `__doc__`, `gc.get_referrers` and three whole messages were missing, and a
+# residual still named a count that had been wrong since the seventh carrier landed.
+# That is the "comment outran the code" shape for the fourth time in this PR, so
+# patching the numbers would have been the fourth patch of a recurring defect.
+#
+# A yaml file and a Markdown table cannot literally derive from a Python constant, so
+# the DERIVATION lives here and the documents are checked against it. BOTH directions
+# matter and the second is the one a hand-written test forgets: a rule that ships
+# without landing in the record reds, AND a rule named in the record that no longer
+# exists reds. Enumeration in the doc, default-deny in the oracle.
+# ---------------------------------------------------------------------------
+
+_CORPUS_DIR = _REPO_ROOT / "tests" / "adversarial" / "tier_laundering"
+_CORPUS_YAML = _CORPUS_DIR / "tl_base_dispatch_and_raw_state_write.yaml"
+_CORPUS_README = _CORPUS_DIR / "README.md"
+_CORPUS_ROW_ID = "tl-2026-013"
+
+# Messages that are NOT #538 authoring-layer rules, keyed BY NAME so the oracle is
+# everything else. The direction is load-bearing: a NEW `_*_MESSAGE` constant falls into
+# the expected set automatically and reds until the record names it, which is exactly the
+# drift that happened three times. Each name is asserted to still EXIST, so a rename
+# cannot silently widen the exclusion into a hole.
+_NOT_AN_AUTHORING_LAYER_MESSAGE: frozenset[str] = frozenset(
+    {
+        # Pre-existing call rules — #539's territory, described elsewhere in the corpus.
+        "_TAG_T3_MESSAGE",
+        "_CAST_TAGGED_CONTENT_MESSAGE",
+        "_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE",
+        "_TYPE_IGNORE_MESSAGE",
+        # Collection failures — the file was not gated, so they are not findings.
+        "_UNDECODABLE_MESSAGE",
+        "_UNPARSEABLE_MESSAGE",
+        "_UNREADABLE_MESSAGE",
+        "_UNSCANNABLE_MESSAGE",
+        "_UNSCANNABLE_PATH_MESSAGE",
+        # The GATE is broken, not the file; travels on GateInternalError to exit 2.
+        "_GATE_INTERNAL_MESSAGE",
+    }
+)
+
+# Tokens the documents may name that are gate constants but not messages. Anything
+# `_UPPER_CASE` outside this and the message set must resolve on the module, or the
+# record is naming something that no longer exists.
+_CORPUS_NON_MESSAGE_TOKENS: frozenset[str] = frozenset({"_TAGGED_STATE_FIELDS"})
+
+
+def _authoring_layer_message_stems() -> frozenset[str]:
+    """Every #538 rule's message constant, minus the ``_MESSAGE`` suffix.
+
+    The STEM is what both documents can be checked against: the yaml writes the full
+    constant name and the README row writes the stem, and a stem is a substring of its
+    own full name, so one containment test reads both spellings.
+    """
+    return frozenset(
+        name.removesuffix("_MESSAGE")
+        for name, value in vars(check_tag_t3).items()
+        if name.endswith("_MESSAGE")
+        and isinstance(value, str)
+        and name not in _NOT_AN_AUTHORING_LAYER_MESSAGE
+    )
+
+
+def test_the_corpus_record_matches_the_shipped_rule_set() -> None:
+    """C3 — the record DERIVES from the gate and from the pinned literals.
+
+    Four assertions, one per way the record has actually gone stale:
+
+    * the EXCLUSION list still resolves — a renamed message must not fall out of the
+      oracle by accident;
+    * no stem is a substring of another, or a containment check for the shorter one is
+      satisfied by the longer one appearing (the #548 test-002 shape, on this axis);
+    * every shipped rule, vehicle attribute, vehicle name and carrier is NAMED in both
+      documents — this is the direction that was broken;
+    * every `_UPPER_CASE` token the documents name still EXISTS on the gate — the
+      opposite direction, so a deleted or renamed rule cannot be left described.
+
+    CONTAINMENT IS DOCUMENT-WIDE, and that is a deliberate looseness with a measured
+    cost. Deleting ``__doc__`` from the yaml's slash-separated vehicle list SURVIVES this
+    test, because a later sentence in the same rationale explains ``__doc__`` and the
+    token is still present. Scoping the check to the list would key it on prose FORMAT,
+    which rots faster than the list does and would red on any tidy-up. The direction that
+    actually matters is proven instead: a vehicle attribute or carrier that ships WITHOUT
+    appearing anywhere in the record reds here, verified by mutating the gate constant and
+    its pinned literal together (so no neighbouring oracle fires first) and watching this
+    test — and only this test — fail.
+    """
+    for excluded in sorted(_NOT_AN_AUTHORING_LAYER_MESSAGE):
+        assert hasattr(check_tag_t3, excluded), (
+            f"{excluded} is excluded from the corpus oracle but no longer exists on the "
+            f"gate. A rename silently widens the exclusion into a hole — update this set."
+        )
+
+    stems = _authoring_layer_message_stems()
+    assert stems, "the derivation found no authoring-layer rules — the oracle is vacuous"
+    shadowed = sorted(
+        (shorter, longer)
+        for shorter in stems
+        for longer in stems
+        if shorter != longer and shorter in longer
+    )
+    assert not shadowed, (
+        f"a rule stem is contained in another: {shadowed} — the containment checks below "
+        f"would be satisfied for the shorter one by the longer one appearing"
+    )
+
+    # The pinned literals, asserted equal to the gate's own constants FIRST so this is
+    # not a tautological oracle, then used as the expected vocabulary.
+    assert _EXPECTED_VEHICLE_ATTRS == check_tag_t3._RAW_STATE_VEHICLE_ATTRS
+    assert _EXPECTED_VEHICLE_NAMES == check_tag_t3._RAW_STATE_VEHICLE_NAMES
+    assert _EXPECTED_CARRIERS == check_tag_t3._RAW_STATE_CARRIERS
+
+    required = (
+        {f"rule {stem}": stem for stem in stems}
+        | {f"vehicle attribute {a}": a for a in _EXPECTED_VEHICLE_ATTRS}
+        | {f"vehicle name {n}": n for n in _EXPECTED_VEHICLE_NAMES}
+        | {f"carrier {m}.{p}": f"{m}.{p}" for m, p in _EXPECTED_CARRIERS}
+    )
+
+    readme_row = [
+        line
+        for line in _CORPUS_README.read_text(encoding="utf-8").splitlines()
+        if _CORPUS_ROW_ID in line
+    ]
+    assert len(readme_row) == 1, (
+        f"expected exactly one {_CORPUS_ROW_ID} row in the corpus README, found "
+        f"{len(readme_row)} — the sweep below reads the wrong text otherwise"
+    )
+    documents = {
+        _CORPUS_YAML.name: _CORPUS_YAML.read_text(encoding="utf-8"),
+        # The README enumerates the RULES only; vehicle attributes, vehicle names and
+        # carriers live in the payload's rationale, which is where a reader looks for
+        # them. Scoped to the one row so an unrelated row cannot satisfy a check.
+        f"README.md::{_CORPUS_ROW_ID}": readme_row[0],
+    }
+    scope = {
+        _CORPUS_YAML.name: required,
+        f"README.md::{_CORPUS_ROW_ID}": {f"rule {stem}": stem for stem in stems},
+    }
+
+    missing = [
+        f"{document} does not name the {label}"
+        for document, text in documents.items()
+        for label, token in sorted(scope[document].items())
+        if token not in text
+    ]
+    assert not missing, (
+        "the adversarial corpus record has fallen behind the shipped rule set:\n  "
+        + "\n  ".join(missing)
+        + "\nThe record is the thing a reviewer reads to learn what the layer covers; a "
+        "rule it omits is a rule nobody outside this file knows shipped."
+    )
+
+    live = {name for name in vars(check_tag_t3)} | {f"{stem}_MESSAGE" for stem in stems}
+    stale = sorted(
+        f"{document} names {token}, which no longer exists on the gate"
+        for document, text in documents.items()
+        for token in set(re.findall(r"_[A-Z][A-Z0-9_]{2,}", text))
+        if token not in live
+        and f"{token}_MESSAGE" not in live
+        and token not in _CORPUS_NON_MESSAGE_TOKENS
+    )
+    assert not stale, (
+        "the corpus record describes rules the gate no longer has:\n  "
+        + "\n  ".join(stale)
+        + "\nDelete them — a record that outlives the code is how a reviewer is told a "
+        "boundary is covered when it is not."
+    )
+
+
+def test_the_alias_seed_derivation_fails_loudly_on_a_call_shape_it_cannot_read() -> None:
+    """PR #553 REVIEW, C4 — an ``IndexError`` is not "failing LOUDLY".
+
+    :func:`_identifiers_the_gate_keys_on` indexed ``node.args[1]`` blind while its own
+    docstring promised it "fails LOUDLY on a seed shape it cannot resolve". The two
+    shapes below are the ones Python allows and the derivation cannot read: a call with
+    too few positional arguments, and the keyword spelling. Both used to raise
+    ``IndexError`` (or silently read the wrong node), which names no file, no line and
+    no remedy — it reads as a broken test rather than as the gate having grown a shape
+    the guard stopped covering.
+
+    POSITIVE TWIN FIRST, and it is the load-bearing half: a guard that refused
+    EVERYTHING would satisfy both negative assertions while making the whole meta-guard
+    unrunnable, and the real gate's four call sites are the only proof it does not.
+    """
+    good = 'x = _alias_names(tree, "BaseModel")\n'
+    assert _identifiers_the_gate_keys_on(good) == {"BaseModel": frozenset({"alias-seed-literal"})}
+
+    for label, source in {
+        "too-few-positional": "x = _alias_names(tree)\n",
+        "keyword-seed": 'x = _alias_names(tree, seed="BaseModel")\n',
+        "starred-args": "x = _alias_names(*pair)\n",
+    }.items():
+        with pytest.raises(AssertionError, match="shape this derivation cannot read") as raised:
+            _identifiers_the_gate_keys_on(source)
+        # THE POINT OF THE GUARD, asserted rather than implied: the diagnosis names the
+        # FILE and the LINE. An IndexError names neither, which is why it read as a bug
+        # in the test rather than as the gate outgrowing the derivation.
+        assert "scripts/check_tag_t3.py:1:" in str(raised.value), (
+            f"the {label} shape failed without naming file:line — that IS the difference "
+            f"between this guard and the IndexError it replaces: {raised.value}"
+        )
+
+    # AND THE REAL GATE STILL RESOLVES — the guard is a floor on shapes that do not
+    # occur, not a wall in front of the ones that do.
+    #
+    # ASSERT THE GUARD WAS REACHED, not merely that the derivation returned something.
+    # `_identifiers_the_gate_keys_on` collects from three channels and two of them do not
+    # touch the guarded branch at all, so a non-empty result proves nothing about it.
+    # MEASURED: transcribed onto `origin/main`, whose gate calls `_alias_names` ZERO
+    # times, the bare truthiness assertion passed — this test was the second of two in
+    # the file green against a gate with none of these rules in it. Requiring an
+    # `alias-seed` provenance is what makes it discriminate: the branch's gate has four
+    # such call sites, and every one of them goes through the arity guard above.
+    derived = _identifiers_the_gate_keys_on(_GATE_SOURCE)
+    seeded = sorted(
+        identifier
+        for identifier, why in derived.items()
+        if any(provenance.startswith("alias-seed") for provenance in why)
+    )
+    assert seeded, (
+        "the real gate's _alias_names call sites produced no alias-seed provenance, so "
+        "the guard above was never exercised on real source and the assertion that it "
+        "does not break the derivation is vacuous"
+    )
 
 
 def test_every_identifier_the_gate_keys_on_is_rowed_or_declared_residual() -> None:
@@ -2436,6 +2866,13 @@ _SWEEP_WINDOW: int = 6
 
 # Dated design records, not live guidance. A plan or spec written before #538 is
 # CORRECT about the world it was written in; rewriting it would falsify the record.
+#
+# THE FORWARD SLASHES ARE CORRECT ON WINDOWS and must not be "fixed" to `os.sep`: these
+# match `git grep` OUTPUT, and git emits repo-relative paths with `/` on every platform.
+# `_REPO_ROOT / rel` then accepts that string unchanged, because `WindowsPath` parses `/`
+# as a separator. Recorded because the sibling defect in this same test WAS a real
+# cross-OS failure (see the decode note in the sweep below) and the next reader will
+# reasonably wonder about these too.
 _SWEEP_EXCLUDED_PREFIXES: tuple[str, ...] = (
     "docs/superpowers/plans/",
     "docs/superpowers/specs/",
@@ -2451,6 +2888,60 @@ _SWEEP_EXCLUDED_FILES: tuple[str, ...] = ("docs/runbooks/slice-3-operator-migrat
 # Assembled at runtime so this file's own fixtures do not plant the literal the sweep
 # hunts for — the sweep scans every tracked file, this one included.
 _Q_PY: str = "quarantine" + ".py"
+
+
+def _git_grep_bytes(pattern: str) -> bytes:
+    """``git grep -n -E <pattern>`` over the whole repo, as RAW BYTES.
+
+    BYTES, and never ``subprocess``'s text mode — that decodes with the PLATFORM LOCALE,
+    which is ``cp1252`` on the windows-latest runner, and this repo's own docs are full
+    of non-ASCII (the first offender is ``←`` U+2190, whose third UTF-8 byte 0x90 is an
+    undefined slot in cp1252). It failed the cross-OS gate (#246) in a way worth writing
+    down, because it did NOT surface as the decode error: Windows
+    ``Popen._communicate`` reads each pipe on a ``_readerthread``, so the
+    ``UnicodeDecodeError`` killed the THREAD, the buffer list stayed empty,
+    ``stdout = stdout[0] if stdout else None`` handed back None, and the caller got
+    ``AttributeError: 'NoneType' object has no attribute 'splitlines'`` with the real
+    cause reduced to a stray traceback in the log. POSIX decodes on the main thread, so
+    the same fault RAISES; reproduced locally by forcing ``encoding="cp1252"``, identical
+    codec and identical byte. ``_git_tracked_python_files`` in the gate itself already had
+    this right, and this is the same pattern for the same reason.
+
+    (The offending keyword's literal spelling appears NOWHERE in this file:
+    ``test_the_sweep_decodes_git_output_as_utf8_not_as_the_platform_locale`` sweeps this
+    file for it, and planting what a sweep hunts for makes the sweep red on itself. Same
+    problem ``_Q_PY`` has, same runtime-assembly solution.)
+
+    A FUNCTION rather than an inline block so the empty-output guard below is REACHABLE
+    from a test: inline, ``proc.stdout`` is never falsy on a host where the pattern
+    matches, so removing the guard changed nothing any test could see — a floor no
+    mutation could kill.
+    """
+    # S603/S607 are reported on DIFFERENT lines — S603 on the call, S607 on the argv
+    # list — so a single combined noqa suppresses neither. `pattern` is supplied by this
+    # module's own callers, never by input; argv is a literal list with no shell.
+    proc = subprocess.run(  # noqa: S603
+        ["git", "grep", "-n", "-E", pattern],  # noqa: S607
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.stdout, (
+        f"git grep found nothing for {pattern!r} (returncode={proc.returncode}, "
+        f"stderr={proc.stderr.decode('utf-8', errors='surrogateescape')[:300]!r}) — a "
+        f"sweep with no input passes VACUOUSLY. Either the pattern stopped matching, or "
+        f"git could not run here at all."
+    )
+    return proc.stdout
+
+
+def _git_grep_lines(pattern: str) -> list[str]:
+    """:func:`_git_grep_bytes`, decoded EXPLICITLY as UTF-8.
+
+    ``surrogateescape`` so a path or a line this repo can hold but UTF-8 cannot
+    round-trip degrades to a mangled string rather than to no sweep at all.
+    """
+    return _git_grep_bytes(pattern).decode("utf-8", errors="surrogateescape").splitlines()
 
 
 def _stale_claim_lines(lines: list[str]) -> list[int]:
@@ -2530,14 +3021,7 @@ def test_no_stale_claim_that_quarantine_is_an_authorised_home_survives() -> None
         == []
     )
 
-    mentions = subprocess.run(
-        ["git", "grep", "-n", "-E", r"quarantine\.py"],  # noqa: S607
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.splitlines()
-    assert mentions, "git grep returned nothing — the sweep would pass vacuously"
+    mentions = _git_grep_lines(_Q_PY.replace(".", r"\."))
 
     candidates: dict[str, None] = {}
     for mention in mentions:
@@ -2555,3 +3039,80 @@ def test_no_stale_claim_that_quarantine_is_an_authorised_home_survives() -> None
         "stale claims that the security/quarantine module is an authorised T3 home:\n"
         + "\n".join(live)
     )
+
+
+# The Windows locale codec, named once. `charmap` is what the error message calls it;
+# `cp1252` is what `codecs` calls it, and they are the same decoder.
+_WINDOWS_LOCALE_CODEC: str = "cp1252"
+
+
+def test_the_sweep_decodes_git_output_as_utf8_not_as_the_platform_locale() -> None:
+    """#246 CROSS-OS. The sweep above shipped in TEXT MODE and FAILED on Windows.
+
+    Text mode — ``subprocess``'s ``text`` keyword set true, whose literal spelling is
+    assembled at runtime below and never written out in this file — decodes with the
+    LOCALE encoding, which is ``cp1252`` on the
+    windows-latest runner. This repo's own documentation is full of non-ASCII, and the
+    failure did not surface as a decode error: Windows ``Popen._communicate`` reads each
+    pipe on a ``_readerthread``, so the ``UnicodeDecodeError`` killed the thread, the
+    buffer list stayed empty, ``stdout = stdout[0] if stdout else None`` returned None,
+    and the caller got ``AttributeError: 'NoneType' object has no attribute
+    'splitlines'`` with the real cause reduced to a stray traceback in the log.
+
+    THIS TEST RUNS THE PROPERTY, NOT THE PLATFORM. It cannot run Windows, so it asserts
+    the two facts that together make the platform outcome inevitable:
+
+    * the real command's output genuinely IS undecodable as ``cp1252`` — so the hazard
+      is live rather than theoretical;
+    * the shape the sweep now uses decodes it without raising, and yields the same lines.
+
+    A mutant that reinstates text mode is not visible to this test on a UTF-8 host,
+    which is why the second half is a LEXICAL floor over the two files this gate owns.
+    That is the honest split: the byte-level half proves the fix, the lexical half is
+    what a reverting edit trips.
+
+    IF THIS TEST EVER REDS ON THE FIRST ASSERTION, the repo has become ASCII-only in
+    everything ``git grep`` reaches. That is not a failure of the sweep — delete the
+    first assertion and keep the rest.
+    """
+    raw = _git_grep_bytes(_Q_PY.replace(".", r"\."))
+
+    with pytest.raises(UnicodeDecodeError) as raised:
+        raw.decode(_WINDOWS_LOCALE_CODEC)
+    assert raised.value.encoding in {_WINDOWS_LOCALE_CODEC, "charmap"}, (
+        f"expected the Windows locale codec to be what fails, got "
+        f"{raised.value.encoding!r} — the reproduction no longer models the runner"
+    )
+    assert _git_grep_lines(_Q_PY.replace(".", r"\.")), (
+        "the utf-8 decode of the SAME bytes produced no lines"
+    )
+
+    # THE EMPTY-OUTPUT GUARD, which is why the helper exists at all. `git grep` exits 1
+    # with empty stdout when nothing matches, and a sweep with no input passes
+    # VACUOUSLY. Inline, this arm was unreachable from any test on a host where the real
+    # pattern matches — measured: deleting the guard killed no test.
+    with pytest.raises(AssertionError, match="passes VACUOUSLY"):
+        _git_grep_lines("zzz" + "_no_such_pattern_in_this_repo_zzz")
+
+    # THE LEXICAL FLOOR, scoped to the two files this task owns. Text-mode decoding of a
+    # subprocess whose output can carry repo text is the CLASS, not this one call site.
+    #
+    # Both the pattern and its twin are ASSEMBLED so this file does not plant the
+    # literal it sweeps for — the same runtime-assembly trick `_Q_PY` uses above, and
+    # for the same reason: measured, spelling it out made this test fail on itself.
+    #
+    # POSITIVE TWIN: the pattern must match when the hazard IS present, or an emptied
+    # regex makes the floor vacuous.
+    keywords = ("text", "universal_newlines")
+    hazard = re.compile("|".join(rf"\b{kw}\s*=\s*True\b" for kw in keywords))
+    for kw in keywords:
+        assert hazard.search(f"subprocess.run(argv, {kw}=True)"), (
+            f"the hazard pattern no longer matches {kw} — the floor below is vacuous"
+        )
+    for owned in (_SCRIPT, Path(__file__).resolve()):
+        assert not hazard.search(owned.read_text(encoding="utf-8")), (
+            f"{owned.name} decodes subprocess output with the PLATFORM LOCALE. On the "
+            f"windows-latest runner that is {_WINDOWS_LOCALE_CODEC}, and this repo's "
+            f"text is not cp1252-decodable. Capture bytes and decode explicitly, as "
+            f"_git_tracked_python_files does."
+        )
