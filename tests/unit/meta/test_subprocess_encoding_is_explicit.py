@@ -115,10 +115,19 @@ def _scan_source(source: str, label: str) -> _Scan:
         keywords = {kw.arg for kw in node.keywords if kw.arg}
         if not (_TEXT_MODE_KWARGS & keywords):
             continue  # bytes mode — no decoding happens, nothing to pin
-        if "encoding" in keywords:
+        # BOTH axes, not just `encoding=`. A bare `encoding="utf-8"` still RAISES
+        # on a byte that is not valid UTF-8 — a latin-1 file reached by `git show`,
+        # a filename in a legacy encoding — so it trades a cp1252 crash for a UTF-8
+        # one rather than removing the class. `errors=` is what makes the decode
+        # total. Requiring its PRESENCE (not a particular value) leaves the choice
+        # with the author while refusing the accidental default.
+        #
+        # Free at the time of writing: all 100 sites already pass both, measured.
+        if "encoding" in keywords and "errors" in keywords:
             conforming += 1
         else:
-            violations.append(f"{label}:{node.lineno}")
+            missing = " and ".join(k for k in ("encoding", "errors") if k not in keywords)
+            violations.append(f"{label}:{node.lineno} (missing {missing})")
     return _Scan(tuple(violations), conforming)
 
 
@@ -221,7 +230,7 @@ def test_detector_trips_on_a_synthetic_violation() -> None:
     """
     source = "import subprocess\nsubprocess.run(['git', 'status'], text=True)\n"
     result = _scan_source(source, "<synthetic>")
-    assert result.violations == ("<synthetic>:2",)
+    assert result.violations == ("<synthetic>:2 (missing encoding and errors)",)
     assert result.conforming == 0
 
 
@@ -241,7 +250,8 @@ def test_detector_trips_on_a_synthetic_violation() -> None:
         ),
         pytest.param(
             "import subprocess\n"
-            "subprocess.run(['git'], universal_newlines=True, encoding='utf-8')\n",
+            "subprocess.run(['git'], universal_newlines=True, encoding='utf-8', "
+            "errors='surrogateescape')\n",
             "the legacy spelling, remedied",
             id="universal-newlines-plus-encoding",
         ),
@@ -268,4 +278,7 @@ def test_detector_sees_through_the_legacy_kwarg_and_a_bare_import() -> None:
         "subprocess.Popen(['git', 'log'], text=True)\n"
     )
     result = _scan_source(source, "<synthetic>")
-    assert result.violations == ("<synthetic>:2", "<synthetic>:4")
+    assert result.violations == (
+        "<synthetic>:2 (missing encoding and errors)",
+        "<synthetic>:4 (missing encoding and errors)",
+    )
