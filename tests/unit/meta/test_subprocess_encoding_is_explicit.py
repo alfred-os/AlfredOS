@@ -113,7 +113,21 @@ def _scan_source(source: str, label: str) -> _Scan:
         if name not in _SUBPROCESS_CALLEES:
             continue
         keywords = {kw.arg for kw in node.keywords if kw.arg}
-        if not (_TEXT_MODE_KWARGS & keywords):
+        # TRUTHY text mode only (PR #556, CR). Keying on the keyword's PRESENCE
+        # classified `text=False` — which selects BYTES mode and decodes nothing —
+        # as a violation, so a legitimate future bytes-mode call would red this
+        # repo-wide gate for a benign reason. Measured: no `text=False` exists
+        # today, so this is a forward false positive, not a live one.
+        #
+        # DEFAULT-DENY on the unknown: only an explicit falsey CONSTANT is treated
+        # as bytes mode. `text=flag` is unresolvable lexically, so it counts as text
+        # mode and must carry the kwargs — the safe direction for a gate.
+        text_mode = any(
+            kw.arg in _TEXT_MODE_KWARGS
+            and not (isinstance(kw.value, ast.Constant) and not kw.value.value)
+            for kw in node.keywords
+        )
+        if not text_mode:
             continue  # bytes mode — no decoding happens, nothing to pin
         # BOTH axes, not just `encoding=`. A bare `encoding="utf-8"` still RAISES
         # on a byte that is not valid UTF-8 — a latin-1 file reached by `git show`,
@@ -247,6 +261,16 @@ def test_detector_trips_on_a_synthetic_violation() -> None:
             "import subprocess\nsubprocess.run(['git'], capture_output=True)\n",
             "bytes mode decodes nothing",
             id="bytes-mode",
+        ),
+        pytest.param(
+            "import subprocess\nsubprocess.run(['git'], text=False)\n",
+            "text=False selects bytes mode and decodes nothing",
+            id="explicit-text-false",
+        ),
+        pytest.param(
+            "import subprocess\nsubprocess.run(['git'], universal_newlines=False)\n",
+            "the legacy spelling, explicitly bytes mode",
+            id="explicit-universal-newlines-false",
         ),
         pytest.param(
             "import subprocess\n"
