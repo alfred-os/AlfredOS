@@ -34,7 +34,14 @@ def compose(
         cmd += ["--env-file", str(env_file)]
     cmd += list(args)
     return subprocess.run(
-        cmd, cwd=REPO_ROOT, check=check, capture_output=True, text=True, timeout=timeout_s
+        cmd,
+        cwd=REPO_ROOT,
+        check=check,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        timeout=timeout_s,
     )
 
 

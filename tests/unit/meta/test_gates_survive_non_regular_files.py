@@ -135,6 +135,8 @@ def test_a_gate_script_returns_a_verdict_despite_a_fifo(
             [sys.executable, str(script), *argv],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             cwd=cwd,
             timeout=_DEADLINE_SECONDS,
             check=False,

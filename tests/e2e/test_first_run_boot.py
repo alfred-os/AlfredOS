@@ -148,7 +148,14 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
         worktree = Path(tmp) / "repo"
         add = ["git", "worktree", "add", "--detach", "--force", str(worktree), "HEAD"]
         subprocess.run(
-            add, cwd=_compose.REPO_ROOT, capture_output=True, text=True, timeout=120.0, check=True
+            add,
+            cwd=_compose.REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=120.0,
+            check=True,
         )
         env_file = _env.write_e2e_env_file(worktree, filename=".env")
         try:
@@ -158,6 +165,8 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
                 cwd=worktree,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="surrogateescape",
                 timeout=_SETUP_SH_TIMEOUT_S,
                 check=False,
                 env={
@@ -211,6 +220,8 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
                     cwd=_compose.REPO_ROOT,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="surrogateescape",
                     timeout=60.0,
                     check=False,
                 )

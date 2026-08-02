@@ -221,6 +221,8 @@ async def _git(repo_path: Path, *args: str) -> str:
             ["git", "-C", str(repo_path), *args],  # noqa: S607
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=True,
             timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
         )

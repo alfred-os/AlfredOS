@@ -81,6 +81,8 @@ def test_ci_rule_rejects_cast_tagged_content(tmp_path: Path) -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(repo_root),
         check=False,
     )

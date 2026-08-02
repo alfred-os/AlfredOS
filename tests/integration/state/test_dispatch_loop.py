@@ -164,6 +164,8 @@ def _commit_blob(repo: Path, relpath: str, content: str, message: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.strip()
 
 
@@ -244,6 +246,8 @@ async def test_dispatch_cycle_bootstraps_null_sentinel_to_origin_main_head(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.strip()
 
     ctx = _make_ctx()
@@ -434,6 +438,8 @@ async def test_dispatch_cycle_atomicity_crash_after_ledger_before_sentinel(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.strip()
     # Add a blob.
     commit_sha = _commit_blob(
@@ -1176,6 +1182,8 @@ async def test_dispatch_cycle_handler_replay_safety_on_idempotent_handler(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.strip()
 
     _commit_blob(state_git_repo, "policies/breaker-resets/abc123def4567890.json", _payload(), "add")

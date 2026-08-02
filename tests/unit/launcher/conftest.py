@@ -76,6 +76,8 @@ def run_launcher(tmp_path: Path):
             [str(LAUNCHER), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             env=_base_env(env),
             cwd=cwd,
             check=False,

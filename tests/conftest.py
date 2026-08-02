@@ -140,6 +140,8 @@ def launcher_chain_fixture(
             [str(_LAUNCHER), plugin_id, str(stub)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             env=_launcher_env(_REPO_ROOT, extra),
             check=False,
             timeout=_LAUNCHER_TIMEOUT_S,

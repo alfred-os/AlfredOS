@@ -94,6 +94,8 @@ def test_t3_derived_data_cast_tagged_content_erasure_is_rejected_by_ci_rule(
         [sys.executable, "scripts/check_tag_t3.py", str(tagged_erasure)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(repo_root),
         check=False,
     )
@@ -117,6 +119,8 @@ def test_t3_derived_data_cast_tagged_content_erasure_is_rejected_by_ci_rule(
         [sys.executable, "scripts/check_tag_t3.py", str(dict_erasure)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(repo_root),
         check=False,
     )

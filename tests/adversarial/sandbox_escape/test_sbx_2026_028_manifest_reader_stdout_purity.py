@@ -41,6 +41,8 @@ def _read_environment(cwd: Path, env: dict[str, str]) -> subprocess.CompletedPro
         [sys.executable, "-m", "alfred.plugins.manifest_reader", "--read-environment"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=cwd,
         env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),

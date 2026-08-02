@@ -192,6 +192,8 @@ def _run_probe(stub: Path, plugin_dir: Path) -> subprocess.CompletedProcess[str]
         [bwrap, *flags, "--", sys.executable, str(stub)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=30,
         check=False,
         env=_bwrap_child_env(),

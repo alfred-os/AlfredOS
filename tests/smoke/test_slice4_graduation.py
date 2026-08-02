@@ -87,6 +87,8 @@ def compose_stack() -> Iterator[None]:
             ["docker", "compose", "up", "-d", "--wait"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
             timeout=HARD_BUDGET_SECONDS,
             env=env,
@@ -147,6 +149,8 @@ def _core_exec(argv: list[str], *, timeout: float) -> subprocess.CompletedProces
         ["docker", "compose", "exec", "-T", _CORE_SERVICE, *argv],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
         timeout=timeout,
     )

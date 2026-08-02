@@ -80,6 +80,8 @@ def test_launcher_passes_bash_syntax_check() -> None:
         ["bash", "-n", str(_LAUNCHER)],  # noqa: S607 — bash is on PATH by convention
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
     )
     assert result.returncode == 0, f"bash -n failed: {result.stderr}"

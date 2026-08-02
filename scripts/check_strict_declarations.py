@@ -165,6 +165,8 @@ def main() -> int:
             ["grep", "--devices=skip", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
         )
     except OSError as exc:

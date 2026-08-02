@@ -70,6 +70,8 @@ def _run_advisory(env_path: Path) -> subprocess.CompletedProcess[str]:
         cwd=env_path.parent,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
         check=False,
         timeout=30,

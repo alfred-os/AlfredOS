@@ -59,6 +59,8 @@ class BootStack:
                     cwd=_compose.REPO_ROOT,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="surrogateescape",
                     timeout=30.0,
                     check=False,
                 )

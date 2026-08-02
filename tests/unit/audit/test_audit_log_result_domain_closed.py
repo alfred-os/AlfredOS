@@ -462,7 +462,12 @@ def test_dynamic_result_sites_are_documented() -> None:
             "src/alfred/supervisor/core.py:692",  # result_label local
             # --- direct AuditEntry(...) construction path (H1) ---
             "src/alfred/audit/log.py:96",  # AuditWriter.append forwards result -> AuditEntry(...)
-            "src/alfred/state/dispatch_loop.py:1061",  # IfExp over dispatched_with_redactions/clean
+            # #555 shifted this by +2 (1061 -> 1063): the `_git` helper near the
+            # top of the file gained an explicit `encoding="utf-8",
+            # errors="surrogateescape"` pair so its captured output stops
+            # decoding with the platform locale (cp1252 on the Windows runner).
+            # The site itself and its reachable values are unchanged.
+            "src/alfred/state/dispatch_loop.py:1063",  # IfExp over dispatched_with_redactions/clean
         ]
     )
     assert locations == expected, (

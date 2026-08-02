@@ -29,6 +29,8 @@ def test_all_shell_scripts_are_lf() -> None:
         ["git", "ls-files", "*.sh", "bin/*"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
         cwd=_REPO_ROOT,
     ).stdout.split()

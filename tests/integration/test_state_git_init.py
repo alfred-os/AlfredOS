@@ -19,6 +19,8 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
 
@@ -30,6 +32,8 @@ def _try(args: list[str]) -> subprocess.CompletedProcess[str]:
         args,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
     )
 

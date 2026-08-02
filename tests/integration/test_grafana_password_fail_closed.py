@@ -121,6 +121,8 @@ def _extract_grafana_entrypoint() -> list[str]:
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=True,
             timeout=120,
         )
@@ -134,6 +136,8 @@ def _extract_grafana_entrypoint() -> list[str]:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=True,
             timeout=30,
         )
@@ -146,6 +150,8 @@ def _extract_grafana_entrypoint() -> list[str]:
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
             timeout=60,
         )

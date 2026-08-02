@@ -107,6 +107,8 @@ def _spawn_launcher_with_planted_fd(
             [str(LAUNCHER), "alfred.example", sys.executable, str(plugin)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             env=env,
             pass_fds=pass_fds,
             check=False,

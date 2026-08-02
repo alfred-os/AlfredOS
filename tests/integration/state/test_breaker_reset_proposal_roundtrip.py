@@ -151,6 +151,8 @@ def _commit_proposal(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.strip()
 
 
@@ -343,6 +345,8 @@ async def test_breaker_reset_proposal_crash_after_ledger_before_sentinel_safe(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     ).stdout.strip()
 
     commit_sha = _commit_proposal(

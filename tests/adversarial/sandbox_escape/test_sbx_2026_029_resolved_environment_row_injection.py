@@ -99,6 +99,8 @@ def _run_launcher(
         [str(_LAUNCHER), _PLUGIN_ID, *_TRUE_ARGV],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=tmp_path,
         env={
             "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}",

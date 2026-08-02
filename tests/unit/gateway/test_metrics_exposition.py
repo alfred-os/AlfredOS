@@ -69,6 +69,8 @@ def test_gateway_exposition_has_no_per_user_labels() -> None:
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env={**os.environ, "ALFRED_ENVIRONMENT": "test"},
         timeout=20,  # bound runtime: an import-path regression must fail, not hang CI (CR #289)
     )
