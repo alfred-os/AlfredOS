@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-02 20:18+0100\n"
+"POT-Creation-Date: 2026-08-02 23:05+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3458,7 +3458,7 @@ msgstr ""
 " parent directory are readable and owned by the invoking user, then "
 "retry."
 
-#: src/alfred/security/tiers.py:255
+#: src/alfred/security/tiers.py:263
 msgid "security.t3_construction_unauthorized"
 msgstr ""
 "security.t3_construction_unauthorized: refused to build a T3-tagged "
@@ -3469,39 +3469,39 @@ msgstr ""
 "directly, and in tests take the authorized_t3_nonce fixture rather than "
 "bypassing the gate."
 
-#: src/alfred/security/tiers.py:455
+#: src/alfred/security/tiers.py:463
 msgid "security.tagged_content_guard_shadow_refused"
 msgstr ""
 "TaggedContent subclass {subclass} redefines trust-tier guard(s): "
 "{guards}. Pydantic rebinds validators by name off the subclass MRO, so "
 "redefining a guard replaces it inside the parent's own slot."
 
-#: src/alfred/security/tiers.py:467
+#: src/alfred/security/tiers.py:475
 msgid "security.tagged_content_namespace_refused"
 msgstr ""
 "TaggedContent may not be subclassed: {subclass} defines {attributes}, "
 "which a genuine parameterisation does not. Overriding a lifecycle hook "
 "such as __init__ skips validation and the post-init tier guard."
 
-#: src/alfred/security/tiers.py:475
+#: src/alfred/security/tiers.py:483
 msgid "security.tagged_content_subclass_refused"
 msgstr ""
 "TaggedContent may not be subclassed: {subclass} in {module}. Pydantic "
 "rebinds validators by name off the subclass MRO, so a subclass can "
 "replace the trust-tier guard. Use TaggedContent[Tier] directly."
 
-#: src/alfred/security/tiers.py:640
+#: src/alfred/security/tiers.py:648
 msgid "security.tier_unknown_wire"
 msgstr "Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
 
-#: src/alfred/security/tiers.py:711 src/alfred/security/tiers.py:736
+#: src/alfred/security/tiers.py:719 src/alfred/security/tiers.py:744
 msgid "security.tagged_content_tier_not_selectable"
 msgstr ""
 "copy(include=…/exclude=…) may not drop the `tier` field: a TaggedContent "
 "without its trust tier has lost the provenance it exists to carry."
 
-#: src/alfred/security/tiers.py:776 src/alfred/security/tiers.py:806
-#: src/alfred/security/tiers.py:936
+#: src/alfred/security/tiers.py:784 src/alfred/security/tiers.py:814
+#: src/alfred/security/tiers.py:944
 msgid "security.tier_unsupported"
 msgstr ""
 "Unsupported trust tier for this build: '{tier_name}' (approved: "
@@ -3511,17 +3511,17 @@ msgstr ""
 # paths in alfred.security.tiers. Each error retains all the diagnostic
 # detail the prior f-string carried; the structured kwargs make the
 # strings re-renderable in a non-English UI at display time.
-#: src/alfred/security/tiers.py:794
+#: src/alfred/security/tiers.py:802
 msgid "security.tier_subclass_missing_name"
 msgstr "TrustTier subclass {subclass} must set a non-empty `name`."
 
-#: src/alfred/security/tiers.py:832
+#: src/alfred/security/tiers.py:840
 msgid "security.tier_mismatch"
 msgstr ""
 "Cross-tier wire payload rejected: declared '{got}' but parser expects "
 "'{expected}' (spec §3.5)."
 
-#: src/alfred/security/tiers.py:998
+#: src/alfred/security/tiers.py:1006
 msgid "security.tag_t3_unauthorized"
 msgstr ""
 "security.tag_t3_unauthorized: tag(T3, ...) refused — caller {caller} did "
