@@ -646,26 +646,49 @@ def test_the_two_state_mutation_rules_share_one_admissibility_predicate() -> Non
     every fixture, the two rules agree on admissibility.
     """
     assert check_tag_t3._is_benign_state_mutation_target.__doc__, "the shared predicate vanished"
-    for name, admissible in (
-        ("metadata", True),
-        ("tier", False),
-        ("content", False),
-        ("source", False),
-        ("__dict__", False),
-    ):
+
+    # EVERY ARM the predicate decides on, not just the field name (PR #553, CR).
+    # Fixtures that vary only the FIELD exercise `_TAGGED_STATE_FIELDS` and the dunder
+    # check; a fork that copies the field logic and relaxes the TARGET or the ARITY arm
+    # agrees with its twin on all of them and survives. MEASURED: with the
+    # `args[0] is the bare Name self` arm stubbed to always pass, the field-only
+    # fixtures were still green.
+    #
+    # Each case is (setattr-argv, delattr-argv, admissible, arm) — the two argv strings
+    # differ only in the value argument, which `__delattr__` does not take.
+    cases = (
+        # the FIELD arm
+        ('self, "metadata", v', 'self, "metadata"', True, "benign field on self"),
+        ('self, "tier", v', 'self, "tier"', False, "tier is state"),
+        ('self, "content", v', 'self, "content"', False, "content is state"),
+        ('self, "source", v', 'self, "source"', False, "source is state"),
+        ('self, "__dict__", v', 'self, "__dict__"', False, "dunder reaches interpreter state"),
+        # the TARGET arm — a benign FIELD on a foreign object is still a write to
+        # someone else's state. `self` is a naming convention, not a type, so this arm
+        # only narrows; it must nonetheless be exercised or a fork can drop it.
+        ('low, "metadata", v', 'low, "metadata"', False, "foreign target"),
+        ('obj.inner, "metadata", v', 'obj.inner, "metadata"', False, "attribute target"),
+        ('"literal", "metadata", v', '"literal", "metadata"', False, "non-Name target"),
+        # the ARITY arm — a call this rule cannot read is a call it must not admit.
+        ("*parts", "*parts", False, "starred argv, unreadable"),
+        ("", "", False, "no arguments at all"),
+        ("self, name, v", "self, name", False, "computed field name"),
+    )
+    for set_argv, del_argv, admissible, arm in cases:
         set_clean = not any(
             check_tag_t3._RAW_SETATTR_SHAPE_MESSAGE in m
-            for m in _messages(f'object.__setattr__(self, "{name}", v)\n')
+            for m in _messages(f"object.__setattr__({set_argv})\n")
         )
         del_clean = not any(
             check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE in m
-            for m in _messages(f'object.__delattr__(self, "{name}")\n')
+            for m in _messages(f"object.__delattr__({del_argv})\n")
         )
         assert set_clean is admissible and del_clean is admissible, (
-            f"the two rules disagree on {name!r}: __setattr__ clean={set_clean}, "
-            f"__delattr__ clean={del_clean}, expected {admissible} — the shared "
-            f"admissibility predicate has been forked"
+            f"the two rules disagree on the {arm!r} arm ({set_argv!r}): "
+            f"__setattr__ clean={set_clean}, __delattr__ clean={del_clean}, "
+            f"expected {admissible} — the shared admissibility predicate has been forked"
         )
+    assert any(a for *_, a, _ in cases), "anti-vacuity: no admissible fixture left"
 
 
 def test_init_re_entry_on_a_foreign_object_is_refused() -> None:
