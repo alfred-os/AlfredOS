@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-01 20:17+0100\n"
+"POT-Creation-Date: 2026-08-02 20:18+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -35,7 +35,7 @@ msgstr ""
 "provider; both are set to {provider}. The dual-LLM split (spec §5.4) "
 "requires distinct providers."
 
-#: src/alfred/cli/_bootstrap.py:103 src/alfred/cli/daemon/_commands.py:482
+#: src/alfred/cli/_bootstrap.py:103 src/alfred/cli/daemon/_commands.py:484
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
@@ -49,17 +49,17 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/_state_git.py:864
+#: src/alfred/cli/_state_git.py:866
 msgid "cli.state_git.error.path_missing"
 msgstr ""
 "{state_git_path} does not exist. Run `alfred-setup` to initialise the "
 "reviewer-gate state repo."
 
-#: src/alfred/cli/_state_git.py:865
+#: src/alfred/cli/_state_git.py:867
 msgid "cli.state_git.error.git_missing"
 msgstr "`git` is not installed on PATH. Install git and re-run the command."
 
-#: src/alfred/cli/_state_git.py:866
+#: src/alfred/cli/_state_git.py:868
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
 "Reviewer-gate push rejected. Check the alfred structured logs for the "
@@ -1005,7 +1005,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:422
+#: src/alfred/cli/daemon/_commands.py:424
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "'{value}' is not a recognised environment. Refusing to boot. Alfred reads"
@@ -1015,7 +1015,7 @@ msgstr ""
 "then re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:425
+#: src/alfred/cli/daemon/_commands.py:427
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -1026,7 +1026,7 @@ msgstr ""
 "then your .env file — and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:485
+#: src/alfred/cli/daemon/_commands.py:487
 msgid "daemon.boot.settings_invalid_field"
 msgstr ""
 "Alfred's configuration is invalid: the '{field}' field failed validation."
@@ -1034,14 +1034,14 @@ msgstr ""
 "re-run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:486
+#: src/alfred/cli/daemon/_commands.py:488
 msgid "daemon.boot.settings_invalid"
 msgstr ""
 "Alfred's configuration is invalid. Refusing to boot — check your .env / "
 "secrets file for a missing or malformed required value, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:657
+#: src/alfred/cli/daemon/_commands.py:659
 msgid "daemon.boot.environment_source_unreadable"
 msgstr ""
 "The environment source could not be read (permission or ownership problem"
@@ -1050,7 +1050,7 @@ msgstr ""
 "permissions/ownership so the daemon process can read it, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:721
+#: src/alfred/cli/daemon/_commands.py:723
 #: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -1058,7 +1058,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:732
+#: src/alfred/cli/daemon/_commands.py:734
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1067,7 +1067,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:756
+#: src/alfred/cli/daemon/_commands.py:758
 #: src/alfred/i18n/_slice_4_reserve.py:122
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1080,7 +1080,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:778
+#: src/alfred/cli/daemon/_commands.py:780
 #: src/alfred/i18n/_slice_4_reserve.py:123
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1092,7 +1092,7 @@ msgstr ""
 " and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:821
+#: src/alfred/cli/daemon/_commands.py:823
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1102,7 +1102,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:847
+#: src/alfred/cli/daemon/_commands.py:849
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "A mandatory first-party capability grant is not live after boot (the DLP-"
@@ -1113,7 +1113,7 @@ msgstr ""
 "failed — then re-run `alfred daemon start` (or `docker compose up -d` on "
 "the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:875
+#: src/alfred/cli/daemon/_commands.py:877
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1124,7 +1124,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:947
+#: src/alfred/cli/daemon/_commands.py:949
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1133,7 +1133,7 @@ msgstr ""
 "daemon start` (or `docker compose up -d` on the compose stack). Multi-"
 "adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:1018
+#: src/alfred/cli/daemon/_commands.py:1020
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1144,7 +1144,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1034
+#: src/alfred/cli/daemon/_commands.py:1036
 msgid "daemon.boot.quarantine_provider_key_unset"
 msgstr ""
 "Cannot start: the quarantined LLM's provider key "
@@ -1156,7 +1156,7 @@ msgstr ""
 "key: alfred-core mounts no secrets.toml, so `.env` plus the compose env "
 "forwarding is the ONLY way in."
 
-#: src/alfred/cli/daemon/_commands.py:1051
+#: src/alfred/cli/daemon/_commands.py:1053
 msgid "daemon.boot.quarantine_max_tokens_invalid"
 msgstr ""
 "Cannot start: the quarantined LLM's per-extraction token budget "
@@ -1172,7 +1172,7 @@ msgstr ""
 " value in BOTH, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1068
+#: src/alfred/cli/daemon/_commands.py:1070
 #: src/alfred/cli/daemon/_comms_boot.py:1039
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
@@ -1182,7 +1182,7 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:1091
+#: src/alfred/cli/daemon/_commands.py:1093
 msgid "daemon.boot.egress_plane_unavailable"
 msgstr ""
 "Cannot start: the egress proxy setting (ALFRED_EGRESS_PROXY_URL) is "
@@ -1195,7 +1195,7 @@ msgstr ""
 "default http://alfred-gateway:8889), and re-run `alfred daemon start` (or"
 " `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1111
+#: src/alfred/cli/daemon/_commands.py:1113
 msgid "daemon.boot.router_secret_missing"
 msgstr ""
 "Cannot start: the primary provider secret (`deepseek_api_key`) could not "
@@ -1203,7 +1203,7 @@ msgstr ""
 "variable for that key and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1130
+#: src/alfred/cli/daemon/_commands.py:1132
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
@@ -1213,38 +1213,38 @@ msgstr ""
 "operator, then re-run `alfred daemon start` (or `docker compose up -d` on"
 " the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1283
+#: src/alfred/cli/daemon/_commands.py:1285
 #: src/alfred/i18n/_slice_4_reserve.py:125
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1481
+#: src/alfred/cli/daemon/_commands.py:1483
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1484
-#: src/alfred/cli/daemon/_commands.py:1489
+#: src/alfred/cli/daemon/_commands.py:1486
+#: src/alfred/cli/daemon/_commands.py:1491
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1491
+#: src/alfred/cli/daemon/_commands.py:1493
 #: src/alfred/i18n/_slice_4_reserve.py:132
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1506
+#: src/alfred/cli/daemon/_commands.py:1508
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1509
+#: src/alfred/cli/daemon/_commands.py:1511
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1517
+#: src/alfred/cli/daemon/_commands.py:1519
 #: src/alfred/i18n/_slice_4_reserve.py:133
 msgid "daemon.status.template"
 msgstr ""
@@ -1253,25 +1253,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1571
-#: src/alfred/cli/daemon/_commands.py:1578
-#: src/alfred/cli/daemon/_commands.py:1589
+#: src/alfred/cli/daemon/_commands.py:1573
+#: src/alfred/cli/daemon/_commands.py:1580
+#: src/alfred/cli/daemon/_commands.py:1591
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1593
+#: src/alfred/cli/daemon/_commands.py:1595
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1595
+#: src/alfred/cli/daemon/_commands.py:1597
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1600
+#: src/alfred/cli/daemon/_commands.py:1602
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1609
+#: src/alfred/cli/daemon/_commands.py:1611
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
@@ -3458,7 +3458,7 @@ msgstr ""
 " parent directory are readable and owned by the invoking user, then "
 "retry."
 
-#: src/alfred/security/tiers.py:263
+#: src/alfred/security/tiers.py:255
 msgid "security.t3_construction_unauthorized"
 msgstr ""
 "security.t3_construction_unauthorized: refused to build a T3-tagged "
@@ -3469,39 +3469,39 @@ msgstr ""
 "directly, and in tests take the authorized_t3_nonce fixture rather than "
 "bypassing the gate."
 
-#: src/alfred/security/tiers.py:463
+#: src/alfred/security/tiers.py:455
 msgid "security.tagged_content_guard_shadow_refused"
 msgstr ""
 "TaggedContent subclass {subclass} redefines trust-tier guard(s): "
 "{guards}. Pydantic rebinds validators by name off the subclass MRO, so "
 "redefining a guard replaces it inside the parent's own slot."
 
-#: src/alfred/security/tiers.py:475
+#: src/alfred/security/tiers.py:467
 msgid "security.tagged_content_namespace_refused"
 msgstr ""
 "TaggedContent may not be subclassed: {subclass} defines {attributes}, "
 "which a genuine parameterisation does not. Overriding a lifecycle hook "
 "such as __init__ skips validation and the post-init tier guard."
 
-#: src/alfred/security/tiers.py:483
+#: src/alfred/security/tiers.py:475
 msgid "security.tagged_content_subclass_refused"
 msgstr ""
 "TaggedContent may not be subclassed: {subclass} in {module}. Pydantic "
 "rebinds validators by name off the subclass MRO, so a subclass can "
 "replace the trust-tier guard. Use TaggedContent[Tier] directly."
 
-#: src/alfred/security/tiers.py:648
+#: src/alfred/security/tiers.py:640
 msgid "security.tier_unknown_wire"
 msgstr "Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
 
-#: src/alfred/security/tiers.py:719 src/alfred/security/tiers.py:744
+#: src/alfred/security/tiers.py:711 src/alfred/security/tiers.py:736
 msgid "security.tagged_content_tier_not_selectable"
 msgstr ""
 "copy(include=…/exclude=…) may not drop the `tier` field: a TaggedContent "
 "without its trust tier has lost the provenance it exists to carry."
 
-#: src/alfred/security/tiers.py:784 src/alfred/security/tiers.py:814
-#: src/alfred/security/tiers.py:944
+#: src/alfred/security/tiers.py:776 src/alfred/security/tiers.py:806
+#: src/alfred/security/tiers.py:936
 msgid "security.tier_unsupported"
 msgstr ""
 "Unsupported trust tier for this build: '{tier_name}' (approved: "
@@ -3511,17 +3511,17 @@ msgstr ""
 # paths in alfred.security.tiers. Each error retains all the diagnostic
 # detail the prior f-string carried; the structured kwargs make the
 # strings re-renderable in a non-English UI at display time.
-#: src/alfred/security/tiers.py:802
+#: src/alfred/security/tiers.py:794
 msgid "security.tier_subclass_missing_name"
 msgstr "TrustTier subclass {subclass} must set a non-empty `name`."
 
-#: src/alfred/security/tiers.py:840
+#: src/alfred/security/tiers.py:832
 msgid "security.tier_mismatch"
 msgstr ""
 "Cross-tier wire payload rejected: declared '{got}' but parser expects "
 "'{expected}' (spec §3.5)."
 
-#: src/alfred/security/tiers.py:1006
+#: src/alfred/security/tiers.py:998
 msgid "security.tag_t3_unauthorized"
 msgstr ""
 "security.tag_t3_unauthorized: tag(T3, ...) refused — caller {caller} did "

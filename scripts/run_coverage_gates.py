@@ -121,7 +121,14 @@ def _run_gate(gate: Gate) -> tuple[bool, str]:
         f"--include={gate.include}",
         f"--fail-under={gate.threshold}",
     ]
-    proc = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+    proc = subprocess.run(  # noqa: S603
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        check=False,
+    )
     return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
 
 

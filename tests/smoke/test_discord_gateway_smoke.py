@@ -181,6 +181,8 @@ def test_discord_gateway_reports_ready(smoke_secrets_file: Path) -> None:
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_WAIT_READY_TIMEOUT_S + _HARNESS_SLACK_S,
         check=False,
     )

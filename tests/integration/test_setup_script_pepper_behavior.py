@@ -150,6 +150,8 @@ def _run_bootstrap_in_tmpdir(
         ["bash", "-c", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
         env=env,
         timeout=30,

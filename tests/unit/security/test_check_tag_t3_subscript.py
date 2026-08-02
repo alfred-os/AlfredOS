@@ -33,6 +33,8 @@ def _run(*args: Path) -> subprocess.CompletedProcess[str]:
         [sys.executable, str(_SCRIPT), *(str(a) for a in args)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )

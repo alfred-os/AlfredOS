@@ -601,6 +601,8 @@ def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> 
             ["git", "ls-files", "--", "src/alfred", "plugins"],  # noqa: S607
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=True,
             cwd=_REPO_ROOT,
         ).stdout.splitlines()
@@ -634,6 +636,8 @@ def test_collect_paths_prefers_git_over_traversal_for_an_in_repo_directory() -> 
             untracked_query,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=True,
             cwd=_REPO_ROOT,
         ).stdout.splitlines()
@@ -1438,6 +1442,8 @@ def test_the_file_argument_residual_is_not_closed_by_this_layer() -> None:
         ["git", "ls-files", "--", "src/alfred"],  # noqa: S607
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
         cwd=_REPO_ROOT,
     ).stdout.splitlines()

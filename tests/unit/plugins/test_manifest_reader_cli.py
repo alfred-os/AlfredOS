@@ -59,6 +59,8 @@ def _run(
         [sys.executable, "-m", "alfred.plugins.manifest_reader", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=base_env,
         input=stdin,
         # #486: `.env` is resolved CWD-relative. Callers asserting an UNRESOLVED environment
@@ -402,6 +404,8 @@ def _run_inline(*args: str, stdin: str | None = None):
         [sys.executable, "-c", _FORCE_NO_LOCALE_THEN_RUN, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=base_env,
         input=stdin,
         check=False,

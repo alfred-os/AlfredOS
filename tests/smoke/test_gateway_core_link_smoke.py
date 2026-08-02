@@ -179,6 +179,8 @@ def test_deployed_daemon_core_and_gateway_link_up(compose_project: str) -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_TEARDOWN_TIMEOUT_S,
     )
 

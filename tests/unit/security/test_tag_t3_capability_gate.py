@@ -308,6 +308,8 @@ def test_check_tag_t3_script_rejects_unauthorized_call(tmp_path: Path) -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -333,6 +335,8 @@ def test_check_tag_t3_script_allows_clean_file(tmp_path: Path) -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(clean_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -371,6 +375,8 @@ def test_check_tag_t3_script_exempts_real_authorised_home() -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(real_home)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -417,6 +423,8 @@ def test_check_tag_t3_script_rejects_synthetic_suffix_attack(tmp_path: Path) -> 
         [sys.executable, "scripts/check_tag_t3.py", str(synthetic_home)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -446,6 +454,8 @@ def test_check_tag_t3_script_clean_on_real_src_tree() -> None:
         [sys.executable, "scripts/check_tag_t3.py"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -473,6 +483,8 @@ def test_check_tag_t3_script_rejects_cast_bypass(tmp_path: Path) -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -504,6 +516,8 @@ def test_check_tag_t3_script_rejects_multiline_tag_t3(tmp_path: Path) -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -531,6 +545,8 @@ def test_check_tag_t3_script_rejects_multiline_cast(tmp_path: Path) -> None:
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -603,6 +619,8 @@ def test_check_tag_t3_script_rejects_qualified_calls(
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )
@@ -647,6 +665,8 @@ def test_check_tag_t3_script_rejects_in_repo_test_prefix_attack(tmp_path: Path) 
             [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             cwd=str(_REPO_ROOT),
             check=False,
         )
@@ -699,6 +719,8 @@ def test_check_tag_t3_script_exempts_out_of_repo_tmp_path_test_file(tmp_path: Pa
         [sys.executable, "scripts/check_tag_t3.py", str(exempt_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(_REPO_ROOT),
         check=False,
     )

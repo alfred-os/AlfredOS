@@ -98,6 +98,8 @@ def test_direct_tagged_content_t3_construction_refused_by_ci_grep_gate(
         [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         cwd=str(repo_root),
         check=False,
     )

@@ -73,6 +73,8 @@ def _run_gate(
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         # Start from a clean slate so a real key in the developer's own shell cannot
         # leak in and flip the shell-precedence branch under test.
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", **(extra_env or {})},

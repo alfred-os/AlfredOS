@@ -225,6 +225,8 @@ def _spawn_with_fd3(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             cwd=str(_REPO_ROOT),
         )
     finally:

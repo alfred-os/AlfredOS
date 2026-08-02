@@ -118,6 +118,8 @@ def test_read_environment_refuses_a_loosening_cwd_dotenv_only_source(
         [sys.executable, "-m", "alfred.plugins.manifest_reader", "--read-environment"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=_manifest_reader_cli_env({"ALFRED_ETC_ENV_FILE": str(tmp_path / "absent")}),
         check=False,
         timeout=_LAUNCHER_TIMEOUT_S,
@@ -161,6 +163,8 @@ def test_launcher_refuses_to_spawn_when_only_cwd_dotenv_claims_development(
         [str(_LAUNCHER), "alfred.example", str(stub)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=_launcher_env(
             {
                 "ALFRED_ETC_ENV_FILE": str(tmp_path / "absent"),

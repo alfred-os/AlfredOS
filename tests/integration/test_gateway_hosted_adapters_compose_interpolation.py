@@ -78,6 +78,8 @@ def _config_env(extra_env: dict[str, str]) -> dict[str, Any]:
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
         timeout=60,
         env={**base_env, **extra_env},

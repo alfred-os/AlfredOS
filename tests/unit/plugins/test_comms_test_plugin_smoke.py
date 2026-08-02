@@ -73,6 +73,8 @@ def test_comms_test_plugin_handles_non_object_json_with_invalid_request() -> Non
         input=bad_frame + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_SMOKE_TIMEOUT_S,
         check=False,
     )
@@ -118,6 +120,8 @@ def test_comms_test_plugin_missing_method_returns_invalid_request() -> None:
         input=bad_frame + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_SMOKE_TIMEOUT_S,
         check=False,
     )
@@ -156,6 +160,8 @@ def test_comms_test_plugin_non_string_method_returns_invalid_request() -> None:
         input=bad_frame + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_SMOKE_TIMEOUT_S,
         check=False,
     )
@@ -202,6 +208,8 @@ def test_comms_test_plugin_missing_method_emits_invalid_request_with_null_id() -
         input=bad_frame + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_SMOKE_TIMEOUT_S,
         check=False,
     )
@@ -235,6 +243,8 @@ def test_comms_test_plugin_non_string_method_no_id_emits_invalid_request_with_nu
         input=bad_frame + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_SMOKE_TIMEOUT_S,
         check=False,
     )
@@ -306,6 +316,8 @@ def test_comms_test_plugin_subprocess_health_round_trip() -> None:
         input=request + "\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         timeout=_SMOKE_TIMEOUT_S,
         check=False,
     )

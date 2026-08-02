@@ -145,6 +145,8 @@ def _seed_state_git(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     commit_hash = head_proc.stdout.strip()

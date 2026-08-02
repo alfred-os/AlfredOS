@@ -74,6 +74,8 @@ def test_make_help_lists_every_documented_target() -> None:
         ["make", "help"],  # noqa: S607 — `make` resolved from PATH by design
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
         cwd=_REPO_ROOT,
         # `make` inherits MAKEFLAGS from an outer `make check` and can be

@@ -66,7 +66,14 @@ def _docker(*args: str) -> str:
     """Run a read-only ``docker`` query and return stripped stdout (S607: trusted CLI)."""
     cmd = ["docker", *args]  # argv-as-local keeps ruff S607 out of scope; S603 is per-file-ignored.
     return subprocess.run(
-        cmd, cwd=_compose.REPO_ROOT, capture_output=True, text=True, timeout=30.0, check=True
+        cmd,
+        cwd=_compose.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        timeout=30.0,
+        check=True,
     ).stdout.strip()
 
 

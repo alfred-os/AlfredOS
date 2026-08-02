@@ -29,6 +29,8 @@ def _run_in_fresh_python(script: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, "-I", "-c", textwrap.dedent(script)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
         timeout=10,
     )

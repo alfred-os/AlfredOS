@@ -284,6 +284,8 @@ def read_state_git_head_sha(state_git_path: Path) -> str:
             ["git", "-C", str(state_git_path), "rev-parse", "HEAD"],  # noqa: S607
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
         )
     except OSError:

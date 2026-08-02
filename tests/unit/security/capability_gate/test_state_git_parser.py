@@ -121,6 +121,8 @@ def _seed_repo_with_grants(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     commit_hash = head_proc.stdout.strip()
@@ -184,6 +186,8 @@ def _seed_empty_repo(tmp_path: Path) -> tuple[Path, str]:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     commit_hash = head_proc.stdout.strip()
@@ -410,6 +414,8 @@ def _seed_repo_with_nested_grants_and_sidecars(tmp_path: Path) -> tuple[Path, st
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     commit_hash = head_proc.stdout.strip()
@@ -519,6 +525,8 @@ def _seed_repo_with_raw_blobs(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     commit_hash = head_proc.stdout.strip()

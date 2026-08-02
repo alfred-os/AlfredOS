@@ -33,7 +33,13 @@ _IMAGE = "postgres:18"  # already pulled by testcontainers in the Integration la
 
 def _run(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["docker", *args], capture_output=True, text=True, timeout=timeout, check=False
+        ["docker", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        timeout=timeout,
+        check=False,
     )
 
 

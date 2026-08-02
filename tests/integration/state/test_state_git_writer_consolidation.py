@@ -149,6 +149,8 @@ def test_plugin_grant_proposal_lands_under_policies_grants_tree(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
     expected_path = f"policies/grants/alfred.web-fetch/{result.proposal_id}.json"
@@ -239,6 +241,8 @@ def test_sync_writer_and_async_shim_produce_semantically_identical_blob(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     ).stdout
     async_blob = subprocess.run(  # noqa: S603
@@ -251,6 +255,8 @@ def test_sync_writer_and_async_shim_produce_semantically_identical_blob(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     ).stdout
 
@@ -333,6 +339,8 @@ def test_parse_state_git_head_round_trips_typed_payload_via_writer(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     merged_commit_hash = head_proc.stdout.strip()
@@ -424,6 +432,8 @@ def test_parse_state_git_head_round_trips_typed_payload_via_async_shim(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env=env,
     )
     merged_commit_hash = head_proc.stdout.strip()

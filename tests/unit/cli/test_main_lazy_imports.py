@@ -132,6 +132,8 @@ def _modules_loaded_after_importing_main() -> list[str]:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     )
     if child.returncode != 0:
         msg = (
@@ -215,6 +217,8 @@ def test_alfred_cli_main_lazy_load_keeps_help_surface_intact() -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     )
     assert child.returncode == 0, (
         f"alfred --help exited {child.returncode} after lazy-import refactor.\n"

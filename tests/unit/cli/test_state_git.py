@@ -193,6 +193,8 @@ def test_create_proposal_branch_exists_in_repo(bare_repo: Path) -> None:
         ["git", "--git-dir", str(bare_repo), "branch", "-a"],  # noqa: S607
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
     assert result.branch in out.stdout
@@ -458,6 +460,8 @@ def test_create_proposal_compat_shim_breaker_reset_lands_at_typed_path(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
     files = out.stdout.splitlines()
@@ -497,6 +501,8 @@ def test_create_proposal_compat_shim_lands_at_typed_on_disk_path(bare_repo: Path
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
     files = out.stdout.splitlines()
@@ -532,6 +538,8 @@ def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> Non
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
     # JSON is sorted + indented; spot-check both keys + the formatting shape.
@@ -558,6 +566,8 @@ def test_create_proposal_commit_message_carries_proposal_id(bare_repo: Path) -> 
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=True,
     )
     assert result.proposal_id in out.stdout
