@@ -105,20 +105,84 @@ invisible at every site that later depends on it.
 from __future__ import annotations
 
 import ast
+import enum
 import errno
+import io
 import os
 import re
 import stat
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
+from typing import NamedTuple
 
-# Line-based pattern. ``# type: ignore`` on a line containing
-# ``TaggedContent`` is fundamentally a comment-and-line construct: the
-# parser discards comments so AST detection cannot see them. Multiline
-# bypass via newline-in-call is not relevant here either (the suppression
-# applies to a specific physical line).
-_TYPE_IGNORE_PATTERN: re.Pattern[str] = re.compile(r"TaggedContent.*#\s*type:\s*ignore")
+# Suppression sits in comment text the parser discards, so AST detection cannot see it.
+# That much was always true; what changed is the instrument. THREE measured reasons force
+# `tokenize` over a line regex:
+#
+# 1. THE NAIVE WIDENING IS THE LIKELY WRONG IMPLEMENTATION. Written with a top-level
+#    alternation — `TaggedContent.*#\s*(?:type|pyright):\s*ignore|noqa` — the `noqa` arm
+#    binds at the TOP level and matches any line containing the word, anywhere, including
+#    inside a string. Measured across both scan roots: 98 hits against 1 correctly grouped,
+#    so 97 pure false positives. The non-capturing group below is load-bearing.
+# 2. A "TOKEN REGEX" IS WORSE THAN THE NAIVE FORM ON ONE CASE — it readmits prose inside a
+#    real comment. Only anchoring at the START of a real COMMENT token's body separates a
+#    directive from a sentence that mentions one.
+# 3. THE OLD RULE NEEDED THE SUPPRESSOR AND `TaggedContent` ON THE SAME PHYSICAL LINE, so
+#    reformatting a call across lines and putting `# type: ignore` on the closing paren made
+#    it blind. The LOGICAL line is the correct scope, and only the tokenizer knows where one
+#    ends.
+#
+# `re.match`, never `re.search`: "we do not noqa here" is prose ABOUT a directive, because
+# the word is not where a directive would start. "noqa is the wrong tool", by contrast, IS a
+# bare directive to every linter that reads it, and reds — the anchor decides that correctly
+# and a review floor asserting otherwise was itself wrong. (This very comment block cannot
+# spell a directive out in full: ruff reads one inside a comment no matter what surrounds
+# it, and flags the unused suppression. That is the same phenomenon, one layer up.)
+#
+# `ruff: noqa`, `flake8: noqa` and `mypy: ignore-errors` are FILE-WIDE suppressors — the
+# strongest of the family — and were invisible to every earlier draft of this rule.
+# TWO CLASSES, because the real tools scope them differently and one span rule cannot be
+# right for both.
+#
+# FILE-WIDE suppressors disable checking for the WHOLE MODULE, so their scope is the file:
+# a blanket ruff or flake8 directive at the top of a module full of `TaggedContent` has
+# silenced every line in it. Scoping those to their own line would make the STRONGEST
+# members of the family the easiest to hide behind, which is exactly backwards.
+#
+# (This block cannot spell either directive out in full. ruff parses one inside a comment
+# regardless of the surrounding prose and then reports it as malformed — the same
+# comment-is-not-prose phenomenon the rule below exists to decide, one layer up.)
+#
+# LINE-SCOPED suppressors apply to the logical line they sit on and nothing else — a bare
+# `# type: ignore` on its own line suppresses NOTHING in mypy, so attaching it to whatever
+# statement happens to follow would be a false positive invented by this gate rather than a
+# property of the source.
+#
+# `mypy: ignore-errors` is matched before `mypy: ignore` would be reached, and the file-wide
+# pattern is tested first, so the longer directive cannot be swallowed by its own prefix.
+_FILE_WIDE_SUPPRESSOR_PATTERN: re.Pattern[str] = re.compile(
+    r"(?:(?:ruff|flake8)\s*:\s*noqa|mypy\s*:\s*ignore-errors)\b"
+)
+_LINE_SUPPRESSOR_PATTERN: re.Pattern[str] = re.compile(
+    r"(?:(?:type|pyright|mypy)\s*:\s*ignore|noqa)\b"
+)
+
+# Token kinds that carry no CODE, so none of them may open a logical-line span. Module-level
+# rather than a local, because a frozenset rebuilt per call is work this gate does 332 times
+# and because ruff's N806 correctly reads an upper-case local as a misplaced constant.
+_NON_CODE_TOKENS: frozenset[int] = frozenset(
+    {
+        tokenize.COMMENT,
+        tokenize.NL,
+        tokenize.NEWLINE,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.ENDMARKER,
+        tokenize.ENCODING,
+    }
+)
 _TYPE_IGNORE_MESSAGE: str = "# type: ignore on TaggedContent line — fix the type, don't suppress"
 
 # AST-detected call-site violations. Each entry describes the call name
@@ -377,6 +441,26 @@ _PRIVATE_SURFACE_MESSAGE: str = (
     "a private name from alfred.security.tiers, named in code — that surface IS the "
     "T3 authorisation mechanism, so no runtime guard can refuse a use of it. Take the "
     "nonce from bootstrap and go through tag_t3_with_nonce()."
+)
+_TAGGED_CONTENT_UNRESOLVED_SLICE_MESSAGE: str = (
+    "TaggedContent[...] whose generic argument is not a tier this gate can read — a "
+    "computed, quoted-non-tier or otherwise non-identifier slice. The gate cannot tell "
+    "T3 from T2 here, so it refuses. Name the tier literally, or use tag_t3_with_nonce()."
+)
+_UNPARAMETERISED_CONSTRUCTION_MESSAGE: str = (
+    "TaggedContent(...) built with no generic argument — the tier arrives as data the "
+    "gate cannot read, so it cannot tell a T3 construction from a T0 one. Parameterise "
+    "the construction, or use tag_t3_with_nonce()."
+)
+_TAGGED_SEAM_MESSAGE: str = (
+    "a TaggedContent construction seam (model_construct / model_validate*) that does not "
+    "name a benign tier — these build field state from DATA, so the tier is not a token "
+    "this gate can read. Use tag_t3_with_nonce()."
+)
+_TIER_MUTATING_COPY_MESSAGE: str = (
+    "a copy seam whose update mapping reaches a 'tier' key — relabelling the tier on an "
+    "existing object never passes the capability gate. Build the object you want with "
+    "tag_t3_with_nonce()."
 )
 
 # Read-surface failures. These are VIOLATIONS, not silent passes (#537):
@@ -868,6 +952,259 @@ def _alias_names(tree: ast.AST, seed: str) -> tuple[frozenset[str], bool]:
     return frozenset(names), True
 
 
+# The tier identifiers that are NOT T3, and the bound a generic tier helper carries.
+#
+# HARD-CODED on `_TIERS_PRIVATE_SURFACE`'s precedent and for its reason: the gate runs
+# under bare `python3` from the Makefile with no venv and no `alfred` importable, so it
+# cannot ask the module, and it must not read `tiers.py` at import time. The drift guard
+# is `test_the_benign_tier_seeds_match_the_real_module`, called from the suite.
+_BENIGN_TIER_SEEDS: tuple[str, ...] = ("T0", "T1", "T2")
+_TRUST_TIER_NAME: str = "TrustTier"
+
+
+class _SliceVerdict(enum.Enum):
+    """What a ``TaggedContent[...]`` generic argument resolves to. THREE, not two.
+
+    ``UNRESOLVED`` is the whole point of this type. The rule this replaces asked "is this
+    slice the name ``T3``?" and answered "no" for ``"T"+"3"``, ``globals()["T3"]``,
+    ``TIERS["T3"]``, ``T3 if x else T2`` and ``(T3,)`` alike — fail-OPEN on every
+    non-``Name`` shape. A two-valued verdict cannot express "I could not read this", so it
+    has to guess, and the safe guess and the quiet guess are different guesses.
+
+    THE THIRD MEMBER IS NOT DECORATION, and the plan review proved it by execution. The
+    first revision of :func:`_tier_alias_env` classified derived bindings with
+    ``t3_seeds if verdict is T3 else benign_seeds`` — a two-way ternary over a
+    three-valued verdict — which routed every ``UNRESOLVED`` into the BENIGN bucket. All
+    six shapes above then scanned CLEAN once bound to a name
+    (``X = TaggedContent["T" + "3"]``; ``X(content=ATTACKER)``) while the identical inline
+    slice correctly red. A set-per-verdict silently drops the verdict that has no set,
+    which is why parameterised bindings travel as a verdict MAP below.
+    """
+
+    T3 = "t3"
+    BENIGN = "benign"
+    UNRESOLVED = "unresolved"
+
+
+# DEFAULT-DENY ORDER. When one name is bound more than once the STRICTER verdict wins, so
+# `X = P` followed by `X = Q` cannot be used to walk a name back down to benign.
+_SLICE_VERDICT_STRICTNESS: dict[_SliceVerdict, int] = {
+    _SliceVerdict.BENIGN: 0,
+    _SliceVerdict.UNRESOLVED: 1,
+    _SliceVerdict.T3: 2,
+}
+
+
+def _stricter(candidate: _SliceVerdict, incumbent: _SliceVerdict | None) -> _SliceVerdict:
+    """The stricter of two verdicts; ``candidate`` when there is no incumbent."""
+    if incumbent is None:
+        return candidate
+    if _SLICE_VERDICT_STRICTNESS[candidate] > _SLICE_VERDICT_STRICTNESS[incumbent]:
+        return candidate
+    return incumbent
+
+
+def _slice_verdict(
+    node: ast.expr, t3_names: frozenset[str], benign_names: frozenset[str]
+) -> _SliceVerdict:
+    """TOTAL over ``ast.expr``. Every shape gets a verdict, and the default is DENY.
+
+    Written as an ALLOW-LIST over the two shapes this gate can read — a bare or qualified
+    identifier, and a quoted generic — with everything else falling through to
+    ``UNRESOLVED``. An enumeration of BAD shapes closes what it names and silently widens
+    the day the grammar grows one; this closes the axis.
+
+    A QUOTED GENERIC IS A FORWARD-REFERENCED NAME, so it resolves through the SAME sets as
+    the bare form. Matching it against the raw seed tuple instead was an asymmetry the
+    review executed: with ``T2 = T3`` in scope, ``TaggedContent[T2](...)`` red while
+    ``TaggedContent["T2"](...)`` scanned clean, because one arm was alias-resolved and the
+    other was not.
+
+    TOTALITY IS LOAD-BEARING BEYOND CORRECTNESS. This function is called from BOTH sides of
+    ``_scan_text``'s :class:`GateInternalError` fence — from :func:`_detect` inside it, and
+    from :func:`_tier_alias_env` outside it — so a raise here would surface as exit 2 down
+    one path and exit 1 down the other for the same input. It has no raise path: every
+    branch returns, and ``_arg_name`` is itself total over ``ast.expr``.
+
+    The benign sets are what make the default-deny affordable. Measured across both scan
+    roots: the only non-``T0..T3`` slices are ``TaggedContent[TierT]`` x3, ``[Any]`` x1 and
+    ``[tier]`` x1, and ALL FIVE are inside the whole-file-exempt ``tiers.py``. The first
+    generic helper written OUTSIDE it reds unless its TypeVar is bound to ``TrustTier`` —
+    which :func:`_trust_tier_type_aliases` seeds — and a plain PARAMETER (``tiers.py:949``)
+    is not rescued by anything lexical.
+    """
+    name = _arg_name(node)
+    if name is None and isinstance(node, ast.Constant) and isinstance(node.value, str):
+        name = node.value
+    if name is None:
+        return _SliceVerdict.UNRESOLVED
+    if name in t3_names:
+        return _SliceVerdict.T3
+    if name in benign_names:
+        return _SliceVerdict.BENIGN
+    return _SliceVerdict.UNRESOLVED
+
+
+class TierAliasEnv(NamedTuple):
+    """The per-file tier name environment every tier rule decides on.
+
+    ``tc_param`` is a MAPPING rather than one set per verdict, and that is the shape the
+    plan review forced: a set-per-verdict has no home for ``UNRESOLVED``, so classification
+    collapses to two ways and the default lands on the OPEN side. A map cannot lose a
+    verdict. See :class:`_SliceVerdict` for the executed bypass.
+
+    Every member is produced by :func:`_alias_names`, the ONE seed-parameterised resolver
+    this gate owns. A second resolver would be the #422 shape — a shared helper fails LOUD,
+    N copies drift SILENTLY — and on this axis the drift is a bypass.
+    """
+
+    tc_bare: frozenset[str]
+    """Names bound to the bare ``TaggedContent`` class."""
+
+    tc_param: dict[str, _SliceVerdict]
+    """Names bound to a PARAMETERISED ``TaggedContent[...]``, mapped to the tier verdict."""
+
+    t3: frozenset[str]
+    """Names bound to ``T3``."""
+
+    benign_tier: frozenset[str]
+    """Names bound to a non-T3 tier, plus in-file generic tier parameters."""
+
+
+def _parameterised_bindings(node: ast.AST) -> list[tuple[str, ast.Subscript]]:
+    """``(bound name, subscript)`` for every binding of a subscript to a NAME.
+
+    DEFAULT-DENY OVER BINDING SHAPES, not an enumeration of the one the review happened to
+    write. Keyed on ``.value`` being an ``ast.Subscript`` and then on the node kind that
+    names the target, which is the same discipline :func:`_binding_name` already applies
+    one layer down. Reading ``ast.Assign`` alone left ``X: TypeAlias = TaggedContent[T3]``,
+    PEP-695 ``type X = TaggedContent[T3]`` and the walrus all scanning clean — measured,
+    not supposed.
+
+    RESIDUAL: a tuple target (``A, B = TaggedContent[T3], other``) binds through an
+    ``ast.Tuple`` whose element order the gate would have to track against the value side.
+    That shape carries no subscript in ``.value`` at all, so it does not reach here; it is
+    an unread binding rather than a misread one, and the name simply stays unknown.
+    """
+    value = getattr(node, "value", None)
+    if not isinstance(value, ast.Subscript):
+        return []
+    if isinstance(node, ast.Assign):
+        targets: list[ast.expr] = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+        targets = [node.target]
+    elif isinstance(node, ast.TypeAlias):
+        targets = [node.name]
+    else:
+        return []
+    return [(t.id, value) for t in targets if isinstance(t, ast.Name)]
+
+
+def _trust_tier_type_aliases(tree: ast.AST, t3_names: frozenset[str]) -> frozenset[str]:
+    """In-file generic tier parameters — PEP-695 aliases and ``TypeVar(bound=TrustTier)``.
+
+    WITHOUT THIS the first generic helper written OUTSIDE ``tiers.py`` reds for a benign
+    reason: ``TaggedContent[TierT]`` is a legitimate shape and ``TierT`` is in no tier set.
+    ``tiers.py`` carries three such sites today and is whole-file exempt, so this seeding
+    buys nothing on the current tree — it is what keeps :func:`_slice_verdict`'s
+    default-deny affordable for the NEXT such helper.
+
+    ``TrustTier`` IS ALIAS-RESOLVED, AND A BOUND THAT NAMES A TIER IS REFUSED. This set is
+    on the ADMITTING side, so a bare literal here is a bypass rather than a residual — and
+    the review executed it: with ``TrustTier = T3`` in scope, ``type TierT = TrustTier``
+    followed by ``TaggedContent[TierT](...)`` scanned clean. The first revision declared
+    that "rebinding makes the gate STRICTER", which is false in every direction for an
+    admitting set. Both legitimate spellings stay clean; the rebound one does not.
+
+    IT DOES NOT RESCUE A PLAIN PARAMETER. ``tiers.py:949`` is ``TaggedContent[tier](...)``
+    where ``tier`` is a function parameter, and no lexical set can decide what a caller
+    passed. Stated here so the next reader does not expect it to.
+    """
+    trust_names, _ = _alias_names(tree, _TRUST_TIER_NAME)
+    admitting = trust_names - t3_names
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.TypeAlias):
+            if _arg_name(node.value) in admitting:
+                names.add(node.name.id)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            bound = next((kw.value for kw in node.value.keywords if kw.arg == "bound"), None)
+            if bound is not None and _arg_name(bound) in admitting:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+    return frozenset(names)
+
+
+def _tier_alias_env(tree: ast.AST) -> tuple[TierAliasEnv, bool]:
+    """The tier name environment for ONE file, plus whether any alias chain overflowed.
+
+    DERIVATION ORDER IS A DAG, NOT AN OUTER FIXED POINT. ``tc_bare``, ``t3`` and
+    ``benign_tier`` are direct :func:`_alias_names` seeds. ``tc_param`` is then derived from
+    ``X = <tc_bare>[<slice>]`` bindings, and each discovered TARGET is fanned back through
+    ``_alias_names`` — so ``B = A`` written before ``A = TaggedContent[T3]`` still resolves
+    ``B``, because the fixed point is ``_alias_names``'s rather than a second one written
+    here.
+
+    THE SEED LOOPS DELIBERATELY USE THE VARIABLE NAME ``seed``. The meta-guard's derivation
+    (`_identifiers_the_gate_keys_on`) collects loop variables that reach ``_alias_names``,
+    and it recognises this call shape by that name. Renaming the variable hard-reds
+    `test_every_keyed_identifier_is_alias_resolved`; `test_the_seed_loop_variable_is_named_seed`
+    pins it so the coupling is visible rather than discovered.
+
+    A NAME BOUND BOTH BARE AND PARAMETERISED IS AMBIGUOUS, and is raised to at least
+    ``UNRESOLVED``. Without that, ``Cool = TaggedContent[T2]`` followed by
+    ``Cool = TaggedContent`` returned BENIGN and silenced the unparameterised-construction
+    rule for ``Cool(tier=T3)`` — executed by the review.
+
+    RESIDUAL, inherited from :func:`_alias_names` and restated because it bites harder on
+    this axis: the environment is PER-FILE. A ``TaggedContent`` re-exported through another
+    module and imported under its new spelling is not resolved.
+
+    RESIDUAL, and a name-keyed set cannot close it: ``benign_tier`` holds bare NAMES, so a
+    parameter or local named ``T2`` is treated as benign — ``def f(T2): TaggedContent[T2](...)``
+    with a caller passing ``T3`` scans clean. It is masked by the runtime guard
+    (``_refuse_unauthorized_t3`` fires regardless of parameterisation), which is what makes
+    it an acceptable residual rather than a hole.
+    """
+    overflowed = False
+    tc_bare, grew = _alias_names(tree, "TaggedContent")
+    overflowed = overflowed or grew
+    t3, grew = _alias_names(tree, "T3")
+    overflowed = overflowed or grew
+
+    benign: set[str] = set()
+    for seed in _BENIGN_TIER_SEEDS:
+        resolved, grew = _alias_names(tree, seed)
+        benign |= resolved
+        overflowed = overflowed or grew
+    benign |= _trust_tier_type_aliases(tree, t3)
+    benign_tier = frozenset(benign)
+
+    seeds: dict[str, _SliceVerdict] = {}
+    for node in ast.walk(tree):
+        for name, subscript in _parameterised_bindings(node):
+            if _arg_name(subscript.value) not in tc_bare:
+                continue
+            verdict = _slice_verdict(subscript.slice, t3, benign_tier)
+            seeds[name] = _stricter(verdict, seeds.get(name))
+
+    tc_param: dict[str, _SliceVerdict] = {}
+    for seed, verdict in sorted(seeds.items()):
+        resolved, grew = _alias_names(tree, seed)
+        overflowed = overflowed or grew
+        for name in resolved:
+            tc_param[name] = _stricter(verdict, tc_param.get(name))
+    for name in tc_param:
+        if name in tc_bare:
+            tc_param[name] = _stricter(_SliceVerdict.UNRESOLVED, tc_param[name])
+
+    return (
+        TierAliasEnv(tc_bare=tc_bare, tc_param=tc_param, t3=t3, benign_tier=benign_tier),
+        overflowed,
+    )
+
+
 def _record(violations: list[str], lines: list[str], path: Path, lineno: int, message: str) -> None:
     """Append a violation MESSAGE line plus its source SNIPPET line.
 
@@ -1251,50 +1588,63 @@ def _is_tag_t3_call(node: ast.Call) -> bool:
     return _arg_name(node.args[0]) == "T3"
 
 
-def _is_tagged_content_t3_subscript_call(node: ast.Call) -> bool:
-    """``TaggedContent[T3](...)`` — direct subscript construction.
+def _unwrap_walrus(node: ast.expr) -> ast.expr:
+    """Strip an assignment expression down to the value it binds.
 
-    Matches:
+    ``(X := TaggedContent[T3])(...)`` puts an ``ast.NamedExpr`` in ``Call.func``, so every
+    rule that reads a callable or a receiver through :func:`_arg_name` sees ``None`` and
+    falls through. The two-statement spelling — bind on one line, call on the next — is
+    caught by the alias environment, so without this the SHORTER form was the one that
+    scanned clean. Measured during acceptance, not supposed.
 
-    - ``TaggedContent[T3](...)``           — bare name + bare T3
-    - ``tiers.TaggedContent[T3](...)``     — qualified Attribute target
-    - ``TaggedContent[tiers.T3](...)``     — qualified Attribute slice
-    - ``tiers.TaggedContent[tiers.T3](...)`` — both qualified
-    - ``TaggedContent["T3"](...)``         — quoted string-form generic
-    - ``tiers.TaggedContent["T3"](...)``   — qualified target + quoted slice
-
-    sec-S3-002: ``tag_t3_with_nonce`` checks the per-process nonce; the
-    ``TaggedContent`` Pydantic field validator does NOT. A direct
-    subscript-construction call therefore admits raw T3 content without
-    the gate. The single authorised home — ``security/tiers.py``, for the
-    ``tag_t3_with_nonce`` body — is exempted via ``_APPROVED_PATHS``;
-    everywhere else this pattern trips the gate, including every other
-    module inside ``security/`` (#538).
-
-    The call target ``func`` is an ``ast.Subscript`` whose ``value`` is
-    the identifier ``TaggedContent`` (covering bare + qualified forms
-    via :func:`_arg_name`) and whose ``slice`` is the identifier ``T3``
-    (covering bare + qualified forms the same way). CR-142 round-3
-    extension: the quoted ``"T3"`` form parses as an ``ast.Constant``
-    rather than an ``ast.Name``, so :func:`_arg_name` returns ``None``
-    for it. Detect the quoted form explicitly so authors cannot bypass
-    the gate by string-quoting the generic argument.
+    Loops rather than recursing once: ``((X := (Y := TaggedContent[T3])))(...)`` nests, and
+    the parser discards the parentheses but not the nodes. Bounded by the expression's own
+    depth, which ``ast.parse`` has already bounded.
     """
-    func = node.func
-    if not isinstance(func, ast.Subscript):
-        return False
-    if _arg_name(func.value) != "TaggedContent":
-        return False
-    if _arg_name(func.slice) == "T3":
-        return True
-    # Quoted string-form generic: ``TaggedContent["T3"](...)`` parses
-    # the slice as ``ast.Constant("T3")``. Without this branch the gate
-    # admits the string-quoted bypass that mirrors the
-    # ``cast("TaggedContent[T2]", x)`` shape already covered in
-    # :func:`_is_cast_tagged_content_call`.
-    if isinstance(func.slice, ast.Constant) and isinstance(func.slice.value, str):
-        return func.slice.value == "T3"
-    return False
+    while isinstance(node, ast.NamedExpr):
+        node = node.value
+    return node
+
+
+def _tagged_subscript_verdict(node: ast.Call, env: TierAliasEnv) -> _SliceVerdict | None:
+    """The tier a ``TaggedContent``-ish construction CALL mints, or ``None`` if it is not one.
+
+    Succeeds :func:`_is_tag_t3_call`'s sibling ``_is_tagged_content_t3_subscript_call``,
+    which asked a yes/no question keyed on the literal identifiers ``TaggedContent`` and
+    ``T3``. Both were rebindable, and both are now resolved through :class:`TierAliasEnv`.
+
+    sec-S3-002: ``tag_t3_with_nonce`` checks the per-process nonce; the ``TaggedContent``
+    Pydantic field validator does NOT. A direct subscript construction therefore admits raw
+    T3 content without the gate. The single authorised home — ``security/tiers.py``, for the
+    ``tag_t3_with_nonce`` body — is exempt via ``_APPROVED_PATHS``; everywhere else this
+    trips, including every other module inside ``security/`` (#538).
+
+    TWO CALL SHAPES reach the same construction and both must be read here:
+
+    * ``TaggedContent[T3](...)`` — the subscript sits in ``Call.func``. Bare and qualified
+      forms on BOTH halves collapse through :func:`_arg_name`, so ``tiers.TaggedContent``
+      and ``tiers.T3`` are covered, as is the quoted ``TaggedContent["T3"]``.
+    * ``Hot(...)`` where ``Hot = TaggedContent[T3]`` — there is NO subscript at the call
+      site at all, so the predicate this replaces was blind to it by construction.
+
+    ONE-POSITION WHITELIST, and it is why the 22 annotation sites across 5 files do not red:
+    ``Call.func`` is the only position read. NEVER an ancestor blacklist — not because a
+    blacklist misfires (a correctly scoped ``.annotation``-subtree blacklist regresses
+    zero), but because it must ENUMERATE annotation-bearing positions and silently widens
+    the day the grammar grows one. ``ast.TypeAlias`` already did exactly that. Thirteen of
+    those 22 sites live outside any exempt file, in ``orchestrator/core.py``,
+    ``plugins/content_store_base.py``, ``security/quarantine_transport.py`` and
+    ``comms_mcp/real_turn_adapter.py``.
+    """
+    func = _unwrap_walrus(node.func)
+    if isinstance(func, ast.Subscript):
+        if _arg_name(func.value) not in env.tc_bare:
+            return None
+        return _slice_verdict(func.slice, env.t3, env.benign_tier)
+    name = _arg_name(func)
+    if name is None:
+        return None
+    return env.tc_param.get(name)
 
 
 def _is_cast_tagged_content_call(node: ast.Call) -> bool:
@@ -1369,6 +1719,125 @@ def _is_unbound_basemodel_seam_call(node: ast.Call, basemodel_names: frozenset[s
     )
 
 
+# The `_BASEMODEL_SEAM_ATTRS` PARTITION. Two rules need disjoint halves of it: the
+# construction seams build field state from DATA (so the tier is not a token this gate can
+# read, and the rule is receiver-scoped), while the copy seams mutate an EXISTING object
+# through an update mapping (so the rule is receiver-BLIND and keys on the mapping).
+#
+# DERIVED, not transcribed. Three overlapping vocabularies of the same five names is the
+# #422 shape, and `test_the_seam_partition_covers_basemodel_seam_attrs` asserts the two
+# halves are disjoint and exhaustive — so adding a sixth seam to the parent forces a
+# decision about which half it belongs to instead of silently belonging to neither.
+_COPY_SEAM_ATTRS: frozenset[str] = frozenset({"copy", "model_copy"})
+_TAGGED_SEAM_ATTRS: frozenset[str] = _BASEMODEL_SEAM_ATTRS - _COPY_SEAM_ATTRS
+
+
+def _mapping_mentions_tier(node: ast.expr) -> bool:
+    """True when ``node`` is a mapping expression that can reach a ``"tier"`` key.
+
+    TOTAL over the mapping shapes a copy seam accepts, and DEFAULT-DENY on the ones it
+    cannot read. Keying on ``ast.Dict`` with a folded ``"tier"`` key alone left
+    ``dict(tier=T3)`` and ``{**{"tier": T3}}`` scanning clean — measured, and both reach
+    the identical write.
+
+    The ``**`` arm is where the default-deny lives. ``{**payload}`` names no key this gate
+    can read, so it is REFUSED rather than admitted: a mapping the rule cannot read is a
+    mapping it must not admit. Measured cost of that strictness across both scan roots:
+    ZERO — the two live ``model_copy(update=...)`` sites carry literal ``wire_seq`` keys.
+
+    RESIDUAL: a mapping built anywhere but at the call site
+    (``payload = {"tier": T3}; obj.model_copy(update=payload)``) is an ``ast.Name`` here and
+    is not matched. Refused at RUNTIME by ``_coerce_and_guard_update``; closing it lexically
+    would mean flagging every ``model_copy`` in the tree, which costs two named floors.
+    """
+    if isinstance(node, ast.Dict):
+        # `strict=True` is a free assertion, not ceremony: the parser produces one entry in
+        # `values` per entry in `keys` (a `**` unpack carries a `None` key), so a length
+        # mismatch would mean the tree is not one `ast.parse` built.
+        for key, value in zip(node.keys, node.values, strict=True):
+            if key is None:
+                # `{**other}` — recurse when the unpacked operand is itself readable,
+                # refuse when it is not.
+                if _mapping_mentions_tier(value):
+                    return True
+                if not isinstance(value, (ast.Dict, ast.Call)):
+                    return True
+            elif _fold_str(key) == "tier":
+                return True
+        return False
+    if isinstance(node, ast.Call) and _arg_name(node.func) == "dict":
+        if any(keyword.arg == "tier" for keyword in node.keywords):
+            return True
+        if any(keyword.arg is None for keyword in node.keywords):
+            # `dict(**other)` — the same unreadable operand as the `**` arm above.
+            return True
+        return any(_mapping_mentions_tier(argument) for argument in node.args)
+    return False
+
+
+def _mutates_tier_in_a_copy(node: ast.Call) -> bool:
+    """True when a ``copy``/``model_copy`` call carries a tier-bearing update mapping.
+
+    RECEIVER-BLIND, and it has to be: the shape this exists for is
+    ``lower.model_copy(update={"tier": T3})`` on an INSTANCE, where there is no class
+    identifier to scope against. It is the most plausible accident of the seven — an author
+    copies an object and edits the tier, never touching a guarded function.
+
+    EVERY argument is read, positional and keyword alike, rather than the index pydantic v1
+    happens to give ``update`` today. ``BaseModel.copy(obj, None, None, {...})`` reaches the
+    write positionally; a signature-derived index closes the spelling it was written against
+    and silently widens when the signature moves, while a shape rule does not.
+
+    ``copy`` is pydantic v1's spelling and does NOT route through ``model_copy`` — it merges
+    ``update`` inside ``copy_internals`` — so both names are needed.
+    """
+    if not (isinstance(node.func, ast.Attribute) and node.func.attr in _COPY_SEAM_ATTRS):
+        return False
+    supplied = list(node.args) + [keyword.value for keyword in node.keywords]
+    return any(_mapping_mentions_tier(argument) for argument in supplied)
+
+
+def _is_tagged_seam_call(node: ast.Call, env: TierAliasEnv) -> bool:
+    """``TaggedContent[...].model_construct/model_validate*(...)`` that names no benign tier.
+
+    RECEIVER-SCOPED **AND** SLICE-DISCRIMINATING, and the second half is not an
+    optimisation. A receiver-scoped but tier-AGNOSTIC rule fires on
+    ``test_model_construct_still_works_for_a_lower_tier`` —
+    ``TaggedContent[T2].model_construct(...)`` — failing a floor this repo explicitly named
+    "still works". Discrimination costs nothing and saves a named benign floor.
+
+    The wire-round-trip argument for tier-agnosticism is measurably FALSE at **0** sites:
+    no seam call anywhere under either scan root has a ``TaggedContent``-shaped receiver.
+    And a NAKED (non-receiver-scoped) tier-agnostic rule is far worse — **34** legitimate
+    seam calls live outside ``tiers.py`` (``model_validate`` 26, ``model_validate_json`` 6,
+    ``model_copy`` 2), every one of which would red.
+
+    AN UNPARAMETERISED RECEIVER IS REFUSED. ``TaggedContent.model_construct(...)`` names no
+    tier the gate can read, so it default-denies like any unresolved slice.
+
+    THIS RULE'S SAFETY IS BORROWED FROM THE RUNTIME GUARD, and saying so is the point:
+    ``TaggedContent[T2].model_construct(tier=T3, ...)`` slips this lexical rule entirely —
+    the receiver names a benign tier and the laundering rides in the keyword — and is caught
+    only by ``_enforce_tier_admissible`` / ``model_post_init``. A rule whose stated basis
+    does not survive measurement is what this epic exists to stop shipping.
+    """
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr in _TAGGED_SEAM_ATTRS):
+        return False
+    receiver = _unwrap_walrus(func.value)
+    if isinstance(receiver, ast.Subscript):
+        if _arg_name(receiver.value) not in env.tc_bare:
+            return False
+        return _slice_verdict(receiver.slice, env.t3, env.benign_tier) is not _SliceVerdict.BENIGN
+    name = _arg_name(receiver)
+    if name is None:
+        return False
+    verdict = env.tc_param.get(name)
+    if verdict is not None:
+        return verdict is not _SliceVerdict.BENIGN
+    return name in env.tc_bare
+
+
 def _detect(
     node: ast.AST,
     prose: frozenset[int],
@@ -1380,6 +1849,7 @@ def _detect(
     private_names: frozenset[str],
     enclosing: dict[int, tuple[str, int]],
     resolved: Path,
+    env: TierAliasEnv,
 ) -> list[str]:
     """Every rule's verdict on ONE already-parsed node, as a list of messages.
 
@@ -1401,8 +1871,35 @@ def _detect(
             messages.append(_TAG_T3_MESSAGE)
         if _is_cast_tagged_content_call(node):
             messages.append(_CAST_TAGGED_CONTENT_MESSAGE)
-        if _is_tagged_content_t3_subscript_call(node):
+        # R4 and R1 share ONE verdict, and that is what keeps them disjoint. A `None`
+        # verdict means "not a TaggedContent-ish construction call at all", which is the
+        # only state in which the unparameterised rule may speak — a name carrying a
+        # verdict has already been decided on its tier.
+        #
+        # `if`/`elif` with no `else`, never a ternary: `coverage.py` does not branch on a
+        # conditional expression, and the first revision of this dispatch WAS a ternary —
+        # which is precisely how it hid a fail-open arm from this file's REQUIRED 100%
+        # branch gate. See `_SliceVerdict` for the executed bypass.
+        verdict = _tagged_subscript_verdict(node, env)
+        if verdict is _SliceVerdict.T3:
             messages.append(_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE)
+        elif verdict is _SliceVerdict.UNRESOLVED:
+            messages.append(_TAGGED_CONTENT_UNRESOLVED_SLICE_MESSAGE)
+        elif verdict is None and _arg_name(node.func) in env.tc_bare:
+            # R1. Deliberately reads NO tier: `tier=_ALIAS` and `**payload` reach the same
+            # write, so an unparameterised construction is refused on SHAPE.
+            #
+            # Justified on the honest ground only. The older plan claimed `tiers.py`'s
+            # empty-generic short-circuit makes this a T3 bypass; that is true of the
+            # tier/generic cross-check and IRRELEVANT for T3, because
+            # `_refuse_unauthorized_t3` fires regardless of parameterisation. This rule
+            # exists because the authoring layer fires when the line is WRITTEN and an
+            # unexercised branch in `src/` ships unrefused until it runs.
+            messages.append(_UNPARAMETERISED_CONSTRUCTION_MESSAGE)
+        if _is_tagged_seam_call(node, env):
+            messages.append(_TAGGED_SEAM_MESSAGE)
+        if _mutates_tier_in_a_copy(node):
+            messages.append(_TIER_MUTATING_COPY_MESSAGE)
         if _is_unbound_basemodel_seam_call(node, basemodel_names):
             messages.append(_BASEMODEL_VALUE_MESSAGE)
         func = node.func
@@ -1506,6 +2003,71 @@ def _detect(
     if private_name is not None and not _private_surface_is_exempt(node, resolved, enclosing):
         messages.append(_PRIVATE_SURFACE_MESSAGE)
     return messages
+
+
+def _suppressed_spans(text: str) -> list[tuple[int, tuple[int, int]]]:
+    """``(comment line, enclosing logical-line span)`` for every real suppressor comment.
+
+    The span is what lets the caller ask "does the statement this suppressor sits on mention
+    ``TaggedContent``?" rather than "does its physical line?" — the difference between
+    seeing a suppressor on a reformatted call's closing paren and being blind to it.
+
+    A STANDALONE COMMENT HAS NO LOGICAL LINE. The tokenizer emits ``NL`` for a comment-only
+    line, not ``NEWLINE``, so such a comment falls into no span at all and gets a degenerate
+    span of itself. That is not a defensive default: it is the shape that keeps
+    ``# noqa is the wrong tool for TaggedContent problems`` on its own line decided by its
+    own text rather than by whatever statement happens to follow it.
+
+    Raises whatever the tokenizer raises. That is deliberate — see :func:`_scan_text`, which
+    runs this INSIDE the arm that reports an unscannable file, because a file the gate
+    cannot tokenize is a file the gate is not gating (#537). It is NOT inside the
+    :class:`GateInternalError` fence: the tokenizer is input-driven in exactly the way
+    ``ast.parse`` is, and misfiling that as a gate defect would be the #543 err-001
+    confusion in the other direction.
+    """
+    # A span is delimited by the CODE it contains, not by a running line cursor. Tracking
+    # `start` as "one past the previous NEWLINE" swept a standalone comment into the span of
+    # the statement BELOW it, because a comment-only line emits `NL` rather than `NEWLINE`
+    # and so never advanced the cursor. Opening a span at the first REAL token instead means
+    # a comment-only line sits in no span at all, which is precisely the property wanted:
+    # a bare `# type: ignore` on its own line suppresses nothing in mypy, so it must not
+    # inherit whatever follows it.
+    spans: list[tuple[int, int]] = []
+    line_scoped: list[int] = []
+    file_wide: list[int] = []
+    opened: int | None = None
+    last_line = 1
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        last_line = max(last_line, token.end[0])
+        if token.type == tokenize.COMMENT:
+            body = token.string.lstrip("#").strip()
+            if _FILE_WIDE_SUPPRESSOR_PATTERN.match(body):
+                file_wide.append(token.start[0])
+            elif _LINE_SUPPRESSOR_PATTERN.match(body):
+                line_scoped.append(token.start[0])
+        elif token.type == tokenize.NEWLINE:
+            # ASSERTED, not defaulted, on `_enclosing_functions`'s precedent. `NEWLINE`
+            # terminates a LOGICAL line, and a logical line contains code by definition —
+            # a blank or comment-only line emits `NL` instead — so a span is always open
+            # here. MEASURED, not assumed: 15 edge-case spellings (bare `;`, form feed,
+            # decorator, continuation, docstring-only, comment-then-code) plus all 332
+            # tracked files under both scan roots produce ZERO arrivals with none open.
+            #
+            # An `if` here would be a branch no input can take, and this file is under a
+            # REQUIRED 100% branch gate with no pragmas: an unreachable arc makes that gate
+            # unsatisfiable rather than safe. Writing it as a conditional expression would
+            # be worse still — `coverage.py` does not branch on a ternary, so the dead arm
+            # would be hidden from the very gate meant to find it.
+            assert opened is not None
+            spans.append((opened, token.end[0]))
+            opened = None
+        elif token.type not in _NON_CODE_TOKENS and opened is None:
+            opened = token.start[0]
+    located = [(comment, (1, last_line)) for comment in file_wide]
+    for comment in line_scoped:
+        span = next(((a, b) for a, b in spans if a <= comment <= b), (comment, comment))
+        located.append((comment, span))
+    return located
 
 
 class GateInternalError(RuntimeError):
@@ -1625,6 +2187,10 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
         carrier_pairs, carrier_names, carrier_overflow = _carrier_bindings(tree)
         basemodel_names, basemodel_overflow = _alias_names(tree, "BaseModel")
         private_names, private_overflow = _private_surface_names(tree)
+        # The TIER environment, built here with the other per-file maps and for the same
+        # reason: it walks the tree, so it is input-driven exactly as `ast.parse` is, and a
+        # fault in it is not a faulting detector PREDICATE.
+        env, env_overflow = _tier_alias_env(tree)
         # Module-scope lines are ABSENT from this map, which both private-surface
         # exemption arms read as "module scope".
         enclosing = _enclosing_functions(tree)
@@ -1637,7 +2203,13 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
         # ONE condition over EVERY resolved seed, not one report per seed: an overflow
         # means the FILE's alias graph is past the budget, and one copy of the same
         # message per seed on the same line would say the same thing over and over.
-        if vars_overflow or carrier_overflow or basemodel_overflow or private_overflow:
+        if (
+            vars_overflow
+            or carrier_overflow
+            or basemodel_overflow
+            or private_overflow
+            or env_overflow
+        ):
             _record(violations, lines, path, 1, _ALIAS_BUDGET_MESSAGE)
 
         for node in ast.walk(tree):
@@ -1669,6 +2241,7 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
                     private_names,
                     enclosing,
                     resolved,
+                    env,
                 )
             except Exception as exc:
                 raise GateInternalError(
@@ -1677,8 +2250,13 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
             for message in findings:
                 _record(violations, lines, path, lineno, message)
 
-        for lineno, line in enumerate(lines, 1):
-            if _TYPE_IGNORE_PATTERN.search(line):
+        # THE SUPPRESSION PASS RUNS HERE, after the walk, exactly where the line loop it
+        # replaces ran. That placement is load-bearing rather than incidental: findings
+        # already collected are APPENDED to, so a tokenizer failure downgrades nothing —
+        # the `except Exception` arm below appends its own message to whatever the walk
+        # found. Moving it up beside `ast.parse` would discard real findings.
+        for lineno, (first, last) in _suppressed_spans(text):
+            if any("TaggedContent" in line for line in lines[first - 1 : last]):
                 _record(violations, lines, path, lineno, _TYPE_IGNORE_MESSAGE)
     except GateInternalError:
         # ORDER IS LOAD-BEARING. `GateInternalError` is an `Exception`, so the

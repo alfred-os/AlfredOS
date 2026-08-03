@@ -126,6 +126,29 @@ out_of_scope_rationale: >-
   code position (_PRIVATE_SURFACE_MESSAGE). An alias chain deeper than the
   resolver's budget is reported rather than silently truncated
   (_ALIAS_BUDGET_MESSAGE).
+  WHAT #539 ADDED — the seven T3-CONSTRUCTION shapes, decided against a
+  per-file tier alias environment in which TaggedContent, T3 and the benign
+  tiers T0/T1/T2 are all alias-resolved through the one _alias_names resolver.
+  A TaggedContent[...] construction whose generic argument is not a tier the
+  gate can read — computed, quoted-non-tier, or any non-identifier shape
+  (_TAGGED_CONTENT_UNRESOLVED_SLICE_MESSAGE); the rule is TOTAL over ast.expr
+  and default-denies on SHAPE, which is what closes "T"+"3", globals()["T3"],
+  TIERS["T3"], T3 if x else T2 and (T3,) as a class rather than one spelling at
+  a time. An UNPARAMETERISED TaggedContent(...) construction, refused on shape
+  because the tier then arrives as data (_UNPARAMETERISED_CONSTRUCTION_MESSAGE).
+  A model_construct / model_validate / model_validate_json seam whose receiver
+  is a TaggedContent naming no benign tier — receiver-scoped AND
+  slice-discriminating, because a tier-agnostic form fires on the repo's own
+  named floor TaggedContent[T2].model_construct(...) (_TAGGED_SEAM_MESSAGE). A
+  copy seam whose update mapping reaches a "tier" key, receiver-BLIND because
+  the shape it exists for is lower.model_copy(update={"tier": T3}) on an
+  INSTANCE, and total over the mapping shapes a copy seam accepts — a literal
+  dict, dict(tier=...), and ** unpacking, with an unreadable ** REFUSED rather
+  than admitted (_TIER_MUTATING_COPY_MESSAGE). Suppression detection moved from
+  a physical-line regex to a tokenize pass anchored at the start of a real
+  COMMENT token and scoped to the enclosing LOGICAL line, covering type:ignore,
+  pyright:ignore, mypy:ignore, mypy:ignore-errors, ruff:noqa, flake8:noqa and
+  bare noqa (_TYPE_IGNORE_MESSAGE).
   WHAT __delattr__ DOES, since it is the newest member and the least obvious:
   it is a laundering, not a crash. object.__delattr__(low, "tier") succeeds
   where the ordinary del low.tier raises pydantic frozen_instance, and what it
@@ -150,8 +173,18 @@ out_of_scope_rationale: >-
   (gc.get_referrers, the unlisted sibling of two listed gc primitives).
   (4) A name-keyed collision —
   another module defining its own _log_t3 reds benignly; measured zero today.
-  (5) TaggedContent.model_construct(...) is refused at RUNTIME only, because
-  the seam rule is receiver-scoped to BaseModel aliases. (6)
+  (5) SUPERSEDED BY #539, and recorded as superseded rather than deleted
+  because the shape of the correction is the point. This residual read
+  "TaggedContent.model_construct(...) is refused at RUNTIME only, because the
+  seam rule is receiver-scoped to BaseModel aliases" — true of #538's seam rule
+  and false since #539, whose own seam rule is receiver-scoped to the
+  TaggedContent alias environment and refuses an unparameterised receiver by
+  default-deny. What DOES remain residual is narrower and is stated where it
+  belongs, in _is_tagged_seam_call: TaggedContent[T2].model_construct(tier=T3,
+  ...) slips the lexical rule entirely, because the receiver names a benign
+  tier and the laundering rides in the keyword. That one is caught by
+  _enforce_tier_admissible / model_post_init at runtime, so the authoring
+  rule's safety on that spelling is BORROWED rather than owned. (6)
   object.__setattr__(self, "metadata", ...) and object.__delattr__(self,
   "metadata") on a TaggedContent: metadata is
   deliberately NOT in _TAGGED_STATE_FIELDS, because

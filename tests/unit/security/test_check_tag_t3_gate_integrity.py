@@ -170,6 +170,16 @@ def test_every_collection_failure_message_is_enumerated() -> None:
         # and its aliased form both scanned clean.
         check_tag_t3._RAW_DELATTR_SHAPE_MESSAGE,
         check_tag_t3._RAW_DELATTR_ALIASED_MESSAGE,
+        # #539's four construction rules. FINDINGS on the same terms as every entry
+        # above: each means the file WAS gated and a T3-construction shape was written
+        # in it. They arrive here automatically because the derivation below keys on the
+        # `_MESSAGE` suffix — which is the property this test exists to have, and the
+        # reason all four had to be classified rather than silently widening the two
+        # message-is-ABSENT floors that read the complement.
+        check_tag_t3._TAGGED_CONTENT_UNRESOLVED_SLICE_MESSAGE,
+        check_tag_t3._UNPARAMETERISED_CONSTRUCTION_MESSAGE,
+        check_tag_t3._TAGGED_SEAM_MESSAGE,
+        check_tag_t3._TIER_MUTATING_COPY_MESSAGE,
     }
     declared = {
         value
@@ -1052,17 +1062,36 @@ def test_qualified_and_unresolvable_call_shapes(tmp_path: Path) -> None:
 
 
 def test_subscript_construction_slice_variants(tmp_path: Path) -> None:
-    """The T3 / quoted-"T3" / benign / non-constant slice branches."""
+    """The T3 / quoted-"T3" / benign / unresolvable slice branches.
+
+    THE NON-CONSTANT SLICE CHANGED SIDES IN #539, and that inversion is the point of the
+    issue rather than a regression in this test. `TaggedContent[1](x)` used to be asserted
+    CLEAN here, which recorded the rule's fail-OPEN posture: the old predicate asked "is
+    this slice the name `T3`?" and answered "no" for every shape that was not a `Name` or a
+    `"T3"` string — including `"T" + "3"`, `globals()["T3"]`, `TIERS["T3"]`,
+    `T3 if x else T2` and `(T3,)`, each of which reaches a real T3 construction. A
+    two-valued verdict cannot say "I could not read this", so the quiet answer and the safe
+    answer were the same answer, and it was the quiet one.
+
+    `_slice_verdict` is now total over `ast.expr` and default-denies on SHAPE, so an
+    unreadable slice reports its own distinct message. `1` is not a tier this gate can
+    resolve, so it reds — deliberately, and with the message that says why.
+    """
     label = tmp_path / "slices.py"
     msg = check_tag_t3._TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE
+    unresolved = check_tag_t3._TAGGED_CONTENT_UNRESOLVED_SLICE_MESSAGE
 
     assert any(msg in v for v in check_tag_t3._scan_text("TaggedContent[T3](x)\n", label))
     assert any(msg in v for v in check_tag_t3._scan_text('TaggedContent["T3"](x)\n', label))
     # Benign tier and a non-T3 string must NOT trip.
     assert check_tag_t3._scan_text("TaggedContent[T2](x)\n", label) == []
     assert check_tag_t3._scan_text('TaggedContent["T2"](x)\n', label) == []
-    # Non-Name, non-Constant slice, and a non-Subscript callee.
-    assert check_tag_t3._scan_text("TaggedContent[1](x)\n", label) == []
+    # An unreadable slice reds under the UNRESOLVED rule, never under the T3 one — the
+    # messages are distinct so a shape test cannot be satisfied by the wrong rule firing.
+    unreadable = check_tag_t3._scan_text("TaggedContent[1](x)\n", label)
+    assert any(unresolved in v for v in unreadable)
+    assert not any(msg in v for v in unreadable)
+    # A foreign generic is not this gate's business at all.
     assert check_tag_t3._scan_text("Other[T3](x)\n", label) == []
 
 
@@ -1619,13 +1648,22 @@ def test_a_violation_survives_a_scan_failure_in_the_same_file(
     proving nothing.
     """
 
-    class _Exploding:
-        """Stands in for `_TYPE_IGNORE_PATTERN` — the LAST step of the scan."""
+    def _exploding(text: str) -> list[tuple[int, tuple[int, int]]]:
+        """Stands in for `_suppressed_spans` — the LAST step of the scan.
 
-        def search(self, line: str) -> object:
-            raise RecursionError(f"injected post-walk fault on {line!r}")
+        #539 REPLACED THE SEAM THIS TEST INJECTS AT, and the replacement had to be made
+        deliberately rather than by deletion. The stand-in used to be an object with a
+        `.search()` method patched over `_TYPE_IGNORE_PATTERN`, because the last step was
+        a per-line regex. It is now a `tokenize` pass over logical lines, so that constant
+        no longer exists — and had the patch been left pointing at a name nothing calls,
+        `monkeypatch.setattr` would still have succeeded and the injected fault would
+        simply never have fired, leaving this test asserting a property it no longer
+        reaches. Patching the function that IS the last step keeps the ordering property
+        pinned.
+        """
+        raise RecursionError(f"injected post-walk fault on {text[:20]!r}")
 
-    monkeypatch.setattr(check_tag_t3, "_TYPE_IGNORE_PATTERN", _Exploding())
+    monkeypatch.setattr(check_tag_t3, "_suppressed_spans", _exploding)
     violations = check_tag_t3._scan_text("tag(T3, payload)\n", Path("src/alfred/mixed.py"))
 
     assert any(check_tag_t3._TAG_T3_MESSAGE in line for line in violations), (
@@ -1670,19 +1708,42 @@ def _clean_source() -> str:
 
 @pytest.mark.parametrize(
     "predicate",
-    ["_is_tag_t3_call", "_is_cast_tagged_content_call", "_is_tagged_content_t3_subscript_call"],
+    [
+        "_is_tag_t3_call",
+        "_is_cast_tagged_content_call",
+        # #539 renamed the third one. `_is_tagged_content_t3_subscript_call` answered a
+        # yes/no question keyed on the literal identifiers `TaggedContent` and `T3`, both
+        # rebindable; `_tagged_subscript_verdict` returns a three-valued verdict against
+        # the alias environment. The rename had to be carried here rather than dropped:
+        # `monkeypatch.setattr` on a name the module no longer defines raises, so leaving
+        # the old string would have reported a fixture error rather than the fence gap
+        # this test exists to catch.
+        "_tagged_subscript_verdict",
+        # The rules #539 added, on the same terms. Each does bounded work on one parsed
+        # node inside the fence, so each must be covered by it.
+        "_is_tagged_seam_call",
+        "_mutates_tier_in_a_copy",
+    ],
 )
 def test_a_faulting_detector_predicate_raises_instead_of_reporting_a_violation(
     monkeypatch: pytest.MonkeyPatch, predicate: str
 ) -> None:
-    """All THREE predicates, because the fence has to cover all three.
+    """EVERY predicate, because the fence has to cover all of them.
 
-    Parametrised rather than written once against `_is_tag_t3_call`: a fence
-    around one predicate and not its siblings would pass a single-predicate
-    test while leaving two thirds of the detector misfiled.
+    Parametrised rather than written once against `_is_tag_t3_call`: a fence around one
+    predicate and not its siblings would pass a single-predicate test while leaving the
+    rest of the detector misfiled.
     """
 
-    def _buggy(node: ast.Call) -> bool:
+    def _buggy(*args: object, **kwargs: object) -> bool:
+        """Signature-agnostic on purpose.
+
+        The predicates do not share an arity — `_tagged_subscript_verdict` and
+        `_is_tagged_seam_call` take the alias environment as a second argument. A stub
+        fixed at one positional parameter would raise `TypeError` on those two instead of
+        the `AttributeError` this test asserts travels as `__cause__`, so the fence would
+        look covered while the assertion measured the stub's own arity bug.
+        """
         raise AttributeError(f"simulated internal bug in {predicate}")
 
     monkeypatch.setattr(check_tag_t3, predicate, _buggy)
