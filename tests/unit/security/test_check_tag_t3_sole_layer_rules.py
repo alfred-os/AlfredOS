@@ -2556,17 +2556,6 @@ _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
     # CONSTRUCTION rules and left those two call rules exactly as they were.
     **dict.fromkeys(("tag",), _PRE_EXISTING_RESIDUAL),
     "bound": _KEYWORD_NAME_RESIDUAL,
-    # `tier` reaches the derivation TWICE, and written as part of a `fromkeys` unpack the
-    # keyword-argument reason silently displaced the state-field one. Spelled out for the
-    # reason the `cast` entry below already is: which reason survives a dict merge is not
-    # something a reader should have to work out.
-    "tier": (
-        "TWO ROLES. (1) a `TaggedContent` STATE FIELD in `_TAGGED_STATE_FIELDS`, compared "
-        "against a folded string literal rather than an identifier — nothing in a source "
-        "file can rebind the name of a field. Pinned by "
-        "`test_every_tagged_state_field_is_refused_on_both_dunders`. (2) "
-        f"{_KEYWORD_NAME_RESIDUAL}"
-    ),
     "TypeVar": _TYPEVAR_CALLEE_RESIDUAL,
     # `__init__` and `__delattr__` are EXCLUDED because each has a behavioural row above.
     # The disjointness assertion in the meta-guard forbids being both, and a row is the
@@ -2575,7 +2564,12 @@ _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
         sorted(_EXPECTED_VEHICLE_NAMES - {"__init__", "__delattr__"}), _VEHICLE_NAME_RESIDUAL
     ),
     **dict.fromkeys(sorted(_EXPECTED_SEAMS), _SEAM_ATTR_RESIDUAL),
-    **dict.fromkeys(sorted(_EXPECTED_TAGGED_STATE_FIELDS), _TAGGED_FIELD_RESIDUAL),
+    # `"tier"` is EXCLUDED here and given its own entry below. It reaches the derivation
+    # twice — as a TaggedContent state field and as a keyword-argument name — and dict
+    # literals resolve last-wins, so leaving it in this unpack silently overwrote the
+    # two-role text with the state-field half. Measured: `"TWO ROLES" in residual` was
+    # False. Same precedent as `cast`, which is written out for exactly this reason.
+    **dict.fromkeys(sorted(_EXPECTED_TAGGED_STATE_FIELDS - {"tier"}), _TAGGED_FIELD_RESIDUAL),
     **dict.fromkeys(
         sorted({primitive for _, primitive in _EXPECTED_CARRIERS}), _CARRIER_PRIMITIVE_RESIDUAL
     ),
@@ -2593,6 +2587,17 @@ _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
     ".py": (
         "a FILE SUFFIX in `_view_is_exempt`'s out-of-repo `tmp_path` arm, not an "
         "identifier. Pinned by `test_a_real_out_of_repo_tmp_path_fixture_is_still_exempt`."
+    ),
+    # `tier` reaches the derivation TWICE, and written as part of a `fromkeys` unpack the
+    # keyword-argument reason silently displaced the state-field one. Spelled out for the
+    # reason the `cast` entry below already is: which reason survives a dict merge is not
+    # something a reader should have to work out.
+    "tier": (
+        "TWO ROLES. (1) a `TaggedContent` STATE FIELD in `_TAGGED_STATE_FIELDS`, compared "
+        "against a folded string literal rather than an identifier — nothing in a source "
+        "file can rebind the name of a field. Pinned by "
+        "`test_every_tagged_state_field_is_refused_on_both_dunders`. (2) "
+        f"{_KEYWORD_NAME_RESIDUAL}"
     ),
     "__main__": "the module-main guard at the foot of the script. Not a rule at all.",
     "TaggedContent[": (

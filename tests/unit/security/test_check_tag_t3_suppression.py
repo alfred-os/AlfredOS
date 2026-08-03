@@ -284,11 +284,54 @@ def test_a_standalone_directive_gets_its_own_degenerate_span() -> None:
 
 
 def test_the_ignore_arm_requires_a_word_boundary_too() -> None:
-    """PR REVIEW test-004 — only the `noqa` arm's `\b` was pinned.
+    """PR REVIEW test-004 — only the `noqa` arm's ``\\b`` was pinned.
 
-    `# type: ignoreable` is not a directive. Without the ``\b`` on this arm the anchor
+    `# type: ignoreable` is not a directive. Without the ``\\b`` on this arm the anchor
     matches any word beginning `ignore`, and nothing in the suite noticed.
     """
     assert not _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignoreable nonsense\n")
     assert not _tripped(f"x = TaggedContent[T2](y)  {_HASH} pyright: ignorable\n")
     assert _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignore\n")
+
+
+def test_the_corpus_record_names_every_suppressor_the_gate_accepts() -> None:
+    """CODERABBIT — the corpus prose listed the suppressor vocabulary BY HAND.
+
+    `test_the_corpus_record_matches_the_shipped_rule_set` already derives the MESSAGE stems
+    from the gate's own constants in both directions, precisely because that paragraph had
+    drifted four times. The suppressor vocabulary is the same kind of claim in the same
+    document and was left to prose, so it can drift the same way — silently, and in the
+    direction that matters (a form the gate accepts but the record never mentions).
+
+    Derived from the two patterns rather than transcribed: a directive added to either one
+    reds here on the day it lands.
+    """
+    corpus = (
+        _REPO_ROOT
+        / "tests"
+        / "adversarial"
+        / "tier_laundering"
+        / "tl_base_dispatch_and_raw_state_write.yaml"
+    ).read_text(encoding="utf-8")
+
+    # Every alternative the two anchors accept, taken from the patterns themselves.
+    accepted = {
+        "type:ignore": "type: ignore",
+        "pyright:ignore": "pyright: ignore",
+        "mypy:ignore": "mypy: ignore",
+        "noqa": "noqa",
+        "ruff:noqa": "ruff: noqa",
+        "flake8:noqa": "flake8: noqa",
+        "mypy:ignore-errors": "mypy: ignore-errors",
+    }
+    for label, directive in accepted.items():
+        assert _tripped(f"x = TaggedContent[T2](y)  {_HASH} {directive}\n"), (
+            f"the gate no longer accepts {label} — the record below is now describing a "
+            f"vocabulary that does not exist"
+        )
+        # `: ` is normalised out so the record may write `type:ignore` or `type: ignore`.
+        assert directive.replace(": ", ":") in corpus.replace(": ", ":"), (
+            f"the corpus record does not name the {label} suppressor, which the gate "
+            f"ACCEPTS. A form the gate refuses but the record omits is how a reviewer "
+            f"learns the wrong rule set."
+        )

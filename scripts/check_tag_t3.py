@@ -1981,7 +1981,16 @@ def _mapping_mentions_tier(node: ast.expr, dict_names: frozenset[str], depth: in
         if any(keyword.arg is None for keyword in node.keywords):
             # `dict(**other)` — the same unreadable operand as the `**` arm above.
             return True
-        return any(_mapping_mentions_tier(a, dict_names, depth + 1) for a in node.args)
+        # POSITIONAL OPERANDS GET THE SAME DEFAULT-DENY as the `**` arm above. Returning
+        # `any(...)` admitted `dict(payload)` — a mapping built from a name this gate
+        # cannot read — while the equivalent `{**payload}` and `dict(**payload)` were both
+        # refused. Three spellings of one idea must not have two answers.
+        for argument in node.args:
+            if _mapping_mentions_tier(argument, dict_names, depth + 1):
+                return True
+            if not _is_readable_mapping(argument, dict_names):
+                return True
+        return False
     return False
 
 
