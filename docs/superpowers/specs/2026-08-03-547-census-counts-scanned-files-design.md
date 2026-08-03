@@ -109,10 +109,40 @@ class _ScannedOk(list[str]):
     __slots__ = ()
 ```
 
-`_scan_text`'s broad-except arm currently appends and falls through to a shared
-`return violations`. It gains an explicit early `return violations` (unmarked); only the
-completion path returns `_ScannedOk(violations)`. **No completion flag is needed** — the
-fall-through becomes an early return, which adds no branch that real inputs cannot reach.
+> **Revised again 2026-08-03 after review round 2.** The first cut of this said an early
+> `return` in the broad-except arm sufficed and "no completion flag is needed". **Measured
+> wrong.** The marker then sat on the `try` statement's FALL-THROUGH, so a new `except` arm
+> written the ordinary way — append, no `return` — reached it. Security built an
+> `except MemoryError` arm reusing `_UNSCANNABLE_MESSAGE` and measured `scanned_ok == 4/4`,
+> rc=1: byte-identical to the failure-marking variant. That version had merely swapped
+> "enumerate the five messages" for "enumerate the five returns".
+
+The marker must hang off a **completion event**, not a fall-through:
+
+```python
+    completed = False
+    try:
+        ...                  # existing walk
+        completed = True     # last statement of the try body
+    except Exception as exc:
+        violations.append(...)
+
+    if completed:            # if/else, never a ternary (#538)
+        return _ScannedOk(violations)
+    return violations
+```
+
+Measured: **683 statements / 366 branches / 0 partial / 100%**, both arcs driven by real
+inputs (the False arc by the suite's own `_ALWAYS_UNSCANNABLE` fixture). The coverage
+objection used to reject this flag was backwards.
+
+**The flag does not stop direct construction.** `_ScannedOk([... _UNREADABLE_MESSAGE ...])`
+fails open through every other guard, and neither mypy nor pyright can see the invariant. Pin
+it with a default-deny **name census** — every `ast.Name` referencing `_ScannedOk`, exactly
+two positions allowed. Not an `ast.Call`-func-is-a-`Name` pin: the architect proposed that,
+executed it, and retracted it — it reports green against `_Alias = _ScannedOk`, a subclass,
+`functools.partial` and `globals()[...]`. Its residual blind spot (`type(x)(...)`,
+`copy.copy`) is named in ADR-0060 rather than claimed closed.
 
 `_scan_file` needs no edit at all: its three failure arms already `return` plain lists, and
 its `return _scan_text(...)` propagates whichever the delegate produced.
@@ -294,8 +324,15 @@ uv run coverage report --include='scripts/check_tag_t3.py' --fail-under=100
 - A file partially scanned before a fault (`_scan_text`'s append arm) counts as **failed**.
   Conservative and fail-closed: it under-counts successes, so it can only make the census
   stricter.
+- **The census counts DISTINCT RESOLVED files, not scan events** (NEW-1). Measured on the
+  shipped gate with no monkeypatch: 260 symlinks to one `x = 1` file exited 0 with empty
+  stderr, having gated exactly one distinct file — and the census as first specified passes
+  that too, because all 260 scan perfectly. `main` deduplicates by resolved path.
+  Deliberately NOT in `_collect_paths`: its per-directory floor and decoy defence are
+  specified over what traversal found, and `recurse_symlinks=True` is load-bearing there
+  (#541), so narrowing its return would change three guards to fix one.
 - **The census proves files were read and parsed, not that they were GATED** (`sec-007`).
-  250 files of `x = 1` clear it. Closing that needs a different instrument — an assertion
+  250 distinct files of `x = 1` clear it. Closing that needs a different instrument — an assertion
   about detector coverage, not about file counts — and is out of scope for #547.
 - **`_is_exempt` is called twice per non-exempt file**, once by `main` and once inside
   `_scan_file`, so the two calls could in principle disagree if the filesystem changes
