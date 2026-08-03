@@ -21,10 +21,16 @@ ONLY enforcement layer:
    asserts the detector scans the residual spellings CLEAN, with a positive control.
    It is designed to FAIL when these rules land. Flip its assertion and rewrite
    `tl_base_dispatch_and_raw_state_write.yaml`'s `out_of_scope_rationale`.
-2. **`object.__setattr__` must NOT be refused outright.** Six legitimate uses exist
-   under the scan root: `src/alfred/plugins/web_fetch/allowlist.py`,
-   `src/alfred/plugins/web_fetch/fetch_dispatcher.py`, `src/alfred/hooks/context.py`. The rule must key on
-   the written attribute being `"tier"`, not on the call.
+2. **`object.__setattr__` must NOT be refused outright.** **THREE** legitimate uses exist
+   under the scan root — the "six" here was wrong and a reviewer calibrated a
+   false-positive budget off it (re-measured 2026-08-03 across all 332 tracked files):
+   `src/alfred/plugins/web_fetch/allowlist.py:139`,
+   `src/alfred/plugins/web_fetch/fetch_dispatcher.py:219`, `src/alfred/hooks/context.py:106`.
+   The rule must key on the written attribute being `"tier"`, not on the call.
+   **AND THAT INSTRUCTION IS ITSELF INSUFFICIENT** — #538 measured
+   `object.__setattr__(obj, "__dict__", {..., "tier": T3})`, which writes `__dict__` and
+   names `tier` nowhere, so an attribute-keyed rule cannot see it by construction. The
+   shipped rules default-deny on the VEHICLE or the SHAPE instead.
 3. **New rules for the two runtime-unclosable shapes** (these are the highest-value
    rules in the PR, because nothing else can catch them):
    - `BaseModel`-receiver dispatch of any seam attr (`copy`, `model_copy`,
@@ -68,9 +74,14 @@ ONLY enforcement layer:
 - **Define `benign_tier_names`** with alias resolution: `T2 as Broadcast` must PASS,
   `T3 as Wire` must TRIP. Add in-file PEP-695 TypeVars bound to `TrustTier` to the
   benign set or the first generic helper reds for a benign reason.
-- **R4 must skip ANNOTATION position** — `TaggedContent[T3]` appears in ~15
-  legitimate annotations (`content_store_base.py:83,91,157,159,162`,
-  `quarantine_transport.py:217,219,223`). Only `ast.Call` func position counts.
+- **R4 must skip ANNOTATION position** — **22** legitimate annotation sites across
+  **FIVE** files, not the "~15 in 2" written here (re-measured 2026-08-03):
+  `plugins/content_store_base.py` (5), `orchestrator/core.py` (4),
+  `security/quarantine_transport.py` (3), `comms_mcp/real_turn_adapter.py` (1) and the
+  whole-file-exempt `security/tiers.py` (9). **The two this list omitted —
+  `orchestrator/core.py` and `comms_mcp/real_turn_adapter.py` — are NOT exempt**, which
+  is exactly why the omission mattered. Only `ast.Call.func` position counts, as a
+  one-position whitelist rather than an ancestor blacklist (see ADR-0059).
 - **Bind `X = TaggedContent[...]` into `tagged_names`**, not just bare
   `X = TaggedContent`.
 - **Import the script via `spec_from_file_location` against the REAL path** — a

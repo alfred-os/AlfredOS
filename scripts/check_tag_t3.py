@@ -95,10 +95,42 @@ WHAT THE #538 RULES CANNOT DO — accepted residuals, stated rather than claimed
   involved. ``_TAGGED_STATE_FIELDS`` is what actually holds; the ``self`` check
   narrows the surface but proves nothing on its own.
 
+WHAT THE #539 RULES CANNOT DO — the seven T3-construction shapes, added on the same
+terms. Every one of these is refused at RUNTIME (verified: 19/19, each with a
+``security.t3_boundary.refused`` audit row), so this layer is defence-in-depth and the
+residuals below are ergonomic ceilings rather than open holes. See
+``docs/adr/0059-default-deny-on-unresolvable-tier-slices.md``.
+
+- **The tier alias environment is PER-FILE.** A ``TaggedContent`` or a tier re-exported
+  through another module and imported under its new spelling is not resolved. Inherited
+  from ``_alias_names`` and restated because it bites harder here: this environment
+  decides four rules rather than one.
+- **A BENIGN-NAME BINDING cannot be decided lexically.** ``benign_tier`` holds bare
+  names, so ``def f(T2): TaggedContent[T2](...)`` with a caller passing ``T3`` scans
+  clean. The same applies to ``tiers.py:949``'s ``TaggedContent[tier](...)``, where the
+  tier is a plain parameter. A name-keyed set cannot decide a runtime binding.
+- **The construction seam's safety is BORROWED from the runtime guard.**
+  ``TaggedContent[T2].model_construct(tier=T3, ...)`` slips the lexical rule entirely —
+  the receiver names a benign tier and the laundering rides in the keyword — and is
+  caught only by ``_enforce_tier_admissible`` / ``model_post_init``. Said plainly because
+  a rule whose stated basis does not survive measurement is what this epic exists to stop
+  shipping.
+- **The copy rule needs its update mapping AT THE CALL SITE.**
+  ``payload = {"tier": T3}; obj.model_copy(update=payload)`` carries an ``ast.Name``, not
+  a mapping this gate can read. Refused at runtime by ``_coerce_and_guard_update``;
+  closing it lexically would mean flagging every ``model_copy`` in the tree, which costs
+  two named benign floors.
+- **``getattr(x, var)``, ``REGISTRY[k](...)`` and a tier arriving through ``**kwargs``**
+  reach a constructor with no identifier in code position for any rule to key on.
+- **``exec``/``eval``** are out of reach in any form; ruff ``S102``/``S307`` are the
+  defence, not this gate.
+- **A tuple-target binding** (``A, B = TaggedContent[T3], other``) carries no subscript in
+  ``.value``, so the name is simply unknown rather than misread.
+
 THE ESCAPE HATCH, and it is the only one: a legitimate future need for one of these
-vehicles belongs behind a NAMED helper inside the already-exempt
-``security/tiers.py``, not behind a loosened rule here. A rule relaxed to admit one
-caller admits every caller that can spell the same shape, and the relaxation is
+vehicles — or for a benign wire round-trip — belongs behind a NAMED helper inside the
+already-exempt ``security/tiers.py``, not behind a loosened rule here. A rule relaxed to
+admit one caller admits every caller that can spell the same shape, and the relaxation is
 invisible at every site that later depends on it.
 """
 
