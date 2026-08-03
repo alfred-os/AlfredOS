@@ -21,9 +21,12 @@ verdicts and default-denying on SHAPE. Suppression detection moves off a line re
 `tokenize`, anchored at the start of a real COMMENT token and scoped to the enclosing LOGICAL
 line.
 
-**Tech Stack:** Python 3.14 stdlib only (`ast`, `enum`, `io`, `re`, `tokenize`). The gate runs
-under bare `python3` from the Makefile with no venv, so it may import nothing outside the
-standard library and must do no filesystem I/O at import time.
+**Tech Stack:** stdlib only (`ast`, `enum`, `io`, `re`, `tokenize`). The gate runs under bare
+`python3` from the Makefile with no venv, so it may import nothing outside the standard
+library and must do no filesystem I/O at import time. Its own interpreter floor is **3.12**,
+not the repo's 3.14 — `ast.TypeAlias` and PEP-695 `type X = …` parsing are what set it — and
+that distinction matters precisely because the interpreter here is whatever `python3` resolves
+to on the contributor's machine rather than the pinned venv.
 
 ---
 
@@ -65,9 +68,16 @@ not survive measurement.
   produces also fails.
 - **Per-rule DISTINCT messages**, and every negative floor needs a positive twin.
 - **Mutation-test every guard, both directions.** Each mutant must red a **named** floor.
-- **Commit subjects carry a literal `#539` AFTER the colon.** `feat:`/`fix:` with `#539`
-  AUTO-CLOSES the issue on merge, so only the FINAL commit of the branch may use that form —
-  see finding arch-003.
+- **Commit subjects must contain `#539` somewhere after the colon.** The gate's regex is
+  `^[a-z]+(\([^)]+\))?(!)?: .*#[0-9]+.*$` — read it rather than trusting a summary of it;
+  an earlier draft here (and a project-memory note) claimed the reference had to come
+  IMMEDIATELY after the colon, which the regex does not require. `refactor: … (#539)`
+  passes just as `fix: #539 …` does.
+- **AUTO-CLOSING is a separate mechanism from the gate.** GitHub closes an issue when the
+  subject reads as a closing keyword plus a reference — `fix: #539 …` parses as `fix #539`.
+  `refactor:`/`test:`/`docs:` with `(#539)` satisfy the gate and close nothing, which is why
+  the intermediate commits use them and exactly one commit carries the closing form. #518
+  closed twice with work undone (finding arch-003).
 - **i18n:** stdlib-only script, no `t()`. No catalog regeneration expected.
 
 ### The real verification commands
@@ -541,11 +551,17 @@ npx --yes markdownlint-cli2 "docs/**/*.md"
 - [ ] **Step 4: `make check`**
 
 ```bash
-make check; echo "EXIT=$?"
+make check || { status=$?; echo "make check FAILED with $status"; exit "$status"; }
 ```
 
-Check `$?` explicitly — piping through `tail` MASKS it. If the macOS integration lane fails,
-re-run the suspect in ISOLATION before concluding anything.
+**Do not write `make check; echo "EXIT=$?"`.** It prints the status and then throws it away —
+the compound command exits with `echo`'s success, so a caller (or a harness) sees 0 for a
+failed build. That is not hypothetical: during this work `make check` reported exit 0 while
+its log ended `make: *** [coverage-gates] Error 1`. Piping through `tail` masks it the same
+way. Read the log as well as the code.
+
+If the macOS integration lane fails, re-run the suspect in ISOLATION before concluding
+anything.
 
 - [ ] **Step 5: Final commit, push, PR**
 

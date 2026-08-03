@@ -1706,25 +1706,50 @@ def _clean_source() -> str:
     return "def hello():\n    return foo(1, 2)\n"
 
 
-@pytest.mark.parametrize(
-    "predicate",
-    [
-        "_is_tag_t3_call",
-        "_is_cast_tagged_content_call",
-        # #539 renamed the third one. `_is_tagged_content_t3_subscript_call` answered a
-        # yes/no question keyed on the literal identifiers `TaggedContent` and `T3`, both
-        # rebindable; `_tagged_subscript_verdict` returns a three-valued verdict against
-        # the alias environment. The rename had to be carried here rather than dropped:
-        # `monkeypatch.setattr` on a name the module no longer defines raises, so leaving
-        # the old string would have reported a fixture error rather than the fence gap
-        # this test exists to catch.
-        "_tagged_subscript_verdict",
-        # The rules #539 added, on the same terms. Each does bounded work on one parsed
-        # node inside the fence, so each must be covered by it.
-        "_is_tagged_seam_call",
-        "_mutates_tier_in_a_copy",
-    ],
-)
+def _predicates_detect_calls() -> frozenset[str]:
+    """Every module-level predicate `_detect` invokes, derived from the gate's own AST.
+
+    HAND-WRITTEN, this list went stale the moment #539 renamed one predicate and added two
+    more — and a parametrisation that silently covers three of five leaves the fence
+    unmeasured on the rest. It is the same enumerate-versus-derive lesson the identifier
+    meta-guard in the sole-layer suite exists to teach, applied to the guard itself.
+    """
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    module_functions = {
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    detect = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_detect"
+    )
+    return frozenset(
+        call.func.id
+        for call in ast.walk(detect)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id in module_functions
+        and call.func.id.startswith("_")
+    )
+
+
+# A SOURCE THAT REACHES EACH PREDICATE. Most are called on every `ast.Call`, so the clean
+# fixture reaches them; three are guarded by a shape test and were NEVER fault-tested while
+# this parametrisation was hand-written — which is exactly what deriving the set exposed.
+_REACHING_SOURCE: dict[str, str] = {
+    "_is_benign_state_mutation_target": 'obj.__setattr__(self, "x", 1)\n',
+    "_is_self_init_re_entry": "obj.__init__(self)\n",
+    "_private_surface_is_exempt": "_log_t3(x)\n",
+}
+
+_DETECT_PREDICATES = sorted(_predicates_detect_calls())
+
+
+def test_the_faulting_predicate_parametrisation_is_derived_not_transcribed() -> None:
+    """The parametrisation below must BE the derived set, not a subset of it."""
+    assert _DETECT_PREDICATES, "no predicates derived — the derivation itself broke"
+    assert set(_DETECT_PREDICATES) == _predicates_detect_calls()
+
+
+@pytest.mark.parametrize("predicate", _DETECT_PREDICATES)
 def test_a_faulting_detector_predicate_raises_instead_of_reporting_a_violation(
     monkeypatch: pytest.MonkeyPatch, predicate: str
 ) -> None:
@@ -1747,11 +1772,12 @@ def test_a_faulting_detector_predicate_raises_instead_of_reporting_a_violation(
         raise AttributeError(f"simulated internal bug in {predicate}")
 
     monkeypatch.setattr(check_tag_t3, predicate, _buggy)
+    source = _REACHING_SOURCE.get(predicate, _clean_source())
 
     with pytest.raises(
         check_tag_t3.GateInternalError, match=re.escape("BUG IN check_tag_t3.py")
     ) as caught:
-        check_tag_t3._scan_text(_clean_source(), Path("src/alfred/totally_clean_file.py"))
+        check_tag_t3._scan_text(source, Path("src/alfred/totally_clean_file.py"))
 
     # The ORIGINAL fault must survive, or a maintainer reads "the gate broke"
     # with no way to find out how.

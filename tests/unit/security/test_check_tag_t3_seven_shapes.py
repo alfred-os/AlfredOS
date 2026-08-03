@@ -610,9 +610,13 @@ _MUST_BE_CLEAN = frozenset(
 def _violations_by_function(text: str, path: Path) -> dict[str, int]:
     """Violation count per enclosing test function in ``text``.
 
-    Parses the location from the RIGHT. ``"{path}:{lineno}: {message}"`` split from the
-    left breaks on the required ``windows-latest`` leg, where an absolute path carries a
-    drive letter and its own colon.
+    Locates the line number by measuring off the KNOWN PATH PREFIX, because neither end of
+    ``"{path}:{lineno}: {message}"`` is safe to split from. Splitting left breaks on the
+    required ``windows-latest`` leg, where an absolute path carries a drive letter and its
+    own colon. Splitting right breaks on any message CONTAINING ``": "`` — and this PR's own
+    ``_TYPE_IGNORE_MESSAGE`` does, so the right-split form raised ``ValueError`` the moment a
+    suppression finding appeared in the oracle. The path is the one part whose length is
+    known, so it is the one thing to measure from.
 
     Raises on a message line it cannot parse rather than skipping it: a silent ``continue``
     would let a format change quietly zero every count and turn both oracle tests green on
