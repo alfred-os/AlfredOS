@@ -1565,6 +1565,15 @@ _KEYED_IDENTIFIER_SPELLINGS: dict[str, dict[str, str]] = {
         }
         for tier in ("T0", "T1", "T2")
     },
+    # PR REVIEW py-001. `dict` LEFT `_DECLARED_ALIAS_RESIDUALS`, whose entry claimed a
+    # rebind "makes the gate stricter". Measured: true inside a `**` operand, FALSE at the
+    # top level — `_d = dict; low.model_copy(update=_d(tier=T3))` scanned CLEAN. A promise
+    # measurement refutes is exactly what a row exists to replace.
+    "dict": {
+        "DIRECT": "low.model_copy(update=dict(tier=T3))",
+        "REBOUND": "_d = dict\nlow.model_copy(update=_d(tier=T3))",
+        "IMPORT-ALIASED": "from builtins import dict as _d\nlow.model_copy(update=_d(tier=T3))",
+    },
     "TrustTier": {
         "DIRECT": "type TierT = TrustTier\nTaggedContent[TierT](content='x')",
         "REBOUND": "TrustTier = T3\ntype TierT = TrustTier\nTaggedContent[TierT](content='x')",
@@ -2521,6 +2530,17 @@ _PATH_SEGMENT_RESIDUAL: str = (
     "against another — not an identifier, and nothing in a source file can rebind it."
 )
 
+_TYPEVAR_CALLEE_RESIDUAL: str = (
+    "matched BY NAME as the callee of a `bound=TrustTier` binding, and NOT closable "
+    "lexically. Requiring the callee at all is a NARROWING — without it, any call carrying "
+    "`bound=TrustTier` seeded its target into the admitting set (`X = attacker(bound=TrustTier)` "
+    "scanned clean, measured). What remains is that a `TypeVar` REBOUND to some other "
+    "callable still matches by name, so the binding is still admitted. That is the same "
+    "class as the benign-NAME residual in the module docstring — a name-keyed set cannot "
+    "decide a runtime binding — and it is masked by the runtime guard. Aliases of the real "
+    "`TypeVar` ARE resolved. Measured in both directions by "
+    "`test_the_typevar_callee_residual_is_still_exactly_what_is_claimed`."
+)
 _KEYWORD_NAME_RESIDUAL: str = (
     "a KEYWORD ARGUMENT NAME read off `ast.keyword.arg`, not an identifier the scanned file "
     "binds. `bound=` in `TypeVar(..., bound=TrustTier)` and `tier=` in `dict(tier=...)` are "
@@ -2529,15 +2549,6 @@ _KEYWORD_NAME_RESIDUAL: str = (
     "`test_a_typevar_bound_to_trust_tier_is_a_benign_slice` and "
     "`test_a_tier_key_reaches_the_rule_through_every_mapping_shape`."
 )
-_BUILTIN_CONSTRUCTOR_RESIDUAL: str = (
-    "the `dict` BUILTIN, matched as the callee of `dict(tier=...)` inside a copy seam's "
-    "update mapping. Keyed in the REFUSING direction with a default-deny behind it: a "
-    "rebound `dict` no longer matches this arm, but the mapping it builds is then an "
-    "`ast.Call` the rule cannot read, and `_mapping_mentions_tier` refuses what it cannot "
-    "read. Rebinding therefore makes the gate stricter, never weaker. Pinned by "
-    "`test_an_unreadable_update_mapping_is_refused`."
-)
-
 _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
     # #539 CLOSED `TaggedContent` and `T3`; both now carry behavioural rows in
     # `_KEYED_IDENTIFIER_SPELLINGS`, which is the stronger disposition — a row measures the
@@ -2545,7 +2556,7 @@ _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
     # CONSTRUCTION rules and left those two call rules exactly as they were.
     **dict.fromkeys(("tag",), _PRE_EXISTING_RESIDUAL),
     **dict.fromkeys(("bound", "tier"), _KEYWORD_NAME_RESIDUAL),
-    "dict": _BUILTIN_CONSTRUCTOR_RESIDUAL,
+    "TypeVar": _TYPEVAR_CALLEE_RESIDUAL,
     # `__init__` and `__delattr__` are EXCLUDED because each has a behavioural row above.
     # The disjointness assertion in the meta-guard forbids being both, and a row is the
     # stronger of the two: it measures the closure instead of asserting it.
@@ -2617,6 +2628,7 @@ def test_the_pre_existing_call_rules_are_still_the_declared_residual() -> None:
         "tag rebound": "_t = tag\n_t(T3, payload)\n",
         "tag import-aliased": ("from alfred.security.tiers import tag as _t\n_t(T3, payload)\n"),
         "cast rebound": "_c = cast\n_c(TaggedContent[T2], x)\n",
+        "cast import-aliased": "from typing import cast as _c\n_c(TaggedContent[T2], x)\n",
     }.items():
         assert check_tag_t3._scan_text(source, _PROBE) == [], (
             f"the {label} spelling now REDS. That is a widening of a pre-existing rule "
@@ -3264,3 +3276,46 @@ def test_the_sweep_decodes_git_output_as_utf8_not_as_the_platform_locale() -> No
             f"text is not cp1252-decodable. Capture bytes and decode explicitly, as "
             f"_git_tracked_python_files does."
         )
+
+
+def test_the_typevar_callee_residual_is_still_exactly_what_is_claimed() -> None:
+    """PR REVIEW sec-003 — MEASURE the residual, never merely declare it.
+
+    This repo has shipped a declared residual that had silently become false, and sec-003
+    was another: `_trust_tier_type_aliases` did not check the callee at all, so ANY call
+    carrying `bound=TrustTier` seeded its target into the ADMITTING set. Requiring the
+    callee narrowed that, and the narrowing is asserted here in BOTH directions so the
+    claim cannot rot:
+
+    * an arbitrary callee must NOT admit (the narrowing is real);
+    * an ALIAS of the real `TypeVar` must admit (aliases are resolved);
+    * a REBOUND `TypeVar` still admits — the residual itself, stated rather than hidden.
+    """
+    assert _messages("X = attacker(bound=TrustTier)\nTaggedContent[X](c=1)\n"), (
+        "the callee check is not live — any call with bound=TrustTier would admit"
+    )
+
+    assert (
+        _messages('TierT = TypeVar("TierT", bound=TrustTier)\nTaggedContent[TierT](c=1)\n') == []
+    ), "the benign floor red: a real TypeVar bound must still admit"
+    assert (
+        _messages(
+            "from typing import TypeVar as _TV\n"
+            'TierT = _TV("TierT", bound=TrustTier)\n'
+            "TaggedContent[TierT](c=1)\n"
+        )
+        == []
+    ), "an ALIAS of the real TypeVar must resolve"
+
+    assert (
+        _messages(
+            "TypeVar = attacker\n"
+            'TierT = TypeVar("TierT", bound=TrustTier)\n'
+            "TaggedContent[TierT](c=1)\n"
+        )
+        == []
+    ), (
+        "a REBOUND TypeVar now REDS. That is a widening of the callee check — good news, "
+        "but _DECLARED_ALIAS_RESIDUALS still claims it is open. Give TypeVar a row in "
+        "_KEYED_IDENTIFIER_SPELLINGS and delete the residual."
+    )

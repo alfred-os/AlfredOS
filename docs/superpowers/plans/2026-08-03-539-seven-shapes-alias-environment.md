@@ -104,7 +104,7 @@ accepted, and the corrected design was re-validated the same way.
 
 | ID | Finding | Closure |
 | --- | --- | --- |
-| arch-001 = err-001 = sec-001 | `bucket = t3_seeds if verdict is T3 else benign_seeds` routes **UNRESOLVED into the benign bucket**. Six of the eight default-deny rows go clean once bound to a name. Executed: `X = TaggedContent["T"+"3"]` then `X(...)` scans clean while the inline slice reds. | A verdict **MAP** replaces the two sets. A map cannot lose a verdict. The ternary — which is also what hid the arm from the branch gate — is gone. |
+| arch-001 = err-001 = sec-001 | `bucket = t3_seeds if verdict is T3 else benign_seeds` routes **UNRESOLVED into the benign bucket**. Default-deny rows go clean once bound to a name (the shipped suite parametrises seven such shapes). Executed: `X = TaggedContent["T"+"3"]` then `X(...)` scans clean while the inline slice reds. | A verdict **MAP** replaces the two sets. A map cannot lose a verdict. The ternary — which is also what hid the arm from the branch gate — is gone. |
 | sec-002 | `tc_bare ∩ tc_param` unchecked: `Cool = TaggedContent[T2]; Cool = TaggedContent; Cool(tier=T3)` returns BENIGN and silences R1. | A name bound BOTH bare and parameterised is ambiguous, so its verdict is raised to at least UNRESOLVED. |
 | sec-003 | `_TRUST_TIER_NAME` was a bare literal on the **admitting** side: `TrustTier = T3; type TierT = TrustTier` admits T3. The proposed residual ("rebinding makes the gate STRICTER") was false in every direction. | `TrustTier` is alias-resolved, and a bound whose name resolves into `t3` is refused. Both legitimate TypeVar spellings stay clean. |
 | sec-004 | `_slice_verdict`'s string arm matched the raw seed tuple while its Name arm was alias-resolved, so `T2 = T3; TaggedContent["T2"](...)` was clean while `TaggedContent[T2](...)` red. | A quoted generic is a forward-referenced NAME: the string arm now resolves through the SAME sets. |
@@ -511,7 +511,7 @@ Each mutant must red a NAMED floor. Record the floor per mutant.
 | # | Mutant | Must red |
 | --- | --- | --- |
 | 1 | `_alias_names` loop → single pass | the reverse-order test, which asserts the EXACT rule |
-| 2 | `_slice_verdict` default → BENIGN | all six UNRESOLVED shapes |
+| 2 | `_slice_verdict` default → BENIGN | every `_UNRESOLVED_SHAPES` case (7 parametrised) |
 | 3 | benign arm deleted (widening) | benign floors + real-tree floor |
 | 4 | `benign_tier` → empty (widening) | the `T2 as Broadcast` floor |
 | 5 | `_trust_tier_type_aliases` → empty (widening) | both TypeVar-spelling tests |

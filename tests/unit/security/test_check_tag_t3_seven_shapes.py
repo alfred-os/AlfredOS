@@ -741,6 +741,7 @@ def test_the_seed_loop_variable_is_named_seed() -> None:
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)
         and call.func.id == "_alias_names"
+        and len(call.args) == 2
         and isinstance(call.args[1], ast.Name)
     } == {"seed"}
 
@@ -849,3 +850,273 @@ def test_a_blank_logical_line_opens_no_span() -> None:
 
     assert check_tag_t3._suppressed_spans(source) == []
     assert _messages(source) == []
+
+
+# ---------------------------------------------------------------------------
+# PR REVIEW — the walrus wrapper, the unreadable base, and the opaque mapping.
+# ---------------------------------------------------------------------------
+
+_WALRUS_BLINDED = {
+    "R1 bare construction": (
+        "(X := TaggedContent)(content=A, tier=T3)\n",
+        "TaggedContent(content=A, tier=T3)\n",
+    ),
+    "tag()": ("(f := tag)(T3, A)\n", "tag(T3, A)\n"),
+    "cast()": ("(f := cast)(TaggedContent[T2], x)\n", "cast(TaggedContent[T2], x)\n"),
+    "BaseModel seam": (
+        "(f := BaseModel.model_copy)(low, update={'tier': T3})\n",
+        "BaseModel.model_copy(low, update={'tier': T3})\n",
+    ),
+    "R3 copy seam": (
+        "(f := low.model_copy)(update={'tier': T3})\n",
+        "low.model_copy(update={'tier': T3})\n",
+    ),
+    "R2 tagged seam": (
+        "(f := TaggedContent[T3].model_construct)(p)\n",
+        "TaggedContent[T3].model_construct(p)\n",
+    ),
+    "#538 setattr": (
+        '(f := object.__setattr__)(low, "tier", T3)\n',
+        'object.__setattr__(low, "tier", T3)\n',
+    ),
+    "#538 vars": ('(f := vars)(obj)["tier"] = T3\n', 'vars(obj)["tier"] = T3\n'),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_WALRUS_BLINDED))
+def test_a_walrus_wrapper_does_not_blind_any_rule(label: str) -> None:
+    """PR REVIEW, err-001 (Critical) — SEVEN of eight rules were blind to this.
+
+    #539's first revision introduced `_unwrap_walrus` and applied it at TWO of the eight
+    positions that read a callable, so the subscript rule saw through the wrapper and
+    seven others did not — including two #538 SOLE-LAYER rules, whose docstrings state
+    that no runtime guard for them can exist.
+
+    Most spellings were already blind BEFORE #539 (`_call_name` has always returned None
+    for a non-Name/Attribute callee), so this is a pre-existing hole rather than a
+    regression. That is precisely why fixing two positions and leaving six was the wrong
+    answer: it is the enumerate-the-spelling mistake this epic exists to stop.
+
+    The TWIN is the positive control — it proves the rule is live at all, so a fixture
+    that matched nothing could not pass this as "both clean".
+    """
+    walrus, twin = _WALRUS_BLINDED[label]
+
+    assert _messages(twin), f"{label}: the rule is not live at all — the twin is vacuous"
+    assert _messages(walrus), f"{label}: the walrus-wrapped spelling scanned CLEAN"
+
+
+def test_no_rule_reads_call_func_directly() -> None:
+    """THE META-GUARD that stops the walrus hole reopening one rule at a time.
+
+    Derived from the gate's own AST rather than written as a list, for the reason the
+    identifier meta-guard in the sole-layer suite gives: an enumeration closes what it
+    enumerates. A future rule that writes the obvious `node.func` reds here on the day it
+    lands instead of quietly reintroducing a bypass seven of eight rules already had.
+
+    `_callee` is the one function allowed to touch it — that is what it is for. `_scan_text`
+    is allowed because its `call_func_ids` set deliberately keys on the RAW node identity:
+    a walrus-wrapped `__setattr__` carries no attribute node in `Call.func` position, so
+    the one-position whitelist reports it under the ALIASED rule, which is correct for it.
+    """
+    source = _SCRIPT.read_text(encoding="utf-8")
+    # `_is_self_init_re_entry` is allowed, and the reason is the direction it keys in.
+    # It reads the RECEIVER call's callable to recognise a zero-argument `super()`, which
+    # is an ADMISSIBILITY test — so `(s := super)()` failing to match makes the gate
+    # STRICTER, not weaker. Unwrapping there would admit a shape that is currently
+    # refused, and the existing comment records that a rebound `super` is dead at runtime
+    # anyway (`RuntimeError: super(): __class__ cell not found`).
+    allowed = {"_callee", "_scan_text", "_is_self_init_re_entry"}
+    offenders: list[str] = []
+    for function in ast.walk(ast.parse(source)):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if function.name in allowed:
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.Attribute) and node.attr == "func":
+                offenders.append(f"{function.name}:{node.lineno}")
+
+    assert not offenders, (
+        f"these functions read `.func` directly instead of through `_callee`: "
+        f"{offenders}. A walrus wrapper `(f := target)(...)` puts an ast.NamedExpr in "
+        f"Call.func, so every such read scans CLEAN. Use _callee(node)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("call base", "_get_tc()[T3](content=A)\n"),
+        ("subscript base", "_TCS[0][T3](content=A)\n"),
+    ],
+)
+def test_an_unreadable_subscript_base_with_a_t3_slice_is_refused(label: str, source: str) -> None:
+    """PR REVIEW, err-002 — the two-valued guess, reintroduced on the BASE axis.
+
+    Returning the not-a-construction sentinel for a base the gate cannot name is the same
+    fail-open `_SliceVerdict` exists to remove from the slice axis.
+    """
+    assert _messages(source), label
+
+
+def test_an_unreadable_base_with_a_benign_slice_stays_clean() -> None:
+    """The twin that keeps the base rule from costing anything."""
+    assert _messages("_get_tc()[T2](content=A)\n") == []
+    assert _messages("whatever()[T1](x)\n") == []
+
+
+def test_a_readable_but_unknown_base_stays_clean_and_is_a_stated_residual() -> None:
+    """The BOUNDARY of the rule above, pinned so the next reader does not mistake it.
+
+    `a.b().c[T3](...)` has a base `_arg_name` CAN read — it collapses the chain to the
+    identifier `c` — which simply is not a `TaggedContent` alias. That is the same class
+    as `Other[T3](...)` and stays clean by design: the unreadable-base rule closes bases
+    that name NO identifier, not bases that name one this file never bound.
+
+    Widening it to "any base not in `tc_bare`" would flag every generic construction in
+    the tree. The residual it leaves is the per-file alias environment's, already stated
+    in the module docstring: a `TaggedContent` re-exported through another module and
+    reached as `mod.Alias[T3](...)` is not resolved.
+    """
+    assert _messages("a.b().c[T3](content=A)\n") == []
+    assert _messages("Other[T3](content=A)\n") == []
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("opaque call", "low.model_copy(update={**build_update()})\n"),
+        ("opaque method", "low.model_copy(update={**self.build()})\n"),
+        ("opaque name", "low.model_copy(update={**payload})\n"),
+    ],
+)
+def test_an_unreadable_unpack_operand_is_refused_whatever_its_shape(
+    label: str, source: str
+) -> None:
+    """CODERABBIT (major) — an opaque CALL was admitted while an opaque NAME was refused.
+
+    The `**` arm exempted every `ast.Call` rather than only a `dict(...)` one, so
+    `{**build_update()}` scanned clean. An opaque call is exactly as unreadable as an
+    opaque name; readability is now decided by `_is_readable_mapping`, not by node class.
+    """
+    assert any(check_tag_t3._TIER_MUTATING_COPY_MESSAGE in m for m in _messages(source)), label
+
+
+def test_a_readable_unpack_operand_is_still_admitted() -> None:
+    """The twin. Default-deny on unreadable must not become deny-everything."""
+    assert _messages("low.model_copy(update={**dict(a=1)})\n") == []
+    assert _messages("low.model_copy(update={**{'wire_seq': w}})\n") == []
+
+
+def test_a_pathological_mapping_nest_is_bounded_not_a_gate_fault() -> None:
+    """PR REVIEW, err-005 — the one uncapped recursive predicate inside the fence.
+
+    An unbounded recursion here would let one pathological file raise from INSIDE the
+    `GateInternalError` fence, and `main` then discards every violation collected so far
+    and exits 2 — hiding a real laundering finding in an EARLIER file behind "the gate is
+    broken". Bounded on `_fold_str`'s precedent, and past the bound the answer is REFUSE.
+    """
+    depth = check_tag_t3._FOLD_MAX_DEPTH + 5
+    nested = "{**" * depth + "{'a': 1}" + "}" * depth
+
+    assert check_tag_t3._mapping_mentions_tier(
+        ast.parse(nested, mode="eval").body, frozenset({"dict"})
+    )
+    assert _messages(f"low.model_copy(update={nested})\n")
+
+
+def test_the_strictness_map_covers_every_slice_verdict() -> None:
+    """PR REVIEW py-002 — `_stricter` reads a dict keyed on enum members.
+
+    A verdict added to `_SliceVerdict` without a strictness entry makes `_stricter` raise
+    `KeyError` — from INSIDE `_scan_text`'s detector fence on the `_detect` path, which
+    `main` reports as exit 2 with every violation collected so far discarded. Deriving the
+    expectation from the enum means the map cannot go stale silently.
+    """
+    assert set(check_tag_t3._SLICE_VERDICT_STRICTNESS) == set(check_tag_t3._SliceVerdict)
+    assert len(set(check_tag_t3._SLICE_VERDICT_STRICTNESS.values())) == len(
+        check_tag_t3._SliceVerdict
+    ), "two verdicts share a rank, so `_stricter` cannot order them"
+
+
+def test_a_trust_tier_chain_past_the_budget_is_reported_by_the_scanner() -> None:
+    """PR REVIEW err-003 — the ONE `_alias_names` call site of nine that swallowed its flag.
+
+    A SURVIVING MUTANT is what put this test here: dropping the flag again passed the whole
+    suite, because every other overflow test drives a different seed. The direction is
+    fail-CLOSED (an unresolved `TrustTier` chain SHRINKS the admitting set, so the gate gets
+    stricter) — which is precisely why nothing else noticed. But the gate's contract is to
+    fail closed AND LOUDLY, and a swallowed flag means an overflowing file is decided on an
+    admittedly incomplete set with no diagnosis at all.
+    """
+    depth = check_tag_t3._ALIAS_RESOLUTION_BUDGET + 5
+    chain = "".join(f"_n{i} = _n{i - 1}\n" for i in range(depth, 0, -1)) + "_n0 = TrustTier\n"
+    _, overflowed = _env(chain)
+
+    assert overflowed, "the TrustTier chain's overflow flag was dropped"
+    assert any(check_tag_t3._ALIAS_BUDGET_MESSAGE in m for m in _messages(chain)), (
+        "the overflow was not reported by the scanner — fail-closed but silent"
+    )
+
+
+def test_a_dict_chain_past_the_budget_is_reported_by_the_scanner() -> None:
+    """The same guard for the `dict` seed #539 added, so it cannot repeat err-003."""
+    depth = check_tag_t3._ALIAS_RESOLUTION_BUDGET + 5
+    chain = "".join(f"_d{i} = _d{i - 1}\n" for i in range(depth, 0, -1)) + "_d0 = dict\n"
+    _, overflowed = _env(chain)
+
+    assert overflowed
+    assert any(check_tag_t3._ALIAS_BUDGET_MESSAGE in m for m in _messages(chain))
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("annassign", "X: TypeAlias = TaggedContent\nX(content=A, tier=T3)\n"),
+        ("pep695", "type X = TaggedContent\nX(content=A, tier=T3)\n"),
+        ("walrus", "(X := TaggedContent)\nX(content=A, tier=T3)\n"),
+        ("assign", "X = TaggedContent\nX(content=A, tier=T3)\n"),
+    ],
+)
+def test_the_shared_resolver_reads_every_binding_shape(label: str, source: str) -> None:
+    """PR REVIEW sec-001 (Critical) — `_alias_names` read `ast.Assign` alone.
+
+    A name outside `tc_bare` silences the unparameterised, seam AND subscript rules at
+    once, so three of the four binding shapes above scanned CLEAN while the plain
+    assignment red. It is the same enumeration `_parameterised_bindings` was written to
+    avoid one layer up — fixed there and not here, which is what left the bare-class axis
+    open. The fix is in the SHARED resolver, so #538's rules gain the closure too.
+    """
+    assert _messages(source), label
+
+
+def test_a_seam_receiver_the_gate_cannot_resolve_is_refused() -> None:
+    """PR REVIEW sec-005 — the seam rule ADMITTED an unreadable receiver.
+
+    Its own docstring says "an unparameterised receiver is refused"; a receiver it could
+    not name at all was admitted, which is the two-valued guess `_SliceVerdict` exists to
+    remove, reintroduced on the receiver axis.
+    """
+    assert any(
+        check_tag_t3._TAGGED_SEAM_MESSAGE in m for m in _messages("_get()[T3].model_validate(p)\n")
+    )
+    assert _messages("_get()[T2].model_validate(p)\n") == [], (
+        "the benign twin red — the unreadable-receiver arm must be slice-scoped"
+    )
+
+
+def test_a_suppressor_on_an_aliased_construction_is_not_invisible() -> None:
+    """PR REVIEW sec-004 — the suppression pass keyed on the raw substring.
+
+    Every other rule resolves the name; this one is a text pass over comment spans, so it
+    has to be HANDED the resolved set. Keying on the literal meant an alias walked past it.
+
+    The other half of sec-004 — that ruff honours a `noqa` following prose, making the
+    `re.match` anchor too narrow — was DECLINED on measurement: `x = undefined  # we do
+    not noqa here` is still reported by `ruff check --select F821`, so the anchor matches
+    ruff's real behaviour and the prose floor below is correct.
+    """
+    assert _messages("from a import TaggedContent as TC\nx = TC[T2](y)  # type: ig" + "nore\n")
+    assert _messages("Cool = TaggedContent[T2]\nx = Cool(y)  # noq" + "a: E501\n")
+    assert _messages("x = plain(y)  # type: ig" + "nore\n") == []
