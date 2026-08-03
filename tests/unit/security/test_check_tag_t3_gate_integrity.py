@@ -2040,3 +2040,157 @@ def test_a_partial_scan_refusal_names_the_remedy() -> None:
     assert "with NO arguments" in message, "the message does not state the remedy"
     for root in check_tag_t3._DEFAULT_SCAN_ROOTS:
         assert root in message, f"the message does not name the root {root!r} to pass instead"
+
+
+# ---------------------------------------------------------------------------
+# #547. The census must count files the gate READ AND PARSED, not files
+# traversal collected. `_ScannedOk` marks the one path that means "this scan
+# ran to completion"; every other return is a failure by construction.
+# ---------------------------------------------------------------------------
+
+
+def _trigger_unparseable(tmp: Path) -> Path:
+    p = tmp / "unparseable.py"
+    p.write_text("def (:\n", encoding="utf-8")
+    return p
+
+
+def _trigger_undecodable(tmp: Path) -> Path:
+    p = tmp / "undecodable.py"
+    p.write_bytes(b"# -*- coding: latin-1 -*-\nx = '\xff\xfe'\n")
+    return p
+
+
+def _trigger_unreadable(tmp: Path) -> Path:
+    p = tmp / "a_directory.py"
+    p.mkdir()
+    return p
+
+
+def _trigger_unscannable(tmp: Path) -> Path:
+    # REUSE `_ALWAYS_UNSCANNABLE` — do NOT hand-roll a nesting depth. It is
+    # derived from `_PATHOLOGICAL_SOURCES["unary-not-chain"]` and is pinned to
+    # MemoryError by `test_the_always_unscannable_premise` above. The
+    # RecursionError/Homebrew build divergence belongs to `binop-chain`, NOT to
+    # this shape: name the fixture, not a remembered mechanism.
+    p = tmp / "unscannable.py"
+    p.write_text(_ALWAYS_UNSCANNABLE, encoding="utf-8")
+    return p
+
+
+def _trigger_unscannable_path(tmp: Path) -> Path:
+    return tmp / "embedded\x00nul.py"
+
+
+_FAILURE_TRIGGERS: dict[str, Callable[[Path], Path]] = {
+    check_tag_t3._UNPARSEABLE_MESSAGE: _trigger_unparseable,
+    check_tag_t3._UNDECODABLE_MESSAGE: _trigger_undecodable,
+    check_tag_t3._UNREADABLE_MESSAGE: _trigger_unreadable,
+    check_tag_t3._UNSCANNABLE_MESSAGE: _trigger_unscannable,
+    check_tag_t3._UNSCANNABLE_PATH_MESSAGE: _trigger_unscannable_path,
+}
+
+
+def test_only_a_completed_scan_returns_the_scanned_ok_marker(tmp_path: Path) -> None:
+    """DEFAULT-DENY the outcome axis.
+
+    `main` counts a file toward the census only when `_scan_file` returns a
+    `_ScannedOk`. Marking the FAILURES instead would enumerate them, and this
+    file already carries two shapes enumeration misses: the `S_ISREG` refusal
+    reuses `_UNREADABLE_MESSAGE`, and `_NOT_A_REGULAR_FILE_REASON` is a
+    collection failure whose name carries no `_MESSAGE` suffix.
+
+    Derived from the module's own constants, so a sixth message reds here.
+    """
+    assert set(_FAILURE_TRIGGERS) == set(_COLLECTION_FAILURE_MESSAGES), (
+        "a collection-failure message has no trigger — add one, or the census "
+        "can silently count its files as successfully scanned"
+    )
+
+    for index, (message, build) in enumerate(_FAILURE_TRIGGERS.items()):
+        directory = tmp_path / f"case{index}"
+        directory.mkdir()
+        result = check_tag_t3._scan_file(build(directory))
+
+        assert result, f"{message!r}: expected a collection failure, got a clean scan"
+        assert any(message in line for line in result), f"expected {message!r} in {result!r}"
+        assert not isinstance(result, check_tag_t3._ScannedOk), (
+            f"{message!r}: marked as a completed scan, so `main` will count "
+            f"this unreadable file toward the census — the fail-open direction"
+        )
+
+
+def test_a_clean_file_returns_the_scanned_ok_marker(tmp_path: Path) -> None:
+    """The other side. Without this, the guard above passes on a build that
+    never marks anything and the census would count zero files forever."""
+    clean = tmp_path / "clean.py"
+    clean.write_text("x = 1\n", encoding="utf-8")
+
+    result = check_tag_t3._scan_file(clean)
+
+    assert result == []
+    assert isinstance(result, check_tag_t3._ScannedOk)
+
+
+def test_a_file_with_a_real_finding_still_counts_as_scanned(tmp_path: Path) -> None:
+    """A finding is not a collection failure. The gate READ this file fine."""
+    bad = tmp_path / "bad.py"
+    bad.write_text(
+        "from alfred.security.tiers import tag, T3\nv = tag(T3, 'x')\n", encoding="utf-8"
+    )
+
+    result = check_tag_t3._scan_file(bad)
+
+    assert result, "expected the tag(T3, ...) finding"
+    assert isinstance(result, check_tag_t3._ScannedOk)
+
+
+def test_the_scanned_ok_marker_is_constructed_in_exactly_one_place() -> None:
+    """DEFAULT-DENY the construction site, by NAME CENSUS.
+
+    The completion flag stops an `except` arm reaching the marked return by
+    falling through. It does NOT stop anyone writing
+    `_ScannedOk([... _UNREADABLE_MESSAGE ...])` directly, which fails open past
+    every other guard here, and neither mypy nor pyright can see the invariant.
+
+    NOT an `ast.Call`-whose-func-is-a-`Name` pin. That was proposed, executed
+    and RETRACTED during review: it reports green against `_Alias = _ScannedOk`,
+    a subclass, `functools.partial(_ScannedOk)` and `globals()["_ScannedOk"]`.
+    Keying on the call shape is the alias-resolution mistake this repo keeps
+    paying for. Every `ast.Name` reference is censused instead, whatever
+    syntactic role it plays, and the allowed LOCATIONS are enumerated — so a
+    reference from anywhere else reds regardless of how it is spelled.
+
+    WHAT THIS CANNOT DO: `type(x)(...)` and `copy.copy(x)` reproduce the class
+    without ever spelling the name, so no source-level instrument sees them.
+    Named here and in ADR-0060 rather than claimed closed.
+    """
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"), filename=str(_SCRIPT))
+
+    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "_ScannedOk"]
+    assert len(classes) == 1, f"expected one _ScannedOk class, found {len(classes)}"
+
+    enclosing: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = node.end_lineno or node.lineno
+            for line in range(node.lineno, end + 1):
+                enclosing[line] = node.name
+
+    references = [
+        (enclosing.get(n.lineno, "<module>"), n.lineno)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and n.id == "_ScannedOk"
+    ]
+    locations = {where for where, _ in references}
+    assert locations <= {"_scan_text", "main"}, (
+        f"_ScannedOk is referenced outside the two functions allowed to see it: "
+        f"{sorted(locations - {'_scan_text', 'main'})} at {references!r}. A marker "
+        f"minted anywhere else counts an ungated file as a completed scan."
+    )
+
+    built_in_scan_text = [where for where, _ in references if where == "_scan_text"]
+    assert len(built_in_scan_text) == 1, (
+        f"expected exactly one _ScannedOk reference in _scan_text (the single "
+        f"construction site), found {len(built_in_scan_text)}: {references!r}"
+    )
