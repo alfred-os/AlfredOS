@@ -169,6 +169,7 @@ Never use `Optional[X]` or `Union[X, Y]` or `typing.List` in new code.
 - `mypy --strict` is on. `disallow_untyped_defs`, `warn_return_any`, `warn_unused_ignores`, `no_implicit_optional`.
 - `pyright` defaults to `strict` mode via `pyproject.toml`.
 - `Any` is a code smell. If you need it, annotate `# type: ignore[<code>]  # reason: ...` or `# pyright: ignore[<code>]` with a one-line reason.
+- **Not on a line that mentions `TaggedContent`.** `scripts/check_tag_t3.py` refuses every suppressor — `type: ignore`, `pyright: ignore`, `mypy: ignore`, bare `noqa`, and the file-wide `ruff: noqa` / `flake8: noqa` / `mypy: ignore-errors` — on any logical line naming `TaggedContent`, because suppressing the type error there is what hides a tier-laundering cast. Fix the type, or route the construction through `tag_t3_with_nonce()`. File-wide suppressors are scoped to the whole file, so one at the top of a module that mentions `TaggedContent` anywhere reds (#539, [ADR-0059](adr/0059-default-deny-on-unresolvable-tier-slices.md)).
 
 ### Protocols over ABCs
 
