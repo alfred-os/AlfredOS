@@ -95,8 +95,8 @@ by the runtime invariant, and the docstring says so:
 
 1. The real `src/alfred/` tree passes clean — includes the **34** legitimate
    pydantic-seam sites outside the exempt `tiers.py` (`model_validate` 26,
-   `model_validate_json` 6, `model_copy` 2) and the 2 legitimate `model_copy(update=…)`
-   sites. The "26 + 2" written here was wrong and the scan root has since widened to
+   `model_validate_json` 6, `model_copy` 2) — the 2 legitimate `model_copy(update=…)`
+   sites are those two `model_copy` entries, not a further pair on top. The "26 + 2" written here was wrong and the scan root has since widened to
    include `plugins/` (re-measured 2026-08-03 across all 332 tracked files). **ZERO** of
    those 34 has a `TaggedContent`-shaped receiver, which is what makes receiver-scoping
    false-positive-free — and what refutes the wire-round-trip argument for a

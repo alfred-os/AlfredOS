@@ -216,7 +216,7 @@ For each failed gate, fetch the failure log via the `detailsUrl`. Classify:
 
 - **Lint failure** (ruff): run `make fix` locally then `make check`. If clean, commit as `fixup` to the most recent commit that introduced the offending code.
 - **Format failure**: run `make format-fix` (in our Makefile) then `make check`.
-- **Type failure** (mypy / pyright): fix the type signature or add a justified `# type: ignore[<code>]  # reason: ...`.
+- **Type failure** (mypy / pyright): fix the type signature or add a justified `# type: ignore[<code>]  # reason: ...`. **If the line mentions `TaggedContent`, a suppressor is not available** — `scripts/check_tag_t3.py` refuses every one of them there (a required check), so reaching for it trades one red gate for another. Fix the type, or route the construction through `tag_t3_with_nonce()` (#539, ADR-0059).
 - **Unit test failure**: read the test output, fix the code (not the test, unless the test is wrong).
 - **Integration test failure**: same, but verify locally with Docker running.
 - **Security scan failure** (gitleaks / zizmor / semgrep / trivy / CodeQL): NEVER suppress; fix the underlying issue. If gitleaks flags a value as a credential and it's a legitimate non-secret, replace with an emphatically-non-secret placeholder (e.g. `not-a-real-secret-bootstrap-placeholder`).

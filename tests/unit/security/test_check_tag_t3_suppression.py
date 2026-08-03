@@ -28,6 +28,7 @@ below are ones where the word is genuinely mid-sentence.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -48,9 +49,10 @@ assert check_tag_t3._REPO_ROOT == _REPO_ROOT, (
 
 _PROBE = Path("/nonexistent/probe.py")
 
-# Assembled at runtime, never written out. A literal `# noqa` in this file's source is read
-# as a real directive by ruff (it does not care that it sits inside a string), which reds
-# RUF100 for an unused suppression — the same phenomenon this module tests, one layer up.
+# Assembled at runtime, never written out. Spelling a suppression directive literally in a
+# comment makes ruff parse it as a real one — it does not care what prose surrounds it —
+# and then flag it as unused. That is the same comment-is-not-prose phenomenon this module
+# exists to decide, one layer up.
 _HASH = "#"
 
 
@@ -219,3 +221,29 @@ def test_a_file_wide_suppressor_in_a_file_with_no_taggedcontent_is_clean() -> No
 def test_a_standalone_line_scoped_suppressor_below_the_construction_is_clean() -> None:
     """The mirror of the standalone case: order must not rescue a line-scoped directive."""
     assert not _tripped(f"x = TaggedContent[T2](y)\n{_HASH} type: ignore\n")
+
+
+def test_a_violated_span_invariant_is_a_gate_defect_not_a_file_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#543 err-001, on the seam #539 added.
+
+    `_suppressed_spans` has two failure modes with OPPOSITE correct dispositions, and an
+    earlier revision gave them one arm. `TokenError` is an INPUT fault — a file the gate
+    cannot tokenize is a file it is not gating — so it belongs at exit 1 as an unscannable
+    file. The `assert` is not: no input reaches it, so if it fires the GATE is broken, and
+    reporting that as "the parser failed on its CONTENT" would be a finding against a file
+    that has nothing wrong with it.
+
+    Injected rather than driven by input, because the whole point is that no input can
+    reach it — a fixture-based version of this test could only assert the property it
+    cannot reach.
+    """
+
+    def _violated(text: str) -> list[tuple[int, tuple[int, int]]]:
+        raise AssertionError
+
+    monkeypatch.setattr(check_tag_t3, "_suppressed_spans", _violated)
+
+    with pytest.raises(check_tag_t3.GateInternalError, match=re.escape("BUG IN check_tag_t3.py")):
+        check_tag_t3._scan_text("x = TaggedContent[T2](y)\n", _PROBE)

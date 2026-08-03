@@ -76,7 +76,12 @@ first-class value carried end to end.**
 
 ### Positive
 
-- The five shapes above are refused as a **class** rather than one spelling at a time.
+- The shapes above are refused as a **class** rather than one spelling at a time, and
+  the class is wider than the table: the shipped suite parametrises seven, adding an
+  unknown bare name and a non-string constant to the five illustrated here. **No count
+  is named in the code**, on this repo's own precedent — a number in prose rots the
+  next time a shape is added, and the first draft of this ADR said "five" beside a
+  docstring that said "six" over a list of five while the suite covered seven.
   Round-2 probes could not bypass the rule.
 - Measured ergonomic cost across the 332 tracked files under both scan roots: **zero**.
   The only non-`T0..T3` slices in the tree are `TaggedContent[TierT]` ×3, `[Any]` ×1 and
@@ -131,3 +136,21 @@ same shape, and the relaxation is invisible at every site that later depends on 
   `test_model_construct_still_works_for_a_lower_tier` — a floor this repo explicitly
   named "still works". A naked, non-receiver-scoped form is worse still, at 34 false
   positives.
+
+## References
+
+- [ADR-0058](0058-single-approved-t3-authoring-home.md) — the single approved T3-authoring
+  home. This ADR leans on that exempt set and does not change it.
+- [ADR-0028](0028-boot-time-authorized-t3-nonce-registration.md) — the boot-time nonce
+  registration both layers exist to protect.
+- `docs/superpowers/plans/2026-08-03-539-seven-shapes-alias-environment.md` — the plan, and
+  the eight-reviewer disposition that forced the verdict-map design.
+- `scripts/check_tag_t3.py` — `_SliceVerdict`, `_slice_verdict`, `_tier_alias_env`,
+  `_callee`.
+- `tests/unit/security/test_check_tag_t3_seven_shapes.py` — the behavioural floors, the
+  independent oracle, and the `_callee` meta-guard.
+- `tests/adversarial/tier_laundering/tl_base_dispatch_and_raw_state_write.yaml` — the
+  corpus record, machine-checked against the gate's own constants in both directions.
+
+All counts in this ADR were measured 2026-08-03 against `main` @ `054c13f7`, over the 332
+tracked `.py` files under `src/alfred` and `plugins`.
