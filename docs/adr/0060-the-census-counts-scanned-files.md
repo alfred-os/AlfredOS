@@ -23,9 +23,9 @@ while its own operator message said `scanned {len(paths)} files`.
 
 ### What was measured
 
-Baseline on `7095dbbc`: `collected=332`, `floor=250`, `exempt=1` (`tiers.py`).
-`_APPROVED_PATHS` has been size one since #538 — `quarantine.py` still exists, is no longer
-exempt, and is genuinely scanned and genuinely clean.
+Baseline on `7095dbbc`: `collected=332`, `floor=250`, exempt=1 (`tiers.py`). The exempt set
+has been size one since #538; [ADR-0058](0058-single-approved-t3-authoring-home.md) owns that
+history and this ADR does not restate it.
 
 Three probes, each an out-of-repo directory passed as one argument:
 
