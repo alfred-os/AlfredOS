@@ -541,6 +541,46 @@ _UNSCANNABLE_PATH_MESSAGE: str = (
     "content was read. Fix the path."
 )
 
+
+class _ScannedOk(list[str]):
+    """Violations from a scan that RAN TO COMPLETION. Empty list = clean.
+
+    DEFAULT-DENY on the outcome axis (#547). ``main``'s census counts a file
+    only when its result is one of these, so a return path nobody has thought
+    of yet — a new ``except`` arm, an early return, a future refactor — counts
+    as a failure rather than as a clean scan.
+
+    RETURNED ON A COMPLETION EVENT, NEVER ON A FALL-THROUGH. ``_scan_text``
+    sets ``completed = True`` as the last statement of its ``try`` body. An
+    earlier draft instead gave the broad ``except`` arm an early ``return`` and
+    left the marked return as the fall-through, which is not the same thing: a
+    new ``except`` arm written the ordinary way (append, no ``return``) reached
+    the marked return and its files scored as clean scans. Measured with a real
+    ``except MemoryError`` arm at 4 of 4 — identical to having no guard at all.
+
+    MARKING THE FAILURES INSTEAD WAS ALSO MEASURED FAIL-OPEN. That variant
+    derived its guard from the ``_*_MESSAGE`` constants while enumerating the
+    producing sites, and this file already carries two shapes that enumeration
+    misses: the ``S_ISREG`` refusal reuses ``_UNREADABLE_MESSAGE`` rather than
+    adding a message, and ``_NOT_A_REGULAR_FILE_REASON`` carries no
+    ``_MESSAGE`` suffix at all.
+
+    A ``list`` subclass rather than a richer return type because ``==`` against
+    a plain list is transparent, so every existing assertion holds unchanged.
+    Rebuilding the list (``+``, a comprehension, ``sorted()``, ``list(...)``)
+    drops the marker — and that direction is FAIL-CLOSED, which is the whole
+    reason the polarity is this way round.
+
+    CONSTRUCTED IN EXACTLY ONE PLACE, pinned by
+    ``test_the_scanned_ok_marker_has_exactly_two_name_references``. Its blind
+    spot is named rather than claimed closed: ``type(x)(...)`` and
+    ``copy.copy(x)`` reproduce the class without spelling the name, so no
+    source-level instrument sees them.
+    """
+
+    __slots__ = ()
+
+
 # The REASON line under `_UNREADABLE_MESSAGE` for a non-regular file (#546),
 # where every other cause supplies the OS's own `strerror`. Deliberately NOT
 # named `*_MESSAGE`: `test_every_collection_failure_message_is_enumerated`
@@ -2385,6 +2425,7 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
     if resolved is None:
         resolved = path
     violations: list[str] = []
+    completed = False
     try:
         lines = text.splitlines()
 
@@ -2524,6 +2565,14 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
         for lineno, (first, last) in suppressed:
             if any(line in tagged_lines for line in range(first, last + 1)):
                 _record(violations, lines, path, lineno, _TYPE_IGNORE_MESSAGE)
+        # THE COMPLETION EVENT (#547). Last statement of the `try` body, so it
+        # is reached only when every preceding step ran. An `except` arm added
+        # later cannot set it, and — unlike a scheme that marks the statement's
+        # FALL-THROUGH — cannot reach the marked return by simply omitting a
+        # `return` of its own. That distinction was measured: with the marker on
+        # the fall-through, a naive `except MemoryError` arm scored 4 files of 4
+        # as clean scans.
+        completed = True
     except GateInternalError:
         # ORDER IS LOAD-BEARING. `GateInternalError` is an `Exception`, so the
         # broad arm below would swallow it and re-file the gate's own defect as
@@ -2576,6 +2625,12 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
         violations.append(f"{path}:1: {_UNSCANNABLE_MESSAGE}")
         violations.append(f"  {type(exc).__name__}: {exc}")
 
+    # NOT a ternary: `coverage.py` does not branch on a conditional expression,
+    # so a ternary would hide an arm from this file's REQUIRED 100% branch gate
+    # (#538). Both arcs are driven by real inputs — the True arc by any clean
+    # file, the False arc by `_ALWAYS_UNSCANNABLE`.
+    if completed:
+        return _ScannedOk(violations)
     return violations
 
 
