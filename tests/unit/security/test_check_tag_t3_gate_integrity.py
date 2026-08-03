@@ -1743,10 +1743,43 @@ _REACHING_SOURCE: dict[str, str] = {
 _DETECT_PREDICATES = sorted(_predicates_detect_calls())
 
 
+# The predicates the derivation MUST find. A floor, not a transcript: the derived set is
+# allowed to grow past it, but never to shrink below it. Written out because a derivation
+# compared only against ITSELF proves nothing — `_DETECT_PREDICATES` is literally
+# `sorted(_predicates_detect_calls())`, so the equality that used to live here could not
+# fail however broken the derivation became. Includes the three shape-guarded predicates
+# whose absence from the hand-written list is what motivated deriving it at all.
+_REQUIRED_DETECT_PREDICATES: frozenset[str] = frozenset(
+    {
+        "_is_tag_t3_call",
+        "_is_cast_tagged_content_call",
+        "_is_unbound_basemodel_seam_call",
+        "_is_benign_state_mutation_target",
+        "_is_self_init_re_entry",
+        "_private_surface_hit",
+        "_private_surface_is_exempt",
+        "_tagged_subscript_verdict",
+        "_is_tagged_seam_call",
+        "_mutates_tier_in_a_copy",
+    }
+)
+
+
 def test_the_faulting_predicate_parametrisation_is_derived_not_transcribed() -> None:
-    """The parametrisation below must BE the derived set, not a subset of it."""
+    """The derived set must cover a NAMED floor, not merely equal itself.
+
+    An assertion that compares a derivation to its own output is vacuous — it holds if the
+    derivation returns everything, nothing, or garbage. This is the shape this repo keeps
+    finding in other people's tests and it went straight into one of mine.
+    """
     assert _DETECT_PREDICATES, "no predicates derived — the derivation itself broke"
-    assert set(_DETECT_PREDICATES) == _predicates_detect_calls()
+    missing = _REQUIRED_DETECT_PREDICATES - set(_DETECT_PREDICATES)
+    assert not missing, (
+        f"the derivation stopped finding {sorted(missing)}. Either `_detect` no longer "
+        f"calls them — in which case the fence no longer covers them — or the derivation "
+        f"is broken."
+    )
+    assert len(_DETECT_PREDICATES) >= len(_REQUIRED_DETECT_PREDICATES)
 
 
 @pytest.mark.parametrize("predicate", _DETECT_PREDICATES)

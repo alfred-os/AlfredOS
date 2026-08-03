@@ -552,6 +552,11 @@ def test_a_tier_key_reaches_the_rule_through_every_mapping_shape(label: str, sou
     [
         ("unpack-opaque", "lower.model_copy(update={**payload})\n"),
         ("dict-unpack-opaque", "lower.model_copy(update=dict(**payload))\n"),
+        # CODERABBIT round 2: the POSITIONAL operand had no default-deny at all, so this
+        # one spelling was admitted while its two siblings above were refused. Three
+        # spellings of one idea must not have two answers.
+        ("dict-positional-opaque", "lower.model_copy(update=dict(payload))\n"),
+        ("dict-positional-call", "lower.model_copy(update=dict(build()))\n"),
     ],
 )
 def test_an_unreadable_update_mapping_is_refused(label: str, source: str) -> None:
@@ -873,10 +878,11 @@ def test_a_non_name_typevar_target_is_skipped_without_stopping_the_scan() -> Non
 def test_a_blank_logical_line_opens_no_span() -> None:
     """A file whose only statement follows blank lines and comments.
 
-    `NEWLINE` with no span open is reached by any module that emits a logical-line
-    terminator before any code token has opened one — the shape a trailing blank line or a
-    comment-only prologue produces. It must not append a span, or a suppressor would be
-    attributed to a line range that contains no statement.
+    `NEWLINE` with no span open is NOT reachable — `_suppressed_spans` asserts as much,
+    after 15 edge-case spellings and all 332 tracked files produced zero arrivals. This
+    test does not probe that arm; it pins the property that actually holds for a
+    comment-only prologue: such lines emit `NL` rather than `NEWLINE`, open no span, and so
+    yield no located suppressor at all.
     """
     source = f"\n\n{_HASH_ONLY} a plain comment\n\n{_HASH_ONLY} another\nx = 1\n"
 
@@ -1039,6 +1045,9 @@ def test_a_readable_unpack_operand_is_still_admitted() -> None:
     """The twin. Default-deny on unreadable must not become deny-everything."""
     assert _messages("low.model_copy(update={**dict(a=1)})\n") == []
     assert _messages("low.model_copy(update={**{'wire_seq': w}})\n") == []
+    # …and the positional form's twin, so its default-deny is not deny-everything either.
+    assert _messages("n.model_copy(update=dict({'wire_seq': w}))\n") == []
+    assert _messages("n.model_copy(update=dict(wire_seq=w))\n") == []
 
 
 def test_a_pathological_mapping_nest_is_bounded_not_a_gate_fault() -> None:

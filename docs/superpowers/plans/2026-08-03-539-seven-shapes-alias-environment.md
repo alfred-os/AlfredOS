@@ -273,8 +273,9 @@ tier-agnosticism is measurably false: 0 TaggedContent-receiver seam sites.
 eight tasks so a reviewer can read it in units, but nothing is pushed as a separate PR and
 **only the final commit carries a `#539` auto-closing subject** (arch-003).
 
-Intermediate commits use `refactor:`/`test:`/`docs:` with `(#539)` in the BODY, not a closing
-`feat: #539` subject.
+Intermediate commits use `refactor:`/`test:`/`docs:` with `(#539)` **in the SUBJECT** — the
+gate requires the reference there, so putting it in the body fails the required check. Those
+types are not closing keywords, so they satisfy the gate and close nothing.
 
 ---
 
@@ -565,10 +566,12 @@ anything.
 
 - [ ] **Step 5: Final commit, push, PR**
 
-Only this commit carries the auto-closing subject.
+Only this commit carries a CLOSING subject — and `feat:` is not one. The closing keywords
+are the `fix`/`close`/`resolve` families, so `feat: #539 …` satisfies the gate and closes
+nothing; it must be either `fix: #539 …` or an explicit `(closes #539)`.
 
 ```bash
-git commit -m "feat: #539 detect the seven T3-construction shapes at the authoring layer"
+git commit -m "fix: #539 detect the seven T3-construction shapes at the authoring layer"
 git push -u origin 539-seven-shapes-alias-environment
 ```
 
