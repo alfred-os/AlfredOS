@@ -2348,3 +2348,113 @@ def test_symlink_copies_of_one_file_do_not_clear_the_census(tmp_path: Path) -> N
         (tree / f"link_{index:04d}.py").symlink_to(tree / "real.py")
 
     assert check_tag_t3.main([str(tree)]) == 2
+
+
+def test_a_file_quoting_a_failure_message_still_counts_as_scanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The NON-SUBSTRING requirement, stated as a test with NO SLACK.
+
+    A substring implementation keys the census on file CONTENT, because
+    `_record` appends a source snippet under every finding. This file is read
+    and parsed perfectly and trips a REAL rule on a line quoting a
+    collection-failure message, so its snippet carries that text.
+
+    ZERO SLACK IS LOAD-BEARING. Plant exactly `_MIN_SCANNED_FILES` files of
+    which ONE is the quoter. `==` is the unique solution: collected >= floor or
+    the pre-scan floor decides the test instead, and collected <= floor or a
+    misclassified quoter still clears the census and the substring mutant
+    survives. An earlier draft planted floor-many files PLUS the quoter and
+    returned rc=1 under BOTH implementations.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 2)
+    tree = _build_flat_tree(tmp_path / "quoter", 1, "x = 1\n")
+    (tree / "quoter.py").write_text(
+        "from alfred.security.tiers import tag, T3\n"
+        f'v = tag(T3, "{check_tag_t3._UNPARSEABLE_MESSAGE}")\n',
+        encoding="utf-8",
+    )
+
+    planted = sorted(tree.glob("*.py"))
+    assert len(planted) == check_tag_t3._MIN_SCANNED_FILES, (
+        "zero slack is the point: one more file and the substring mutant "
+        "survives; one fewer and the pre-scan floor decides the test"
+    )
+    assert not any(check_tag_t3._is_exempt(p) for p in planted)
+
+    assert check_tag_t3.main([str(tree)]) == 1, (
+        "expected the real tag(T3, ...) finding under exit 1; exit 2 means the "
+        "census classified a perfectly-scannable file as a read failure "
+        "because its SOURCE quoted a message constant"
+    )
+
+
+_NAIVE_ARM = """    except MemoryError as exc:
+        violations.append(f"{path}:1: {_UNSCANNABLE_MESSAGE}")
+        violations.append(f"  {type(exc).__name__}: {exc}")
+"""
+
+
+def test_a_naive_new_except_arm_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DoD #7, against a REAL new arm in REAL source.
+
+    The shape that broke two earlier designs: an `except` arm written the
+    ordinary way — append messages, no `return` — reusing an EXISTING message
+    so no `_*_MESSAGE`-derived guard can see it. Marking the failure sites
+    scored these files as clean scans; so did marking the try statement's
+    FALL-THROUGH, because a naive arm simply falls into it.
+
+    A SOURCE-MUTATION HARNESS, not a monkeypatch. The property under test IS
+    `_scan_text`'s control flow, so replacing the function cannot exercise it —
+    an earlier draft stubbed `_scan_text` wholesale and passed against a
+    fail-open build, which is how it reached review as a "proof".
+    """
+    source = _SCRIPT.read_text(encoding="utf-8")
+    # Anchored on the GateInternalError re-raise: a bare `except Exception as
+    # exc:` appears three times in this file, so it is not a unique anchor.
+    anchor = "        raise\n    except Exception as exc:\n"
+    assert source.count(anchor) == 1, "anchor drifted — the mutation would not apply"
+    mutated = source.replace(
+        anchor, "        raise\n" + _NAIVE_ARM + "    except Exception as exc:\n", 1
+    )
+    assert mutated != source, "MUTANT NEVER APPLIED — a green result would be meaningless"
+
+    # `_REPO_ROOT` is derived from `__file__`, so WHERE the mutated script
+    # lives decides which trees look in-repo to it. Put it under a fake repo
+    # root and the scan tree OUTSIDE that root: otherwise the scan tree is
+    # in-repo for the mutant, the `_DEFAULT_SCAN_ROOTS` runtime invariant fires
+    # first, and rc=2 arrives from `PartialScanRootError` with the census never
+    # consulted. Measured: that made this test pass identically against the
+    # fail-open build, which is exactly the vacuity it exists to avoid.
+    fake_repo = tmp_path / "fake_repo"
+    scripts_dir = fake_repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    script = scripts_dir / "mutated_gate.py"
+    script.write_text(mutated, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("mutated_gate", script)
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    harness_root = gate._REPO_ROOT
+    assert harness_root == fake_repo, "harness misplaced the mutant"
+
+    gate._MIN_SCANNED_FILES = 4
+    tree = _build_flat_tree(tmp_path / "trees" / "newarm", 4, _ALWAYS_UNSCANNABLE)
+    assert not tree.resolve().is_relative_to(gate._REPO_ROOT), (
+        "the scan tree is in-repo for the mutant — the root invariant will "
+        "decide this test instead of the census"
+    )
+
+    rc = gate.main([str(tree)])
+    err = capsys.readouterr().err
+
+    assert rc == 2, (
+        "a naive new except arm was counted as a clean scan — the marker is "
+        "reachable by falling through instead of by a completion event"
+    )
+    # POSITIVE proof that the CENSUS refused, not another guard.
+    assert "0 scanned" in err and "4 unreadable" in err, (
+        f"rc=2 did not come from the census — stderr was {err!r}"
+    )
