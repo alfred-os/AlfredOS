@@ -177,6 +177,13 @@ def test_the_real_tree_scans_clean_with_an_assert_ran_census() -> None:
 
     assert len(paths) >= check_tag_t3._MIN_SCANNED_FILES
     assert [v for p in paths for v in check_tag_t3._scan_file(p)] == []
+    # DEVICE 3. The census proves files were COLLECTED, not that this rule ran on them —
+    # and R5 has exactly one live site in the whole tree, inside an exempt file, so
+    # "clean" is the expected answer for a no-op too.
+    assert _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignore\n"), (
+        "the suppression rule produced NOTHING on a known-bad input, so the clean verdict "
+        "above measured a no-op rather than a clean tree"
+    )
 
 
 def test_an_untokenizable_file_is_reported_by_the_existing_unscannable_arm() -> None:
@@ -247,3 +254,26 @@ def test_a_violated_span_invariant_is_a_gate_defect_not_a_file_finding(
 
     with pytest.raises(check_tag_t3.GateInternalError, match=re.escape("BUG IN check_tag_t3.py")):
         check_tag_t3._scan_text("x = TaggedContent[T2](y)\n", _PROBE)
+
+
+def test_the_degenerate_span_is_what_keeps_a_standalone_directive_from_leaking() -> None:
+    """PR REVIEW test-002 — the fallback had only its CLEAN half pinned.
+
+    Deleting the `(comment, comment)` fallback reddened nothing, because every test that
+    named it asserted a clean result — which a missing span also produces. This asserts the
+    other direction: a standalone directive on a line that DOES name TaggedContent must
+    still trip, from its own span rather than from a neighbouring statement's.
+    """
+    assert _tripped(f"{_HASH} type: ignore for TaggedContent below\nx = 1\n")
+    assert not _tripped(f"{_HASH} type: ignore\nx = TaggedContent[T2](y)\n")
+
+
+def test_the_ignore_arm_requires_a_word_boundary_too() -> None:
+    """PR REVIEW test-004 — only the `noqa` arm's `\b` was pinned.
+
+    `# type: ignoreable` is not a directive. Without the boundary on this arm the anchor
+    matches any word beginning `ignore`, and nothing in the suite noticed.
+    """
+    assert not _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignoreable nonsense\n")
+    assert not _tripped(f"x = TaggedContent[T2](y)  {_HASH} pyright: ignorable\n")
+    assert _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignore\n")

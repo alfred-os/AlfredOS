@@ -628,8 +628,14 @@ def _violations_by_function(text: str, path: Path) -> dict[str, int]:
     for line in check_tag_t3._scan_text(text, path):
         if line.startswith("  "):
             continue
-        location, _, _ = line.rpartition(": ")
-        lineno = int(location.rsplit(":", 1)[1])
+        # ANCHORED ON THE KNOWN PATH, because neither end of the line is safe to split
+        # from. A left split breaks on the `windows-latest` leg, where an absolute path
+        # carries a drive letter and its own colon. A right split breaks on any message
+        # CONTAINING `": "` — and this PR's own `_TYPE_IGNORE_MESSAGE` does, so
+        # `rpartition` raised `ValueError` the moment a suppression finding appeared in
+        # the oracle. The path is the one part of the line whose length is known.
+        assert line.startswith(f"{path}:"), f"unparseable violation line: {line!r}"
+        lineno = int(line[len(str(path)) + 1 :].split(":", 1)[0])
         for name, span in spans.items():
             if lineno in span:
                 counts[name] += 1
@@ -670,6 +676,28 @@ def test_the_real_tree_scans_clean_with_an_assert_ran_census() -> None:
 
     assert len(paths) >= check_tag_t3._MIN_SCANNED_FILES
     assert [v for p in paths for v in check_tag_t3._scan_file(p)] == []
+    _assert_the_detector_was_live()
+
+
+def _assert_the_detector_was_live() -> None:
+    """DEVICE 3 — the positive control every "real tree is clean" floor needs.
+
+    A census proves files were COLLECTED. It does not prove a detector ran on them, and
+    review measured exactly that: with `_detect` stubbed to return `[]`, both real-tree
+    floors still passed. Every rule in this file has ZERO live sites, so "clean" is the
+    expected answer either way — which is precisely what makes the census alone a
+    tautology rather than a floor.
+
+    Driven through the same `_scan_text` entry point the tree scan uses, so a no-op
+    detector cannot satisfy one and fail the other.
+    """
+    probe = _REPO_ROOT / "src" / "alfred" / "_synthetic_live_probe.py"
+    findings = check_tag_t3._scan_text("TaggedContent[T3](content='x', tier=T3)\n", probe)
+
+    assert findings, (
+        "the detector produced NOTHING on a known-bad input, so the clean verdict above "
+        "measured a no-op rather than a clean tree"
+    )
 
 
 def test_the_benign_tier_seeds_match_the_real_module() -> None:
