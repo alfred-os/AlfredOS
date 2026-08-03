@@ -2,19 +2,22 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Revision 2 — 2026-08-03, after the `/review-plan` fleet.** Five reviewers plus the
-> coordinator returned 48 findings (4 Critical, 15 High after reconciliation, 0 retractions).
-> Revision 1's design was sound and its **test specification was not**: three of its tests
-> could not distinguish fixed from broken, and its sentinel polarity was measured fail-open.
-> Findings that changed the shape of the work are marked inline with their id.
+> **Revision 3 — 2026-08-03, after a SECOND `/review-plan` fleet.** Round 1 returned 48
+> findings; round 2 returned 40 more against revision 2, including three Criticals revision 2
+> introduced itself. The pattern across both rounds: the design direction held every time and
+> the mechanism and tests did not. Revision 2's inversion marked the `try` fall-through rather
+> than a completion event, which is enumeration wearing default-deny's clothes — measured
+> fail-open, byte-identical to revision 1. Findings that changed the work are marked inline
+> with their id.
 
 **Goal:** Make `scripts/check_tag_t3.py`'s aggregate census assert the number of files the
 gate actually read and parsed, not the number traversal collected, so the gate cannot report
 success — or report "violations found" — while having gated nothing.
 
-**Architecture:** A `_ScannedOk(list[str])` subclass marks the ONE path meaning "this file was
-completely read, parsed and gated". Every other return — every arm today and every arm added
-later — is a failure by construction. `main` classifies with `isinstance`, skips exempt files
+**Architecture:** A `_ScannedOk(list[str])` subclass is returned only on a COMPLETION EVENT —
+a `completed = True` as the last statement of `_scan_text`'s `try` body — so no arm can reach
+it by falling through. A name census pins the marker to two construction sites. `main` counts
+DISTINCT resolved files. `main` classifies with `isinstance`, skips exempt files
 on both sides of the ratio, prints everything it collected, then asserts
 `scanned_ok >= _MIN_SCANNED_FILES`.
 
@@ -65,17 +68,23 @@ mandatory reviewer because the artifact is a release-blocking security gate.
 2. Probe A (non-exempt unparseable tree above the floor) exits **2**, not 1.
 3. Probe C (all-exempt tree above the floor) exits **2**, not 0, with a message saying
    *exempt* rather than *could not read*.
-4. Production unchanged: `scanned_ok == 331` exactly, pinned by floor bisection, verified
-   with **bare `python3`** (both call sites and CI use `python3`, not `uv run` — `ops-002`).
+4. Production gated as a PROPERTY over constants — zero unreadable, at least the shipped
+   floor of distinct non-exempt files — never a hard-coded count. Verified with bare
+   `python3`, the invocation form both call sites use (`ops-002`).
 5. A single genuine syntax error in-tree still exits **1**, not 2.
 6. A file that trips a real rule on a line whose source quotes a collection-failure message
    counts as **scanned**, proved with ZERO slack.
-7. A sixth `except` arm reusing an existing `_*_MESSAGE` scores `scanned_ok == 0` — the
-   fail-closed proof.
+7. A naive new `except MemoryError` arm — append, no `return`, reusing an existing message —
+   inserted into REAL source scores `scanned_ok == 0`. Proved by a source-mutation harness,
+   not a monkeypatch: revision 2's stub replaced `_scan_text` and so never entered its `try`,
+   and measured PASS against the fail-open build.
 8. The census prints every collected violation before refusing.
 9. `scripts/check_tag_t3.py` at **100% line + branch**, no pragmas.
 10. `make check` green; `mypy --strict` + `pyright` clean; `ruff` clean; markdownlint clean.
-11. No existing test edited to keep it passing.
+11. 260 symlinks to one file do NOT clear the census — it counts distinct resolved files,
+    not scan events (NEW-1, measured rc=0 and silent on the shipped gate).
+12. `_ScannedOk` is referenced in exactly two places in the source, enforced by a name census.
+13. No existing test edited to keep it passing.
 
 ---
 
@@ -88,8 +97,8 @@ enumerating the producing-site axis, the #518 mistake on a second axis.
 
 **Files:**
 
-- Modify: `scripts/check_tag_t3.py` — new class near the message constants (~`:543`); an
-  early `return` in `_scan_text`'s broad-except arm; the shared return at `:2579`
+- Modify: `scripts/check_tag_t3.py` — new class near the message constants (~`:543`); a
+  `completed` flag in `_scan_text`; the shared return at `:2579`
 - Test: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
@@ -128,8 +137,10 @@ def _trigger_unscannable(tmp: Path) -> Path:
     # REUSE `_ALWAYS_UNSCANNABLE` (`:1540`) — do NOT hand-roll a nesting depth.
     # It is derived from `_PATHOLOGICAL_SOURCES["unary-not-chain"]` and is the
     # one shape documented as behaving identically on EVERY build measured.
-    # `ast.parse` raises RecursionError on the uv/proto standalone build and
-    # parses clean on Homebrew at the same CPython version.
+    # The RecursionError/Homebrew divergence belongs to
+    # `binop-chain`, NOT to this shape — `unary-not-chain` is pinned to
+    # MemoryError at test file `:1550`. Name the fixture, not a remembered
+    # mechanism.
     p = tmp / "unscannable.py"
     p.write_text(_ALWAYS_UNSCANNABLE, encoding="utf-8")
     return p
@@ -240,24 +251,64 @@ class _ScannedOk(list[str]):
     __slots__ = ()
 ```
 
-- [ ] **Step 4: Convert the fall-through into an early return**
+- [ ] **Step 4: Mark on a COMPLETION EVENT, not on the fall-through**
 
-In `_scan_text`'s broad-except arm, after the two `violations.append(...)` calls at `:2576`:
+> **Revision 3 correction.** Revision 2 added an early `return` to the broad-except arm and
+> claimed no completion flag was needed. That was wrong, and measured wrong three times:
+> `_ScannedOk` then marked the `try` statement's **fall-through**, so a new `except` arm
+> written the ordinary way — append, no `return` — falls straight through to the marked
+> return. Security built an `except MemoryError` arm reusing `_UNSCANNABLE_MESSAGE` and
+> measured `scanned_ok == 4/4`, rc=1: **byte-identical to revision 1's fail-open.** Revision 2
+> replaced "enumerate the five messages" with "enumerate the five returns" and called it
+> default-deny. Only a positive completion event actually inverts the polarity.
 
 ```python
+    completed = False
+    try:
+        ...                      # existing walk, unchanged
+        # THE COMPLETION EVENT. Last statement of the try body, so it is
+        # reached only when every preceding step ran. An `except` arm added
+        # later cannot set it, and cannot reach the marked return by falling
+        # through — which is what revision 2 got wrong.
+        completed = True
+    except Exception as exc:
         violations.append(f"{path}:1: {_UNSCANNABLE_MESSAGE}")
         violations.append(f"  {type(exc).__name__}: {exc}")
-        # NOT a fall-through to the marked return below (#547). The walk was
-        # abandoned part-way, so this file's clean lines prove nothing and it
-        # must not count toward the census.
-        return violations
 
-    return _ScannedOk(violations)
+    # NOT a ternary: `coverage.py` does not branch on a conditional expression,
+    # so a ternary would hide an arm from this file's REQUIRED 100% branch gate
+    # (#538). Both arcs are driven by real inputs — the True arc by any clean
+    # file, the False arc by the suite's own `_ALWAYS_UNSCANNABLE` fixture.
+    if completed:
+        return _ScannedOk(violations)
+    return violations
 ```
 
-No completion flag is needed: the fall-through becomes an early return, which adds no branch
-that real inputs cannot reach. `_scan_file` needs **no edit** — its three failure arms already
-return plain lists, and `return _scan_text(text, path, resolved)` propagates the delegate's.
+Measured on the flag variant: **683 statements / 366 branches / 0 partial / 100%**, no
+pragma. Revision 2's coverage objection to this flag was backwards.
+
+`_scan_file` needs **no edit** — its three failure arms already return plain lists, and
+`return _scan_text(text, path, resolved)` propagates the delegate's.
+
+- [ ] **Step 4b: Pin the marker to exactly two construction sites**
+
+The flag closes fall-through. It does **not** stop anyone constructing a marker directly:
+`_ScannedOk([... _UNREADABLE_MESSAGE ...])` fails open through every other guard, and neither
+mypy nor pyright can see the invariant (`arch-002`).
+
+**Do NOT write this as an `ast.Call`-whose-func-is-a-`Name` pin.** The architect proposed
+that, executed it, and **retracted it**: it reports GREEN against `_Alias = _ScannedOk`, a
+subclass, `functools.partial(_ScannedOk)` and `globals()["_ScannedOk"]` — all fail-open at
+4/4. That is this repo's alias-resolution lesson for the third time in one issue.
+
+Ship a default-deny **name census** instead — every `ast.Name` node referencing `_ScannedOk`
+anywhere in the source, with exactly two positions allowed (the `class` statement and the one
+`return`). Any third reference, in any syntactic role, reds.
+
+**Name its blind spot rather than claiming closure:** `type(x)(...)` and `copy.copy(x)`
+reproduce the class without ever spelling the name, so no source-level instrument sees them.
+That residual goes in ADR-0060 (`sec-007` family), or is closed later by a runtime
+construction invariant on the #518/#520 pattern.
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -332,8 +383,8 @@ path — fix the guard before continuing.
 
 **Files:**
 
-- Modify: `scripts/check_tag_t3.py` — `main`'s census block and scan loop (~`:2988-3010`),
-  `main`'s docstring (`:2965-2979`), the `_MIN_SCANNED_FILES` rationale comment (`:560-622`)
+- Modify: `scripts/check_tag_t3.py` — `main`'s census block and scan loop (~`:2987-3019`),
+  `main`'s docstring (`:2963-2980`), the `_MIN_SCANNED_FILES` rationale comment (`:579-621`)
 - Test: `tests/unit/security/test_check_tag_t3_gate_integrity.py`
 
 **Interfaces:**
@@ -371,13 +422,19 @@ def test_a_tree_the_gate_cannot_read_exits_2_not_1(
 
     assert check_tag_t3.main([str(tree)]) == 2
     err = capsys.readouterr().err
-    assert "0 scanned" in err and "4 unreadable" in err
+    # ALL THREE terms. Asserting only two let a mutant dropping `- exempt`
+    # from the unreadable arithmetic survive every test in the suite.
+    assert "0 exempt" in err and "0 scanned" in err and "4 unreadable" in err
     assert "not reaching the source tree" not in err, (
         "the PRE-SCAN floor fired, not the post-scan census — this tree does "
         "not clear the collection floor and the test proves nothing (rev-003)"
     )
     assert check_tag_t3._UNPARSEABLE_MESSAGE in err, (
         "the census refused without printing what it collected (arch-001)"
+    )
+    assert check_tag_t3._PARTIAL_HEADER in err, "wrong header on a refusal"
+    assert check_tag_t3._FINDINGS_HEADER not in err, (
+        "520 read failures announced as 'violations found' (arch-004)"
     )
 
 
@@ -397,7 +454,12 @@ def test_a_tree_of_only_exempt_files_exits_2_and_says_exempt(
 
     assert check_tag_t3.main([str(tree)]) == 2
     err = capsys.readouterr().err
-    assert "4 exempt" in err and "0 scanned" in err
+    # THE THIRD TERM IS LOAD-BEARING. A mutant computing `unreadable` as
+    # `len(distinct) - scanned_ok` (dropping `- exempt`) reports "4 exempt,
+    # 0 scanned, 4 unreadable" here and survived all 91 tests, because this was
+    # the only test reaching the census with exempt > 0 and it checked two of
+    # the three terms.
+    assert "4 exempt" in err and "0 scanned" in err and "0 unreadable" in err
     assert "not reaching the source tree" not in err
 
 
@@ -438,26 +500,64 @@ def test_one_unparseable_file_among_many_still_exits_1(
     assert check_tag_t3.main([str(tree)]) == 1
 
 
-def test_the_production_tree_scans_exactly_331_files(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """DoD #4. `scanned_ok` is a local printed only on failure, so it cannot be
-    asserted directly (`arch-004`). Bisect the floor against the real tree
-    instead: 331 must pass and 332 must refuse, pinning it exactly while adding
-    no new surface to the gate.
-    """
-    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 331)
-    assert check_tag_t3.main([]) != 2
+def test_the_production_tree_is_gated_as_a_property(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DoD #4, as a PROPERTY over constants — never a count.
 
-    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 332)
-    assert check_tag_t3.main([]) == 2
+    Revision 2 bisected the floor around 331 and four reviewers rejected it: the
+    production tree grows ~25 `.py` files per 30 days, `tests/unit` runs in four
+    required checks, and the next unrelated merge would red it within ~2 days.
+    The plan's own Notes reject count-keyed guards for exactly that reason, and
+    revision 2 then wrote one three sections later.
+
+    An stderr-reading variant is no better: the post-scan census is reachable on
+    the real tree at exactly ONE floor value, so any such test is structurally
+    count-pinned. The test-engineer withdrew its own stderr suggestion on that
+    evidence.
+
+    Every assertion here is against a CONSTANT or a relation, so nothing drifts
+    with the tree. Oracle independence comes from pairing this with
+    `test_only_a_completed_scan_returns_the_scanned_ok_marker`, which pins the
+    marker itself without reference to any count.
+    """
+    paths = check_tag_t3._collect_paths([])
+    distinct = {p.resolve(strict=False) for p in paths}
+    exempt = {p for p in distinct if check_tag_t3._is_exempt(p)}
+    unreadable = [
+        p
+        for p in distinct - exempt
+        if not isinstance(check_tag_t3._scan_file(p), check_tag_t3._ScannedOk)
+    ]
+
+    assert not unreadable, f"the gate cannot read its own tree: {unreadable}"
+    assert len(distinct - exempt) >= check_tag_t3._MIN_SCANNED_FILES
+    assert len(exempt) <= len(check_tag_t3._APPROVED_PATHS)
+    assert check_tag_t3.main([]) != 2
 
 
 def test_a_realistic_mass_failure_above_the_real_floor_exits_2(tmp_path: Path) -> None:
     """The one full-size case, at the SHIPPED floor with no monkeypatch —
     the decoy-fixture precedent at `:1920`. Everything else runs small."""
     tree = _build_flat_tree(tmp_path / "big", 260, "def (:\n")
-    assert 260 > check_tag_t3._MIN_SCANNED_FILES
+    # `<` not `>`: ruff SIM300 reds a Yoda condition.
+    assert check_tag_t3._MIN_SCANNED_FILES < 260
+
+    assert check_tag_t3.main([str(tree)]) == 2
+
+
+def test_symlink_copies_of_one_file_do_not_clear_the_census(tmp_path: Path) -> None:
+    """NEW-1. `_collect_paths` never deduped, so the census counted scan EVENTS
+    rather than distinct files.
+
+    MEASURED ON THE SHIPPED GATE, no monkeypatch: 260 symlinks to a single
+    `x = 1` file exited 0 with empty stderr, having gated one distinct file.
+    That falsifies this plan's goal sentence on the live gate, and the census as
+    specified in revisions 1 and 2 passes it too — all 260 scan perfectly.
+    """
+    tree = tmp_path / "links"
+    tree.mkdir()
+    (tree / "real.py").write_text("x = 1\n", encoding="utf-8")
+    for index in range(260):
+        (tree / f"link_{index:04d}.py").symlink_to(tree / "real.py")
 
     assert check_tag_t3.main([str(tree)]) == 2
 ```
@@ -474,14 +574,31 @@ Two call sites now print violations, so factor it once (#422 — a shared helper
 copies drift SILENTLY):
 
 ```python
-def _print_violations(violations: list[str]) -> None:
-    """Print collected violation lines to stderr. Shared by the census refusal
-    and the exit-1 path so the two cannot drift apart."""
+def _print_violations(violations: list[str], header: str) -> None:
+    """Print collected violation lines to stderr under ``header``.
+
+    The HEADER is a parameter, not a constant (#547, `arch-004`). Sharing the
+    printer must not share the headline: exit 1 means "every listed line is a
+    finding in a file", and printing that over 520 read failures tells the
+    operator the opposite of the truth.
+    """
     if violations:
-        print("check_tag_t3: violations found:", file=sys.stderr)
+        print(header, file=sys.stderr)
         for line in violations:
             print(line, file=sys.stderr)
+
+
+_FINDINGS_HEADER: str = "check_tag_t3: violations found:"
+_PARTIAL_HEADER: str = (
+    "check_tag_t3: partial results from a scan that did NOT complete — these "
+    "are what the gate managed to collect before refusing, NOT a clean bill of "
+    "health for anything absent from this list:"
+)
 ```
+
+The `if violations:` guard needs its own pin, not merely coverage: the test-engineer's sweep
+showed dropping it survives all tests while both arcs report covered. Coverage-covered is not
+the same as pinned.
 
 - [ ] **Step 4: Replace the census and the scan loop**
 
@@ -505,11 +622,24 @@ def _print_violations(violations: list[str]) -> None:
         )
         return 2
 
+    # DEDUPE BY RESOLVED PATH (#547, NEW-1). `_collect_paths` returns what
+    # traversal found, and nothing deduped it — so the census counted scan
+    # EVENTS, not distinct files. Measured on the SHIPPED gate with no
+    # monkeypatch: 260 symlinks to one `x = 1` file exited 0 with empty stderr,
+    # having gated exactly one distinct file. Every one of them scans perfectly,
+    # so `scanned_ok` alone cannot see it.
+    #
+    # Deduping HERE and not in `_collect_paths` is deliberate: that function's
+    # per-directory floor and decoy defence are specified over what traversal
+    # found, and `recurse_symlinks=True` is load-bearing there (#541). Narrowing
+    # its return would change three guards to fix one.
+    distinct = sorted({path.resolve(strict=False): path for path in paths}.values())
+
     all_violations: list[str] = []
     exempt = 0
     scanned_ok = 0
     try:
-        for path in paths:
+        for path in distinct:
             # EXEMPT FILES COUNT ON NEITHER SIDE. An exemption is a decision not
             # to gate, so counting one as a successful scan counts a non-event —
             # and with `_APPROVED_PATHS` at size one, a production run always has
@@ -546,22 +676,27 @@ def _print_violations(violations: list[str]) -> None:
         # PRINT WHAT WE FOUND BEFORE REFUSING. Returning above this discarded
         # every violation collected so far — a real tag(T3, ...) finding
         # alongside read failures vanished entirely, and a change that fixes a
-        # diagnostic defect must not introduce a worse one.
-        _print_violations(all_violations)
+        # diagnostic defect must not introduce a worse one. Under its OWN
+        # header: these are partial results, not a findings list.
+        _print_violations(all_violations, _PARTIAL_HEADER)
         print(
-            f"check_tag_t3: collected {len(paths)} files: {exempt} exempt, "
-            f"{scanned_ok} scanned, {len(paths) - exempt - scanned_ok} "
-            f"unreadable — expected at least {_MIN_SCANNED_FILES} scanned. "
-            f"Refusing to report success while gating nothing.",
+            f"check_tag_t3: collected {len(paths)} files ({len(distinct)} "
+            f"distinct): {exempt} exempt, {scanned_ok} scanned, "
+            f"{len(distinct) - exempt - scanned_ok} unreadable — expected at "
+            f"least {_MIN_SCANNED_FILES} scanned. Refusing to report success "
+            f"while gating nothing.",
             file=sys.stderr,
         )
         return 2
 
     if all_violations:
-        _print_violations(all_violations)
+        _print_violations(all_violations, _FINDINGS_HEADER)
         return 1
     return 0
 ```
+
+Note `len(distinct)`, not `len(paths)`, in the unreadable term — with dedup they differ, and
+the tally must describe what was actually scanned.
 
 - [ ] **Step 5: Run to verify they pass**
 
@@ -571,12 +706,12 @@ Expected: PASS (6 tests).
 
 - [ ] **Step 6: Update `main`'s docstring and the floor rationale**
 
-`main`'s docstring at `:2965-2979` enumerates "THREE routes to exit 2" with "the aggregate
+`main`'s docstring at `:2963-2980` enumerates "THREE routes to exit 2" with "the aggregate
 census below" as one. There are now two censuses, and a whole input class moves from 1 to 2
 (`arch-005`). Update it, and the module docstring's "Exits 0 if clean; exits 1 with violation
 messages" contract.
 
-`_MIN_SCANNED_FILES`'s rationale comment at `:560-622` is written entirely for the *collected*
+`_MIN_SCANNED_FILES`'s rationale comment at `:579-621` is written entirely for the *collected*
 quantity ("332 tracked .py files ... 250 leaves headroom"). It now governs two populations —
 collected (includes exempt) and `scanned_ok` (excludes them). State both, and that production
 is 332 collected / 331 scanned (`arch-006`).
@@ -679,6 +814,15 @@ def test_a_file_quoting_a_failure_message_still_counts_as_scanned(
     )
 ```
 
+- [ ] **Step 1b: Run the new tests GREEN before mutating anything**
+
+Run: `uv run pytest tests/unit/security/test_check_tag_t3_gate_integrity.py -k "quoting_a_failure_message or naive_new_except_arm" -v`
+
+Expected: **PASS**. Revision 2 went straight from writing a test to mutating and expecting
+FAIL, with no green baseline — so a failure could not be told from a test that never worked.
+That is revision 1's false-kill shape one task later, and it must not recur: a mutation result
+means nothing until the test has been observed passing on unmutated code.
+
 - [ ] **Step 2: Mutation-test the discriminator**
 
 The implementation is committed (Task 2 Step 9), so a mutation is safely revertible.
@@ -706,34 +850,60 @@ git status --porcelain scripts/check_tag_t3.py   # must print nothing
 
 This is the test that justifies the polarity, and the one revision 1 could not pass.
 
+> **Revision 3 correction — this test was vacuous and is rewritten.** Revision 2
+> monkeypatched `_scan_text` wholesale, so it never entered the real `try` at all and
+> **measured PASS against the fail-open variant**. It was the flagship test for the whole
+> polarity decision and it could not see the bug it existed to prove absent. A stub that
+> replaces the function cannot test the function's control flow; the arm has to be added to
+> the real source.
+
 ```python
-def test_an_unknown_failure_arm_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """DoD #7. A future `except` arm reusing an EXISTING message must not count
-    as a clean scan.
+_NAIVE_ARM = '''
+    except MemoryError as exc:
+        violations.append(f"{path}:1: {_UNSCANNABLE_MESSAGE}")
+        violations.append(f"  {type(exc).__name__}: {exc}")
+'''
 
-    This is the shape that made the failure-marking variant fail open: it
-    derived its guard from the `_*_MESSAGE` constants, so an arm reusing one was
-    invisible. Both shapes already exist here — the `S_ISREG` refusal reuses
-    `_UNREADABLE_MESSAGE`, and `_NOT_A_REGULAR_FILE_REASON` carries no `_MESSAGE`
-    suffix at all.
+
+def test_a_naive_new_except_arm_fails_closed(tmp_path: Path) -> None:
+    """DoD #7, against a REAL new arm in REAL source.
+
+    The shape that broke both earlier designs: an `except` arm written the
+    ordinary way — append messages, no `return` — reusing an EXISTING message so
+    no `_*_MESSAGE`-derived guard can see it. Revision 1 scored these files as
+    clean scans; so did revision 2, because its marker sat on the try
+    statement's fall-through rather than on a completion event.
+
+    A source-mutation harness rather than a monkeypatch, because the property
+    under test IS `_scan_text`'s control flow. Replacing the function cannot
+    exercise it — that is exactly how revision 2's version passed against a
+    fail-open build.
     """
-    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 4)
+    source = Path(check_tag_t3.__file__).read_text(encoding="utf-8")
+    anchor = "    except Exception as exc:\n"
+    assert source.count(anchor) == 1, "anchor drifted — the mutation would not apply"
+    mutated = source.replace(anchor, _NAIVE_ARM.lstrip("\n") + anchor, 1)
+    assert mutated != source, "MUTANT NEVER APPLIED — a green result would be meaningless"
 
-    def _new_arm(text: str, path: Path, resolved: Path) -> list[str]:
-        # A hypothetical sixth arm: returns a plain list reusing an existing
-        # message, exactly as a real `except PermissionError` would.
-        return [f"{path}:1: {check_tag_t3._UNREADABLE_MESSAGE}", "  simulated"]
+    script = tmp_path / "mutated_gate.py"
+    script.write_text(mutated, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("mutated_gate", script)
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
 
-    monkeypatch.setattr(check_tag_t3, "_scan_text", _new_arm)
-    tree = _build_flat_tree(tmp_path / "newarm", 4, "x = 1\n")
+    gate._MIN_SCANNED_FILES = 4
+    tree = _build_flat_tree(tmp_path / "newarm", 4, _ALWAYS_UNSCANNABLE)
 
-    assert check_tag_t3.main([str(tree)]) == 2, (
-        "an unrecognised failure arm was counted as a clean scan — the census "
-        "enumerates outcomes instead of default-denying them"
+    assert gate.main([str(tree)]) == 2, (
+        "a naive new except arm was counted as a clean scan — the marker is on "
+        "the try fall-through, not on a completion event"
     )
 ```
+
+`_ALWAYS_UNSCANNABLE` is the fixture that reaches the broad arm; the inserted `MemoryError`
+arm sits **above** `except Exception` so it wins for that shape. The test file already
+imports `importlib.util`.
 
 - [ ] **Step 4: Run the required coverage gate**
 
@@ -838,8 +1008,11 @@ gh pr create --base main \
   --body "Closes #547. <summary>"
 ```
 
-The title carries the `fix: #547` shape the repo's commit gate wants on the squashed subject;
-`Closes #547` in the body does the closing. No empty commit, no amend after review.
+Verified via `gh api`: the repo is **rebase-only** (`allow_squash_merge: false`), so the PR
+title never becomes a commit subject. The commit gate reads `git log BASE..HEAD`, and the
+`test:`/`docs:` subjects below each carry a literal `#547`, so it passes on those.
+A `Closes #547` line in the PR BODY closes the issue under a rebase merge. No empty commit, no amend after
+review.
 
 - [ ] **Step 2: Run the full review fleet**
 
