@@ -2194,3 +2194,157 @@ def test_the_scanned_ok_marker_is_constructed_in_exactly_one_place() -> None:
         f"expected exactly one _ScannedOk reference in _scan_text (the single "
         f"construction site), found {len(built_in_scan_text)}: {references!r}"
     )
+
+
+def _build_flat_tree(root: Path, count: int, body: str, prefix: str = "mod") -> Path:
+    """`count` files of identical content in one out-of-repo directory."""
+    root.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (root / f"{prefix}_{index:04d}.py").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_a_tree_the_gate_cannot_read_exits_2_not_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Probe A. Measured on the pre-#547 gate as rc=1 with 521 stderr lines.
+
+    Exit 1 is "violations found", and `main`'s docstring promises "every listed
+    line is a finding in a file, not a fault in the gate". Files the gate could
+    not parse are not findings in files.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 4)
+    tree = _build_flat_tree(tmp_path / "unreadable", 4, "def (:\n")
+
+    assert check_tag_t3.main([str(tree)]) == 2
+    err = capsys.readouterr().err
+    # ALL THREE terms. Asserting only two let a mutant dropping `- exempt` from
+    # the unreadable arithmetic survive every test in the suite.
+    assert "0 exempt" in err and "0 scanned" in err and "4 unreadable" in err
+    assert "not reaching the source tree" not in err, (
+        "the PRE-SCAN floor fired, not the post-scan census — this tree does "
+        "not clear the collection floor and the test proves nothing"
+    )
+    assert check_tag_t3._UNPARSEABLE_MESSAGE in err, (
+        "the census refused without printing what it collected"
+    )
+    assert check_tag_t3._PARTIAL_HEADER in err, "wrong header on a refusal"
+    assert check_tag_t3._FINDINGS_HEADER not in err, "read failures announced as 'violations found'"
+
+
+def test_a_tree_of_only_exempt_files_exits_2_and_says_exempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Probe C — the genuinely SILENT shape. Measured pre-#547 as rc=0, no output.
+
+    The message must say EXEMPT, not "could not read it": every file here was
+    read perfectly and simply was not gated.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 4)
+    tree = _build_flat_tree(tmp_path / "allexempt", 4, "x = 1\n", prefix="test_x")
+    assert all(check_tag_t3._is_exempt(p) for p in tree.glob("*.py")), (
+        "the fixture is not exempt — this test would pass for the wrong reason"
+    )
+
+    assert check_tag_t3.main([str(tree)]) == 2
+    err = capsys.readouterr().err
+    # THE THIRD TERM IS LOAD-BEARING. A mutant computing `unreadable` as
+    # `len(distinct) - scanned_ok` reports "4 exempt, 0 scanned, 4 unreadable"
+    # here and survives everything else, because this is the only test reaching
+    # the census with exempt > 0.
+    assert "4 exempt" in err and "0 scanned" in err and "0 unreadable" in err
+    assert "not reaching the source tree" not in err
+
+
+def test_the_census_passes_at_the_floor_and_fails_one_below(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both sides of the new comparison.
+
+    The failing half must be decided by the POST-SCAN census, not the pre-scan
+    collection floor: an earlier draft planted 3 files with the floor at 4, so
+    the pre-scan floor refused it and the test passed on unmodified code. Here
+    the tree always CLEARS the collection floor and only the scanned tally
+    varies.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 4)
+
+    at_floor = _build_flat_tree(tmp_path / "at", 4, "x = 1\n")
+    assert check_tag_t3.main([str(at_floor)]) == 0
+
+    one_below = _build_flat_tree(tmp_path / "below", 3, "x = 1\n")
+    (one_below / "broken.py").write_text("def (:\n", encoding="utf-8")
+    assert check_tag_t3.main([str(one_below)]) == 2
+    err = capsys.readouterr().err
+    assert "3 scanned" in err and "1 unreadable" in err
+    assert "not reaching the source tree" not in err, (
+        "the pre-scan floor decided this — 4 files were collected, so it must not"
+    )
+
+
+def test_one_unparseable_file_among_many_still_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proportionality: only a MASS read failure flips the exit code."""
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 4)
+    tree = _build_flat_tree(tmp_path / "mostly_fine", 5, "x = 1\n")
+    (tree / "broken.py").write_text("def (:\n", encoding="utf-8")
+
+    assert check_tag_t3.main([str(tree)]) == 1
+
+
+def test_the_production_tree_is_gated_as_a_property() -> None:
+    """DoD #4, as a PROPERTY over constants — never a count.
+
+    An earlier draft bisected the floor around 331 and four reviewers rejected
+    it: the production tree grows ~25 `.py` files per 30 days and `tests/unit`
+    runs in four required checks, so the next unrelated merge would red it. An
+    stderr-reading variant is no better — the post-scan census is reachable on
+    the real tree at exactly ONE floor value, so any such test is structurally
+    count-pinned.
+
+    Every assertion here is against a CONSTANT or a relation. Oracle
+    independence comes from pairing this with
+    `test_only_a_completed_scan_returns_the_scanned_ok_marker`, which pins the
+    marker itself without reference to any count.
+    """
+    paths = check_tag_t3._collect_paths([])
+    distinct = {p.resolve(strict=False) for p in paths}
+    exempt = {p for p in distinct if check_tag_t3._is_exempt(p)}
+    unreadable = [
+        p
+        for p in sorted(distinct - exempt)
+        if not isinstance(check_tag_t3._scan_file(p), check_tag_t3._ScannedOk)
+    ]
+
+    assert not unreadable, f"the gate cannot read its own tree: {unreadable}"
+    assert len(distinct - exempt) >= check_tag_t3._MIN_SCANNED_FILES
+    assert len(exempt) <= len(check_tag_t3._APPROVED_PATHS)
+    assert check_tag_t3.main([]) != 2
+
+
+def test_a_realistic_mass_failure_above_the_real_floor_exits_2(tmp_path: Path) -> None:
+    """The one full-size case, at the SHIPPED floor with no monkeypatch."""
+    tree = _build_flat_tree(tmp_path / "big", 260, "def (:\n")
+    # `<` not `>`: ruff SIM300 reds a Yoda condition.
+    assert check_tag_t3._MIN_SCANNED_FILES < 260
+
+    assert check_tag_t3.main([str(tree)]) == 2
+
+
+@_NEEDS_SYMLINKS
+def test_symlink_copies_of_one_file_do_not_clear_the_census(tmp_path: Path) -> None:
+    """NEW-1. `_collect_paths` never deduped, so the census counted scan EVENTS.
+
+    MEASURED ON THE SHIPPED GATE, no monkeypatch: 260 symlinks to a single
+    `x = 1` file exited 0 with empty stderr, having gated one distinct file.
+    That falsifies the gate's own purpose, and a census over `scanned_ok` alone
+    passes it too — all 260 scan perfectly.
+    """
+    tree = tmp_path / "links"
+    tree.mkdir()
+    (tree / "real.py").write_text("x = 1\n", encoding="utf-8")
+    for index in range(260):
+        (tree / f"link_{index:04d}.py").symlink_to(tree / "real.py")
+
+    assert check_tag_t3.main([str(tree)]) == 2

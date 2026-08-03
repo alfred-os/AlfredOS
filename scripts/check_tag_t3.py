@@ -659,6 +659,20 @@ _DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("src/alfred", "plugins")
 # vacuous. Unchanged at 250 by #541 and #543 — it is not, and never was, a
 # check that every root was supplied, nor (as of #543) the decoy defence; that
 # is what ``_DEFAULT_SCAN_ROOTS`` plus the two runtime invariants are for.
+#
+# SINCE #547 THIS CONSTANT GOVERNS TWO DIFFERENT POPULATIONS, and the reader
+# needs both:
+#
+#   * the PRE-SCAN floor compares it against files COLLECTED — includes exempt
+#     files, includes duplicate paths resolving to one file. 332 today.
+#   * the POST-SCAN census compares it against DISTINCT files actually read and
+#     parsed — excludes the exempt ones. 331 today (332 collected, 1 exempt).
+#
+# The 81-file margin above 250 therefore belongs to the tighter of the two.
+# Do NOT pin either number in a test: the tree grew ~25 ``.py`` files in the 30
+# days before #547, so a count-keyed assertion reds on an unrelated merge
+# within days. That is the same growth argument that rejected raising this
+# constant to 300 — it applies to test oracles too.
 _MIN_SCANNED_FILES: int = 250
 
 # The authorised non-test home — resolved to an absolute path inside THIS
@@ -3014,24 +3028,59 @@ def _collect_paths(argv: list[str]) -> list[Path]:
     return paths
 
 
+def _print_violations(violations: list[str], header: str) -> None:
+    """Print collected violation lines to stderr under ``header``.
+
+    The HEADER is a parameter, not a constant (#547). Sharing the printer must
+    not share the headline: exit 1 means "every listed line is a finding in a
+    file", and printing that over a wall of read failures tells the operator
+    the opposite of the truth.
+    """
+    if violations:
+        print(header, file=sys.stderr)
+        for line in violations:
+            print(line, file=sys.stderr)
+
+
+_FINDINGS_HEADER: str = "check_tag_t3: violations found:"
+_PARTIAL_HEADER: str = (
+    "check_tag_t3: partial results from a scan that did NOT complete — these are what "
+    "the gate managed to collect before refusing, NOT a clean bill of health for "
+    "anything absent from this list:"
+)
+
+
 def main(argv: list[str]) -> int:
     """Return 0 clean, 1 violations found, 2 the gate could not run.
 
     Exit 2 is deliberately distinct from 1: a caller must be able to tell
     "the gate failed" from "the gate never gated anything".
 
-    THREE routes to exit 2, all of them "the gate could not run":
+    FOUR routes to exit 2, all of them "the gate could not run":
 
     * :class:`EmptyScanRootError` (and its :class:`PartialScanRootError`
       subclass) — the gate was pointed at nothing, at less than everything,
       or at a tree that is not this repo;
-    * the aggregate census below;
+    * the PRE-SCAN collection floor — traversal did not reach the source tree;
+    * the POST-SCAN census (#547) — traversal reached it and the gate could not
+      READ it. Counted over DISTINCT resolved files that were actually read and
+      parsed, because collection proves none of that: a tree of unreadable
+      files, a tree of exempt files, and 260 symlinks to one file all cleared
+      the old count-what-traversal-found floor;
     * :class:`GateInternalError` — a detector predicate faulted. #543 review
       (err-001) found that arriving here as exit 1, so a broken predicate
       read as "violations found" on files that were clean.
 
     Exit 1 therefore means what it says: every listed line is a finding in a
-    file, not a fault in the gate.
+    file, not a fault in the gate. #547 moved a whole input class the other way
+    — a mass read failure used to arrive here as exit 1, which contradicted
+    that sentence.
+
+    A refusal still PRINTS what it collected, under
+    :data:`_PARTIAL_HEADER` rather than :data:`_FINDINGS_HEADER`: discarding a
+    real ``tag(T3, ...)`` finding because the same run also hit read failures
+    would trade one diagnostic defect for a worse one, but announcing read
+    failures as "violations found" would be a second lie.
     """
     try:
         paths = sorted(_collect_paths(argv))
@@ -3047,7 +3096,7 @@ def main(argv: list[str]) -> int:
     scanned_a_directory = not argv or any(Path(a).is_dir() for a in argv)
     if scanned_a_directory and len(paths) < _MIN_SCANNED_FILES:
         print(
-            f"check_tag_t3: scanned {len(paths)} files, expected at least "
+            f"check_tag_t3: collected {len(paths)} files, expected at least "
             f"{_MIN_SCANNED_FILES}. The gate is not reaching the source tree "
             f"(wrong working directory, or the scan root moved) — refusing to "
             f"report success while gating nothing.",
@@ -3055,10 +3104,42 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
+    # DEDUPE BY RESOLVED PATH (#547). `_collect_paths` returns what traversal
+    # found and nothing deduped it, so the census counted scan EVENTS rather
+    # than distinct files. Measured on the pre-#547 gate with no monkeypatch:
+    # 260 symlinks to one `x = 1` file exited 0 with empty stderr, having gated
+    # exactly one distinct file. Every one of them scans perfectly, so a census
+    # over successful scans alone cannot see it.
+    #
+    # Deduping HERE and not in `_collect_paths` is deliberate: that function's
+    # per-directory floor and decoy defence are specified over what traversal
+    # FOUND, and `recurse_symlinks=True` is load-bearing there (#541).
+    # Narrowing its return would change three guards to fix one.
+    distinct = sorted({path.resolve(strict=False): path for path in paths}.values())
+
     all_violations: list[str] = []
+    exempt = 0
+    scanned_ok = 0
     try:
-        for path in paths:
-            all_violations.extend(_scan_file(path))
+        for path in distinct:
+            # EXEMPT FILES COUNT ON NEITHER SIDE. An exemption is a decision not
+            # to gate, so counting one as a successful scan counts a non-event —
+            # and with `_APPROVED_PATHS` at size one, a production run always has
+            # one, which is what made an all-or-nothing test over the collected
+            # set unreachable in production (ADR-0058).
+            #
+            # `_scan_file` checks this again. One redundant CALL to one
+            # implementation, not a second implementation — #422's drift trap is
+            # copy-pasted logic, and there is none here.
+            if _is_exempt(path):
+                exempt += 1
+                continue
+            violations = _scan_file(path)
+            all_violations.extend(violations)
+            # DEFAULT-DENY: only a completed scan carries the marker, so any
+            # other return path — including one added later — is a failure.
+            if isinstance(violations, _ScannedOk):
+                scanned_ok += 1
     except GateInternalError as exc:
         # NOT exit 1. Whatever was collected before the fault is discarded on
         # purpose: a faulting detector means no file's verdict is trustworthy,
@@ -3066,10 +3147,34 @@ def main(argv: list[str]) -> int:
         print(f"check_tag_t3: {exc}", file=sys.stderr)
         return 2
 
+    # The POST-SCAN census (#547). `len(paths)` counted files COLLECTED during
+    # traversal — `git ls-files` plus a `stat`, which proves nothing was read,
+    # parsed or gated. Two measured shapes cleared it: a tree the gate could not
+    # read exited 1 ("violations found") against an exit contract that reserves
+    # 2 for "the gate could not run", and a tree of exempt files exited 0 in
+    # silence having scanned nothing at all.
+    #
+    # ONE self-diagnosing message rather than two arms: reporting the full tally
+    # distinguishes "all exempt" from "could not read" without a second branch
+    # to cover under this file's 100% gate.
+    if scanned_a_directory and scanned_ok < _MIN_SCANNED_FILES:
+        # PRINT WHAT WE FOUND BEFORE REFUSING, under its OWN header. Returning
+        # above this discarded every violation collected so far — a real
+        # tag(T3, ...) finding alongside read failures vanished entirely, and a
+        # change that fixes a diagnostic defect must not introduce a worse one.
+        _print_violations(all_violations, _PARTIAL_HEADER)
+        print(
+            f"check_tag_t3: collected {len(paths)} files ({len(distinct)} "
+            f"distinct): {exempt} exempt, {scanned_ok} scanned, "
+            f"{len(distinct) - exempt - scanned_ok} unreadable — expected at "
+            f"least {_MIN_SCANNED_FILES} scanned. Refusing to report success "
+            f"while gating nothing.",
+            file=sys.stderr,
+        )
+        return 2
+
     if all_violations:
-        print("check_tag_t3: violations found:", file=sys.stderr)
-        for line in all_violations:
-            print(line, file=sys.stderr)
+        _print_violations(all_violations, _FINDINGS_HEADER)
         return 1
     return 0
 
