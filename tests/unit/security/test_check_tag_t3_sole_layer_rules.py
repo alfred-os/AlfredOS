@@ -1272,11 +1272,19 @@ def test_unbound_basemodel_seam_dispatch_is_refused() -> None:
     ``copy`` is pydantic v1's spelling and does NOT route through ``model_copy`` — it
     merges ``update`` inside ``copy_internals`` — so both must be named.
     """
+    # #539's tier-mutating-copy rule fires on the SAME lines, and both are correct:
+    # `BaseModel.model_copy(low, update={"tier": T3})` is an unbound base dispatch AND an
+    # update mapping that reaches a tier key. Asserting by EQUALITY is what surfaced that —
+    # a containment assertion would have hidden the second rule's arrival entirely, which
+    # is the property this file's equality style exists to have. The order is `_detect`'s
+    # append order, not an alphabetisation.
     assert _messages('BaseModel.model_copy(low, update={"tier": T3})\n') == [
-        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+        f"{_PROBE}:1: {check_tag_t3._TIER_MUTATING_COPY_MESSAGE}",
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}",
     ]
     assert _messages('BaseModel.copy(low, update={"tier": T3})\n') == [
-        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+        f"{_PROBE}:1: {check_tag_t3._TIER_MUTATING_COPY_MESSAGE}",
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}",
     ]
 
 
@@ -1290,7 +1298,10 @@ def test_qualified_basemodel_receiver_is_refused() -> None:
     drift apart.
     """
     source = 'import pydantic\npydantic.BaseModel.model_copy(low, update={"tier": T3})\n'
-    assert _messages(source) == [f"{_PROBE}:2: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"]
+    assert _messages(source) == [
+        f"{_PROBE}:2: {check_tag_t3._TIER_MUTATING_COPY_MESSAGE}",
+        f"{_PROBE}:2: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}",
+    ]
 
 
 def test_qualified_receiver_does_not_widen_to_ordinary_modules() -> None:
@@ -1337,6 +1348,12 @@ def test_a_non_seam_attribute_below_the_basemodel_receiver_stays_clean() -> None
 def test_import_aliased_basemodel_is_refused() -> None:
     """A09 — ``from pydantic import BaseModel as BM``."""
     source = "from pydantic import BaseModel as BM\nBM.model_copy(obj, update=u)\n"
+    # ONE message, not two. #539's tier-mutating-copy rule does NOT fire here and must not:
+    # `update=u` is a bare `ast.Name`, so the mapping is built somewhere this gate cannot
+    # read. That is the rule's stated residual — refused at runtime by
+    # `_coerce_and_guard_update`, not closable lexically without flagging every
+    # `model_copy` in the tree. This assertion is where that residual is measured rather
+    # than merely declared.
     assert _messages(source) == [f"{_PROBE}:2: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"]
 
 
@@ -1394,7 +1411,8 @@ def test_basemodel_named_only_in_prose_stays_clean_with_a_positive_twin() -> Non
         == []
     )
     assert _messages('BaseModel.model_copy(obj, update={"tier": T3})\n') == [
-        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}"
+        f"{_PROBE}:1: {check_tag_t3._TIER_MUTATING_COPY_MESSAGE}",
+        f"{_PROBE}:1: {check_tag_t3._BASEMODEL_VALUE_MESSAGE}",
     ]
 
 
@@ -1506,7 +1524,62 @@ _KEYED_IDENTIFIER_SPELLINGS: dict[str, dict[str, str]] = {
             "from alfred.security.tiers import _set_authorized_t3_nonce as _reg\n_reg(mine)"
         ),
     },
+    # #539. `TaggedContent` and `T3` LEFT `_DECLARED_ALIAS_RESIDUALS` to sit here, which is
+    # the stronger of the two dispositions: a row MEASURES the closure where a residual only
+    # promises it. `test_the_pre_existing_call_rules_are_still_the_declared_residual` was
+    # built to red on exactly this day, and its own failure message names this move as the
+    # remedy.
+    "TaggedContent": {
+        "DIRECT": "TaggedContent[T3](content='x', tier=T3)",
+        "REBOUND": "_TC = TaggedContent\n_TC[T3](content='x', tier=T3)",
+        "IMPORT-ALIASED": (
+            "from alfred.security.tiers import TaggedContent as _TC\n_TC[T3](content='x', tier=T3)"
+        ),
+    },
+    "T3": {
+        "DIRECT": "TaggedContent[T3](content='x', tier=T3)",
+        "REBOUND": "_T = T3\nTaggedContent[_T](content='x', tier=_T)",
+        "IMPORT-ALIASED": (
+            "from alfred.security.tiers import T3 as _T\nTaggedContent[_T](content='x', tier=_T)"
+        ),
+    },
+    # #539, and these three are rowed for a reason the entries above do not share: they are
+    # keyed on the ADMITTING side. `T2` naming a benign tier is what makes a slice CLEAN, so
+    # a rebind is not merely a bypass risk — it is the difference between a floor and a hole,
+    # in both directions. The security review executed `T2 = T3` and measured
+    # `TaggedContent["T2"](...)` scanning clean while `TaggedContent[T2](...)` red, because
+    # one arm was alias-resolved and the other matched the raw seed tuple.
+    #
+    # The DIRECT spelling is therefore the benign floor (it must stay clean) and the two
+    # rebinding spellings are the positive controls (they must red once the name points at
+    # T3). `_benign_tier_row` builds all three so the asymmetry cannot creep back in one
+    # spelling at a time.
+    **{
+        tier: {
+            "DIRECT": f"TaggedContent[{tier}](content='x')",
+            "REBOUND": f"{tier} = T3\nTaggedContent[{tier}](content='x')",
+            "IMPORT-ALIASED": (
+                f"from alfred.security.tiers import T3 as {tier}\n"
+                f"TaggedContent[{tier}](content='x')"
+            ),
+        }
+        for tier in ("T0", "T1", "T2")
+    },
+    "TrustTier": {
+        "DIRECT": "type TierT = TrustTier\nTaggedContent[TierT](content='x')",
+        "REBOUND": "TrustTier = T3\ntype TierT = TrustTier\nTaggedContent[TierT](content='x')",
+        "IMPORT-ALIASED": (
+            "from alfred.security.tiers import T3 as TrustTier\n"
+            "type TierT = TrustTier\nTaggedContent[TierT](content='x')"
+        ),
+    },
 }
+
+# The three benign-tier seeds and `TrustTier` are keyed in the ADMITTING direction, so their
+# rows invert the usual contract: DIRECT must stay CLEAN and the rebinding spellings must
+# RED. `test_every_keyed_identifier_is_alias_resolved` reads this set to know which way round
+# to score them, rather than inferring it from the identifier's name.
+_ADMITTING_ROWS: frozenset[str] = frozenset({"T0", "T1", "T2", "TrustTier"})
 
 
 def test_every_keyed_identifier_is_alias_resolved() -> None:
@@ -1552,15 +1625,33 @@ def test_every_keyed_identifier_is_alias_resolved() -> None:
     behaviourally true; that one is what proves no row is missing.
     """
     assert _KEYED_IDENTIFIER_SPELLINGS, "the behavioural table is empty — nothing is proven"
+    assert set(_KEYED_IDENTIFIER_SPELLINGS) >= _ADMITTING_ROWS, (
+        "_ADMITTING_ROWS names identifiers with no row — the inversion below would then "
+        "silently score nothing"
+    )
     for identifier, spellings in _KEYED_IDENTIFIER_SPELLINGS.items():
         assert "DIRECT" in spellings, (
             f"{identifier}: no DIRECT spelling. That row is the POSITIVE CONTROL — "
             f"without it a typo'd fixture matching nothing 'passes' on an absent rule"
         )
+        # #539. An ADMITTING identifier is keyed the other way round: its DIRECT spelling is
+        # the BENIGN FLOOR and must stay clean, while its rebinding spellings are the
+        # positive controls. Scoring all rows the same way would have required the benign
+        # floor to red, which is the opposite of the property `T0`/`T1`/`T2`/`TrustTier`
+        # exist to have — and a table that cannot express the inversion would push those
+        # four into `_DECLARED_ALIAS_RESIDUALS`, where nothing measures them at all.
+        admitting = identifier in _ADMITTING_ROWS
         for label, source in spellings.items():
             use_line = source.count("\n") + 1
             flagged = _messages(source + "\n")
-            assert any(f":{use_line}: " in message for message in flagged), (
+            used = [message for message in flagged if f":{use_line}: " in message]
+            if admitting and label == "DIRECT":
+                assert not used, (
+                    f"{identifier}: the DIRECT spelling is the BENIGN FLOOR and it RED. "
+                    f"A benign tier naming itself must not trip. Messages: {flagged}"
+                )
+                continue
+            assert used, (
                 f"{identifier}: the {label} spelling's USE (line {use_line}) was not "
                 f"flagged. Messages: {flagged}"
             )
@@ -2335,6 +2426,17 @@ def _identifiers_the_gate_keys_on(source: str) -> dict[str, frozenset[str]]:
             if isinstance(seed, ast.Constant) and isinstance(seed.value, str):
                 record(seed.value, "alias-seed-literal")
                 continue
+            # A MODULE-LEVEL CONSTANT NAMED DIRECTLY — the third seed shape, taught here
+            # rather than dodged (#539). `_trust_tier_type_aliases` calls
+            # `_alias_names(tree, _TRUST_TIER_NAME)`, which is neither a literal nor a
+            # loop variable, and this guard's own message says the remedy is to teach it.
+            # Inlining the literal at the call site would have satisfied the guard while
+            # making the gate less readable, and would have left the NEXT constant-seeded
+            # call in the same hole.
+            if isinstance(seed, ast.Name) and seed.id in constants:
+                for literal in constants[seed.id]:
+                    record(literal, f"alias-seed-constant:{seed.id}")
+                continue
             feeding = [
                 name
                 for name in (loops.get(seed.id, frozenset()) if isinstance(seed, ast.Name) else ())
@@ -2419,8 +2521,31 @@ _PATH_SEGMENT_RESIDUAL: str = (
     "against another — not an identifier, and nothing in a source file can rebind it."
 )
 
+_KEYWORD_NAME_RESIDUAL: str = (
+    "a KEYWORD ARGUMENT NAME read off `ast.keyword.arg`, not an identifier the scanned file "
+    "binds. `bound=` in `TypeVar(..., bound=TrustTier)` and `tier=` in `dict(tier=...)` are "
+    "fixed by the callee's signature, so nothing in a source file can rebind them — renaming "
+    "either one changes which function is being called, not which rule applies. Pinned by "
+    "`test_a_typevar_bound_to_trust_tier_is_a_benign_slice` and "
+    "`test_a_tier_key_reaches_the_rule_through_every_mapping_shape`."
+)
+_BUILTIN_CONSTRUCTOR_RESIDUAL: str = (
+    "the `dict` BUILTIN, matched as the callee of `dict(tier=...)` inside a copy seam's "
+    "update mapping. Keyed in the REFUSING direction with a default-deny behind it: a "
+    "rebound `dict` no longer matches this arm, but the mapping it builds is then an "
+    "`ast.Call` the rule cannot read, and `_mapping_mentions_tier` refuses what it cannot "
+    "read. Rebinding therefore makes the gate stricter, never weaker. Pinned by "
+    "`test_an_unreadable_update_mapping_is_refused`."
+)
+
 _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
-    **dict.fromkeys(("tag", "TaggedContent", "T3"), _PRE_EXISTING_RESIDUAL),
+    # #539 CLOSED `TaggedContent` and `T3`; both now carry behavioural rows in
+    # `_KEYED_IDENTIFIER_SPELLINGS`, which is the stronger disposition — a row measures the
+    # closure instead of asserting it. `tag` and `cast` stay: #539 widened the SUBSCRIPT and
+    # CONSTRUCTION rules and left those two call rules exactly as they were.
+    **dict.fromkeys(("tag",), _PRE_EXISTING_RESIDUAL),
+    **dict.fromkeys(("bound", "tier"), _KEYWORD_NAME_RESIDUAL),
+    "dict": _BUILTIN_CONSTRUCTOR_RESIDUAL,
     # `__init__` and `__delattr__` are EXCLUDED because each has a behavioural row above.
     # The disjointness assertion in the meta-guard forbids being both, and a row is the
     # stronger of the two: it measures the closure instead of asserting it.
@@ -2476,12 +2601,14 @@ def test_the_pre_existing_call_rules_are_still_the_declared_residual() -> None:
     asserted in BOTH directions: the direct spelling must red (the rules are live), and
     the rebound and import-aliased spellings must NOT (the residual is real).
 
-    THIS TEST IS MEANT TO RED WHEN #539 CLOSES THESE RULES. That is the point: the
-    residual declaration above must not outlive the fact, and the failure message says so.
+    THIS TEST WAS MEANT TO RED WHEN #539 CLOSED THESE RULES, AND IT DID. `TaggedContent`
+    and `T3` are gone from the residual set — both now carry behavioural rows in
+    `_KEYED_IDENTIFIER_SPELLINGS`. What remains is `tag` and `cast`, whose CALL rules #539
+    did not widen, and the contract is unchanged for them: it still reds the day a future PR
+    closes either one, and the message still says so.
     """
     for label, source in {
         "tag": "tag(T3, payload)\n",
-        "TaggedContent[T3]": "TaggedContent[T3](tier=T3, content=x)\n",
         "cast": "cast(TaggedContent[T2], x)\n",
     }.items():
         assert _messages(source), f"the pre-existing {label} rule is not live at all"
@@ -2489,15 +2616,13 @@ def test_the_pre_existing_call_rules_are_still_the_declared_residual() -> None:
     for label, source in {
         "tag rebound": "_t = tag\n_t(T3, payload)\n",
         "tag import-aliased": ("from alfred.security.tiers import tag as _t\n_t(T3, payload)\n"),
-        "TaggedContent rebound": "_TC = TaggedContent\n_TC[T3](tier=T3, content=x)\n",
-        "T3 rebound": "_T = T3\nTaggedContent[_T](tier=_T, content=x)\n",
         "cast rebound": "_c = cast\n_c(TaggedContent[T2], x)\n",
     }.items():
         assert check_tag_t3._scan_text(source, _PROBE) == [], (
             f"the {label} spelling now REDS. That is a widening of a pre-existing rule "
-            f"(#539's territory) — good news, but _DECLARED_ALIAS_RESIDUALS still claims "
-            f"it is out of scope. Give the identifier a row in "
-            f"_KEYED_IDENTIFIER_SPELLINGS and delete the residual."
+            f"— good news, but _DECLARED_ALIAS_RESIDUALS still claims it is out of "
+            f"scope. Give the identifier a row in _KEYED_IDENTIFIER_SPELLINGS and "
+            f"delete the residual."
         )
 
 
