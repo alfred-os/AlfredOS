@@ -2493,15 +2493,27 @@ def _scan_text(text: str, path: Path, resolved: Path | None = None) -> list[str]
                 f"{type(exc).__name__}: a logical-line invariant in _suppressed_spans "
                 f"does not hold for this file."
             ) from exc
-        # THE ALIAS ENVIRONMENT, not the literal `"TaggedContent"`. Keying on the raw
-        # substring meant a suppressor on an ALIASED construction was invisible —
-        # `from a import TaggedContent as TC` then `TC[T2](y)  # type: ignore` scanned
-        # clean, measured. Every other rule in this file resolves the name; this one is a
-        # text pass, so it has to be handed the resolved set rather than find it.
+        # THE ALIAS ENVIRONMENT, resolved through the AST rather than matched against the
+        # raw text. Two corrections live here, and they pull in opposite directions.
+        #
+        # Keying on the literal `"TaggedContent"` made a suppressor on an ALIASED
+        # construction invisible: `from a import TaggedContent as TC` then
+        # `TC[T2](y)  # type: ignore` scanned clean. So the resolved set is what to look
+        # for.
+        #
+        # But looking for it as a SUBSTRING is worse than the bug it fixes. An alias is
+        # often short, and `TC` occurs inside `MATCHER` — measured, `MATCHER = 1` with a
+        # suppressor on it red for no reason at all, as did the word `TCP` inside a string.
+        # Asking the parser which lines actually REFERENCE a tagged name costs nothing and
+        # cannot be fooled by prose, by a longer identifier, or by a string literal.
         tagged_names = env.tc_bare | frozenset(env.tc_param)
+        tagged_lines: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Name, ast.Attribute)) and _arg_name(node) in tagged_names:
+                start = getattr(node, "lineno", 1)
+                tagged_lines.update(range(start, getattr(node, "end_lineno", start) + 1))
         for lineno, (first, last) in suppressed:
-            span = lines[first - 1 : last]
-            if any(name in line for name in tagged_names for line in span):
+            if any(line in tagged_lines for line in range(first, last + 1)):
                 _record(violations, lines, path, lineno, _TYPE_IGNORE_MESSAGE)
     except GateInternalError:
         # ORDER IS LOAD-BEARING. `GateInternalError` is an `Exception`, so the

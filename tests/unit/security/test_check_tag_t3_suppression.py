@@ -256,22 +256,37 @@ def test_a_violated_span_invariant_is_a_gate_defect_not_a_file_finding(
         check_tag_t3._scan_text("x = TaggedContent[T2](y)\n", _PROBE)
 
 
-def test_the_degenerate_span_is_what_keeps_a_standalone_directive_from_leaking() -> None:
-    """PR REVIEW test-002 — the fallback had only its CLEAN half pinned.
+def test_a_standalone_directive_gets_its_own_degenerate_span() -> None:
+    """PR REVIEW test-002 — the fallback was pinned only through a clean VERDICT.
 
-    Deleting the `(comment, comment)` fallback reddened nothing, because every test that
-    named it asserted a clean result — which a missing span also produces. This asserts the
-    other direction: a standalone directive on a line that DOES name TaggedContent must
-    still trip, from its own span rather than from a neighbouring statement's.
+    Deleting the `(comment, comment)` fallback reddened nothing, because every test naming
+    it asserted "clean" — which a missing span produces too. Asserting the SPAN directly is
+    what discriminates: the fallback is the only thing standing between a comment-only line
+    and `StopIteration`, and it is what stops a standalone directive inheriting the
+    statement below it.
+
+    There is no "trips" half to assert, and that is a property of the AST-resolved rule
+    rather than a gap: a comment-only line holds no code, so no tagged identifier can be
+    referenced on it. An earlier version of this test asserted that
+    `# type: ignore for TaggedContent below` DID trip — true only while the rule matched
+    the raw text, where the word in the comment counted as a use of the name.
     """
-    assert _tripped(f"{_HASH} type: ignore for TaggedContent below\nx = 1\n")
+    spans = check_tag_t3._suppressed_spans(f"{_HASH} type: ignore\nx = TaggedContent[T2](y)\n")
+
+    assert spans == [(1, (1, 1))], (
+        "a comment-only line must get a span of ITSELF, not the span of the statement "
+        f"below it. Got {spans}"
+    )
     assert not _tripped(f"{_HASH} type: ignore\nx = TaggedContent[T2](y)\n")
+    assert _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignore\n"), (
+        "positive twin: the same directive ON the construction must still trip"
+    )
 
 
 def test_the_ignore_arm_requires_a_word_boundary_too() -> None:
     """PR REVIEW test-004 — only the `noqa` arm's `\b` was pinned.
 
-    `# type: ignoreable` is not a directive. Without the boundary on this arm the anchor
+    `# type: ignoreable` is not a directive. Without the ``\b`` on this arm the anchor
     matches any word beginning `ignore`, and nothing in the suite noticed.
     """
     assert not _tripped(f"x = TaggedContent[T2](y)  {_HASH} type: ignoreable nonsense\n")

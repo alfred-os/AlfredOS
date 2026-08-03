@@ -1552,8 +1552,8 @@ _KEYED_IDENTIFIER_SPELLINGS: dict[str, dict[str, str]] = {
     #
     # The DIRECT spelling is therefore the benign floor (it must stay clean) and the two
     # rebinding spellings are the positive controls (they must red once the name points at
-    # T3). `_benign_tier_row` builds all three so the asymmetry cannot creep back in one
-    # spelling at a time.
+    # T3). The comprehension below builds all three for every seed, so the asymmetry cannot
+    # creep back in one spelling at a time.
     **{
         tier: {
             "DIRECT": f"TaggedContent[{tier}](content='x')",
@@ -2555,7 +2555,18 @@ _DECLARED_ALIAS_RESIDUALS: dict[str, str] = {
     # closure instead of asserting it. `tag` and `cast` stay: #539 widened the SUBSCRIPT and
     # CONSTRUCTION rules and left those two call rules exactly as they were.
     **dict.fromkeys(("tag",), _PRE_EXISTING_RESIDUAL),
-    **dict.fromkeys(("bound", "tier"), _KEYWORD_NAME_RESIDUAL),
+    "bound": _KEYWORD_NAME_RESIDUAL,
+    # `tier` reaches the derivation TWICE, and written as part of a `fromkeys` unpack the
+    # keyword-argument reason silently displaced the state-field one. Spelled out for the
+    # reason the `cast` entry below already is: which reason survives a dict merge is not
+    # something a reader should have to work out.
+    "tier": (
+        "TWO ROLES. (1) a `TaggedContent` STATE FIELD in `_TAGGED_STATE_FIELDS`, compared "
+        "against a folded string literal rather than an identifier — nothing in a source "
+        "file can rebind the name of a field. Pinned by "
+        "`test_every_tagged_state_field_is_refused_on_both_dunders`. (2) "
+        f"{_KEYWORD_NAME_RESIDUAL}"
+    ),
     "TypeVar": _TYPEVAR_CALLEE_RESIDUAL,
     # `__init__` and `__delattr__` are EXCLUDED because each has a behavioural row above.
     # The disjointness assertion in the meta-guard forbids being both, and a row is the
