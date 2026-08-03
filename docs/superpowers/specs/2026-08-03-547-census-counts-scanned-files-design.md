@@ -75,7 +75,59 @@ scanned_ok = attempted - read/parse failures
 Only a *mass* read failure flips the exit code. A single unparseable file still reports as
 a violation under exit 1, which is the existing and correct behaviour.
 
-## Decision 2 — the outcome travels as a sentinel type, not a substring
+## Decision 2 — the SUCCESS path is marked, so unknown failures fail closed
+
+> **Revised 2026-08-03 after the plan-review fleet (`sec-004`).** The first version of this
+> decision marked the five FAILURE sites with a `_CollectionFailure(str)`. Two reviewers
+> built both variants and measured the difference: that version default-denies the *message*
+> axis but **enumerates the producing-site axis**, which is the #518 mistake on a second
+> axis. Adding a sixth `except PermissionError` arm reusing `_UNREADABLE_MESSAGE` — a shape
+> that already exists twice in this file, via the `S_ISREG` route and
+> `_NOT_A_REGULAR_FILE_REASON` — left the derived guard reporting GREEN while six unreadable
+> files scored `scanned_ok=6`. **Fail-open.** Under the inversion below the same arm scores
+> `0`. Coverage is not the discriminator: both variants reach 100% at an identical 362
+> branches. The failure DIRECTION is.
+
+Mark the one path that means "this file was completely read, parsed and gated"; everything
+else — every arm that exists today and every arm anyone adds later — is a failure by
+construction.
+
+```python
+class _ScannedOk(list[str]):
+    """Violations from a scan that RAN TO COMPLETION. Empty list = clean.
+
+    DEFAULT-DENY on the outcome axis. `main` counts a file toward the census
+    only when its result is one of these, so a return path nobody has thought
+    of yet — a new `except` arm, an early return, a future refactor — is
+    counted as a failure rather than as a clean scan. Marking the failures
+    instead would enumerate them, and this file already carries two shapes that
+    enumeration misses: the `S_ISREG` refusal reuses `_UNREADABLE_MESSAGE`, and
+    `_NOT_A_REGULAR_FILE_REASON` is a collection failure whose name carries no
+    `_MESSAGE` suffix.
+    """
+
+    __slots__ = ()
+```
+
+`_scan_text`'s broad-except arm currently appends and falls through to a shared
+`return violations`. It gains an explicit early `return violations` (unmarked); only the
+completion path returns `_ScannedOk(violations)`. **No completion flag is needed** — the
+fall-through becomes an early return, which adds no branch that real inputs cannot reach.
+
+`_scan_file` needs no edit at all: its three failure arms already `return` plain lists, and
+its `return _scan_text(...)` propagates whichever the delegate produced.
+
+`main` then classifies with `isinstance(result, _ScannedOk)`.
+
+Measured on the built variant: 1335/1335 tests pass with **324 existing tests unedited**,
+`mypy --strict` and `pyright` clean, and `scripts/check_tag_t3.py` at 674 statements / 362
+branches / 0 miss / 0 partial with no pragma.
+
+## Superseded — Decision 2, first version (failure-site marking)
+
+> **NOT THE SHIPPING DESIGN.** Retained because ADR-0060 must record it under *Alternatives
+> considered*, and because the reason it fails is the substance of the decision above. Read
+> everything below as describing the rejected variant.
 
 The discriminator must come from the control flow that produced the result, never from
 matching its text: `_scan_file` returns a flat `list[str]` and `_record` appends a source
@@ -146,15 +198,37 @@ issue is about. It becomes `collected`, and the new post-scan message says `scan
 `main` classifies; it does not re-implement anything:
 
 ```python
-scanned_ok = 0
+exempt = scanned_ok = 0
 for path in paths:
     if _is_exempt(path):
-        continue                      # a decision NOT to gate — counts on neither side
+        exempt += 1                   # a decision NOT to gate — counts on neither side
+        continue
     result = _scan_file(path)
     all_violations.extend(result)
-    if not any(isinstance(line, _CollectionFailure) for line in result):
+    if isinstance(result, _ScannedOk):
         scanned_ok += 1
 ```
+
+**The census prints what it found before it refuses (`arch-001` / `sec-003`).** The first
+draft returned 2 above the print block, which discarded every violation collected so far:
+probe A lost 520 diagnostic lines, and probe D's real `tag(T3, ...)` finding vanished
+entirely — a change that fixes a diagnostic defect must not introduce a worse one. Every
+line in `all_violations` is printed, not just the collection failures, because a real
+finding collected alongside read failures is exactly the case that must not be swallowed.
+
+**One self-diagnosing message, not two arms (`probe C misdiagnosis`).** A single
+"could not read it" string misdescribes the all-exempt shape, where every file was read
+perfectly and simply was not gated. Reporting the full tally covers both shapes without a
+second branch to cover under the 100% gate:
+
+```text
+check_tag_t3: collected 260 files: 260 exempt, 0 scanned, 0 unreadable
+— expected at least 250 scanned. Refusing to report success while gating nothing.
+```
+
+The pre-scan message keeps its own distinct wording. Tests must key on the discriminating
+substrings (`exempt,` / `scanned,` / `unreadable`) and **never** on `expected at least`,
+which matches both censuses and so cannot tell you which one fired (`test-003`).
 
 `_is_exempt` is pure and is called again inside `_scan_file`, so non-exempt files pay one
 redundant call (two `resolve()`s each, ~660 on the real tree — measured negligible). This
@@ -173,8 +247,21 @@ still not a collection-failure message — it says the gate is broken, not the f
 | Realistic mass failure | ≥250-file unparseable tree (decoy-fixture precedent, `:1920`) | `rc == 2`, not 1 |
 | All-exempt | probe C shape | `rc == 2`, not 0 |
 | **Discriminator** | a file tripping a REAL rule on a line whose source quotes a collection-failure message | counted as **scanned**, not failed |
-| **Derived marker guard** | every `_*_MESSAGE` collection failure | its produced line is `isinstance(_CollectionFailure)` |
-| Production unchanged | argument-less run | `scanned_ok == 331`, rc unchanged |
+| **Derived outcome guard** | every collection-failure trigger, plus a clean file | failures return a plain `list`; only the clean file returns `_ScannedOk` |
+| **Fail-closed proof** | a sixth `except` arm reusing an existing `_*_MESSAGE` | its files score `scanned_ok == 0`, not `N` |
+| Production unchanged | argument-less run | `scanned_ok == 331` exactly, rc unchanged |
+
+**The discriminator test must have ZERO slack** (`sec-001`, `rev-002`, `test-001` — three
+reviewers, and the test-engineer measured it). Plant exactly `_MIN_SCANNED_FILES` files of
+which one is the quoter, asserting `len(planted) == _MIN_SCANNED_FILES`. `==` is the unique
+solution: *collected ≥ floor* or the pre-scan floor decides the test instead (`rev-003`),
+and *collected ≤ floor* or a misclassified quoter still clears the census and the substring
+mutant survives.
+
+**`scanned_ok` is a local, unobservable on a passing run** (`arch-004`), so the production
+invariant cannot be asserted directly. Pin it by bisecting the floor against the real tree:
+monkeypatch to 331 and assert the run does not refuse, then to 332 and assert it does. That
+pins `scanned_ok == 331` exactly and adds no new surface to the gate.
 
 Coverage: the new arm's false side is already covered by the existing `main([])` tests; the
 true side by the boundary-fail and all-exempt tests. The 100% line+branch gate on this file
@@ -207,9 +294,24 @@ uv run coverage report --include='scripts/check_tag_t3.py' --fail-under=100
 - A file partially scanned before a fault (`_scan_text`'s append arm) counts as **failed**.
   Conservative and fail-closed: it under-counts successes, so it can only make the census
   stricter.
-- The sentinel is lost by any reformatting of a producing line. The derived guard catches a
-  dropped marker at the five known sites and at any sixth message; it cannot catch a caller
-  that copies a line out and back through an f-string. No such caller exists today.
+- **The census proves files were read and parsed, not that they were GATED** (`sec-007`).
+  250 files of `x = 1` clear it. Closing that needs a different instrument — an assertion
+  about detector coverage, not about file counts — and is out of scope for #547.
+- **`_is_exempt` is called twice per non-exempt file**, once by `main` and once inside
+  `_scan_file`, so the two calls could in principle disagree if the filesystem changes
+  between them (`sec-006`). Same shape as the accepted `stat`/`open` TOCTOU residual #546
+  documented: it needs write access to the tree mid-scan, which already defeats a gate that
+  reads the tree it is gating.
+- **`scanned_ok` inherits the build-sensitivity of the RecursionError→unscannable arm**
+  (`ops-002`). Measured identical at 331 across three CPython 3.14.6 builds, with 81 files
+  of headroom above the floor, and any divergence makes the census *stricter*. Accepted and
+  named rather than closed; DoD verification runs bare `python3`, matching the two real call
+  sites rather than `uv run`.
+- A `list` subclass is lost by any operation that rebuilds the list (`+`, a comprehension,
+  `sorted()`, `list(...)`). Nothing between `_scan_text`'s return and `main`'s `isinstance`
+  does that today, and the direction of loss is **fail-closed** — a rebuilt list counts as a
+  failure, never as a clean scan. This is the property the failure-marking variant did not
+  have.
 - Explicit FILE arguments remain exempt from the census, unchanged. The call-site pin in
   `tests/unit/meta/test_gate_surfaces_are_pinned.py` is what stops that becoming an
   enumeration bypass.
