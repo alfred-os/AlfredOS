@@ -36,7 +36,11 @@ from alfred.plugins.comms_wire import CommsProtocolError
 
 from .conftest import FakeAuditWriter, FakeSupervisor
 
-pytestmark = pytest.mark.asyncio
+# NO module-level `pytestmark = pytest.mark.asyncio`. `asyncio_mode = "auto"`
+# (pyproject.toml) already runs the async tests here; the mark was redundant for
+# them and stamped a no-op mark onto the sync ones, which pytest warns about
+# once per test. `tests/unit/test_asyncio_mode_guard.py` pins the mode, so
+# dropping the mark cannot silently stop the async tests from running.
 
 _EPOCH = "a" * 32
 
