@@ -19,6 +19,7 @@ so the handler is unit-testable without a live gateway.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -79,17 +80,22 @@ def _request(
     )
 
 
-def _handler(tmp_path: Path, target: DiscordMockSendable) -> tuple[OutboundHandler, _Resolver]:
-    store = IdempotencyStore(db_path=tmp_path / "idempotency.db")
+_DB_NAME = "idempotency.db"
+
+
+def _handler(
+    closing_stack: contextlib.ExitStack, tmp_path: Path, target: DiscordMockSendable
+) -> tuple[OutboundHandler, _Resolver]:
+    store = closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / _DB_NAME))
     resolver = _Resolver(target)
     return OutboundHandler(resolver=resolver, store=store), resolver
 
 
 async def test_dm_happy_path_returns_delivered(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable(sent_id=42)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request(addressing_mode="dm"))
     assert isinstance(result, _OutboundDelivered)
     assert result.outcome == "delivered"
@@ -98,10 +104,10 @@ async def test_dm_happy_path_returns_delivered(
 
 
 async def test_mention_prefixes_user_mention(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable()
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(
         _request(addressing_mode="mention", target_platform_id="555")
     )
@@ -110,29 +116,31 @@ async def test_mention_prefixes_user_mention(
 
 
 async def test_channel_send_bare_body(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable()
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request(addressing_mode="channel"))
     assert isinstance(result, _OutboundDelivered)
     assert target.sent == ["hello"]
 
 
-async def test_thread_send(tmp_path: Path, discord_mock_factory: DiscordMockFactory) -> None:
+async def test_thread_send(
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
+) -> None:
     target = discord_mock_factory.sendable()
-    handler, resolver = _handler(tmp_path, target)
+    handler, resolver = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request(addressing_mode="thread"))
     assert isinstance(result, _OutboundDelivered)
     assert resolver.calls[-1] == ("777", "thread")
 
 
 async def test_rate_limit_429_returns_retryable_rounded_up(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     exc = discord_mock_factory.http_exception(status=429, retry_after=2.5)
     target = discord_mock_factory.sendable(raises=exc)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundRetryable)
     assert result.outcome == "retryable_failure"
@@ -141,11 +149,11 @@ async def test_rate_limit_429_returns_retryable_rounded_up(
 
 
 async def test_server_5xx_returns_retryable_default_backoff(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     exc = discord_mock_factory.http_exception(status=500)
     target = discord_mock_factory.sendable(raises=exc)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundRetryable)
     assert result.retry_after_seconds == 5
@@ -153,14 +161,14 @@ async def test_server_5xx_returns_retryable_default_backoff(
 
 
 async def test_client_4xx_returns_terminal_not_retryable(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     # A non-429 4xx (e.g. 400 Bad Request) reaching ``_map_http_exception`` is a
     # CLIENT error — permanently bad, not transient. It must map to a terminal
     # failure; classifying it retryable would create an endless retry loop.
     exc = discord_mock_factory.http_exception(status=400)
     target = discord_mock_factory.sendable(raises=exc)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundTerminal)
     assert result.outcome == "terminal_failure"
@@ -168,23 +176,23 @@ async def test_client_4xx_returns_terminal_not_retryable(
 
 
 async def test_unknown_status_http_exception_returns_terminal(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     # A 3xx-ish / non-4xx-non-5xx status (defensive: should not occur on a send)
     # is also NOT retryable — only 429 + 5xx are.
     exc = discord_mock_factory.http_exception(status=302)
     target = discord_mock_factory.sendable(raises=exc)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundTerminal)
     assert result.error_class == "discord_client_error"
 
 
 async def test_forbidden_returns_terminal(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable(raises=discord_mock_factory.forbidden())
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundTerminal)
     assert result.outcome == "terminal_failure"
@@ -193,10 +201,10 @@ async def test_forbidden_returns_terminal(
 
 
 async def test_not_found_returns_terminal(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable(raises=discord_mock_factory.not_found())
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundTerminal)
     assert result.error_class == "discord_not_found"
@@ -216,11 +224,13 @@ class _RaisingResolver:
         raise self._exc
 
 
-async def test_non_numeric_target_value_error_returns_terminal(tmp_path: Path) -> None:
+async def test_non_numeric_target_value_error_returns_terminal(
+    closing_stack: contextlib.ExitStack, tmp_path: Path
+) -> None:
     # L1: a non-numeric target id makes the live resolver's ``int(...)`` raise
     # ``ValueError`` — not in the discord.py exception set — which previously
     # escaped as an uncaught crash. It must map to a terminal failure instead.
-    store = IdempotencyStore(db_path=tmp_path / "idempotency.db")
+    store = closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / _DB_NAME))
     handler = OutboundHandler(
         resolver=_RaisingResolver(ValueError("invalid literal for int()")),
         store=store,
@@ -232,7 +242,7 @@ async def test_non_numeric_target_value_error_returns_terminal(tmp_path: Path) -
 
 
 async def test_terminal_detail_is_dlp_scrubbed(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     # sec-2: a planted API-key-shaped secret in the exception string must NEVER
     # reach the wire detail_redacted field.
@@ -240,17 +250,17 @@ async def test_terminal_detail_is_dlp_scrubbed(
     target = discord_mock_factory.sendable(raises=discord_mock_factory.forbidden())
     # Override the exception's rendered message to carry the planted secret.
     target._raises.args = (leak,)  # type: ignore[union-attr]
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     result = await handler.handle_outbound(_request())
     assert isinstance(result, _OutboundTerminal)
     assert "sk-ABCDEFGHIJKLMNOPQRSTUVWX" not in result.detail_redacted
 
 
 async def test_idempotency_dedup_skips_second_send(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable(sent_id=99)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     key = uuid4()
     first = await handler.handle_outbound(_request(idempotency_key=key))
     second = await handler.handle_outbound(_request(idempotency_key=key))
@@ -262,17 +272,23 @@ async def test_idempotency_dedup_skips_second_send(
 
 
 async def test_idempotency_dedup_survives_restart(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     key = uuid4()
     target = discord_mock_factory.sendable(sent_id=99)
-    handler, _ = _handler(tmp_path, target)
+    handler, _ = _handler(closing_stack, tmp_path, target)
     await handler.handle_outbound(_request(idempotency_key=key))
 
-    # Simulate plugin restart: a fresh store at the same path + a fresh target
-    # that would EXPLODE if hit (so a re-send would fail the test loudly).
+    # A SECOND store at the same path + a target that EXPLODES if hit, so a
+    # re-send fails loudly. Note the first store is deliberately still OPEN: a
+    # crash-respawn never closes it cleanly, so this proves the harder
+    # cross-connection read off an uncheckpointed WAL. The strict
+    # close-then-reopen proof lives one layer down in
+    # test_idempotency_store.py::test_record_survives_restart. Not vacuous —
+    # mutants for record() no-op, a :memory: ledger and INSERT-without-commit
+    # are all killed here.
     boom = discord_mock_factory.sendable(raises=AssertionError("must not re-send"))
-    restarted_store = IdempotencyStore(db_path=tmp_path / "idempotency.db")
+    restarted_store = closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / _DB_NAME))
     restarted = OutboundHandler(resolver=_Resolver(boom), store=restarted_store)
     result = await restarted.handle_outbound(_request(idempotency_key=key))
     assert isinstance(result, _OutboundDelivered)

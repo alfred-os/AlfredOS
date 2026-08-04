@@ -10,6 +10,7 @@ an outbound slips out between the 429 and the pause.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
@@ -82,14 +83,14 @@ def _request(text: str) -> OutboundMessageRequest:
 
 
 async def test_429_signal_awaited_before_next_outbound(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     sink = _OrderRecordingSink()
     rl_429 = discord_mock_factory.http_exception(status=429, retry_after=2.0)
     first = discord_mock_factory.sendable(raises=rl_429)
     rest = discord_mock_factory.sendable(sent_id=1)
     resolver = _SwitchableResolver(first=first, rest=rest, log=sink.events)
-    store = IdempotencyStore(db_path=tmp_path / "idempotency.db")
+    store = closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / "idempotency.db"))
     handler = OutboundHandler(resolver=resolver, store=store)
     emitter = RateLimitEmitter(adapter_id=_ADAPTER, sink=sink)
     dispatcher = OutboundDispatcher(handler=handler, rate_limit_emitter=emitter)

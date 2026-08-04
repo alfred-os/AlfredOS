@@ -19,6 +19,7 @@ the consume blocks during the window and proceeds after auto-resume.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -80,7 +81,7 @@ def _request(factory_dlp: OutboundDlp, n: int) -> OutboundMessageRequest:
 
 @pytest.mark.asyncio
 async def test_429_pauses_queue_then_auto_resumes(
-    discord_mock_factory: DiscordMockFactory, tmp_path: Any
+    closing_stack: contextlib.ExitStack, discord_mock_factory: DiscordMockFactory, tmp_path: Any
 ) -> None:
     dlp = OutboundDlp(broker=_Broker(), audit=lambda **_: None)
     audit_writer = object()
@@ -100,7 +101,8 @@ async def test_429_pauses_queue_then_auto_resumes(
             return discord_mock_factory.sendable(sent_id=100 + call_count["n"])
 
     handler = OutboundHandler(
-        resolver=_Resolver(), store=IdempotencyStore(db_path=tmp_path / "idem.db")
+        resolver=_Resolver(),
+        store=closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / "idem.db")),
     )
     emitter = RateLimitEmitter(adapter_id=_ADAPTER_ID, sink=sink)
     dispatcher = OutboundDispatcher(handler=handler, rate_limit_emitter=emitter)

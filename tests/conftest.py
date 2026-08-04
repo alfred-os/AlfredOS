@@ -1,6 +1,7 @@
 """Root pytest fixtures shared across the suite.
 
-Exports ``launcher_chain_fixture`` (arch-1 cross-PR contract): a callable
+Exports ``closing_stack`` (an ``ExitStack`` that reaps whatever a test opens; see
+its docstring) and ``launcher_chain_fixture`` (arch-1 cross-PR contract): a callable
 factory that spawns ``bin/alfred-plugin-launcher.sh`` against a per-test
 temporary policy directory. PR-S4-7's policy-translation tests import this
 fixture; without it they don't compile. The signature is pinned:
@@ -14,10 +15,11 @@ under a fake bwrap, and returns the :class:`LauncherResult`.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,6 +100,28 @@ def _launcher_env(repo_root: Path, extra: dict[str, str]) -> dict[str, str]:
     }
     env.update(extra)
     return env
+
+
+@pytest.fixture
+def closing_stack() -> Iterator[contextlib.ExitStack]:
+    """An ExitStack that closes everything a test opens, at teardown.
+
+    Two of its users genuinely need a stack rather than a `with` block: the
+    `_handler`/`_server` helpers BUILD AND RETURN a wired-up object, so the
+    resource must outlive the call that opened it. The inline sites could have
+    used `with` and deliberately do not — one mechanism across every site in a
+    file is easier to follow, and to copy correctly, than two.
+
+    Prefer `enter_context(Thing(...))` over a test-local `close()`: that runs
+    the PRODUCTION `__exit__`, so the reaper under test is the real one.
+
+    Why it matters: a leaked handle raises ``ResourceWarning`` from the GARBAGE
+    COLLECTOR, not from the code that leaked it, so the report names whatever
+    frame happened to be running and blames an innocent file. Per-file runs then
+    show zero and the leak only appears once the whole lane runs (#566).
+    """
+    with contextlib.ExitStack() as stack:
+        yield stack
 
 
 @pytest.fixture

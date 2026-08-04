@@ -9,6 +9,7 @@ the ``OutboundMessageResult`` discriminated-union dict.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import tempfile
 from pathlib import Path
@@ -59,8 +60,10 @@ def _outbound_params() -> dict[str, object]:
     return request.model_dump(mode="json")
 
 
-def _server(tmp_path: Path, target: DiscordMockSendable) -> DiscordServer:
-    store = IdempotencyStore(db_path=tmp_path / "idempotency.db")
+def _server(
+    closing_stack: contextlib.ExitStack, tmp_path: Path, target: DiscordMockSendable
+) -> DiscordServer:
+    store = closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / "idempotency.db"))
     handler = OutboundHandler(resolver=_Resolver(target), store=store)
     emitter = RateLimitEmitter(adapter_id=_ADAPTER, sink=_NullSink())
     dispatcher = OutboundDispatcher(handler=handler, rate_limit_emitter=emitter)
@@ -99,10 +102,10 @@ def test_idempotency_db_path_falls_back_to_private_0700_dir(
 
 
 async def test_outbound_message_delivers_via_real_handler(
-    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+    closing_stack: contextlib.ExitStack, tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
     target = discord_mock_factory.sendable(sent_id=314)
-    server = _server(tmp_path, target)
+    server = _server(closing_stack, tmp_path, target)
     resp = await server.dispatch(
         {"jsonrpc": "2.0", "id": 7, "method": "outbound.message", "params": _outbound_params()}
     )
