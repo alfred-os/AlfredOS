@@ -10,13 +10,19 @@ readme = "README.md"
 # updates, and the weekly pip updater. The ENFORCED floor is 3.14.6 and lives in
 # `alfred._python_floor`, checked at import.
 #
-# gh-135228: CPython 3.14.0-3.14.4 generate a broken `__setattr__` for
-# `@dataclass(frozen=True, slots=True)` — the generated function closes over the
-# pre-slots class, so an unknown-attribute assignment raises a spurious
-# `TypeError: super(type, obj)` instead of FrozenInstanceError. Fixed in 3.14.5
-# (`_frozen_get_del_attr` -> `_frozen_set_del_attr`, `cls` -> `__class__`), NOT
-# 3.14.6 as previously recorded here. AlfredOS has 36+ frozen+slots dataclasses,
-# including trust-boundary types.
+# gh-105936: `@dataclass(frozen=True, slots=True)` generates `__setattr__` /
+# `__delattr__` that close over the PRE-slots class, so an unknown-attribute
+# assignment raises a spurious `TypeError: super(type, obj)` instead of
+# FrozenInstanceError. NOT a 3.14 regression — it is long-standing, and the fix
+# (CPython GH-144021) was backported to 3.13 as well (GH-148476). It reached the
+# 3.14 series via GH-148469, released in 3.14.5; measured broken on 3.14.0 and
+# 3.14.4, correct on 3.14.5 and 3.14.6, so within 3.14 the affected patches are
+# 3.14.0-3.14.4. AlfredOS has 36+ frozen+slots dataclasses, incl. trust-boundary
+# types.
+#
+# This repo cited gh-135228 from #303 until #568. That is a DIFFERENT issue —
+# "slot dataclasses classes leak original class" — same area and same underlying
+# closure-cell change, but not the `__setattr__` behaviour this floor exists for.
 requires-python = ">=3.14"
 license = { text = "Apache-2.0" }
 authors = [{ name = "AlfredOS contributors" }]
