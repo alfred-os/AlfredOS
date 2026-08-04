@@ -19,6 +19,7 @@ recorded resolver so the gate is deterministic and CI-runnable.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -199,13 +200,16 @@ async def test_addressing_mode_inbound_round_trip(
 @pytest.mark.parametrize("mode", ["dm", "mention", "channel", "thread"])
 @pytest.mark.asyncio
 async def test_addressing_mode_outbound_round_trip(
-    discord_mock_factory: DiscordMockFactory, mode: PersonaAddressingMode, tmp_path: Any
+    closing_stack: contextlib.ExitStack,
+    discord_mock_factory: DiscordMockFactory,
+    mode: PersonaAddressingMode,
+    tmp_path: Any,
 ) -> None:
     dlp = OutboundDlp(broker=_Broker(), audit=lambda **_: None)
     target = _RecordingResolverTarget(discord_mock_factory)
     handler = OutboundHandler(
         resolver=target,
-        store=IdempotencyStore(db_path=tmp_path / f"idem-{mode}.db"),
+        store=closing_stack.enter_context(IdempotencyStore(db_path=tmp_path / f"idem-{mode}.db")),
     )
     request = OutboundMessageRequest(
         idempotency_key=uuid.uuid4(),

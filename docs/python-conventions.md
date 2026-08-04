@@ -450,6 +450,16 @@ report names whatever frame happened to be running and blames an innocent file. 
 `with sqlite3.connect(...)` commits but does **not** close; `contextlib.closing()` is what
 releases the handle.
 
+When the lifetime does not fit one `with` block — typically a helper that builds and *returns*
+an object holding the resource — use the `closing_stack` fixture from `tests/conftest.py`:
+`store = closing_stack.enter_context(IdempotencyStore(...))`. It reaps at teardown via the
+object's own `__exit__`, so the production reaper is what runs.
+
+Assert the close, too. A `close()` mutated to `return None` left the whole suite green
+(measured on #566), so every `with` and `enter_context` in it was inert with nothing to notice:
+close the resource, then assert the observable effect (e.g. `sqlite3.ProgrammingError` on next
+use).
+
 ### Skill tests — the triad
 
 Per CLAUDE.md, every new skill ships with all three: a happy-path test, an error-path test, and an out-of-scope refusal test. Missing any of the three is a release blocker for the skill.

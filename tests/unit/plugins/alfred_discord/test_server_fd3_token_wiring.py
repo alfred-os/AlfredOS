@@ -13,18 +13,29 @@ server-construction contract:
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+
+import pytest
 
 import plugins.alfred_discord.server as server_module
 from plugins.alfred_discord.lifecycle import DiscordLifecycle, Fd3TokenSource
 
 
-def test_build_server_wires_fd3_token_source_into_lifecycle() -> None:
+def test_build_server_wires_fd3_token_source_into_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     captured: dict[str, object] = {}
     real_init = DiscordLifecycle.__init__
 
     def _spy_init(self: DiscordLifecycle, **kwargs: object) -> None:
         captured.update(kwargs)
         real_init(self, **kwargs)  # type: ignore[arg-type]
+
+    # `_build_server` constructs the REAL idempotency ledger. Without this
+    # override `idempotency_db_path()` falls back to a private temp dir OUTSIDE
+    # `tmp_path`, so the db plus its -wal/-shm pair persist between runs on a
+    # developer box and leak state across tests. Pin it into tmp_path.
+    monkeypatch.setenv("ALFRED_DISCORD_RUNTIME_DIR", str(tmp_path))
 
     original = DiscordLifecycle.__init__
     DiscordLifecycle.__init__ = _spy_init  # type: ignore[method-assign]

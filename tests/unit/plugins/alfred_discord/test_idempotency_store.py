@@ -134,6 +134,24 @@ async def test_concurrent_same_key_record_exactly_one_wins(tmp_path: Path) -> No
         assert store.lookup("race-key") in {"platform-A", "platform-B"}
 
 
+def test_close_actually_closes_the_connection(tmp_path: Path) -> None:
+    """The DETECTOR for every `with _store(...)` and `enter_context` in the suite.
+
+    Without this, mutating `close()` to `return None` leaves the whole suite
+    green (measured: 222 passed) — every close-discipline fix in #559/#561/#566
+    goes inert with nothing to catch it, and the `filterwarnings` gate that
+    would otherwise notice is deferred to #560. Assert the OBSERVABLE effect,
+    not that the method was called.
+    """
+    store = _store(tmp_path)
+    store.record("key-1", "platform-42")
+
+    store.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        store.lookup("key-1")
+
+
 def test_wal_journal_mode_enabled(tmp_path: Path) -> None:
     db_path = tmp_path / _DB_NAME
     with _store(tmp_path) as store:
