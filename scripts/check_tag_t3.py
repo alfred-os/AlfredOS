@@ -3158,7 +3158,17 @@ def main(argv: list[str]) -> int:
     # seen. `_collect_paths` stays untouched for the same reason as before: its
     # per-directory floor and decoy defence are specified over what traversal
     # FOUND, and `recurse_symlinks=True` is load-bearing there (#541).
+    # EXPLICIT FILE ARGUMENTS ARE CENSUS-EXEMPT — a contract this file has
+    # documented since #541, and which the census silently broke. Measured: a
+    # directory whose every file failed to scan, passed alongside six clean
+    # explicit files, exited 1 because the explicit files carried `scanned_ok`
+    # over the floor; the same directory alone exits 2. The floors exist to
+    # judge what the DIRECTORY scan gated, so they must count only what the
+    # directory contributed.
+    explicit_files = {_resolved_identity(Path(a)) for a in argv if Path(a).is_file()}
+
     all_violations: list[str] = []
+    census_paths = 0
     exempt_files: set[Path] = set()
     scanned_files: set[Path] = set()
     failed_files: set[Path] = set()
@@ -3174,13 +3184,20 @@ def main(argv: list[str]) -> int:
             # implementation, not a second implementation — #422's drift trap is
             # copy-pasted logic, and there is none here.
             resolved = _resolved_identity(path)
+            # Gate EVERY path regardless of provenance; only the CENSUS
+            # accounting is scoped to directory-derived paths.
+            counts_toward_census = resolved not in explicit_files
+            census_paths += 1 if counts_toward_census else 0
             if _is_exempt(path):
-                exempt_files.add(resolved)
+                if counts_toward_census:
+                    exempt_files.add(resolved)
                 continue
             violations = _scan_file(path)
             all_violations.extend(violations)
             # DEFAULT-DENY: only a completed scan carries the marker, so any
             # other return path — including one added later — is a failure.
+            if not counts_toward_census:
+                continue
             if isinstance(violations, _ScannedOk):
                 scanned_files.add(resolved)
             else:
@@ -3195,9 +3212,15 @@ def main(argv: list[str]) -> int:
     # A path scanned under one spelling and exempt under another counts as
     # SCANNED: it was gated. Subtracting keeps the tally honest without letting
     # an exemption erase a real scan.
-    exempt = len(exempt_files - scanned_files)
+    # DISJOINT, with a stated precedence. One resolved file can be reached by
+    # several spellings and get different verdicts: exempt under its own name,
+    # non-exempt (and possibly failing) under an alias. Counting it in two
+    # buckets makes the tally lie. SCANNED wins over everything — it WAS gated —
+    # and FAILED wins over EXEMPT, because a spelling the gate could not read is
+    # the fact worth surfacing.
     scanned_ok = len(scanned_files)
     unscannable = len(failed_files - scanned_files)
+    exempt = len(exempt_files - scanned_files - failed_files)
     distinct_count = len(exempt_files | scanned_files | failed_files)
 
     # The POST-SCAN census (#547). `len(paths)` counted files COLLECTED during
@@ -3217,8 +3240,10 @@ def main(argv: list[str]) -> int:
         # change that fixes a diagnostic defect must not introduce a worse one.
         _print_violations(all_violations, _PARTIAL_HEADER)
         print(
-            f"check_tag_t3: collected {len(paths)} paths resolving to "
-            f"{distinct_count} distinct files: {exempt} exempt, {scanned_ok} "
+            f"check_tag_t3: the directory scan collected {census_paths} paths "
+            f"resolving to {distinct_count} distinct files "
+            f"({len(paths) - census_paths} explicit file arguments are "
+            f"census-exempt and excluded): {exempt} exempt, {scanned_ok} "
             f"scanned, {unscannable} could not be scanned — expected at least "
             f"{_MIN_SCANNED_FILES} scanned. Refusing to report success while "
             f"gating nothing. If collected greatly exceeds distinct, the scan "
