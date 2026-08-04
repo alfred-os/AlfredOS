@@ -248,14 +248,20 @@ git commit -m "build: #568 relax requires-python to series-level in both manifes
 
 This is currently inert only because `__init__.py` is 0 bytes — and Task 3 is what populates it. Fix the gate first, so Task 3 is measured by a gate that can see it.
 
-**Measured, with the faithful precondition** (`alfred` already resident, as it always is mid-suite):
+**Measured — the blindness is UNCONDITIONAL under pytest, worse than first described.**
+`tests/unit/conftest.py:39` imports `alfred.audit.log` at module scope and has done since
+2026-05-27 (#95), so pytest loads it during collection and `alfred` is resident for *every*
+invocation, including running this file alone.
 
-| precondition | current gate | fixed gate |
+| how the gate is run | pre-fix | post-fix |
 | --- | --- | --- |
-| `alfred` not resident (file run alone) | mutant killed | mutant killed |
-| `alfred` already resident (real session) | **MUTANT SURVIVED** | mutant killed |
+| whole security dir (`-k import_closure`) | **MUTANT SURVIVED** | mutant killed |
+| this file alone | **MUTANT SURVIVED** | mutant killed |
 
-The blindness is conditional on test-execution order, which is why it went unnoticed: running that file alone gives the correct answer.
+An earlier draft claimed the blindness was order-dependent and that running the file alone measured
+correctly. That was an artefact of probing in a bare `python` process, where no conftest runs.
+Under pytest there is no configuration in which the pre-fix gate sees `src/alfred/__init__.py` — it
+has been blind since 2026-05-27, not merely blind in some orders.
 
 **Files:**
 
@@ -275,13 +281,14 @@ printf 'import alfred.audit  # MUTANT\n' > src/alfred/__init__.py
 uv run pytest tests/unit/security/ -q -k "import_closure"
 ```
 
-Expected: **PASSES** (blind). Now confirm it is order-dependent:
+Expected: **PASSES** (blind). Now run the file alone — it is blind here too, because
+`tests/unit/conftest.py` imports `alfred` at module scope during collection:
 
 ```bash
 uv run pytest tests/unit/security/test_quarantine_child_import_closure.py -q
 ```
 
-Expected: FAILS. Record both outcomes before changing anything.
+Expected: **PASSES** (blind) as well. Record both outcomes before changing anything.
 
 - [ ] **Step 2: Fix `to_clear` via a shared production helper**
 
