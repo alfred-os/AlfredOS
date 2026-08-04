@@ -1493,7 +1493,23 @@ uv run pytest tests/unit/meta/ -q
 
 Expected: pass. If a `zip()` strict error appears at collection, one of the five surfaces was missed — that is the mechanism working.
 
-- [ ] **Step 5: Confirm 100% coverage on the new script**
+- [ ] **Step 5a: Remove the transitional `omit` entry, and cover the CLI shell**
+
+Task 5 added `scripts/check_dependency_graph_freshness.py` to `pyproject.toml`'s
+`[tool.coverage.run] omit` list, because the census (#423/#543) fails the build on any
+`scripts/*.py` that is neither gated nor omitted, and the CLI shell had no caller yet. This task
+is that caller, so the entry must now come OUT.
+
+Delete the `#568` block from the `omit` list, then add tests until the script reaches 100%. The
+uncovered surface measured 59% unit-only: `main()`, `_read_json`'s error branches, argparse
+wiring, `report()`'s unhealthy-path formatting, and one `lock_versions` branch.
+
+**Order matters.** A `coverage report --include=<omitted file> --fail-under=100` exits 1 with
+`No data to report.` — verified. It fails loud rather than passing vacuously, so the combination
+cannot become a paper gate, but leaving the omit in place while adding the gate will simply break
+the build.
+
+- [ ] **Step 5b: Confirm 100% coverage on the new script**
 
 ```bash
 make coverage-unit
