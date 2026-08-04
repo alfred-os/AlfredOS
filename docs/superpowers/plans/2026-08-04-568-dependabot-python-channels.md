@@ -177,7 +177,7 @@ Expected: 3 passed.
 
 ```bash
 sed -i.bak 's/^requires-python = ">=3.14"$/requires-python = ">=3.14.6"/' pyproject.toml
-uv run pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -q
+uv run --frozen pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -q
 ```
 
 Expected: **FAIL** on the `pyproject.toml` case. Then restore and repeat for the lockfile:
@@ -185,17 +185,22 @@ Expected: **FAIL** on the `pyproject.toml` case. Then restore and repeat for the
 ```bash
 mv pyproject.toml.bak pyproject.toml
 sed -i.bak '3s/.*/requires-python = ">=3.14.6"/' uv.lock
-uv run pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -q
+uv run --frozen pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -q
 ```
 
 Expected: **FAIL** on the `uv.lock` case *and* on `test_both_manifests_agree`. Restore:
 
 ```bash
 mv uv.lock.bak uv.lock
-uv run pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -q   # 3 passed
+uv run --frozen pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -q   # 3 passed
 ```
 
 A detector that cannot be made to fail is not a detector. Do not skip this step.
+
+**`--frozen` is load-bearing in every command above.** Plain `uv run` performs an implicit
+non-frozen `uv sync`, which REPAIRS a drifted `uv.lock` before pytest starts — the mutation
+silently self-heals and the step reports a false pass. Any future mutation-verification that
+touches `uv.lock` or `pyproject.toml` must use `uv run --frozen`.
 
 - [ ] **Step 7: Add the `uv lock --check` gate**
 
