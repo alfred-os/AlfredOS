@@ -17,7 +17,7 @@
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
         check format-check lint-check typecheck strict-declarations-lint tag-t3-check test test-unit test-integration test-smoke test-e2e test-adversarial test-perf \
-        i18n-check i18n-fix coverage-unit coverage-gates-unit coverage-gates \
+        i18n-check i18n-fix coverage-unit coverage-gates-unit coverage-gates lockcheck \
         docs-check wiki-check
 
 # The character class MUST carry `0-9` (#543 review, dx-002). Without it any
@@ -156,6 +156,9 @@ i18n-fix: ## Regenerate the i18n catalog after touching any file with a t() call
 coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates read.
 	uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report= --cov-fail-under=0
 
+lockcheck: ## Fail if uv.lock has drifted from pyproject.toml (#568).
+	uv lock --check
+
 coverage-gates-unit: coverage-unit ## Run the 28 unit-tier 100% gates from ci.yml.
 	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 28
 
@@ -249,7 +252,7 @@ tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(Tagge
 # adversarial suite and CodeQL live only in CI. It previously claimed to be
 # "identical to CI" while running NONE of the 50 per-module 100% coverage
 # gates (#474) — an overclaim that cost a CI round-trip on PR #529.
-check: format-check lint-check typecheck strict-declarations-lint tag-t3-check i18n-check coverage-gates ## Verify what CI verifies locally (see comment). No mutations.
+check: format-check lint-check typecheck strict-declarations-lint tag-t3-check i18n-check coverage-gates lockcheck ## Verify what CI verifies locally (see comment). No mutations.
 
 # ──────────────────────────────────────────────────────────────
 # Docs link + anchor checker (PR E, plan task 8)
