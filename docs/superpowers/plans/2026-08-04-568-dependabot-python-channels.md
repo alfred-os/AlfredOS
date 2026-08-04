@@ -751,7 +751,7 @@ uv run pytest tests/adversarial -q
 ```bash
 git add src/alfred/audit/audit_row_schemas.py bin/alfred-plugin-launcher.sh \
         tests/unit/security/test_launcher_interpreter_floor_reason.py
-git commit -m "fix(launcher): #568 name a sub-floor interpreter instead of guessing environment_not_set"
+git commit -m "feat(launcher): #568 name a sub-floor interpreter instead of guessing environment_not_set"
 ```
 
 ---
