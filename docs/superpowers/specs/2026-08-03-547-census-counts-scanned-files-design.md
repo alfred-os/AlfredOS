@@ -132,7 +132,7 @@ The marker must hang off a **completion event**, not a fall-through:
     return violations
 ```
 
-Measured: **683 statements / 366 branches / 0 partial / 100%**, both arcs driven by real
+Measured: **686 statements / 366 branches / 0 partial / 100%**, both arcs driven by real
 inputs (the False arc by the suite's own `_ALWAYS_UNSCANNABLE` fixture). The coverage
 objection used to reject this flag was backwards.
 
@@ -150,7 +150,7 @@ its `return _scan_text(...)` propagates whichever the delegate produced.
 `main` then classifies with `isinstance(result, _ScannedOk)`.
 
 Measured on the built variant: 1335/1335 tests pass with **324 existing tests unedited**,
-`mypy --strict` and `pyright` clean, and `scripts/check_tag_t3.py` at 674 statements / 362
+`mypy --strict` and `pyright` clean, and `scripts/check_tag_t3.py` at 686 statements / 366
 branches / 0 miss / 0 partial with no pragma.
 
 ## Superseded — Decision 2, first version (failure-site marking)

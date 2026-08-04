@@ -572,10 +572,15 @@ class _ScannedOk(list[str]):
     reason the polarity is this way round.
 
     CONSTRUCTED IN EXACTLY ONE PLACE, pinned by
-    ``test_the_scanned_ok_marker_has_exactly_two_name_references``. Its blind
-    spot is named rather than claimed closed: ``type(x)(...)`` and
-    ``copy.copy(x)`` reproduce the class without spelling the name, so no
-    source-level instrument sees them.
+    ``test_the_scanned_ok_marker_is_constructed_in_exactly_one_place``, which
+    caps the TOTAL number of ``ast.Name`` references at two — the construction
+    here and the ``isinstance`` in ``main``. Capping only this function while
+    leaving ``main`` open was measured insufficient: ``_ScannedOk(_scan_file(
+    path))`` inside ``main`` counted every file as a completed scan and the
+    guard stayed green. Its blind spot is named rather than claimed closed:
+    ``globals()[...]``, ``getattr(sys.modules[...])``, ``type(x)(...)`` and
+    ``copy.copy(x)`` never spell the identifier, so no source-level instrument
+    sees them.
     """
 
     __slots__ = ()
@@ -3111,17 +3116,28 @@ def main(argv: list[str]) -> int:
     # exactly one distinct file. Every one of them scans perfectly, so a census
     # over successful scans alone cannot see it.
     #
-    # Deduping HERE and not in `_collect_paths` is deliberate: that function's
+    # Deduping is for COUNTING ONLY. It must never decide WHICH files are
+    # scanned, and a draft of this change did exactly that, with measured
+    # consequences. Keying a dict on the resolved path and iterating the
+    # survivors made the winner depend on sort order, and `_is_exempt`
+    # deliberately requires the LEXICAL and RESOLVED views to AGREE. So a
+    # tracked symlink `src/alfred/core/alias.py -> security/tiers.py` collapsed
+    # onto the exempt real file, which `main` then skipped: measured rc=1 with
+    # the violation named before that draft, rc=0 with empty stderr after. It
+    # failed OPEN and SILENT, and only for aliases sorting BEFORE their target —
+    # so an ordering-blind test passes straight through it.
+    #
+    # Every collected path is therefore still scanned, exactly as before. The
+    # census counts DISTINCT RESOLVED files by accumulating what was actually
+    # seen. `_collect_paths` stays untouched for the same reason as before: its
     # per-directory floor and decoy defence are specified over what traversal
     # FOUND, and `recurse_symlinks=True` is load-bearing there (#541).
-    # Narrowing its return would change three guards to fix one.
-    distinct = sorted({path.resolve(strict=False): path for path in paths}.values())
-
     all_violations: list[str] = []
-    exempt = 0
-    scanned_ok = 0
+    exempt_files: set[Path] = set()
+    scanned_files: set[Path] = set()
+    failed_files: set[Path] = set()
     try:
-        for path in distinct:
+        for path in paths:
             # EXEMPT FILES COUNT ON NEITHER SIDE. An exemption is a decision not
             # to gate, so counting one as a successful scan counts a non-event —
             # and with `_APPROVED_PATHS` at size one, a production run always has
@@ -3131,21 +3147,32 @@ def main(argv: list[str]) -> int:
             # `_scan_file` checks this again. One redundant CALL to one
             # implementation, not a second implementation — #422's drift trap is
             # copy-pasted logic, and there is none here.
+            resolved = path.resolve(strict=False)
             if _is_exempt(path):
-                exempt += 1
+                exempt_files.add(resolved)
                 continue
             violations = _scan_file(path)
             all_violations.extend(violations)
             # DEFAULT-DENY: only a completed scan carries the marker, so any
             # other return path — including one added later — is a failure.
             if isinstance(violations, _ScannedOk):
-                scanned_ok += 1
+                scanned_files.add(resolved)
+            else:
+                failed_files.add(resolved)
     except GateInternalError as exc:
         # NOT exit 1. Whatever was collected before the fault is discarded on
         # purpose: a faulting detector means no file's verdict is trustworthy,
         # including the ones that came back clean. Exit 2 says exactly that.
         print(f"check_tag_t3: {exc}", file=sys.stderr)
         return 2
+
+    # A path scanned under one spelling and exempt under another counts as
+    # SCANNED: it was gated. Subtracting keeps the tally honest without letting
+    # an exemption erase a real scan.
+    exempt = len(exempt_files - scanned_files)
+    scanned_ok = len(scanned_files)
+    unscannable = len(failed_files - scanned_files)
+    distinct_count = len(exempt_files | scanned_files | failed_files)
 
     # The POST-SCAN census (#547). `len(paths)` counted files COLLECTED during
     # traversal — `git ls-files` plus a `stat`, which proves nothing was read,
@@ -3164,11 +3191,13 @@ def main(argv: list[str]) -> int:
         # change that fixes a diagnostic defect must not introduce a worse one.
         _print_violations(all_violations, _PARTIAL_HEADER)
         print(
-            f"check_tag_t3: collected {len(paths)} files ({len(distinct)} "
-            f"distinct): {exempt} exempt, {scanned_ok} scanned, "
-            f"{len(distinct) - exempt - scanned_ok} unreadable — expected at "
-            f"least {_MIN_SCANNED_FILES} scanned. Refusing to report success "
-            f"while gating nothing.",
+            f"check_tag_t3: collected {len(paths)} paths resolving to "
+            f"{distinct_count} distinct files: {exempt} exempt, {scanned_ok} "
+            f"scanned, {unscannable} could not be scanned — expected at least "
+            f"{_MIN_SCANNED_FILES} scanned. Refusing to report success while "
+            f"gating nothing. If collected greatly exceeds distinct, the scan "
+            f"root is full of links to the same files; otherwise check that "
+            f"the gate can read the tree it was pointed at.",
             file=sys.stderr,
         )
         return 2

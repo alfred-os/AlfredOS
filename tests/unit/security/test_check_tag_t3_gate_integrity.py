@@ -2161,8 +2161,13 @@ def test_the_scanned_ok_marker_is_constructed_in_exactly_one_place() -> None:
     syntactic role it plays, and the allowed LOCATIONS are enumerated — so a
     reference from anywhere else reds regardless of how it is spelled.
 
-    WHAT THIS CANNOT DO: `type(x)(...)` and `copy.copy(x)` reproduce the class
-    without ever spelling the name, so no source-level instrument sees them.
+    WHAT THIS CANNOT DO, measured rather than guessed: any construction that
+    never spells the identifier evades an `ast.Name` census —
+    `globals()["_ScannedOk"](...)`, `getattr(sys.modules[__name__], ...)`,
+    `type(x)(...)` and `copy.copy(x)` were all built and all scored 4 of 4
+    as completed scans. The total cap above closes the spellings that DO name
+    it, including a second reference in `main`; the reflective ones need a
+    runtime construction invariant (#518/#520), not a source-level rule.
     Named here and in ADR-0060 rather than claimed closed.
     """
     tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"), filename=str(_SCRIPT))
@@ -2182,8 +2187,18 @@ def test_the_scanned_ok_marker_is_constructed_in_exactly_one_place() -> None:
         for n in ast.walk(tree)
         if isinstance(n, ast.Name) and n.id == "_ScannedOk"
     ]
+    # CAP THE TOTAL, not just the locations. Restricting WHERE the name may
+    # appear while leaving `main` uncapped let four mutants through, measured:
+    # `_ScannedOk(_scan_file(path))` inside `main` counted every file as a
+    # completed scan and this guard stayed green. Exactly two references exist
+    # by design — the construction in `_scan_text` and the `isinstance` in
+    # `main` — so anything else is a third site whatever it is called.
+    assert len(references) == 2, (
+        f"expected exactly two _ScannedOk references (one construction in "
+        f"_scan_text, one isinstance in main), found {references!r}"
+    )
     locations = {where for where, _ in references}
-    assert locations <= {"_scan_text", "main"}, (
+    assert locations == {"_scan_text", "main"}, (
         f"_ScannedOk is referenced outside the two functions allowed to see it: "
         f"{sorted(locations - {'_scan_text', 'main'})} at {references!r}. A marker "
         f"minted anywhere else counts an ungated file as a completed scan."
@@ -2220,7 +2235,7 @@ def test_a_tree_the_gate_cannot_read_exits_2_not_1(
     err = capsys.readouterr().err
     # ALL THREE terms. Asserting only two let a mutant dropping `- exempt` from
     # the unreadable arithmetic survive every test in the suite.
-    assert "0 exempt" in err and "0 scanned" in err and "4 unreadable" in err
+    assert "0 exempt" in err and "0 scanned" in err and "4 could not be scanned" in err
     assert "not reaching the source tree" not in err, (
         "the PRE-SCAN floor fired, not the post-scan census — this tree does "
         "not clear the collection floor and the test proves nothing"
@@ -2252,8 +2267,14 @@ def test_a_tree_of_only_exempt_files_exits_2_and_says_exempt(
     # `len(distinct) - scanned_ok` reports "4 exempt, 0 scanned, 4 unreadable"
     # here and survives everything else, because this is the only test reaching
     # the census with exempt > 0.
-    assert "4 exempt" in err and "0 scanned" in err and "0 unreadable" in err
+    assert "4 exempt" in err and "0 scanned" in err and "0 could not be scanned" in err
     assert "not reaching the source tree" not in err
+    # Nothing was COLLECTED here — every file was exempt — so the partial-results
+    # header must not print above an empty list. This is the only path that
+    # reaches `_print_violations` with nothing to print, and it is the one path
+    # whose stated purpose is not misleading the operator.
+    assert check_tag_t3._PARTIAL_HEADER not in err
+    assert check_tag_t3._FINDINGS_HEADER not in err
 
 
 def test_the_census_passes_at_the_floor_and_fails_one_below(
@@ -2276,7 +2297,7 @@ def test_the_census_passes_at_the_floor_and_fails_one_below(
     (one_below / "broken.py").write_text("def (:\n", encoding="utf-8")
     assert check_tag_t3.main([str(one_below)]) == 2
     err = capsys.readouterr().err
-    assert "3 scanned" in err and "1 unreadable" in err
+    assert "3 scanned" in err and "1 could not be scanned" in err
     assert "not reaching the source tree" not in err, (
         "the pre-scan floor decided this — 4 files were collected, so it must not"
     )
@@ -2320,20 +2341,32 @@ def test_the_production_tree_is_gated_as_a_property() -> None:
     assert not unreadable, f"the gate cannot read its own tree: {unreadable}"
     assert len(distinct - exempt) >= check_tag_t3._MIN_SCANNED_FILES
     assert len(exempt) <= len(check_tag_t3._APPROVED_PATHS)
-    assert check_tag_t3.main([]) != 2
+    # No `main([])` call here. `test_main_returns_zero_on_the_real_tree`
+    # already drives that exact invocation and asserts `== 0`, which is
+    # strictly stronger than `!= 2` — repeating it cost a second full
+    # production scan (measured 6.2s of this test's 11.4s, ~24s across the
+    # four required unit legs) and covered no line or branch the other test
+    # does not already reach.
 
 
-def test_a_realistic_mass_failure_above_the_real_floor_exits_2(tmp_path: Path) -> None:
+def test_a_realistic_mass_failure_above_the_real_floor_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """The one full-size case, at the SHIPPED floor with no monkeypatch."""
     tree = _build_flat_tree(tmp_path / "big", 260, "def (:\n")
     # `<` not `>`: ruff SIM300 reds a Yoda condition.
     assert check_tag_t3._MIN_SCANNED_FILES < 260
 
     assert check_tag_t3.main([str(tree)]) == 2
+    err = capsys.readouterr().err
+    assert "0 scanned" in err and "260 could not be scanned" in err
+    assert "not reaching the source tree" not in err
 
 
 @_NEEDS_SYMLINKS
-def test_symlink_copies_of_one_file_do_not_clear_the_census(tmp_path: Path) -> None:
+def test_symlink_copies_of_one_file_do_not_clear_the_census(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """NEW-1. `_collect_paths` never deduped, so the census counted scan EVENTS.
 
     MEASURED ON THE SHIPPED GATE, no monkeypatch: 260 symlinks to a single
@@ -2348,6 +2381,15 @@ def test_symlink_copies_of_one_file_do_not_clear_the_census(tmp_path: Path) -> N
         (tree / f"link_{index:04d}.py").symlink_to(tree / "real.py")
 
     assert check_tag_t3.main([str(tree)]) == 2
+    err = capsys.readouterr().err
+    # NAME THE GUARD. `rc == 2` alone is satisfied by the PRE-scan floor, and
+    # moving the dedup onto that floor leaves every test green while the census
+    # never runs — measured. This test is the only killer of the dedup mutants,
+    # so its oracle is load-bearing.
+    assert "1 distinct" in err and "1 scanned" in err
+    assert "not reaching the source tree" not in err, (
+        "the pre-scan collection floor refused this, not the census"
+    )
 
 
 def test_a_file_quoting_a_failure_message_still_counts_as_scanned(
@@ -2455,6 +2497,163 @@ def test_a_naive_new_except_arm_fails_closed(
         "reachable by falling through instead of by a completion event"
     )
     # POSITIVE proof that the CENSUS refused, not another guard.
-    assert "0 scanned" in err and "4 unreadable" in err, (
+    assert "0 scanned" in err and "4 could not be scanned" in err, (
         f"rc=2 did not come from the census — stderr was {err!r}"
+    )
+
+
+def test_the_completion_flag_is_the_last_statement_of_the_try_body() -> None:
+    """PIN THE FLAG'S POSITION, not just its existence.
+
+    `_ScannedOk` is returned only when `completed` is True, which makes the
+    ASSIGNMENT's position load-bearing: a new detection pass appended AFTER
+    `completed = True` but inside the same `try` runs with the flag already
+    set, so a file whose scan raises in that pass is still marked as a
+    completed scan. Measured on a mutant of exactly that shape: 4 of 4 counted,
+    rc=1 — the same outcome ADR-0060 records for both REJECTED designs.
+
+    That shape is not hypothetical. This file grows by appending passes; the
+    suppression pass is the most recent one. Existence tests cannot see it,
+    because the flag is still there and still assigned.
+    """
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"), filename=str(_SCRIPT))
+
+    scan_text = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_scan_text"
+    )
+    tries = [n for n in scan_text.body if isinstance(n, ast.Try)]
+    assert len(tries) == 1, f"expected one top-level try in _scan_text, found {len(tries)}"
+
+    last = tries[0].body[-1]
+    assert isinstance(last, ast.Assign), (
+        f"the last statement of _scan_text's try body is {type(last).__name__}, "
+        f"not the `completed = True` assignment — anything appended after it "
+        f"runs with the completion flag already set"
+    )
+    targets = [t.id for t in last.targets if isinstance(t, ast.Name)]
+    assert targets == ["completed"], f"expected `completed = True`, found targets {targets}"
+    assert isinstance(last.value, ast.Constant) and last.value.value is True, (
+        "the completion flag must be set to a literal True as the final act of the try body"
+    )
+
+
+# The one collection failure a DIRECTORY scan cannot reach: its trigger is a
+# path that is never created, so traversal finds nothing and `EmptyScanRootError`
+# refuses first. It is reachable only as an explicit file argument, which is
+# census-exempt by design. Declared here so the exclusion cannot silently widen —
+# `test_the_traversal_unreachable_failure_is_still_exactly_one` pins the count.
+_TRAVERSAL_UNREACHABLE: frozenset[str] = frozenset({check_tag_t3._UNSCANNABLE_PATH_MESSAGE})
+_CENSUS_REACHABLE: tuple[str, ...] = tuple(
+    m for m in _COLLECTION_FAILURE_MESSAGES if m not in _TRAVERSAL_UNREACHABLE
+)
+
+
+def test_the_traversal_unreachable_failure_is_still_exactly_one() -> None:
+    """Pin the exclusion above, so a sixth message cannot join it unnoticed.
+
+    A widening exclusion list is how an end-to-end matrix quietly stops covering
+    what it claims. Both halves are derived from the module's own constants.
+    """
+    assert len(_TRAVERSAL_UNREACHABLE) == 1
+    assert _TRAVERSAL_UNREACHABLE.issubset(_COLLECTION_FAILURE_MESSAGES)
+    assert len(_CENSUS_REACHABLE) == len(_COLLECTION_FAILURE_MESSAGES) - 1
+
+
+def test_the_unreachable_failure_is_unreachable_for_the_stated_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """MEASURE the exclusion's reason rather than asserting it in a comment.
+
+    If this ever starts producing files, the exclusion is wrong and the matrix
+    above should cover it.
+    """
+    tree = tmp_path / "unreachable"
+    tree.mkdir()
+    target = _trigger_unscannable_path(tree)
+
+    assert not target.exists(), "the trigger created a file — it IS traversable now"
+    assert not list(tree.glob("*.py")), "traversal would find files — update the exclusion"
+    assert check_tag_t3.main([str(tree)]) == 2
+    assert "no Python files found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("message", _CENSUS_REACHABLE)
+def test_every_collection_failure_reaches_the_census_end_to_end(
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """DRIVE THE CENSUS over every failure shape, not just the parseable one.
+
+    The `_FAILURE_TRIGGERS` matrix was only ever exercised against `_scan_file`.
+    Every end-to-end census test used a syntax error or `_ALWAYS_UNSCANNABLE`,
+    so `_UNREADABLE`, `_UNDECODABLE` and `_UNSCANNABLE_PATH` never reached
+    `main`'s counting at all.
+
+    That gap is what let a laundering edit inside `main` survive: adding
+    `or any(_UNREADABLE_MESSAGE in line for line in violations)` to the
+    `isinstance` check restores the exact pre-#547 defect — 260 unreadable
+    files go rc=1 — while leaving every test green. A name census cannot catch
+    it either, because the edit adds no `_ScannedOk` reference. Only driving
+    each failure shape through the census does.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 4)
+    tree = tmp_path / "census"
+    tree.mkdir()
+    build = _FAILURE_TRIGGERS[message]
+    for index in range(4):
+        case = tree / f"case{index}"
+        case.mkdir()
+        build(case)
+
+    assert check_tag_t3.main([str(tree)]) == 2, (
+        f"{message!r} did not drive the census to a refusal — these files were "
+        f"counted as completed scans"
+    )
+    err = capsys.readouterr().err
+    assert "0 scanned" in err, f"{message!r}: expected zero completed scans, got {err!r}"
+    assert "not reaching the source tree" not in err
+
+
+@_NEEDS_SYMLINKS
+def test_an_alias_of_an_exempt_file_is_still_gated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION. Dedup must COUNT distinct files, never DECIDE which are scanned.
+
+    A draft of #547 keyed a dict on the resolved path and iterated the
+    survivors. `_is_exempt` deliberately requires the LEXICAL and RESOLVED views
+    to AGREE, so an alias and its exempt target get OPPOSITE verdicts — and
+    last-wins over sorted order discarded whichever spelling sorted first. When
+    that was the non-exempt alias, the exempt target survived, `main` skipped
+    it, and a real violation vanished: measured rc=1 before the draft, rc=0 with
+    empty stderr after.
+
+    It failed OPEN and SILENT, and only when the alias sorted BEFORE its target,
+    so an ordering-blind test passes straight through it. `aaa_alias.py` is named
+    to sort first deliberately.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 2)
+    tree = _build_flat_tree(tmp_path / "alias", 1, "x = 1\n")
+    target = tree / "test_exempt.py"
+    target.write_text(
+        "from alfred.security.tiers import tag, T3\nv = tag(T3, 'payload')\n", encoding="utf-8"
+    )
+    alias = tree / "aaa_alias.py"
+    alias.symlink_to(target)
+
+    assert check_tag_t3._is_exempt(target), "fixture broken: the target must be exempt"
+    assert not check_tag_t3._is_exempt(alias), (
+        "fixture broken: the alias must NOT be exempt — that opposition is the bug"
+    )
+    assert sorted(p.name for p in tree.glob("*.py"))[0] == "aaa_alias.py", (
+        "the alias must sort BEFORE its target or the bug does not reproduce"
+    )
+
+    assert check_tag_t3.main([str(tree)]) == 1, (
+        "the alias was not gated — dedup discarded it and skipped its exempt "
+        "target, silently un-gating a real tag(T3, ...) violation"
     )

@@ -5,8 +5,9 @@
 - **Slice**: #547 (`check_tag_t3` aggregate census — the last open member of the #536 family)
 - **Relates to**: [ADR-0058](0058-single-approved-t3-authoring-home.md) (whose Consequences
   carry the instruction "Do not implement #547 against its body as written" — **this ADR
-  supersedes that instruction**; the issue body was rewritten 2026-08-03 and this records what
-  was implemented instead), [ADR-0059](0059-default-deny-on-unresolvable-tier-slices.md)
+  discharges that instruction**, it does not overturn it: the instruction was OBEYED. The
+  issue body was rewritten 2026-08-03 and this records what was implemented instead. ADR-0060
+  relies on ADR-0058's single-exempt-home rule rather than reversing any part of it), [ADR-0059](0059-default-deny-on-unresolvable-tier-slices.md)
   (default-deny on an unreadable operand — same principle, different axis), issue
   [#547](https://github.com/alfred-os/AlfredOS/issues/547)
 
@@ -101,8 +102,7 @@ a second lie.
   reusing an existing message. Rejected.
 - **Mark the try fall-through** (an early `return` in the broad-except arm, no flag). Measured
   fail-open on a naive new arm, byte-identical to the above. Rejected. The coverage objection
-  originally used to reject the flag was backwards: the flag variant reaches 100% at 366
-  branches with both arcs driven by real inputs.
+  originally used to reject the flag was backwards: the flag variant reaches 100% at 366 branches with both arcs driven by real inputs.
 - **An explicit `(outcome, violations)` tuple** threaded through `_scan_file`/`_scan_text`
   behind list-returning wrappers. Rejected on surface cost: an enum, two wrappers and new
   branches on a file under a REQUIRED 100% no-pragma gate, for a signal a subclass carries at
