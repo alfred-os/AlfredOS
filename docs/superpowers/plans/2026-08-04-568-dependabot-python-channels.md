@@ -54,6 +54,11 @@ and the weekly pip updater. BOTH files carry the specifier and BOTH are parsed
 by the `uv` updater, so both are pinned here — a pyproject-only check would
 report green on a repo where the fix does not work.
 
+The two manifests hold it at DIFFERENT depths: PEP 621 puts pyproject's under
+`[project]`, while uv.lock carries it at top level. The accessor path is part of
+each manifest's entry rather than a shared assumption, because assuming one
+shape for both makes the pyproject case permanently red.
+
 The real floor is enforced at import by `alfred._python_floor` (ADR-0061).
 """
 
@@ -62,6 +67,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -72,16 +78,31 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 #: from whatever produces the value.
 _SERIES_LEVEL = re.compile(r"^>=\d+\.\d+$")
 
-_MANIFESTS = (
-    Path("pyproject.toml"),
-    Path("uv.lock"),
+#: (manifest, key path to `requires-python`). The paths differ — see the docstring.
+_MANIFESTS: tuple[tuple[Path, tuple[str, ...]], ...] = (
+    (Path("pyproject.toml"), ("project", "requires-python")),
+    (Path("uv.lock"), ("requires-python",)),
 )
 
+_MANIFEST_IDS = [manifest.as_posix() for manifest, _ in _MANIFESTS]
 
-@pytest.mark.parametrize("manifest", _MANIFESTS, ids=lambda p: p.as_posix())
-def test_requires_python_is_series_level(manifest: Path) -> None:
-    raw = (_REPO_ROOT / manifest).read_bytes()
-    spec = tomllib.loads(raw.decode())["requires-python"]
+
+def _specifier(manifest: Path, key_path: tuple[str, ...]) -> str:
+    """Read `requires-python` out of `manifest` by walking `key_path`."""
+    node: Any = tomllib.loads((_REPO_ROOT / manifest).read_bytes().decode())
+    for key in key_path:
+        assert key in node, (
+            f"{manifest.as_posix()} has no {'.'.join(key_path)} — the manifest layout "
+            f"changed and this pin is reading the wrong place"
+        )
+        node = node[key]
+    assert isinstance(node, str)
+    return node
+
+
+@pytest.mark.parametrize(("manifest", "key_path"), _MANIFESTS, ids=_MANIFEST_IDS)
+def test_requires_python_is_series_level(manifest: Path, key_path: tuple[str, ...]) -> None:
+    spec = _specifier(manifest, key_path)
     assert _SERIES_LEVEL.match(spec), (
         f"{manifest.as_posix()} declares requires-python = {spec!r}, which carries a patch "
         f"component. Dependabot cannot resolve it and will abort with "
@@ -94,10 +115,8 @@ def test_requires_python_is_series_level(manifest: Path) -> None:
 def test_both_manifests_agree() -> None:
     """A lockfile that drifts from pyproject re-breaks Dependabot silently."""
     specs = {
-        manifest.as_posix(): tomllib.loads((_REPO_ROOT / manifest).read_bytes().decode())[
-            "requires-python"
-        ]
-        for manifest in _MANIFESTS
+        manifest.as_posix(): _specifier(manifest, key_path)
+        for manifest, key_path in _MANIFESTS
     }
     assert len(set(specs.values())) == 1, (
         f"requires-python differs between manifests: {specs}. `uv sync --frozen` returns 0 "
@@ -111,7 +130,9 @@ def test_both_manifests_agree() -> None:
 uv run pytest tests/unit/meta/test_requires_python_is_dependabot_resolvable.py -v
 ```
 
-Expected: both parametrised cases FAIL, reporting `'>=3.14.6'`. If any case passes now, stop — the premise is wrong.
+Expected: both parametrised cases FAIL with an **AssertionError reporting `'>=3.14.6'`** — not a
+`KeyError`. A `KeyError` means the accessor is reading the wrong depth and the test could never
+go green; stop and fix the accessor. If any case PASSES now, stop — the premise is wrong.
 
 - [ ] **Step 3: Relax `pyproject.toml`**
 
