@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from alfred._python_floor import REFUSAL_KEY
 from alfred.audit import audit_row_schemas
 from alfred.plugins import manifest_reader, sandbox_policy
 
@@ -57,13 +58,14 @@ _RESERVED_UNEMITTED = frozenset(
 
 
 def test_sandbox_refused_reasons_constant_shape() -> None:
-    """The vocabulary is a real frozenset[str] of 35, and contains every reserved reason."""
+    """The vocabulary is a real frozenset[str] of 37, and contains every reserved reason."""
     reasons = audit_row_schemas.SANDBOX_REFUSED_REASONS
     assert isinstance(reasons, frozenset)
     assert all(isinstance(r, str) and r for r in reasons)
-    # 36 as of ADR-0057 (#486): +environment_untrusted_source. Bump DELIBERATELY — this
-    # count exists so adding a refusal reason is a conscious act, not a side effect.
-    assert len(reasons) == 36, f"expected 36 reasons, got {len(reasons)}: {sorted(reasons)}"
+    # 37 as of #568: +interpreter_below_floor (36 was ADR-0057/#486's
+    # +environment_untrusted_source). Bump DELIBERATELY — this count exists so
+    # adding a refusal reason is a conscious act, not a side effect.
+    assert len(reasons) == 37, f"expected 37 reasons, got {len(reasons)}: {sorted(reasons)}"
     missing_reserved = _RESERVED_UNEMITTED - reasons
     assert not missing_reserved, (
         f"reserved reasons dropped from the vocab: {sorted(missing_reserved)}"
@@ -260,6 +262,52 @@ def _parse_case(subject: str) -> tuple[frozenset[str], str | None]:
     return first_arm, fallback
 
 
+def _parse_environment_case() -> tuple[frozenset[str], str | None, str | None]:
+    """Parse the launcher's ``case "${_env_err_key}" in`` block — now THREE arms (#568).
+
+    NOT reusable via ``_parse_case``: that helper's "exactly two arms" contract (allow-list +
+    ``*)``) still holds for the schema case (``${_CAPTURED_REASON}``), its only other caller.
+    #568 added a second recognised arm to the environment case —
+    ``daemon.boot.interpreter_below_floor`` — sourced from a DIFFERENT emitter than the first
+    arm's three keys: ``alfred._python_floor.REFUSAL_KEY`` is raised at package *import*, before
+    ``_cmd_read_environment`` is ever called, so it is not one of that function's ``_fail()``
+    call sites. Folding it into the first arm's pipe-list would make
+    ``test_environment_case_classifies_exactly_the_read_environment_keys`` compare a 4-member
+    case arm against ``_read_environment_keys()``'s 3-member AST-derived set and fail for the
+    WRONG reason — this file's own #432 vacuity lesson, applied to itself. Keeping the arms
+    separate lets each be bound to its own real source.
+
+    Returns (read-environment allow-list arm, the floor-guard arm's single pattern or ``None``,
+    the ``*)`` fallback literal or ``None``).
+    """
+    body = _extract_case_body("${_env_err_key}")
+
+    read_environment_arm: frozenset[str] | None = None
+    floor_arm: str | None = None
+    fallback: str | None = None
+    stray_arms: list[str] = []
+    for arm in (a.strip() for a in body.split(";;") if a.strip()):
+        pattern, _, arm_body = arm.partition(")")
+        pattern = pattern.strip()
+        if pattern == "*":
+            matches = re.findall(r'[A-Za-z_]\w*="([^"]*)"', arm_body)
+            fallback = matches[-1] if matches else None
+        elif read_environment_arm is None:
+            read_environment_arm = frozenset(
+                alt.strip() for alt in pattern.split("|") if alt.strip()
+            )
+        elif floor_arm is None:
+            floor_arm = pattern
+        else:
+            stray_arms.append(pattern)
+    assert not stray_arms, (
+        f"the environment case has arm(s) beyond the allow-list, the floor-guard arm, and the "
+        f"`*)` fallback: {stray_arms}. This parser understands exactly three arms; extend it."
+    )
+    assert read_environment_arm, "no allow-list arm parsed under the environment case"
+    return read_environment_arm, floor_arm, fallback
+
+
 def _parse_mapping_case(subject: str, var: str) -> dict[str, str]:
     """Parse a launcher ``case "<subject>" in`` whose arms each assign ``var="literal"``.
 
@@ -401,7 +449,7 @@ def test_environment_case_classifies_exactly_the_read_environment_keys() -> None
     A key missing here silently degrades to the fail-closed environment_not_set default — a real
     refusal reported as the wrong one. Same drift class as the schema case, second copy.
     """
-    first_arm, _ = _parse_case("${_env_err_key}")
+    first_arm, _, _ = _parse_environment_case()
     expected = _read_environment_keys()
     # 3 as of ADR-0057 (#486): not_set, unrecognised, untrusted_source.
     assert len(expected) == 3, f"vacuity floor: derived {len(expected)} environment keys, want 3"
@@ -414,6 +462,18 @@ def test_environment_case_classifies_exactly_the_read_environment_keys() -> None
     )
 
 
+def test_environment_case_floor_arm_matches_the_floor_guards_own_key() -> None:
+    """#568: the environment case's second arm is sourced from a DIFFERENT emitter —
+    `alfred._python_floor.REFUSAL_KEY`, raised at package import rather than by
+    `_cmd_read_environment` — so it is bound against that source directly rather than folded
+    into `_read_environment_keys()`'s AST walk (which cannot see it and must not be made to)."""
+    _, floor_arm, _ = _parse_environment_case()
+    assert floor_arm == REFUSAL_KEY, (
+        f"the environment case's floor-guard arm is {floor_arm!r}, not {REFUSAL_KEY!r} — "
+        f"alfred._python_floor.REFUSAL_KEY and the launcher's case arm have drifted apart."
+    )
+
+
 def _launcher_emittable_reasons() -> frozenset[str]:
     """Every reason any path through the launcher can write into a sandbox_refused row.
 
@@ -421,8 +481,8 @@ def _launcher_emittable_reasons() -> frozenset[str]:
     resolves its `reason` field:
       * a literal -> {that literal};
       * `%s` fed by ${_AUDIT_REASON}    -> union of the schema case first arm and its `*)` arm;
-      * `%s` fed by ${_env_err_key#...} -> union of the env case first arm and its `*)` arm
-        (prefix-stripped);
+      * `%s` fed by ${_env_err_key#...} -> union of the env case first arm, its #568 floor-guard
+        arm, and its `*)` arm (prefix-stripped);
       * `%s` fed by ${_SANDBOX_REASON}  -> the #434A mapping-case's resolved values (its `*)` arm
         assigns the same variable, so its fallback is already folded into the mapping — no
         separate union needed here).
@@ -431,7 +491,7 @@ def _launcher_emittable_reasons() -> frozenset[str]:
     silently skipped while a `>= N` floor still passes (#432 review ops-001 / err-003).
     """
     schema_first, schema_fallback = _parse_case("${_CAPTURED_REASON}")
-    env_first, env_fallback = _parse_case("${_env_err_key}")
+    env_first, env_floor_arm, env_fallback = _parse_environment_case()
     sandbox_map = _parse_mapping_case("${_sandbox_err_key}", "_SANDBOX_REASON")
     sandbox_set = set(sandbox_map.values())
 
@@ -439,6 +499,8 @@ def _launcher_emittable_reasons() -> frozenset[str]:
     if schema_fallback is not None:
         schema_set.add(schema_fallback)
     env_set = {key.removeprefix(_ENV_KEY_PREFIX) for key in env_first}
+    if env_floor_arm is not None:
+        env_set.add(env_floor_arm.removeprefix(_ENV_KEY_PREFIX))
     if env_fallback is not None:
         env_set.add(env_fallback.removeprefix(_ENV_KEY_PREFIX))
 
@@ -523,7 +585,7 @@ def test_case_fallback_literals_are_in_the_closed_vocab() -> None:
     something out-of-vocab and this fails by name (belt-and-suspenders with the ⊆ test).
     """
     _, schema_fallback = _parse_case("${_CAPTURED_REASON}")
-    _, env_fallback = _parse_case("${_env_err_key}")
+    _, _, env_fallback = _parse_environment_case()
     assert schema_fallback is not None, "schema case `*)` arm has no assigned literal"
     assert env_fallback is not None, "environment case `*)` arm has no assigned literal"
     fallbacks = {schema_fallback, env_fallback.removeprefix(_ENV_KEY_PREFIX)}

@@ -1230,6 +1230,13 @@ SANDBOX_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
         # ADR-0057 (#486): a `.env`-sourced value that is not `production`. A writable
         # `.env` may tighten the sandbox, never loosen it.
         "environment_untrusted_source",
+        # #568: the interpreter running `manifest_reader` is below the ENFORCED
+        # CPython floor. `pyproject.toml` is series-level so Dependabot can resolve
+        # it, so this is the first check that refuses a sub-floor interpreter — and
+        # `:241` imports `alfred`, so it fires there, pre-exec. Without this token
+        # the `*)` arm recorded it as `environment_not_set`: wrong subsystem, wrong
+        # remedy, in a signed append-only row.
+        "interpreter_below_floor",
         "fake_uname_in_production",
         "unknown_host_os",
         "uid_separation_unavailable",

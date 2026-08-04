@@ -245,9 +245,28 @@ if ! _capture_stderr_last_line "unset" "unknown" python3 -m alfred.plugins.manif
     # refusing with a generic reason; fall back to the not_set key if the
     # capture was empty (fail-closed).
     _env_err_key="${_CAPTURE_ERR_LAST_LINE}"
+    # Each comment below lives INSIDE its own arm's body (after that arm's
+    # OWN `)`), never in the gap between two arms. This file's text-based
+    # drift-guard (`_parse_environment_case` in
+    # test_sandbox_reason_vocab_sync.py) splits the case body on `;;` and
+    # takes the FIRST `)` in each chunk as the pattern terminator — a
+    # between-arm comment containing its own `)` (e.g. a `(#nnn)` citation)
+    # would fuse into the following arm's parsed pattern and corrupt it
+    # silently. Same discipline as the `${_sandbox_err_key}` case below.
     case "${_env_err_key}" in
         daemon.boot.environment_unrecognised | daemon.boot.environment_not_set | daemon.boot.environment_untrusted_source) : ;;
-        *) _env_err_key="daemon.boot.environment_not_set" ;;
+        daemon.boot.interpreter_below_floor)
+            # #568: the floor guard in `alfred/__init__.py` fires on ANY
+            # `alfred` import, and this line imports it. Its message ends
+            # with this bare key precisely so the capture above names the
+            # real cause.
+            : ;;
+        *)
+            # An empty or unrecognised capture is a drift/crash ALARM, not a
+            # routine refusal — mirror the `:440` exemplar and say so rather
+            # than guessing `environment_not_set` into a signed audit row
+            # (#434B, #568).
+            _env_err_key="daemon.boot.reason_unclassified" ;;
     esac
     printf '%s plugin_id=%s\n' "${_env_err_key}" "${PLUGIN_ID}" >&2
     printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"%s","environment":"unset","host_os":"unknown"}\n' "${PLUGIN_ID}" "${_env_err_key#daemon.boot.}" >&2
