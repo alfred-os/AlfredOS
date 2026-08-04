@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from collections.abc import Iterable
 
 # Privileged host subsystems the quarantined child must never be able to import.
 # Roots are matched as ``m == root or m.startswith(root + ".")`` so a submodule
@@ -69,6 +70,16 @@ def _is_forbidden(module_name: str) -> bool:
     return any(
         module_name == root or module_name.startswith(root + ".") for root in _FORBIDDEN_ROOTS
     )
+
+
+def _alfred_modules_to_clear(module_names: Iterable[str]) -> list[str]:
+    """Every ``alfred`` module to evict before measuring the child's import delta.
+
+    The ENTIRE tree, including the BARE package. Leaving ``alfred`` resident means
+    ``src/alfred/__init__.py`` never re-executes, so whatever it imports is absent
+    from the delta and the ADR-0030 reachable-surface bound cannot see it (#568).
+    """
+    return [name for name in module_names if name == "alfred" or name.startswith("alfred.")]
 
 
 def test_quarantine_child_package_is_wheel_path_importable() -> None:
@@ -106,7 +117,7 @@ def test_quarantine_child_import_closure_touches_no_privileged_module() -> None:
         # (since 2026-05-27, #95), so `alfred` is already resident during
         # collection even when this file is run alone. There was no way to run
         # the pre-fix gate that would have caught it.
-        to_clear = [name for name in sys.modules if name == "alfred" or name.startswith("alfred.")]
+        to_clear = _alfred_modules_to_clear(sys.modules)
         for name in to_clear:
             del sys.modules[name]
 
@@ -128,18 +139,22 @@ def test_quarantine_child_import_closure_touches_no_privileged_module() -> None:
         sys.modules.update(_orig_modules)
 
 
-def test_the_closure_measurement_includes_the_package_init() -> None:
-    """The gate must re-execute `alfred/__init__.py`, not inherit it from a sibling test.
+def test_the_clearing_rule_evicts_the_bare_alfred_package() -> None:
+    """#568: omitting the bare package is what made the gate blind.
 
-    #568: `to_clear` once omitted `alfred` itself, so a forbidden import added to
-    the package __init__ was invisible whenever any earlier test had already
-    imported `alfred` — i.e. always, in a real session. Asserting the CLEARING
-    RULE rather than a symptom, because the symptom only appears once
-    __init__.py is non-empty.
+    Calls the PRODUCTION helper. The previous version of this test rebuilt the
+    predicate inline and so passed even with the rule reverted — verified by
+    mutation.
     """
-    resident = {"alfred", "alfred.security", "alfred.security.quarantine_child"}
-    cleared = {name for name in resident if name == "alfred" or name.startswith("alfred.")}
+    cleared = _alfred_modules_to_clear(
+        ["alfred", "alfred.security", "alfred.security.quarantine_child", "os"]
+    )
     assert "alfred" in cleared, (
-        "the closure gate must clear the bare `alfred` package so its __init__ re-runs; "
+        "the closure gate must evict the bare `alfred` package so its __init__ re-runs; "
         "otherwise the dual-LLM reachable-surface bound cannot see what __init__ imports"
     )
+
+
+def test_the_clearing_rule_leaves_unrelated_modules_resident() -> None:
+    """`alfredo` must not match: the rule is `alfred.`-prefixed, not `alfred`-prefixed."""
+    assert _alfred_modules_to_clear(["os", "sys", "alfredo"]) == []
