@@ -159,8 +159,8 @@ coverage-unit: ## Build the unit-only coverage dataset CI's `python` job gates r
 lockcheck: ## Fail if uv.lock has drifted from pyproject.toml (#568).
 	uv lock --check
 
-coverage-gates-unit: coverage-unit ## Run the 28 unit-tier 100% gates from ci.yml.
-	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 28
+coverage-gates-unit: coverage-unit ## Run the 29 unit-tier 100% gates from ci.yml.
+	uv run python3 scripts/run_coverage_gates.py --job python --min-gates 29
 
 # ORDER IS LOAD-BEARING: the unit gates must read unit-ONLY data. Combined data
 # is a superset, so running them after the integration append would let a module

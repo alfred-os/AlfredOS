@@ -45,7 +45,10 @@ _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 # (scripts/run_coverage_gates.py, scripts/check_strict_declarations.py), so the
 # `python` job's count moved 26 -> 28. Derived, not stated: `_iter_gates` over
 # ci.yml reports 28 / 22. The combined job is untouched.
-_MIN_UNIT_GATES = 28
+# 2026-08-05: #568 added a 29th unit-tier gate
+# (scripts/check_dependency_graph_freshness.py) — the CLI shell Task 5 left
+# omitted pending this task's caller.
+_MIN_UNIT_GATES = 29
 _MIN_COMBINED_GATES = 22
 
 # `runner`, `ci_workflow` and `ci_workflow_raw` come from

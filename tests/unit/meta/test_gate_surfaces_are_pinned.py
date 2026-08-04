@@ -98,6 +98,11 @@ _REQUIRED_COVERAGE_GATES: tuple[tuple[str, int], ...] = (
     # `--cov=scripts` widened the dataset without widening the gates.
     ("scripts/run_coverage_gates.py", 100),
     ("scripts/check_strict_declarations.py", 100),
+    # #568: the CLI shell of the Dependabot Python-graph freshness monitor.
+    # Task 5 left it omitted in pyproject.toml pending a caller; the
+    # `.github/workflows/dependency-graph-freshness.yml` step this pin
+    # anchors is that caller, so it is gated at 100% rather than omitted.
+    ("scripts/check_dependency_graph_freshness.py", 100),
 )
 
 # `if:` conditions a gate step may carry, NORMALISED. `steps.check.outputs.has_py`
@@ -136,6 +141,7 @@ _GATE_STEP_NAMES: tuple[str, ...] = (
     "check_tag_t3 detector 100% line+branch coverage",
     "run_coverage_gates runner 100% line+branch coverage",
     "check_strict_declarations guard 100% line+branch coverage",
+    "check_dependency_graph_freshness 100% line+branch coverage",
 )
 
 # Per-step (include, threshold), keyed by the SAME name pinned in _GATE_STEP_NAMES.

@@ -265,21 +265,6 @@ omit = [
     "scripts/gen_alfred_seccomp.py",
     "scripts/quarantine_spawn_probe.py",
     "scripts/validate_devin_wiki.py",
-    # #568. `check_dependency_graph_freshness.py`'s `evaluate()` and its four
-    # helper functions are covered by tests/unit/meta/test_dependency_graph_
-    # freshness.py's 10 mutation-verified cases. The CLI shell — `main()`,
-    # `_read_json`'s error branches, argparse wiring — is NOT: nothing invokes
-    # this script as a subprocess yet, because the workflow step that will
-    # (`--sbom`/`--runs`/`--min-packages` from a live `gh api` call) is a
-    # follow-up task, not this one. Measured 2026-08-05 on the unit-only
-    # dataset: 59% (lines 96-111, 150, 196-202, 206-230 — `report()`'s
-    # unhealthy-path formatting, one `lock_versions` branch, `_read_json`,
-    # `main()`). Omitted rather than gated at <100% for the same reason as
-    # `validate_devin_wiki.py` above: a non-100 threshold is a different
-    # promise than #543 asks for. Revisit when the workflow wiring lands and
-    # exercises the CLI end-to-end — at that point this becomes either a
-    # 100% gate or a ratcheted one in ci.yml, not a permanent omission.
-    "scripts/check_dependency_graph_freshness.py",
     # Vendored third-party code under scripts/vendor/. The census filters it out
     # of the MEASURED set, but nothing stopped `--cov=scripts` measuring it — so
     # a vendored file would drag the whole-tree floor with no owner and no gate.

@@ -137,6 +137,7 @@ is now BLOCKING on macOS and Windows — #246 Phase A/B. See below.)
 | Check name | Workflow | Why not required |
 | --- | --- | --- |
 | `CodeRabbit` | (external service, no workflow file) | CodeRabbit has occasional service blips that surface as non-success status. We gate via `request_changes_workflow: true` in `.coderabbit.yaml` + the 1-approving-review rule instead, so an outage means "manually approve" rather than "repo unmergeable". |
+| `Dependency graph freshness` | `.github/workflows/dependency-graph-freshness.yml` | `schedule:`-only (`workflow_dispatch:` for manual runs); deliberately permanent, not "pending promotion". It cannot be a PR check because the `Dependency Graph` workflow (id `283281805`) has only ever run on `main` — 41/41 runs, zero on a `pull_request` ref — so a PR-triggered leg would have no run to read. It also cannot trigger on `push: main`: the graph run is created ~6s after a push and takes 34-45s plus ingest lag, so reading it immediately after a push sees the PRE-push graph and reports false drift (#568). Failure is routed to a permanently-open tracking issue (label `dependency-graph-health`) rewritten each run, not to the merge button — "open on drift, close on resync" would make silence read as healthy, which is #568's own failure class recurring inside its remedy. |
 
 ## On bypass
 
