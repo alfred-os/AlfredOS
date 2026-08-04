@@ -146,13 +146,19 @@ Replace `pyproject.toml:6-12` (the comment block and the `requires-python` line)
 # updates, and the weekly pip updater. The ENFORCED floor is 3.14.6 and lives in
 # `alfred._python_floor`, checked at import.
 #
-# gh-135228: CPython 3.14.0-3.14.4 generate a broken `__setattr__` for
-# `@dataclass(frozen=True, slots=True)` — the generated function closes over the
-# pre-slots class, so an unknown-attribute assignment raises a spurious
-# `TypeError: super(type, obj)` instead of FrozenInstanceError. Fixed in 3.14.5
-# (`_frozen_get_del_attr` -> `_frozen_set_del_attr`, `cls` -> `__class__`), NOT
-# 3.14.6 as previously recorded here. AlfredOS has 36+ frozen+slots dataclasses,
-# including trust-boundary types.
+# gh-105936: `@dataclass(frozen=True, slots=True)` generates `__setattr__` /
+# `__delattr__` that close over the PRE-slots class, so an unknown-attribute
+# assignment raises a spurious `TypeError: super(type, obj)` instead of
+# FrozenInstanceError. NOT a 3.14 regression — it is long-standing, and the fix
+# (CPython GH-144021) was backported to 3.13 as well (GH-148476). It reached the
+# 3.14 series via GH-148469, released in 3.14.5; measured broken on 3.14.0 and
+# 3.14.4, correct on 3.14.5 and 3.14.6, so within 3.14 the affected patches are
+# 3.14.0-3.14.4. AlfredOS has 36+ frozen+slots dataclasses, incl. trust-boundary
+# types.
+#
+# This repo cited gh-135228 from #303 until #568. That is a DIFFERENT issue —
+# "slot dataclasses classes leak original class" — same area and same underlying
+# closure-cell change, but not the `__setattr__` behaviour this floor exists for.
 requires-python = ">=3.14"
 ```
 
@@ -541,7 +547,7 @@ def enforce(version: tuple[int, int, int]) -> None:
         f"({sys.executable}).\n"
         f"\n"
         f"Why: CPython 3.14.0-3.14.4 generate a broken __setattr__ for\n"
-        f"@dataclass(frozen=True, slots=True) (gh-135228) — an unknown-attribute\n"
+        f"@dataclass(frozen=True, slots=True) (gh-105936) — an unknown-attribute\n"
         f"assignment raises TypeError instead of FrozenInstanceError. AlfredOS has\n"
         f"36+ such frozen types, including trust-boundary types, so the failure is\n"
         f"silent rather than loud. Fixed upstream in 3.14.5; the floor is held at\n"
@@ -1698,7 +1704,13 @@ git commit -m "ci: #568 add the scheduled dependency-graph freshness monitor"
 
 - [ ] **Step 1: Correct the guard test's docstring**
 
-In `tests/unit/test_frozen_slots_dataclass_regression_guard.py`, replace the range claim on lines 3-8 and the class docstring on line 26. The corrected fact: the regression is in **3.14.0–3.14.4** and was fixed in **3.14.5** (`_frozen_get_del_attr` → `_frozen_set_del_attr`, `cls` → `__class__`); the floor is held at 3.14.6 because that is the only patch CI exercises, and it is now enforced by `alfred._python_floor`, not by `requires-python`.
+In `tests/unit/test_frozen_slots_dataclass_regression_guard.py`, fix BOTH the citation and the
+range. The file cites **gh-135228** in four places (lines 1, 10, 28 as `gh135228` in a test NAME,
+and 32); the correct issue is **gh-105936** — gh-135228 is "slot dataclasses classes leak original
+class", a different bug in the same area. The fix PR is CPython GH-144021, reaching 3.14 via
+GH-148469. Renaming the test method is part of this: `test_unknown_attribute_assignment_is_not_the_gh135228_typeerror`
+carries the wrong number in its own name. Then correct the range claim on lines 3-8 and the class
+docstring on line 26. The corrected fact: the regression is in **3.14.0–3.14.4** and was fixed in **3.14.5** (`_frozen_get_del_attr` → `_frozen_set_del_attr`, `cls` → `__class__`); the floor is held at 3.14.6 because that is the only patch CI exercises, and it is now enforced by `alfred._python_floor`, not by `requires-python`.
 
 - [ ] **Step 2: Correct the canonical rules file**
 
