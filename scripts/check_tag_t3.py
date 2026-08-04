@@ -765,8 +765,12 @@ def _is_exempt(path: Path) -> bool:
         lexical = Path(os.path.normpath(path.absolute()))
     except (OSError, RuntimeError, ValueError):
         # A path we cannot resolve is not one of the known-good homes.
-        # ValueError is NOT redundant: an embedded NUL raises ValueError,
-        # not OSError, on every supported platform.
+        # ValueError is NOT redundant: an embedded NUL raises ValueError, not
+        # OSError, on POSIX. NOT "on every supported platform" — that claim was
+        # here and #547 measured it false: windows-latest resolves an embedded
+        # NUL without complaint. The guard stays broad because WHICH exception
+        # a hostile path produces is a platform fact this code should not
+        # predict, which is the same reason the arm catches three classes.
         return False
 
     # Lexical normalisation collapses ``..`` WITHOUT following symlinks. Both
