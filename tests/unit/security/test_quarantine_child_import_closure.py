@@ -94,15 +94,15 @@ def test_quarantine_child_import_closure_touches_no_privileged_module() -> None:
     # broker bound to the original module object. #237.
     _orig_modules = dict(sys.modules)
     try:
-        # Drop any already-imported child + privileged modules so the delta
-        # reflects the child's OWN reachable surface, not residue from a sibling.
-        to_clear = [
-            name
-            for name in sys.modules
-            if name == _CHILD_PACKAGE
-            or name.startswith(_CHILD_PACKAGE + ".")
-            or _is_forbidden(name)
-        ]
+        # Drop the ENTIRE `alfred` tree, not just the child + forbidden roots.
+        # #568: clearing only those leaves `alfred` itself resident, so
+        # `src/alfred/__init__.py` never re-executes and anything IT imports is
+        # absent from the delta — the gate was structurally blind to the package
+        # __init__. Inert while that file was empty; `alfred._python_floor` now
+        # populates it. The blindness was order-dependent (running this file
+        # alone re-imported `alfred` and measured correctly), which is why it
+        # survived review.
+        to_clear = [name for name in sys.modules if name == "alfred" or name.startswith("alfred.")]
         for name in to_clear:
             del sys.modules[name]
 
@@ -122,3 +122,20 @@ def test_quarantine_child_import_closure_touches_no_privileged_module() -> None:
         for name in set(sys.modules) - set(_orig_modules):
             del sys.modules[name]
         sys.modules.update(_orig_modules)
+
+
+def test_the_closure_measurement_includes_the_package_init() -> None:
+    """The gate must re-execute `alfred/__init__.py`, not inherit it from a sibling test.
+
+    #568: `to_clear` once omitted `alfred` itself, so a forbidden import added to
+    the package __init__ was invisible whenever any earlier test had already
+    imported `alfred` — i.e. always, in a real session. Asserting the CLEARING
+    RULE rather than a symptom, because the symptom only appears once
+    __init__.py is non-empty.
+    """
+    resident = {"alfred", "alfred.security", "alfred.security.quarantine_child"}
+    cleared = {name for name in resident if name == "alfred" or name.startswith("alfred.")}
+    assert "alfred" in cleared, (
+        "the closure gate must clear the bare `alfred` package so its __init__ re-runs; "
+        "otherwise the dual-LLM reachable-surface bound cannot see what __init__ imports"
+    )
