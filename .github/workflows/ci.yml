@@ -219,6 +219,17 @@ jobs:
           uv run coverage report \
             --include='scripts/check_strict_declarations.py' \
             --fail-under=100
+      - name: check_dependency_graph_freshness 100% line+branch coverage
+        # #568: this script is the detector for three dependency channels that
+        # died silently for 44 days. It is gate-enforcing code, so
+        # tests/unit/meta/test_scripts_coverage_census.py requires it GATED at
+        # 100% rather than omitted (#423 — gate on the allow-list, not the
+        # calendar).
+        if: steps.check.outputs.has_py == 'true'
+        run: |
+          uv run coverage report \
+            --include='scripts/check_dependency_graph_freshness.py' \
+            --fail-under=100
       - name: Hooks subsystem 100% line+branch coverage
         # Slice 2.5 PR-A's ``src/alfred/hooks/`` is a trust boundary in its
         # own right — the capability gate (sec-007), the re-entry bypass

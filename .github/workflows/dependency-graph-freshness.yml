@@ -1,0 +1,118 @@
+name: dependency-graph-freshness
+
+# Is the submitted Python dependency graph alive and current? (#568)
+#
+# NOT a required check, and deliberately NOT triggered on `push: main`. The
+# Dependabot `update_graph` job is created ~6s AFTER a push and takes 34-45s
+# plus ingest lag, so a push-triggered run reads the PRE-push graph and reports
+# false drift. There is no sha to synchronise on: the SBOM's `documentNamespace`
+# is a per-request UUID and `created` is request time, not snapshot time.
+# `workflow_run:` does not fire on the Dependabot-hosted `dynamic` job.
+#
+# Failure is routed to a PERMANENTLY-OPEN tracking issue whose body is rewritten
+# each run. "Open on drift, close on resync" would make SILENCE the healthy
+# state — so a broken monitor would be indistinguishable from a healthy repo,
+# which is #568's own failure class inside its remedy.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  freshness:
+    name: Dependency graph freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Needed by both `gh api repos/.../actions/workflows/<id>/runs` calls in
+      # the fetch step below (the dependency-graph run and the Dependabot-
+      # updates run). An explicit `permissions:` block sets every UNLISTED
+      # scope to `none`, so without this line both calls 403 and the
+      # monitor's PRIMARY signal never works.
+      actions: read  # read run conclusions for both liveness queries below
+      # Needed to create/update the permanently-open tracking issue this
+      # monitor rewrites each run (see the module comment above) — the repo's
+      # first `issues: write` workflow. No other write scope is granted.
+      issues: write  # create/update the #568 tracking issue
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch the submitted SBOM and the per-channel run conclusions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/dependency-graph/sbom" > sbom.json
+          # Latest conclusion per channel. `// "unknown"` keeps the fail-closed
+          # contract: absent is NOT success.
+          graph=$(gh api "repos/${REPO}/actions/workflows/283281805/runs?per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "unknown"')
+          dependabot=$(gh api "repos/${REPO}/actions/workflows/282449388/runs?per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "unknown"')
+          jq -n --arg g "$graph" --arg d "$dependabot" \
+            '{"dependency-graph":$g,"dependabot-updates":$d}' > runs.json
+          cat runs.json
+
+      - name: Evaluate
+        id: evaluate
+        run: |
+          set -euo pipefail
+          if python3 scripts/check_dependency_graph_freshness.py \
+               --sbom sbom.json --runs runs.json --min-packages 101 > report.txt 2>&1; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+          fi
+          cat report.txt
+
+      - name: Update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEALTHY: ${{ steps.evaluate.outputs.healthy }}
+        run: |
+          set -euo pipefail
+          # report.txt is machine-generated from package names and versions.
+          # It is passed as a FILE, never interpolated into this script, so a
+          # hostile package name cannot reach the shell (this is the repo's
+          # first `issues: write` workflow; check_tag_t3's roots are pinned to
+          # src/alfred + plugins, so that discipline is not inherited here).
+          {
+            printf 'Status as of the latest run: %s\n\n' \
+              "$( [ "$HEALTHY" = "true" ] && echo HEALTHY || echo UNHEALTHY )"
+            printf '```\n'
+            cat report.txt
+            printf '```\n\n'
+            printf 'Rewritten by `.github/workflows/dependency-graph-freshness.yml` (#568).\n'
+            printf 'This issue stays OPEN permanently and is rewritten each run — an\n'
+            printf 'absent issue means the MONITOR is broken, not that the repo is healthy.\n'
+          } > body.md
+
+          number=$(gh issue list --repo "$REPO" --state open \
+            --label dependency-graph-health --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh issue create --repo "$REPO" \
+              --title 'Dependency graph health (#568 monitor)' \
+              --label dependency-graph-health --body-file body.md
+          else
+            gh issue edit "$number" --repo "$REPO" --body-file body.md
+          fi
+
+      - name: Fail if unhealthy
+        if: steps.evaluate.outputs.healthy != 'true'
+        run: |
+          echo "::error::dependency graph is stale or a channel is dead — see the tracking issue"
+          exit 1
