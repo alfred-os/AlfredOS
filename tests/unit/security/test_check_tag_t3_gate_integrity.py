@@ -2657,3 +2657,28 @@ def test_an_alias_of_an_exempt_file_is_still_gated(
         "the alias was not gated — dedup discarded it and skipped its exempt "
         "target, silently un-gating a real tag(T3, ...) violation"
     )
+
+
+def test_the_resolved_identity_helper_never_raises() -> None:
+    """Both arcs of `_resolved_identity`, driven by REAL inputs.
+
+    The failure arc is unreachable through `main` today — `_collect_paths`
+    refuses an embedded-NUL argument before the census sees it — so it is
+    driven directly here rather than left uncovered or pragma'd away. An
+    unreachable defensive branch would red this file's REQUIRED 100% gate;
+    a unit-level call makes it a real, tested outcome.
+    """
+    ordinary = Path(__file__)
+    assert check_tag_t3._resolved_identity(ordinary) == ordinary.resolve(strict=False)
+
+    # The shape `_is_exempt`'s own guard documents: an embedded NUL raises
+    # ValueError, not OSError, on every supported platform.
+    hostile = Path("bad\x00name.py")
+    with pytest.raises(ValueError):
+        hostile.resolve(strict=False)
+
+    fallback = check_tag_t3._resolved_identity(hostile)
+    assert fallback.is_absolute(), "the fallback must still be a usable identity"
+    # FAIL-CLOSED: distinct per spelling, so an unresolvable path can never be
+    # merged into another file's identity and counted as already scanned.
+    assert fallback != check_tag_t3._resolved_identity(Path("other\x00name.py"))

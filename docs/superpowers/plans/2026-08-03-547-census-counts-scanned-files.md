@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Revision 4 — 2026-08-04, after `/review-pr` on the implementation.** The fleet found a
+> Critical the plan itself had specified: deduplicating by resolved path and iterating the
+> SURVIVORS silently un-gated real files, because `_is_exempt` requires the lexical and
+> resolved views to agree, so an alias and its exempt target get opposite verdicts. Dedup now
+> COUNTS and never decides what is scanned. `_resolved_identity` replaces a bare `resolve()`.
+> The code blocks below are corrected in place; the revision-3 note that follows is retained
+> because its reasoning about polarity still stands.
+>
 > **Revision 3 — 2026-08-03, after a SECOND `/review-plan` fleet.** Round 1 returned 48
 > findings; round 2 returned 40 more against revision 2, including three Criticals revision 2
 > introduced itself. The pattern across both rounds: the design direction held every time and
@@ -633,7 +641,13 @@ the same as pinned.
     # per-directory floor and decoy defence are specified over what traversal
     # found, and `recurse_symlinks=True` is load-bearing there (#541). Narrowing
     # its return would change three guards to fix one.
-    distinct = sorted({path.resolve(strict=False): path for path in paths}.values())
+    # Revision 4: this line was the Critical. Deduping here and iterating the
+    # survivors let sort order decide which spelling survived, and an alias and
+    # its exempt target get OPPOSITE exemption verdicts — so a real violation
+    # vanished (measured rc=1 -> rc=0). Dedup COUNTS ONLY; see the shipped
+    # implementation, which iterates every collected path and accumulates
+    # `exempt_files` / `scanned_files` / `failed_files` sets of
+    # `_resolved_identity(path)`.
 
     all_violations: list[str] = []
     exempt = 0
