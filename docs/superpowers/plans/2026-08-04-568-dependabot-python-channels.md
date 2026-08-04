@@ -512,9 +512,11 @@ from typing import Final
 
 from alfred.errors import AlfredError
 
-#: The ENFORCED floor. gh-135228 broke `@dataclass(frozen=True, slots=True)`
-#: `__setattr__` on 3.14.0-3.14.4 (measured on 3.14.0 and 3.14.4; fixed 3.14.5 by
-#: `_frozen_get_del_attr` -> `_frozen_set_del_attr`, `cls` -> `__class__`). Held
+#: The ENFORCED floor. gh-105936 breaks `@dataclass(frozen=True, slots=True)`
+#: `__setattr__` on 3.14.0-3.14.4 (measured on 3.14.0 and 3.14.4; fixed in 3.14.5
+#: by CPython GH-144021 via GH-148469 — `_frozen_get_del_attr` ->
+#: `_frozen_set_del_attr`, `cls` -> `__class__`). Long-standing, NOT a 3.14
+#: regression. Held
 #: at 3.14.6 rather than the true 3.14.5 boundary because 3.14.6 is
 #: `.python-version` and the only patch any CI lane exercises — supported ==
 #: tested, with no untested band.
