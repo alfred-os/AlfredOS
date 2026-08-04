@@ -3033,6 +3033,28 @@ def _collect_paths(argv: list[str]) -> list[Path]:
     return paths
 
 
+def _resolved_identity(path: Path) -> Path:
+    """The identity the census counts ``path`` under. NEVER raises.
+
+    ``Path.resolve`` raises ``ValueError`` on an embedded NUL and ``OSError`` on
+    some platform edges, and ``_is_exempt`` two lines away already guards that
+    exact class. Leaving the census's own resolution bare was an asymmetry, not
+    a decision: today `_collect_paths` refuses a NUL argument before it reaches
+    here, but "unreachable today" is the reasoning that produced the defect this
+    whole change exists to fix.
+
+    FAIL-CLOSED on failure: fall back to the lexical absolute path, which is
+    unique per spelling. An unresolvable path therefore counts as its OWN
+    distinct file and can never be merged into another file's identity — the
+    direction that cannot hide a violation. Merging is what the symlink-alias
+    regression proved dangerous.
+    """
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return Path(os.path.normpath(path.absolute()))
+
+
 def _print_violations(violations: list[str], header: str) -> None:
     """Print collected violation lines to stderr under ``header``.
 
@@ -3147,7 +3169,7 @@ def main(argv: list[str]) -> int:
             # `_scan_file` checks this again. One redundant CALL to one
             # implementation, not a second implementation — #422's drift trap is
             # copy-pasted logic, and there is none here.
-            resolved = path.resolve(strict=False)
+            resolved = _resolved_identity(path)
             if _is_exempt(path):
                 exempt_files.add(resolved)
                 continue
