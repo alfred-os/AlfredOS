@@ -2671,14 +2671,40 @@ def test_the_resolved_identity_helper_never_raises() -> None:
     ordinary = Path(__file__)
     assert check_tag_t3._resolved_identity(ordinary) == ordinary.resolve(strict=False)
 
-    # The shape `_is_exempt`'s own guard documents: an embedded NUL raises
-    # ValueError, not OSError, on every supported platform.
+    # WHETHER this input trips resolution is PLATFORM-SPECIFIC, measured on CI:
+    # POSIX raises ValueError on an embedded NUL, windows-latest resolves it
+    # without complaint. The invariant asserted here is platform-independent —
+    # the helper returns a usable, per-spelling-distinct identity either way.
+    # The POSIX-only premise and the fallback arc are pinned by
+    # `test_an_embedded_nul_drives_the_fallback_arc_on_posix` below, which is
+    # where the coverage gate runs.
     hostile = Path("bad\x00name.py")
-    with pytest.raises(ValueError):
-        hostile.resolve(strict=False)
-
     fallback = check_tag_t3._resolved_identity(hostile)
     assert fallback.is_absolute(), "the fallback must still be a usable identity"
     # FAIL-CLOSED: distinct per spelling, so an unresolvable path can never be
     # merged into another file's identity and counted as already scanned.
     assert fallback != check_tag_t3._resolved_identity(Path("other\x00name.py"))
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only premise: an embedded NUL raises ValueError from "
+        "Path.resolve on POSIX but resolves without complaint on "
+        "windows-latest (measured on CI, 2026-08-04). This test pins the "
+        "raising premise AND the fallback arc it drives; the arc's coverage "
+        "is required on Linux, where the gate runs."
+    ),
+)
+def test_an_embedded_nul_drives_the_fallback_arc_on_posix() -> None:
+    """The real input that reaches `_resolved_identity`'s except arm.
+
+    Kept separate from the invariant test so a platform that does NOT raise
+    here fails neither — a test asserting a raising premise universally is a
+    test that names a platform it never measured.
+    """
+    hostile = Path("bad\x00name.py")
+    with pytest.raises(ValueError):
+        hostile.resolve(strict=False)
+
+    assert check_tag_t3._resolved_identity(hostile) == Path(os.path.normpath(hostile.absolute()))
