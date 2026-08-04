@@ -99,9 +99,13 @@ def test_quarantine_child_import_closure_touches_no_privileged_module() -> None:
         # `src/alfred/__init__.py` never re-executes and anything IT imports is
         # absent from the delta — the gate was structurally blind to the package
         # __init__. Inert while that file was empty; `alfred._python_floor` now
-        # populates it. The blindness was order-dependent (running this file
-        # alone re-imported `alfred` and measured correctly), which is why it
-        # survived review.
+        # populates it.
+        #
+        # The blindness was UNCONDITIONAL under pytest, not order-dependent:
+        # `tests/unit/conftest.py` imports `alfred.audit.log` at module scope
+        # (since 2026-05-27, #95), so `alfred` is already resident during
+        # collection even when this file is run alone. There was no way to run
+        # the pre-fix gate that would have caught it.
         to_clear = [name for name in sys.modules if name == "alfred" or name.startswith("alfred.")]
         for name in to_clear:
             del sys.modules[name]
