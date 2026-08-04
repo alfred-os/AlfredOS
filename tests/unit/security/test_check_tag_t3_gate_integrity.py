@@ -2329,18 +2329,27 @@ def test_the_production_tree_is_gated_as_a_property() -> None:
     `test_only_a_completed_scan_returns_the_scanned_ok_marker`, which pins the
     marker itself without reference to any count.
     """
+    # MIRROR `main`: exemption is decided on the LEXICAL path, and only the
+    # RESOLVED identity is recorded. Resolving first would make a non-exempt
+    # alias of an exempt target look exempt — the opposite of the contract, and
+    # the exact confusion behind this PR's Critical.
     paths = check_tag_t3._collect_paths([])
-    distinct = {p.resolve(strict=False) for p in paths}
-    exempt = {p for p in distinct if check_tag_t3._is_exempt(p)}
-    unreadable = [
-        p
-        for p in sorted(distinct - exempt)
-        if not isinstance(check_tag_t3._scan_file(p), check_tag_t3._ScannedOk)
-    ]
+    exempt: set[Path] = set()
+    scanned: set[Path] = set()
+    failed: set[Path] = set()
+    for path in paths:
+        resolved = check_tag_t3._resolved_identity(path)
+        if check_tag_t3._is_exempt(path):
+            exempt.add(resolved)
+            continue
+        if isinstance(check_tag_t3._scan_file(path), check_tag_t3._ScannedOk):
+            scanned.add(resolved)
+        else:
+            failed.add(resolved)
 
-    assert not unreadable, f"the gate cannot read its own tree: {unreadable}"
-    assert len(distinct - exempt) >= check_tag_t3._MIN_SCANNED_FILES
-    assert len(exempt) <= len(check_tag_t3._APPROVED_PATHS)
+    assert not failed, f"the gate cannot read its own tree: {sorted(failed)}"
+    assert len(scanned) >= check_tag_t3._MIN_SCANNED_FILES
+    assert len(exempt - scanned - failed) <= len(check_tag_t3._APPROVED_PATHS)
     # No `main([])` call here. `test_main_returns_zero_on_the_real_tree`
     # already drives that exact invocation and asserts `== 0`, which is
     # strictly stronger than `!= 2` — repeating it cost a second full
@@ -2708,3 +2717,67 @@ def test_an_embedded_nul_drives_the_fallback_arc_on_posix() -> None:
         hostile.resolve(strict=False)
 
     assert check_tag_t3._resolved_identity(hostile) == Path(os.path.normpath(hostile.absolute()))
+
+
+def test_explicit_file_arguments_do_not_prop_up_a_directory_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Explicit FILE arguments are census-exempt — a contract the census broke.
+
+    MEASURED before the fix: a directory whose every file failed to scan,
+    passed alongside six clean explicit files, exited 1 because the explicit
+    files carried `scanned_ok` over the floor. The same directory alone exits 2.
+    The floors judge what the DIRECTORY scan gated, so borrowing completed scans
+    from another argument source is exactly the "success while gating nothing"
+    this gate refuses.
+    """
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 5)
+    directory = _build_flat_tree(tmp_path / "dir", 3, "def (:\n")
+    extra = _build_flat_tree(tmp_path / "files", 6, "x = 1\n", prefix="ok")
+    argv = [str(directory), *[str(f) for f in sorted(extra.glob("*.py"))]]
+
+    assert check_tag_t3.main(argv) == 2, (
+        "explicit file arguments propped the directory census over its floor"
+    )
+    err = capsys.readouterr().err
+    assert "0 scanned" in err and "census-exempt and excluded" in err
+
+
+@_NEEDS_SYMLINKS
+def test_a_file_is_never_counted_in_two_census_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The buckets are DISJOINT, with a stated precedence.
+
+    One resolved file can be reached by several spellings and get different
+    verdicts: exempt under its own name, non-exempt under an alias — and if
+    that alias fails to scan, a naive tally counts the same file as both exempt
+    and unscannable, so the three numbers no longer describe one population.
+    """
+    # FLOOR 3, NOT 2. At 2 the census PASSES, prints nothing, and an assertion
+    # guarded on the message never runs — the tally mutant then survives. The
+    # census must be FORCED to report for this test to see anything at all.
+    monkeypatch.setattr(check_tag_t3, "_MIN_SCANNED_FILES", 3)
+    tree = _build_flat_tree(tmp_path / "buckets", 2, "x = 1\n")
+    exempt_but_broken = tree / "test_exempt.py"
+    exempt_but_broken.write_text("def (:\n", encoding="utf-8")
+    (tree / "aaa_alias.py").symlink_to(exempt_but_broken)
+
+    assert check_tag_t3._is_exempt(exempt_but_broken)
+    assert not check_tag_t3._is_exempt(tree / "aaa_alias.py")
+
+    assert check_tag_t3.main([str(tree)]) == 2, "the census must fire for this to test anything"
+    err = capsys.readouterr().err
+    assert "distinct files" in err, f"no census line to parse: {err!r}"
+
+    distinct = int(err.split("resolving to ")[1].split()[0])
+    tail = err.split("distinct files")[-1]
+    counted = [int(w) for w in tail.replace(",", " ").split() if w.isdigit()]
+    exempt, scanned, unscannable = counted[0], counted[1], counted[2]
+
+    # One resolved file, several spellings, opposite verdicts. The three buckets
+    # describe ONE population, so they cannot sum past it.
+    assert exempt + scanned + unscannable <= distinct, (
+        f"census buckets overlap: {exempt} exempt + {scanned} scanned + "
+        f"{unscannable} unscannable sums past {distinct} distinct files"
+    )

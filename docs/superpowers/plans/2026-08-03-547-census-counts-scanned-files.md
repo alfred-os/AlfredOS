@@ -610,107 +610,25 @@ the same as pinned.
 
 - [ ] **Step 4: Replace the census and the scan loop**
 
-```python
-    # The PRE-SCAN floor. Fast-fails a wrong-checkout scan before reading 332
-    # files, and diagnoses a DIFFERENT fault from the post-scan census below:
-    # "traversal did not reach the source tree" rather than "it reached it and
-    # could not read it". Explicit file arguments are how the unit suite plants
-    # fixtures, so they are exempt.
-    #
-    # #547: this message said "scanned" and meant "collected". That conflation
-    # IS the defect this census had.
-    scanned_a_directory = not argv or any(Path(a).is_dir() for a in argv)
-    if scanned_a_directory and len(paths) < _MIN_SCANNED_FILES:
-        print(
-            f"check_tag_t3: collected {len(paths)} files, expected at least "
-            f"{_MIN_SCANNED_FILES}. The gate is not reaching the source tree "
-            f"(wrong working directory, or the scan root moved) — refusing to "
-            f"report success while gating nothing.",
-            file=sys.stderr,
-        )
-        return 2
+> **Revision 4 — this step's code block has been REMOVED rather than patched.** It specified
+> the algorithm that became this PR's Critical: iterate a pre-deduplicated collection. Every
+> attempt to keep a "corrected" listing here drifted from the code again within one review
+> round, which is the drift a plan-embedded implementation invites. The shipped algorithm is
+> the single source of truth; read `main` in `scripts/check_tag_t3.py`.
 
-    # DEDUPE BY RESOLVED PATH (#547, NEW-1). `_collect_paths` returns what
-    # traversal found, and nothing deduped it — so the census counted scan
-    # EVENTS, not distinct files. Measured on the SHIPPED gate with no
-    # monkeypatch: 260 symlinks to one `x = 1` file exited 0 with empty stderr,
-    # having gated exactly one distinct file. Every one of them scans perfectly,
-    # so `scanned_ok` alone cannot see it.
-    #
-    # Deduping HERE and not in `_collect_paths` is deliberate: that function's
-    # per-directory floor and decoy defence are specified over what traversal
-    # found, and `recurse_symlinks=True` is load-bearing there (#541). Narrowing
-    # its return would change three guards to fix one.
-    # Revision 4: this line was the Critical. Deduping here and iterating the
-    # survivors let sort order decide which spelling survived, and an alias and
-    # its exempt target get OPPOSITE exemption verdicts — so a real violation
-    # vanished (measured rc=1 -> rc=0). Dedup COUNTS ONLY; see the shipped
-    # implementation, which iterates every collected path and accumulates
-    # `exempt_files` / `scanned_files` / `failed_files` sets of
-    # `_resolved_identity(path)`.
+The shipped shape, stated as requirements rather than as a listing to copy:
 
-    all_violations: list[str] = []
-    exempt = 0
-    scanned_ok = 0
-    try:
-        for path in distinct:
-            # EXEMPT FILES COUNT ON NEITHER SIDE. An exemption is a decision not
-            # to gate, so counting one as a successful scan counts a non-event —
-            # and with `_APPROVED_PATHS` at size one, a production run always has
-            # one, which is what made the withdrawn draft's all-or-nothing test
-            # unreachable in production (#547, ADR-0058).
-            #
-            # `_scan_file` checks this again. One redundant CALL to one
-            # implementation, not a second implementation — #422's drift trap is
-            # copy-pasted logic, and there is none here.
-            if _is_exempt(path):
-                exempt += 1
-                continue
-            violations = _scan_file(path)
-            all_violations.extend(violations)
-            # DEFAULT-DENY: only a completed scan carries the marker, so any
-            # other return path — including one added later — is a failure.
-            if isinstance(violations, _ScannedOk):
-                scanned_ok += 1
-    except GateInternalError as exc:
-        print(f"check_tag_t3: {exc}", file=sys.stderr)
-        return 2
-
-    # The POST-SCAN census (#547). `len(paths)` counted files COLLECTED during
-    # traversal — `git ls-files` plus a `stat`, which proves nothing was read,
-    # parsed or gated. Two measured shapes cleared it: a tree the gate could not
-    # read exited 1 ("violations found") against an exit contract that reserves 2
-    # for "the gate could not run", and a tree of exempt files exited 0 in
-    # silence having scanned nothing at all.
-    #
-    # ONE self-diagnosing message rather than two arms: reporting the full tally
-    # distinguishes "all exempt" from "could not read" without a second branch
-    # to cover under this file's 100% gate.
-    if scanned_a_directory and scanned_ok < _MIN_SCANNED_FILES:
-        # PRINT WHAT WE FOUND BEFORE REFUSING. Returning above this discarded
-        # every violation collected so far — a real tag(T3, ...) finding
-        # alongside read failures vanished entirely, and a change that fixes a
-        # diagnostic defect must not introduce a worse one. Under its OWN
-        # header: these are partial results, not a findings list.
-        _print_violations(all_violations, _PARTIAL_HEADER)
-        print(
-            f"check_tag_t3: collected {len(paths)} files ({len(distinct)} "
-            f"distinct): {exempt} exempt, {scanned_ok} scanned, "
-            f"{len(distinct) - exempt - scanned_ok} unreadable — expected at "
-            f"least {_MIN_SCANNED_FILES} scanned. Refusing to report success "
-            f"while gating nothing.",
-            file=sys.stderr,
-        )
-        return 2
-
-    if all_violations:
-        _print_violations(all_violations, _FINDINGS_HEADER)
-        return 1
-    return 0
-```
-
-Note `len(distinct)`, not `len(paths)`, in the unreadable term — with dedup they differ, and
-the tally must describe what was actually scanned.
+1. **Scan every path in `paths`.** Never iterate a deduplicated collection — deduping decided
+   which spelling survived, and `_is_exempt` gives an alias and its target OPPOSITE verdicts,
+   so a real violation vanished (measured `rc=1` → `rc=0`).
+2. **Accumulate three sets** keyed by `_resolved_identity(path)`: `exempt_files`,
+   `scanned_files`, `failed_files`. Dedup is a property of the SETS, not of the iteration.
+3. **Count only directory-derived paths.** Explicit FILE arguments are census-exempt; six
+   clean explicit files were measured carrying a directory of total read failures over the
+   floor.
+4. **Keep the buckets disjoint**, scanned ≻ failed ≻ exempt: one resolved file reached by
+   several spellings must not be counted twice.
+5. **Print collected violations before refusing**, under `_PARTIAL_HEADER`.
 
 - [ ] **Step 5: Run to verify they pass**
 
