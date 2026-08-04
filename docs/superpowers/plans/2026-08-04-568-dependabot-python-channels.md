@@ -924,6 +924,24 @@ class TestDegenerateSbomsMustFail:
         assert ("aiohttp", "3.13.5", "3.14.3") in verdict.version_mismatches
 
 
+class TestCoverageFloor:
+    def test_a_too_small_but_otherwise_perfect_sbom_fails(self, freshness: ModuleType) -> None:
+        """Isolates the coverage floor from containment.
+
+        Every OTHER degenerate case also trips containment, and containment alone
+        is sufficient to fail — so without this test, deleting the coverage floor
+        is undetectable (proven by mutation). This SBOM carries every lock package
+        at the right version, so containment and version comparison are both
+        clean; it fails only because the graph is too small to be a plausible
+        submission.
+        """
+        verdict = freshness.evaluate(_sbom(*_LOCK.items()), _LOCK, _HEALTHY_RUNS, min_packages=50)
+        assert not verdict.ok
+        assert verdict.package_count == len(_LOCK)
+        assert not verdict.missing_from_sbom, "containment must be clean or the floor is not isolated"
+        assert not verdict.version_mismatches, "versions must match or the floor is not isolated"
+
+
 class TestPhantomRecords:
     def test_version_less_duplicates_do_not_cause_false_drift(
         self, freshness: ModuleType
