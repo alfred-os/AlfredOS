@@ -284,7 +284,7 @@ class _ScannedOk(list[str]):
     return violations
 ```
 
-Measured on the flag variant: **683 statements / 366 branches / 0 partial / 100%**, no
+Measured on the flag variant: **686 statements / 366 branches / 0 partial / 100%**, no
 pragma. Revision 2's coverage objection to this flag was backwards.
 
 `_scan_file` needs **no edit** — its three failure arms already return plain lists, and
@@ -912,8 +912,8 @@ uv run pytest tests/unit --cov=src/alfred --cov=scripts -q
 uv run coverage report --include='scripts/check_tag_t3.py' --fail-under=100
 ```
 
-Expected: `100%`, exit 0. Reference from the built variant: 674 statements, 362 branches, 0
-miss, 0 partial. No pragma, no `exclude_also` edit, no ternary laundering.
+Expected: `100%`, exit 0. Reference measurement on the shipped code: 686 statements, 366 branches,
+0 miss, 0 partial. No pragma, no `exclude_also` edit, no ternary laundering.
 
 - [ ] **Step 5: Verify the gate-surface pin rather than grepping**
 

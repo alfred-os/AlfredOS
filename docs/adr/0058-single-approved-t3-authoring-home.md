@@ -1,6 +1,11 @@
 # ADR-0058 — One approved T3-authoring home, not two
 
 - **Status**: Accepted
+- **Discharged in part by**: [ADR-0060](0060-the-census-counts-scanned-files.md) (2026-08-03)
+  — the Consequences below instruct "Do not implement #547 against its body as written".
+  That instruction was OBEYED: the issue body was rewritten 2026-08-03 and #547 implemented
+  against the corrected premise. No decision in this ADR is reversed; ADR-0060 relies on the
+  single-exempt-home rule established here.
 - **Date**: 2026-08-01
 - **Slice**: #538 (`check_tag_t3` sole-layer rules — the raw-state-write vehicles and
   the authorisation-bypass names), Task 5
