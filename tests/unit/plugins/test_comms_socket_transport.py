@@ -45,7 +45,11 @@ from alfred.plugins.comms_socket_transport import (
 )
 from alfred.plugins.comms_stdio_transport import _MAX_COMMS_LINE_BYTES
 
-pytestmark = pytest.mark.asyncio
+# NO module-level `pytestmark = pytest.mark.asyncio`. `asyncio_mode = "auto"`
+# (pyproject.toml) already runs the async tests here; the mark was redundant for
+# them and stamped a no-op mark onto the sync ones, which pytest warns about
+# once per test. `tests/unit/test_asyncio_mode_guard.py` pins the mode, so
+# dropping the mark cannot silently stop the async tests from running.
 
 _ADAPTER_ID = "tui-test-0001"
 
@@ -1134,17 +1138,21 @@ def test_dial_path_owned_helper_accepts_owned_socket(runtime_dir: Path) -> None:
     """
     import alfred.plugins.comms_socket_transport as cst
 
-    async def _bound() -> Path:
+    async def _assert_while_bound() -> None:
+        # The assertion runs INSIDE the listener's lifetime: `aclose()` unlinks
+        # the socket file, so checking after it would stat a missing path. The
+        # listener must still be reaped on every exit path — returning just the
+        # path and unlinking it by hand left the socket FD open (a real
+        # ResourceWarning), which is the defect class #559 closes.
         listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
         await listener.bind()
-        return listener.path
+        try:
+            # No raise -> the owned-socket branch passes.
+            cst._assert_dial_path_owned(listener.path)
+        finally:
+            await listener.aclose()
 
-    sock_path = asyncio.run(_bound())
-    try:
-        # No raise -> the owned-socket branch passes.
-        cst._assert_dial_path_owned(sock_path)
-    finally:
-        sock_path.unlink(missing_ok=True)
+    asyncio.run(_assert_while_bound())
 
 
 def test_dial_path_owned_helper_passes_missing_path_through(

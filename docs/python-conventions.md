@@ -429,6 +429,27 @@ Prefer the comprehension when it reads better; prefer the reduce when the operat
 
 Slice 1's smoke directory is at `tests/smoke/`. (CLAUDE.md historically referenced `tests/e2e/`; that pre-dated this slice's naming decision and is being aligned.)
 
+### Never write `pytestmark = pytest.mark.asyncio`
+
+`asyncio_mode = "auto"` is set in `pyproject.toml`, so pytest-asyncio already runs every
+`async def test_*`. A module-level `pytestmark = pytest.mark.asyncio` is redundant for those —
+and if the module also holds any *sync* test, the mark lands on it as a no-op and pytest emits
+one `PytestWarning` per test. `tests/unit/test_asyncio_mode_guard.py` pins the mode, so relying
+on auto mode cannot silently regress into tests that never run.
+
+Many existing modules still carry the mark; they are inert only because none of them mixes a
+sync test. Don't copy them.
+
+### Close what you open, in tests too
+
+A test that constructs a resource (sqlite connection, socket listener, subprocess) must close
+it deterministically — use the object's own context manager where it has one, so the test
+exercises the production reaper instead of reimplementing it. A leaked handle raises
+`ResourceWarning` from the garbage collector, **not** from the test that leaked it, so the
+report names whatever frame happened to be running and blames an innocent file. Note also that
+`with sqlite3.connect(...)` commits but does **not** close; `contextlib.closing()` is what
+releases the handle.
+
 ### Skill tests — the triad
 
 Per CLAUDE.md, every new skill ships with all three: a happy-path test, an error-path test, and an out-of-scope refusal test. Missing any of the three is a release blocker for the skill.

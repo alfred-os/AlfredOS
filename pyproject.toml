@@ -172,6 +172,12 @@ pythonpath = [".", "plugins/alfred_tui/src"]
 # job's explicit `-m real_llm` override this default and still collect it.
 addopts = "-ra --strict-markers --strict-config -m \"not real_llm\""
 asyncio_mode = "auto"
+# NOTE: there is deliberately no `filterwarnings` key here YET — its absence is
+# tracked in #560, not an oversight. Nothing currently escalates a warning, which
+# is how 32 leaked sqlite connections accumulated unnoticed (#559). When it lands
+# it must be bare `"error"` plus narrow `ignore::` entries: a targeted
+# `"error::ResourceWarning"` is a PAPER GATE — the leak surfaces from the GC
+# finalizer, so that filter alone cannot fail the run (measured on #561).
 # pytest-asyncio 1.x changed the UNSET default async-fixture loop scope to
 # function-scope. Pin it explicitly so a future broad-scope async fixture binds
 # deterministically under the new major (inert today — the DB fixtures are sync).

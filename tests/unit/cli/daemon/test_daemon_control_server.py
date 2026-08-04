@@ -48,7 +48,11 @@ from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
 from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
 from alfred.plugins._local_socket import MAX_LOCAL_SOCKET_LINE_BYTES
 
-pytestmark = pytest.mark.asyncio
+# NO module-level `pytestmark = pytest.mark.asyncio`. `asyncio_mode = "auto"`
+# (pyproject.toml) already runs the async tests here; the mark was redundant for
+# them and stamped a no-op mark onto the sync ones, which pytest warns about
+# once per test. `tests/unit/test_asyncio_mode_guard.py` pins the mode, so
+# dropping the mark cannot silently stop the async tests from running.
 
 _EPOCH = "e" * 32
 _NOW = datetime(2026, 6, 20, 9, 0, 0, tzinfo=UTC)
