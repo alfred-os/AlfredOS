@@ -71,7 +71,7 @@ AlfredOS/
 
 ## Tech stack
 
-- **Language (core):** Python 3.14+ (pyproject floor `>=3.14.6` — see the CPython frozen-dataclass regression note there)
+- **Language (core):** Python 3.14+ (pyproject declares a series-level `>=3.14` so Dependabot can resolve it; the enforced floor is 3.14.6 in `alfred._python_floor` — see ADR-0061)
 - **Async runtime:** asyncio
 - **Plugins:** MCP (stdio for in-process, HTTP for remote) — polyglot
 - **Datastores:** Postgres 18 (+ pgvector when semantic memory lands), Redis 8, Qdrant
