@@ -68,15 +68,32 @@ jobs:
           # live on 2026-08-02 and 2026-08-03: the most recent run both days
           # was a `github_actions in /` SUCCESS while the `uv` channel was
           # actively failing, so the unfiltered query reads SUCCESS straight
-          # through a real Python-channel outage. Filter to the uv/pip
-          # ecosystem's own runs by `display_title` (real titles look like
-          # "uv in /. for GitPython, aiohttp, ... - Update #NNNNNNN"). Do NOT
-          # "simplify" this back to an unfiltered `.workflow_runs[0]` — that
-          # silently reintroduces the exact fail-open this comment describes.
-          # `// "unknown"` still applies to the filtered result: if no `uv in`
-          # run exists at all in the last 50, absent must never read success.
-          dependabot=$(gh api "repos/${REPO}/actions/workflows/282449388/runs?per_page=50" \
-            --jq '[.workflow_runs[] | select(.display_title | startswith("uv in"))][0].conclusion // "unknown"')
+          # through a real Python-channel outage. Filter to the Python
+          # ecosystem's own runs by `display_title`.
+          #
+          # That ecosystem is NOT one label. Dependabot titles the SAME
+          # Python channel `uv` or `pip` depending on which manifest it
+          # resolved against for that update — both are real Python-channel
+          # runs, not two different ecosystems. Measured across the last 100
+          # runs of this workflow on 2026-08-05: `uv in /.` 28 + `uv in /` 9
+          # = 37 (22 failure / 15 success); `pip in /` 12 + `pip in /.` 8 =
+          # 20 (17 failure / 3 success); `github_actions in ...` 27 + 8 = 35
+          # (all success); `docker ...` 8. A selector anchored to `uv in`
+          # alone reads through 17 real Python-channel FAILURES reported
+          # only under the `pip` label — the exact fail-open this comment
+          # describes, merely narrowed from four labels to one. Do NOT
+          # narrow this back to a single label (real titles look like
+          # "uv in /. for GitPython, aiohttp, ... - Update #NNNNNNN" or
+          # "pip in / for requests - Update #NNNNNNN"); match both, anchored
+          # at the start with the trailing space, so a future `uvx`- or
+          # `pipenv`-style label can't slip through un-noticed either. Do
+          # NOT "simplify" this back to an unfiltered `.workflow_runs[0]` —
+          # that silently reintroduces the exact fail-open this comment
+          # describes. `// "unknown"` still applies to the filtered result:
+          # if no `uv in`/`pip in` run exists at all in the last 100, absent
+          # must never read success.
+          dependabot=$(gh api "repos/${REPO}/actions/workflows/282449388/runs?per_page=100" \
+            --jq '[.workflow_runs[] | select(.display_title | test("^(uv|pip) in "))][0].conclusion // "unknown"')
           jq -n --arg g "$graph" --arg d "$dependabot" \
             '{"dependency-graph":$g,"dependabot-updates":$d}' > runs.json
           cat runs.json

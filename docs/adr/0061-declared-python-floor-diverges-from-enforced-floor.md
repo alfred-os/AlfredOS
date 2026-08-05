@@ -92,11 +92,17 @@ revive the graph channel while leaving the other two dead.
   all** — the same workflow also runs the `github-actions` and `docker` ecosystems from
   `.github/dependabot.yml`, and those run far more often, so the workflow's single latest
   conclusion is most often theirs, not the Python channels'. This is why the monitor filters
-  to runs whose `display_title` starts with `uv in` rather than trusting
+  to runs whose `display_title` matches the anchored, trailing-space-qualified pattern
+  `^(uv|pip) in` rather than trusting
   `.workflow_runs[0]` unfiltered — confirmed live: on 2026-08-02 and 2026-08-03 the
-  unfiltered conclusion was a `github_actions in /` success while the `uv` channel was
-  actively failing. Splitting security-update from weekly-`pip` within the filtered `uv`
-  runs still needs per-job inspection, tracked as a follow-up rather than claimed here.
+  unfiltered conclusion was a `github_actions in /` success while the Python channel was
+  actively failing. The filter matches **both** `uv` and `pip` labels because Dependabot
+  titles the same Python channel either way depending on which manifest it resolved
+  against — an earlier revision of this filter matched `uv in` only, which silently read
+  through 17 real Python-channel failures reported under the `pip` label (measured across
+  the last 100 runs on 2026-08-05). Splitting security-update from weekly-`pip` within the
+  filtered runs still needs per-job inspection, tracked as a follow-up rather than claimed
+  here.
 
 ### Neutral
 
