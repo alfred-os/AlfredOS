@@ -1420,7 +1420,7 @@ git commit -m "feat: #568 add the liveness-first dependency-graph freshness chec
 
 ### Task 6: The monitor workflow, and the coverage-gate lockstep
 
-**No `push: main` trigger.** Measured: the graph run is created **+6 s** after a push and completes in 34–45 s, plus ingest lag, so a push-triggered monitor reads the pre-push graph and reports false drift. The sha fix is unavailable — the SBOM carries no commit ref (`documentNamespace` is a per-request UUID, `created` is request time). `workflow_run:` does not fire on the `dynamic` Dependabot job.
+**No `push: main` trigger.** Measured: the graph run is created **+6 s** after a push and completes in 34–98 s (measured range across 41 runs), plus ingest lag, so a push-triggered monitor reads the pre-push graph and reports false drift. The sha fix is unavailable — the SBOM carries no commit ref (`documentNamespace` is a per-request UUID, `created` is request time). `workflow_run:` does not fire on the `dynamic` Dependabot job.
 
 Adding a `scripts/` file requires a **five-surface lockstep**; `zip(..., strict=True)` makes a partial edit fail at collection time rather than silently mispair.
 
@@ -1528,7 +1528,7 @@ name: dependency-graph-freshness
 # Is the submitted Python dependency graph alive and current? (#568)
 #
 # NOT a required check, and deliberately NOT triggered on `push: main`. The
-# Dependabot `update_graph` job is created ~6s AFTER a push and takes 34-45s
+# Dependabot `update_graph` job is created ~6s AFTER a push and takes 34-98s
 # plus ingest lag, so a push-triggered run reads the PRE-push graph and reports
 # false drift. There is no sha to synchronise on: the SBOM's `documentNamespace`
 # is a per-request UUID and `created` is request time, not snapshot time.

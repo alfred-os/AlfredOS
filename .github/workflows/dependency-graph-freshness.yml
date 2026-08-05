@@ -3,11 +3,12 @@ name: dependency-graph-freshness
 # Is the submitted Python dependency graph alive and current? (#568)
 #
 # NOT a required check, and deliberately NOT triggered on `push: main`. The
-# Dependabot `update_graph` job is created ~6s AFTER a push and takes 34-45s
-# plus ingest lag, so a push-triggered run reads the PRE-push graph and reports
-# false drift. There is no sha to synchronise on: the SBOM's `documentNamespace`
-# is a per-request UUID and `created` is request time, not snapshot time.
-# `workflow_run:` does not fire on the Dependabot-hosted `dynamic` job.
+# Dependabot `update_graph` job is created ~6s AFTER a push and takes 34-98s
+# (measured range across 41 runs) plus ingest lag, so a push-triggered run
+# reads the PRE-push graph and reports false drift. There is no sha to
+# synchronise on: the SBOM's `documentNamespace` is a per-request UUID and
+# `created` is request time, not snapshot time. `workflow_run:` does not fire
+# on the Dependabot-hosted `dynamic` job.
 #
 # Failure is routed to a PERMANENTLY-OPEN tracking issue whose body is rewritten
 # each run. "Open on drift, close on resync" would make SILENCE the healthy
@@ -60,8 +61,22 @@ jobs:
           # contract: absent is NOT success.
           graph=$(gh api "repos/${REPO}/actions/workflows/283281805/runs?per_page=1" \
             --jq '.workflow_runs[0].conclusion // "unknown"')
-          dependabot=$(gh api "repos/${REPO}/actions/workflows/282449388/runs?per_page=1" \
-            --jq '.workflow_runs[0].conclusion // "unknown"')
+          # Workflow 282449388 ("Dependabot Updates") is shared across FOUR
+          # ecosystems from .github/dependabot.yml: github-actions, pip/uv,
+          # and docker in both "/" and "/docker". `.workflow_runs[0]` is
+          # whichever of those four ran LAST, not the Python one — verified
+          # live on 2026-08-02 and 2026-08-03: the most recent run both days
+          # was a `github_actions in /` SUCCESS while the `uv` channel was
+          # actively failing, so the unfiltered query reads SUCCESS straight
+          # through a real Python-channel outage. Filter to the uv/pip
+          # ecosystem's own runs by `display_title` (real titles look like
+          # "uv in /. for GitPython, aiohttp, ... - Update #NNNNNNN"). Do NOT
+          # "simplify" this back to an unfiltered `.workflow_runs[0]` — that
+          # silently reintroduces the exact fail-open this comment describes.
+          # `// "unknown"` still applies to the filtered result: if no `uv in`
+          # run exists at all in the last 50, absent must never read success.
+          dependabot=$(gh api "repos/${REPO}/actions/workflows/282449388/runs?per_page=50" \
+            --jq '[.workflow_runs[] | select(.display_title | startswith("uv in"))][0].conclusion // "unknown"')
           jq -n --arg g "$graph" --arg d "$dependabot" \
             '{"dependency-graph":$g,"dependabot-updates":$d}' > runs.json
           cat runs.json
@@ -70,8 +85,17 @@ jobs:
         id: evaluate
         run: |
           set -euo pipefail
+          # 90 is DELIBERATELY BELOW the measured live count — 99 non-`alfred`
+          # packages in `uv.lock` as of 2026-08-05. It is not 101: that figure
+          # was measured off the frozen 2026-06-19 SBOM, which still counted
+          # `click` (dropped from `uv.lock` 2026-07-05) and `hatchling` (a
+          # build-system dependency, never a graph-eligible runtime one) — so
+          # a correctly resubmitted graph could never clear 101 and this floor
+          # would trip forever. Do NOT "tighten" this to the exact current
+          # package count; leave headroom below it or normal dependency churn
+          # re-creates the same permanent false UNHEALTHY.
           if python3 scripts/check_dependency_graph_freshness.py \
-               --sbom sbom.json --runs runs.json --min-packages 101 > report.txt 2>&1; then
+               --sbom sbom.json --runs runs.json --min-packages 90 > report.txt 2>&1; then
             echo "healthy=true" >> "$GITHUB_OUTPUT"
           else
             echo "healthy=false" >> "$GITHUB_OUTPUT"
@@ -79,10 +103,19 @@ jobs:
           cat report.txt
 
       - name: Update the tracking issue
+        # `if: always()` — this step must still run when an EARLIER step (the
+        # SBOM/run-conclusion fetch) fails, e.g. a `gh api` error. Without
+        # this, a failed fetch skips straight past evaluation to this
+        # (skipped) step, the job reddens, but the tracking issue keeps
+        # whatever verdict its LAST successful run wrote — indistinguishable
+        # from a fresh healthy run. That is #568's own failure class
+        # (silence reading as healthy) recurring inside its own remedy.
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEALTHY: ${{ steps.evaluate.outputs.healthy }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           # report.txt is machine-generated from package names and versions.
@@ -90,12 +123,37 @@ jobs:
           # hostile package name cannot reach the shell (this is the repo's
           # first `issues: write` workflow; check_tag_t3's roots are pinned to
           # src/alfred + plugins, so that discipline is not inherited here).
+          # RUN_URL is likewise passed via `env:` rather than spliced into
+          # this script — same discipline as HEALTHY above, even though
+          # github.run_id/github.repository are not attacker-controlled.
+          timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           {
-            printf 'Status as of the latest run: %s\n\n' \
-              "$( [ "$HEALTHY" = "true" ] && echo HEALTHY || echo UNHEALTHY )"
-            printf '```\n'
-            cat report.txt
-            printf '```\n\n'
+            case "$HEALTHY" in
+              true)
+                printf 'Status as of %s: HEALTHY\n\n' "$timestamp"
+                printf '```\n'
+                cat report.txt
+                printf '```\n\n'
+                ;;
+              false)
+                printf 'Status as of %s: UNHEALTHY\n\n' "$timestamp"
+                printf '```\n'
+                cat report.txt
+                printf '```\n\n'
+                ;;
+              *)
+                # HEALTHY is neither "true" nor "false" — the evaluate step
+                # never ran because an earlier step (most likely the SBOM/run
+                # fetch) failed first. Say so explicitly instead of leaving
+                # the previous verdict standing; report.txt may not exist in
+                # this branch, so it is never `cat`.
+                printf 'Status as of %s: COULD NOT BE EVALUATED\n\n' "$timestamp"
+                printf 'An earlier step in this run failed before a verdict could be produced\n'
+                printf '(see the run log). The status above is NOT a fresh healthy result —\n'
+                printf 'it means the monitor itself did not complete this cycle.\n\n'
+                ;;
+            esac
+            printf 'Run: %s\n\n' "$RUN_URL"
             printf 'Rewritten by `.github/workflows/dependency-graph-freshness.yml` (#568).\n'
             printf 'This issue stays OPEN permanently and is rewritten each run — an\n'
             printf 'absent issue means the MONITOR is broken, not that the repo is healthy.\n'
