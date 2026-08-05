@@ -88,8 +88,15 @@ revive the graph channel while leaving the other two dead.
 - The freshness monitor (`.github/workflows/dependency-graph-freshness.yml`) measures only
   two liveness signals, not three: Dependabot's security-update and weekly-`pip` channels
   are separate commands inside one workflow (`282449388`), so the Actions runs API reports
-  one shared conclusion for both. Splitting them needs per-job inspection, tracked as a
-  follow-up rather than claimed here.
+  one shared conclusion for both. That shared conclusion is usually **not about Python at
+  all** — the same workflow also runs the `github-actions` and `docker` ecosystems from
+  `.github/dependabot.yml`, and those run far more often, so the workflow's single latest
+  conclusion is most often theirs, not the Python channels'. This is why the monitor filters
+  to runs whose `display_title` starts with `uv in` rather than trusting
+  `.workflow_runs[0]` unfiltered — confirmed live: on 2026-08-02 and 2026-08-03 the
+  unfiltered conclusion was a `github_actions in /` success while the `uv` channel was
+  actively failing. Splitting security-update from weekly-`pip` within the filtered `uv`
+  runs still needs per-job inspection, tracked as a follow-up rather than claimed here.
 
 ### Neutral
 

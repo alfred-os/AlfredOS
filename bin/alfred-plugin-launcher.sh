@@ -242,8 +242,9 @@ if ! _capture_stderr_last_line "unset" "unknown" python3 -m alfred.plugins.manif
     # The helper emits a closed-vocabulary bare key (daemon.boot.environment_-
     # not_set | daemon.boot.environment_unrecognised) on its LAST stderr line.
     # Surface it verbatim (low-3) instead of discarding it with 2>/dev/null and
-    # refusing with a generic reason; fall back to the not_set key if the
-    # capture was empty (fail-closed).
+    # refusing with a generic reason; the `*)` arm below reclassifies an empty
+    # or unrecognised capture to `daemon.boot.reason_unclassified` rather than
+    # guessing a specific reason (fail-closed).
     _env_err_key="${_CAPTURE_ERR_LAST_LINE}"
     # Each comment below lives INSIDE its own arm's body (after that arm's
     # OWN `)`), never in the gap between two arms. This file's text-based
