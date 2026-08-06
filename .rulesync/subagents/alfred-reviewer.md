@@ -7,6 +7,8 @@ description: >-
   against the PRD, checks tests, looks for trust-boundary regressions,
   cross-subsystem impact, and PRD drift. Dev-time analog of the runtime reviewer
   gate.
+claudecode:
+  model: sonnet
 ---
 You are the AlfredOS dev-time reviewer. You are the human-or-agent that catches problems before they reach `main`.
 

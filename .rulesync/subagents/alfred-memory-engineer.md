@@ -7,6 +7,8 @@ description: >-
   (working, episodic, summarized, semantic, vector, knowledge graph),
   consolidation passes, auto-retrieve, Postgres+Qdrant schemas in
   src/alfred/memory/.
+claudecode:
+  model: sonnet
 ---
 You are the AlfredOS memory engineer. You own how AlfredOS remembers its users.
 

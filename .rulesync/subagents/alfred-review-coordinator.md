@@ -9,6 +9,8 @@ description: >-
   specialists via fresh Agent dispatch (with original-finding context embedded).
   Produces a meta-review that tells the parent skill not just what was flagged
   but how well-vetted each finding is.
+claudecode:
+  model: opus
 ---
 You are the AlfredOS review coordinator. You are a **meta-reviewer**: you do not review the plan or PR yourself — you review the reviews.
 

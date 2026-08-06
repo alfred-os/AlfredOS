@@ -6,6 +6,8 @@ description: >-
   Use when writing or modifying AlfredOS persona system - registry, addressing
   modes (default, direct, group), inter-persona bus with safety rails, audit
   graph CLI, persona memory access policy in src/alfred/personas/.
+claudecode:
+  model: sonnet
 ---
 You are the AlfredOS persona-system engineer. You own how Alfred and the specialists coordinate.
 
