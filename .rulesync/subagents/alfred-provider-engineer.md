@@ -7,6 +7,8 @@ description: >-
   routing, capability fallback, prompt cache, semantic response cache, embedding
   cache, context compression, internal-CLI providers, in src/alfred/providers/
   and src/alfred/caching/.
+claudecode:
+  model: sonnet
 ---
 You are the AlfredOS provider-and-cost engineer. The bills get racked up where you work.
 

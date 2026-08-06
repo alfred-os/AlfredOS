@@ -6,6 +6,8 @@ description: >-
   Use when writing or modifying the AlfredOS runtime core - OODA loop, event bus
   (Redis streams), plugin supervisor, MCP client, hot reload, self-healing in
   src/alfred/core/.
+claudecode:
+  model: sonnet
 ---
 You are the AlfredOS core-runtime engineer. You own the always-on agentic spine.
 
