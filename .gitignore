@@ -89,6 +89,7 @@ AGENTS.md
 # which holds tracked workflows, CODEOWNERS, dependabot, and templates.
 .agent/
 .agents/
+.ai/
 .amp/
 .antigravity/
 .augment/
@@ -112,14 +113,18 @@ GEMINI.md
 .github/agents/
 .github/copilot-instructions.md
 .github/hooks/
+.github/mcp.json
 .github/prompts/
 .github/skills/
 .goose/
 .goosehints
 .grok/
+.hermes/
+.hermes.md
 .junie/
 .kilo/
 kilo.jsonc
+.kimi-code/
 .kiro/
 .opencode/
 .opencode.json
@@ -129,6 +134,8 @@ opencode.jsonc
 QODER.md
 .qwen/
 QWEN.md
+.reasonix/
+REASONIX.md
 .roo/
 .roomodes
 .rovodev/
