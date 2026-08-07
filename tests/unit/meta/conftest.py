@@ -47,15 +47,17 @@ def _load_script(module_name: str, path: Path) -> ModuleType:
     """Load `path` as a standalone module (a script, not a package).
 
     Registers the module in `sys.modules` BEFORE `exec_module` runs. Without
-    that registration, a script using `from __future__ import annotations`
-    alongside `@dataclass` crashes on first INSTANTIATION — not on import —
-    with `AttributeError: 'NoneType' object has no attribute '__dict__'`.
-    Dataclass's generated `__init__`/`__repr__` resolve lazily-stringified
-    field annotations via `sys.modules[cls.__module__].__dict__`; if the
-    module was never registered under that name, the lookup returns `None`.
-    Reproduced directly: a synthetic module built with `spec_from_file_location`
-    + `exec_module` and NO registration crashes exactly this way on 3.14.6;
-    the identical module WITH `sys.modules[name] = module` set first does not.
+    that registration, a script combining `from __future__ import annotations`
+    with `@dataclass` raises a bare `AttributeError: 'NoneType' object has no
+    attribute '__dict__'` — not on some later use, but DURING `exec_module`
+    itself, while the `@dataclass` decorator is running as part of executing
+    the class body. `@dataclass` resolves ClassVar/InitVar/KW_ONLY markers by
+    string-evaluating the postponed annotations against
+    `sys.modules.get(cls.__module__).__dict__`; that lookup is `None` for a
+    module never registered under its own name. Reproduced directly: a
+    synthetic module built with `spec_from_file_location` + `exec_module` and
+    no registration fails inside `exec_module` on 3.14.6; the identical module
+    with `sys.modules[name] = module` set first does not.
 
     Current `scripts/*.py` callers happen not to trip this (none currently
     combine both features while ALSO being loaded this way), which is exactly
@@ -69,7 +71,16 @@ def _load_script(module_name: str, path: Path) -> ModuleType:
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        del sys.modules[module_name]
+        # `.pop(name, None)`, not `del`: a script's OWN code can remove
+        # itself from `sys.modules` before raising (e.g. some
+        # self-unregistering pattern) — `del` on an absent key raises
+        # `KeyError`, which REPLACES the script's real exception as what the
+        # caller sees (it survives only as `__context__`, invisible to
+        # `except OriginalType:` and to `pytest.raises(OriginalType, ...)`).
+        # #574 review; reproduced: a script that does `del
+        # sys.modules[__name__]` then `raise RuntimeError(...)` surfaced
+        # `KeyError` to the caller under the old `del`.
+        sys.modules.pop(module_name, None)
         raise
     return module
 
