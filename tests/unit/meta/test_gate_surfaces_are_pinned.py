@@ -73,6 +73,8 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.unit.meta.conftest import GATE_ENFORCING_SCRIPT_NAMES
+
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 _WORKFLOWS_DIR: Path = _REPO_ROOT / ".github" / "workflows"
 _CI_WORKFLOW: Path = _WORKFLOWS_DIR / "ci.yml"
@@ -402,9 +404,11 @@ def test_the_two_gate_oracles_agree(
 #     mutation-tests exactly that distinction.
 #   * a 100% coverage gate. `--cov-fail-under=` (pytest's whole-tree floor)
 #     cannot match: it carries a single dash before `fail-under`.
+_GATE_SCRIPT_ALTERNATION: str = "|".join(
+    re.escape(name) for name in sorted(GATE_ENFORCING_SCRIPT_NAMES)
+)
 _GATE_SCRIPT_RUN_RE: re.Pattern[str] = re.compile(
-    r"(?:^|[\s;&|])python3?\s+scripts/"
-    r"(?:check_tag_t3|check_strict_declarations|run_coverage_gates)\.py"
+    r"(?:^|[\s;&|])python3?\s+scripts/" rf"(?:{_GATE_SCRIPT_ALTERNATION})\.py"
 )
 _COVERAGE_GATE_RUN_RE: re.Pattern[str] = re.compile(r"coverage\s+report\b[^\n]*?--fail-under=100\b")
 

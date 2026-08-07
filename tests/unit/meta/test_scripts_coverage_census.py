@@ -19,6 +19,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
+
+from tests.unit.meta.conftest import GATE_ENFORCING_SCRIPT_NAMES
+
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 _PYPROJECT: Path = _REPO_ROOT / "pyproject.toml"
 _SCRIPTS_DIR: Path = _REPO_ROOT / "scripts"
@@ -137,14 +141,67 @@ def test_the_census_is_not_vacuous(runner: ModuleType, ci_workflow: dict[str, An
 def test_the_gate_enforcing_scripts_are_gated_not_omitted(
     runner: ModuleType, ci_workflow: dict[str, Any]
 ) -> None:
-    """Naming these means moving either into `omit` is a failing edit."""
+    """Moving any of these into `omit` is a failing edit.
+
+    Derived from `GATE_ENFORCING_SCRIPT_NAMES` (`conftest.py`) — the SAME
+    canonical set `test_gate_surfaces_are_pinned.py` builds its
+    `_GATE_SCRIPT_RUN_RE` detector from — rather than a second, independently
+    hand-copied list. #568: the list this replaced named only 2 of the 3 real
+    gate-enforcing scripts (`check_tag_t3` was missing), so moving THAT one to
+    `omit` would have passed this regression guard silently. Two
+    independently-maintained lists of the same three names is exactly the
+    #422 shape ("a hand-copied list is a second source of truth that drifts
+    silently") this file's own module docstring warns about.
+    """
     gated = _gated_script_paths(runner, ci_workflow)
 
-    for script in ("scripts/run_coverage_gates.py", "scripts/check_strict_declarations.py"):
+    for name in sorted(GATE_ENFORCING_SCRIPT_NAMES):
+        script = f"scripts/{name}.py"
         assert script in gated, (
             f"{script} is gate-enforcing code and must carry its own gate "
             f"(#543); found gated scripts: {sorted(gated)}"
         )
+
+
+def test_the_gate_enforcing_regression_guard_catches_a_dropped_script(
+    runner: ModuleType, ci_workflow: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#568 non-vacuity proof: simulates `check_tag_t3.py` losing its gate.
+
+    All three canonical names are gated on the real tree today, so running
+    `test_the_gate_enforcing_scripts_are_gated_not_omitted` against real data
+    cannot distinguish "checks all 3 names" from "checks the old 2". This
+    monkeypatches the gate SOURCE (not the assertion) to remove
+    `check_tag_t3.py`'s gate, then calls the REAL function under test — not a
+    reimplementation of its logic — and asserts it raises. A copy of the
+    assertion here would pass regardless of what the real test does; this
+    must fail if `test_the_gate_enforcing_scripts_are_gated_not_omitted` ever
+    reverts to a hand-copied subset of `GATE_ENFORCING_SCRIPT_NAMES`.
+
+    Verified by executing the negative case: temporarily reverting the real
+    test's loop to the old 2-name tuple, this test FAILED with `DID NOT RAISE
+    AssertionError` — proving the old shape could not have caught the
+    check_tag_t3.py regression. Restored before commit.
+    """
+    real_iter_gates = runner._iter_gates
+
+    def _iter_gates_without_check_tag_t3(workflow: dict[str, Any], job_id: str) -> list[Any]:
+        # Matches the real `_iter_gates` return shape (`list[Gate]`) rather than
+        # a generator — a monkeypatch replacement should model the real
+        # function's type, not just its iteration behaviour.
+        return [
+            gate
+            for gate in real_iter_gates(workflow, job_id)
+            if "scripts/check_tag_t3.py" not in gate.paths
+        ]
+
+    monkeypatch.setattr(runner, "_iter_gates", _iter_gates_without_check_tag_t3)
+
+    gated = _gated_script_paths(runner, ci_workflow)
+    assert "scripts/check_tag_t3.py" not in gated, "monkeypatch is broken — still gated"
+
+    with pytest.raises(AssertionError, match="check_tag_t3"):
+        test_the_gate_enforcing_scripts_are_gated_not_omitted(runner, ci_workflow)
 
 
 def test_the_vendor_exemption_names_the_same_root_as_the_omit_entry() -> None:

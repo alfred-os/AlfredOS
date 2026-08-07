@@ -15,6 +15,7 @@ so one instance is safe — and it removes 12 re-executions of the script per ru
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -26,15 +27,57 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 CI_WORKFLOW: Path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 RUNNER_SCRIPT: Path = REPO_ROOT / "scripts" / "run_coverage_gates.py"
 
+#: Canonical set of gate-enforcing script BASENAMES (no `.py`, no `scripts/`
+#: prefix) — scripts whose OWN correctness underpins a merge-blocking CI gate,
+#: so moving one to `[tool.coverage.run] omit` would silently drop the check
+#: that check enforces. Single source of truth for two independent consumers
+#: that must never drift apart (#568): `test_gate_surfaces_are_pinned.py`
+#: builds `_GATE_SCRIPT_RUN_RE` from this to detect a REQUIRED-check
+#: invocation in `ci.yml`; `test_scripts_coverage_census.py` uses it to assert
+#: none of these may ever be reclassified to `omit`. Before #568 the census
+#: side hand-copied a 2-item tuple that had already drifted from this set
+#: (`check_tag_t3` was missing), so that regression guard silently protected
+#: only 2 of the 3 real gate-enforcing scripts.
+GATE_ENFORCING_SCRIPT_NAMES: frozenset[str] = frozenset(
+    {"check_tag_t3", "check_strict_declarations", "run_coverage_gates"}
+)
+
+
+def _load_script(module_name: str, path: Path) -> ModuleType:
+    """Load `path` as a standalone module (a script, not a package).
+
+    Registers the module in `sys.modules` BEFORE `exec_module` runs. Without
+    that registration, a script using `from __future__ import annotations`
+    alongside `@dataclass` crashes on first INSTANTIATION — not on import —
+    with `AttributeError: 'NoneType' object has no attribute '__dict__'`.
+    Dataclass's generated `__init__`/`__repr__` resolve lazily-stringified
+    field annotations via `sys.modules[cls.__module__].__dict__`; if the
+    module was never registered under that name, the lookup returns `None`.
+    Reproduced directly: a synthetic module built with `spec_from_file_location`
+    + `exec_module` and NO registration crashes exactly this way on 3.14.6;
+    the identical module WITH `sys.modules[name] = module` set first does not.
+
+    Current `scripts/*.py` callers happen not to trip this (none currently
+    combine both features while ALSO being loaded this way), which is exactly
+    why it is a latent trap rather than a live failure — see
+    `test_script_loader_handles_future_annotations_dataclasses.py`.
+    """
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[module_name]
+        raise
+    return module
+
 
 @pytest.fixture(scope="session")
 def runner() -> ModuleType:
     """Import ``scripts/run_coverage_gates.py`` — a script, not a package."""
-    spec = importlib.util.spec_from_file_location("run_coverage_gates", RUNNER_SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_script("run_coverage_gates", RUNNER_SCRIPT)
 
 
 @pytest.fixture(scope="session")
