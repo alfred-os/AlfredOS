@@ -615,7 +615,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 
 Decisions captured during design (2026-05-24):
 
-- **DEC-001:** Core in Python 3.14+ (pyproject floor `>=3.14.6`). Plugins polyglot via MCP.
+- **DEC-001:** Core in Python 3.14+ (pyproject declares `>=3.14`; enforced floor `3.14.6` — ADR-0061). Plugins polyglot via MCP.
 - **DEC-002:** Postgres + Redis + Qdrant as default datastores.
 - **DEC-003:** Hybrid plugin isolation — trusted in-process subprocess, untrusted in container.
 - **DEC-004:** Tiered routing with capability fallback; reviewer on a different provider.
