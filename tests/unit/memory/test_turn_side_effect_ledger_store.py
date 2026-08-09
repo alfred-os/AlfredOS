@@ -11,10 +11,11 @@ the integration tier (tests/integration/test_turn_side_effect_ledger_postgres.py
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from alfred.memory.turn_side_effects import (
     _TRY_APPLY_ASSISTANT_TURN_SQL,
@@ -50,34 +51,36 @@ def test_store_satisfies_protocol() -> None:
 
 
 async def test_try_apply_user_turn_proceeds_on_first_apply() -> None:
-    session = _FakeSession(returned=True)
+    fake_session = _FakeSession(returned=True)
+    session: AsyncSession = cast(AsyncSession, fake_session)
     store = PostgresTurnSideEffectLedger()
     assert await store.try_apply_user_turn(session, adapter_id="discord", inbound_id="m1") is True
-    stmt, params = session.executed[0]
+    stmt, params = fake_session.executed[0]
     assert stmt is _TRY_APPLY_USER_TURN_SQL
     assert params == {"adapter_id": "discord", "inbound_id": "m1"}
 
 
 async def test_try_apply_user_turn_skips_when_already_applied() -> None:
     # No row returned (the WHERE ...=FALSE guard didn't match) => already applied.
-    session = _FakeSession(returned=None)
+    session: AsyncSession = cast(AsyncSession, _FakeSession(returned=None))
     store = PostgresTurnSideEffectLedger()
     assert await store.try_apply_user_turn(session, adapter_id="discord", inbound_id="m1") is False
 
 
 async def test_try_apply_assistant_turn_proceeds_on_first_apply() -> None:
-    session = _FakeSession(returned=True)
+    fake_session = _FakeSession(returned=True)
+    session: AsyncSession = cast(AsyncSession, fake_session)
     store = PostgresTurnSideEffectLedger()
     assert (
         await store.try_apply_assistant_turn(session, adapter_id="discord", inbound_id="m1") is True
     )
-    stmt, params = session.executed[0]
+    stmt, params = fake_session.executed[0]
     assert stmt is _TRY_APPLY_ASSISTANT_TURN_SQL
     assert params == {"adapter_id": "discord", "inbound_id": "m1"}
 
 
 async def test_try_apply_assistant_turn_skips_when_already_applied() -> None:
-    session = _FakeSession(returned=None)
+    session: AsyncSession = cast(AsyncSession, _FakeSession(returned=None))
     store = PostgresTurnSideEffectLedger()
     assert (
         await store.try_apply_assistant_turn(session, adapter_id="discord", inbound_id="m1")
@@ -87,10 +90,11 @@ async def test_try_apply_assistant_turn_skips_when_already_applied() -> None:
 
 async def test_adapter_id_is_part_of_the_key_not_a_free_column() -> None:
     # A different adapter_id, same inbound_id, must not be treated as the same gate.
-    session = _FakeSession(returned=True)
+    fake_session = _FakeSession(returned=True)
+    session: AsyncSession = cast(AsyncSession, fake_session)
     store = PostgresTurnSideEffectLedger()
     assert await store.try_apply_user_turn(session, adapter_id="tui", inbound_id="m1") is True
-    _stmt, params = session.executed[0]
+    _stmt, params = fake_session.executed[0]
     assert params == {"adapter_id": "tui", "inbound_id": "m1"}
 
 
@@ -99,12 +103,13 @@ async def test_the_ledger_never_commits_or_rolls_back_the_callers_session() -> N
     # interaction is execute(). Commit/rollback belong to the caller's
     # session_scope — a ledger that committed would re-create the exact
     # independent-commit bug this revision removes.
-    session = _FakeSession(returned=True)
+    fake_session = _FakeSession(returned=True)
+    session: AsyncSession = cast(AsyncSession, fake_session)
     store = PostgresTurnSideEffectLedger()
     await store.try_apply_user_turn(session, adapter_id="discord", inbound_id="m1")
     await store.try_apply_assistant_turn(session, adapter_id="discord", inbound_id="m1")
     assert not hasattr(store, "_session_scope")
-    assert len(session.executed) == 2  # two execute() calls and nothing else
+    assert len(fake_session.executed) == 2  # two execute() calls and nothing else
 
 
 @pytest.mark.parametrize("method_name", ["try_apply_user_turn", "try_apply_assistant_turn"])
@@ -113,7 +118,7 @@ async def test_db_error_propagates_fail_loud(method_name: str) -> None:
     # False (which would silently re-permit a side effect that should have
     # stayed blocked, or block one that should have proceeded).
     boom = OperationalError("UPSERT failed", {}, Exception("db down"))
-    session = _FakeSession(raises=boom)
+    session: AsyncSession = cast(AsyncSession, _FakeSession(raises=boom))
     store = PostgresTurnSideEffectLedger()
     method = getattr(store, method_name)
     with pytest.raises(OperationalError):
