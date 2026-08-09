@@ -1,16 +1,35 @@
-"""Durable turn-side-effect idempotency ledger (#410 PR1).
+"""Durable turn-side-effect idempotency ledger (#410 PR1, transactional revision).
 
 The forwarded dispatched-edge path
 (:func:`alfred.comms_mcp.inbound.process_inbound_message` with
 ``commit_at_dispatch_edge=True``) leaves a failed frame NOT committed, so the
-forwarding leg replays it (ADR-0039 item 4). A resumed
-:meth:`alfred.orchestrator.core.Orchestrator._handle_turn` re-runs from
+forwarding leg replays it (ADR-0039 item 4). A resumed turn re-runs from
 scratch, which — absent this ledger — re-appends the user/assistant turns to
 the live in-process :class:`~alfred.memory.working.WorkingMemory` buffer and
-re-writes both episodic rows (ADR-0049's accepted residual, narrowed by #410
-to include the working-memory exposure ADR-0049 did not name). This ledger
-makes each of those two effects apply AT MOST ONCE per committed
-``(adapter_id, inbound_id)``.
+re-writes both episodic rows. This ledger makes each of those two effects
+apply AT MOST ONCE per committed ``(adapter_id, inbound_id)``.
+
+**Transactional contract (ADR-0062 — this INVERTS the original PR1 design):**
+each ``try_apply_*`` call executes on the CALLER's :class:`AsyncSession`,
+inside the caller's transaction. The gate and the guarded episodic write
+commit or roll back TOGETHER: a mid-phase rollback un-marks the gate in
+lockstep with the write it guards, so a replay after any failure correctly
+sees "not yet applied" and retries — never "applied but missing" (the
+data-loss bug the original independent-session design had). The ledger never
+calls ``commit()``/``rollback()`` itself and holds no session of its own.
+
+The caller is :meth:`alfred.orchestrator.core.Orchestrator`'s Phase A/C —
+each a SHORT-LIVED transaction (ledger UPSERT + one episodic write) that
+closes before any provider call, so the row lock a losing concurrent attempt
+waits on is held for milliseconds, and an orphaned (crashed-caller) lock is
+reclaimed by the TURN pool's ``idle_in_transaction_session_timeout``.
+
+**Deliberate divergence from the sibling**
+:class:`~alfred.memory.forwarded_dispatch_attempts.ForwardedDispatchAttemptStore`:
+that store's own-independent-session design is CORRECT for what IT guards (a
+retry counter, not a durability claim about another write). This ledger's
+original copy of that pattern was a mis-transfer, not a second instance of a
+shared design — recorded in ADR-0062 so the deviation reads as deliberate.
 
 **The budget charge is deliberately NOT gated by this ledger** (a #410 design
 correction found during the `/review-plan` fleet pass, after an earlier draft
@@ -24,10 +43,8 @@ over-charge, the safe direction) and composes correctly with the #410 PR2
 replay journal for free: a fast-forwarded tool call never re-invokes the
 provider, so only genuinely new post-resume completions are ever charged.
 
-Durable-across-restart on purpose, same rationale as the sibling
-:class:`~alfred.memory.forwarded_dispatch_attempts.ForwardedDispatchAttemptStore`:
-the forwarded-edge replay happens ACROSS core restarts, so an in-memory guard
-would reset exactly when it is needed.
+Durable-across-restart on purpose: the forwarded-edge replay happens ACROSS
+core restarts, so an in-memory guard would reset exactly when it is needed.
 
 Each ``try_apply_*`` method is a single ``INSERT ... ON CONFLICT (adapter_id,
 inbound_id) DO UPDATE ... WHERE <column> = FALSE RETURNING <column>``
@@ -35,10 +52,13 @@ statement — no read-then-write window. A row is returned (mapped to
 ``True``, "proceed") only when this call is the one that flips the column
 from FALSE to TRUE (either via the fresh INSERT or via a WHERE-qualified
 UPDATE); a conflicting call that finds the column already TRUE returns no
-row (mapped to ``False``, "already applied, skip"). The two columns share
-ONE row per ``(adapter_id, inbound_id)`` (not two tables) since they are two
-facets of the SAME turn attempt and must never be attributed to different
-inbound frames.
+row (mapped to ``False``, "already applied, skip"). Under READ COMMITTED a
+concurrent second transaction on the same key blocks on the row lock until
+the first resolves: first committed => the ``WHERE ... = FALSE`` guard denies
+the second; first rolled back => the second's insert wins. The two columns
+share ONE row per ``(adapter_id, inbound_id)`` (not two tables) since they
+are two facets of the SAME turn attempt and must never be attributed to
+different inbound frames.
 
 **Composite key, not `inbound_id` alone** (a #410 design correction found
 during the `/review-plan` fleet pass): ``inbound_id`` is a free-form,
@@ -49,18 +69,13 @@ composite ``(adapter_id, inbound_id)`` keys) — a single-column key would let
 two DIFFERENT adapters' turns collide on the same ``inbound_id`` string and
 silently gate-skip each other's unrelated content.
 
-**Caller contract:** call the relevant ``try_apply_*`` gate BEFORE performing
-the guarded effect — the only sound order for a check-then-act idempotency
-gate (a "do the effect, then mark" order would let two sequential/concurrent
-attempts both pass an unmarked check and both perform the effect,
-reintroducing the exact duplication this ledger exists to prevent). The one
-accepted residual: a genuine process crash — SIGKILL, OOM, host reboot, NOT
-the realistic "process alive, outbound-send failed" scenario ADR-0049
-describes and this ledger actually targets — landing in the sub-millisecond
-window between the gate's commit and the guarded write's own completion
-could theoretically lose that turn's content. Accepted as a residual bounded
-to that narrow crash class; see Task 4's crash-injection test for the exact
-scope pinned.
+**Caller contract:** call the relevant ``try_apply_*`` gate at the START of
+the same transaction that performs the guarded episodic write, and defer any
+NON-transactional twin effect (the in-process working-memory append) until
+AFTER that transaction commits. The residual this leaves is an orphaned USER
+episodic row when Phase B fails after Phase A committed — accepted (ADR-0062)
+as strictly better than the alternative (losing the user's message entirely):
+replay re-denies the user gate, allows the assistant gate, and converges.
 
 A genuine DB failure (``SQLAlchemyError``) PROPAGATES — never caught and
 collapsed into a boolean, which could either silently re-permit a blocked
@@ -69,8 +84,6 @@ side effect or silently block a permitted one.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
 from typing import Protocol, runtime_checkable
 
 import sqlalchemy as sa
@@ -104,13 +117,21 @@ _TRY_APPLY_ASSISTANT_TURN_SQL = sa.text(
 
 @runtime_checkable
 class TurnSideEffectLedger(Protocol):
-    """Durable per-``(adapter_id, inbound_id)`` at-most-once gate for two turn side effects."""
+    """Durable per-``(adapter_id, inbound_id)`` at-most-once gate, caller-transactional."""
 
-    async def try_apply_user_turn(self, *, adapter_id: str, inbound_id: str) -> bool:
-        """Return ``True`` iff the caller should apply the user-turn write now."""
+    async def try_apply_user_turn(
+        self, session: AsyncSession, *, adapter_id: str, inbound_id: str
+    ) -> bool:
+        """Return ``True`` iff the caller should apply the user-turn write now.
+
+        Executes inside ``session``'s transaction; commit/rollback are the
+        caller's, so the gate travels with the guarded write.
+        """
         ...
 
-    async def try_apply_assistant_turn(self, *, adapter_id: str, inbound_id: str) -> bool:
+    async def try_apply_assistant_turn(
+        self, session: AsyncSession, *, adapter_id: str, inbound_id: str
+    ) -> bool:
         """Return ``True`` iff the caller should apply the assistant-turn write now."""
         ...
 
@@ -118,35 +139,25 @@ class TurnSideEffectLedger(Protocol):
 class PostgresTurnSideEffectLedger:
     """Postgres-backed :class:`TurnSideEffectLedger`.
 
-    Owns its OWN ``session_scope`` — a fresh, immediately-committing
-    transaction per call, INDEPENDENT of the per-turn ``session`` in
-    :meth:`Orchestrator._handle_turn`. This is load-bearing: the per-turn
-    session rolls back on a deadline/exception, but a live in-process
-    ``WorkingMemory.append`` does NOT roll back with it. If this ledger
-    shared the per-turn session, a rollback would un-mark an already-applied
-    working-memory append, and the next resume would re-apply it — exactly
-    the bug this ledger exists to prevent. Same shape as
-    :class:`~alfred.memory.forwarded_dispatch_attempts.PostgresForwardedDispatchAttemptStore`.
+    Stateless on purpose: every call runs its single atomic UPSERT on the
+    caller's session, inside the caller's transaction. There is no
+    constructor seam through which an independent session/scope could be
+    re-introduced — the shape of the class IS the transactional contract.
     """
 
-    def __init__(
-        self,
-        *,
-        session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
-    ) -> None:
-        self._session_scope = session_scope
+    async def try_apply_user_turn(
+        self, session: AsyncSession, *, adapter_id: str, inbound_id: str
+    ) -> bool:
+        result = await session.execute(
+            _TRY_APPLY_USER_TURN_SQL, {"adapter_id": adapter_id, "inbound_id": inbound_id}
+        )
+        return result.scalar_one_or_none() is not None
 
-    async def try_apply_user_turn(self, *, adapter_id: str, inbound_id: str) -> bool:
-        async with self._session_scope() as session:
-            result = await session.execute(
-                _TRY_APPLY_USER_TURN_SQL, {"adapter_id": adapter_id, "inbound_id": inbound_id}
-            )
-            return result.scalar_one_or_none() is not None
-
-    async def try_apply_assistant_turn(self, *, adapter_id: str, inbound_id: str) -> bool:
-        async with self._session_scope() as session:
-            result = await session.execute(
-                _TRY_APPLY_ASSISTANT_TURN_SQL,
-                {"adapter_id": adapter_id, "inbound_id": inbound_id},
-            )
-            return result.scalar_one_or_none() is not None
+    async def try_apply_assistant_turn(
+        self, session: AsyncSession, *, adapter_id: str, inbound_id: str
+    ) -> bool:
+        result = await session.execute(
+            _TRY_APPLY_ASSISTANT_TURN_SQL,
+            {"adapter_id": adapter_id, "inbound_id": inbound_id},
+        )
+        return result.scalar_one_or_none() is not None
