@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 import structlog
 from pydantic import (
@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic.fields import FieldInfo
+from pydantic_core import PydanticCustomError
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -46,6 +47,30 @@ _PLACEHOLDER_API_KEY = "sk-..."
 # validator rejects those explicitly (FIX 3) and asserts the resolved manifest
 # path stays under ``plugins/``.
 _COMMS_ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# #410 PR1 / ADR-0062: hard ceiling on the two runtime pools' combined size.
+DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET: Final[int] = 60
+"""Ceiling on ``db_turn_pool_max_connections + db_side_pool_max_connections``.
+
+Derivation — every number named, none bare (the pre-#410 "15" was an
+unconfigured SQLAlchemy default that was never justified anywhere; this
+constant exists so that mistake is not repeated):
+
+- 100 : postgres:18 default ``max_connections`` (docker-compose.yaml ships no
+  override)
+- -3 : postgres default ``superuser_reserved_connections`` — never available
+  to alfred's non-superuser role
+- -15 : capability-gate backend CONTROL pool (stock QueuePool: pool_size 5 +
+  max_overflow 10 — ``alfred.memory.db._CONTROL_POOL_SIZE`` /
+  ``_CONTROL_MAX_OVERFLOW``, wired in ``_gate_boot.py``)
+- -15 : sync IdentityResolver CONTROL engine (same explicit stock shape —
+  ``_bootstrap.install_identity_factories_for_settings``)
+- -7 : CLI / Alembic / emergency-operator headroom (``alfred user ...``,
+  migrations, and a rescue psql session must never be locked out by a
+  saturated runtime)
+
+100 - 3 - 15 - 15 - 7 = 60.
+"""
 
 
 def _environment_keys(settings_cls: type[BaseSettings]) -> tuple[str, ...]:
@@ -249,6 +274,31 @@ class Settings(BaseSettings):
     # from thrashing on the very first persona switch (CR finding — enforce
     # the docstring contract at the field level).
     working_memory_pool_max: int | None = Field(default=None, ge=50)
+
+    # #410 PR1 / ADR-0062: role-scoped Postgres pools. TURN carries the
+    # orchestrator's sub-millisecond Phase A/C transactions; SIDE_EFFECT
+    # carries the durability-guaranteed audit/idempotency writes that must
+    # acquire a SECOND connection while a TURN one is held (hard rule #7) —
+    # which is exactly why the two pools are separate: a saturated TURN pool
+    # must never starve the audit path. Their SUM is validated against
+    # DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET below. ge=2 on each: a
+    # 1-connection pool serializes every concurrent user through one socket.
+    db_turn_pool_max_connections: int = Field(default=32, ge=2, le=200)
+    db_side_pool_max_connections: int = Field(default=16, ge=2, le=200)
+    # Pool checkout wait bound. A checkout that waits longer than this raises
+    # instead of joining a silent convoy; le=30 keeps it under the 30 s action
+    # deadline so starvation surfaces as a distinct loud error, not a timeout.
+    db_pool_checkout_timeout_seconds: float = Field(default=10.0, gt=0.0, le=30.0)
+    # Postgres-side idle_in_transaction_session_timeout for TURN/SIDE_EFFECT
+    # connections. Safe to keep TIGHT only because of the three-phase split:
+    # the only in-transaction work is Phase A/C (ledger UPSERT + one episodic
+    # write, bounded by the before-write hook chain —
+    # HOOK_CHAIN_DEADLINE_SECONDS 0.25 s x 2 hookpoints ~= 0.5 s worst case).
+    # Default 5 s = 10x that bound; ge=1.0 stops an operator configuring a
+    # value that would reap HEALTHY transactions. An orphaned crash-abandoned
+    # transaction's row locks are reclaimed within this window instead of OS
+    # TCP-keepalive timescales (hours).
+    db_idle_in_transaction_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
 
     # PR-S4-8 (#152, perf-003): per-adapter cap on concurrent inbound
     # notification handlers. ``AlfredPluginSession`` allocates one
@@ -464,6 +514,48 @@ class Settings(BaseSettings):
         itself and wants to know which source won.
         """
         return self._environment_load_result
+
+    @model_validator(mode="after")
+    def _refuse_over_budget_db_pools(self) -> Settings:
+        """#410 PR1: refuse a pool combination Postgres cannot actually serve.
+
+        Without this, an operator override could configure more pooled
+        connections than ``max_connections`` minus reserves — which fails at
+        the WORST time (peak load, checkout storm) instead of at boot.
+
+        Raised as :class:`PydanticCustomError` (a ``ValueError`` subclass),
+        NOT a bare ``ValueError`` — deliberately. A model-level validator
+        reports ``loc=()``, and the daemon boundary
+        (``alfred.cli.daemon._commands._settings_error_field_name``) refuses
+        to interpolate ``str(exc)`` for DLP reasons, so a bare raise would be
+        swallowed into the fully generic ``daemon.boot.settings_invalid``
+        message. The custom error TYPE slug
+        (``db_pool_connection_budget_exceeded``) is the value-free category
+        that boundary surfaces instead — the operator learns WHICH constraint
+        refused the boot without any configured number reaching a log sink.
+        The full message (numbers included) still reaches the interactive
+        path via ``load_settings_or_die``'s ``str(exc)`` echo.
+        """
+        total = self.db_turn_pool_max_connections + self.db_side_pool_max_connections
+        if total > DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET:
+            raise PydanticCustomError(
+                "db_pool_connection_budget_exceeded",
+                "db_turn_pool_max_connections ({turn}) + "
+                "db_side_pool_max_connections ({side}) = {total}, which exceeds "
+                "the connection budget of {budget} (postgres:18 default "
+                "max_connections 100 minus superuser reserve, the two "
+                "CONTROL-role pools, and CLI/ops headroom — see "
+                "DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET's docstring). Lower "
+                "the pool fields, or raise Postgres max_connections and this "
+                "budget together, deliberately.",
+                {
+                    "turn": self.db_turn_pool_max_connections,
+                    "side": self.db_side_pool_max_connections,
+                    "total": total,
+                    "budget": DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET,
+                },
+            )
+        return self
 
     @field_validator("comms_enabled_adapters")
     @classmethod

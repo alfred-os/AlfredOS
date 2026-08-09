@@ -244,12 +244,13 @@ def test_settings_error_field_name_none_when_loc_is_empty() -> None:
     real pydantic model failure — a ``model_validator(mode="after")`` that raises
     reports ``loc=()`` (verified directly against pydantic: a minimal model with such
     a validator produces ``errors() == [{"type": "value_error", "loc": (), ...}]``).
-    ``Settings`` has no such validator today, so no real ``Settings()`` call reaches
-    this via the daemon boot path — but the guard exists precisely so a FUTURE
-    model-level validator on ``Settings`` degrades to the generic
-    ``daemon.boot.settings_invalid`` message rather than rendering an empty field
-    name. Built via pydantic's own ``ValidationError.from_exception_data`` for the
-    same determinism/scoping reason as the sibling test.
+    ``Settings`` has a model-level connection-budget validator (#410 PR1), so this
+    shape IS reachable — but the guard exists so a model-level validator raised as
+    a BARE ``ValueError`` degrades to the generic ``daemon.boot.settings_invalid``
+    message rather than rendering an empty field name — a deliberately-slugged
+    ``PydanticCustomError`` instead surfaces its category slug (#410 PR1; see the
+    sibling test below). Built via pydantic's own ``ValidationError.from_exception_data``
+    for the same determinism/scoping reason as the sibling test.
     """
     line_errors: list[InitErrorDetails] = [
         InitErrorDetails(
@@ -263,6 +264,29 @@ def test_settings_error_field_name_none_when_loc_is_empty() -> None:
         raise SettingsError("settings blew up") from cause
     except SettingsError as exc:
         assert _settings_error_field_name(exc) is None
+
+
+def test_settings_error_field_name_surfaces_a_custom_slug_at_empty_loc() -> None:
+    """#410 PR1 (fleet finding H-3): a model-level (``loc=()``) refusal raised
+    as a deliberately-slugged ``PydanticCustomError`` surfaces its slug — the
+    DLP-safe category naming WHICH constraint failed — instead of degrading to
+    the fully generic message. The sibling test above still holds: a BARE
+    ``ValueError`` raise arrives as pydantic's generic ``value_error`` wrapper
+    type, which names nothing and stays swallowed. Slugs are authored string
+    literals in settings.py — never interpolated from a value — so this is
+    the same value-free contract as the M2 field-name variant."""
+    line_errors: list[InitErrorDetails] = [
+        InitErrorDetails(
+            type=PydanticCustomError("db_pool_connection_budget_exceeded", "over budget"),
+            loc=(),
+            input="irrelevant",
+        )
+    ]
+    cause = ValidationError.from_exception_data("Settings", line_errors)
+    try:
+        raise SettingsError("settings blew up") from cause
+    except SettingsError as exc:
+        assert _settings_error_field_name(exc) == "db_pool_connection_budget_exceeded"
 
 
 def test_placeholder_api_key_settings_error_shows_curated_hint(
