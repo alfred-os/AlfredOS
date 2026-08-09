@@ -24,7 +24,7 @@ from alfred.memory.turn_side_effects import (
 
 
 class _FakeResult:
-    def __init__(self, returned: bool | None) -> None:
+    def __init__(self, *, returned: bool | None) -> None:
         self._returned = returned
 
     def scalar_one_or_none(self) -> bool | None:
@@ -41,7 +41,7 @@ class _FakeSession:
         self.executed.append((statement, params))
         if self._raises is not None:
             raise self._raises
-        return _FakeResult(self._returned)
+        return _FakeResult(returned=self._returned)
 
 
 def _scope_for(session: _FakeSession) -> Any:
