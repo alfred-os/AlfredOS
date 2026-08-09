@@ -198,10 +198,7 @@ def test_action_outcome_domain_constant_pins_closed_set() -> None:
     """
     from alfred.supervisor.observability import _ACTION_OUTCOME_DOMAIN
 
-    assert (
-        frozenset({"success", "timeout", "cancelled", "commit_failed"})
-        == _ACTION_OUTCOME_DOMAIN
-    )
+    assert frozenset({"success", "timeout", "cancelled", "commit_failed"}) == _ACTION_OUTCOME_DOMAIN
 
 
 def test_breaker_state_domain_constant_pins_closed_set() -> None:
@@ -234,9 +231,7 @@ def test_commit_failed_is_recorded_verbatim_not_rewritten_to_unknown() -> None:
         "breaker_state": "UNKNOWN",
     }
     before = (
-        REGISTRY.get_sample_value(
-            "alfred_orchestrator_action_duration_seconds_count", labels
-        )
+        REGISTRY.get_sample_value("alfred_orchestrator_action_duration_seconds_count", labels)
         or 0.0
     )
     record_action_duration(
@@ -245,9 +240,7 @@ def test_commit_failed_is_recorded_verbatim_not_rewritten_to_unknown() -> None:
         action_outcome="commit_failed",
         breaker_state="UNKNOWN",
     )
-    after = REGISTRY.get_sample_value(
-        "alfred_orchestrator_action_duration_seconds_count", labels
-    )
+    after = REGISTRY.get_sample_value("alfred_orchestrator_action_duration_seconds_count", labels)
     assert after == before + 1.0
 
 
@@ -265,13 +258,10 @@ def test_orphaned_user_turn_counter_increments_under_the_callers_bucket() -> Non
 
     labels = {"user_id_bucket": bucket_user_id("orphan-probe-user")}
     before = (
-        REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels)
-        or 0.0
+        REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels) or 0.0
     )
     record_orphaned_user_turn(user_id="orphan-probe-user")
-    after = REGISTRY.get_sample_value(
-        "alfred_orchestrator_orphaned_user_turn_total", labels
-    )
+    after = REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels)
     assert after == before + 1.0
 
 
