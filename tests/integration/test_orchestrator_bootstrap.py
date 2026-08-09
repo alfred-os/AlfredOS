@@ -29,7 +29,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
@@ -42,39 +42,10 @@ from alfred.memory.models import AuditEntry, Base, Episode
 from alfred.orchestrator.core import Orchestrator
 from alfred.providers.base import CompletionResponse
 from alfred.security.tiers import T2, tag
+from tests.helpers.schema import CREATE_TURN_SIDE_EFFECT_LEDGER_SQL
 
 _OPERATOR_SLUG = "operator"
 _OPERATOR_LANGUAGE = "en-US"
-
-# #410 PR1: build_orchestrator now unconditionally arms the
-# PostgresTurnSideEffectLedger, which reads/writes the
-# turn_side_effect_ledger table via raw SQL (migration 0025) — there is no
-# ORM model for that table, so Base.metadata.create_all below cannot create
-# it. Running the full alembic chain was tried and rejected here too: this
-# module's own module docstring states the deliberate choice of
-# Base.metadata.create_all + manual seed "isolated from migration-shape
-# drift" (the alembic-upgrade path is the SEPARATE smoke test's job), and
-# migration 0004's idempotent operator backfill would collide with
-# _seed_operator's own insert at the same "operator" slug. This DDL mirrors
-# migration 0025's upgrade() verbatim (kept in sync by inspection; both are
-# additive-only and unlikely to drift) without replaying the rest of the
-# chain's data-seeding side effects.
-_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL = text(
-    """
-    CREATE TABLE turn_side_effect_ledger (
-        adapter_id VARCHAR(128) NOT NULL,
-        inbound_id VARCHAR(255) NOT NULL,
-        user_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
-        assistant_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-        CONSTRAINT pk_turn_side_effect_ledger PRIMARY KEY (adapter_id, inbound_id),
-        CONSTRAINT ck_turn_side_effect_ledger_adapter_id_length
-            CHECK (char_length(adapter_id) BETWEEN 1 AND 128),
-        CONSTRAINT ck_turn_side_effect_ledger_inbound_id_length
-            CHECK (char_length(inbound_id) BETWEEN 1 AND 255)
-    )
-    """
-)
 
 
 def _seed_operator(sync_url: str) -> None:
@@ -151,8 +122,11 @@ async def test_build_orchestrator_drives_one_turn(
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-                # #410 PR1: not part of Base.metadata (see module comment above).
-                await conn.execute(_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
+                # #410 PR1: build_orchestrator now unconditionally arms the
+                # PostgresTurnSideEffectLedger; turn_side_effect_ledger has
+                # no ORM model (see tests.helpers.schema), so create_all
+                # above can't create it.
+                await conn.execute(CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
         finally:
             await engine.dispose()
         _seed_operator(sync_url)

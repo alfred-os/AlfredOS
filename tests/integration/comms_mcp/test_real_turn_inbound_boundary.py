@@ -86,6 +86,7 @@ from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
 from tests.helpers.routers import FixedAnswerRouter
+from tests.helpers.schema import CREATE_TURN_SIDE_EFFECT_LEDGER_SQL
 
 pytestmark = pytest.mark.integration
 
@@ -373,36 +374,6 @@ def _seed_users(sync_url: str) -> None:
         sync_engine.dispose()
 
 
-# #410 PR1: ``build_orchestrator`` now unconditionally arms the
-# ``PostgresTurnSideEffectLedger``, which reads/writes the
-# ``turn_side_effect_ledger`` table via raw SQL (migration 0025) — there is
-# no ORM model for that table, so ``Base.metadata.create_all`` below cannot
-# create it. Running the FULL alembic chain instead was tried and rejected:
-# migration 0004 auto-installs a default "operator"-slug user (idempotent
-# backfill), which collides with this module's own ``_seed_users`` operator
-# row (``_OPERATOR_SLUG = "the-operator"``) and trips
-# ``IdentityResolver.get_operator()``'s multi-operator refusal. This DDL
-# mirrors migration 0025's ``upgrade()`` verbatim (kept in sync by
-# inspection; both are additive-only and unlikely to drift) without
-# replaying the rest of the chain's data-seeding side effects.
-_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL = text(
-    """
-    CREATE TABLE turn_side_effect_ledger (
-        adapter_id VARCHAR(128) NOT NULL,
-        inbound_id VARCHAR(255) NOT NULL,
-        user_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
-        assistant_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-        CONSTRAINT pk_turn_side_effect_ledger PRIMARY KEY (adapter_id, inbound_id),
-        CONSTRAINT ck_turn_side_effect_ledger_adapter_id_length
-            CHECK (char_length(adapter_id) BETWEEN 1 AND 128),
-        CONSTRAINT ck_turn_side_effect_ledger_inbound_id_length
-            CHECK (char_length(inbound_id) BETWEEN 1 AND 255)
-    )
-    """
-)
-
-
 @asynccontextmanager
 async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
     """Create the schema, seed users, and yield a real Postgres ``AuditWriter``."""
@@ -410,7 +381,15 @@ async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            await conn.execute(_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
+            # #410 PR1: build_orchestrator now unconditionally arms the
+            # PostgresTurnSideEffectLedger, which reads/writes
+            # turn_side_effect_ledger via raw SQL (migration 0025) — there
+            # is no ORM model for that table, so create_all above can't
+            # create it (see tests.helpers.schema for why this is a raw-DDL
+            # escape hatch rather than a full alembic replay: migration
+            # 0004's operator backfill would collide with this module's own
+            # _seed_users operator row, "the-operator").
+            await conn.execute(CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
 
         sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
         _seed_users(sync_url)
