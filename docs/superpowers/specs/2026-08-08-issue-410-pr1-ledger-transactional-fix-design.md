@@ -125,6 +125,50 @@ committing sessions" to "8 independent transactions that each commit or roll
 back the guarded write together with the gate", which is the same shape, not
 a weaker one.
 
+**Accepted trade-off, named explicitly (found during `/review-plan`, 2026-08-08
+— independently by two reviewers, `alfred-memory-engineer` and
+`alfred-security-engineer`):** folding the ledger into the shared transaction
+means a losing concurrent attempt's row-lock wait grows from a fast,
+standalone statement (milliseconds, under the old independent-session design)
+to up to the **full turn duration**, bounded only by the 30s action deadline —
+since the loser now blocks until the winner's entire transaction (provider
+call, tool dispatch, terminal audit write, and all) resolves, not just its own
+UPSERT. Today this is masked entirely: `RealTurnOrchestratorAdapter._turn_locks`
+(`src/alfred/comms_mcp/real_turn_adapter.py:193-203`) already serializes the
+whole turn per `(persona, user_id)` in-process, so two genuinely concurrent
+attempts on the same `(adapter_id, inbound_id)` key require two separate
+processes to occur at all — not ruled out architecturally, just not exercised
+by any test today. **Accepted as a deadline-bounded residual** (Option B, the
+alternative that avoids this by not sharing the transaction, was already
+rejected in §4 for reopening the concurrent-safety race this design closes) —
+worth a dedicated ADR-0049 entry (Task 8) rather than three scattered notes,
+and a test asserting the loser's wait is bounded and resolves promptly once
+the winner's transaction concludes (Task 3).
+
+**A second, related trade-off: no DB-side bound on an orphaned lock (found
+during `/review-plan`, `alfred-security-engineer`, confirmed by
+`alfred-memory-engineer`):** a genuine process crash mid-turn now leaves an
+orphaned transaction holding the ledger row lock — nothing rolls it back,
+since rollback is the connection's own job and the connection is gone.
+`src/alfred/memory/db.py`'s engine construction sets no
+`idle_in_transaction_session_timeout` (confirmed: no such override anywhere in
+`src/alfred/memory/db.py` or the compose config), so Postgres itself imposes
+no bound either — the crash-then-restart replay, the exact path this ledger
+exists to protect, could block on that orphaned lock for however long the
+OS-level TCP connection takes to be recognized as dead (commonly on the order
+of hours under default keepalive settings), not the sub-second window the
+"deadline-bounded" framing above implies for the live-contention case. **This
+one needs an actual fix, not just documentation**: set
+`idle_in_transaction_session_timeout` on the engine (via
+`create_async_engine`'s `connect_args={"server_settings": {...}}}` — confirmed
+mechanically sound against this codebase's SQLAlchemy version) to a bound at
+least as generous as `action_deadline_seconds`, so Postgres itself reclaims an
+orphaned transaction's locks within a known, short window regardless of
+whether the crashed process's connection is ever recognized as dead. Task 3
+needs an integration test that kills a connection mid-transaction and asserts
+the replay's wait is bounded by this timeout, not by OS-level keepalive
+defaults.
+
 ### 3.2 The current turn's own message always reaches the provider
 
 `_handle_turn` threads the current attempt's own user input into the message
@@ -160,15 +204,47 @@ the transaction has actually committed."
 **Mechanism:** `_handle_turn` returns a small internal outcome carrying the
 reply plus the staged working-memory appends (which turns to append, decided
 by the gate results, not yet applied) instead of returning the reply string
-directly:
+directly. The pseudocode below is illustrative of control flow and ordering,
+not final implementation code — but every element that matters (the outer
+try/except, the telemetry call's exact position, the loop) must appear in the
+implementation exactly as shown, not merely "be a natural consequence" of the
+restructure (a `/review-plan` finding, 2026-08-08: an earlier draft of this
+section showed the deferred-append loop without showing where the relocated
+telemetry call goes, and the existing safety-net test
+(`test_success_path_records_duration`, `test_core.py:1005-1024`) is an
+unordered spy assertion that would not catch an implementer leaving the call
+in its old, pre-commit position):
+
+**Structure superseded by ADR-0062 (see the status block above):** the single
+`async with` below is now TWO short-lived phase scopes with the provider call
+between them. The telemetry positions and the deferred-append loop carry
+forward per-phase; the enclosing transaction shape does not.
 
 ```python
 outcome: _TurnOutcome | None = None
-async with self._session_scope() as session:
-    try:
-        outcome = await self._deadline_wrapper.run(self._handle_turn, session, ...)
-    except TimeoutError: ...      # existing rollback arms, unchanged, all re-raise
-# commit has happened here — session_scope.__aexit__ ran session.commit()
+try:
+    async with self._session_scope() as session:
+        try:
+            outcome = await self._deadline_wrapper.run(self._handle_turn, session, ...)
+        except TimeoutError: ...      # existing rollback arms, unchanged, all re-raise
+    # commit has succeeded here — session_scope.__aexit__ ran session.commit()
+except Exception:
+    # #410 PR1 fix (found during `/review-plan`, 2026-08-08): a commit
+    # failure at __aexit__ happens AFTER the inner try/except above has
+    # already exited cleanly, so none of the three existing rollback arms
+    # ever see it — without this outer arm, a commit failure records NO
+    # telemetry at all (worse than the pre-fix bug, which at least recorded
+    # a wrongly-labeled "success"). Record before re-raising; never swallow.
+    record_action_duration(action_outcome="commit_failed")
+    raise
+# Telemetry BEFORE the deferred-append loop, not after (found during
+# `/review-plan`, 2026-08-08): if a deferred append itself ever raised and
+# the metric fired afterward, this would reproduce the exact "records
+# success for an incomplete turn" bug this fix exists to close, just moved
+# one step later. Firing here means "success" means "the transaction
+# committed" — the append loop below is best-effort in-process delivery,
+# not part of the durability claim the metric makes.
+record_action_duration(action_outcome="success")
 for role, text in outcome.working_memory_appends:
     await working_memory.append(role=role, content=text)
 return outcome.reply
@@ -179,7 +255,11 @@ return outcome.reply
 is already generic (`deadline.py:70`) and types through unchanged. No test
 calls `_handle_turn` directly — every test goes through
 `handle_user_message` — so this is an internal signature change with no
-external contract impact.
+external contract impact. The implementation plan must add a forced-commit-
+failure test (e.g. monkeypatching `session.commit` to raise) asserting the
+`commit_failed` outcome is recorded and the exception still propagates —
+`action_outcome="commit_failed"` is a new value; confirm it doesn't collide
+with an existing enum/literal type constraining that field before landing it.
 
 **Why not a SQLAlchemy `after_commit` hook:** rejected. `after_commit`
 handlers are synchronous; `WorkingMemory.append` is async, and bridging would
@@ -207,25 +287,66 @@ process crash between the transaction's commit and the (now-deferred)
 strictly *better* than the residual it replaces, not worse: the crash also
 kills the in-process buffer regardless, and restart rehydrates from the
 already-committed episodic row (`working_pool.py:113-122`), so net loss is
-zero. (Verified: cancellation between commit and append is not reachable
-today — there is no suspension point between `__aexit__` returning and the
-deferred-append loop running; `WorkingMemory.append`'s lock acquisition is
-uncontended under the per-key turn mutex and returns without awaiting on
-CPython 3.14.6's fast path.) Commit failure itself is naturally fail-closed
-under this design — the exception propagates from the `async with` statement,
-the post-block loop never runs, no append happens — a property the current
+zero. Commit failure itself is naturally fail-closed under this design (see
+the outer `except Exception` above) — the exception propagates, the
+deferred-append loop never runs, no append happens — a property the current
 (pre-fix) design does not have.
 
-### 3.4 Bonus fix, free with this restructure
+**This safety argument has a named, load-bearing external dependency — cite
+it, don't just assert the property (found during `/review-plan`, 2026-08-08,
+independently by `alfred-memory-engineer` and `alfred-security-engineer`):**
+"cancellation between commit and append is not reachable today" is true only
+because `RealTurnOrchestratorAdapter._turn_locks`
+(`src/alfred/comms_mcp/real_turn_adapter.py:193-203`) — a DIFFERENT module,
+not `Orchestrator` or `WorkingMemory`'s own contract — serializes the whole
+turn per `(persona, user_id)`, so `WorkingMemory.append`'s lock acquisition is
+always uncontended and its current implementation returns without ever
+awaiting (a general property of an uncontended `asyncio.Lock` in this
+codebase's Python version, not a version-specific "fast path" — the earlier
+draft of this section over-attributed this to "CPython 3.14.6" specifically,
+which mischaracterized a stable stdlib property and obscured the real
+dependency). §6 already names the Slice-3 Redis swap as a future obligation
+that would break this; this paragraph is the other half of that same
+obligation — **if a future caller ever reaches `Orchestrator` without going
+through `RealTurnOrchestratorAdapter`'s mutex**, the deferred-append region
+(outside any try/except by design, since it's meant to be the "committed,
+just delivering" tail) could raise or be cancelled uncaught: no audit row, no
+error surfaced, reply potentially lost after the durable write already
+succeeded — a CLAUDE.md hard-rule-#7 concern. Whoever removes or bypasses
+that mutex inherits the obligation to re-derive this section's safety
+argument, not just the Redis-swap one. The implementation plan should either
+cross-reference `_turn_locks` by name in the deferred-append loop's own
+comment (cheap, recommended), or wrap the loop in an `except
+asyncio.CancelledError` that logs/audits a "committed but in-process delivery
+raced a cancel" outcome before re-raising (more defensive, not required given
+the current mutex, but worth considering if the mutex's scope ever changes).
+
+### 3.4 Telemetry correctness, folded into §3.3's mechanism
 
 `record_action_duration(action_outcome="success")` (`core.py:462-467`)
-currently fires *before* the transaction's commit. A commit failure today
-would record a spurious "success" observation. Moving the success
-observation to after the `async with` block (a natural consequence of moving
-`return` out of the block per §3.3) fixes this for free. Verify
-`tests/unit/orchestrator/test_core.py:1020`
-(`action_outcome == "success"` assertion) still passes — it inspects kwargs
-only, so it should be unaffected by the timing move.
+currently fires *before* the transaction's commit — a commit failure today
+records a spurious "success" observation. **This is not a side effect that
+falls out naturally from §3.3's restructure — it is an explicit part of the
+mechanism, shown in §3.3's pseudocode** (a `/review-plan` finding, 2026-08-08:
+an earlier draft called this a "natural consequence" without the pseudocode
+actually showing it, which is exactly the kind of gap that lets an
+implementer reproduce the bug one line later). The three requirements, all
+visible in §3.3's code block:
+
+1. The relocated `record_action_duration(action_outcome="success")` call
+   fires immediately after the `async with` block exits successfully, before
+   the deferred-append loop — not after it, and not left in its original
+   pre-commit position.
+2. A commit failure specifically (not just the three pre-existing rollback
+   arms) is caught by an outer `except Exception` and recorded as its own
+   outcome (`"commit_failed"`) before re-raising — today's code effectively
+   has no path that reaches this state distinctly, so this is new coverage,
+   not a relocation.
+3. Verify `tests/unit/orchestrator/test_core.py:1020`
+   (`action_outcome == "success"` assertion) still passes as an unordered spy
+   check — it inspects kwargs only, so it is unaffected by the timing move —
+   but add the forced-commit-failure test §3.3 calls for, since nothing
+   today exercises requirement 2.
 
 ## 4. Rejected alternatives
 
@@ -262,55 +383,143 @@ This section is a map for the implementation plan, not the plan itself.
   from an owned `session_scope` factory to accepting the per-turn session
   (mirroring `episodic_factory`). Docstring rationale at `:52-67` and
   `:118-130` inverts and needs rewriting, not amending — it currently asserts
-  the opposite of this design and is the direct cause of the bug.
-- **Task 3** (Postgres integration test): signature change only: the
-  concurrent-race test's "exactly one winner" property is preserved per §3.1,
-  restructured to model 8 concurrent transactions rather than 8 independent
-  sessions. A **new** integration test is required and does not exist today:
-  a transaction that rolls back after the gate must leave the gate unset —
-  nothing currently pins this, and it's the direct regression test for the
-  bug this design fixes.
+  the opposite of this design and is the direct cause of the bug. **Test
+  fallout is larger than "constructor changes" implies** (found during
+  `/review-plan`, 2026-08-08, `alfred-test-engineer`, confirmed by direct
+  count): all 7/7 tests in `tests/unit/memory/test_turn_side_effect_ledger_store.py`
+  currently construct via the doomed `session_scope=` kwarg and will fail
+  with `TypeError` at construction, not just "the constructor" in the
+  abstract — budget the implementation task for rewriting every one of them,
+  not a subset.
+- **Task 3** (Postgres integration test): **not signature-change-only** (a
+  `/review-plan` finding, 2026-08-08, `alfred-architect`, confirmed against
+  `test_turn_side_effect_ledger_postgres.py:36-43,82-90` — the fixture setup
+  and every test body construct and pass a session-scope callable, all of
+  which restructure, not just the constructor call site). The concurrent-race
+  test's "exactly one winner" property is preserved per §3.1, restructured to
+  model 8 concurrent transactions rather than 8 independent sessions. Three
+  **new** tests are required here, none of which exist today: (1) a
+  transaction that rolls back after the gate must leave the gate unset — the
+  direct regression test for the bug this design fixes; (2) a connection
+  killed mid-transaction (simulating a crash) must show the replay's wait is
+  bounded by the new `idle_in_transaction_session_timeout` (§3.1), not by
+  OS-level keepalive defaults; (3) a concurrent-attempt-plus-rollback
+  intersection — §3.1's single-statement "exactly one winner" argument holds
+  by inspection of the UPSERT alone, but the WIDER shared transaction this
+  design introduces is new lock-footprint surface that inspection of the
+  statement doesn't cover (found during `/review-plan`,
+  `alfred-test-engineer`, confirmed by `alfred-security-engineer` as directly
+  related to the lock-duration trade-off named in §3.1) — a concurrent
+  variant of the rollback test closes this, or the "provable by inspection"
+  claim in the eventual ADR-0049 entry should be scoped explicitly to the
+  ledger statement alone, not the transaction's full lock footprint.
 - **Task 4** (already implemented as committed, `0a75f1ba`..`fa13d3e8` on this
   worktree branch — needs revision, not a fresh implementation): the
   `_TurnOutcome` restructure, the deferred-append loop, and the
   prompt-construction fix (§3.2) all land here. `TestTurnSideEffectLedgerGating`'s
   existing assertions on final working-memory contents are unaffected (final
   state is unchanged by the restructure — only *when* the append happens
-  moves) — verified, no edits needed to those specific assertions. New tests
-  needed: the rollback-leaves-no-append test, the happy-path
-  prompt-threading test, and a prefill-continuation test precise enough to
-  distinguish "prompt ends on assistant" from "prompt ends on user" (not just
-  turn counts — the existing Task 7 test design can't catch this class of
-  bug).
+  moves) — verified, no edits needed to those specific assertions. **One
+  existing test in this class goes silently stale, not merely
+  "unaffected" — the most severe finding from `/review-plan`
+  (2026-08-08, Critical, found independently by `alfred-core-engineer` and
+  `alfred-test-engineer`):** `test_gate_is_awaited_before_the_guarded_write_starts`
+  (`test_core.py:1173-1196`) asserts, via its docstring, that the accepted
+  residual is "a crash between two adjacent awaits" (gate call, then
+  immediate append) — under §3.3's restructure the append moves far
+  downstream of the gate (past commit), so the residual's real scope changes
+  materially, but the test's mechanical `call_order[:2] == ["gate","write"]`
+  assertion keeps passing regardless, because `call_order` only ever records
+  two labels no matter how much code now runs between them. It will silently
+  stop proving the property its own docstring claims. This task must rewrite
+  or replace it to pin the new §3.3-described commit-to-deferred-append
+  window, not just leave it green.
+  New tests needed: the rollback-leaves-no-append test (**assertion contract,
+  found during `/review-plan`, `alfred-test-engineer`, confirmed by
+  `alfred-security-engineer`, must be stated explicitly or this risks landing
+  vacuous**: pre-fix, a mid-turn rollback already raises today — since the
+  append is synchronous and inside the gated block — so a test asserting
+  only exception-propagation would pass on BOTH the buggy and the fixed
+  code, proving nothing; the implementation must force a mid-turn failure
+  after gate-apply and assert `working_memory.append` was never invoked,
+  spying on the real `WorkingMemory` object, not a convenience stub); the
+  happy-path prompt-threading test (§3.2); the forced-commit-failure test
+  (§3.3/§3.4); and a prefill-continuation test precise enough to distinguish
+  "prompt ends on assistant" from "prompt ends on user" (not just turn counts
+  — the existing Task 7 test design can't catch this class of bug). **Also
+  in scope for this task, not a separate follow-up:**
+  `tests/integration/comms_mcp/test_real_turn_inbound_boundary.py` (found
+  during `/review-plan`, `alfred-test-engineer`) — traced the real
+  construction path (`_boot_stack` → `_build_comms_boot_graph` →
+  `build_orchestrator`, `src/alfred/cli/_bootstrap.py:459`) and confirmed
+  Task 5 arms the real ledger there with no opt-out, so
+  `test_forwarded_crash_injection_replays_exactly_twice_with_bounded_residual`'s
+  current assertion of the pre-fix duplicate-append behavior becomes wrong
+  the moment Task 5 lands. PR1's own Task 6 already names this file and
+  commits to the flip (see below) — this design doc names it here explicitly
+  too so the Task 4/5/6 sequencing dependency (Task 6's flip must not land
+  before Task 5 arms the fix, or it asserts against unwired code) is visible
+  in one place, not only in the original plan.
 - **Task 5** (boot wiring): construction-site change matching Task 1's new
   constructor shape. No behavior change beyond that.
 - **Task 6** (crash-injection test flip) and **Task 7** (new working-memory
   regression test): both get *simpler*, not more complex — the exactly-once
   assertion now holds unconditionally rather than needing to special-case the
   same-process-retry path.
-- **Task 8** (ADR-0049 amendment): the residual panel's new entry is
-  narrower and stronger than originally drafted — no gate/write window
-  remains at all; the only named residual is "genuine process crash between
-  commit and the deferred in-process append", which costs nothing (§3.3) —
-  worth stating plainly rather than hedging. Also record the sibling-pattern
-  distinction from investigation round 1 (§2.1): `ForwardedDispatchAttemptStore`'s
+- **Task 8** (ADR-0049 amendment): the residual panel needs **two** entries,
+  not one. First, the data-loss window: narrower and stronger than originally
+  drafted — no gate/write window remains at all; the only named residual is
+  "genuine process crash between commit and the deferred in-process append",
+  which costs nothing (§3.3) — worth stating plainly rather than hedging.
+  Second — **consolidated from three independent `/review-plan` findings
+  (2026-08-08: `alfred-memory-engineer`, `alfred-security-engineer` ×2) into
+  one entry, not three scattered notes** — the lock-hold-duration trade-off
+  (§3.1): a losing concurrent attempt's wait grows from milliseconds to up to
+  the full deadline-bounded turn duration, masked today by
+  `RealTurnOrchestratorAdapter._turn_locks`; plus the orphaned-lock case
+  (crash mid-turn, no DB-side timeout without the `idle_in_transaction_session_timeout`
+  fix §3.1 now specifies). Also record the sibling-pattern distinction from
+  investigation round 1 (§2.1): `ForwardedDispatchAttemptStore`'s
   independent-commit design is correct for what it guards; the ledger's
   original copy of that pattern was a mis-transfer, not a second instance of
   a shared bug — worth naming so the deviation from the sibling reads as
-  deliberate to a future reader.
+  deliberate to a future reader, and so PR2's plan (§6) inherits the
+  distinction rather than re-discovering it.
 
 ## 6. Non-goals
 
 - This design does not touch PR2 (replay journal) or PR3 (tools-on cutover)
   scope. The Act loop's ephemeral `local` transcript (`core.py:776`) is
   entirely separate from `working_memory` and unaffected by any of the above.
+  **Heads-up for whoever picks up PR2 next (found during `/review-plan`,
+  2026-08-08, `alfred-architect`, confirmed by `alfred-memory-engineer`):**
+  `docs/superpowers/plans/2026-08-07-issue-410-pr2-replay-journal.md:435-442`
+  cites `PostgresTurnSideEffectLedger` and `PostgresForwardedDispatchAttemptStore`
+  together as "same shape" architectural precedent for `PostgresReplayJournal`.
+  This design just proved that grouping unsound for the ledger's specific use
+  (§2.1's sibling-pattern distinction: `ForwardedDispatchAttemptStore`'s
+  independent-commit design is correct for what IT guards — a retry counter,
+  not a durability claim — the ledger's copy of that pattern was a
+  mis-transfer). Cross-checked: PR2's plan doesn't currently *read* the
+  ledger table, only cites it as a pattern to imitate, so there is no live
+  impact on PR1 — but `ReplayJournal`'s own durability invariant needs to be
+  re-derived from what IT actually guards, not inherited by citing a sibling
+  whose independent-commit design turned out to be a mis-transfer once
+  already.
 - Option C (idempotent episodic write, retiring the ledger table) is recorded
   as a considered-but-deferred alternative, not adopted. Revisiting it is a
   future decision, not part of this fix.
-- The Slice-3 Redis swap for `WorkingMemory` (`working.py:6-8`) is out of
+- The Slice-3 Redis swap for `WorkingMemory` (`working.py:7-9`) is out of
   scope here. §3.3 notes that both this design's crash-safety argument and
   the *original* (pre-#410) self-healing argument depend on `WorkingMemory`
   staying in-process and non-durable — whoever lands the Redis swap inherits
   that constraint and should re-derive the safety argument then, under
   either design. This design doesn't make that future problem worse; it just
   doesn't solve it in advance.
+- **External readers of `turn_side_effect_ledger` should expect a staleness
+  window, not near-instant visibility** (found during `/review-plan`,
+  `alfred-security-engineer`, confirmed) — §3.1's row-lock-until-commit
+  behavior means a row's `TRUE` state isn't visible to a concurrent reader
+  until the whole turn's transaction commits, not at the moment the gate
+  itself logically "decides." Not a live concern for PR1 (nothing reads this
+  table today; see the PR2 note above for the one plan that will).
