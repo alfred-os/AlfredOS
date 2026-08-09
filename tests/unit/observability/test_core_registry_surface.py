@@ -25,8 +25,8 @@ def test_build_core_registry_serves_the_capability_counter():
     assert "alfred_quarantine_capability_revoked" in families  # parser strips the Counter's _total
 
 
-def test_ten_core_collectors():
-    assert len(CORE_OWNED_COLLECTORS) == 10
+def test_twelve_core_collectors():
+    assert len(CORE_OWNED_COLLECTORS) == 12
 
 
 # Reviewed allowlist in the PARSER's naming (counters WITHOUT _total; _created filtered).
@@ -43,6 +43,8 @@ _EXPECTED_FAMILIES: frozenset[str] = frozenset(
         "alfred_plugin_spawn_seconds",
         "alfred_outbound_dlp_scan_seconds",
         "alfred_inbound_scanner_scan_seconds",
+        "alfred_db_side_effect_scope_inside_turn",  # Counter — parser strips _total
+        "alfred_orchestrator_orphaned_user_turn",  # Counter — parser strips _total
     }
 )
 
@@ -56,6 +58,7 @@ _EXPECTED_DECLARED_LABELS: dict[str, frozenset[str]] = {
     "alfred_plugin_spawn_seconds": frozenset({"plugin_id", "outcome"}),
     "alfred_outbound_dlp_scan_seconds": frozenset({"outcome"}),
     "alfred_inbound_scanner_scan_seconds": frozenset({"outcome"}),
+    "alfred_orchestrator_orphaned_user_turn": frozenset({"user_id_bucket"}),
     # every other core family declares NO labels (defaults to frozenset()).
 }
 

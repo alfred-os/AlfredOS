@@ -100,7 +100,7 @@ _ENGINES: dict[tuple[str, ConnectionRole], AsyncEngine] = {}
 # alfred.hooks.registry._reentry).
 _TURN_SCOPE_ACTIVE: ContextVar[bool] = ContextVar("alfred_db_turn_scope_active", default=False)
 
-_SIDE_EFFECT_INSIDE_TURN: Final[Counter] = Counter(
+SIDE_EFFECT_INSIDE_TURN_COUNTER: Final[Counter] = Counter(
     "alfred_db_side_effect_scope_inside_turn_total",
     "SIDE_EFFECT-role session scopes opened while a TURN-role scope was held "
     "(the audit-durability exception to the no-nesting rule, CLAUDE.md hard "
@@ -290,7 +290,7 @@ async def session_scope(
                 "scope is already held in this task; only SIDE_EFFECT may nest "
                 "inside TURN (ADR-0062 acquisition hierarchy)"
             )
-        _SIDE_EFFECT_INSIDE_TURN.inc()
+        SIDE_EFFECT_INSIDE_TURN_COUNTER.inc()
     token = _TURN_SCOPE_ACTIVE.set(True) if role is ConnectionRole.TURN else None
     try:
         async with factory() as session:
