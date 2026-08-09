@@ -2,13 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Prerequisite: PR1 must be merged first.** This is NOT independent of PR1 (a
-`/review-plan` fleet pass found and corrected an earlier "could run in
-parallel" claim). Two concrete dependencies: this PR's migration `0026`
-chains on PR1's `0025`; and `_fast_forward_journalled_calls` (Task 4) reads
-`ctx` at a point in `_handle_turn` that only exists once PR1's Task 4 moves
-`ctx`'s resolution earlier — on `main` without PR1, `ctx` is not yet assigned
-at that point.
+**Prerequisite: PR1 must be merged first — CONFIRMED merged (`main` @ `9cb85eaf`, 2026-08-09).**
+This was NOT independent of PR1 (a `/review-plan` fleet pass found and
+corrected an earlier "could run in parallel" claim): this PR's migration
+`0026` chains on PR1's `0025`, and `_fast_forward_journalled_calls` (Task 4)
+is called from `_orient_and_act` (Phase B), which receives `ctx` as an
+already-resolved parameter — `ctx` is resolved exactly once, in
+`_run_turn_phases`, before `_orient_and_act` is ever invoked (see
+[ADR-0062](../../adr/0062-three-phase-turn-and-role-scoped-connection-pools.md)
+for the full three-phase-turn shape this PR builds on).
+
+**Correction (found during a second `/review-plan` pass, 2026-08-09, after
+PR1's later "pool-deadlock fix" revision merged):** this plan's original
+draft named the turn entry point `_handle_turn` throughout. PR1's final
+shipped shape renamed it to `_run_turn_phases` (Phase A/C, ctx resolution)
+plus `_orient_and_act` (Phase B — the provider call and the tool-dispatch
+loop this PR's Task 4 modifies). Every reference below has been corrected to
+match the shipped names.
 
 **Goal:** Make a forwarded-path resume of a tool-bearing turn replay its already-decided tool calls instead of re-consulting a fresh, possibly-divergent planner — so a resumed turn converges through the existing Spec C egress ledger's memoize-and-replay instead of risking `EgressIdIntegrityError` or, worse, silently losing accounting for egress calls that already fired for real on the crashed attempt. Ships with **no live consumer**: the fast-forward path is a no-op whenever `self._tool_registry is None` (true in production throughout this PR — PR3 wires a live registry), so it never reaches Postgres in production until PR3 lands, matching the same seam-first precedent as #339 PR1, G7-2a, and #338 PR1.
 
@@ -233,7 +243,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'alfred.memory.replay_j
 On the forwarded dispatched-edge path, a crash between "the planner decided
 to call these tools" and `commit_once` leaves the frame uncommitted, so it
 replays (ADR-0039 item 4). Without this journal, a resumed
-:meth:`Orchestrator._handle_turn` would ask the planner AGAIN for a fresh,
+:meth:`Orchestrator._orient_and_act` would ask the planner AGAIN for a fresh,
 possibly non-deterministic plan — the Spec C egress ledger's body-hash
 integrity check (`src/alfred/memory/egress_idempotency.py:220`) then either
 catches a genuine divergence loudly (`EgressIdIntegrityError`) or, worse, if
@@ -338,7 +348,7 @@ side effects would inherit this gap silently.
 rated High, comms-engineer rated Low; both agreed this pinning matters
 regardless): `tool_arguments_json` NEVER contains a resolved secret value,
 only an unresolved `{{secret:name}}` placeholder if one is present.** This
-holds STRUCTURALLY, not by luck of call ordering: `Orchestrator._handle_turn`
+holds STRUCTURALLY, not by luck of call ordering: `Orchestrator._orient_and_act`
 (Task 4) calls `self._replay_journal.append_batch(...)` with the planner's raw
 `ToolCall`s BEFORE any of that iteration's `dispatch_tool` calls run at all — broker secret substitution
 happens INSIDE a tool's own dispatcher (e.g. `dispatch_web_fetch`'s Step 1c),
@@ -517,6 +527,7 @@ git commit -m "feat(memory): deterministic tool-call replay journal store (#410 
 **Files:**
 
 - Create: `src/alfred/memory/migrations/versions/0026_tool_call_journal.py`
+- Modify: `src/alfred/memory/models.py` — add the `ToolCallJournalRow` schema-definition-only ORM twin (Step 3b; found missing during a second `/review-plan` pass, 2026-08-09 — every sibling ledger table has one, `tool_call_journal` was the only one that didn't)
 - Test: `tests/integration/test_migration_0026_tool_call_journal.py`
 
 **Known gap, accepted for this PR** — mirroring PR1 Task 2's identical callout for `turn_side_effect_ledger` (found during `/review-plan`, and again flagged for symmetry during the fleet's second pass, 2026-08-07): this table ships with no retention index or pruning story either — it grows one row per journalled tool call forever, and stores attacker-influenced tool-call-argument JSON up to 256 KB/row (Task 1). Not yet filed as a tracked GitHub issue; both this table and PR1's ledger should be addressed together (e.g. a shared prune-on-`commit_once` sweep) rather than solved twice independently. See PR1 Task 2 for the fuller note and the follow-up issue this PR should also cross-reference once filed.
@@ -778,6 +789,52 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS tool_call_journal")
 ```
 
+- [ ] **Step 3b: Add the `ToolCallJournalRow` schema-definition-only ORM twin**
+
+**Found during a second `/review-plan` pass (2026-08-09):** every sibling durable-ledger table (`InboundIdempotency`, `EgressIdempotency`, `ForwardedDispatchAttempt`, PR1's `TurnSideEffectLedgerRow`) has a schema-definition-only ORM twin in `src/alfred/memory/models.py`, registered on the SAME `Base` that `tests/unit/conftest.py`'s shared `session_factory` fixture calls `Base.metadata.create_all()` against for unit-tier SQLite tests. `tool_call_journal` was the only one missing this — any future unit test that reaches for `PostgresReplayJournal` via that SQLite fixture (rather than a testcontainer or a raw-SQL path) would silently hit a missing table. Add to `src/alfred/memory/models.py`, immediately after `TurnSideEffectLedgerRow`:
+
+```python
+class ToolCallJournalRow(Base):
+    """Deterministic tool-call replay journal (#410 PR2, migration 0026).
+
+    Schema-definition-only twin, mirroring :class:`TurnSideEffectLedgerRow`
+    immediately above: production code (:mod:`alfred.memory.replay_journal`)
+    reads/writes this table EXCLUSIVELY via raw SQL (`append_batch`/`read`)
+    — that module's docstring is explicit this is the atomic-batch-write
+    contract, with no ORM session-holding constructor seam. This class is
+    never queried through; it exists solely so ``Base.metadata.create_all()``
+    builds the table for fixtures (unit-tier SQLite and integration-tier
+    Postgres alike) that intentionally build schema without a full Alembic
+    replay.
+
+    Postgres-only CHECK constraints (the length caps and the
+    `tool_arguments_json` size cap) live ONLY in migration 0026, not here —
+    mirroring `TurnSideEffectLedgerRow`'s identical precedent (SQLite's
+    `tests/unit/conftest.py` `session_factory` fixture cannot parse
+    `char_length()`/`octet_length()`). The composite PK is dialect-portable
+    and carried here.
+    """
+
+    __tablename__ = "tool_call_journal"
+
+    adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    call_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    iteration: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_arguments_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        sa.PrimaryKeyConstraint(
+            "adapter_id", "inbound_id", "call_index", name="pk_tool_call_journal"
+        ),
+    )
+```
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/integration/test_migration_0026_tool_call_journal.py -v`
@@ -786,8 +843,8 @@ Expected: PASS (5 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/alfred/memory/migrations/versions/0026_tool_call_journal.py tests/integration/test_migration_0026_tool_call_journal.py
-git commit -m "feat(memory): migration 0026 — tool_call_journal table (#410 PR2)"
+git add src/alfred/memory/migrations/versions/0026_tool_call_journal.py src/alfred/memory/models.py tests/integration/test_migration_0026_tool_call_journal.py
+git commit -m "feat(memory): migration 0026 — tool_call_journal table + ORM twin (#410 PR2)"
 ```
 
 ---
@@ -1241,7 +1298,13 @@ class TestReplayJournalFastForward:
             # gate and outbound_dlp deliberately omitted.
             replay_journal=journal,
         )
-        with pytest.raises(RuntimeError, match="dispatch_seams_unwired"):
+        # Match the real translated catalog string, not the i18n key name —
+        # found during a second `/review-plan` pass, 2026-08-09: the key
+        # `orchestrator.tool.dispatch_seams_unwired` translates to "Tool
+        # dispatch is not fully wired: registry, gate, and DLP must be
+        # configured together." (locale/en/LC_MESSAGES/alfred.po), which
+        # does not contain the key name as a substring.
+        with pytest.raises(RuntimeError, match="not fully wired"):
             await _drive_turn(orch)
 
     async def test_temperature_is_zero_when_tools_are_advertised(self, monkeypatch: Any) -> None:
@@ -1313,6 +1376,131 @@ class TestReplayJournalFastForward:
         await _drive_turn(orch)
         _journalled_index, journalled_call = journal.append_batch.await_args.kwargs["calls"][0]
         assert journalled_call.arguments["header"] == "{{secret:api-key}}"
+
+    async def test_dispatch_failure_mid_iteration_does_not_lose_the_journal_write(
+        self, monkeypatch: Any
+    ) -> None:
+        """Found during a second `/review-plan` pass, 2026-08-09: every prior
+        test in this class proved atomicity only via call-count/ordering on
+        the HAPPY path — none actually drove a real `dispatch_tool` failure
+        to prove the journal write already landed durably BEFORE the crash.
+        This is the PR's central crash-safety claim; simulate the SECOND of
+        two calls in one iteration raising.
+        """
+        journal = MagicMock()
+        journal.read = AsyncMock(return_value=())
+        journal.append_batch = AsyncMock()
+        r0 = _tool_use_response(
+            ToolCall(id="c0", name="clock.now", arguments={}),
+            ToolCall(id="c1", name="clock.now", arguments={}),
+        )
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=r0)
+        dispatched: list[str] = []
+
+        async def _fake_dispatch(call: ToolCall, call_index: int, **kw: Any) -> str:
+            dispatched.append(call.id)
+            if call.id == "c1":
+                raise RuntimeError("simulated crash mid-dispatch")
+            return f"result-{call.id}"
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _fake_dispatch)
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+            replay_journal=journal,
+        )
+        with pytest.raises(RuntimeError, match="simulated crash mid-dispatch"):
+            await _drive_turn(orch)
+        # The WHOLE iteration's decision (both c0 and c1) was already
+        # durably journalled before dispatch of EITHER call began — a
+        # resume can fast-forward the full iteration even though the
+        # process crashed between dispatching c0 and c1.
+        journal.append_batch.assert_awaited_once()
+        batch_kwargs = journal.append_batch.await_args.kwargs
+        assert [call.id for _idx, call in batch_kwargs["calls"]] == ["c0", "c1"]
+        assert dispatched == ["c0", "c1"]
+
+    async def test_fast_forward_propagates_an_escalation_exception_from_dispatch(
+        self, monkeypatch: Any
+    ) -> None:
+        """Found during a second `/review-plan` pass, 2026-08-09: every
+        fast-forward test before this one used an unconditionally-succeeding
+        fake dispatch. `_fast_forward_journalled_calls` calls the real
+        `dispatch_tool` chokepoint with no try/except around it, so an
+        escalation exception (e.g. a canary trip) on a REPLAYED call must
+        propagate exactly like it does on the live path — mirrors
+        `TestActLoopEscalationPropagation` (this same file).
+        """
+        journalled_call = ToolCall(id="tc-1", name="clock.now", arguments={})
+        journal = MagicMock()
+        journal.read = AsyncMock(
+            return_value=(JournalEntry(call_index=0, iteration=0, tool_call=journalled_call),)
+        )
+
+        async def _fake_dispatch(call: ToolCall, call_index: int, **kw: Any) -> str:
+            raise InboundCanaryTripped(destination="evil.example", egress_id="egress-1")
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _fake_dispatch)
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=_text_response("unreachable"))
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+            replay_journal=journal,
+        )
+        with pytest.raises(InboundCanaryTripped):
+            await _drive_turn(orch, egress_context=_forwarded_egress_context())
+        router.complete.assert_not_awaited()  # never reached the resumed planner call
+
+    async def test_fast_forward_of_a_now_unknown_tool_returns_the_refusal_result(
+        self, monkeypatch: Any
+    ) -> None:
+        """Found during a second `/review-plan` pass, 2026-08-09: a
+        cross-restart registry-drift scenario the live path can never
+        exercise by definition — a journalled tool that no longer exists in
+        the registry by the time a resume fast-forwards it. `dispatch_tool`
+        resolves this to its own `unknown_tool` refusal RESULT (not an
+        exception, see `tool_dispatch.py`); the fast-forward path must
+        surface that result exactly like the live path does, never crash or
+        silently drop it.
+        """
+        journalled_call = ToolCall(id="tc-1", name="retired.tool", arguments={})
+        journal = MagicMock()
+        journal.read = AsyncMock(
+            return_value=(JournalEntry(call_index=0, iteration=0, tool_call=journalled_call),)
+        )
+        dispatched_results: list[str] = []
+
+        async def _fake_dispatch(call: ToolCall, call_index: int, **kw: Any) -> str:
+            result = t("orchestrator.tool.unknown_tool", tool=call.name)
+            dispatched_results.append(result)
+            return result
+
+        monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _fake_dispatch)
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=_text_response("handled the refusal"))
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            # The registry no longer advertises "retired.tool" — the
+            # fast-forward path dispatches it anyway (from the journalled
+            # ToolCall directly, not a fresh registry lookup), matching
+            # dispatch_tool's own unknown_tool resolution.
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+            replay_journal=journal,
+        )
+        reply = await _drive_turn(orch, egress_context=_forwarded_egress_context())
+        assert reply == "handled the refusal"
+        assert dispatched_results == [t("orchestrator.tool.unknown_tool", tool="retired.tool")]
 ```
 
 - [ ] **Step 3: Run to verify they fail**
@@ -1438,7 +1626,7 @@ Add the `itertools` import at the top of the file (alongside the existing `impor
 import itertools
 ```
 
-- [ ] **Step 5: Wire the fast-forward call into `_handle_turn` and adjust the loop bound**
+- [ ] **Step 5: Wire the fast-forward call into `_orient_and_act` and adjust the loop bound**
 
 Replace:
 
@@ -1577,7 +1765,7 @@ with:
 - [ ] **Step 8: Run to verify the new tests pass**
 
 Run: `uv run pytest tests/unit/orchestrator/test_act_loop.py -v -k ReplayJournalFastForward`
-Expected: PASS (10 tests)
+Expected: PASS. This count has moved several times since this step was written (CodeRabbit review, PR #579, 2026-08-10, added 3 more regression tests to this class) — rather than re-pinning a number that will go stale again, verify against the class's own test count: `uv run pytest tests/unit/orchestrator/test_act_loop.py -k ReplayJournalFastForward --collect-only -q` reports `N/45 tests collected`.
 
 - [ ] **Step 8a: Add the hypothesis property test the design spec commits to**
 
@@ -1634,9 +1822,25 @@ async def test_fast_forward_always_dispatches_in_journalled_call_index_order(
 
 Add `hypothesis` to this file's imports if not already present (check first — several other test files in this repo already use it; confirm via `grep -rl "^from hypothesis" tests/unit/`).
 
-**Mutation-testing note (design spec §10):** per project history, a new guard's first draft tends to reproduce the exact failure it exists to catch. After Step 9 below passes, run the repo's mutation-testing target (check `Makefile`/`pyproject.toml` for the exact invocation — do not guess flags) scoped to `_fast_forward_journalled_calls` and the two new call sites in `_handle_turn`, and confirm every surviving mutant is either killed by an existing test or explicitly triaged.
+**Mutation-testing note (design spec §10; corrected during a second
+`/review-plan` pass, 2026-08-09 — no automated mutation-testing target exists
+anywhere in this repo's `Makefile`/`pyproject.toml`; the original note's
+"check for the exact invocation" instruction sent an implementer hunting for
+something that doesn't exist).** Per project history, a new guard's first
+draft tends to reproduce the exact failure it exists to catch. This repo's
+established convention (from #547,
+`docs/superpowers/plans/2026-08-03-547-census-counts-scanned-files.md`) is a
+**manual, hand-applied** process, not an automated tool: after Step 9 below
+passes and the work up to here is committed, hand-introduce one mutation at a
+time into `_fast_forward_journalled_calls` and the two new call sites in
+`_orient_and_act` (e.g. drop the `journal.append_batch` call before dispatch,
+swap `call_index` for a freshly-derived counter, flip the `groupby` key), run
+the affected test file, confirm at least one test fails, then revert with
+`git restore --source=HEAD --staged --worktree <file>` before trying the next
+mutation. Triage explicitly (fix the test or accept the gap in writing) if
+any mutation survives.
 
-- [ ] **Step 9: Run the full existing suite for both files sharing `_handle_turn`**
+- [ ] **Step 9: Run the full existing suite for both files exercising `_orient_and_act`**
 
 Run: `uv run pytest tests/unit/orchestrator/test_act_loop.py tests/unit/orchestrator/test_core.py -v`
 Expected: PASS — every pre-existing test unmodified, plus PR1's and this task's new classes. If anything pre-existing fails, stop and fix before proceeding; do not weaken an existing assertion.
@@ -1657,199 +1861,144 @@ git commit -m "feat(orchestrator): fast-forward journalled tool calls on resume,
 
 ### Task 5: Wire `PostgresReplayJournal` into the live boot graph (dark — no live consumer)
 
+**Fully rewritten during a second `/review-plan` pass (2026-08-09).** Four
+independent reviewers (architect, cross-cutting reviewer, memory-engineer,
+core-engineer) converged Critical on the same root cause: this task's
+original text was written against a PR1 shape that never shipped.
+`build_orchestrator` has **no** injectable `side_effect_ledger` parameter to
+"widen alongside" — verified against the real, merged
+`src/alfred/cli/_bootstrap.py:486-565`. `PostgresTurnSideEffectLedger()` is
+built UNCONDITIONALLY, inline, with **zero constructor args** (the class
+deliberately has no `__init__` at all — ADR-0062's Decision section names
+the original constructor-seam design a mis-transfer, not something to
+extend). The real precedent to mirror is that unconditional-build pattern,
+not an injection point that doesn't exist.
+
+`PostgresReplayJournal` genuinely does need a constructor arg
+(`session_scope`, Task 1) unlike the ledger — but `build_orchestrator`
+already resolves exactly the right scope for it: `audit_session_scope`
+(SIDE_EFFECT-role, immediately-committing, independent of the per-turn
+session — precisely what Task 1's docstring specifies as
+`PostgresReplayJournal`'s required shape, matching
+`PostgresForwardedDispatchAttemptStore`'s identical
+`session_scope=build_boot_session_scope(settings)` precedent at
+`_comms_boot.py:842`). Building it there, unconditionally, from the
+already-resolved `audit_session_scope`, means **`src/alfred/cli/daemon/_comms_boot.py`
+needs NO changes at all** — its existing call to `build_orchestrator` already
+supplies `audit_session_scope=build_boot_session_scope(settings)`
+(`_comms_boot.py:810`), so the live wiring happens automatically, with zero
+new surface at the call site.
+
+This also retires the original Step 5a's invented CliRunner-based
+daemon-boot spy test: PR1 never needed one for the analogous
+`side_effect_ledger` wiring either (verified: no
+`test_daemon_idempotency_store_wired.py`-style test exists for
+`side_effect_ledger` anywhere in this repo) — because the wiring lives
+entirely inside `build_orchestrator` with zero diff at the `_comms_boot.py`
+call site, the unit-level `build_orchestrator` tests below (extending the
+SAME test file and functions PR1 already established for `side_effect_ledger`)
+are the identical proof PR1 relied on, at the identical layer.
+
 **Files:**
 
-- Modify: `src/alfred/cli/_bootstrap.py:459-517` (`build_orchestrator`)
-- Modify: `src/alfred/cli/daemon/_comms_boot.py:793-816` (the live construction call)
-- Test: `tests/unit/cli/test_bootstrap_build_orchestrator.py` (created by PR1 Task 5 — add to it)
-- Create: `tests/unit/cli/daemon/test_daemon_replay_journal_wired.py` (Step 5a — proves the live wiring itself, which the type-check/regression steps alone cannot)
+- Modify: `src/alfred/cli/_bootstrap.py` (`build_orchestrator`) — the ONLY
+  production file this task touches.
+- Test: `tests/unit/cli/test_build_orchestrator_wiring.py` (the REAL file
+  PR1 created — not `test_bootstrap_build_orchestrator.py`, which does not
+  exist; extend its two existing test functions, both of which already
+  assert `isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)`
+  on exactly the pattern this task's `replay_journal` addition mirrors).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing assertions**
 
-Add to `tests/unit/cli/test_bootstrap_build_orchestrator.py`:
+In `tests/unit/cli/test_build_orchestrator_wiring.py`, add the import:
 
 ```python
-async def test_build_orchestrator_forwards_replay_journal(monkeypatch: Any) -> None:
-    # Deliberately a PLAIN MagicMock, not MagicMock(spec=Settings) — see
-    # PR1's identical Task 5 fix: a spec'd mock doesn't know about pydantic
-    # v2 fields and raises AttributeError inside build_budget_guard.
-    settings = MagicMock()
-    journal = MagicMock()
-
-    @asynccontextmanager
-    async def _scope() -> Any:
-        yield MagicMock()
-
-    broker = MagicMock()
-    router = MagicMock()
-    resolver = MagicMock()
-    resolver.version_counter = 1
-
-    orch = build_orchestrator(
-        settings,
-        broker=broker,
-        router=router,
-        resolver=resolver,
-        session_scope=_scope,
-        replay_journal=journal,
-    )
-    assert orch._replay_journal is journal  # type: ignore[attr-defined]
+from alfred.memory.replay_journal import PostgresReplayJournal
 ```
+
+In `test_default_scopes_are_role_scoped_and_the_ledger_is_armed`, immediately
+after the existing `assert isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)`
+line, add:
+
+```python
+    # #410 PR2: the replay journal is armed unconditionally too, using the
+    # SAME already-resolved audit_session_scope its sibling
+    # ForwardedDispatchAttemptStore uses (SIDE_EFFECT-role, not TURN).
+    assert isinstance(orch._replay_journal, PostgresReplayJournal)
+```
+
+In `test_injected_scopes_are_used_verbatim_no_default_builds`, add the
+identical assertion immediately after that test's own
+`assert isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)` line.
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run pytest tests/unit/cli/test_bootstrap_build_orchestrator.py -v -k replay_journal`
-Expected: FAIL — `TypeError: build_orchestrator() got an unexpected keyword argument 'replay_journal'`
+Run: `uv run pytest tests/unit/cli/test_build_orchestrator_wiring.py -v`
+Expected: FAIL — `AttributeError: 'Orchestrator' object has no attribute '_replay_journal'`
 
-- [ ] **Step 3: Widen `build_orchestrator`**
+- [ ] **Step 3: Arm the journal inside `build_orchestrator`**
 
 In `src/alfred/cli/_bootstrap.py`, add the import:
 
 ```python
-from alfred.memory.replay_journal import ReplayJournal
+from alfred.memory.replay_journal import PostgresReplayJournal
 ```
 
-Widen the signature (alongside PR1's `side_effect_ledger` param) and forward it:
-
-```python
-        side_effect_ledger: TurnSideEffectLedger | None = None,
-        # #410 PR2: forwarded straight to Orchestrator. None (every caller
-        # before this PR's Task 5 wiring below) preserves today's behaviour.
-        replay_journal: ReplayJournal | None = None,
-    ) -> Orchestrator:
-```
-
-And in the `return Orchestrator(...)` call, add `replay_journal=replay_journal,` alongside the existing `side_effect_ledger=side_effect_ledger,` line.
+In the `return Orchestrator(...)` call, add `replay_journal=PostgresReplayJournal(session_scope=audit_session_scope),`
+alongside the existing `side_effect_ledger=PostgresTurnSideEffectLedger(),`
+line — both unconditional, both built from state this same function already
+resolved earlier (`audit_session_scope`, ~line 551-555). No new parameter on
+`build_orchestrator`'s signature; this is not injectable, exactly like
+`side_effect_ledger`.
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `uv run pytest tests/unit/cli/test_bootstrap_build_orchestrator.py -v`
+Run: `uv run pytest tests/unit/cli/test_build_orchestrator_wiring.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Wire the live construction site**
+- [ ] **Step 5: Confirm the live boot graph needs no changes**
 
-In `src/alfred/cli/daemon/_comms_boot.py`, add the import alongside `PostgresTurnSideEffectLedger`:
+`src/alfred/cli/daemon/_comms_boot.py`'s call to `build_orchestrator` already
+passes `audit_session_scope=build_boot_session_scope(settings)` (line 810) —
+Step 3 above is the entire wiring. Run the existing boot-graph and
+orchestrator-bootstrap integration suites to confirm nothing regresses:
 
-```python
-from alfred.memory.replay_journal import PostgresReplayJournal
-```
-
-In the `orchestrator = build_orchestrator(...)` call (PR1 added `side_effect_ledger=...` here), add:
-
-```python
-            side_effect_ledger=PostgresTurnSideEffectLedger(
-                session_scope=build_boot_session_scope(settings)
-            ),
-            # #410 PR2: the LIVE journal store — constructed and wired, but
-            # with NO reachable consumer until PR3 wires a live
-            # tool_registry (self._tool_registry stays None here, so
-            # _fast_forward_journalled_calls always returns ([], 0, 0) and
-            # the write-before-dispatch site inside the Act loop's
-            # tool-dispatch for-loop is unreachable). Same shared-DSN-
-            # cached-engine session_scope shape as every sibling store here.
-            replay_journal=PostgresReplayJournal(
-                session_scope=build_boot_session_scope(settings)
-            ),
-        )
-```
-
-(Adjust the exact insertion point to match wherever the `quarantined_extractor=None,` / `side_effect_ledger=...,` lines currently end the call, per PR1's own Task 5 edit — this is an addition to that same call, not a replacement.)
-
-- [ ] **Step 5a: Prove the live wiring actually happened, not just that it type-checks**
-
-**Found during `/review-plan` (2026-08-07):** because this wiring is deliberately dark, Steps 6/7 below (mypy/pyright, and "the integration suite still passes unmodified") pass IDENTICALLY whether or not the `replay_journal=` kwarg was actually added to the live `_comms_boot.py` call — neither exercises the wiring itself. PR1's Task 6 gets this proof for free via an observable behaviour change (a test assertion flips `4→2`); this PR's wiring has no such observable effect until PR3. Add an explicit wiring-proof test instead, modeled exactly on the existing `tests/unit/cli/daemon/test_daemon_idempotency_store_wired.py` pattern (spy the constructor via `monkeypatch`, boot the real daemon through `CliRunner().invoke(daemon_app, ["start"])`, assert the captured kwarg):
-
-```python
-"""#410 PR2: the daemon boot graph wires a real PostgresReplayJournal into
-Orchestrator, even though nothing consumes it yet (dark).
-
-Modelled exactly on tests/unit/cli/daemon/test_daemon_idempotency_store_wired.py
-(same fixtures, same CliRunner-boot-the-real-daemon shape) — that file proves
-the analogous PostgresInboundIdempotencyStore wiring; this proves PR1's
-PostgresTurnSideEffectLedger and PR2's PostgresReplayJournal wiring alongside it.
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Any
-
-import pytest
-
-from alfred.cli.daemon import daemon_app
-from alfred.memory.replay_journal import PostgresReplayJournal
-from alfred.memory.turn_side_effects import PostgresTurnSideEffectLedger
-from alfred.orchestrator.core import Orchestrator
-from typer.testing import CliRunner
-
-from .conftest import FakeAuditWriter
-from .test_daemon_comms_spawn import _ENABLED_ADAPTER, _patch_comms_seams, quarantine_registry
-
-__all__ = ["quarantine_registry"]
-
-
-def test_enabled_adapter_wires_replay_journal_and_side_effect_ledger(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    boot_success_env: FakeAuditWriter,
-    quarantine_registry: Any,
-    patch_quarantine_child_spawn: list[Any],
-) -> None:
-    del quarantine_registry, patch_quarantine_child_spawn
-    captured: list[Any] = []
-    original_init = Orchestrator.__init__
-
-    def _spy_init(self: Any, **kwargs: Any) -> None:
-        captured.append((kwargs.get("side_effect_ledger"), kwargs.get("replay_journal")))
-        original_init(self, **kwargs)
-
-    monkeypatch.setattr(Orchestrator, "__init__", _spy_init)
-    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
-    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
-    _patch_comms_seams(monkeypatch)
-
-    result = CliRunner().invoke(daemon_app, ["start"])
-    assert result.exit_code == 0, result.output
-
-    assert len(captured) == 1
-    side_effect_ledger, replay_journal = captured[0]
-    assert isinstance(side_effect_ledger, PostgresTurnSideEffectLedger)
-    assert isinstance(replay_journal, PostgresReplayJournal)
-```
-
-(Verify `boot_success_env`/`patch_quarantine_child_spawn`/`quarantine_registry` fixture names and the exact `_patch_comms_seams`/`_ENABLED_ADAPTER` import path against the CURRENT `test_daemon_idempotency_store_wired.py` and `test_daemon_comms_spawn.py` before writing this — they are read, not invented, and any drift in this repo's fixture names since this plan was written should be resolved by matching the real files, not this snippet.)
-
-Place this new file at `tests/unit/cli/daemon/test_daemon_replay_journal_wired.py`.
-
-- [ ] **Step 5b: Run the wiring-proof test**
-
-Run: `uv run pytest tests/unit/cli/daemon/test_daemon_replay_journal_wired.py -v`
-Expected: PASS — this is the ONLY step in this task that would actually fail if the `replay_journal=`/`side_effect_ledger=` kwargs were silently dropped from the live `_comms_boot.py` call.
+Run: `uv run pytest tests/integration/comms_mcp/test_real_turn_inbound_boundary.py tests/integration/test_orchestrator_bootstrap.py -v`
+Expected: PASS, unmodified — this PR adds a construction-time-only change
+inside `build_orchestrator`, invisible to these tests' assertions, matching
+`side_effect_ledger`'s own precedent.
 
 - [ ] **Step 6: Type-check**
 
-Run: `uv run mypy src/alfred/cli/_bootstrap.py src/alfred/cli/daemon/_comms_boot.py && uv run pyright src/alfred/cli/_bootstrap.py src/alfred/cli/daemon/_comms_boot.py`
+Run: `uv run mypy src/alfred/cli/_bootstrap.py tests/unit/cli/test_build_orchestrator_wiring.py && uv run pyright src/alfred/cli/_bootstrap.py`
 Expected: no errors
 
-- [ ] **Step 7: Run the full existing boot-graph integration suite (confirms the dark wiring doesn't perturb anything live)**
-
-Run: `uv run pytest tests/integration/comms_mcp/test_real_turn_inbound_boundary.py -v`
-Expected: PASS, unmodified (every assertion from PR1's Task 6/7 edits still holds — this PR adds a construction-time-only change, no behaviour visible to these tests).
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/alfred/cli/_bootstrap.py src/alfred/cli/daemon/_comms_boot.py tests/unit/cli/test_bootstrap_build_orchestrator.py tests/unit/cli/daemon/test_daemon_replay_journal_wired.py
-git commit -m "feat(cli): wire PostgresReplayJournal into the live comms boot graph, dark (#410 PR2)"
+git add src/alfred/cli/_bootstrap.py tests/unit/cli/test_build_orchestrator_wiring.py
+git commit -m "feat(cli): arm PostgresReplayJournal inside build_orchestrator, dark (#410 PR2)"
 ```
 
 ---
 
-### Task 6: ADR-0062 — the deterministic-replay journal contract
+### Task 6: ADR-0063 — the deterministic-replay journal contract
+
+**Renumbered from ADR-0062 to ADR-0063 during a second `/review-plan` pass
+(2026-08-09).** Four independent reviewers converged Critical: ADR-0062 is
+already claimed by PR1's merged, Accepted
+`docs/adr/0062-three-phase-turn-and-role-scoped-connection-pools.md`, already
+cross-referenced inline in shipped `core.py` comments (lines 739/761). No CI
+check enforces ADR-number uniqueness, so a collision here is caught by
+review or not at all — and a shipped collision permanently makes every
+future "see ADR-0062" citation ambiguous. **0063** is the next free number
+(confirmed via `ls docs/adr/ | sort -t- -k1 -n | tail -1` at execution time
+— re-verify, since another PR may claim a number first).
 
 **Files:**
 
-- Create: `docs/adr/0062-deterministic-tool-call-replay-journal.md`
+- Create: `docs/adr/0063-deterministic-tool-call-replay-journal.md`
 
 - [ ] **Step 1: Read ADR-0049's structure to match this repo's ADR conventions**
 
@@ -1858,7 +2007,7 @@ Run: `sed -n '1,60p' docs/adr/0049-real-privileged-turn-comms-inbound.md` — ma
 - [ ] **Step 2: Write the ADR**
 
 ```markdown
-# ADR-0062 — Deterministic tool-call replay journal
+# ADR-0063 — Deterministic tool-call replay journal
 
 - **Status**: Accepted (on #410 PR2 merge)
 - **Date**: 2026-08-07
@@ -1866,10 +2015,13 @@ Run: `sed -n '1,60p' docs/adr/0049-real-privileged-turn-comms-inbound.md` — ma
 - **Relates to**: [ADR-0039](0039-gateway-adapter-inbound-bridge.md) (the
   forwarded dispatched-edge replay this journal makes safe for tool-bearing
   turns), [ADR-0049](0049-real-privileged-turn-comms-inbound.md) (the #338
-  cutover this journal was deferred from — see its Context), the Spec C
-  egress-idempotency ledger (`src/alfred/egress/egress_id.py`,
-  `src/alfred/memory/egress_idempotency.py`) this journal makes converge
-  rather than raise, issue #410 (epic), issue #338 (predecessor)
+  cutover this journal was deferred from — see its Context),
+  [ADR-0062](0062-three-phase-turn-and-role-scoped-connection-pools.md) (the
+  three-phase turn / `_run_turn_phases` + `_orient_and_act` split this
+  journal wires into, Task 4), the Spec C egress-idempotency ledger
+  (`src/alfred/egress/egress_id.py`, `src/alfred/memory/egress_idempotency.py`)
+  this journal makes converge rather than raise, issue #410 (epic), issue
+  #338 (predecessor)
 
 ## Context
 
@@ -1980,15 +2132,15 @@ name.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/adr/0062-deterministic-tool-call-replay-journal.md
-git commit -m "docs(adr): ADR-0062 — deterministic tool-call replay journal (#410 PR2)"
+git add docs/adr/0063-deterministic-tool-call-replay-journal.md
+git commit -m "docs(adr): ADR-0063 — deterministic tool-call replay journal (#410 PR2)"
 ```
 
 ---
 
 ## Definition of Done
 
-- [ ] All 6 tasks' tests pass: `uv run pytest tests/unit/memory/test_replay_journal_store.py tests/integration/test_migration_0026_tool_call_journal.py tests/integration/test_replay_journal_postgres.py tests/unit/orchestrator/test_act_loop.py tests/unit/orchestrator/test_core.py tests/unit/cli/test_bootstrap_build_orchestrator.py tests/unit/cli/daemon/test_daemon_replay_journal_wired.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py -v`
+- [ ] All 6 tasks' tests pass: `uv run pytest tests/unit/memory/test_replay_journal_store.py tests/integration/test_migration_0026_tool_call_journal.py tests/integration/test_replay_journal_postgres.py tests/unit/orchestrator/test_act_loop.py tests/unit/orchestrator/test_core.py tests/unit/cli/test_build_orchestrator_wiring.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py tests/integration/test_orchestrator_bootstrap.py -v`
 - [ ] `make check` passes clean.
 - [ ] `uv run pytest tests/adversarial -q` still passes.
 - [ ] `/review-plan` fleet run on this plan (and PR1's) before implementation; full `/review-pr` fleet + CodeRabbit `full review` on the resulting PR before merge.
