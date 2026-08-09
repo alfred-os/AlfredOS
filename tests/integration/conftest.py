@@ -16,6 +16,7 @@ post-migration state, which is sync-shaped and natural with a sync engine.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from sqlalchemy import Engine, create_engine
@@ -76,15 +77,34 @@ def egress_proxy_url_env(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 @pytest.fixture
-def postgres_engine(postgres_url: str) -> Iterator[Engine]:
+def integration_pool_kwargs() -> dict[str, Any]:
+    """Starvation-by-default engine kwargs for the integration tier (#410 PR1).
+
+    Deliberately SMALL: with pool_size=2 and no overflow, any code path that
+    holds one connection while demanding another beyond the pool fails with a
+    loud SQLAlchemy TimeoutError within pool_timeout seconds — so every
+    integration test exercising the real boot graph doubles as an incidental
+    hold-and-wait detector (ADR-0062). Opt out by overriding this fixture at
+    a narrower conftest/module/class scope; never by inflating this default.
+    An INTERMITTENT failure under these kwargs is not automatically flake:
+    timing-dependent hold-and-wait bites only under contention, so rule out
+    a genuine pool-starvation regression (TimeoutError on checkout, stalled
+    connection acquisition) before dismissing one.
+    """
+    return {"pool_size": 2, "max_overflow": 0, "pool_timeout": 5}
+
+
+@pytest.fixture
+def postgres_engine(postgres_url: str, integration_pool_kwargs: dict[str, Any]) -> Iterator[Engine]:
     """Yield a sync SQLAlchemy Engine bound to the per-test Postgres container.
 
     Rewrites the asyncpg URL back to psycopg2 for the sync engine — the
     migration env consumes ``postgres_url`` (asyncpg), the tests use this
     sync engine for inspecting / inserting rows around the migration calls.
+    Pool-starved by default via ``integration_pool_kwargs`` (#410 PR1).
     """
     sync_url = postgres_url.replace("asyncpg", "psycopg2")
-    engine = create_engine(sync_url, future=True)
+    engine = create_engine(sync_url, future=True, **integration_pool_kwargs)
     try:
         yield engine
     finally:
