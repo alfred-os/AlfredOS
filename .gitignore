@@ -166,3 +166,7 @@ graphify-out/
 # #494 e2e boot lane run artifacts (written to CWD by the harness)
 /e2e-tally.json
 /e2e-stack.log
+
+# superpowers:subagent-driven-development scratch (ledgers, briefs, review
+# packages) — per-plan working state, never source of truth.
+.superpowers/
