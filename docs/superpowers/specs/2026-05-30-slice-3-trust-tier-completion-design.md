@@ -670,7 +670,7 @@ The capability gate exposes `alfred_capability_gate_check_seconds` Prometheus hi
 
 ### 7a.3 Per-action observability
 
-`alfred_orchestrator_action_duration_seconds` histogram, labelled `(user_id_bucket, action_outcome, breaker_state)`. The supervisor's `deadline.py` emits duration on **every** action (success, timeout, and cancelled), not only on timeout. Per-phase OpenTelemetry sub-spans: `tool.web.fetch`, `security.quarantined.extract`, `hookchain_total`. This lets operators see the 30s budget consumed asymmetrically and tune `orchestrator.action_deadline_seconds` against observed p99.
+`alfred_orchestrator_action_duration_seconds` histogram, labelled `(user_id_bucket, action_outcome, breaker_state)`. The supervisor's `deadline.py` emits duration on **every** action (success, timeout, and cancelled), not only on timeout; since #410 PR1 the orchestrator additionally records `commit_failed` when a phase transaction's COMMIT raises after its body completed (the closed outcome vocabulary is pinned in `_ACTION_OUTCOME_DOMAIN`). Per-phase OpenTelemetry sub-spans: `tool.web.fetch`, `security.quarantined.extract`, `hookchain_total`. This lets operators see the 30s budget consumed asymmetrically and tune `orchestrator.action_deadline_seconds` against observed p99.
 
 ---
 
