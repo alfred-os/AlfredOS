@@ -96,6 +96,7 @@ from alfred.comms_mcp import observability as comms_observability
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
+from alfred.memory.turn_side_effects import TurnSideEffectLedger
 from alfred.memory.working import WorkingMemory
 from alfred.orchestrator import loop_constants
 from alfred.orchestrator.tool_dispatch import dispatch_tool
@@ -298,6 +299,14 @@ class Orchestrator:
         tool_registry: ToolRegistry | None = None,
         gate: CapabilityGate | None = None,
         outbound_dlp: OutboundDlpProtocol | None = None,
+        # #410 PR1: the at-most-once guard for turn-start/turn-end (the
+        # budget charge is deliberately NOT gated — see
+        # alfred.memory.turn_side_effects's module docstring). Additive +
+        # optional so every pre-#410 caller (tests, fixtures, alfred chat,
+        # and every Slice-1..4 production path before this PR's Task 5)
+        # keeps constructing unchanged and every guarded call site below
+        # defaults to "always apply" (`side_effect_ledger is None`).
+        side_effect_ledger: TurnSideEffectLedger | None = None,
     ) -> None:
         # Resolve the operator exactly once, here. Caching for the
         # orchestrator's lifetime is load-bearing: re-resolving each turn
@@ -332,6 +341,7 @@ class Orchestrator:
         self._tool_registry = tool_registry
         self._gate = gate
         self._outbound_dlp = outbound_dlp
+        self._side_effect_ledger = side_effect_ledger
 
     async def quarantined_extract(
         self,
@@ -687,6 +697,17 @@ class Orchestrator:
         # audit reader couldn't stitch the cancelled turn together.
         episodic = self._episodic_factory(session)
 
+        # #410 PR1: resolved here (moved up from its prior position just
+        # before the Act loop) so ctx.inbound_id is available to the
+        # turn-start gate immediately below. A provided egress_context, else
+        # one derived from trace_id + user (both fixed for the turn) — so it
+        # is resolved once, not re-derived on every dispatch.
+        ctx = (
+            egress_context
+            if egress_context is not None
+            else self._synthesize_egress_context(trace_id=trace_id, user=user)
+        )
+
         # ------------------------------------------------------------------
         # Observe — ``content`` arrives already tagged at this boundary
         # (host-side comms-MCP ingress owns tagging post-PR-S4-10;
@@ -699,22 +720,30 @@ class Orchestrator:
         # ------------------------------------------------------------------
         user_input_text = content.content
         user_input_tier = content.tier.name
-        await working_memory.append(role="user", content=user_input_text)
-        await episodic.record(
-            user_id=user.slug,
-            role="user",
-            content=user_input_text,
-            trust_tier=user_input_tier,
-            language=user.language,
-            persona=_ALFRED_PERSONA_ID,
-            # Slice-2 per-row attribution: ``persona`` is the legacy text
-            # column (kept for downstream analytics already reading it);
-            # ``persona_id`` is the new migration-0004 column the audit
-            # graph joins on. Both must be set on every write so a Slice 5+
-            # multi-persona deployment doesn't end up with NULL persona_id
-            # rows on its Slice-1+2 history.
-            persona_id=_ALFRED_PERSONA_ID,
-        )
+        # #410 PR1: at-most-once per committed (adapter_id, inbound_id).
+        # `None` (every pre-#410 caller) means "always apply" — behaviour
+        # unchanged. The gate is called BEFORE the guarded write — the only
+        # sound order for a check-then-act idempotency gate (see Task 1's
+        # module docstring for why "effect first" was rejected).
+        if self._side_effect_ledger is None or await self._side_effect_ledger.try_apply_user_turn(
+            adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
+        ):
+            await working_memory.append(role="user", content=user_input_text)
+            await episodic.record(
+                user_id=user.slug,
+                role="user",
+                content=user_input_text,
+                trust_tier=user_input_tier,
+                language=user.language,
+                persona=_ALFRED_PERSONA_ID,
+                # Slice-2 per-row attribution: ``persona`` is the legacy text
+                # column (kept for downstream analytics already reading it);
+                # ``persona_id`` is the new migration-0004 column the audit
+                # graph joins on. Both must be set on every write so a Slice 5+
+                # multi-persona deployment doesn't end up with NULL persona_id
+                # rows on its Slice-1+2 history.
+                persona_id=_ALFRED_PERSONA_ID,
+            )
 
         # ------------------------------------------------------------------
         # Orient — operator_name is the household OWNER (cached at
@@ -763,14 +792,6 @@ class Orchestrator:
         # matches the variable name, not the value; suppressed below.
         final_result_token = "success"  # noqa: S105
         final_exit_reason: str | None = None  # set only on a non-normal exit
-        # Loop-invariant — a provided egress_context, else one derived from
-        # trace_id + user (all fixed for the turn) — so it is resolved once here
-        # rather than re-derived on every dispatch inside the loop below.
-        ctx = (
-            egress_context
-            if egress_context is not None
-            else self._synthesize_egress_context(trace_id=trace_id, user=user)
-        )
 
         for iteration in range(loop_constants.MAX_TOOL_ITERATIONS):
             request = CompletionRequest(
@@ -1006,32 +1027,44 @@ class Orchestrator:
         # the T2 input that triggered it). T0 is reserved for AlfredOS
         # internals/code/prompts/configs per PRD §7.1. Slice 2's dual-LLM
         # split refines provider output to T1 and introduces T3.
-        await working_memory.append(role="assistant", content=answer)
-        # A synthetic refusal (final_exit_reason set) is a local i18n string, not
-        # a provider completion — its episodic row must carry ZERO provider
-        # tokens/cost (the real cost already rode the provider_call:* rows).
-        # Charging it `final_response`'s tokens/cost would misattribute the
-        # PRIOR completion's spend to the refusal string AND double-count cost
-        # already logged on a `provider_call:*` audit row.
-        answer_from_provider = final_exit_reason is None
-        # FIX-15: episodic.record logs the FINAL completion's cost/tokens (the
-        # answer's attribution); the `completed` audit row logs the TURN total
-        # (per_turn_spent_usd). For a multi-completion turn these differ BY
-        # DESIGN — episodic = answer attribution, audit = turn spend.
-        await episodic.record(
-            user_id=user.slug,
-            role="assistant",
-            content=answer,
-            trust_tier="T2",
-            tokens_in=final_response.tokens_in if answer_from_provider else 0,
-            tokens_out=final_response.tokens_out if answer_from_provider else 0,
-            cost_usd=final_response.cost_usd if answer_from_provider else 0.0,
-            language=user.language,
-            persona=_ALFRED_PERSONA_ID,
-            # See the user-turn ``episodic.record`` call above for the
-            # ``persona`` vs ``persona_id`` split rationale.
-            persona_id=_ALFRED_PERSONA_ID,
-        )
+        # #410 PR1: at-most-once per committed (adapter_id, inbound_id).
+        # `answer` is still returned below regardless of this gate — a
+        # resumed turn always sends SOMETHING (a fresh completion's text,
+        # per ADR-0049's accepted "duplicate paid completion" residual) —
+        # this gate only stops that text from ALSO being re-persisted as a
+        # second assistant turn.
+        if (
+            self._side_effect_ledger is None
+            or await self._side_effect_ledger.try_apply_assistant_turn(
+                adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
+            )
+        ):
+            await working_memory.append(role="assistant", content=answer)
+            # A synthetic refusal (final_exit_reason set) is a local i18n string, not
+            # a provider completion — its episodic row must carry ZERO provider
+            # tokens/cost (the real cost already rode the provider_call:* rows).
+            # Charging it `final_response`'s tokens/cost would misattribute the
+            # PRIOR completion's spend to the refusal string AND double-count cost
+            # already logged on a `provider_call:*` audit row.
+            answer_from_provider = final_exit_reason is None
+            # FIX-15: episodic.record logs the FINAL completion's cost/tokens (the
+            # answer's attribution); the `completed` audit row logs the TURN total
+            # (per_turn_spent_usd). For a multi-completion turn these differ BY
+            # DESIGN — episodic = answer attribution, audit = turn spend.
+            await episodic.record(
+                user_id=user.slug,
+                role="assistant",
+                content=answer,
+                trust_tier="T2",
+                tokens_in=final_response.tokens_in if answer_from_provider else 0,
+                tokens_out=final_response.tokens_out if answer_from_provider else 0,
+                cost_usd=final_response.cost_usd if answer_from_provider else 0.0,
+                language=user.language,
+                persona=_ALFRED_PERSONA_ID,
+                # See the user-turn ``episodic.record`` call above for the
+                # ``persona`` vs ``persona_id`` split rationale.
+                persona_id=_ALFRED_PERSONA_ID,
+            )
 
         completed_subject: dict[str, object] = {
             "phase": "completed",
