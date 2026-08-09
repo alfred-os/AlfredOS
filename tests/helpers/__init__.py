@@ -9,5 +9,4 @@ Empty package marker so ``tests/helpers/`` is importable as
   (``_FireCounter``, ``_CannedResponse``, ``_FakeClient``, ``_FakeResponse``,
   ``make_fake_external_world``).
 * :mod:`tests.helpers.gates` — :class:`CapabilityGate` test fixtures.
-* :mod:`tests.helpers.schema` — raw-SQL DDL for tables with no ORM model.
 """
