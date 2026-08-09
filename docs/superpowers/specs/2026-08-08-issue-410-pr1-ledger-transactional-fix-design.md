@@ -8,6 +8,22 @@
 > `2026-08-07-issue-410-tools-on-design.md` spec (that document is unaffected —
 > this fix is internal to PR1's own implementation, not a scope change to the
 > #410 epic).
+> **2026-08-08, later:** §3.1's one-transaction-spanning-the-provider-call
+> mechanism is itself superseded by
+> [ADR-0062](../../adr/0062-three-phase-turn-and-role-scoped-connection-pools.md)
+> (empirically verified pool deadlock: 16 concurrent turns, 0 succeeded);
+> §3.2 carries forward as gate-keyed conditional threading and §3.3/§3.4 as
+> per-phase deferred appends + `commit_failed` telemetry, per
+> `docs/superpowers/plans/2026-08-08-issue-410-pr1-pool-deadlock-fix.md`.
+> Task-number key: §1/§5 below cite the ORIGINAL
+> `2026-08-07-issue-410-pr1-turn-side-effect-ledger.md` plan's numbering.
+> In the superseding pool-deadlock plan those land as — original Task 1
+> (`turn_side_effects.py` rewrite) → its Task 3; original Task 3 (Postgres
+> integration contract) → its Task 4; original Task 4 (orchestrator
+> wiring) → its Task 6; original Task 5 (boot wiring / arming) → its
+> Task 7; original Task 6 (crash-injection flip) → folded into its Task 7
+> Step 4; original Task 7 (working-memory append tests) → its Task 6
+> Step 6. Read §5's per-task impact notes through that mapping.
 
 ## 1. Problem
 
