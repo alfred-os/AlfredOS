@@ -27,6 +27,13 @@ Strictly additive: a new table, no existing columns touched, no cross-table
 CHECK constraint. Downgrade drops the table — no destructive row deletion
 needed (unlike migration 0020's ``ck_audit_log_result`` widen/narrow), so no
 loud-NOTICE deletion step applies here.
+
+Unlike ``egress_idempotency`` (migration 0023), this table ships with no
+retention index or pruning story — it grows unbounded, a known gap accepted
+for this PR (matching PR2's journal table identical risk note). Both should be
+addressed together in a shared prune-on-``commit_once`` sweep rather than
+solved independently. Tracked as a follow-up, to be filed alongside PR1/PR2
+planning (see PR3 Task 6 for the gap-filing pattern).
 """
 
 from __future__ import annotations
