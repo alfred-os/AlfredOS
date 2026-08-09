@@ -364,9 +364,13 @@ class Orchestrator:
             # unit tests and pre-#410 construction paths, but a PRODUCTION
             # boot site omitting audit_session_scope silently points the
             # AuditWriters at the TURN pool — quietly re-coupling the two
-            # pools this plan separates. Both real boot sites pass it
-            # explicitly today; this once-at-construction warning makes any
-            # future omission a visible decision, never a silent default.
+            # pools this plan separates. Task 7 wires the one real production
+            # boot site (src/alfred/cli/_bootstrap.py) to pass this
+            # explicitly; until that lands, this warning fires on EVERY
+            # production boot (e.g. `alfred chat` startup) — that is the
+            # intended, visible signal that the wiring is still pending, not
+            # a bug. Once Task 7 lands, this warning firing in production
+            # again means a future omission, not the initial gap.
             _log.warning("orchestrator.audit_session_scope_fallback")
         self._audit_session_scope = (
             audit_session_scope if audit_session_scope is not None else session_scope
