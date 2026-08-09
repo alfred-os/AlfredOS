@@ -17,6 +17,7 @@ import pytest
 from alfred.cli import _bootstrap
 from alfred.config.settings import Settings
 from alfred.memory.db import ConnectionRole
+from alfred.memory.replay_journal import PostgresReplayJournal
 from alfred.memory.turn_side_effects import PostgresTurnSideEffectLedger
 
 
@@ -72,6 +73,10 @@ def test_default_scopes_are_role_scoped_and_the_ledger_is_armed(
     )
     # The at-most-once gate is ARMED on the production construction path.
     assert isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)
+    # #410 PR2: the replay journal is armed unconditionally too, using the
+    # SAME already-resolved audit_session_scope its sibling
+    # ForwardedDispatchAttemptStore uses (SIDE_EFFECT-role, not TURN).
+    assert isinstance(orch._replay_journal, PostgresReplayJournal)
     # Turn scope first, audit (SIDE_EFFECT) scope second — and nothing else.
     assert recorded_roles == [ConnectionRole.TURN, ConnectionRole.SIDE_EFFECT]
 
@@ -104,6 +109,10 @@ def test_injected_scopes_are_used_verbatim_no_default_builds(
         audit_session_scope=_fake_scope(),
     )
     assert isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)
+    # #410 PR2: the replay journal is armed unconditionally too, using the
+    # SAME already-resolved audit_session_scope its sibling
+    # ForwardedDispatchAttemptStore uses (SIDE_EFFECT-role, not TURN).
+    assert isinstance(orch._replay_journal, PostgresReplayJournal)
     # The comms boot graph injects both scopes — the builder must not build
     # shadow ones (a shadow TURN engine would double the budgeted pool).
     assert recorded_roles == []
