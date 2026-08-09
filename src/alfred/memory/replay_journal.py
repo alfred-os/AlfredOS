@@ -110,8 +110,9 @@ regardless): `tool_arguments_json` NEVER contains a resolved secret value,
 only an unresolved `{{secret:name}}` placeholder if one is present.** This
 holds STRUCTURALLY, not by luck of call ordering: `Orchestrator._handle_turn`
 (Task 4) calls `self._replay_journal.append_batch(...)` with the planner's raw
-`ToolCall`s BEFORE any of that iteration's `dispatch_tool` calls run at all — broker secret substitution
-happens INSIDE a tool's own dispatcher (e.g. `dispatch_web_fetch`'s Step 1c),
+`ToolCall`s BEFORE any of that iteration's `dispatch_tool` calls run at all
+— broker secret substitution happens INSIDE a tool's own dispatcher
+(e.g. `dispatch_web_fetch`'s Step 1c),
 strictly downstream of the journal write, and writes the resolved value into
 a local dict that is never round-tripped back into `call.arguments`. Task 4
 pins this with a regression test. If a FUTURE refactor ever moved secret
@@ -143,8 +144,10 @@ __all__ = [
 
 _APPEND_SQL = sa.text(
     "INSERT INTO tool_call_journal "
-    "(adapter_id, inbound_id, call_index, iteration, tool_call_id, tool_name, tool_arguments_json) "
-    "VALUES (:adapter_id, :inbound_id, :call_index, :iteration, :tool_call_id, :tool_name, :tool_arguments_json)"
+    "(adapter_id, inbound_id, call_index, iteration, tool_call_id, tool_name, "
+    "tool_arguments_json) "
+    "VALUES (:adapter_id, :inbound_id, :call_index, :iteration, :tool_call_id, "
+    ":tool_name, :tool_arguments_json)"
 )
 
 _READ_SQL = sa.text(
@@ -173,7 +176,9 @@ class ReplayJournal(Protocol):
         iteration: int,
         calls: Sequence[tuple[int, ToolCall]],
     ) -> None:
-        """Durably record an ENTIRE iteration's tool-dispatch decisions, atomically, before any is dispatched.
+        """Record an ENTIRE iteration's tool-dispatch decisions atomically, before dispatch.
+
+        Durable and deterministic: provides replay safety across restarts.
 
         ``calls`` is the ``(call_index, ToolCall)`` pairs the planner's
         completion requested for THIS iteration, in call order. All of them
@@ -202,7 +207,7 @@ class ReplayJournal(Protocol):
         ...
 
     async def read(self, *, adapter_id: str, inbound_id: str) -> tuple[JournalEntry, ...]:
-        """Return every journalled entry for ``(adapter_id, inbound_id)``, ordered by ``call_index``.
+        """Return journalled entries for ``(adapter_id, inbound_id)``, ordered by ``call_index``.
 
         Returns ``()`` if none exist (the overwhelmingly common case — every
         first-ever attempt, and every direct/fixture call with its
