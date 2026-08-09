@@ -373,6 +373,36 @@ def _seed_users(sync_url: str) -> None:
         sync_engine.dispose()
 
 
+# #410 PR1: ``build_orchestrator`` now unconditionally arms the
+# ``PostgresTurnSideEffectLedger``, which reads/writes the
+# ``turn_side_effect_ledger`` table via raw SQL (migration 0025) — there is
+# no ORM model for that table, so ``Base.metadata.create_all`` below cannot
+# create it. Running the FULL alembic chain instead was tried and rejected:
+# migration 0004 auto-installs a default "operator"-slug user (idempotent
+# backfill), which collides with this module's own ``_seed_users`` operator
+# row (``_OPERATOR_SLUG = "the-operator"``) and trips
+# ``IdentityResolver.get_operator()``'s multi-operator refusal. This DDL
+# mirrors migration 0025's ``upgrade()`` verbatim (kept in sync by
+# inspection; both are additive-only and unlikely to drift) without
+# replaying the rest of the chain's data-seeding side effects.
+_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL = text(
+    """
+    CREATE TABLE turn_side_effect_ledger (
+        adapter_id VARCHAR(128) NOT NULL,
+        inbound_id VARCHAR(255) NOT NULL,
+        user_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
+        assistant_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        CONSTRAINT pk_turn_side_effect_ledger PRIMARY KEY (adapter_id, inbound_id),
+        CONSTRAINT ck_turn_side_effect_ledger_adapter_id_length
+            CHECK (char_length(adapter_id) BETWEEN 1 AND 128),
+        CONSTRAINT ck_turn_side_effect_ledger_inbound_id_length
+            CHECK (char_length(inbound_id) BETWEEN 1 AND 255)
+    )
+    """
+)
+
+
 @asynccontextmanager
 async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
     """Create the schema, seed users, and yield a real Postgres ``AuditWriter``."""
@@ -380,6 +410,7 @@ async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
 
         sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
         _seed_users(sync_url)
@@ -675,10 +706,12 @@ async def test_forwarded_crash_injection_replays_exactly_twice_with_bounded_resi
     FOLD-R6 (DECISION CLOSED): the residual is bounded by the POISON CEILING
     (5, ``inbound.py:201``) IN GENERAL — not "at most twice" — a single
     injected failure happens to produce exactly two runs, but the general
-    bound this same ledger enforces is the ceiling. The in-process working-
-    memory deque is NOT rolled back on the failed first attempt — asserted
-    directly (the un-rolled-back double-append this fold accepts as a bounded,
-    self-healing residual, not silently swept under the rug).
+    bound this same ledger enforces is the ceiling.
+    #410 PR1: the armed TurnSideEffectLedger now CLOSES the double-append
+    residual this test previously accepted — the replay's fresh completion is
+    still paid for (ADR-0049's duplicate-paid-completion residual stands),
+    but the deque ends with exactly one user + one assistant turn, asserted
+    directly below.
     """
     async with _boot_stack(postgres_url, monkeypatch) as stack:
         flaky_sender = _FlakyOnceSender(stack.sender)
@@ -748,7 +781,11 @@ async def test_forwarded_crash_injection_replays_exactly_twice_with_bounded_resi
         wm = await pool.acquire(key)
         turns_after_replay = await wm.turns()
         await pool.release(key, wm)
-        assert len(turns_after_replay) == 4  # 2 user + 2 assistant — duplicated, not lost
+        # #410 PR1: the ledger denies BOTH gates on the replay (the first
+        # attempt's Phase A/C transactions committed before the send failed),
+        # so the replay re-runs the completion but re-appends NOTHING.
+        assert len(turns_after_replay) == 2
+        assert [t.role for t in turns_after_replay] == ["user", "assistant"]
 
 
 async def test_direct_path_crash_injection_is_at_most_once(

@@ -253,7 +253,9 @@ def apply_boot_success_patches(
     )
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_session_scope",
-        lambda _settings: lambda: None,
+        # #410 PR1: accept-and-ignore the new role kwarg so callers with or
+        # without an explicit role hit the same inert double.
+        lambda _settings, *, role=None: lambda: None,
     )
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_handshake",

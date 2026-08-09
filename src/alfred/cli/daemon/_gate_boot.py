@@ -124,12 +124,21 @@ async def build_boot_real_gate_for_daemon(
     row), never a raw traceback.
     """
     from alfred.bootstrap.gate_factory import build_boot_real_gate
+    from alfred.memory.db import ConnectionRole, make_session_factory
     from alfred.security.capability_gate._comms_adapter_grants import (
         comms_adapter_load_grants,
     )
     from alfred.security.capability_gate.backend import PostgresBackend
 
-    backend = PostgresBackend(dsn=settings.database_url.unicode_string())
+    # #410 PR1 / ADR-0062: route the gate backend through the CACHED
+    # CONTROL-role engine (the pre-existing session_factory= injection seam,
+    # backend.py:283-296) instead of a private dsn=-built engine that
+    # bypassed the registry — and dispose_all_engines() — entirely. CONTROL
+    # is the named 15-connection reserve in settings.py's
+    # DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET arithmetic.
+    backend = PostgresBackend(
+        session_factory=make_session_factory(settings, role=ConnectionRole.CONTROL)
+    )
 
     async def _noop_audit_sink(**_kw: object) -> None:
         return None

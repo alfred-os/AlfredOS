@@ -29,7 +29,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
@@ -45,6 +45,36 @@ from alfred.security.tiers import T2, tag
 
 _OPERATOR_SLUG = "operator"
 _OPERATOR_LANGUAGE = "en-US"
+
+# #410 PR1: build_orchestrator now unconditionally arms the
+# PostgresTurnSideEffectLedger, which reads/writes the
+# turn_side_effect_ledger table via raw SQL (migration 0025) — there is no
+# ORM model for that table, so Base.metadata.create_all below cannot create
+# it. Running the full alembic chain was tried and rejected here too: this
+# module's own module docstring states the deliberate choice of
+# Base.metadata.create_all + manual seed "isolated from migration-shape
+# drift" (the alembic-upgrade path is the SEPARATE smoke test's job), and
+# migration 0004's idempotent operator backfill would collide with
+# _seed_operator's own insert at the same "operator" slug. This DDL mirrors
+# migration 0025's upgrade() verbatim (kept in sync by inspection; both are
+# additive-only and unlikely to drift) without replaying the rest of the
+# chain's data-seeding side effects.
+_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL = text(
+    """
+    CREATE TABLE turn_side_effect_ledger (
+        adapter_id VARCHAR(128) NOT NULL,
+        inbound_id VARCHAR(255) NOT NULL,
+        user_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
+        assistant_turn_applied BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        CONSTRAINT pk_turn_side_effect_ledger PRIMARY KEY (adapter_id, inbound_id),
+        CONSTRAINT ck_turn_side_effect_ledger_adapter_id_length
+            CHECK (char_length(adapter_id) BETWEEN 1 AND 128),
+        CONSTRAINT ck_turn_side_effect_ledger_inbound_id_length
+            CHECK (char_length(inbound_id) BETWEEN 1 AND 255)
+    )
+    """
+)
 
 
 def _seed_operator(sync_url: str) -> None:
@@ -121,6 +151,8 @@ async def test_build_orchestrator_drives_one_turn(
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                # #410 PR1: not part of Base.metadata (see module comment above).
+                await conn.execute(_CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
         finally:
             await engine.dispose()
         _seed_operator(sync_url)
@@ -221,6 +253,13 @@ def test_build_orchestrator_reuses_injected_components(
 
     injected_router = MagicMock()
     injected_session_scope = MagicMock()
+    # #410 PR1: build_orchestrator now defaults audit_session_scope via the
+    # SAME build_session_scope seam (role=SIDE_EFFECT) when it isn't
+    # injected — inject it here too, per the "callers injecting one should
+    # inject both" contract in build_orchestrator's docstring, so this
+    # build-broker/router/session_scope non-rebuild proof isn't tripped by
+    # an unrelated default-audit-scope build.
+    injected_audit_session_scope = MagicMock()
     orch = _bootstrap.build_orchestrator(
         settings,
         broker=MagicMock(),
@@ -228,6 +267,7 @@ def test_build_orchestrator_reuses_injected_components(
         # A MagicMock resolver satisfies the ctor's get_operator()/version_counter reads.
         resolver=MagicMock(),
         session_scope=injected_session_scope,
+        audit_session_scope=injected_audit_session_scope,
     )
     assert isinstance(orch, Orchestrator)
     build_broker_spy.assert_not_called()
@@ -238,3 +278,4 @@ def test_build_orchestrator_reuses_injected_components(
     # assert identity so a hypothetical fallback-construction path can't pass (CR).
     assert orch._router is injected_router
     assert orch._session_scope is injected_session_scope
+    assert orch._audit_session_scope is injected_audit_session_scope

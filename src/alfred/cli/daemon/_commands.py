@@ -152,6 +152,7 @@ from alfred.i18n import t
 # comms-enabled boot with no (or a corrupt multi-operator) seeded identity refuses
 # audited (exit 2) instead of crashing uncaught (#368 anti-pattern).
 from alfred.identity.errors import IdentityResolutionError
+from alfred.memory.db import ConnectionRole
 from alfred.observability.core_metrics import build_core_registry
 from alfred.observability.metrics_server import (
     CORE_METRICS_DEFAULT_PORT,
@@ -225,13 +226,19 @@ class _StubOperatorResolver:
 
 def build_boot_session_scope(  # pragma: no cover - real-infra glue; unit tests monkeypatch
     settings: Settings,
+    *,
+    role: ConnectionRole = ConnectionRole.SIDE_EFFECT,
 ) -> Callable[[], AbstractAsyncContextManager[AsyncSession]]:
-    """Build the async session scope the Supervisor + audit writer share."""
+    """Build a role-scoped async session scope for the daemon boot graph.
+
+    Default SIDE_EFFECT keeps every existing caller (Supervisor, audit
+    writer, idempotency stores, working-pool rehydrate) on the durability
+    pool; the orchestrator assembly passes ``role=ConnectionRole.TURN``
+    explicitly (#410 PR1 / ADR-0062).
+    """
     from alfred.memory.db import build_session_scope
 
-    # build_session_scope is an untyped Slice-1 helper (returns a no-arg
-    # callable shaped exactly like our annotation); the cast pins the type.
-    return build_session_scope(settings)  # type: ignore[no-any-return]
+    return build_session_scope(settings, role=role)
 
 
 def _build_boot_outbound_dlp(  # pragma: no cover - real-infra glue; unit tests monkeypatch

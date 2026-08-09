@@ -61,6 +61,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.i18n import t
+from alfred.memory.db import ConnectionRole
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_socket_transport import CommsSocketListener
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
@@ -801,7 +802,12 @@ async def _build_comms_boot_graph(
             broker=secret_broker,
             router=router,
             resolver=resolver,
-            session_scope=build_boot_session_scope(settings),
+            # #410 PR1 / ADR-0062: TURN-role scope for the sub-ms Phase A/C
+            # transactions; SIDE_EFFECT-role scope for the AuditWriters so the
+            # in-turn audit acquisition draws from the durability pool, never
+            # a second TURN connection.
+            session_scope=build_boot_session_scope(settings, role=ConnectionRole.TURN),
+            audit_session_scope=build_boot_session_scope(settings),
             # extraction runs at the adapter->bridge boundary, not the orchestrator funnel
             quarantined_extractor=None,
         )
