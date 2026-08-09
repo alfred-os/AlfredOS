@@ -86,14 +86,12 @@ def _text_response(content: str = "hello", cost: float = 0.01) -> CompletionResp
 def _make_orchestrator(*, router: Any = None, budget: Any = None, **kw: Any) -> Orchestrator:
     @asynccontextmanager
     async def _scope() -> Any:
-        # ``rollback`` must be an AsyncMock (mirrors test_core.py's ``_build``):
-        # the top-level ``except BaseException`` arm in ``handle_user_message``
-        # awaits ``session.rollback()`` on ANY propagating exception — including
-        # the Task 3 escalation-propagation tests' faked ``dispatch_tool``
-        # raises. A plain ``MagicMock`` attribute is a sync callable and would
-        # raise ``TypeError: 'MagicMock' object can't be awaited`` there,
-        # masking the escalation the test means to observe.
+        # #410 PR1: handle_user_message no longer calls session.rollback()
+        # itself (each phase's scope owns rollback), but the double keeps
+        # commit/rollback as AsyncMocks so it stays shaped like a real
+        # AsyncSession for any scope double that models the real session_scope.
         session = MagicMock()
+        session.commit = AsyncMock()
         session.rollback = AsyncMock()
         yield session
 

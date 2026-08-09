@@ -35,18 +35,26 @@ Flow per turn:
               happened). On user cancellation, audit ``result="cancelled"``
               and re-raise so the cancellation signal propagates.
 
-Session lifecycle: a per-turn ``session_scope`` is opened around the whole
-turn so episodic + user-content writes share a transaction. The scope context
-manager is responsible for commit on clean exit; we explicitly rollback on
-any propagating exception. This keeps the orchestrator decoupled from the
-session-factory's commit/rollback policy (real DB vs. testcontainers vs.
-in-memory mock).
+Session lifecycle (#410 PR1 / ADR-0062 — the three-phase turn): NO database
+connection is ever held across external I/O. Phase A (Observe) opens one
+short-lived ``session_scope``, runs the ledger user-gate + the episodic user
+write in ONE transaction, and commits; the working-memory append is deferred
+until after that commit. Phase B (Orient + Act) — prompt construction, the
+provider call, the whole tool loop, and every audit write — runs with ZERO
+connections held. Phase C (Persist) opens a second short-lived scope for the
+ledger assistant-gate + the episodic assistant write, commits, then performs
+the deferred assistant append and the terminal audit row. Rollback of a
+phase is the scope's own job — there are no manual ``session.rollback()``
+calls in this module any more.
 
-**Audit writes live OUTSIDE that transaction.** ``AuditWriter`` takes its own
-``session_factory`` and opens a fresh session per ``.append()``. Otherwise a
-failing turn (provider error, budget block, cancellation) would rollback the
-audit row alongside the user-content row, violating CLAUDE.md hard rule #7
-(no silent failures in security paths).
+**Audit writes live OUTSIDE those transactions.** ``AuditWriter`` takes its
+own ``session_factory`` (the SIDE_EFFECT-role scope in production) and opens
+a fresh session per ``.append()`` — CLAUDE.md hard rule #7: audit rows
+survive any caller rollback. That second-connection acquisition is exactly
+why the SIDE_EFFECT pool is separate from the TURN pool: under the pre-#410
+single-turn-transaction design, N in-flight turns each holding a TURN
+connection while demanding a SIDE_EFFECT one deadlocked the unconfigured
+shared pool (verified: 16 concurrent turns, 0 succeeded).
 
 7-branch audit enumeration (spec §5 line 792 — PR-B adds the 7th):
     1. ``result="success"`` (happy path)
@@ -82,8 +90,9 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import structlog
@@ -106,7 +115,7 @@ from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T1, T2, TaggedContent
 from alfred.supervisor.breaker import invoke_supervisor_action_timeout_hookpoint
 from alfred.supervisor.deadline import DeadlineWrapper
-from alfred.supervisor.observability import record_action_duration
+from alfred.supervisor.observability import record_action_duration, record_orphaned_user_turn
 
 if TYPE_CHECKING:
     from alfred.hooks.capability import CapabilityGate
@@ -245,6 +254,24 @@ def _truncate_tool_result(text: str) -> str:
     return text[: limit - len(marker)] + marker
 
 
+@dataclass(frozen=True, slots=True)
+class _TurnOutcome:
+    """Everything Phase B decides that Phases C + the terminal row consume.
+
+    Frozen: Phase B's result is a fact by the time Phase C runs — nothing
+    downstream may edit it.
+    """
+
+    answer: str
+    final_response: CompletionResponse
+    final_result_token: str
+    final_exit_reason: str | None
+    answer_from_provider: bool
+    estimate: float
+    per_turn_spent_usd: float
+    pending_completion_cost: float
+
+
 class Orchestrator:
     """Stateless-per-turn OODA dispatch for Slice-2 PR-B multi-user.
 
@@ -307,6 +334,13 @@ class Orchestrator:
         # keeps constructing unchanged and every guarded call site below
         # defaults to "always apply" (`side_effect_ledger is None`).
         side_effect_ledger: TurnSideEffectLedger | None = None,
+        # #410 PR1: the scope the two AuditWriters draw their per-append
+        # sessions from. In production this is the SIDE_EFFECT-role scope —
+        # audit writes are the ONE acquisition permitted while a TURN-role
+        # phase transaction is open (hard rule #7; ADR-0062 hierarchy).
+        # ``None`` falls back to ``session_scope`` so every existing caller
+        # and test constructs byte-for-byte unchanged.
+        audit_session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     ) -> None:
         # Resolve the operator exactly once, here. Caching for the
         # orchestrator's lifetime is load-bearing: re-resolving each turn
@@ -322,17 +356,29 @@ class Orchestrator:
         self._audit_factory = audit_factory
         self._autocommit_audit_factory = autocommit_audit_factory
         self._redactor = redactor
-        # Audit writer is built once from the session_scope factory — it
-        # opens its own session per `.append()` and is independent of the
-        # per-turn user-content transaction below.
-        self._audit = self._audit_factory(self._session_scope)
+        # Audit writer is built once from the audit_session_scope factory —
+        # it opens its own session per `.append()` and is independent of the
+        # per-phase turn transactions.
+        if audit_session_scope is None:
+            # #410 PR1 (fleet finding M-10): the fallback is legitimate for
+            # unit tests and pre-#410 construction paths, but a PRODUCTION
+            # boot site omitting audit_session_scope silently points the
+            # AuditWriters at the TURN pool — quietly re-coupling the two
+            # pools this plan separates. Both real boot sites pass it
+            # explicitly today; this once-at-construction warning makes any
+            # future omission a visible decision, never a silent default.
+            _log.warning("orchestrator.audit_session_scope_fallback")
+        self._audit_session_scope = (
+            audit_session_scope if audit_session_scope is not None else session_scope
+        )
+        self._audit = self._audit_factory(self._audit_session_scope)
         # Second writer purpose-built for the deadline-fired path. Logically
         # distinct from ``self._audit`` even when both factories share the
-        # same session_scope underneath — the duality makes the wiring
+        # same audit_session_scope underneath — the duality makes the wiring
         # observable in tests and lets a future deployment swap an
         # independent autocommit-isolation factory in without changing the
         # call sites (core-003 + CR-R3 #7).
-        self._autocommit_audit = self._autocommit_audit_factory(self._session_scope)
+        self._autocommit_audit = self._autocommit_audit_factory(self._audit_session_scope)
         # Per-action deadline wrapper — Task 11 ships a pure timing wrapper;
         # the orchestrator owns the audit-row emission so the row can land
         # outside the rolled-back session.
@@ -403,25 +449,44 @@ class Orchestrator:
         :func:`alfred.identity._ingest._ingest_tier` encodes the
         role-x-adapter rule but is currently unwired (reserved; see issue
         #237). The orchestrator reads ``content.content`` and
-        ``content.tier.name``
-        but does not re-tag. The accepted tiers are T1 (operator via TUI)
-        and T2 (all other authenticated ingress); T3 NEVER reaches this
-        method directly — T3 bytes live behind opaque ContentHandle
-        references in the plugin host's content store (spec §3.1, §7.3).
-        ``working_memory`` is the pool-acquired buffer for this
+        ``content.tier.name`` but does not re-tag. The accepted tiers are T1
+        (operator via TUI) and T2 (all other authenticated ingress); T3 NEVER
+        reaches this method directly — T3 bytes live behind opaque
+        ContentHandle references in the plugin host's content store (spec
+        §3.1, §7.3). ``working_memory`` is the pool-acquired buffer for this
         (persona, user.slug) pair; the adapter owns its lifecycle (acquire
         before, release in finally). ``egress_context`` is the per-turn
         :class:`TurnEgressContext` the live comms inbound path passes so the
         egress ledger anchors to the real ``(adapter_id, inbound_id,
-        session_id)`` identity; ``None`` (the default) synthesizes it from the
-        ``trace_id`` for the ``alfred chat``/fixture path (#338).
+        session_id)`` identity; ``None`` (the default) synthesizes it from
+        the ``trace_id`` for the ``alfred chat``/fixture path (#338).
+
+        #410 PR1: the deadline wrapper now encloses the WHOLE three-phase
+        sequence (Phase A observe-txn, Phase B provider/tools with no
+        connection held, Phase C persist-txn + deferred appends + terminal
+        row) instead of a single-session turn body. If the deadline or an
+        external cancel fires during Phase B, no connection is held, so the
+        autocommit audit writes below always acquire cleanly; if it fires
+        during Phase A/C, that phase's own ``async with`` unwinds (rolling
+        the transaction back) BEFORE either arm runs — the pre-#410
+        recovery-ordering hazard (audit write needing a fresh connection
+        BEFORE the held one was rolled back) is gone structurally, which is
+        why the explicit ``session.rollback()`` calls that used to live in
+        these arms no longer exist.
 
         Raises:
             BudgetError: pre-check refusal — or, for the 7th audit branch,
                 ``UnknownBudgetUserError`` (defense-in-depth on a slug the
-                resolver should have caught upstream).
+                resolver should have caught upstream). Phase A has committed
+                by then: the orphan user episodic row is the ADR-0062
+                accepted trade-off (replay re-denies the user gate and
+                converges).
             Exception: re-raises the provider's exception if both providers
-                in the router fail.
+                in the router fail, and re-raises a phase-commit failure
+                after recording ``action_outcome="commit_failed"``, writing
+                the ``orchestrator.turn`` ``phase_commit:*`` audit row, and
+                logging ``orchestrator.phase_commit_failed`` (see
+                ``_run_committed_phase``).
             asyncio.CancelledError: re-raised after auditing on user cancel.
             Exception: re-raises the audit writer's exception if persistence
                 breaks after a successful provider call (CLAUDE.md hard
@@ -431,119 +496,74 @@ class Orchestrator:
         # PR-S3-3b Task 14: stamp the start of the action for the per-turn
         # Prometheus histogram. ``time.monotonic`` is the right clock here —
         # immune to NTP step adjustments and never goes backwards across a
-        # suspended laptop or a leap second. ``record_action_duration`` runs
-        # on every exit branch (success / timeout / cancelled) so per-user p99
-        # captures every action regardless of outcome (spec §7a.3).
+        # suspended laptop or a leap second.
         action_start = time.monotonic()
-        async with self._session_scope() as session:
-            try:
-                # PR-S3-3b Task 12: wrap the turn body with the per-action
-                # deadline. ``_user_id`` and ``_correlation_id`` are consumed
-                # by ``DeadlineWrapper.run`` and NOT forwarded to
-                # ``_handle_turn`` (core-005 — see DeadlineWrapper docstring).
-                reply = await self._deadline_wrapper.run(
-                    self._handle_turn,
-                    session,
-                    user=user,
-                    content=content,
-                    working_memory=working_memory,
-                    trace_id=trace_id,
-                    egress_context=egress_context,
-                    _user_id=user.slug,
-                    _correlation_id=trace_id,
-                )
-                # PR-S3-3b Task 14: success-path histogram observation. Wired
-                # post-return so a failed audit-write inside _handle_turn lands
-                # in the except arm below instead of double-observing. The
-                # ``breaker_state="UNKNOWN"`` literal is the Slice-3 default;
-                # PR-S3-4+ threads real breaker state from
-                # ``Supervisor.get_or_create_breaker`` once the supervisor is
-                # constructed at process bootstrap.
-                record_action_duration(
-                    duration_seconds=time.monotonic() - action_start,
-                    user_id=user.slug,
-                    action_outcome="success",
-                    breaker_state="UNKNOWN",
-                )
-                return reply
-            except TimeoutError:
-                # PR-S3-3b Task 12 — the deadline fired. Two audit rows land
-                # on the AUTOCOMMIT writer so they survive the outer
-                # rollback (core-003 + CR-R3 #7):
-                #
-                #   1. ``supervisor.action_timeout`` — operator-facing
-                #      supervisor row carrying the deadline + phase label.
-                #   2. ``orchestrator.turn`` ``result=cancelled`` — the
-                #      turn's own cancellation row. Using the session-bound
-                #      writer here would lose the row when ``session.rollback()``
-                #      below runs; the autocommit writer flushes it in its
-                #      own session that the parent rollback cannot reach.
-                #
-                # We then re-raise ``CancelledError`` so existing
-                # cancellation-aware callers (TUI, adapter loops) keep their
-                # single-shape handling. The orchestrator's higher-level
-                # cancellation contract collapses "deadline expired" onto
-                # the same shape as operator-initiated cancel (spec §10.5).
-                await self._emit_supervisor_timeout_row(
-                    user_id=user.slug,
-                    correlation_id=trace_id,
-                    action_duration_seconds=time.monotonic() - action_start,
-                )
-                await self._emit_orchestrator_turn_cancelled_row_autocommit(
-                    user=user,
-                    trace_id=trace_id,
-                    phase="turn_timeout",
-                )
-                # PR-S3-3b Task 14: timeout-path histogram observation. Bound
-                # to the same trace_id as the supervisor.action_timeout audit
-                # row so dashboards can join the two by trace.
-                record_action_duration(
-                    duration_seconds=time.monotonic() - action_start,
-                    user_id=user.slug,
-                    action_outcome="timeout",
-                    breaker_state="UNKNOWN",
-                )
-                await session.rollback()
-                raise asyncio.CancelledError("deadline expired") from None
-            except asyncio.CancelledError:
-                # External cancellation (NOT timeout-derived). Session is
-                # alive; the session-bound ``_audit_cancellation`` flushes
-                # inside the active txn which we then roll back — the row
-                # is intentionally tied to the rolled-back work and is
-                # lost on rollback. That's the correct semantic for
-                # "user cancelled mid-turn; nothing committed."
-                #
-                # CLAUDE.md hard rule #7: cancellation at ANY awaited step
-                # in the turn (working-memory append, episodic write,
-                # pre-/post-provider audit) MUST write a ``cancelled``
-                # audit row — not only cancellation that lands inside
-                # ``_router.complete``. The inner provider-call branch
-                # (see ``_handle_turn``) already audits-and-re-raises for
-                # the common case; this top-level arm is the backstop
-                # that catches any re-raised CancelledError (and any
-                # cancellation that lands elsewhere). Tagged with a
-                # distinct phase so the audit reader can tell timeout
-                # apart from operator-cancel.
-                await self._audit_cancellation(user=user, trace_id=trace_id, phase="turn_cancelled")
-                # PR-S3-3b Task 14: cancelled-path histogram observation.
-                # Distinct outcome label from timeout — operator-initiated
-                # cancellation contributes to per-user p99 the same way
-                # successful turns do, just under a different label.
-                record_action_duration(
-                    duration_seconds=time.monotonic() - action_start,
-                    user_id=user.slug,
-                    action_outcome="cancelled",
-                    breaker_state="UNKNOWN",
-                )
-                await session.rollback()
-                raise
-            except BaseException:
-                # Catches KeyboardInterrupt, SystemExit (BaseException but not
-                # asyncio.CancelledError, which is handled above) so the
-                # user-content session is always rolled back on any abnormal
-                # exit. Re-raises immediately to propagate the shutdown signal.
-                await session.rollback()
-                raise
+        try:
+            reply = await self._deadline_wrapper.run(
+                self._run_turn_phases,
+                user=user,
+                content=content,
+                working_memory=working_memory,
+                trace_id=trace_id,
+                egress_context=egress_context,
+                action_start=action_start,
+                _user_id=user.slug,
+                _correlation_id=trace_id,
+            )
+        except TimeoutError:
+            # PR-S3-3b Task 12 — the deadline fired. Two audit rows land on
+            # the AUTOCOMMIT writer (its own SIDE_EFFECT-role sessions):
+            #   1. ``supervisor.action_timeout`` — operator-facing row.
+            #   2. ``orchestrator.turn`` ``result=cancelled`` — the turn's
+            #      own cancellation row.
+            # #410 PR1: no session is held here (see the method docstring),
+            # so these writes always acquire a fresh connection cleanly.
+            await self._emit_supervisor_timeout_row(
+                user_id=user.slug,
+                correlation_id=trace_id,
+                action_duration_seconds=time.monotonic() - action_start,
+            )
+            await self._emit_orchestrator_turn_cancelled_row_autocommit(
+                user=user,
+                trace_id=trace_id,
+                phase="turn_timeout",
+            )
+            record_action_duration(
+                duration_seconds=time.monotonic() - action_start,
+                user_id=user.slug,
+                action_outcome="timeout",
+                breaker_state="UNKNOWN",
+            )
+            raise asyncio.CancelledError("deadline expired") from None
+        except asyncio.CancelledError:
+            # External cancellation (NOT timeout-derived). CLAUDE.md hard
+            # rule #7: cancellation at ANY awaited step in the turn MUST
+            # write a ``cancelled`` audit row. ``_audit_cancellation`` opens
+            # its own session (audit_session_scope), so the row COMMITS and
+            # survives — the pre-#410 comment claiming this row was
+            # "intentionally lost on rollback" described a wiring that never
+            # matched the writer's own fresh-session-per-append contract and
+            # is gone with the held session itself.
+            await self._audit_cancellation(user=user, trace_id=trace_id, phase="turn_cancelled")
+            record_action_duration(
+                duration_seconds=time.monotonic() - action_start,
+                user_id=user.slug,
+                action_outcome="cancelled",
+                breaker_state="UNKNOWN",
+            )
+            raise
+        # Success telemetry fires only after the whole sequence (both commits,
+        # deferred appends, terminal audit row) returned — same post-return
+        # position as pre-#410, so a terminal-audit failure still records
+        # nothing rather than a spurious "success" (§3.4 requirement 1's
+        # commit-ordering half is carried by _run_committed_phase).
+        record_action_duration(
+            duration_seconds=time.monotonic() - action_start,
+            user_id=user.slug,
+            action_outcome="success",
+            breaker_state="UNKNOWN",
+        )
+        return reply
 
     async def _audit_cancellation(self, *, user: UserLike, trace_id: str, phase: str) -> None:
         """Best-effort audit write for a user-cancelled turn.
@@ -681,70 +701,274 @@ class Orchestrator:
             persona_id=_ALFRED_PERSONA_ID,
         )
 
-    async def _handle_turn(
+    async def _run_turn_phases(
         self,
-        session: AsyncSession,
         *,
         user: UserLike,
         content: TaggedContent[T1] | TaggedContent[T2],
         working_memory: WorkingMemory,
         trace_id: str,
-        egress_context: TurnEgressContext | None = None,
+        egress_context: TurnEgressContext | None,
+        action_start: float,
     ) -> str:
         # ``trace_id`` is supplied by ``handle_user_message`` so the top-level
         # cancellation-audit row and the per-phase audit rows share the same
-        # trace identifier — without this they'd be different UUIDs and the
-        # audit reader couldn't stitch the cancelled turn together.
-        episodic = self._episodic_factory(session)
-
-        # #410 PR1: resolved here (moved up from its prior position just
-        # before the Act loop) so ctx.inbound_id is available to the
-        # turn-start gate immediately below. A provided egress_context, else
-        # one derived from trace_id + user (both fixed for the turn) — so it
-        # is resolved once, not re-derived on every dispatch.
+        # trace identifier. ctx is resolved once — both ledger gates and every
+        # dispatch must key on the SAME (adapter_id, inbound_id).
         ctx = (
             egress_context
             if egress_context is not None
             else self._synthesize_egress_context(trace_id=trace_id, user=user)
         )
-
-        # ------------------------------------------------------------------
-        # Observe — ``content`` arrives already tagged at this boundary
-        # (host-side comms-MCP ingress owns tagging post-PR-S4-10;
-        # ``alfred.identity._ingest._ingest_tier`` is reserved/unwired, see
-        # issue #237); read off the tier name
-        # for downstream rows but do not re-tag. Content is
-        # ``TaggedContent[T1]`` (operator via TUI) or ``TaggedContent[T2]``
-        # (all other ingress paths). T3 never reaches this method directly
-        # — T3 bytes are held in ContentHandle references only (spec §3.1).
-        # ------------------------------------------------------------------
         user_input_text = content.content
         user_input_tier = content.tier.name
-        # #410 PR1: at-most-once per committed (adapter_id, inbound_id).
-        # `None` (every pre-#410 caller) means "always apply" — behaviour
-        # unchanged. The gate is called BEFORE the guarded write — the only
-        # sound order for a check-then-act idempotency gate (see Task 1's
-        # module docstring for why "effect first" was rejected).
-        if self._side_effect_ledger is None or await self._side_effect_ledger.try_apply_user_turn(
-            adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
-        ):
-            await working_memory.append(role="user", content=user_input_text)
-            await episodic.record(
-                user_id=user.slug,
-                role="user",
-                content=user_input_text,
-                trust_tier=user_input_tier,
-                language=user.language,
-                persona=_ALFRED_PERSONA_ID,
-                # Slice-2 per-row attribution: ``persona`` is the legacy text
-                # column (kept for downstream analytics already reading it);
-                # ``persona_id`` is the new migration-0004 column the audit
-                # graph joins on. Both must be set on every write so a Slice 5+
-                # multi-persona deployment doesn't end up with NULL persona_id
-                # rows on its Slice-1+2 history.
-                persona_id=_ALFRED_PERSONA_ID,
+
+        # ── Phase A — Observe: ledger user-gate + episodic user row, ONE
+        # short-lived transaction (ADR-0062). The gate travels with the write.
+        user_turn_applied = await self._run_committed_phase(
+            lambda session: self._observe_user_turn(
+                session,
+                user=user,
+                user_input_text=user_input_text,
+                user_input_tier=user_input_tier,
+                ctx=ctx,
+            ),
+            user=user,
+            trace_id=trace_id,
+            trigger_tier=user_input_tier,
+            phase="observe_user_turn",
+            action_start=action_start,
+        )
+        # ONE orphan-counting arm spans everything BETWEEN Phase A's commit
+        # and Phase C's commit (fleet finding M-14, widened by pass-2 finding
+        # core-004): ANY failure in that span — the deferred user append,
+        # a provider error, budget refusal, cancellation, deadline (both are
+        # BaseExceptions), escalation, a Phase-C body exception, or Phase C's
+        # own commit failure — leaves the IDENTICAL accepted
+        # orphan-user-episodic-row state (ADR-0062). Count it on the way out
+        # so the deliberate degradation has a production rate; the exception
+        # itself propagates untouched to the existing arms. The post-commit
+        # steps (deferred assistant append, terminal audit row) sit OUTSIDE
+        # the arm: once Phase C committed, the assistant row exists and the
+        # user row is no longer orphaned.
+        try:
+            if user_turn_applied:
+                # Deferred until AFTER Phase A's commit: an append before
+                # commit could survive a rollback the durable gate did not
+                # (§3.3 of the 2026-08-08 design doc, carried into the phase
+                # split).
+                await working_memory.append(role="user", content=user_input_text)
+
+            # ── Phase B — Orient + Act: NO database connection held. The
+            # provider call, the tool loop, and every audit write happen
+            # here; audit writers open their own SIDE_EFFECT-role sessions
+            # per append.
+            outcome = await self._orient_and_act(
+                user=user,
+                working_memory=working_memory,
+                trace_id=trace_id,
+                ctx=ctx,
+                user_input_text=user_input_text,
+                user_input_tier=user_input_tier,
+                # §3.2, now CONDITIONAL under the phase split: on the happy path
+                # Phase A already committed AND appended the user turn, so the
+                # history read below ends on it — re-threading would duplicate
+                # it. Only a denied user gate (a replay) needs the explicit
+                # thread so the prompt never ends on an assistant turn (the
+                # prefill-continuation bug). Keyed on the GATE RESULT — never on
+                # content comparison.
+                thread_current_user_message=not user_turn_applied,
             )
 
+            # ── Phase C — Persist: ledger assistant-gate + episodic assistant
+            # row, ONE short-lived transaction.
+            assistant_turn_applied = await self._run_committed_phase(
+                lambda session: self._persist_assistant_turn(
+                    session, user=user, outcome=outcome, ctx=ctx
+                ),
+                user=user,
+                trace_id=trace_id,
+                trigger_tier=user_input_tier,
+                phase="persist_assistant_turn",
+                action_start=action_start,
+            )
+        except BaseException:
+            if user_turn_applied:
+                record_orphaned_user_turn(user_id=user.slug)
+            raise
+
+        if assistant_turn_applied:
+            # Deferred post-commit append. Uncancelled-tail safety argument:
+            # ``RealTurnOrchestratorAdapter._turn_locks``
+            # (src/alfred/comms_mcp/real_turn_adapter.py:193-203) serialises
+            # the whole turn per (persona, user_id), so this append's lock is
+            # uncontended and returns without awaiting. Whoever removes or
+            # bypasses that mutex inherits the obligation to re-derive this
+            # safety argument (design doc §3.3; ADR-0062).
+            await working_memory.append(role="assistant", content=outcome.answer)
+
+        # Terminal ``completed`` audit row AFTER Phase C's scope has closed —
+        # never nested inside it (its own fresh SIDE_EFFECT session must not
+        # be an in-TURN acquisition when it doesn't have to be).
+        await self._emit_turn_completed_row(
+            user=user, trace_id=trace_id, outcome=outcome, user_input_tier=user_input_tier
+        )
+        _log.info(
+            "orchestrator.turn",
+            trace_id=trace_id,
+            tokens_in=outcome.final_response.tokens_in,
+            tokens_out=outcome.final_response.tokens_out,
+            cost_usd=outcome.per_turn_spent_usd,
+            charge_result=outcome.final_result_token,
+        )
+        return outcome.answer
+
+    async def _run_committed_phase[R](
+        self,
+        body: Callable[[AsyncSession], Awaitable[R]],
+        *,
+        user: UserLike,
+        trace_id: str,
+        trigger_tier: str,
+        phase: str,
+        action_start: float,
+    ) -> R:
+        """Run ``body`` in ONE short-lived turn transaction; label commit failure.
+
+        ``body_completed`` is the deterministic discriminator (§3.4): once the
+        body returned, the only raiser left inside the ``async with`` is the
+        scope's own ``session.commit()`` — so an ``Exception`` with
+        ``body_completed=True`` IS a commit failure. Fleet finding H-2: every
+        sibling failure arm in this turn (provider failure, budget refusal,
+        terminal-row failure) writes an audit row, and a lost phase commit is
+        at least as operator-significant — so a commit failure is recorded
+        THREE ways before re-raising, never a spurious "success", never a
+        metric-only whisper:
+
+        * ``action_outcome="commit_failed"`` on the duration histogram;
+        * a loud ``orchestrator.phase_commit_failed`` structlog error;
+        * an ``orchestrator.turn`` audit row. ``result="failed"`` — an
+          in-domain ``ck_audit_log_result`` value, reused across writers the
+          same way the spawn-grant refusal row reuses ``'refused'``
+          (models.py documents that precedent); the ``phase_commit:<phase>``
+          ``subject.phase`` is the discriminator. The audit writer opens its
+          OWN ``audit_session_scope`` session, so the row commits even though
+          the phase's session is broken. If the audit write itself fails, it
+          is logged loudly and the ORIGINAL commit exception still propagates
+          — the same non-masking contract as ``_audit_cancellation``.
+
+        The catch is deliberately ``Exception``, not ``BaseException``: a
+        ``CancelledError`` landing during the commit await is a CANCELLATION
+        (the scope's own ``BaseException`` arm already rolled the phase back;
+        the caller's timeout/cancel arms own its audit + telemetry) — not a
+        commit failure to double-report. Body failures likewise record
+        nothing here; the caller's arms handle them exactly as before.
+        """
+        body_completed = False
+        try:
+            async with self._session_scope() as session:
+                result = await body(session)
+                body_completed = True
+        except Exception as exc:
+            if body_completed:
+                record_action_duration(
+                    duration_seconds=time.monotonic() - action_start,
+                    user_id=user.slug,
+                    action_outcome="commit_failed",
+                    breaker_state="UNKNOWN",
+                )
+                _log.error(
+                    "orchestrator.phase_commit_failed",
+                    trace_id=trace_id,
+                    phase=phase,
+                    error_type=type(exc).__name__,
+                )
+                try:
+                    await self._audit.append(
+                        event="orchestrator.turn",
+                        actor_user_id=user.slug,
+                        actor_persona=_ALFRED_PERSONA_ID,
+                        subject=_sanitize_subject(
+                            {
+                                "phase": f"phase_commit:{phase}",
+                                "error_type": type(exc).__name__,
+                            },
+                            self._redactor,
+                        ),
+                        trust_tier_of_trigger=trigger_tier,
+                        result="failed",
+                        cost_estimate_usd=0.0,
+                        cost_actual_usd=0.0,
+                        trace_id=trace_id,
+                        language=user.language,
+                        persona_id=_ALFRED_PERSONA_ID,
+                    )
+                except Exception as audit_exc:
+                    _log.error(
+                        "orchestrator.commit_failed_audit_write_failed",
+                        trace_id=trace_id,
+                        phase=phase,
+                        error_type=type(audit_exc).__name__,
+                    )
+            raise
+        return result
+
+    async def _observe_user_turn(
+        self,
+        session: AsyncSession,
+        *,
+        user: UserLike,
+        user_input_text: str,
+        user_input_tier: str,
+        ctx: TurnEgressContext,
+    ) -> bool:
+        """Phase A body: user-gate + episodic user row in the caller's txn.
+
+        ``content`` arrives already tagged at this boundary (host-side
+        comms-MCP ingress owns tagging post-PR-S4-10; ``alfred.identity.
+        _ingest._ingest_tier`` is reserved/unwired, see issue #237); T3 never
+        reaches this method — T3 bytes are held in ContentHandle references
+        only (spec §3.1). ``None`` ledger (every pre-#410 caller) means
+        "always apply" — behaviour unchanged.
+        """
+        applied = (
+            True
+            if self._side_effect_ledger is None
+            else await self._side_effect_ledger.try_apply_user_turn(
+                session, adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
+            )
+        )
+        if not applied:
+            return False
+        episodic = self._episodic_factory(session)
+        await episodic.record(
+            user_id=user.slug,
+            role="user",
+            content=user_input_text,
+            trust_tier=user_input_tier,
+            language=user.language,
+            persona=_ALFRED_PERSONA_ID,
+            # Slice-2 per-row attribution: ``persona`` is the legacy text
+            # column (kept for downstream analytics already reading it);
+            # ``persona_id`` is the new migration-0004 column the audit
+            # graph joins on. Both must be set on every write so a Slice 5+
+            # multi-persona deployment doesn't end up with NULL persona_id
+            # rows on its Slice-1+2 history.
+            persona_id=_ALFRED_PERSONA_ID,
+        )
+        return True
+
+    async def _orient_and_act(
+        self,
+        *,
+        user: UserLike,
+        working_memory: WorkingMemory,
+        trace_id: str,
+        ctx: TurnEgressContext,
+        user_input_text: str,
+        user_input_tier: str,
+        thread_current_user_message: bool,
+    ) -> _TurnOutcome:
         # ------------------------------------------------------------------
         # Orient — operator_name is the household OWNER (cached at
         # construction); addressed_user_name is the per-turn requester.
@@ -759,6 +983,13 @@ class Orchestrator:
         history = await working_memory.turns()
         messages: list[Message] = [Message(role="system", content=system_prompt)]
         messages.extend(Message(role=turn.role, content=turn.content) for turn in history)
+        if thread_current_user_message:
+            # Replay path (user gate denied): the history already holds the
+            # prior committed [user, assistant] pair and would otherwise END
+            # on the assistant turn — which providers treat as a prefill to
+            # continue, not a question to answer (§3.2). Redundant-but-
+            # correct context; the prompt always ends on a fresh user turn.
+            messages.append(Message(role="user", content=user_input_text))
         # ------------------------------------------------------------------
         # Act — the agentic tool-calling loop (#339 PR3, spec §6/§7/§9).
         #
@@ -780,10 +1011,9 @@ class Orchestrator:
         # Pyright can't prove the loop body below runs at least once (it only
         # sees MAX_TOOL_ITERATIONS as `Final[int]`, not a literal), so it
         # can't see that `estimate` is always assigned before the `completed`
-        # audit row reads it (line ~1006). Runtime-safe either way — the
-        # constant is 8, so the loop always executes — but the 0.0 here is
-        # never the value actually persisted; it only satisfies the static
-        # analyzer.
+        # audit row reads it. Runtime-safe either way — the constant is 8, so
+        # the loop always executes — but the 0.0 here is never the value
+        # actually persisted; it only satisfies the static analyzer.
         estimate: float = 0.0
         final_content: str | None = None
         final_response: CompletionResponse | None = None
@@ -1019,63 +1249,88 @@ class Orchestrator:
 
         # final_response is None ONLY on the iteration-0 pre-check raise / provider
         # failure paths, which do not reach here (they raise). So it is populated
-        # on every path that reaches persist.
+        # on every path that reaches this point.
         assert final_response is not None
         answer = final_content if final_content is not None else final_response.content
+        return _TurnOutcome(
+            answer=answer,
+            final_response=final_response,
+            final_result_token=final_result_token,
+            final_exit_reason=final_exit_reason,
+            # A synthetic refusal (final_exit_reason set) is a local i18n
+            # string, not a provider completion — its episodic row must carry
+            # ZERO provider tokens/cost (the real cost already rode the
+            # provider_call:* rows).
+            answer_from_provider=final_exit_reason is None,
+            estimate=estimate,
+            per_turn_spent_usd=per_turn_spent_usd,
+            pending_completion_cost=pending_completion_cost,
+        )
 
-        # ADR-0008: assistant output is T2 in Slice 1+2 (at-most-as-trusted as
-        # the T2 input that triggered it). T0 is reserved for AlfredOS
-        # internals/code/prompts/configs per PRD §7.1. Slice 2's dual-LLM
-        # split refines provider output to T1 and introduces T3.
-        # #410 PR1: at-most-once per committed (adapter_id, inbound_id).
-        # `answer` is still returned below regardless of this gate — a
-        # resumed turn always sends SOMETHING (a fresh completion's text,
-        # per ADR-0049's accepted "duplicate paid completion" residual) —
-        # this gate only stops that text from ALSO being re-persisted as a
-        # second assistant turn.
-        if (
-            self._side_effect_ledger is None
-            or await self._side_effect_ledger.try_apply_assistant_turn(
-                adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
-            )
-        ):
-            await working_memory.append(role="assistant", content=answer)
-            # A synthetic refusal (final_exit_reason set) is a local i18n string, not
-            # a provider completion — its episodic row must carry ZERO provider
-            # tokens/cost (the real cost already rode the provider_call:* rows).
-            # Charging it `final_response`'s tokens/cost would misattribute the
-            # PRIOR completion's spend to the refusal string AND double-count cost
-            # already logged on a `provider_call:*` audit row.
-            answer_from_provider = final_exit_reason is None
-            # FIX-15: episodic.record logs the FINAL completion's cost/tokens (the
-            # answer's attribution); the `completed` audit row logs the TURN total
-            # (per_turn_spent_usd). For a multi-completion turn these differ BY
-            # DESIGN — episodic = answer attribution, audit = turn spend.
-            await episodic.record(
-                user_id=user.slug,
-                role="assistant",
-                content=answer,
-                trust_tier="T2",
-                tokens_in=final_response.tokens_in if answer_from_provider else 0,
-                tokens_out=final_response.tokens_out if answer_from_provider else 0,
-                cost_usd=final_response.cost_usd if answer_from_provider else 0.0,
-                language=user.language,
-                persona=_ALFRED_PERSONA_ID,
-                # See the user-turn ``episodic.record`` call above for the
-                # ``persona`` vs ``persona_id`` split rationale.
-                persona_id=_ALFRED_PERSONA_ID,
-            )
+    async def _persist_assistant_turn(
+        self,
+        session: AsyncSession,
+        *,
+        user: UserLike,
+        outcome: _TurnOutcome,
+        ctx: TurnEgressContext,
+    ) -> bool:
+        """Phase C body: assistant-gate + episodic assistant row in the caller's txn.
 
+        ADR-0008: assistant output is T2 in Slice 1+2 (at-most-as-trusted as
+        the T2 input that triggered it). ``outcome.answer`` is still returned
+        by the caller regardless of this gate — a resumed turn always sends
+        SOMETHING (a fresh completion's text, per ADR-0049's accepted
+        "duplicate paid completion" residual) — this gate only stops that
+        text from ALSO being re-persisted as a second assistant turn.
+        """
+        applied = (
+            True
+            if self._side_effect_ledger is None
+            else await self._side_effect_ledger.try_apply_assistant_turn(
+                session, adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
+            )
+        )
+        if not applied:
+            return False
+        episodic = self._episodic_factory(session)
+        # FIX-15: episodic.record logs the FINAL completion's cost/tokens (the
+        # answer's attribution); the `completed` audit row logs the TURN total
+        # (per_turn_spent_usd). For a multi-completion turn these differ BY
+        # DESIGN — episodic = answer attribution, audit = turn spend.
+        await episodic.record(
+            user_id=user.slug,
+            role="assistant",
+            content=outcome.answer,
+            trust_tier="T2",
+            tokens_in=outcome.final_response.tokens_in if outcome.answer_from_provider else 0,
+            tokens_out=outcome.final_response.tokens_out if outcome.answer_from_provider else 0,
+            cost_usd=outcome.final_response.cost_usd if outcome.answer_from_provider else 0.0,
+            language=user.language,
+            persona=_ALFRED_PERSONA_ID,
+            # See _observe_user_turn for the persona vs persona_id rationale.
+            persona_id=_ALFRED_PERSONA_ID,
+        )
+        return True
+
+    async def _emit_turn_completed_row(
+        self,
+        *,
+        user: UserLike,
+        trace_id: str,
+        outcome: _TurnOutcome,
+        user_input_tier: str,
+    ) -> None:
         completed_subject: dict[str, object] = {
             "phase": "completed",
-            "model": final_response.model,
-            "tokens_in": final_response.tokens_in,
-            "tokens_out": final_response.tokens_out,
-            "charge_result": final_result_token,
-            "turn_cost_usd": per_turn_spent_usd,
+            "model": outcome.final_response.model,
+            "tokens_in": outcome.final_response.tokens_in,
+            "tokens_out": outcome.final_response.tokens_out,
+            "charge_result": outcome.final_result_token,
+            "turn_cost_usd": outcome.per_turn_spent_usd,
         }
-        if final_exit_reason is not None:
-            completed_subject["exit_reason"] = final_exit_reason
+        if outcome.final_exit_reason is not None:
+            completed_subject["exit_reason"] = outcome.final_exit_reason
         try:
             await self._audit.append(
                 event="orchestrator.turn",
@@ -1083,9 +1338,9 @@ class Orchestrator:
                 actor_persona=_ALFRED_PERSONA_ID,
                 subject=_sanitize_subject(completed_subject, self._redactor),
                 trust_tier_of_trigger=user_input_tier,
-                result=final_result_token,
-                cost_estimate_usd=estimate,  # MINOR-A: was 0.0; restores terminal estimate
-                cost_actual_usd=pending_completion_cost,  # FIX-3: terminal cost only
+                result=outcome.final_result_token,
+                cost_estimate_usd=outcome.estimate,  # MINOR-A: terminal estimate
+                cost_actual_usd=outcome.pending_completion_cost,  # FIX-3: terminal cost only
                 trace_id=trace_id,
                 language=user.language,
                 persona_id=_ALFRED_PERSONA_ID,
@@ -1099,16 +1354,6 @@ class Orchestrator:
                 error_type=type(exc).__name__,
             )
             raise
-
-        _log.info(
-            "orchestrator.turn",
-            trace_id=trace_id,
-            tokens_in=final_response.tokens_in,
-            tokens_out=final_response.tokens_out,
-            cost_usd=per_turn_spent_usd,
-            charge_result=final_result_token,
-        )
-        return answer
 
     async def _audit_unknown_budget_user(
         self,
