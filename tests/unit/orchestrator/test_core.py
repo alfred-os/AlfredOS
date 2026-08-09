@@ -107,6 +107,17 @@ def _make_episodic_audit() -> tuple[MagicMock, MagicMock]:
     return episodic, audit
 
 
+def _make_side_effect_ledger(
+    *,
+    user_turn: bool = True,
+    assistant_turn: bool = True,
+) -> MagicMock:
+    ledger = MagicMock()
+    ledger.try_apply_user_turn = AsyncMock(return_value=user_turn)
+    ledger.try_apply_assistant_turn = AsyncMock(return_value=assistant_turn)
+    return ledger
+
+
 def _build(
     *,
     working: MagicMock | None = None,
@@ -127,6 +138,10 @@ def _build(
     # timeout-row emission.
     deadline_seconds: float = 30.0,
     autocommit_audit: MagicMock | None = None,
+    # #410 PR1: the at-most-once turn-start/turn-end gate. `None` (the
+    # default, matching every pre-#410 caller) means "always apply" — the
+    # gated call sites in core.py fall back to unconditional behaviour.
+    side_effect_ledger: MagicMock | None = None,
 ) -> tuple[Orchestrator, dict[str, Any]]:
     if working is None:
         # A simple in-memory stand-in: append accumulates Turns; turns() returns
@@ -197,6 +212,8 @@ def _build(
     }
     if redactor is not None:
         kwargs["redactor"] = redactor
+    if side_effect_ledger is not None:
+        kwargs["side_effect_ledger"] = side_effect_ledger
     orch = Orchestrator(**kwargs)
     return orch, {
         "working": working,
@@ -208,6 +225,7 @@ def _build(
         "autocommit_audit": autocommit_audit,
         "identity_resolver": identity_resolver,
         "operator": resolved_operator,
+        "side_effect_ledger": side_effect_ledger,
     }
 
 
@@ -1075,3 +1093,104 @@ class TestOrchestratorActionDurationHistogram:
         assert kwargs["user_id"] == "bruce"
         assert kwargs["action_outcome"] == "cancelled"
         assert kwargs["breaker_state"] == "UNKNOWN"
+
+
+class TestTurnSideEffectLedgerGating:
+    """#410 PR1: the ledger, when supplied, gates turn-start and turn-end.
+    The budget charge is intentionally NOT gated (Task 1) — every test below
+    asserts `check_and_charge` fires unconditionally, gate or no gate."""
+
+    async def test_no_ledger_supplied_behaves_exactly_as_before(self) -> None:
+        # The regression pin: every pre-existing caller omits side_effect_ledger.
+        orch, m = _build()
+        await _send(orch, m, "no ledger here")
+        assert m["episodic"].record.await_count == 2
+        assert m["budget"].check_and_charge.call_count == 1
+        assert await m["working"].turns() == [
+            Turn(role="user", content="no ledger here"),
+            Turn(role="assistant", content="Very good, Sir."),
+        ]
+
+    async def test_ledger_grants_both_gates_applies_normally(self) -> None:
+        ledger = _make_side_effect_ledger()
+        orch, m = _build(side_effect_ledger=ledger)
+        await _send(orch, m, "fresh turn")
+        assert m["episodic"].record.await_count == 2
+        assert m["budget"].check_and_charge.call_count == 1
+        assert ledger.try_apply_user_turn.await_count == 1
+        assert ledger.try_apply_assistant_turn.await_count == 1
+
+    async def test_ledger_denies_user_turn_gate_skips_working_memory_and_episodic(self) -> None:
+        ledger = _make_side_effect_ledger(user_turn=False)
+        orch, m = _build(side_effect_ledger=ledger)
+        await _send(orch, m, "replayed turn")
+        # User-turn write skipped; assistant-turn write (a separate gate) still applies.
+        assert m["episodic"].record.await_count == 1
+        assert m["episodic"].record.await_args_list[0].kwargs["role"] == "assistant"
+        assert await m["working"].turns() == [
+            Turn(role="assistant", content="Very good, Sir."),
+        ]
+        # Budget is charged regardless — it is never gated.
+        assert m["budget"].check_and_charge.call_count == 1
+
+    async def test_ledger_denies_assistant_turn_gate_skips_working_memory_and_episodic(
+        self,
+    ) -> None:
+        ledger = _make_side_effect_ledger(assistant_turn=False)
+        orch, m = _build(side_effect_ledger=ledger)
+        reply = await _send(orch, m, "replayed turn")
+        # The reply is still returned (for re-send) even though it isn't re-persisted.
+        assert reply == "Very good, Sir."
+        assert m["episodic"].record.await_count == 1
+        assert m["episodic"].record.await_args_list[0].kwargs["role"] == "user"
+        assert await m["working"].turns() == [
+            Turn(role="user", content="replayed turn"),
+        ]
+        assert m["budget"].check_and_charge.call_count == 1
+
+    async def test_budget_charge_always_fires_regardless_of_ledger_state(self) -> None:
+        # A resumed turn with BOTH gates denied still charges budget on every
+        # attempt — the ADR-0049 over-charge residual, deliberately preserved.
+        ledger = _make_side_effect_ledger(user_turn=False, assistant_turn=False)
+        orch, m = _build(side_effect_ledger=ledger)
+        await _send(orch, m, "fully replayed turn")
+        assert m["budget"].check_and_charge.call_count == 1
+        assert m["episodic"].record.await_count == 0
+
+    async def test_ledger_gates_are_keyed_on_the_resolved_egress_context_inbound_id(self) -> None:
+        # Direct/fixture path: no egress_context passed => synthesized with a
+        # fresh trace_id-derived inbound_id. The ledger still receives it.
+        ledger = _make_side_effect_ledger()
+        orch, m = _build(side_effect_ledger=ledger)
+        await _send(orch, m, "check the key")
+        user_turn_kwargs = ledger.try_apply_user_turn.await_args_list[0].kwargs
+        assistant_kwargs = ledger.try_apply_assistant_turn.await_args_list[0].kwargs
+        assert user_turn_kwargs["inbound_id"]
+        assert user_turn_kwargs["adapter_id"]
+        assert user_turn_kwargs["inbound_id"] == assistant_kwargs["inbound_id"]
+        assert user_turn_kwargs["adapter_id"] == assistant_kwargs["adapter_id"]
+
+    async def test_gate_is_awaited_before_the_guarded_write_starts(self) -> None:
+        # Pins the accepted residual's exact scope (Task 1's module
+        # docstring): the ledger call must complete BEFORE working_memory /
+        # episodic are touched, so the only loss window is a genuine process
+        # crash between two adjacent awaits — never a "process alive, send
+        # failed" resume, which this test's ordering assertion rules out.
+        call_order: list[str] = []
+        ledger = _make_side_effect_ledger()
+
+        async def _tracked_try_apply_user_turn(**_kw: object) -> bool:
+            call_order.append("gate")
+            return True
+
+        ledger.try_apply_user_turn = AsyncMock(side_effect=_tracked_try_apply_user_turn)
+        orch, m = _build(side_effect_ledger=ledger)
+        original_append = m["working"].append
+
+        async def _tracked_append(**kw: object) -> None:
+            call_order.append("write")
+            await original_append(**kw)
+
+        m["working"].append = AsyncMock(side_effect=_tracked_append)
+        await _send(orch, m, "ordering check")
+        assert call_order[:2] == ["gate", "write"]
