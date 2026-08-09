@@ -3,7 +3,7 @@
 On the forwarded dispatched-edge path, a crash between "the planner decided
 to call these tools" and `commit_once` leaves the frame uncommitted, so it
 replays (ADR-0039 item 4). Without this journal, a resumed
-:meth:`Orchestrator._handle_turn` would ask the planner AGAIN for a fresh,
+:meth:`Orchestrator._orient_and_act` would ask the planner AGAIN for a fresh,
 possibly non-deterministic plan — the Spec C egress ledger's body-hash
 integrity check (`src/alfred/memory/egress_idempotency.py:220`) then either
 catches a genuine divergence loudly (`EgressIdIntegrityError`) or, worse, if
@@ -108,7 +108,7 @@ side effects would inherit this gap silently.
 rated High, comms-engineer rated Low; both agreed this pinning matters
 regardless): `tool_arguments_json` NEVER contains a resolved secret value,
 only an unresolved `{{secret:name}}` placeholder if one is present.** This
-holds STRUCTURALLY, not by luck of call ordering: `Orchestrator._handle_turn`
+holds STRUCTURALLY, not by luck of call ordering: `Orchestrator._orient_and_act`
 (Task 4) calls `self._replay_journal.append_batch(...)` with the planner's raw
 `ToolCall`s BEFORE any of that iteration's `dispatch_tool` calls run at all
 — broker secret substitution happens INSIDE a tool's own dispatcher
