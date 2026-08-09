@@ -887,6 +887,54 @@ class TurnSideEffectLedgerRow(Base):
     )
 
 
+class ToolCallJournalRow(Base):
+    """Deterministic tool-dispatch replay log (#410 PR2, migration 0026).
+
+    Schema-definition-only twin, mirroring the pattern already established by
+    :class:`InboundIdempotency` / :class:`EgressIdempotency` /
+    :class:`ForwardedDispatchAttempt` / :class:`TurnSideEffectLedgerRow` above:
+    production code (:mod:`alfred.memory.replay_journal`) reads/writes this
+    table EXCLUSIVELY via raw SQL INSERTs — that module's docstring is explicit
+    about the contract. This class is never queried through; it exists solely
+    so ``Base.metadata.create_all()`` builds the table for fixtures (unit-tier
+    SQLite and integration-tier Postgres alike) that intentionally build schema
+    without a full Alembic replay.
+
+    Named ``...Row``, matching :class:`TurnSideEffectLedgerRow` (#410 PR1
+    final review M-5): :mod:`alfred.memory.replay_journal` already defines a
+    :class:`~alfred.memory.replay_journal.ReplayJournal` Protocol (the sibling
+    ORM twins' Protocols are all suffixed ``...Store``, so no collision arose
+    there) — reusing that bare name here would collide two distinct, unrelated
+    types under one import-ambiguous identifier.
+
+    Postgres-only ``char_length()``, integer-bound, and ``octet_length()``
+    CHECK constraints live ONLY in migration 0026, not here — mirroring
+    :class:`InboundIdempotency`'s precedent (SQLite's ``tests/unit/conftest.py``
+    ``session_factory`` fixture calls ``Base.metadata.create_all()`` against an
+    in-memory SQLite engine, which cannot parse ``char_length()`` / ``octet_length()``).
+    The composite PK is dialect-portable and carried here.
+    """
+
+    __tablename__ = "tool_call_journal"
+
+    adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    call_index: Mapped[int] = mapped_column(Integer(), nullable=False)
+    iteration: Mapped[int] = mapped_column(Integer(), nullable=False)
+    tool_call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_arguments_json: Mapped[str] = mapped_column(Text(), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        sa.PrimaryKeyConstraint(
+            "adapter_id", "inbound_id", "call_index", name="pk_tool_call_journal"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cross-module Base.metadata registration
 # ---------------------------------------------------------------------------
