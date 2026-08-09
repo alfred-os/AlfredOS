@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-09 04:17+0100\n"
+"POT-Creation-Date: 2026-08-09 07:11+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -35,17 +35,17 @@ msgstr ""
 "provider; both are set to {provider}. The dual-LLM split (spec §5.4) "
 "requires distinct providers."
 
-#: src/alfred/cli/_bootstrap.py:104 src/alfred/cli/daemon/_commands.py:506
+#: src/alfred/cli/_bootstrap.py:110 src/alfred/cli/daemon/_commands.py:512
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
 "'sk-...' with a real DeepSeek API key."
 
-#: src/alfred/cli/_bootstrap.py:106
+#: src/alfred/cli/_bootstrap.py:112
 msgid "error.config_invalid"
 msgstr "configuration is invalid: {detail}"
 
-#: src/alfred/cli/_bootstrap.py:107
+#: src/alfred/cli/_bootstrap.py:113
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
@@ -650,7 +650,7 @@ msgstr ""
 # the schema is not initialised (``circuit_breakers`` does not exist).
 # Routes to a dedicated key naming the remediation rather than dumping
 # a raw SQLAlchemy traceback at an operator.
-#: src/alfred/cli/supervisor.py:497 src/alfred/cli/supervisor.py:962
+#: src/alfred/cli/supervisor.py:516 src/alfred/cli/supervisor.py:981
 msgid "cli.supervisor.status.schema_not_initialised"
 msgstr ""
 "Database schema not initialised. Run: alfred-stack migrate (or `alembic "
@@ -661,8 +661,8 @@ msgstr ""
 # (stack-down vs URL-wrong vs auth-failed vs restarting) so the hint
 # names a concrete action for each common cause rather than collapsing
 # everything to "check the stack".
-#: src/alfred/cli/supervisor.py:504 src/alfred/cli/supervisor.py:513
-#: src/alfred/cli/supervisor.py:965
+#: src/alfred/cli/supervisor.py:523 src/alfred/cli/supervisor.py:532
+#: src/alfred/cli/supervisor.py:984
 msgid "cli.supervisor.status.postgres_unavailable"
 msgstr ""
 "Cannot reach the Alfred Postgres database.\n"
@@ -676,33 +676,33 @@ msgstr ""
 "If none of the above, check the supervisor logs for the underlying\n"
 "SQLSTATE class."
 
-#: src/alfred/cli/supervisor.py:516
+#: src/alfred/cli/supervisor.py:535
 msgid "cli.supervisor.status.no_components_yet"
 msgstr ""
 "No supervised components registered yet. The supervisor writes the first "
 "row to the `circuit_breakers` table when a plugin loads — wait for the "
 "orchestrator to boot a component, then re-run `alfred supervisor status`."
 
-#: src/alfred/cli/supervisor.py:546
+#: src/alfred/cli/supervisor.py:565
 msgid "cli.supervisor.status.column.state"
 msgstr "STATE"
 
-#: src/alfred/cli/supervisor.py:547
+#: src/alfred/cli/supervisor.py:566
 msgid "cli.supervisor.status.column.trip_count"
 msgstr "TRIP COUNT"
 
-#: src/alfred/cli/supervisor.py:550 src/alfred/cli/supervisor.py:565
+#: src/alfred/cli/supervisor.py:569 src/alfred/cli/supervisor.py:584
 msgid "cli.supervisor.status.column.component"
 msgstr "COMPONENT"
 
-#: src/alfred/cli/supervisor.py:559 src/alfred/cli/supervisor.py:568
+#: src/alfred/cli/supervisor.py:578 src/alfred/cli/supervisor.py:587
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
 # CR-156 round-7 MEDIUM #14: freshness footer printed after the status
 # table. Surfaces the staleness model inline so operators don't need
 # to consult the runbook to know how current the data is.
-#: src/alfred/cli/supervisor.py:600
+#: src/alfred/cli/supervisor.py:619
 msgid "cli.supervisor.status.freshness_footer"
 msgstr ""
 "Snapshot reflects the supervisor's last save_to_db write (typically <=1 "
@@ -713,7 +713,7 @@ msgstr ""
 # unreachable OR schema not initialised. The primary status surface
 # (the breaker table) already rendered, so we surface the footer's
 # unavailability instead of crashing the whole status command.
-#: src/alfred/cli/supervisor.py:624
+#: src/alfred/cli/supervisor.py:643
 msgid "cli.supervisor.status.dispatch_footer_unavailable"
 msgstr ""
 "Recent proposal dispatch (last hour): unavailable. Check supervisor logs "
@@ -726,7 +726,7 @@ msgstr ""
 # was always 0 (the loop is monotonically forward — a merged blob
 # either appears in the ledger or has not yet been walked); dropped
 # until a meaningful pending-count surface lands.
-#: src/alfred/cli/supervisor.py:633
+#: src/alfred/cli/supervisor.py:652
 msgid "cli.supervisor.status.dispatch_footer"
 msgstr "Recent proposal dispatch (last hour): {applied} applied, {failed} failed."
 
@@ -734,11 +734,11 @@ msgstr "Recent proposal dispatch (last hour): {applied} applied, {failed} failed
 # intent for code readers; this key surfaces on the `--help` operator
 # surface. The deferred-to-#171 stopgap is tombstoned now that the
 # dispatcher ships in the same PR.
-#: src/alfred/cli/supervisor.py:640
+#: src/alfred/cli/supervisor.py:659
 msgid "cli.supervisor.reset.help.short"
 msgstr "Reset a circuit breaker. Writes a reviewer-gated state.git proposal."
 
-#: src/alfred/cli/supervisor.py:642
+#: src/alfred/cli/supervisor.py:661
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
@@ -746,7 +746,7 @@ msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 # writes a real state.git proposal (the no-op stopgap from #154 was
 # only justified while the underlying reset was deferred), so explicit
 # confirmation is meaningful again.
-#: src/alfred/cli/supervisor.py:652
+#: src/alfred/cli/supervisor.py:671
 msgid "cli.supervisor.reset.confirm_help"
 msgstr ""
 "Required: confirm the reset request. Writes a reviewer-gated state.git "
@@ -755,17 +755,17 @@ msgstr ""
 # ADR-0021 #171: emitted when --confirm is absent. The flag is now a
 # real gate (partial revert of #154 BLOCKER #6 no-op semantic) because
 # the underlying reset performs actual state mutation.
-#: src/alfred/cli/supervisor.py:686
+#: src/alfred/cli/supervisor.py:705
 msgid "cli.supervisor.reset.confirm_required"
 msgstr ""
 "alfred supervisor reset requires --confirm to write the state.git "
 "proposal. Re-run with --confirm to queue the reset for reviewer approval."
 
-#: src/alfred/cli/supervisor.py:750
+#: src/alfred/cli/supervisor.py:769
 msgid "cli.supervisor.reset.denied"
 msgstr "alfred supervisor reset denied: {reason}"
 
-#: src/alfred/cli/supervisor.py:752
+#: src/alfred/cli/supervisor.py:771
 msgid "cli.supervisor.reset.proposal_submitted"
 msgstr ""
 "Circuit-breaker reset for {component} queued for reviewer approval.\n"
@@ -779,20 +779,20 @@ msgstr ""
 # CR-rework round-2 follow-up: localise the two parser-error messages
 # emitted from :func:`_parse_duration` so the operator-facing surface
 # stays consistent across locales (CLAUDE.md i18n hard rule #1).
-#: src/alfred/cli/supervisor.py:896
+#: src/alfred/cli/supervisor.py:915
 msgid "cli.supervisor.proposals.since_invalid"
 msgstr ""
 "Invalid --since value: {value}. Expected a unit-suffixed duration like "
 "{example}."
 
-#: src/alfred/cli/supervisor.py:903
+#: src/alfred/cli/supervisor.py:922
 msgid "cli.supervisor.proposals.since_must_be_positive"
 msgstr "Invalid --since value: {value}. Duration must be positive."
 
 # ADR-0021 #171: ``alfred supervisor proposals`` subcommand. Lists
 # recently-processed state.git side-effecting dispatch outcomes; the
 # canonical operator surface for "what did the dispatcher do?".
-#: src/alfred/cli/supervisor.py:907
+#: src/alfred/cli/supervisor.py:926
 msgid "cli.supervisor.proposals.help.short"
 msgstr "List recent state.git side-effecting dispatch results."
 
@@ -800,7 +800,7 @@ msgstr "List recent state.git side-effecting dispatch results."
 # binary ``--recent`` flag so operators can scope to arbitrary
 # windows (1h / 24h / 7d). Default 1h preserves the previous
 # ``--recent`` semantic.
-#: src/alfred/cli/supervisor.py:913
+#: src/alfred/cli/supervisor.py:932
 msgid "cli.supervisor.proposals.since_help"
 msgstr ""
 "Scope to dispatches processed within DURATION (e.g. 1h, 24h, 7d). Default"
@@ -809,18 +809,18 @@ msgstr ""
 # CR rework round-1 HIGH #13: paginate the listing. ``--all`` is
 # the escape hatch when an operator wants every row in the ledger
 # (e.g. forensic export).
-#: src/alfred/cli/supervisor.py:920
+#: src/alfred/cli/supervisor.py:939
 msgid "cli.supervisor.proposals.limit_help"
 msgstr "Maximum rows to render. Default 20. Ignored when --all is passed."
 
-#: src/alfred/cli/supervisor.py:928
+#: src/alfred/cli/supervisor.py:947
 msgid "cli.supervisor.proposals.all_help"
 msgstr "Render every row in the ledger; ignores --limit and --since."
 
 # CR-rework round-2 follow-up: ``--all`` disables the time filter, so
 # the ``--since`` window text from ``empty`` would mislead the
 # operator. Distinct empty-state body omits the window.
-#: src/alfred/cli/supervisor.py:979
+#: src/alfred/cli/supervisor.py:998
 msgid "cli.supervisor.proposals.empty_all"
 msgstr ""
 "No proposals to display. The supervisor's dispatch loop polls every "
@@ -829,41 +829,41 @@ msgstr ""
 # CR rework round-1 HIGH #13: empty-state body includes the
 # dispatch-cycle interval so the operator knows how long to wait
 # before re-checking after a proposal merges.
-#: src/alfred/cli/supervisor.py:983
+#: src/alfred/cli/supervisor.py:1002
 msgid "cli.supervisor.proposals.empty"
 msgstr ""
 "No proposals to display in the {since} window. The supervisor's dispatch "
 "loop polls every {interval}s; re-run after the next cycle if a proposal "
 "has just merged."
 
-#: src/alfred/cli/supervisor.py:991
+#: src/alfred/cli/supervisor.py:1010
 msgid "cli.supervisor.proposals.column.proposal_type"
 msgstr "TYPE"
 
-#: src/alfred/cli/supervisor.py:992
+#: src/alfred/cli/supervisor.py:1011
 msgid "cli.supervisor.proposals.column.proposal_id"
 msgstr "ID"
 
-#: src/alfred/cli/supervisor.py:993
+#: src/alfred/cli/supervisor.py:1012
 msgid "cli.supervisor.proposals.column.result"
 msgstr "RESULT"
 
-#: src/alfred/cli/supervisor.py:994
+#: src/alfred/cli/supervisor.py:1013
 msgid "cli.supervisor.proposals.column.failure_kind"
 msgstr "FAILURE"
 
-#: src/alfred/cli/supervisor.py:995
+#: src/alfred/cli/supervisor.py:1014
 msgid "cli.supervisor.proposals.column.operator_user_id"
 msgstr "OPERATOR"
 
-#: src/alfred/cli/supervisor.py:996
+#: src/alfred/cli/supervisor.py:1015
 msgid "cli.supervisor.proposals.column.processed_at"
 msgstr "PROCESSED AT"
 
 # CR rework round-1 HIGH #13: closed-vocab legend for the ``result``
 # column. Helps operators decode the four values without consulting
 # the runbook on the on-call channel.
-#: src/alfred/cli/supervisor.py:1013
+#: src/alfred/cli/supervisor.py:1032
 msgid "cli.supervisor.proposals.legend"
 msgstr ""
 "Result values: applied (handler ran cleanly), failed_handler (handler "
@@ -1005,7 +1005,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:431
+#: src/alfred/cli/daemon/_commands.py:437
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "'{value}' is not a recognised environment. Refusing to boot. Alfred reads"
@@ -1015,7 +1015,7 @@ msgstr ""
 "then re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:434
+#: src/alfred/cli/daemon/_commands.py:440
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -1026,7 +1026,7 @@ msgstr ""
 "then your .env file — and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:509
+#: src/alfred/cli/daemon/_commands.py:515
 msgid "daemon.boot.settings_invalid_field"
 msgstr ""
 "Alfred's configuration is invalid: the '{field}' field failed validation."
@@ -1034,14 +1034,14 @@ msgstr ""
 "re-run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:510
+#: src/alfred/cli/daemon/_commands.py:516
 msgid "daemon.boot.settings_invalid"
 msgstr ""
 "Alfred's configuration is invalid. Refusing to boot — check your .env / "
 "secrets file for a missing or malformed required value, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:681
+#: src/alfred/cli/daemon/_commands.py:687
 msgid "daemon.boot.environment_source_unreadable"
 msgstr ""
 "The environment source could not be read (permission or ownership problem"
@@ -1050,7 +1050,7 @@ msgstr ""
 "permissions/ownership so the daemon process can read it, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:745
+#: src/alfred/cli/daemon/_commands.py:778
 #: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -1058,7 +1058,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:756
+#: src/alfred/cli/daemon/_commands.py:789
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1067,7 +1067,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:780
+#: src/alfred/cli/daemon/_commands.py:813
 #: src/alfred/i18n/_slice_4_reserve.py:122
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1080,7 +1080,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:802
+#: src/alfred/cli/daemon/_commands.py:835
 #: src/alfred/i18n/_slice_4_reserve.py:123
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1092,7 +1092,7 @@ msgstr ""
 " and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:845
+#: src/alfred/cli/daemon/_commands.py:878
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1102,7 +1102,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:871
+#: src/alfred/cli/daemon/_commands.py:904
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "A mandatory first-party capability grant is not live after boot (the DLP-"
@@ -1113,7 +1113,7 @@ msgstr ""
 "failed — then re-run `alfred daemon start` (or `docker compose up -d` on "
 "the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:899
+#: src/alfred/cli/daemon/_commands.py:932
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1124,7 +1124,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:971
+#: src/alfred/cli/daemon/_commands.py:1004
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1133,7 +1133,7 @@ msgstr ""
 "daemon start` (or `docker compose up -d` on the compose stack). Multi-"
 "adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:1042
+#: src/alfred/cli/daemon/_commands.py:1075
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1144,7 +1144,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1058
+#: src/alfred/cli/daemon/_commands.py:1091
 msgid "daemon.boot.quarantine_provider_key_unset"
 msgstr ""
 "Cannot start: the quarantined LLM's provider key "
@@ -1156,7 +1156,7 @@ msgstr ""
 "key: alfred-core mounts no secrets.toml, so `.env` plus the compose env "
 "forwarding is the ONLY way in."
 
-#: src/alfred/cli/daemon/_commands.py:1075
+#: src/alfred/cli/daemon/_commands.py:1108
 msgid "daemon.boot.quarantine_max_tokens_invalid"
 msgstr ""
 "Cannot start: the quarantined LLM's per-extraction token budget "
@@ -1172,7 +1172,7 @@ msgstr ""
 " value in BOTH, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1092
+#: src/alfred/cli/daemon/_commands.py:1125
 #: src/alfred/cli/daemon/_comms_boot.py:1045
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
@@ -1182,7 +1182,7 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:1115
+#: src/alfred/cli/daemon/_commands.py:1148
 msgid "daemon.boot.egress_plane_unavailable"
 msgstr ""
 "Cannot start: the egress proxy setting (ALFRED_EGRESS_PROXY_URL) is "
@@ -1195,7 +1195,7 @@ msgstr ""
 "default http://alfred-gateway:8889), and re-run `alfred daemon start` (or"
 " `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1135
+#: src/alfred/cli/daemon/_commands.py:1168
 msgid "daemon.boot.router_secret_missing"
 msgstr ""
 "Cannot start: the primary provider secret (`deepseek_api_key`) could not "
@@ -1203,7 +1203,7 @@ msgstr ""
 "variable for that key and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1154
+#: src/alfred/cli/daemon/_commands.py:1187
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
@@ -1213,38 +1213,38 @@ msgstr ""
 "operator, then re-run `alfred daemon start` (or `docker compose up -d` on"
 " the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1307
+#: src/alfred/cli/daemon/_commands.py:1340
 #: src/alfred/i18n/_slice_4_reserve.py:125
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1505
+#: src/alfred/cli/daemon/_commands.py:1538
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1508
-#: src/alfred/cli/daemon/_commands.py:1513
+#: src/alfred/cli/daemon/_commands.py:1541
+#: src/alfred/cli/daemon/_commands.py:1546
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1515
+#: src/alfred/cli/daemon/_commands.py:1548
 #: src/alfred/i18n/_slice_4_reserve.py:132
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1530
+#: src/alfred/cli/daemon/_commands.py:1563
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1533
+#: src/alfred/cli/daemon/_commands.py:1566
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1541
+#: src/alfred/cli/daemon/_commands.py:1574
 #: src/alfred/i18n/_slice_4_reserve.py:133
 msgid "daemon.status.template"
 msgstr ""
@@ -1253,25 +1253,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1595
-#: src/alfred/cli/daemon/_commands.py:1602
-#: src/alfred/cli/daemon/_commands.py:1613
+#: src/alfred/cli/daemon/_commands.py:1628
+#: src/alfred/cli/daemon/_commands.py:1635
+#: src/alfred/cli/daemon/_commands.py:1646
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1617
+#: src/alfred/cli/daemon/_commands.py:1650
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1619
+#: src/alfred/cli/daemon/_commands.py:1652
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1624
+#: src/alfred/cli/daemon/_commands.py:1657
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1633
+#: src/alfred/cli/daemon/_commands.py:1666
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
@@ -2753,36 +2753,36 @@ msgstr ""
 "follow a winning commit_intent — this is a caller-contract violation, not"
 " a transient failure."
 
-#: src/alfred/orchestrator/core.py:424
+#: src/alfred/orchestrator/core.py:432
 msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
 msgstr ""
 "comms inbound must be T3: quarantined_extract refuses any source_tier "
 "other than T3 (no silent T3->T2 promotion)."
 
-#: src/alfred/orchestrator/core.py:426
+#: src/alfred/orchestrator/core.py:434
 msgid "orchestrator.quarantined_extract.no_extractor_wired"
 msgstr ""
 "quarantined_extract called on an orchestrator constructed without a "
 "quarantined_extractor; the comms inbound trust-boundary funnel is not "
 "wired."
 
-#: src/alfred/orchestrator/core.py:1079
+#: src/alfred/orchestrator/core.py:1094
 msgid "orchestrator.tool.budget_exhausted_mid_turn"
 msgstr "I ran out of budget partway through this request."
 
-#: src/alfred/orchestrator/core.py:1180
+#: src/alfred/orchestrator/core.py:1195
 msgid "orchestrator.tool.budget_overrun_mid_turn"
 msgstr "This request went over budget, so I stopped before running more tools."
 
-#: src/alfred/orchestrator/core.py:1192
+#: src/alfred/orchestrator/core.py:1207
 msgid "orchestrator.tool.too_many_tool_calls"
 msgstr "That request needed too many tools at once, so I stopped for safety."
 
-#: src/alfred/orchestrator/core.py:1206
+#: src/alfred/orchestrator/core.py:1221
 msgid "orchestrator.tool.max_iterations_reached"
 msgstr "I reached the limit on tool steps for this request without finishing it."
 
-#: src/alfred/orchestrator/core.py:1234
+#: src/alfred/orchestrator/core.py:1249
 msgid "orchestrator.tool.dispatch_seams_unwired"
 msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "
