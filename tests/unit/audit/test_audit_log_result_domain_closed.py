@@ -392,8 +392,38 @@ def test_dynamic_result_sites_are_documented() -> None:
             # side-effect-ledger gate) and wrapping the turn-start
             # working_memory/episodic writes in that gate's `if` — both
             # changes land entirely above this point in the file; the site
-            # itself is unchanged.
-            "src/alfred/orchestrator/core.py:932",
+            # itself is unchanged. #410 PR1 Task 6 shifted it again
+            # (932 -> 1166): `_handle_turn` was split into six phase methods
+            # (`_run_turn_phases` / `_run_committed_phase` /
+            # `_observe_user_turn` / `_orient_and_act` /
+            # `_persist_assistant_turn` / `_emit_turn_completed_row`); this
+            # site now lives inside `_orient_and_act`, further down the file
+            # because of the new phase-method bodies above it — the site
+            # itself is still unchanged (still `result=charge_result if ...
+            # else "success"`). `ruff format` shifted it again (1166 -> 1165)
+            # by collapsing the new `audit_session_scope` parameter's
+            # two-line type annotation onto one line — the site itself is
+            # unaffected. #410 PR1 Task 6's docs follow-up (32bb81e6)
+            # shifted it again (1165 -> 1169) by expanding the
+            # `audit_session_scope_fallback` warning's explanatory comment
+            # by 4 lines, well above this point in the file — the site
+            # itself is unaffected. The #410 PR1 final whole-branch review's
+            # fix wave shifted it again (1169 -> 1184, net +15): finding M-1
+            # reworded that SAME `audit_session_scope_fallback` comment again
+            # (net +8 lines, now describing the post-Task-7 state instead of
+            # a "Task 7 hasn't landed" framing) and deferred finding #2
+            # qualified the `_run_committed_phase` docstring's "still
+            # propagates" claim with a BaseException carve-out (net +7
+            # lines) — both edits land well above this point in the file;
+            # the site itself is unaffected.
+            # PR #576 review remediation shifted it again (1184 -> 1181,
+            # net -3): CodeRabbit's security finding removed the raw
+            # `error=str(exc))` field from the phase-commit-failure log AND
+            # the nested audit-write-failure log (CLAUDE.md hard rule #1 —
+            # SQLAlchemy/asyncpg exceptions can embed the DSN), keeping only
+            # `error_type`; both edits are ABOVE this point in the file —
+            # the site itself is unaffected.
+            "src/alfred/orchestrator/core.py:1181",
             # #339 PR3 task 2 — the NEW terminal `completed` row forwards
             # final_result_token, a closed-vocab local (success/budget_blocked/
             # budget_overrun/refused, all in-domain). Task 3 added
@@ -419,7 +449,33 @@ def test_dynamic_result_sites_are_documented() -> None:
             # in the file) PLUS wrapping the turn-end working_memory/episodic
             # writes in the new assistant-turn side-effect-ledger gate — the
             # site itself is unchanged (still `result=final_result_token`).
-            "src/alfred/orchestrator/core.py:1086",
+            # #410 PR1 Task 6 shifted it again (1086 -> 1345): the terminal
+            # `completed` row moved into its own `_emit_turn_completed_row`
+            # method (the tail of the old `_handle_turn`, now consuming the
+            # frozen `_TurnOutcome` Phase B returns instead of local
+            # variables) — the site itself is unchanged in shape (still an
+            # in-domain closed-vocab forward, now spelled
+            # `result=outcome.final_result_token`). `ruff format` shifted it
+            # again (1345 -> 1344) by collapsing the new `audit_session_scope`
+            # parameter's two-line type annotation onto one line (same cause
+            # as the :1184 site above, pinned at :1169 at the time) — the
+            # site itself is unaffected.
+            # #410 PR1 Task 6's docs follow-up (32bb81e6) shifted it again
+            # (1344 -> 1348), same cause as the :1184 site above (pinned at
+            # :1169 at the time) — the site itself is unaffected. The #410
+            # PR1 final whole-branch review's fix wave shifted it again
+            # (1348 -> 1363, net +15), same two causes as the :1184 site
+            # above (M-1's `audit_session_scope_fallback` reword, net +8
+            # lines, and deferred finding #2's `_run_committed_phase`
+            # BaseException-carve-out qualification, net +7 lines) — both
+            # land well above this point in the file; the site itself is
+            # unaffected.
+            # PR #576 review remediation shifted it again (1363 -> 1360,
+            # net -3), same cause as the :1181 site above (CodeRabbit's
+            # security-finding removal of the raw `error=str(exc))` field
+            # from both commit-failure log sinks) — both edits are ABOVE
+            # this point in the file; the site itself is unaffected.
+            "src/alfred/orchestrator/core.py:1360",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already

@@ -87,14 +87,30 @@ def _make_budget(*, estimate: float = 0.01, would_exceed: bool = False) -> Magic
 
 
 def _make_session_scope() -> tuple[Any, MagicMock]:
-    """Return (scope_callable, session_mock) — the scope is an async ctx manager
-    that yields the session. The session has an async ``rollback``."""
+    """Return (scope_callable, session_mock).
+
+    The scope MODELS the real alfred.memory.db.session_scope — commit on
+    clean exit, rollback + re-raise on BaseException. The BaseException arm
+    is load-bearing (fleet finding H-1): the real scope rolls back
+    EXPLICITLY on asyncio.CancelledError too, and a double that only rolled
+    back on Exception would hide exactly the cancellation-mid-phase class
+    the real scope exists to handle. A test double must model the real
+    object: the old always-just-yield double could not distinguish "phase
+    committed" from "phase rolled back", which is the entire property
+    #410 PR1 turns on.
+    """
     session = MagicMock()
+    session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
     @asynccontextmanager
     async def scope() -> AsyncIterator[MagicMock]:
-        yield session
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise
 
     return scope, session
 
@@ -310,7 +326,8 @@ class TestOrchestratorHappyPath:
         assert audit_kwargs["subject"]["model"] == "deepseek-chat"
         assert audit_kwargs["subject"]["charge_result"] == "success"
 
-        # Session was not rolled back.
+        # Both phase transactions committed; nothing rolled back.
+        assert m["session"].commit.await_count == 2
         m["session"].rollback.assert_not_awaited()
 
     async def test_get_operator_called_exactly_once_at_construction(self) -> None:
@@ -346,8 +363,11 @@ class TestOrchestratorBudgetBlocked:
         # The user-input episode was still written; the assistant one was not.
         roles = [c.kwargs["role"] for c in m["episodic"].record.await_args_list]
         assert roles == ["user"]
-        # Session rolled back because we raised out of the scope.
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: the refusal fires in Phase B, AFTER Phase A committed the
+        # user episode — the accepted orphan-user-row trade-off (ADR-0062).
+        # Nothing is rolled back because no transaction is open in Phase B.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
 
 
 class TestOrchestratorProviderFailure:
@@ -370,8 +390,10 @@ class TestOrchestratorProviderFailure:
         m["budget"].check_and_charge.assert_not_called()
         # Working memory got the user turn but not an assistant turn.
         assert m["working"].append.await_count == 1
-        # Rollback fired on the way out.
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: the provider failed in Phase B — Phase A's commit stands
+        # (orphan user row, ADR-0062); no transaction was open to roll back.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
 
 
 class TestOrchestratorAuditFailureIsLoud:
@@ -385,8 +407,11 @@ class TestOrchestratorAuditFailureIsLoud:
         # The provider call still happened and the assistant turn was buffered.
         m["router"].complete.assert_awaited()
         assert m["working"].append.await_count == 2
-        # Rollback fired because we propagated out of the session scope.
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: the terminal audit row fires AFTER Phase C committed —
+        # both phase commits stand; the audit failure propagates loudly with
+        # no transaction left open to roll back.
+        assert m["session"].commit.await_count == 2
+        m["session"].rollback.assert_not_awaited()
 
 
 class TestOrchestratorBudgetOverrun:
@@ -556,8 +581,9 @@ class TestOrchestratorCancellation:
         assert audit_kwargs["language"] == "en-US"
         # Assistant turn never buffered (provider call was cancelled).
         assert m["working"].append.await_count == 1
-        # User-content txn rolled back as part of the outer BaseException arm.
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: the cancel landed in Phase B — Phase A's commit stands.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
 
     async def test_cancellation_before_provider_call_is_still_audited(self) -> None:
         # Cancellation lands inside ``WorkingMemory.append`` — the FIRST
@@ -578,7 +604,10 @@ class TestOrchestratorCancellation:
         assert audit_kwargs["subject"]["phase"] == "turn_cancelled"
         # Provider was never called.
         assert m["router"].complete.await_count == 0
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: working_memory.append is the deferred post-commit step —
+        # the cancel lands AFTER Phase A committed, outside any transaction.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
 
     async def test_cancellation_after_provider_call_is_still_audited(self) -> None:
         # Provider succeeded; cancellation lands during the post-provider
@@ -612,6 +641,11 @@ class TestOrchestratorCancellation:
         audit_kwargs = m["audit"].append.await_args.kwargs
         assert audit_kwargs["result"] == "cancelled"
         assert audit_kwargs["subject"]["phase"] == "turn_cancelled"
+        # #410 PR1: the cancel landed inside Phase C's scope — Phase A
+        # committed, Phase C did not. The scope's BaseException arm rolled
+        # Phase C back EXPLICITLY (never the implicit-close fallback), so the
+        # rollback assertion is KEPT, now joined by the phase-commit count.
+        assert m["session"].commit.await_count == 1
         m["session"].rollback.assert_awaited()
 
 
@@ -648,8 +682,10 @@ class TestOrchestratorSevenAuditBranches:
         assert audit_kwargs["subject"]["phase"] == "budget_pre_check"
         # Cost numbers stay zero: the call never went out.
         assert audit_kwargs["cost_actual_usd"] == 0.0
-        # Session rolled back on the way out.
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: raised in Phase B — Phase A's commit stands (orphan user
+        # row, ADR-0062); nothing to roll back.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
 
     async def test_unknown_budget_user_on_post_charge_audits_and_reraises(self) -> None:
         # The provider call succeeds; the post-success ``check_and_charge``
@@ -674,8 +710,10 @@ class TestOrchestratorSevenAuditBranches:
         audit_kwargs = m["audit"].append.await_args.kwargs
         assert audit_kwargs["result"] == "unknown_budget_user"
         assert audit_kwargs["subject"]["phase"] == "budget_post_charge"
-        # Session rolled back on the way out.
-        m["session"].rollback.assert_awaited()
+        # #410 PR1: raised in Phase B — Phase A's commit stands (orphan user
+        # row, ADR-0062); nothing to roll back.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
 
 
 class TestOrchestratorRedactsAuditSubject:
@@ -727,10 +765,11 @@ class TestOrchestratorActionDeadline:
       ``supervisor.action_timeout`` audit row via the **autocommit** writer
       so the row survives the outer session rollback (core-003 + CR-R3 #7).
     * The orchestrator ALSO emits an ``orchestrator.turn`` ``result=cancelled``
-      row via the autocommit writer (CR-R3 #7 fix) — using the session-bound
-      writer would lose the row to the rollback that follows.
-    * The session is rolled back and ``CancelledError`` is re-raised so
-      higher-level cancellation handling stays unchanged.
+      row via the autocommit writer.
+    * #410 PR1: no session is held when the deadline fires mid-Phase-B (and a
+      deadline inside Phase A/C unwinds that phase's own scope first), so
+      there is no rollback step in the arm any more — ``CancelledError`` is
+      re-raised so higher-level cancellation handling stays unchanged.
     """
 
     @pytest.fixture(autouse=True)
@@ -857,8 +896,12 @@ class TestOrchestratorActionDeadline:
             if call.kwargs.get("event") == "orchestrator.turn":
                 assert call.kwargs.get("result") != "cancelled"
 
-    async def test_timeout_rolls_back_user_content_session(self) -> None:
-        """The outer session.rollback() is called when the deadline fires."""
+    async def test_timeout_leaves_no_transaction_open(self) -> None:
+        """#410 PR1: the deadline fires during Phase B (the slow provider),
+        where NO transaction is open — Phase A's sub-ms commit already stood.
+        The pre-#410 assertion (an explicit outer session.rollback()) pinned
+        machinery that no longer exists; the property that replaced it is
+        "Phase A committed, nothing held, nothing to roll back"."""
         router = MagicMock()
 
         async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
@@ -871,7 +914,56 @@ class TestOrchestratorActionDeadline:
         with pytest.raises(asyncio.CancelledError):
             await _send(orch, m, "deadline-fires")
 
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_not_awaited()
+
+    async def test_deadline_expiry_inside_phase_a_rolls_back_and_audits_timeout(
+        self, monkeypatch: Any
+    ) -> None:
+        """Pass-2 finding core-005: the external task.cancel() test
+        (test_cancellation_inside_phase_a_rolls_back_and_appends_nothing)
+        proves the rollback path for a DELIVERED cancellation; this one
+        proves the same behavior when the cancellation source is the turn's
+        OWN DeadlineWrapper expiring while Phase A's transaction is open —
+        episodic.record parks past the deadline (the same deterministic
+        short-deadline pattern as test_timeout_leaves_no_transaction_open;
+        the difference is WHERE the deadline lands: inside a phase
+        transaction, not Phase B)."""
+        recorder = MagicMock()
+        monkeypatch.setattr("alfred.orchestrator.core.record_action_duration", recorder)
+
+        async def _parked_record(**_kw: object) -> None:
+            # The ONLY exit from this await is the deadline's CancelledError.
+            await asyncio.Event().wait()
+
+        orch, m = _build(deadline_seconds=0.001)
+        m["episodic"].record = AsyncMock(side_effect=_parked_record)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline lands in phase A")
+
+        # The scope's explicit BaseException arm rolled Phase A back — a
+        # deadline-driven cancellation un-marks the gate exactly like an
+        # external one; nothing committed.
         m["session"].rollback.assert_awaited()
+        m["session"].commit.assert_not_awaited()
+        # The deferred post-commit append never ran.
+        m["working"].append.assert_not_awaited()
+        # The timeout arm's audit + telemetry contract holds unchanged for a
+        # deadline landing inside a phase transaction: the turn-cancelled row
+        # rides the AUTOCOMMIT writer's append(), the
+        # supervisor.action_timeout row its append_schema(), and the
+        # histogram outcome is "timeout" — never "commit_failed" (the scope
+        # rolled back; no commit was attempted after the body).
+        cancel_rows = [
+            c
+            for c in m["autocommit_audit"].append.await_args_list
+            if c.kwargs.get("result") == "cancelled"
+        ]
+        assert len(cancel_rows) == 1
+        assert m["autocommit_audit"].append_schema.await_count == 1
+        outcomes = [c.kwargs["action_outcome"] for c in recorder.call_args_list]
+        assert outcomes == ["timeout"]
 
     async def test_timeout_reraises_cancelled_error_not_timeout(self) -> None:
         """The orchestrator re-raises CancelledError after the timeout.
@@ -1170,27 +1262,399 @@ class TestTurnSideEffectLedgerGating:
         assert user_turn_kwargs["inbound_id"] == assistant_kwargs["inbound_id"]
         assert user_turn_kwargs["adapter_id"] == assistant_kwargs["adapter_id"]
 
-    async def test_gate_is_awaited_before_the_guarded_write_starts(self) -> None:
-        # Pins the accepted residual's exact scope (Task 1's module
-        # docstring): the ledger call must complete BEFORE working_memory /
-        # episodic are touched, so the only loss window is a genuine process
-        # crash between two adjacent awaits — never a "process alive, send
-        # failed" resume, which this test's ordering assertion rules out.
+    async def test_gate_write_commit_append_order_is_pinned_per_phase(self) -> None:
+        """Replaces test_gate_is_awaited_before_the_guarded_write_starts, whose
+        call_order[:2] == ["gate","write"] assertion kept passing no matter how
+        much code ran between the two labels (silently stale under the phase
+        split). The property that matters now, per phase: gate -> episodic
+        write (same txn) -> COMMIT -> deferred working-memory append. An
+        append that ever precedes its phase's commit is the §3.3 regression."""
         call_order: list[str] = []
         ledger = _make_side_effect_ledger()
 
-        async def _tracked_try_apply_user_turn(**_kw: object) -> bool:
-            call_order.append("gate")
+        # NOTE: every tracking side_effect below is an ASYNC def — AsyncMock
+        # only awaits an async side_effect; a sync lambda returning a
+        # coroutine hands the un-awaited coroutine back as the call's result
+        # (truthy, so the gate would "pass" without ever recording its label).
+        # The real gate takes (session, *, adapter_id, inbound_id); *_args
+        # absorbs the positional session.
+        async def _gate_user(*_args: object, **_kw: object) -> bool:
+            call_order.append("gate:user")
             return True
 
-        ledger.try_apply_user_turn = AsyncMock(side_effect=_tracked_try_apply_user_turn)
+        async def _gate_assistant(*_args: object, **_kw: object) -> bool:
+            call_order.append("gate:assistant")
+            return True
+
+        ledger.try_apply_user_turn = AsyncMock(side_effect=_gate_user)
+        ledger.try_apply_assistant_turn = AsyncMock(side_effect=_gate_assistant)
         orch, m = _build(side_effect_ledger=ledger)
+
+        async def _tracked_record(**kw: object) -> None:
+            call_order.append(f"episodic:{kw['role']}")
+
+        m["episodic"].record = AsyncMock(side_effect=_tracked_record)
+
+        async def _tracked_commit() -> None:
+            call_order.append("commit")
+
+        m["session"].commit = AsyncMock(side_effect=_tracked_commit)
         original_append = m["working"].append
 
         async def _tracked_append(**kw: object) -> None:
-            call_order.append("write")
+            call_order.append(f"append:{kw['role']}")
             await original_append(**kw)
 
         m["working"].append = AsyncMock(side_effect=_tracked_append)
-        await _send(orch, m, "ordering check")
-        assert call_order[:2] == ["gate", "write"]
+        await _send(orch, m, "ordering")
+        assert call_order == [
+            "gate:user",
+            "episodic:user",
+            "commit",
+            "append:user",
+            "gate:assistant",
+            "episodic:assistant",
+            "commit",
+            "append:assistant",
+        ]
+
+    async def test_replayed_turn_with_denied_user_gate_still_ends_prompt_on_user(
+        self,
+    ) -> None:
+        """§3.2 precise prefill pin: the request's LAST message must be a USER
+        turn carrying the current text — not an assistant tail, which
+        providers treat as a prefill continuation to extend rather than a
+        question to answer. Turn counts alone cannot catch this class."""
+        ledger = _make_side_effect_ledger(user_turn=False)
+        orch, m = _build(side_effect_ledger=ledger)
+        # Prefill the buffer with the PRIOR committed attempt's exchange —
+        # what WorkingMemoryPool rehydration yields on a send-failed retry.
+        await m["working"].append(role="user", content="original question")
+        await m["working"].append(role="assistant", content="original answer")
+        reply = await _send(orch, m, "original question")
+        assert reply == "Very good, Sir."
+        req = m["router"].complete.await_args.args[0]
+        assert req.messages[-1].role == "user"
+        assert req.messages[-1].content == "original question"
+        # Redundant-but-correct: the committed pair appears exactly once.
+        assert [msg.role for msg in req.messages] == ["system", "user", "assistant", "user"]
+
+    async def test_happy_path_does_not_double_thread_the_current_user_message(
+        self,
+    ) -> None:
+        """§3.2's conditionality: an APPLIED user gate means the post-commit
+        append already put the current turn in history — unconditional
+        threading would duplicate it. Keyed on the gate result, never content
+        comparison."""
+        ledger = _make_side_effect_ledger()
+        orch, m = _build(side_effect_ledger=ledger)
+        await _send(orch, m, "fresh question")
+        req = m["router"].complete.await_args.args[0]
+        assert req.messages[-1].role == "user"
+        assert req.messages[-1].content == "fresh question"
+        occurrences = [
+            msg for msg in req.messages if msg.role == "user" and msg.content == "fresh question"
+        ]
+        assert len(occurrences) == 1
+
+    async def test_phase_b_failure_appends_user_but_never_assistant(self) -> None:
+        """Assertion-contract note (design doc §5 "Task 4" — this plan's
+        Task 6 per the design doc's status-block numbering key): exception
+        propagation alone passes on both buggy and fixed code — this test
+        spies the REAL WorkingMemory and pins WHICH appends happened. Under
+        the phase split a Phase-B failure legitimately leaves the user append
+        (Phase A committed first — the ADR-0062 orphan trade-off); the
+        assistant append must NEVER have run."""
+        from alfred.memory.working import WorkingMemory as RealWorkingMemory
+
+        real_wm = RealWorkingMemory()
+        append_roles: list[str] = []
+        original_append = real_wm.append
+
+        async def _spy_append(*, role: str, content: str) -> None:
+            append_roles.append(role)
+            await original_append(role=role, content=content)  # type: ignore[arg-type]
+
+        real_wm.append = _spy_append  # type: ignore[method-assign]
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=RuntimeError("upstream 503"))
+        orch, m = _build(working=real_wm, router=router)  # type: ignore[arg-type]
+
+        with pytest.raises(RuntimeError, match="upstream 503"):
+            await _send(orch, m, "will fail in phase B")
+
+        assert append_roles == ["user"]
+        assert [turn.role for turn in await real_wm.turns()] == ["user"]
+
+    async def test_phase_commit_failure_records_commit_failed_and_appends_nothing(
+        self, monkeypatch: Any
+    ) -> None:
+        """§3.3/§3.4 + fleet finding H-2: a commit failure records its OWN
+        outcome AND its own audit row AND a loud structlog line (never a
+        spurious success, never a metric-only whisper — every sibling failure
+        arm in the same method audits), the exception propagates, and the
+        deferred append NEVER ran — fail-closed by construction."""
+        from structlog.testing import capture_logs
+
+        recorder = MagicMock()
+        monkeypatch.setattr("alfred.orchestrator.core.record_action_duration", recorder)
+        orch, m = _build()
+        m["session"].commit = AsyncMock(side_effect=RuntimeError("commit refused"))
+
+        with capture_logs() as cap_logs, pytest.raises(RuntimeError, match="commit refused"):
+            await _send(orch, m, "hi")
+
+        outcomes = [c.kwargs["action_outcome"] for c in recorder.call_args_list]
+        assert outcomes == ["commit_failed"]  # exactly one observation, no "success"
+        m["working"].append.assert_not_awaited()
+        m["session"].rollback.assert_awaited()  # the modeled scope rolled the phase back
+        # Fleet finding H-2: the failure is a loud audit row, not only a metric.
+        # The audit writer has its own session, so the row survives the broken
+        # phase session. (This fails in Phase A: subject.phase names it.)
+        commit_rows = [
+            c
+            for c in m["audit"].append.await_args_list
+            if str(c.kwargs["subject"].get("phase", "")).startswith("phase_commit:")
+        ]
+        assert len(commit_rows) == 1
+        assert commit_rows[0].kwargs["result"] == "failed"
+        assert commit_rows[0].kwargs["subject"]["phase"] == "phase_commit:observe_user_turn"
+        assert commit_rows[0].kwargs["subject"]["error_type"] == "RuntimeError"
+        # structlog does NOT land in caplog — capture_logs() is the harness.
+        assert any(e["event"] == "orchestrator.phase_commit_failed" for e in cap_logs)
+
+    async def test_cancellation_inside_phase_a_rolls_back_and_appends_nothing(
+        self,
+    ) -> None:
+        """Fleet finding H-1's orchestrator-level twin (unit tier, no
+        Postgres): a REAL task.cancel() delivered while Phase A's transaction
+        is open (episodic.record parks until cancelled) must hit the scope's
+        explicit BaseException rollback — un-marking the gate with it — and
+        the deferred post-commit append must never run. Mirrors the
+        real-driver proof in tests/integration/
+        test_turn_side_effect_ledger_postgres.py; here the modeled scope
+        (Step 4's double) stands in for session_scope, and the REAL
+        WorkingMemory proves no append leaked."""
+        from alfred.memory.working import WorkingMemory as RealWorkingMemory
+
+        real_wm = RealWorkingMemory()
+        record_started = asyncio.Event()
+
+        async def _parked_record(**_kw: object) -> None:
+            record_started.set()
+            # The ONLY exit from this await is the injected CancelledError.
+            await asyncio.Event().wait()
+
+        orch, m = _build(working=real_wm)  # type: ignore[arg-type]
+        m["episodic"].record = AsyncMock(side_effect=_parked_record)
+
+        task = asyncio.create_task(_send(orch, m, "cancel mid phase A"))
+        async with asyncio.timeout(5):
+            await record_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The modeled scope's BaseException arm rolled Phase A back...
+        m["session"].rollback.assert_awaited()
+        m["session"].commit.assert_not_awaited()
+        # ...the deferred post-commit append never ran...
+        assert await real_wm.turns() == []
+        # ...and the cancellation was still audited (hard rule #7).
+        cancel_rows = [
+            c for c in m["audit"].append.await_args_list if c.kwargs.get("result") == "cancelled"
+        ]
+        assert len(cancel_rows) == 1
+
+    async def test_phase_b_failure_increments_the_orphaned_user_turn_counter(
+        self,
+    ) -> None:
+        """Fleet finding M-14: the accepted orphan-user-row trade-off gets a
+        production rate. A Phase-B provider failure after Phase A committed
+        increments alfred_orchestrator_orphaned_user_turn_total under the
+        requester's bucket; the exception still propagates untouched."""
+        from prometheus_client import REGISTRY
+
+        from alfred.supervisor.observability import bucket_user_id
+
+        labels = {"user_id_bucket": bucket_user_id(_default_user().slug)}
+        before = (
+            REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels) or 0.0
+        )
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=RuntimeError("upstream 503"))
+        orch, m = _build(router=router)
+
+        with pytest.raises(RuntimeError, match="upstream 503"):
+            await _send(orch, m, "will orphan the user row")
+
+        after = REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels)
+        assert after == before + 1.0
+
+    async def test_phase_c_failure_increments_the_orphaned_user_turn_counter(
+        self,
+    ) -> None:
+        """Pass-2 finding core-004 (cross-check widening of M-14): an ORDINARY
+        Phase-C body exception — not just a deadline/cancellation — leaves the
+        IDENTICAL committed-user-row-with-no-assistant-row state and must be
+        counted on the same metric. Here the episodic ASSISTANT write raises
+        inside Phase C's transaction; Phase A's commit stands, Phase C rolls
+        back, and the orphan is counted on the way out."""
+        from prometheus_client import REGISTRY
+
+        from alfred.supervisor.observability import bucket_user_id
+
+        labels = {"user_id_bucket": bucket_user_id(_default_user().slug)}
+        before = (
+            REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels) or 0.0
+        )
+        orch, m = _build()
+
+        async def _fail_assistant_record(**kw: object) -> None:
+            if kw["role"] == "assistant":
+                raise RuntimeError("phase C write refused")
+
+        m["episodic"].record = AsyncMock(side_effect=_fail_assistant_record)
+
+        with pytest.raises(RuntimeError, match="phase C write refused"):
+            await _send(orch, m, "will orphan via phase C")
+
+        after = REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels)
+        assert after == before + 1.0
+        # Phase A committed; Phase C rolled back — the orphan state is real,
+        # not an artifact of the counting arm.
+        assert m["session"].commit.await_count == 1
+        m["session"].rollback.assert_awaited()
+
+
+class TestThreePhaseConnectionDiscipline:
+    """#410 PR1 / ADR-0062: the provider call must run with ZERO turn-session
+    scopes open. This is the unit-level twin of the integration barrier proof
+    (tests/integration/orchestrator/test_turn_pool_no_hold_across_provider.py)."""
+
+    async def test_no_turn_scope_is_open_while_the_provider_call_runs(self) -> None:
+        open_scopes = 0
+        observed_during_complete: list[int] = []
+        session = MagicMock()
+        session.commit = AsyncMock()
+        session.rollback = AsyncMock()
+
+        @asynccontextmanager
+        async def counting_scope() -> AsyncIterator[MagicMock]:
+            nonlocal open_scopes
+            open_scopes += 1
+            try:
+                yield session
+                await session.commit()
+            finally:
+                open_scopes -= 1
+
+        router = MagicMock()
+
+        async def _observing_complete(*_args: Any, **_kwargs: Any) -> CompletionResponse:
+            observed_during_complete.append(open_scopes)
+            return CompletionResponse(
+                content="Very good, Sir.",
+                tokens_in=1,
+                tokens_out=1,
+                cost_usd=0.0001,
+                model="m",
+            )
+
+        router.complete = AsyncMock(side_effect=_observing_complete)
+        resolver = MagicMock()
+        resolver.get_operator = MagicMock(return_value=_default_operator())
+        audit = MagicMock()
+        audit.append = AsyncMock()
+        audit.append_schema = AsyncMock()
+        episodic = MagicMock()
+        episodic.record = AsyncMock()
+        orch = Orchestrator(
+            identity_resolver=resolver,
+            session_scope=counting_scope,
+            router=router,
+            budget=_make_budget(),
+            episodic_factory=lambda _s: episodic,
+            audit_factory=lambda _f: audit,
+            autocommit_audit_factory=lambda _f: audit,
+        )
+        buffer: list[Turn] = []
+        working = MagicMock(
+            turns=AsyncMock(side_effect=lambda: list(buffer)),
+            append=AsyncMock(
+                side_effect=lambda *, role, content: buffer.append(
+                    Turn(role=role, content=content)  # type: ignore[arg-type]
+                )
+            ),
+            clear=AsyncMock(),
+        )
+        reply = await orch.handle_user_message(
+            user=_default_user(), content=_tag_t2("hold check"), working_memory=working
+        )
+        assert reply == "Very good, Sir."
+        # THE invariant: zero scopes open at the moment the provider ran.
+        assert observed_during_complete == [0]
+        # And the turn still committed both phases.
+        assert session.commit.await_count == 2
+
+    async def test_audit_factories_receive_the_audit_session_scope_when_provided(
+        self,
+    ) -> None:
+        seen: list[object] = []
+
+        def _capturing_factory(f: Any) -> MagicMock:
+            seen.append(f)
+            writer = MagicMock()
+            writer.append = AsyncMock()
+            writer.append_schema = AsyncMock()
+            return writer
+
+        turn_scope, _s1 = _make_session_scope()
+        audit_scope, _s2 = _make_session_scope()
+        resolver = MagicMock()
+        resolver.get_operator = MagicMock(return_value=_default_operator())
+        Orchestrator(
+            identity_resolver=resolver,
+            session_scope=turn_scope,
+            router=MagicMock(),
+            budget=_make_budget(),
+            audit_factory=_capturing_factory,
+            autocommit_audit_factory=_capturing_factory,
+            audit_session_scope=audit_scope,
+        )
+        assert seen == [audit_scope, audit_scope]
+
+    async def test_audit_factories_fall_back_to_session_scope_when_omitted(self) -> None:
+        """Fleet finding M-10: the fallback is pinned EXPLICITLY (a future
+        change to this default must break a test, not slip through), and it
+        warns once at construction — a production boot site omitting
+        audit_session_scope would silently re-couple the two pools."""
+        from structlog.testing import capture_logs
+
+        seen: list[object] = []
+
+        def _capturing_factory(f: Any) -> MagicMock:
+            seen.append(f)
+            writer = MagicMock()
+            writer.append = AsyncMock()
+            writer.append_schema = AsyncMock()
+            return writer
+
+        turn_scope, _s1 = _make_session_scope()
+        resolver = MagicMock()
+        resolver.get_operator = MagicMock(return_value=_default_operator())
+        with capture_logs() as cap_logs:
+            Orchestrator(
+                identity_resolver=resolver,
+                session_scope=turn_scope,
+                router=MagicMock(),
+                budget=_make_budget(),
+                audit_factory=_capturing_factory,
+                autocommit_audit_factory=_capturing_factory,
+            )
+        # Backward-compat: omitted audit_session_scope == the turn scope, so
+        # every pre-#410 caller/test constructs byte-for-byte unchanged.
+        assert seen == [turn_scope, turn_scope]
+        # The fallback is visible, never silent (structlog does not land in
+        # caplog — capture_logs() is the harness).
+        assert any(e["event"] == "orchestrator.audit_session_scope_fallback" for e in cap_logs)
