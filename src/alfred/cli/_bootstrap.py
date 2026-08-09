@@ -41,8 +41,9 @@ from alfred.identity import (
     InProcessTokenBucketRateLimiter,
 )
 from alfred.identity.cli import install_factories as install_identity_factories
-from alfred.memory.db import build_session_scope
+from alfred.memory.db import ConnectionRole, build_session_scope
 from alfred.memory.episodic import EpisodicMemory
+from alfred.memory.turn_side_effects import PostgresTurnSideEffectLedger
 from alfred.memory.working_pool import WorkingMemoryPool
 from alfred.orchestrator.core import Orchestrator, QuarantinedExtractorLike
 from alfred.providers.anthropic_native import AnthropicProvider
@@ -228,7 +229,24 @@ def install_identity_factories_for_settings(settings: Settings) -> IdentityResol
     """
     # ``future=True`` was the SQLAlchemy 1.4→2.0 migration flag — accepted
     # but a no-op on 2.0+. Drop it to keep the call sites readable.
-    sync_engine = create_engine(sync_db_url(settings))
+    # #410 PR1 / ADR-0062: pin the sync resolver engine's pool EXPLICITLY to
+    # the stock CONTROL-tier shape (pool_size 5 + max_overflow 10) so its
+    # budget usage is a NAMED number in settings.py's
+    # DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET arithmetic, not an
+    # unconfigured default-by-accident (the exact mistake #410 started from).
+    # pool_recycle mirrors alfred.memory.db._POOL_RECYCLE_SECONDS and is
+    # REQUIRED here, not optional (pass-2 finding mem-p2-002): this engine
+    # lives for the whole daemon process, and — per db.py's own rationale —
+    # a long-lived process otherwise accumulates server-side-stale
+    # connections across Postgres restarts that pool_pre_ping alone detects
+    # one checkout too late.
+    sync_engine = create_engine(
+        sync_db_url(settings),
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+    )
     sync_factory: sessionmaker = sessionmaker(  # type: ignore[type-arg]  # reason: SA 2.0 sessionmaker has runtime-generic shape; the Session-bound form is what IdentityResolver expects and what we pass here
         sync_engine, expire_on_commit=False
     )
@@ -463,6 +481,7 @@ def build_orchestrator(
     router: ProviderRouter | None = None,
     resolver: IdentityResolver | None = None,
     session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
+    audit_session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     quarantined_extractor: QuarantinedExtractorLike | None = None,
 ) -> Orchestrator:
     """Assemble a privileged :class:`Orchestrator` from operator settings.
@@ -491,6 +510,17 @@ def build_orchestrator(
     orchestrator's ``quarantined_extract`` funnel raises loudly if invoked
     while it is ``None`` (CLAUDE.md hard rule #7), so an un-wired extractor can
     never silently no-op the trust boundary.
+
+    #410 PR1 / ADR-0062: ``session_scope`` defaults to the TURN-role scope
+    (the orchestrator's sub-ms Phase A/C transactions) and
+    ``audit_session_scope`` to the SIDE_EFFECT-role scope (the AuditWriters'
+    per-append durability sessions — the one acquisition permitted while a
+    TURN scope is held). Callers injecting one should inject both, from the
+    same role-scoped builders, or the budgeted pool split is bypassed. The
+    ``PostgresTurnSideEffectLedger`` is armed unconditionally: it is
+    stateless, keys on the per-turn egress context, and the fixture/chat
+    path's synthesized per-turn ``(adapter_id, inbound_id)`` makes each gate
+    trivially first-apply there.
     """
     # sec-001 / #370: this builder intentionally keeps the RAW ``build_broker``
     # (NOT the CLI ``build_broker_or_die``). ``build_orchestrator`` is the daemon
@@ -504,15 +534,26 @@ def build_orchestrator(
     resolver = (
         resolver if resolver is not None else install_identity_factories_for_settings(settings)
     )
-    session_scope = session_scope if session_scope is not None else build_session_scope(settings)
+    session_scope = (
+        session_scope
+        if session_scope is not None
+        else build_session_scope(settings, role=ConnectionRole.TURN)
+    )
+    audit_session_scope = (
+        audit_session_scope
+        if audit_session_scope is not None
+        else build_session_scope(settings, role=ConnectionRole.SIDE_EFFECT)
+    )
     budget = build_budget_guard(resolver, settings)  # type: ignore[arg-type]  # reason: resolver.version_counter is the dynamically-promoted PR-B Phase 1 attribute; Phase 5 lifts it to a typed property
     return Orchestrator(
         identity_resolver=resolver,
         session_scope=session_scope,
+        audit_session_scope=audit_session_scope,
         router=router,
         budget=budget,
         episodic_factory=_episodic_factory,
         quarantined_extractor=quarantined_extractor,
+        side_effect_ledger=PostgresTurnSideEffectLedger(),
     )
 
 

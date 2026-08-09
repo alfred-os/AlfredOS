@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Annotated, Final, TypedDict
 import structlog
 import typer
 from sqlalchemy import create_engine, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import sessionmaker
 
@@ -368,6 +369,26 @@ def _resolve_database_url() -> str:
     return sync_db_url(load_settings_or_die())
 
 
+def _control_engine() -> Engine:
+    """One CLI-invocation-lifetime sync engine, explicit CONTROL pool shape.
+
+    #410 PR1 / ADR-0062: pins pool_size 5 + max_overflow 10 — the same
+    named numbers as ``alfred.memory.db._CONTROL_POOL_SIZE`` /
+    ``_CONTROL_MAX_OVERFLOW`` and the ``_bootstrap`` sync identity-resolver
+    engine — so no engine anywhere in the codebase carries an
+    unconfigured-default pool (the mistake #410 started from). Short-lived
+    by contract: every caller disposes in a ``finally``; the explicit shape
+    is about the budget arithmetic staying honest, not throughput. No
+    idle-in-transaction bound, per the CONTROL role's human-scale semantics.
+    """
+    return create_engine(
+        _resolve_database_url(),
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+    )
+
+
 def _list_breaker_states() -> list[BreakerStateRow]:
     """Read every row from the ``circuit_breakers`` Postgres table.
 
@@ -404,7 +425,7 @@ def _list_breaker_states() -> list[BreakerStateRow]:
     # the cost so ``alfred --help`` stays light.
     from alfred.memory.models import CircuitBreakerState
 
-    engine = create_engine(_resolve_database_url(), pool_pre_ping=True)
+    engine = _control_engine()
     try:
         # ``sessionmaker`` is conventionally bound to a PascalCase name in
         # SQLAlchemy docs, but ruff's ``N806`` (uppercase-local) is correct
@@ -788,7 +809,7 @@ def _list_proposals(
 
     from alfred.memory.models import ProcessedProposal
 
-    engine = create_engine(_resolve_database_url(), pool_pre_ping=True)
+    engine = _control_engine()
     try:
         session_factory = sessionmaker(bind=engine, expire_on_commit=False)
         with session_factory() as session:
@@ -826,7 +847,7 @@ def _recent_dispatch_counts() -> dict[str, int]:
 
     from alfred.memory.models import ProcessedProposal
 
-    engine = create_engine(_resolve_database_url(), pool_pre_ping=True)
+    engine = _control_engine()
     try:
         session_factory = sessionmaker(bind=engine, expire_on_commit=False)
         with session_factory() as session:
