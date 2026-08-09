@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import (
@@ -61,7 +62,9 @@ from alfred.memory.models import Base
 
 
 @pytest.fixture
-async def pg_engine() -> AsyncIterator[AsyncEngine]:
+async def pg_engine(
+    integration_pool_kwargs: dict[str, Any],
+) -> AsyncIterator[AsyncEngine]:
     """Yield a per-test async engine bound to a fresh Postgres container.
 
     The container is per-test (not per-module) for the same reason the
@@ -75,10 +78,12 @@ async def pg_engine() -> AsyncIterator[AsyncEngine]:
     ``create_all`` (rather than ``alembic upgrade``) keeps the baseline
     immune to migration-shape drift; the migration-specific integration
     tests cover that axis separately.
+
+    Pool-starved by default via ``integration_pool_kwargs`` (#410 PR1).
     """
     with PostgresContainer("postgres:18") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
-        engine = create_async_engine(url)
+        engine = create_async_engine(url, **integration_pool_kwargs)
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
