@@ -49,6 +49,7 @@ from alfred.memory.db import (
     build_session_scope,
 )
 from alfred.memory.episodic import EpisodicMemory
+from alfred.memory.replay_journal import PostgresReplayJournal
 from alfred.memory.turn_side_effects import PostgresTurnSideEffectLedger
 from alfred.memory.working_pool import WorkingMemoryPool
 from alfred.orchestrator.core import Orchestrator, QuarantinedExtractorLike
@@ -563,6 +564,7 @@ def build_orchestrator(
         episodic_factory=_episodic_factory,
         quarantined_extractor=quarantined_extractor,
         side_effect_ledger=PostgresTurnSideEffectLedger(),
+        replay_journal=PostgresReplayJournal(session_scope=audit_session_scope),
     )
 
 
