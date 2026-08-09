@@ -838,6 +838,48 @@ class ForwardedDispatchAttempt(Base):
     )
 
 
+class TurnSideEffectLedger(Base):
+    """At-most-once guard for turn-start/turn-end (#410 PR1, migration 0025).
+
+    Schema-definition-only twin, mirroring the pattern already established by
+    :class:`InboundIdempotency` / :class:`EgressIdempotency` /
+    :class:`ForwardedDispatchAttempt` above: production code
+    (:mod:`alfred.memory.turn_side_effects`) reads/writes this table
+    EXCLUSIVELY via raw SQL UPSERTs — that module's docstring is explicit
+    that the raw-SQL shape IS the atomic-UPSERT transactional contract, with
+    no ORM session-holding constructor seam through which an independent
+    transaction could be reintroduced. This class is never queried through;
+    it exists solely so ``Base.metadata.create_all()`` builds the table for
+    fixtures (unit-tier SQLite and integration-tier Postgres alike) that
+    intentionally build schema without a full Alembic replay.
+
+    Postgres-only ``char_length()`` CHECK constraints live ONLY in migration
+    0025, not here — mirroring :class:`InboundIdempotency`'s precedent
+    (SQLite's ``tests/unit/conftest.py`` ``session_factory`` fixture calls
+    ``Base.metadata.create_all()`` against an in-memory SQLite engine, which
+    cannot parse ``char_length()``). The composite PK is dialect-portable and
+    carried here.
+    """
+
+    __tablename__ = "turn_side_effect_ledger"
+
+    adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_turn_applied: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, server_default=sa.false()
+    )
+    assistant_turn_applied: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, server_default=sa.false()
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        sa.PrimaryKeyConstraint("adapter_id", "inbound_id", name="pk_turn_side_effect_ledger"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cross-module Base.metadata registration
 # ---------------------------------------------------------------------------

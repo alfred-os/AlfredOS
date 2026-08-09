@@ -42,7 +42,6 @@ from alfred.memory.models import AuditEntry, Base, Episode
 from alfred.orchestrator.core import Orchestrator
 from alfred.providers.base import CompletionResponse
 from alfred.security.tiers import T2, tag
-from tests.helpers.schema import CREATE_TURN_SIDE_EFFECT_LEDGER_SQL
 
 _OPERATOR_SLUG = "operator"
 _OPERATOR_LANGUAGE = "en-US"
@@ -118,15 +117,15 @@ async def test_build_orchestrator_drives_one_turn(
 
         # Create the schema (audit-persistence path; alembic is the smoke
         # test's job) and seed the operator the resolver will cache.
+        # #410 PR1: build_orchestrator now unconditionally arms the
+        # PostgresTurnSideEffectLedger; turn_side_effect_ledger is covered by
+        # create_all below via alfred.memory.models.TurnSideEffectLedger, a
+        # schema-definition-only ORM twin (mirrors InboundIdempotency /
+        # EgressIdempotency / ForwardedDispatchAttempt).
         engine = create_async_engine(async_url, future=True)
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-                # #410 PR1: build_orchestrator now unconditionally arms the
-                # PostgresTurnSideEffectLedger; turn_side_effect_ledger has
-                # no ORM model (see tests.helpers.schema), so create_all
-                # above can't create it.
-                await conn.execute(CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
         finally:
             await engine.dispose()
         _seed_operator(sync_url)

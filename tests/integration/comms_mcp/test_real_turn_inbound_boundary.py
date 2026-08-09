@@ -86,7 +86,6 @@ from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
 from tests.helpers.routers import FixedAnswerRouter
-from tests.helpers.schema import CREATE_TURN_SIDE_EFFECT_LEDGER_SQL
 
 pytestmark = pytest.mark.integration
 
@@ -380,16 +379,15 @@ async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
     engine = create_async_engine(postgres_url, future=True)
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
             # #410 PR1: build_orchestrator now unconditionally arms the
             # PostgresTurnSideEffectLedger, which reads/writes
-            # turn_side_effect_ledger via raw SQL (migration 0025) — there
-            # is no ORM model for that table, so create_all above can't
-            # create it (see tests.helpers.schema for why this is a raw-DDL
-            # escape hatch rather than a full alembic replay: migration
-            # 0004's operator backfill would collide with this module's own
-            # _seed_users operator row, "the-operator").
-            await conn.execute(CREATE_TURN_SIDE_EFFECT_LEDGER_SQL)
+            # turn_side_effect_ledger via raw SQL (migration 0025).
+            # alfred.memory.models.TurnSideEffectLedger is a
+            # schema-definition-only ORM twin of that table (mirrors
+            # InboundIdempotency / EgressIdempotency / ForwardedDispatchAttempt),
+            # so create_all below builds it same as every other table here —
+            # no separate DDL step needed.
+            await conn.run_sync(Base.metadata.create_all)
 
         sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
         _seed_users(sync_url)
