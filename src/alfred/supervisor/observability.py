@@ -75,7 +75,7 @@ import hashlib
 from contextlib import AbstractContextManager, nullcontext
 from typing import Final
 
-from prometheus_client import Histogram
+from prometheus_client import Counter, Histogram
 
 # perf-001: bounded label cardinality. 256 distinct buckets is a deliberate
 # choice — high enough that a healthy single-household deployment (1-20
@@ -107,7 +107,9 @@ _BUCKET_COUNT: Final[int] = 256
 # breaker-state labels. We pin the literal values here (rather than
 # importing the enum) to keep ``observability`` import-side-effect-free —
 # the same pattern PR-S3-3a uses for ``alfred_stdio_transport_dispatch_seconds``.
-_ACTION_OUTCOME_DOMAIN: Final[frozenset[str]] = frozenset({"success", "timeout", "cancelled"})
+_ACTION_OUTCOME_DOMAIN: Final[frozenset[str]] = frozenset(
+    {"success", "timeout", "cancelled", "commit_failed"}
+)
 _BREAKER_STATE_DOMAIN: Final[frozenset[str]] = frozenset({"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"})
 
 
@@ -183,6 +185,10 @@ def record_action_duration(
       ``supervisor.action_timeout`` audit row by the same ``correlation_id``.
     * ``cancelled`` — operator-initiated cancel (not deadline-fired). Bound
       to the ``orchestrator.turn result=cancelled`` audit row.
+    * ``commit_failed`` — a phase transaction's COMMIT raised after its body
+      completed (#410 PR1 three-phase turn). Distinct from ``success`` so a
+      commit failure can never masquerade as a completed turn, and distinct
+      from the exception-free rollback paths, which record nothing.
 
     ``user_id`` is bucketed internally via :func:`bucket_user_id` before
     landing in the histogram label set (perf-001). Callers MUST pass the
@@ -209,6 +215,39 @@ def record_action_duration(
         action_outcome=safe_action_outcome,
         breaker_state=safe_breaker_state,
     ).observe(duration_seconds)
+
+
+# #410 PR1 / ADR-0062 accepted trade-off, made observable: ANY failure
+# between Phase A's commit and Phase C's commit (provider error, budget
+# refusal, cancellation, deadline, a Phase-C write or commit failure —
+# pass-2 finding core-004 widened this beyond Phase-B-only) leaves a user
+# episodic row with no paired assistant row — the "orphan user row" the
+# three-phase split deliberately accepts as strictly better than losing the
+# user's message. Deliberate degradations still need a rate: a spike here
+# means the turn pipeline is failing often enough that WorkingMemoryPool
+# rehydration is regularly prefilling double-user-turn context, which is
+# the signal to investigate the underlying failures.
+# Bucketed like every per-user family (perf-001).
+ORPHANED_USER_TURN_COUNTER: Final[Counter] = Counter(
+    "alfred_orchestrator_orphaned_user_turn_total",
+    "Turns that failed after Phase A committed the user episodic row but "
+    "before Phase C committed the assistant row (#410 PR1 three-phase "
+    "turn) — the accepted orphan-user-row trade-off, counted so its "
+    "production rate is visible.",
+    labelnames=["user_id_bucket"],
+)
+
+
+def record_orphaned_user_turn(*, user_id: str) -> None:
+    """Count one orphaned-user-turn occurrence (#410 PR1 / ADR-0062).
+
+    Fired by the orchestrator when anything raises after Phase A's
+    transaction committed and before Phase C's committed — a Phase-B
+    failure of any class OR a Phase-C body/commit failure (core-004).
+    ``user_id`` is the RAW id — bucketed here via
+    :func:`bucket_user_id`, same contract as :func:`record_action_duration`.
+    """
+    ORPHANED_USER_TURN_COUNTER.labels(user_id_bucket=bucket_user_id(user_id)).inc()
 
 
 def span_web_fetch() -> AbstractContextManager[None]:
@@ -247,8 +286,10 @@ def span_hookchain() -> AbstractContextManager[None]:
 
 __all__ = [
     "ACTION_DURATION_HISTOGRAM",
+    "ORPHANED_USER_TURN_COUNTER",
     "bucket_user_id",
     "record_action_duration",
+    "record_orphaned_user_turn",
     "span_hookchain",
     "span_quarantine_extract",
     "span_web_fetch",

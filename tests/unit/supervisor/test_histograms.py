@@ -188,7 +188,7 @@ def test_breaker_state_out_of_domain_falls_back_to_unknown() -> None:
 
 
 def test_action_outcome_domain_constant_pins_closed_set() -> None:
-    """The closed domain for ``action_outcome`` is the spec's three values.
+    """The closed domain for ``action_outcome`` is the spec's four values.
 
     Pinning the constant prevents accidental widening of the domain
     (which would re-expose the unbounded-cardinality risk). Test fails
@@ -198,7 +198,10 @@ def test_action_outcome_domain_constant_pins_closed_set() -> None:
     """
     from alfred.supervisor.observability import _ACTION_OUTCOME_DOMAIN
 
-    assert frozenset({"success", "timeout", "cancelled"}) == _ACTION_OUTCOME_DOMAIN
+    assert (
+        frozenset({"success", "timeout", "cancelled", "commit_failed"})
+        == _ACTION_OUTCOME_DOMAIN
+    )
 
 
 def test_breaker_state_domain_constant_pins_closed_set() -> None:
@@ -211,6 +214,65 @@ def test_breaker_state_domain_constant_pins_closed_set() -> None:
     from alfred.supervisor.observability import _BREAKER_STATE_DOMAIN
 
     assert frozenset({"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"}) == _BREAKER_STATE_DOMAIN
+
+
+def test_commit_failed_is_recorded_verbatim_not_rewritten_to_unknown() -> None:
+    """#410 PR1: a commit failure at a phase boundary records its OWN outcome.
+
+    The domain normaliser rewrites out-of-domain values to "unknown" — if
+    "commit_failed" were missing from the domain, the new telemetry Task 6
+    emits would silently vanish into the unknown bucket.
+    """
+    from prometheus_client import REGISTRY
+
+    from alfred.supervisor.observability import bucket_user_id, record_action_duration
+
+    bucket = bucket_user_id("commit-failed-probe-user")
+    labels = {
+        "user_id_bucket": bucket,
+        "action_outcome": "commit_failed",
+        "breaker_state": "UNKNOWN",
+    }
+    before = (
+        REGISTRY.get_sample_value(
+            "alfred_orchestrator_action_duration_seconds_count", labels
+        )
+        or 0.0
+    )
+    record_action_duration(
+        duration_seconds=0.01,
+        user_id="commit-failed-probe-user",
+        action_outcome="commit_failed",
+        breaker_state="UNKNOWN",
+    )
+    after = REGISTRY.get_sample_value(
+        "alfred_orchestrator_action_duration_seconds_count", labels
+    )
+    assert after == before + 1.0
+
+
+def test_orphaned_user_turn_counter_increments_under_the_callers_bucket() -> None:
+    """#410 PR1 (fleet finding M-14, widened by pass-2 finding core-004): the
+    accepted orphan trade-off — a committed user episodic row with no paired
+    assistant row — is a DELIBERATE behavior change, and a deliberate
+    degradation with no metric is invisible in production. One counter,
+    bucketed like every other per-user family (perf-001), fired by the
+    orchestrator whenever a turn fails after Phase A committed and before
+    Phase C committed (Task 6)."""
+    from prometheus_client import REGISTRY
+
+    from alfred.supervisor.observability import bucket_user_id, record_orphaned_user_turn
+
+    labels = {"user_id_bucket": bucket_user_id("orphan-probe-user")}
+    before = (
+        REGISTRY.get_sample_value("alfred_orchestrator_orphaned_user_turn_total", labels)
+        or 0.0
+    )
+    record_orphaned_user_turn(user_id="orphan-probe-user")
+    after = REGISTRY.get_sample_value(
+        "alfred_orchestrator_orphaned_user_turn_total", labels
+    )
+    assert after == before + 1.0
 
 
 def test_span_web_fetch_is_a_context_manager() -> None:
