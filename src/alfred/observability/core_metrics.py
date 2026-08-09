@@ -1,7 +1,8 @@
 """The exact set of collectors the core /metrics exposes — one source of truth (#470).
 
 Importing this module registers all twelve on the DEFAULT registry at import (side effect
-of importing the six observability modules), so build_core_registry has live references AND
+of importing the five observability modules — comms_mcp, memory.db, plugins, security,
+supervisor), so build_core_registry has live references AND
 alfred_quarantine_capability_revoked_total reads 0 from t=0. The collectors are NOT moved off
 the default registry (the duplicate-name-loud property + the gateway process depend on them).
 """

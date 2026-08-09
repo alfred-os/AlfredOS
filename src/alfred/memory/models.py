@@ -120,7 +120,7 @@ class AuditEntry(Base):
             name="ck_audit_log_trust_tier_of_trigger",
         ),
         # `result` is the audit subsystem's closed domain. The orchestrator
-        # writes one of these values per turn (see Orchestrator._handle_turn),
+        # writes one of these values per turn (see Orchestrator._run_turn_phases),
         # the Slice-2 comms adapters write the refusal / rate-limited /
         # outbound-failure family (migration 0005), and Slice-2.5 PR-B's
         # :class:`alfred.memory.hooks_audit_sink.EpisodicAuditSink` writes
@@ -838,7 +838,7 @@ class ForwardedDispatchAttempt(Base):
     )
 
 
-class TurnSideEffectLedger(Base):
+class TurnSideEffectLedgerRow(Base):
     """At-most-once guard for turn-start/turn-end (#410 PR1, migration 0025).
 
     Schema-definition-only twin, mirroring the pattern already established by
@@ -852,6 +852,13 @@ class TurnSideEffectLedger(Base):
     it exists solely so ``Base.metadata.create_all()`` builds the table for
     fixtures (unit-tier SQLite and integration-tier Postgres alike) that
     intentionally build schema without a full Alembic replay.
+
+    Named ``...Row``, unlike its three siblings above (#410 PR1 final review
+    M-5): :mod:`alfred.memory.turn_side_effects` already defines a
+    :class:`~alfred.memory.turn_side_effects.TurnSideEffectLedger` Protocol
+    (the sibling ORM twins' Protocols are all suffixed ``...Store``, so no
+    collision arose there) — reusing that bare name here would collide two
+    distinct, unrelated types under one import-ambiguous identifier.
 
     Postgres-only ``char_length()`` CHECK constraints live ONLY in migration
     0025, not here — mirroring :class:`InboundIdempotency`'s precedent

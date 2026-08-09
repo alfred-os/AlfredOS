@@ -360,17 +360,25 @@ class Orchestrator:
         # it opens its own session per `.append()` and is independent of the
         # per-phase turn transactions.
         if audit_session_scope is None:
-            # #410 PR1 (fleet finding M-10): the fallback is legitimate for
-            # unit tests and pre-#410 construction paths, but a PRODUCTION
-            # boot site omitting audit_session_scope silently points the
-            # AuditWriters at the TURN pool — quietly re-coupling the two
-            # pools this plan separates. Task 7 wires the one real production
-            # boot site (src/alfred/cli/_bootstrap.py) to pass this
-            # explicitly; until that lands, this warning fires on EVERY
-            # production boot (e.g. `alfred chat` startup) — that is the
-            # intended, visible signal that the wiring is still pending, not
-            # a bug. Once Task 7 lands, this warning firing in production
-            # again means a future omission, not the initial gap.
+            # #410 PR1 (fleet finding M-10, reworded post-Task-7 by the final
+            # review's M-1): the fallback is legitimate for unit tests that
+            # construct ``Orchestrator(...)`` directly (bypassing the
+            # builder), but a PRODUCTION boot site omitting
+            # audit_session_scope would silently point the AuditWriters at
+            # the TURN pool — quietly re-coupling the two pools this plan
+            # separates. Task 7 landed: ``Orchestrator(...)`` is constructed
+            # in exactly ONE place in ``src/`` — ``cli/_bootstrap.py``'s
+            # ``build_orchestrator`` — and that builder ALWAYS supplies
+            # ``audit_session_scope`` explicitly, either injected (the
+            # daemon's ``_comms_boot.py``, the one production caller with a
+            # comms-enabled boot) or self-built as the SIDE_EFFECT-role
+            # default (every other real caller, e.g. a comms-disabled boot).
+            # ``alfred chat`` is NOT such a caller — ``_chat_main``
+            # (``cli/main.py``) dials the running gateway over a socket and
+            # constructs no orchestrator locally. So this warning firing
+            # today means exactly one thing: a test (or some future code)
+            # constructed ``Orchestrator(...)`` directly instead of going
+            # through ``build_orchestrator`` — not a pending-wiring gap.
             _log.warning("orchestrator.audit_session_scope_fallback")
         self._audit_session_scope = (
             audit_session_scope if audit_session_scope is not None else session_scope
@@ -859,7 +867,14 @@ class Orchestrator:
           OWN ``audit_session_scope`` session, so the row commits even though
           the phase's session is broken. If the audit write itself fails, it
           is logged loudly and the ORIGINAL commit exception still propagates
-          — the same non-masking contract as ``_audit_cancellation``.
+          — the same non-masking contract as ``_audit_cancellation`` —
+          PROVIDED the audit write's own failure is an ``Exception``; the
+          inner catch here is deliberately ``Exception``, not
+          ``BaseException`` (mirroring the outer catch's own reasoning
+          below), so a ``BaseException`` raised by the audit write itself
+          (e.g. a cancellation landing mid-append) is NOT caught here and
+          propagates in place of the original commit exception rather than
+          alongside it.
 
         The catch is deliberately ``Exception``, not ``BaseException``: a
         ``CancelledError`` landing during the commit await is a CANCELLATION

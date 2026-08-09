@@ -57,16 +57,43 @@ I/O.
   because of hard rule #7 (audit durability); it is counted on
   `alfred_db_side_effect_scope_inside_turn_total`. A nested `TURN` or
   `CONTROL` scope raises `NestedTurnConnectionError` (fail loud, never
-  wait). **Named exception:** the capability-gate `PostgresBackend` receives
-  a CONTROL-role `session_factory` and opens sessions directly, without
-  `session_scope` — the guard never sees those acquisitions. This is a
-  known, currently-safe gap, not closure: the gate backend is the only
-  CONTROL-role consumer reachable from turn handling, gate checks run in
-  Phase B (which holds zero TURN connections), and nothing dispatches tools
-  from inside Phase A/C. Any change that invokes the gate while a TURN scope
-  is held must first route the backend through `session_scope` (or extend
-  the guard) — the pool-starved integration tier is the behavioral backstop
-  in the meantime. `alfred_db_side_effect_scope_inside_turn_total` is
+  wait). **The guard only sees session-scope-mediated access — any
+  acquisition not routed through `session_scope` is invisible to it.**
+  This is a known, currently-safe gap, not closure. Two currently-known
+  instances, not an exhaustive list — enumerating names closes what you
+  thought of at decision time; only default-deny (routing every
+  acquisition through `session_scope`) closes the class:
+  - The capability-gate `PostgresBackend` receives a CONTROL-role
+    `session_factory` and opens sessions directly. Gate checks run in
+    Phase B (which holds zero TURN connections), and nothing dispatches
+    tools from inside Phase A/C. This bypass is not only phase-scoped
+    request traffic: `RealGate._heartbeat_loop`
+    (`security/capability_gate/_gate.py`) also calls `backend.ping()`
+    every 10 s for the daemon's whole lifetime — a continuous CONTROL-role
+    acquisition outside `session_scope`. Harmless (own long-lived task,
+    never runs inside a TURN scope, drawn from the budgeted CONTROL pool),
+    but worth naming so the bypass isn't read as occasional/request-scoped
+    only.
+  - The sync `IdentityResolver` engine built in `cli/_bootstrap.py`
+    (`create_engine(sync_db_url(settings), pool_size=5, max_overflow=10,
+    ...)`) is a SECOND connection pool outside `alfred.memory.db`'s
+    `_ENGINES` registry entirely — outside `dispose_all_engines()` and
+    invisible to the nesting guard. It IS reachable from inside a turn:
+    `BudgetGuard._load_or_get_user` (`budget/guard.py`) calls
+    `resolver.show(slug=...)` on a cache miss or whenever
+    `IdentityVersionCounter` advances (`orchestrator/core.py`) — a
+    synchronous, blocking psycopg call made directly on the event loop
+    (`IdentityResolver`'s own docstring requires async callers to wrap
+    calls in `asyncio.to_thread`; this loader does not).
+
+  Any change that invokes either of these while a TURN scope is held must
+  first route the acquisition through `session_scope` (or extend the
+  guard to see it) — the pool-starved integration tier is the behavioral
+  backstop in the meantime, via `tests/integration/conftest.py`'s autouse
+  `_starve_settings_derived_turn_side_pools` fixture (every real
+  `Settings()`-derived TURN/SIDE_EFFECT engine in the tier) alongside the
+  narrower `integration_pool_kwargs` (the ~12 migration-round-trip files
+  that build their engine directly). `alfred_db_side_effect_scope_inside_turn_total` is
   expected to read a constant ZERO in this PR: every in-turn audit write
   happens in Phase B (no TURN scope open) or after Phase C's scope closes.
   It is forward provisioning for the #410 PR2 replay journal and PR3
@@ -154,8 +181,22 @@ I/O.
   pre-#410 design exposed the whole multi-second provider call to the
   same class of window.
 - The nesting guard is per-task (`contextvars`); code that smuggles a scope
-  across tasks defeats it. The pool-starved integration tier
-  (`integration_pool_kwargs`) is the behavioral backstop.
+  across tasks defeats it. The pool-starved integration tier is the
+  behavioral backstop — `tests/integration/conftest.py`'s autouse
+  `_starve_settings_derived_turn_side_pools` fixture plus the narrower
+  `integration_pool_kwargs`.
+- **Mirror case, opposite direction, currently unreachable:**
+  `asyncio.create_task` (`hooks/invoke.py`'s `_spawn_subscriber`) copies the
+  CURRENT `contextvars.Context` at task-creation time, so a subscriber task
+  spawned inside a Phase A/C scope inherits `_TURN_SCOPE_ACTIVE=True` as a
+  frozen snapshot — the parent's `reset(token)` on scope exit runs in the
+  parent's context and cannot reach the copy. An orphaned/abandoned
+  subscriber task (e.g. one dropped on the hook-chain-timeout path) could
+  therefore carry a stale "TURN held" flag and later false-positive-trip
+  `NestedTurnConnectionError` on an acquisition that is not actually nested
+  under a live TURN scope. Zero production subscribers are registered on the
+  episodic hookpoints today, so this is latent, not exercised — named here so
+  it is not lost if that changes.
 
 ## Alternatives considered
 

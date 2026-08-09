@@ -382,7 +382,7 @@ async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
             # #410 PR1: build_orchestrator now unconditionally arms the
             # PostgresTurnSideEffectLedger, which reads/writes
             # turn_side_effect_ledger via raw SQL (migration 0025).
-            # alfred.memory.models.TurnSideEffectLedger is a
+            # alfred.memory.models.TurnSideEffectLedgerRow is a
             # schema-definition-only ORM twin of that table (mirrors
             # InboundIdempotency / EgressIdempotency / ForwardedDispatchAttempt),
             # so create_all below builds it same as every other table here —

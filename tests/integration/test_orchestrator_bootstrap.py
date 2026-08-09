@@ -119,7 +119,7 @@ async def test_build_orchestrator_drives_one_turn(
         # test's job) and seed the operator the resolver will cache.
         # #410 PR1: build_orchestrator now unconditionally arms the
         # PostgresTurnSideEffectLedger; turn_side_effect_ledger is covered by
-        # create_all below via alfred.memory.models.TurnSideEffectLedger, a
+        # create_all below via alfred.memory.models.TurnSideEffectLedgerRow, a
         # schema-definition-only ORM twin (mirrors InboundIdempotency /
         # EgressIdempotency / ForwardedDispatchAttempt).
         engine = create_async_engine(async_url, future=True)
