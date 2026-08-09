@@ -24,7 +24,15 @@ from alfred.providers.base import ToolCall
 
 
 class _FakeRow:
-    def __init__(self, *, call_index: int, iteration: int, tool_call_id: str, tool_name: str, tool_arguments_json: str) -> None:
+    def __init__(
+        self,
+        *,
+        call_index: int,
+        iteration: int,
+        tool_call_id: str,
+        tool_name: str,
+        tool_arguments_json: str,
+    ) -> None:
         self.call_index = call_index
         self.iteration = iteration
         self.tool_call_id = tool_call_id
@@ -44,7 +52,12 @@ class _FakeResult:
 
 
 class _FakeSession:
-    def __init__(self, *, rows: list[_FakeRow] | None = None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        rows: list[_FakeRow] | None = None,
+        raises: Exception | None = None,
+    ) -> None:
         self._rows = rows or []
         self._raises = raises
         self.executed: list[tuple[Any, Any]] = []
@@ -75,9 +88,7 @@ async def test_append_batch_sends_the_expected_params() -> None:
     session = _FakeSession()
     store = PostgresReplayJournal(session_scope=_scope_for(session))
     call = ToolCall(id="tc-1", name="web.fetch", arguments={"url": "https://example.invalid"})
-    await store.append_batch(
-        adapter_id=_ADAPTER, inbound_id="m1", iteration=0, calls=[(0, call)]
-    )
+    await store.append_batch(adapter_id=_ADAPTER, inbound_id="m1", iteration=0, calls=[(0, call)])
     _stmt, params_list = session.executed[0]
     assert len(params_list) == 1
     params = params_list[0]
