@@ -386,8 +386,14 @@ def test_dynamic_result_sites_are_documented() -> None:
             # `handle_user_message`/`_handle_turn` and widening the `ctx =`
             # assignment into a provided-over-synthesized ternary — the site
             # itself is unchanged (still `result=charge_result if ... else
-            # "success"`).
-            "src/alfred/orchestrator/core.py:911",
+            # "success"`). #410 PR1 Task 4 shifted it again (911 -> 932) by
+            # moving the `ctx = (...)` resolution earlier in the function
+            # (so its `inbound_id` is available to the new turn-start
+            # side-effect-ledger gate) and wrapping the turn-start
+            # working_memory/episodic writes in that gate's `if` — both
+            # changes land entirely above this point in the file; the site
+            # itself is unchanged.
+            "src/alfred/orchestrator/core.py:932",
             # #339 PR3 task 2 — the NEW terminal `completed` row forwards
             # final_result_token, a closed-vocab local (success/budget_blocked/
             # budget_overrun/refused, all in-domain). Task 3 added
@@ -407,8 +413,13 @@ def test_dynamic_result_sites_are_documented() -> None:
             # (1042 -> 1053) for the same reason as the :911 site above (the
             # optional `egress_context` param/docstring/ternary, all above
             # this point in the file) — the site itself is unchanged (still
-            # `result=final_result_token`).
-            "src/alfred/orchestrator/core.py:1053",
+            # `result=final_result_token`). #410 PR1 Task 4 shifted it again
+            # (1053 -> 1086) for the same reason as the :932 site above (the
+            # `ctx =` move + the new turn-start gate, both above this point
+            # in the file) PLUS wrapping the turn-end working_memory/episodic
+            # writes in the new assistant-turn side-effect-ledger gate — the
+            # site itself is unchanged (still `result=final_result_token`).
+            "src/alfred/orchestrator/core.py:1086",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
