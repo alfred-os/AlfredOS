@@ -148,6 +148,15 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
   failure). The deterministic-replay **journal** (tools-on follow-up) is the
   durable fix; making the episodic write + budget charge `inbound_id`-idempotent
   is a ratifiable in-scope alternative, deliberately not implemented here.
+  **Amended 2026-08-08 (#410 PR1 / [ADR-0062](0062-three-phase-turn-and-role-scoped-connection-pools.md)):**
+  the episodic-transcript double-write and the working-memory double-append
+  halves of this residual are now CLOSED by the `turn_side_effect_ledger`
+  at-most-once gate; the duplicate paid completion and the in-process budget
+  double-charge remain accepted (bounded over-charge is the safe direction
+  for a cost control). The transactional-coupling design's contemplated
+  "row-lock held up to the full turn duration" residual was AVOIDED — never
+  shipped — by ADR-0062's three-phase split; it is recorded there as
+  avoided, not here as accepted.
 - **New operational precondition.** A comms-enabled `alfred daemon start` now
   hard-requires exactly one pre-seeded `authorization=operator` user — previously
   the daemon never touched identity resolution before a live turn ran. An operator
