@@ -76,6 +76,41 @@ def egress_proxy_url_env(monkeypatch: pytest.MonkeyPatch) -> str:
     return _PLACEHOLDER_EGRESS_PROXY_URL
 
 
+@pytest.fixture(autouse=True)
+def _starve_settings_derived_turn_side_pools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Autouse: starve any real ``Settings()``-derived TURN/SIDE_EFFECT pool too (#410 PR1).
+
+    ADR-0062 names "the pool-starved integration tier" as the behavioral
+    backstop for two accepted gaps: the nesting guard's per-task blind spot,
+    and the capability-gate / identity-resolver acquisitions that bypass
+    ``session_scope`` entirely. That claim was only true for the ~12 files
+    that consume ``integration_pool_kwargs`` below (migration round-trips,
+    via ``postgres_engine`` / the memory-conftest's async twin) — every test
+    that drives a REAL turn through the boot graph
+    (``alfred.cli._bootstrap.build_orchestrator`` et al., or a bare
+    ``create_async_engine`` with no pool kwargs) instead builds its engine
+    from a real ``Settings()`` instance, which resolves the STOCK production
+    defaults (``db_turn_pool_max_connections=32`` /
+    ``db_side_pool_max_connections=16``) absent an override.
+
+    Setting these two env vars here, autouse and unconditionally, makes the
+    backstop claim true tier-wide rather than only for the tests that
+    happen to request ``integration_pool_kwargs`` explicitly. ``2`` is
+    ``Settings``' own floor on both fields (``ge=2`` in
+    ``config/settings.py``) — the smallest legal value, matching
+    ``integration_pool_kwargs``' own ``pool_size=2``. Unlike
+    ``integration_pool_kwargs`` (deliberately overridable per test via
+    fixture shadowing), this has no override parameter: a test that needs
+    the full production pool shape for its own reasons can still
+    ``monkeypatch.setenv`` a larger value itself (this fixture runs first,
+    so a later ``setenv`` in the test body wins), but no test can silently
+    inherit an un-starved pool by omission — that omission is exactly the
+    gap this fixture closes.
+    """
+    monkeypatch.setenv("ALFRED_DB_TURN_POOL_MAX_CONNECTIONS", "2")
+    monkeypatch.setenv("ALFRED_DB_SIDE_POOL_MAX_CONNECTIONS", "2")
+
+
 @pytest.fixture
 def integration_pool_kwargs() -> dict[str, Any]:
     """Starvation-by-default engine kwargs for the integration tier (#410 PR1).
