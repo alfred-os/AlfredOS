@@ -8,7 +8,7 @@ Create Date: 2026-08-07 00:00:00.000000
 (:func:`alfred.comms_mcp.inbound.process_inbound_message` with
 ``commit_at_dispatch_edge=True``) leaves a failed frame NOT committed, so the
 forwarding leg replays it — and, absent this table, a resumed
-``Orchestrator._handle_turn`` re-applies the user-turn write and the
+``Orchestrator._run_turn_phases`` re-applies the user-turn write and the
 assistant-turn write (ADR-0049's accepted residual, widened by #410 to also
 cover the previously-unnamed in-process ``WorkingMemory`` double-append).
 The budget charge is deliberately NOT gated by this table — see
