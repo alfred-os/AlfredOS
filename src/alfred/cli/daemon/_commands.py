@@ -440,7 +440,9 @@ def _settings_error_field_name(exc: SettingsError) -> str | None:
     ``ValidationError`` on a genuine ``Settings()`` construction failure. Returns
     ``None`` when no such chain exists (e.g. a test double raising ``SettingsError``
     directly with no ``from``) or the cause is not a ``ValidationError`` — the caller
-    falls back to the fully generic message rather than guess.
+    falls back to the fully generic message rather than guess — except for a model-level
+    (``loc=()``) error whose TYPE is a deliberately-authored ``PydanticCustomError`` slug,
+    which is returned as the DLP-safe category (#410 PR1).
     """
     cause = exc.__cause__
     if not isinstance(cause, ValidationError):
@@ -450,6 +452,19 @@ def _settings_error_field_name(exc: SettingsError) -> str | None:
         return None
     loc = errors[0]["loc"]
     if not loc:
+        # #410 PR1 (fleet finding H-3): a model-level validator reports
+        # loc=(). A DELIBERATELY-SLUGGED PydanticCustomError (e.g. the
+        # db-pool budget validator's "db_pool_connection_budget_exceeded")
+        # carries its category in the error TYPE — a value-free identifier
+        # authored as a string literal in settings.py, safe to surface under
+        # the same never-a-value contract as the field path below. Pydantic's
+        # own wrappers for bare `raise ValueError/AssertionError` arrive as
+        # the generic "value_error"/"assertion_error" types, which name
+        # nothing — those (and only those) still degrade to the generic
+        # message.
+        error_type = errors[0]["type"]
+        if error_type not in {"value_error", "assertion_error"}:
+            return error_type
         return None
     return ".".join(str(part) for part in loc)
 
