@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-09 11:18+0100\n"
+"POT-Creation-Date: 2026-08-10 23:33+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -35,17 +35,17 @@ msgstr ""
 "provider; both are set to {provider}. The dual-LLM split (spec §5.4) "
 "requires distinct providers."
 
-#: src/alfred/cli/_bootstrap.py:110 src/alfred/cli/daemon/_commands.py:512
+#: src/alfred/cli/_bootstrap.py:111 src/alfred/cli/daemon/_commands.py:512
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
 "'sk-...' with a real DeepSeek API key."
 
-#: src/alfred/cli/_bootstrap.py:112
+#: src/alfred/cli/_bootstrap.py:113
 msgid "error.config_invalid"
 msgstr "configuration is invalid: {detail}"
 
-#: src/alfred/cli/_bootstrap.py:113
+#: src/alfred/cli/_bootstrap.py:114
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
@@ -2753,36 +2753,43 @@ msgstr ""
 "follow a winning commit_intent — this is a caller-contract violation, not"
 " a transient failure."
 
-#: src/alfred/orchestrator/core.py:432
+#: src/alfred/orchestrator/core.py:463
 msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
 msgstr ""
 "comms inbound must be T3: quarantined_extract refuses any source_tier "
 "other than T3 (no silent T3->T2 promotion)."
 
-#: src/alfred/orchestrator/core.py:434
+#: src/alfred/orchestrator/core.py:465
 msgid "orchestrator.quarantined_extract.no_extractor_wired"
 msgstr ""
 "quarantined_extract called on an orchestrator constructed without a "
 "quarantined_extractor; the comms inbound trust-boundary funnel is not "
 "wired."
 
-#: src/alfred/orchestrator/core.py:1091
+#: src/alfred/orchestrator/core.py:1104
+msgid "orchestrator.tool.resume_iteration_beyond_ceiling"
+msgstr ""
+"I can't resume this request: its recorded tool history already reaches "
+"step {start}, at or past the limit of {ceiling}. Please start a new "
+"request."
+
+#: src/alfred/orchestrator/core.py:1201
 msgid "orchestrator.tool.budget_exhausted_mid_turn"
 msgstr "I ran out of budget partway through this request."
 
-#: src/alfred/orchestrator/core.py:1192
+#: src/alfred/orchestrator/core.py:1302
 msgid "orchestrator.tool.budget_overrun_mid_turn"
 msgstr "This request went over budget, so I stopped before running more tools."
 
-#: src/alfred/orchestrator/core.py:1204
+#: src/alfred/orchestrator/core.py:1314
 msgid "orchestrator.tool.too_many_tool_calls"
 msgstr "That request needed too many tools at once, so I stopped for safety."
 
-#: src/alfred/orchestrator/core.py:1218
+#: src/alfred/orchestrator/core.py:1328
 msgid "orchestrator.tool.max_iterations_reached"
 msgstr "I reached the limit on tool steps for this request without finishing it."
 
-#: src/alfred/orchestrator/core.py:1246
+#: src/alfred/orchestrator/core.py:1356 src/alfred/orchestrator/core.py:1696
 msgid "orchestrator.tool.dispatch_seams_unwired"
 msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "

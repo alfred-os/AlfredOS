@@ -88,6 +88,7 @@ provider output to T1 (operator-trust) and introduces T3 (untrusted).
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -103,8 +104,10 @@ from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard, UnknownBudgetUserError
 from alfred.comms_mcp import observability as comms_observability
 from alfred.egress.egress_id import TurnEgressContext
+from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
+from alfred.memory.replay_journal import ReplayJournal
 from alfred.memory.turn_side_effects import TurnSideEffectLedger
 from alfred.memory.working import WorkingMemory
 from alfred.orchestrator import loop_constants
@@ -254,6 +257,28 @@ def _truncate_tool_result(text: str) -> str:
     return text[: limit - len(marker)] + marker
 
 
+class ReplayIterationCeilingError(AlfredError):
+    """A journalled resume point sits at or past ``MAX_TOOL_ITERATIONS``.
+
+    #410 PR2 final-review finding: ``_fast_forward_journalled_calls`` returns
+    the iteration the Act loop should resume from, and the loop expresses that
+    as ``range(start_iteration, MAX_TOOL_ITERATIONS)``. A ``start_iteration``
+    at or past the ceiling makes that range EMPTY — the loop body never runs,
+    no completion happens, and the turn would fall out the bottom with nothing
+    to answer with. Silently producing an empty loop is exactly the shape
+    CLAUDE.md hard rule #7 forbids, so the precondition is checked and raised
+    on instead.
+
+    Not reachable today: the Act loop's ``iteration == MAX_TOOL_ITERATIONS - 1``
+    guard breaks BEFORE the journal write, so no row can carry an iteration at
+    the ceiling. That ordering is an unenforced write-side invariant, not a
+    schema constraint (``tool_call_journal.iteration`` has no upper-bound
+    CHECK) — lowering ``MAX_TOOL_ITERATIONS`` between a crash and a resume
+    reaches it, and so would any future writer that journals from somewhere
+    else. "Unreachable today" is not a safety argument; guard the class.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class _TurnOutcome:
     """Everything Phase B decides that Phases C + the terminal row consume.
@@ -334,6 +359,11 @@ class Orchestrator:
         # keeps constructing unchanged and every guarded call site below
         # defaults to "always apply" (`side_effect_ledger is None`).
         side_effect_ledger: TurnSideEffectLedger | None = None,
+        # #410 PR2: the deterministic tool-call replay journal. Additive +
+        # optional; `None` (every caller before PR3 wires a live
+        # tool_registry) preserves today's behaviour exactly — this seam has
+        # NO live consumer until PR3.
+        replay_journal: ReplayJournal | None = None,
         # #410 PR1: the scope the two AuditWriters draw their per-append
         # sessions from. In production this is the SIDE_EFFECT-role scope —
         # audit writes are the ONE acquisition permitted while a TURN-role
@@ -400,6 +430,7 @@ class Orchestrator:
         self._gate = gate
         self._outbound_dlp = outbound_dlp
         self._side_effect_ledger = side_effect_ledger
+        self._replay_journal = replay_journal
 
     async def quarantined_extract(
         self,
@@ -732,6 +763,23 @@ class Orchestrator:
             if egress_context is not None
             else self._synthesize_egress_context(trace_id=trace_id, user=user)
         )
+        # #410 PR2 (final whole-branch review, finding 3): only a FORWARDED
+        # adapter context can ever have a journalled prefix to replay. The
+        # synthesized fallback mints ``inbound_id = trace_id``, a fresh uuid4
+        # per ``handle_user_message`` call, so its journal read is
+        # guaranteed-empty by construction. Passing that fact down (rather
+        # than paying a Postgres round-trip to rediscover it every direct /
+        # `alfred chat` turn once PR3 arms a live tool_registry) both saves
+        # the read AND makes the "a synthesized turn never resumes" property
+        # structural instead of an unenforced consequence of how
+        # ``_synthesize_egress_context`` happens to mint its inbound_id
+        # today. Deliberately asymmetric with the journal WRITE, which stays
+        # unconditional: writing rows under a fresh-by-construction identity
+        # is inert (nothing can ever read them back), whereas READING under
+        # an identity that later stopped being fresh would splice a foreign
+        # turn's decided tool calls into this one — the hazardous direction
+        # is the one guarded.
+        forwarded_context = egress_context is not None
         user_input_text = content.content
         user_input_tier = content.tier.name
 
@@ -790,6 +838,7 @@ class Orchestrator:
                 # prefill-continuation bug). Keyed on the GATE RESULT — never on
                 # content comparison.
                 thread_current_user_message=not user_turn_applied,
+                forwarded_context=forwarded_context,
             )
 
             # ── Phase C — Persist: ledger assistant-gate + episodic assistant
@@ -987,6 +1036,7 @@ class Orchestrator:
         user_input_text: str,
         user_input_tier: str,
         thread_current_user_message: bool,
+        forwarded_context: bool,
     ) -> _TurnOutcome:
         # ------------------------------------------------------------------
         # Orient — operator_name is the household OWNER (cached at
@@ -1023,8 +1073,39 @@ class Orchestrator:
         # ------------------------------------------------------------------
         tools = self._tool_registry.definitions() if self._tool_registry is not None else ()
         base_messages = messages  # system + history (built in Orient)
-        local: list[Message] = []  # in-turn tool transcript (EPHEMERAL — never persisted)
-        call_index = 0  # monotonic per-turn dispatch ordinal (threaded to the egress path)
+        # #410 PR2: fast-forward any journalled tool-call prefix for this
+        # inbound_id BEFORE entering the loop. Returns ([], 0, 0) — today's
+        # exact behaviour — whenever no journal exists (always true until
+        # PR3 wires a live tool_registry; even then, true for every
+        # synthesized-context turn and for every FIRST attempt of any
+        # forwarded inbound_id). See that method's docstring for the full
+        # four-case early-return list.
+        local, call_index, start_iteration = await self._fast_forward_journalled_calls(
+            ctx=ctx, user=user, trace_id=trace_id, forwarded_context=forwarded_context
+        )
+        # #410 PR2 (final whole-branch review, finding 1b): the loop below is
+        # `range(start_iteration, MAX_TOOL_ITERATIONS)`. A resume point at or
+        # past the ceiling makes that range EMPTY — no completion runs and the
+        # turn reaches the post-loop code with nothing to answer with. Check
+        # the precondition where the coupling to MAX_TOOL_ITERATIONS actually
+        # lives, so ANY future producer of a bad `start_iteration` (not just
+        # the journal) fails loud here rather than silently no-op-ing a whole
+        # turn. See ReplayIterationCeilingError for why this is guarded
+        # despite being unreachable through today's write side.
+        if start_iteration >= loop_constants.MAX_TOOL_ITERATIONS:
+            _log.error(
+                "orchestrator.replay_iteration_beyond_ceiling",
+                trace_id=trace_id,
+                start_iteration=start_iteration,
+                max_tool_iterations=loop_constants.MAX_TOOL_ITERATIONS,
+            )
+            raise ReplayIterationCeilingError(
+                t(
+                    "orchestrator.tool.resume_iteration_beyond_ceiling",
+                    start=start_iteration,
+                    ceiling=loop_constants.MAX_TOOL_ITERATIONS,
+                )
+            )
         per_turn_spent_usd = 0.0
         pending_completion_cost = 0.0  # this completion's cost until a provider_call row logs it
         # Pyright can't prove the loop body below runs at least once (it only
@@ -1042,11 +1123,21 @@ class Orchestrator:
         final_result_token = "success"  # noqa: S105
         final_exit_reason: str | None = None  # set only on a non-normal exit
 
-        for iteration in range(loop_constants.MAX_TOOL_ITERATIONS):
+        # #410 PR2: resume from the fast-forwarded point (0 in every case
+        # reachable before PR3). The upper bound and every per-iteration
+        # check below (budget, fan-out cap, max-iterations) are UNCHANGED.
+        for iteration in range(start_iteration, loop_constants.MAX_TOOL_ITERATIONS):
             request = CompletionRequest(
                 messages=base_messages + local,
                 tools=tools,
                 tool_choice="auto",
+                # #410 PR2: temperature=0 for tool-bearing turns as
+                # defence-in-depth ON TOP OF the journal (not instead of
+                # it) — a resumed turn should ideally re-derive the
+                # identical plan even before the fast-forward above ever
+                # runs. `tools` is empty until PR3 wires a live registry,
+                # so this is inert (default 0.7) in production today.
+                temperature=0.0 if tools else 0.7,
             )
 
             # --- per-iteration budget pre-check (spec §7) ---
@@ -1063,10 +1154,28 @@ class Orchestrator:
                     )
                 raise
             if would_exceed:
-                if iteration == 0:
-                    # No spend yet — preserve the pre-#339 pre-check contract
-                    # (a budget_pre_check row + a raised BudgetError). Existing
+                if final_response is None:
+                    # No completion has happened in THIS process yet, so there
+                    # is no answer to fall back on — preserve the pre-#339
+                    # pre-check contract (a budget_pre_check row + a raised
+                    # BudgetError). Existing
                     # test_pre_check_refusal_audits_and_raises depends on this.
+                    #
+                    # #410 PR2 (final whole-branch review, finding 1a): this
+                    # was `iteration == 0`. On a NON-resumed turn the two are
+                    # exactly equivalent — the only way to reach iteration 1
+                    # is to have completed iteration 0, which assigns
+                    # `final_response` — so today's reachable behaviour is
+                    # byte-for-byte unchanged. They diverge only once
+                    # `_fast_forward_journalled_calls` can return a
+                    # `start_iteration >= 1`: the resumed turn's FIRST fresh
+                    # attempt is `iteration >= 1` but is still a pre-check
+                    # with nothing completed, and the old test fell through to
+                    # the mid-turn graceful break below, leaving
+                    # `final_response is None` for the post-loop code to trip
+                    # over. Keying on "has any completion landed in this
+                    # process" states the ACTUAL condition the two arms
+                    # discriminate on.
                     await self._audit.append(
                         event="orchestrator.turn",
                         actor_user_id=user.slug,
@@ -1086,7 +1195,8 @@ class Orchestrator:
                     raise BudgetError(
                         f"pre-check refused: estimate ${estimate:.4f} would breach budget"
                     )
-                # Mid-turn (iteration >= 1): end gracefully; the terminal
+                # Mid-turn (a completion already landed this process): end
+                # gracefully on the answer we already have; the terminal
                 # `completed` row records it (FIX-6 — no separate row).
                 final_content = t("orchestrator.tool.budget_exhausted_mid_turn")
                 final_result_token = "budget_blocked"  # noqa: S105
@@ -1244,6 +1354,28 @@ class Orchestrator:
                 # t()'d for consistency with the sibling quarantined_extract
                 # wiring guards above (source_tier_must_be_t3 / no_extractor_wired).
                 raise RuntimeError(t("orchestrator.tool.dispatch_seams_unwired"))
+            if self._replay_journal is not None and response.tool_calls:
+                # #410 PR2: journal the WHOLE iteration's decision as ONE
+                # atomic write, BEFORE dispatching any call in it — so a
+                # crash mid-dispatch still leaves a resume able to
+                # fast-forward the entire iteration, rather than losing the
+                # decision and re-asking a possibly-divergent planner.
+                # Deliberately NOT one append per call inside the dispatch
+                # loop below (a #410 design correction found during the
+                # `/review-plan` fleet's second pass, 2026-08-07): a per-call
+                # write would leave a crash window between journalling call
+                # N and call N+1 of the SAME iteration — see
+                # `ReplayJournal.append_batch`'s docstring (Task 1) for the
+                # full failure mode this closes.
+                await self._replay_journal.append_batch(
+                    adapter_id=ctx.adapter_id,
+                    inbound_id=ctx.inbound_id,
+                    iteration=iteration,
+                    calls=[
+                        (call_index + offset, call)
+                        for offset, call in enumerate(response.tool_calls)
+                    ],
+                )
             for call in response.tool_calls:
                 result_t2 = await dispatch_tool(
                     call,
@@ -1266,9 +1398,28 @@ class Orchestrator:
                     )
                 )
 
-        # final_response is None ONLY on the iteration-0 pre-check raise / provider
-        # failure paths, which do not reach here (they raise). So it is populated
-        # on every path that reaches this point.
+        # Invariant: every path that REACHES this point has assigned
+        # final_response. Three things establish it, and all three are load-
+        # bearing (#410 PR2 final whole-branch review, finding 1 — the
+        # previous wording here claimed the sole no-completion exits were
+        # "the iteration-0 pre-check raise / provider failure", which the
+        # resume path falsified):
+        #   1. Every raising exit (pre-check refusal, BudgetError from the
+        #      estimate, provider failure, UnknownBudgetUserError on charge,
+        #      the unwired-seams guard, a dispatch escalation, a journal
+        #      write failure) leaves the function instead of arriving here.
+        #   2. Every `break` OTHER than the budget pre-check's sits below
+        #      `final_response = response`, so it cannot run before a
+        #      completion landed; the budget pre-check's own break is now
+        #      guarded by `if final_response is None:` taking the RAISE arm
+        #      instead (finding 1a), which is what makes this hold on a
+        #      RESUMED turn whose first fresh attempt is over budget.
+        #   3. The loop body always breaks or raises on its final permitted
+        #      iteration (the `iteration == MAX_TOOL_ITERATIONS - 1` guard),
+        #      so the range is never merely exhausted — and the range is
+        #      never EMPTY either, because `start_iteration >=
+        #      MAX_TOOL_ITERATIONS` raises ReplayIterationCeilingError above
+        #      the loop (finding 1b).
         assert final_response is not None
         answer = final_content if final_content is not None else final_response.content
         return _TurnOutcome(
@@ -1426,3 +1577,151 @@ class Orchestrator:
             inbound_id=trace_id,
             session_id=user.slug,
         )
+
+    async def _fast_forward_journalled_calls(
+        self,
+        *,
+        ctx: TurnEgressContext,
+        user: UserLike,
+        trace_id: str,
+        forwarded_context: bool,
+    ) -> tuple[list[Message], int, int]:
+        """Replay the journalled tool-call prefix for ``ctx.inbound_id``, if any.
+
+        Returns ``(local, call_index, start_iteration)``: the reconstructed
+        ephemeral tool transcript, the next ``call_index`` a fresh dispatch
+        should use, and the iteration the main Act loop should resume from.
+        Returns ``([], 0, 0)`` — behaviourally identical to today — in four
+        cases, checked in this ORDER (each cheaper and more fundamental than
+        the journal read it stands in front of):
+
+        1. ``self._tool_registry is None``. Checked FIRST and
+           unconditionally: this is what makes the whole seam provably
+           dark/no-live-consumer until PR3 — a #410 design correction, found
+           during the `/review-plan` fleet pass, to an earlier draft that
+           only checked ``self._replay_journal is None`` and would have done
+           a real Postgres round-trip on every live comms turn the moment
+           Task 5's boot-graph wiring landed, well before PR3 exists.
+        2. ``forwarded_context`` is ``False`` — ``_run_turn_phases``
+           synthesized ``ctx`` instead of receiving one from a comms
+           adapter, so ``ctx.inbound_id`` is a per-turn ``trace_id`` that BY
+           CONSTRUCTION has never been journalled (the overwhelmingly common
+           case even once tools are live: only a forwarded dispatched-edge
+           replay, ADR-0039, can re-present the same ``inbound_id``). Added
+           by the #410 PR2 final whole-branch review, finding 3; see the
+           comment at the ``forwarded_context`` derivation in
+           ``_run_turn_phases`` for why the READ is guarded on this and the
+           WRITE deliberately is not.
+        3. ``self._replay_journal is None``.
+        4. No journal entries exist for this ``(adapter_id, inbound_id)`` —
+           i.e. this forwarded frame's FIRST attempt, or an attempt that
+           crashed before reaching the tool-dispatch stage.
+
+        Each replayed call goes through the SAME ``dispatch_tool`` the
+        normal path uses — the Spec C egress ledger's existing memoize-and-
+        replay handles the actual dedup for ``ExternalToolSpec`` tools (e.g.
+        web.fetch); this method adds no new dedup logic of its own.
+        ``InternalToolSpec`` tools (e.g. `clock.now`) have NO such
+        protection and re-dispatch for real on every fast-forward — an
+        accepted, documented gap (Task 1's module docstring) since they are
+        side-effect-free by construction. Entries are sorted by
+        ``(iteration, call_index)`` and then grouped by their journalled
+        ``iteration`` — ``read()`` only orders by ``call_index ASC``, and
+        the two are not the same key, so grouping the raw read order would
+        silently split one iteration across two groups the moment they
+        diverge (CodeRabbit review, PR #579, 2026-08-10) — so the
+        reconstructed transcript's assistant-tool_calls / tool-result
+        message SHAPE
+        matches the original run — the reconstructed assistant message's
+        ``content`` is always the empty string, NOT the original model's
+        accompanying text (the journal does not store it — only the tool
+        calls). This is a deliberate, accepted simplification: `local` is
+        purely EPHEMERAL scratch space for the remainder of THIS turn's
+        completions, never persisted to working memory or episodic history,
+        so the wrap-up completion sees a structurally faithful tool-call/
+        tool-result exchange without needing the original prose.
+        """
+        if self._tool_registry is None:
+            return [], 0, 0
+        if not forwarded_context:
+            return [], 0, 0
+        if self._replay_journal is None:
+            return [], 0, 0
+        entries = await self._replay_journal.read(
+            adapter_id=ctx.adapter_id, inbound_id=ctx.inbound_id
+        )
+        if not entries:
+            return [], 0, 0
+        if self._gate is None or self._outbound_dlp is None:
+            # tool_registry is confirmed non-None above; gate/outbound_dlp
+            # unwired alongside it is the SAME construction-time
+            # misconfiguration the main Act loop's dispatch-loop guard
+            # (below, ahead of its own `for call in response.tool_calls:`)
+            # already names.
+            raise RuntimeError(t("orchestrator.tool.dispatch_seams_unwired"))
+        local: list[Message] = []
+        max_iteration = -1
+        # Sort by (iteration, call_index) before grouping: `read()` orders
+        # by `call_index ASC` ONLY, and `groupby` groups CONSECUTIVE keys,
+        # so grouping the raw read order would silently split one iteration
+        # into two assistant messages the moment iterations interleave in
+        # call-index order. Same defensive posture as `entry.call_index`
+        # (commit 360e60a8) and `max(...)` below: read the journalled
+        # values, don't trust a derived ordering (CodeRabbit review, PR
+        # #579, 2026-08-10).
+        ordered_entries = sorted(entries, key=lambda e: (e.iteration, e.call_index))
+        for iteration, group in itertools.groupby(ordered_entries, key=lambda e: e.iteration):
+            group_entries = list(group)
+            calls = tuple(entry.tool_call for entry in group_entries)
+            # content="" — see the docstring above: the journal stores tool
+            # calls only, never the model's accompanying prose. `calls` is a
+            # tuple (not a list) — Message.tool_calls is typed
+            # tuple[ToolCall, ...] (a #410 design correction found during
+            # the `/review-plan` fleet's second pass, 2026-08-07: an earlier
+            # draft passed a list here, which mypy --strict rejects).
+            local.append(Message(role="assistant", content="", tool_calls=calls))
+            for entry in group_entries:
+                # Dispatch using entry.call_index DIRECTLY, not a freshly
+                # re-derived local counter (a #410 design correction found
+                # during the `/review-plan` fleet's second pass, 2026-08-07):
+                # call_index is the sole (with ctx) input to
+                # compute_egress_id, so replay convergence must reproduce
+                # the EXACT call_index the original dispatch used — reading
+                # it straight from the journal makes that self-evidently
+                # true rather than dependent on an unenforced contiguity
+                # invariant on the write side.
+                result_t2 = await dispatch_tool(
+                    entry.tool_call,
+                    entry.call_index,
+                    ctx=ctx,
+                    registry=self._tool_registry,
+                    gate=self._gate,
+                    dlp=self._outbound_dlp,
+                    audit=self._audit,
+                    user_id=user.slug,
+                    correlation_id=trace_id,
+                    language=user.language,
+                )
+                local.append(
+                    Message(
+                        role="tool",
+                        tool_call_id=entry.tool_call.id,
+                        content=_truncate_tool_result(result_t2),
+                    )
+                )
+            # `max(...)`, not a plain assignment (#410 PR2 final whole-branch
+            # review, finding 2): a plain assignment would make the LAST
+            # group's iteration the resume point, which is only the MAXIMUM
+            # while `read()`'s `call_index ASC` ordering happens to coincide
+            # with iteration-ascending order — true today by write-side
+            # construction, but an unenforced invariant rather than a
+            # guarantee. Same defensive posture the fast-forward dispatch
+            # above already takes for `entry.call_index` (commit 360e60a8):
+            # read the journalled value, don't trust a derived ordering.
+            max_iteration = max(max_iteration, iteration)
+        # max(...) over ALL entries, not the last one processed: sorting
+        # groups by iteration does not guarantee the highest call_index also
+        # belongs to the highest iteration once they interleave — same
+        # reasoning as `max_iteration` above.
+        next_call_index = max(entry.call_index for entry in entries) + 1
+        return local, next_call_index, max_iteration + 1
