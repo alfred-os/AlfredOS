@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-09 07:11+0100\n"
+"POT-Creation-Date: 2026-08-09 11:18+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2766,23 +2766,23 @@ msgstr ""
 "quarantined_extractor; the comms inbound trust-boundary funnel is not "
 "wired."
 
-#: src/alfred/orchestrator/core.py:1094
+#: src/alfred/orchestrator/core.py:1091
 msgid "orchestrator.tool.budget_exhausted_mid_turn"
 msgstr "I ran out of budget partway through this request."
 
-#: src/alfred/orchestrator/core.py:1195
+#: src/alfred/orchestrator/core.py:1192
 msgid "orchestrator.tool.budget_overrun_mid_turn"
 msgstr "This request went over budget, so I stopped before running more tools."
 
-#: src/alfred/orchestrator/core.py:1207
+#: src/alfred/orchestrator/core.py:1204
 msgid "orchestrator.tool.too_many_tool_calls"
 msgstr "That request needed too many tools at once, so I stopped for safety."
 
-#: src/alfred/orchestrator/core.py:1221
+#: src/alfred/orchestrator/core.py:1218
 msgid "orchestrator.tool.max_iterations_reached"
 msgstr "I reached the limit on tool steps for this request without finishing it."
 
-#: src/alfred/orchestrator/core.py:1249
+#: src/alfred/orchestrator/core.py:1246
 msgid "orchestrator.tool.dispatch_seams_unwired"
 msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "
