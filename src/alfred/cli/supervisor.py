@@ -372,19 +372,38 @@ def _resolve_database_url() -> str:
 def _control_engine() -> Engine:
     """One CLI-invocation-lifetime sync engine, explicit CONTROL pool shape.
 
-    #410 PR1 / ADR-0062: pins pool_size 5 + max_overflow 10 — the same
-    named numbers as ``alfred.memory.db._CONTROL_POOL_SIZE`` /
-    ``_CONTROL_MAX_OVERFLOW`` and the ``_bootstrap`` sync identity-resolver
-    engine — so no engine anywhere in the codebase carries an
-    unconfigured-default pool (the mistake #410 started from). Short-lived
-    by contract: every caller disposes in a ``finally``; the explicit shape
-    is about the budget arithmetic staying honest, not throughput. No
-    idle-in-transaction bound, per the CONTROL role's human-scale semantics.
+    #410 PR1 / ADR-0062: pins the SAME named constants
+    ``alfred.memory.db._CONTROL_POOL_SIZE`` / ``_CONTROL_MAX_OVERFLOW`` the
+    ``_bootstrap`` sync identity-resolver engine also imports (#410 PR1
+    final review M-4 — this shape was previously a repeated literal, not an
+    import, at both sites) — so no CLI-tool engine carries an
+    unconfigured-default pool (the mistake #410 started from), and a future
+    change to the CONTROL shape can't silently desynchronize the two. This
+    does not close the class: the capability gate's ``PostgresBackend(dsn=...)``
+    construction branch (``security/capability_gate/backend.py``) still
+    builds a bare ``create_async_engine(dsn, echo=False)`` with no pool
+    kwargs at all — unreachable in production today (only a unit test
+    exercises that branch; the real ``_gate_boot.py`` boot site always
+    supplies ``session_factory=``) but present, so "no engine anywhere"
+    would overclaim. Short-lived by contract: every caller disposes in a
+    ``finally``; the explicit shape is about the budget arithmetic staying
+    honest, not throughput. No idle-in-transaction bound, per the CONTROL
+    role's human-scale semantics.
+
+    perf-001 (``tests/unit/cli/test_main_lazy_imports.py``): the constants
+    import is LOCAL to this function, not module-top — ``alfred.memory.db``
+    is a pinned-forbidden prefix on the ``alfred --help`` path (it drags in
+    the async session-scope factory + SQLAlchemy async engine chain), and
+    this module's ``supervisor_app`` is registered at ``main.py`` module-top,
+    so a module-top import here would leak that chain onto every CLI
+    invocation, not just ``alfred supervisor ...``.
     """
+    from alfred.memory.db import _CONTROL_MAX_OVERFLOW, _CONTROL_POOL_SIZE
+
     return create_engine(
         _resolve_database_url(),
-        pool_size=5,
-        max_overflow=10,
+        pool_size=_CONTROL_POOL_SIZE,
+        max_overflow=_CONTROL_MAX_OVERFLOW,
         pool_pre_ping=True,
     )
 

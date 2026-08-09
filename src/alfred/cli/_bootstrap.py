@@ -41,7 +41,13 @@ from alfred.identity import (
     InProcessTokenBucketRateLimiter,
 )
 from alfred.identity.cli import install_factories as install_identity_factories
-from alfred.memory.db import ConnectionRole, build_session_scope
+from alfred.memory.db import (
+    _CONTROL_MAX_OVERFLOW,
+    _CONTROL_POOL_SIZE,
+    _POOL_RECYCLE_SECONDS,
+    ConnectionRole,
+    build_session_scope,
+)
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.turn_side_effects import PostgresTurnSideEffectLedger
 from alfred.memory.working_pool import WorkingMemoryPool
@@ -230,22 +236,25 @@ def install_identity_factories_for_settings(settings: Settings) -> IdentityResol
     # ``future=True`` was the SQLAlchemy 1.4→2.0 migration flag — accepted
     # but a no-op on 2.0+. Drop it to keep the call sites readable.
     # #410 PR1 / ADR-0062: pin the sync resolver engine's pool EXPLICITLY to
-    # the stock CONTROL-tier shape (pool_size 5 + max_overflow 10) so its
-    # budget usage is a NAMED number in settings.py's
-    # DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET arithmetic, not an
-    # unconfigured default-by-accident (the exact mistake #410 started from).
-    # pool_recycle mirrors alfred.memory.db._POOL_RECYCLE_SECONDS and is
-    # REQUIRED here, not optional (pass-2 finding mem-p2-002): this engine
-    # lives for the whole daemon process, and — per db.py's own rationale —
-    # a long-lived process otherwise accumulates server-side-stale
-    # connections across Postgres restarts that pool_pre_ping alone detects
-    # one checkout too late.
+    # the stock CONTROL-tier shape — the SAME named constants
+    # ``alfred.memory.db._CONTROL_POOL_SIZE`` / ``_CONTROL_MAX_OVERFLOW`` /
+    # ``_POOL_RECYCLE_SECONDS`` that role's engines use — so its budget usage
+    # is a NAMED number in settings.py's DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET
+    # arithmetic, not an unconfigured default-by-accident (the exact mistake
+    # #410 started from), AND so a future change to the CONTROL shape cannot
+    # silently desynchronize this engine from the others (#410 PR1 final
+    # review M-4 — this literal was previously repeated, not imported, in
+    # three places). ``pool_recycle`` is REQUIRED here, not optional (pass-2
+    # finding mem-p2-002): this engine lives for the whole daemon process,
+    # and — per db.py's own rationale — a long-lived process otherwise
+    # accumulates server-side-stale connections across Postgres restarts
+    # that pool_pre_ping alone detects one checkout too late.
     sync_engine = create_engine(
         sync_db_url(settings),
-        pool_size=5,
-        max_overflow=10,
+        pool_size=_CONTROL_POOL_SIZE,
+        max_overflow=_CONTROL_MAX_OVERFLOW,
         pool_pre_ping=True,
-        pool_recycle=1800,
+        pool_recycle=_POOL_RECYCLE_SECONDS,
     )
     sync_factory: sessionmaker = sessionmaker(  # type: ignore[type-arg]  # reason: SA 2.0 sessionmaker has runtime-generic shape; the Session-bound form is what IdentityResolver expects and what we pass here
         sync_engine, expire_on_commit=False
