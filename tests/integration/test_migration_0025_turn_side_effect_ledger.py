@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
-
-import pytest
 
 pytestmark = pytest.mark.integration
 
@@ -20,7 +19,9 @@ def alembic_cfg(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> AlembicCo
     return cfg
 
 
-def test_upgrade_creates_table_with_expected_columns(alembic_cfg: AlembicConfig, postgres_url: str) -> None:
+def test_upgrade_creates_table_with_expected_columns(
+    alembic_cfg: AlembicConfig, postgres_url: str
+) -> None:
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
     command.upgrade(alembic_cfg, "head")
 
@@ -50,7 +51,8 @@ def test_columns_default_false(alembic_cfg: AlembicConfig, postgres_url: str) ->
         with engine.begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO turn_side_effect_ledger (adapter_id, inbound_id, user_turn_applied) "
+                    "INSERT INTO turn_side_effect_ledger "
+                    "(adapter_id, inbound_id, user_turn_applied) "
                     "VALUES ('discord', 'probe-1', TRUE)"
                 )
             )
@@ -65,7 +67,9 @@ def test_columns_default_false(alembic_cfg: AlembicConfig, postgres_url: str) ->
         engine.dispose()
 
 
-def test_composite_key_namespaces_are_isolated(alembic_cfg: AlembicConfig, postgres_url: str) -> None:
+def test_composite_key_namespaces_are_isolated(
+    alembic_cfg: AlembicConfig, postgres_url: str
+) -> None:
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
     command.upgrade(alembic_cfg, "head")
 
@@ -75,7 +79,8 @@ def test_composite_key_namespaces_are_isolated(alembic_cfg: AlembicConfig, postg
             # Two DIFFERENT adapters minting the SAME inbound_id string must not collide.
             conn.execute(
                 text(
-                    "INSERT INTO turn_side_effect_ledger (adapter_id, inbound_id, user_turn_applied) "
+                    "INSERT INTO turn_side_effect_ledger "
+                    "(adapter_id, inbound_id, user_turn_applied) "
                     "VALUES ('discord', 'shared-id', TRUE), ('tui', 'shared-id', FALSE)"
                 )
             )
