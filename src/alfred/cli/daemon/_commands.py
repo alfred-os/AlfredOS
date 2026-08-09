@@ -6,7 +6,13 @@ The boot sequence (core-007 closure — probes at the CLI layer, NOT inside
 1. ``load_settings_or_die()`` — build the boot AuditWriter FIRST (sec-001),
    then resolve the mandatory three-layer ``environment`` (ADR-0053). On a
    missing/invalid environment, emit ``DAEMON_BOOT_FAILED_FIELDS`` and exit
-   2 — never a silent failure (CLAUDE.md hard rule 7).
+   2 — never a silent failure (CLAUDE.md hard rule 7). Once ``Settings``
+   resolves, the pre-Settings writer's default-tuned engine is disposed and
+   the writer is rebuilt over a real settings-derived, role-scoped session
+   scope (#410 PR1 final review I-1) — otherwise the engine registry's
+   first-construction-wins contract (``memory/db.py``) would pin the whole
+   process's SIDE_EFFECT pool to unconfigured defaults, silently discarding
+   operator pool tuning.
 2. Emit the ``daemon.boot.environment_source_conflict`` audit row if the
    env-var and ``/etc/alfred/environment`` disagree (the env-var wins).
 3. Unsandboxed-in-production refusal (sec-002 — truthy-env parsing).
@@ -152,7 +158,7 @@ from alfred.i18n import t
 # comms-enabled boot with no (or a corrupt multi-operator) seeded identity refuses
 # audited (exit 2) instead of crashing uncaught (#368 anti-pattern).
 from alfred.identity.errors import IdentityResolutionError
-from alfred.memory.db import ConnectionRole
+from alfred.memory.db import ConnectionRole, dispose_all_engines
 from alfred.observability.core_metrics import build_core_registry
 from alfred.observability.metrics_server import (
     CORE_METRICS_DEFAULT_PORT,
@@ -513,9 +519,9 @@ def _bootstrap_settings_message(exc: SettingsError) -> str:
 def _start_core_metrics_server(boot_id: str) -> None:
     """Serve the core /metrics over the curated registry (loud-and-continue). Monkeypatchable seam.
 
-    Importing ``alfred.observability.core_metrics`` registers the ten core families on the
-    default registry as a side effect; the five UNLABELED families (incl.
-    ``alfred_quarantine_capability_revoked_total``) read 0 from t=0, while the five LABELED
+    Importing ``alfred.observability.core_metrics`` registers the twelve core families on the
+    default registry as a side effect; the six UNLABELED families (incl.
+    ``alfred_quarantine_capability_revoked_total``) read 0 from t=0, while the six LABELED
     families expose their family metadata immediately but materialize no child series until the
     first ``.labels(...)`` call (rev.1 core-006). ``start_http_server`` spawns a detached daemon
     thread binding a real socket — invisible to the #472 teardown ``finally``, which only tracks
@@ -707,6 +713,33 @@ async def _start_async() -> None:
             boot_id=boot_id,
             environment_source=exc.source,
         )
+
+    # I-1 (#410 PR1 final review): rebuild the audit writer's engine now that
+    # Settings has resolved. The pre-Settings writer above (sec-001 — "audit
+    # before environment check") built its SIDE_EFFECT engine from
+    # ``fallback_database_url()`` with NO ``tuning=`` (``DbPoolTuning()``
+    # defaults), because ``Settings`` cannot exist yet at that point.
+    # ``memory.db``'s engine registry is keyed by ``(dsn, role)`` and the
+    # FIRST construction for a key wins its pool parameters — and
+    # ``fallback_database_url()`` resolves to the exact same DSN
+    # ``settings.database_url`` will. Left alone, that eager default-tuned
+    # engine would become the ONE cached SIDE_EFFECT engine for the rest of
+    # the process: every later ``build_boot_session_scope(settings)`` call
+    # (the comms boot graph's ``audit_session_scope``, pool/idempotency
+    # stores, this very probe-(c) handshake scope below) would be a cache
+    # HIT on it, silently discarding operator overrides of
+    # ``ALFRED_DB_SIDE_POOL_MAX_CONNECTIONS`` /
+    # ``ALFRED_DB_POOL_CHECKOUT_TIMEOUT_SECONDS`` /
+    # ``ALFRED_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS``. Dispose the interim
+    # engine and rebuild the writer over the real, settings-derived,
+    # role-scoped scope BEFORE anything else can acquire a SIDE_EFFECT
+    # session under the stale key — safe to do unconditionally here because
+    # nothing on this success path has used ``audit`` yet (only the
+    # except-arms above do, and each of those exits via ``_refuse_boot``
+    # before reaching this line), so ``_ENGINES`` holds at most the one
+    # entry this dispose is targeting.
+    await dispose_all_engines()
+    audit = build_boot_audit_writer(session_scope_factory=build_boot_session_scope(settings))
 
     # #470 (mirrors the gateway's G6-0 pre-relay call site,
     # cli/gateway/_commands.py:288-291): stand up the core Prometheus exposition now
