@@ -530,7 +530,7 @@ git commit -m "feat(memory): deterministic tool-call replay journal store (#410 
 - Modify: `src/alfred/memory/models.py` — add the `ToolCallJournalRow` schema-definition-only ORM twin (Step 3b; found missing during a second `/review-plan` pass, 2026-08-09 — every sibling ledger table has one, `tool_call_journal` was the only one that didn't)
 - Test: `tests/integration/test_migration_0026_tool_call_journal.py`
 
-**Known gap, accepted for this PR** — mirroring PR1 Task 2's identical callout for `turn_side_effect_ledger` (found during `/review-plan`, and again flagged for symmetry during the fleet's second pass, 2026-08-07): this table ships with no retention index or pruning story either — it grows one row per journalled tool call forever, and stores attacker-influenced tool-call-argument JSON up to 256 KB/row (Task 1). Not yet filed as a tracked GitHub issue; both this table and PR1's ledger should be addressed together (e.g. a shared prune-on-`commit_once` sweep) rather than solved twice independently. See PR1 Task 2 for the fuller note and the follow-up issue this PR should also cross-reference once filed.
+**Known gap, accepted for this PR** — mirroring PR1 Task 2's identical callout for `turn_side_effect_ledger` (found during `/review-plan`, and again flagged for symmetry during the fleet's second pass, 2026-08-07): this table ships with no retention index or pruning story either — it grows one row per journalled tool call forever, and stores attacker-influenced tool-call-argument JSON up to 256 KB/row (Task 1). Tracked as [#581](https://github.com/alfred-os/AlfredOS/issues/581), which also covers PR1's identical gap on `turn_side_effect_ledger` — both tables should be addressed together (e.g. a shared prune-on-`commit_once` sweep) rather than solved twice independently.
 
 - [ ] **Step 1: Write the failing migration round-trip test**
 
@@ -1501,6 +1501,59 @@ class TestReplayJournalFastForward:
         reply = await _drive_turn(orch, egress_context=_forwarded_egress_context())
         assert reply == "handled the refusal"
         assert dispatched_results == [t("orchestrator.tool.unknown_tool", tool="retired.tool")]
+
+    async def test_fast_forward_of_a_registry_dropped_tool_uses_the_real_dispatch_path(
+        self, monkeypatch: Any
+    ) -> None:
+        """CodeRabbit review, PR #579 (2026-08-10).
+
+        The test above proves the fast-forward path surfaces whatever
+        `dispatch_tool` returns without crashing or dropping it, but its
+        `_fake_dispatch` ignores every kwarg — it does not prove the
+        fast-forward call site actually threads the CURRENT
+        `self._tool_registry` into the real `dispatch_tool`, which is
+        the thing that makes registry drift resolvable at all. This test
+        does not monkeypatch `dispatch_tool`: it drives the real
+        chokepoint (already unit-tested in isolation by
+        `test_tool_dispatch.py::test_unknown_tool_recoverable_and_audited`)
+        through the fast-forward wiring, with a registry that no longer
+        advertises the journalled tool — `spec is None` resolves before
+        `gate`/`dlp` are ever touched, so the fixture's plain
+        `MagicMock()` gate/dlp are never exercised on this path.
+
+        A real (not `_fake_registry`) empty `ToolRegistry` is required
+        here: `_fake_registry` is a bare `MagicMock` whose unconfigured
+        `.get()` returns a truthy `MagicMock` for ANY name — it would
+        make `retired.tool` resolve as a false "known" tool the instant
+        the real `dispatch_tool` calls `registry.get(call.name)`,
+        defeating the whole point of this test.
+        """
+        journalled_call = ToolCall(id="tc-1", name="retired.tool", arguments={})
+        journal = MagicMock()
+        journal.read = AsyncMock(
+            return_value=(JournalEntry(call_index=0, iteration=0, tool_call=journalled_call),)
+        )
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=_text_response("handled the refusal"))
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            # A real, empty registry — "retired.tool" is genuinely absent,
+            # so the real dispatch_tool resolves this to its unknown_tool
+            # refusal.
+            tool_registry=ToolRegistry([]),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+            replay_journal=journal,
+        )
+        reply = await _drive_turn(orch, egress_context=_forwarded_egress_context())
+        assert reply == "handled the refusal"
+        sent_request = router.complete.await_args_list[0].args[0]
+        tool_result_msgs = [msg for msg in sent_request.messages if msg.role == "tool"]
+        assert len(tool_result_msgs) == 1
+        assert tool_result_msgs[0].content == t(
+            "orchestrator.tool.unknown_tool", tool="retired.tool"
+        )
 ```
 
 - [ ] **Step 3: Run to verify they fail**
@@ -2107,9 +2160,10 @@ name.
   sole authority on "did this already happen."
 - Negative: `tool_call_journal` grows without a retention/pruning story in
   this PR — a committed frame never resumes again, so pruning on
-  `commit_once` is the natural follow-up, tracked but not built here.
-- Negative (accepted, tracked): `InternalToolSpec` tools have no dedup
-  protection on replay at all (see above) — safe only by the
+  `commit_once` is the natural follow-up. Tracked as
+  [#581](https://github.com/alfred-os/AlfredOS/issues/581), not built here.
+- Negative (accepted, **not tracked by an issue**): `InternalToolSpec` tools
+  have no dedup protection on replay at all (see above) — safe only by the
   side-effect-free convention, not an enforced guarantee.
 
 ## Alternatives considered
