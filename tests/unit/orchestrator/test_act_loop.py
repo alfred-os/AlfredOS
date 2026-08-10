@@ -758,6 +758,34 @@ class TestReplayJournalFastForward:
         journal.read.assert_awaited_once()
         journal.append_batch.assert_not_called()  # no tool_use in this fixture's response
 
+    async def test_missing_replay_journal_with_registry_wired_returns_cleanly(
+        self, monkeypatch: Any
+    ) -> None:
+        """review-pr fleet, 2026-08-10.
+
+        `_fast_forward_journalled_calls` has 4 ordered early-return guards;
+        the other three each have an isolated pin elsewhere in this class —
+        this is guard 3's (``self._replay_journal is None``). Constructs an
+        orchestrator with ``tool_registry`` wired (guard 1 passes) and NO
+        ``replay_journal`` at all — a real partial-wiring state, distinct
+        from every other fast-forward test in this class, which always
+        wires a ``MagicMock`` journal — driving a FORWARDED turn (guard 2
+        passes) to pin that guard 3 returns ``([], 0, 0)`` cleanly rather
+        than raising ``AttributeError`` on ``self._replay_journal.read(...)``.
+        """
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=_text_response("no journal, no crash"))
+        orch = _make_orchestrator(
+            router=router,
+            budget=_make_no_op_budget(),
+            tool_registry=_fake_registry("clock.now"),
+            gate=MagicMock(),
+            outbound_dlp=MagicMock(),
+            # replay_journal intentionally omitted -> defaults to None.
+        )
+        reply = await _drive_turn(orch, egress_context=_forwarded_egress_context())
+        assert reply == "no journal, no crash"
+
     async def test_synthesized_context_never_reads_the_journal(self, monkeypatch: Any) -> None:
         """#410 PR2 final whole-branch review, finding 3.
 
