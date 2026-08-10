@@ -423,7 +423,23 @@ def test_dynamic_result_sites_are_documented() -> None:
             # SQLAlchemy/asyncpg exceptions can embed the DSN), keeping only
             # `error_type`; both edits are ABOVE this point in the file —
             # the site itself is unaffected.
-            "src/alfred/orchestrator/core.py:1181",
+            # #410 PR2 Task 4 shifted it again (1181 -> 1205, net +24): the
+            # Act loop now writes and reads the tool_call_journal table,
+            # adding new logic between the loop start and this dynamic site —
+            # the site itself is unaffected (still `result=charge_result if ...
+            # else "success"`).
+            # The #410 PR2 final whole-branch review's fix wave shifted it
+            # again (1205 -> 1291, net +86): the ReplayIterationCeilingError
+            # class + its docstring, the `forwarded_context` derivation and
+            # its rationale comment, the pre-loop `start_iteration` ceiling
+            # guard, and the reworded budget-pre-check arm all land ABOVE this
+            # point in the file — the site itself is unaffected (still
+            # `result=charge_result if ... else "success"`). The #410 PR2
+            # review-pr fleet's second CodeRabbit pass (2026-08-10) shifted
+            # it again (1291 -> 1302, net +11): the ADR-referenced
+            # CompletionRequest split (dropping the duplicated `temperature`
+            # default) lands ABOVE this point — the site itself is unaffected.
+            "src/alfred/orchestrator/core.py:1302",
             # #339 PR3 task 2 — the NEW terminal `completed` row forwards
             # final_result_token, a closed-vocab local (success/budget_blocked/
             # budget_overrun/refused, all in-domain). Task 3 added
@@ -475,7 +491,25 @@ def test_dynamic_result_sites_are_documented() -> None:
             # security-finding removal of the raw `error=str(exc))` field
             # from both commit-failure log sinks) — both edits are ABOVE
             # this point in the file; the site itself is unaffected.
-            "src/alfred/orchestrator/core.py:1360",
+            # #410 PR2 Task 4 shifted it again (1360 -> 1406, net +46): the
+            # Act loop now writes and reads the tool_call_journal table,
+            # adding new logic between the loop start and this dynamic site —
+            # the site itself is unaffected (still `result=outcome.final_result_token`).
+            # The #410 PR2 final whole-branch review's fix wave shifted it
+            # again (1406 -> 1504, net +98): the same four edits named at the
+            # :1302 site above, PLUS the expanded post-loop
+            # `assert final_response is not None` invariant comment (which
+            # sits between the two sites), MINUS the #410 PR2 review-pr fleet
+            # DRY extraction (2026-08-10) of `_dispatch_and_wrap_tool_call`,
+            # which removed net lines ahead of this site — the site itself
+            # is unaffected (still `result=outcome.final_result_token`). The
+            # #410 PR2 review-pr fleet's second CodeRabbit pass (2026-08-10)
+            # shifted it again (1504 -> 1521, net +17): the assert-to-raise
+            # conversion for this SAME invariant (now an explicit
+            # `if final_response is None: raise RuntimeError(...)` a few
+            # lines above this site, replacing a bare `assert`) plus the
+            # `temperature` split above it — the site itself is unaffected.
+            "src/alfred/orchestrator/core.py:1521",
             # #339 PR2 — dispatch_tool._audit forwards its result= param; the
             # reachable values are the closed-vocab literals "success" /
             # "refused" / "quarantined" / "rate_limited" / "fault", all already
