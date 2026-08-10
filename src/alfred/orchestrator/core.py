@@ -113,7 +113,7 @@ from alfred.memory.working import WorkingMemory
 from alfred.orchestrator import loop_constants
 from alfred.orchestrator.tool_dispatch import dispatch_tool
 from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
-from alfred.providers.base import CompletionRequest, CompletionResponse, Message
+from alfred.providers.base import CompletionRequest, CompletionResponse, Message, ToolCall
 from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T1, T2, TaggedContent
 from alfred.supervisor.breaker import invoke_supervisor_action_timeout_hookpoint
@@ -1377,26 +1377,19 @@ class Orchestrator:
                     ],
                 )
             for call in response.tool_calls:
-                result_t2 = await dispatch_tool(
-                    call,
-                    call_index,
-                    ctx=ctx,
-                    registry=self._tool_registry,
-                    gate=self._gate,
-                    dlp=self._outbound_dlp,
-                    audit=self._audit,
-                    user_id=user.slug,
-                    correlation_id=trace_id,
-                    language=user.language,
-                )
-                call_index += 1
                 local.append(
-                    Message(
-                        role="tool",
-                        tool_call_id=call.id,
-                        content=_truncate_tool_result(result_t2),
+                    await self._dispatch_and_wrap_tool_call(
+                        call,
+                        call_index,
+                        ctx=ctx,
+                        registry=self._tool_registry,
+                        gate=self._gate,
+                        dlp=self._outbound_dlp,
+                        user=user,
+                        trace_id=trace_id,
                     )
                 )
+                call_index += 1
 
         # Invariant: every path that REACHES this point has assigned
         # final_response. Three things establish it, and all three are load-
@@ -1578,6 +1571,48 @@ class Orchestrator:
             session_id=user.slug,
         )
 
+    async def _dispatch_and_wrap_tool_call(
+        self,
+        tool_call: ToolCall,
+        call_index: int,
+        *,
+        ctx: TurnEgressContext,
+        registry: ToolRegistry,
+        gate: CapabilityGate,
+        dlp: OutboundDlpProtocol,
+        user: UserLike,
+        trace_id: str,
+    ) -> Message:
+        """Dispatch one tool call through the chokepoint and wrap its T2 result.
+
+        Shared by the live Act loop's dispatch loop and
+        ``_fast_forward_journalled_calls``'s replay loop (#410 PR2 review-pr
+        fleet, 2026-08-10) — both routed every call through the identical
+        ``dispatch_tool`` kwargs and ``Message(role="tool", ...)``
+        construction, hand-duplicated at two call sites. ``registry``/
+        ``gate``/``dlp`` are taken as already-narrowed non-``None``
+        parameters, not read off ``self`` here: both call sites already
+        raise on a ``None`` seam immediately before calling this helper, and
+        mypy cannot see that narrowing across a method boundary.
+        """
+        result_t2 = await dispatch_tool(
+            tool_call,
+            call_index,
+            ctx=ctx,
+            registry=registry,
+            gate=gate,
+            dlp=dlp,
+            audit=self._audit,
+            user_id=user.slug,
+            correlation_id=trace_id,
+            language=user.language,
+        )
+        return Message(
+            role="tool",
+            tool_call_id=tool_call.id,
+            content=_truncate_tool_result(result_t2),
+        )
+
     async def _fast_forward_journalled_calls(
         self,
         *,
@@ -1690,23 +1725,16 @@ class Orchestrator:
                 # it straight from the journal makes that self-evidently
                 # true rather than dependent on an unenforced contiguity
                 # invariant on the write side.
-                result_t2 = await dispatch_tool(
-                    entry.tool_call,
-                    entry.call_index,
-                    ctx=ctx,
-                    registry=self._tool_registry,
-                    gate=self._gate,
-                    dlp=self._outbound_dlp,
-                    audit=self._audit,
-                    user_id=user.slug,
-                    correlation_id=trace_id,
-                    language=user.language,
-                )
                 local.append(
-                    Message(
-                        role="tool",
-                        tool_call_id=entry.tool_call.id,
-                        content=_truncate_tool_result(result_t2),
+                    await self._dispatch_and_wrap_tool_call(
+                        entry.tool_call,
+                        entry.call_index,
+                        ctx=ctx,
+                        registry=self._tool_registry,
+                        gate=self._gate,
+                        dlp=self._outbound_dlp,
+                        user=user,
+                        trace_id=trace_id,
                     )
                 )
             # `max(...)`, not a plain assignment (#410 PR2 final whole-branch
