@@ -49,7 +49,7 @@ match the shipped names.
 
 **Interfaces:**
 
-- Produces: `ReplayJournal` (Protocol), `PostgresReplayJournal` (impl), `JournalEntry` (frozen dataclass: `call_index: int`, `iteration: int`, `tool_call: ToolCall`). `async def append_batch(self, *, adapter_id: str, inbound_id: str, iteration: int, calls: Sequence[tuple[int, ToolCall]]) -> None` — durably records an ENTIRE iteration's tool-dispatch decisions (`calls` is `(call_index, ToolCall)` pairs) as ONE atomic multi-row write, before any of them is dispatched (**not** a single-call `append`, and **not** one write per call — a #410 design correction found during the `/review-plan` fleet's second pass, 2026-08-07: see Task 4 Step 6 for why per-call journalling left a silent-data-loss window on crash). `async def read(self, *, adapter_id: str, inbound_id: str) -> tuple[JournalEntry, ...]` — returns entries ordered by `call_index` ascending, `()` if none exist. **Composite `(adapter_id, inbound_id, call_index)` key** — same rationale as PR1's `TurnSideEffectLedger`: `inbound_id` is a free-form, per-adapter-minted opaque string (found during `/review-plan`, matching the sibling `inbound_idempotency`/`forwarded_dispatch_attempts` composite-key precedent).
+- Produces: `ReplayJournal` (Protocol), `PostgresReplayJournal` (impl), `JournalEntry` (frozen dataclass: `call_index: int`, `iteration: int`, `tool_call: ToolCall`). `async def append_batch(self, *, adapter_id: str, inbound_id: str, iteration: int, calls: Sequence[tuple[int, ToolCall]]) -> None` — durably records an ENTIRE iteration's tool-dispatch decisions (`calls` is `(call_index, ToolCall)` pairs) as ONE atomic multi-row write, before any of them is dispatched (**not** a single-call `append`, and **not** one write per call — a #410 design correction found during the `/review-plan` fleet's second pass, 2026-08-07: see Task 4 Step 6 for why per-call journaling left a silent-data-loss window on crash). `async def read(self, *, adapter_id: str, inbound_id: str) -> tuple[JournalEntry, ...]` — returns entries ordered by `call_index` ascending, `()` if none exist. **Composite `(adapter_id, inbound_id, call_index)` key** — same rationale as PR1's `TurnSideEffectLedger`: `inbound_id` is a free-form, per-adapter-minted opaque string (found during `/review-plan`, matching the sibling `inbound_idempotency`/`forwarded_dispatch_attempts` composite-key precedent).
 
 - [ ] **Step 1: Write the failing unit tests**
 
@@ -420,7 +420,7 @@ class ReplayJournal(Protocol):
         commit in ONE transaction. Deliberately NOT a single-call primitive
         (a #410 design correction found during the `/review-plan` fleet's
         second pass, 2026-08-07): a per-call write would leave a crash
-        window between journalling call N and call N+1 of the SAME
+        window between journaling call N and call N+1 of the SAME
         iteration, after which a resume's fast-forward — which groups
         entries by iteration and assumes each group is COMPLETE — would
         silently believe the iteration only ever requested N calls,
@@ -1386,10 +1386,18 @@ class TestReplayJournalFastForward:
         to prove the journal write already landed durably BEFORE the crash.
         This is the PR's central crash-safety claim; simulate the SECOND of
         two calls in one iteration raising.
+
+        `events` (review-pr fleet, 2026-08-10): `journal.append_batch.
+        assert_awaited_once()` and `dispatched == ["c0", "c1"]` alone do NOT
+        prove ordering — both would still pass if the journal write landed
+        BETWEEN c0 and c1's dispatch rather than before either (the mocks
+        don't observe each other's timing). Recording both operations into
+        one shared list and asserting its exact order closes that gap.
         """
         journal = MagicMock()
         journal.read = AsyncMock(return_value=())
-        journal.append_batch = AsyncMock()
+        events: list[str] = []
+        journal.append_batch = AsyncMock(side_effect=lambda **_: events.append("journal"))
         r0 = _tool_use_response(
             ToolCall(id="c0", name="clock.now", arguments={}),
             ToolCall(id="c1", name="clock.now", arguments={}),
@@ -1399,6 +1407,7 @@ class TestReplayJournalFastForward:
         dispatched: list[str] = []
 
         async def _fake_dispatch(call: ToolCall, call_index: int, **kw: Any) -> str:
+            events.append(f"dispatch:{call.id}")
             dispatched.append(call.id)
             if call.id == "c1":
                 raise RuntimeError("simulated crash mid-dispatch")
@@ -1422,6 +1431,7 @@ class TestReplayJournalFastForward:
         journal.append_batch.assert_awaited_once()
         batch_kwargs = journal.append_batch.await_args.kwargs
         assert [call.id for _idx, call in batch_kwargs["calls"]] == ["c0", "c1"]
+        assert events == ["journal", "dispatch:c0", "dispatch:c1"]
         assert dispatched == ["c0", "c1"]
 
     async def test_fast_forward_propagates_an_escalation_exception_from_dispatch(
@@ -1490,9 +1500,12 @@ class TestReplayJournalFastForward:
             router=router,
             budget=_make_no_op_budget(),
             # The registry no longer advertises "retired.tool" — the
-            # fast-forward path dispatches it anyway (from the journalled
-            # ToolCall directly, not a fresh registry lookup), matching
-            # dispatch_tool's own unknown_tool resolution.
+            # fast-forward path dispatches it anyway, from the journalled
+            # ToolCall directly rather than a fresh PLANNER decision
+            # (review-pr fleet, 2026-08-10: dispatch_tool still performs its
+            # OWN real registry.get() lookup on every call, live or
+            # replayed — nothing here skips that), matching dispatch_tool's
+            # own unknown_tool resolution.
             tool_registry=_fake_registry("clock.now"),
             gate=MagicMock(),
             outbound_dlp=MagicMock(),
@@ -1757,7 +1770,7 @@ with:
                 # Deliberately NOT one append per call inside the dispatch
                 # loop below (a #410 design correction found during the
                 # `/review-plan` fleet's second pass, 2026-08-07): a per-call
-                # write would leave a crash window between journalling call
+                # write would leave a crash window between journaling call
                 # N and call N+1 of the SAME iteration — see
                 # `ReplayJournal.append_batch`'s docstring (Task 1) for the
                 # full failure mode this closes.
