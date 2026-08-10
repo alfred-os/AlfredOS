@@ -1127,17 +1127,28 @@ class Orchestrator:
         # reachable before PR3). The upper bound and every per-iteration
         # check below (budget, fan-out cap, max-iterations) are UNCHANGED.
         for iteration in range(start_iteration, loop_constants.MAX_TOOL_ITERATIONS):
-            request = CompletionRequest(
-                messages=base_messages + local,
-                tools=tools,
-                tool_choice="auto",
-                # #410 PR2: temperature=0 for tool-bearing turns as
-                # defence-in-depth ON TOP OF the journal (not instead of
-                # it) — a resumed turn should ideally re-derive the
-                # identical plan even before the fast-forward above ever
-                # runs. `tools` is empty until PR3 wires a live registry,
-                # so this is inert (default 0.7) in production today.
-                temperature=0.0 if tools else 0.7,
+            # #410 PR2: temperature=0 for tool-bearing turns as defence-in-
+            # depth ON TOP OF the journal (not instead of it) — a resumed
+            # turn should ideally re-derive the identical plan even before
+            # the fast-forward above ever runs. `tools` is empty until PR3
+            # wires a live registry, so this is inert in production today.
+            # Omit the kwarg entirely rather than duplicating
+            # CompletionRequest's own `temperature: float = 0.7` default
+            # (review-pr fleet, 2026-08-10) — keeps that default the sole
+            # source of truth for the no-tools case.
+            request = (
+                CompletionRequest(
+                    messages=base_messages + local,
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=0.0,
+                )
+                if tools
+                else CompletionRequest(
+                    messages=base_messages + local,
+                    tools=tools,
+                    tool_choice="auto",
+                )
             )
 
             # --- per-iteration budget pre-check (spec §7) ---
@@ -1363,7 +1374,7 @@ class Orchestrator:
                 # Deliberately NOT one append per call inside the dispatch
                 # loop below (a #410 design correction found during the
                 # `/review-plan` fleet's second pass, 2026-08-07): a per-call
-                # write would leave a crash window between journalling call
+                # write would leave a crash window between journaling call
                 # N and call N+1 of the SAME iteration — see
                 # `ReplayJournal.append_batch`'s docstring (Task 1) for the
                 # full failure mode this closes.
@@ -1413,7 +1424,13 @@ class Orchestrator:
         #      never EMPTY either, because `start_iteration >=
         #      MAX_TOOL_ITERATIONS` raises ReplayIterationCeilingError above
         #      the loop (finding 1b).
-        assert final_response is not None
+        # An `assert` here would be stripped under `python -O`, degrading a
+        # broken invariant to an opaque `AttributeError` on the `.content`
+        # access below — the SAME reasoning the unwired-seams guard above
+        # already applies (review-pr fleet, 2026-08-10): an explicit raise
+        # fails loud (hard rule #7) regardless of optimization flags.
+        if final_response is None:  # pragma: no cover - invariant, see above
+            raise RuntimeError(t("orchestrator.tool.no_completion_in_turn"))
         answer = final_content if final_content is not None else final_response.content
         return _TurnOutcome(
             answer=answer,

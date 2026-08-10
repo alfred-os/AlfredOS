@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-10 23:33+0100\n"
+"POT-Creation-Date: 2026-08-11 00:27+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2773,27 +2773,33 @@ msgstr ""
 "step {start}, at or past the limit of {ceiling}. Please start a new "
 "request."
 
-#: src/alfred/orchestrator/core.py:1201
+#: src/alfred/orchestrator/core.py:1212
 msgid "orchestrator.tool.budget_exhausted_mid_turn"
 msgstr "I ran out of budget partway through this request."
 
-#: src/alfred/orchestrator/core.py:1302
+#: src/alfred/orchestrator/core.py:1313
 msgid "orchestrator.tool.budget_overrun_mid_turn"
 msgstr "This request went over budget, so I stopped before running more tools."
 
-#: src/alfred/orchestrator/core.py:1314
+#: src/alfred/orchestrator/core.py:1325
 msgid "orchestrator.tool.too_many_tool_calls"
 msgstr "That request needed too many tools at once, so I stopped for safety."
 
-#: src/alfred/orchestrator/core.py:1328
+#: src/alfred/orchestrator/core.py:1339
 msgid "orchestrator.tool.max_iterations_reached"
 msgstr "I reached the limit on tool steps for this request without finishing it."
 
-#: src/alfred/orchestrator/core.py:1356 src/alfred/orchestrator/core.py:1696
+#: src/alfred/orchestrator/core.py:1367 src/alfred/orchestrator/core.py:1713
 msgid "orchestrator.tool.dispatch_seams_unwired"
 msgstr ""
 "Tool dispatch is not fully wired: registry, gate, and DLP must be "
 "configured together."
+
+#: src/alfred/orchestrator/core.py:1433
+msgid "orchestrator.tool.no_completion_in_turn"
+msgstr ""
+"Turn completed without producing a final response — the Act loop's "
+"completion invariant did not hold."
 
 #: src/alfred/orchestrator/tool_dispatch.py:147
 msgid "orchestrator.tool.unknown_tool"
