@@ -255,12 +255,23 @@ def test_downgrade_drops_table(postgres_url: str, monkeypatch: pytest.MonkeyPatc
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
     cfg = config.Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", postgres_url)
-    command.upgrade(cfg, "head")
-    command.downgrade(cfg, "-1")
+    # Pinned to EXPLICIT revisions, not `head` + `-1` (#410 PR2 final
+    # whole-branch review). This test is correct TODAY only because 0026
+    # happens to be head; the moment a migration 0027 lands, `-1` would step
+    # 0027 -> 0026 and this assertion would fail against a table the step
+    # never touched. That is exactly how PR2's own 0026 broke PR1's
+    # `test_migration_0025_turn_side_effect_ledger.py::test_downgrade_drops_table`
+    # — fixed there in the same commit as here rather than left as a second
+    # copy of the same trap waiting to fire.
+    command.upgrade(cfg, "0026")
+    command.downgrade(cfg, "0025")
 
     engine = create_engine(sync_url, future=True)
     try:
         inspector = inspect(engine)
         assert "tool_call_journal" not in inspector.get_table_names()
+        # The parent revision's table must SURVIVE the step — pins that the
+        # downgrade landed on 0025 rather than unwinding further.
+        assert "turn_side_effect_ledger" in inspector.get_table_names()
     finally:
         engine.dispose()

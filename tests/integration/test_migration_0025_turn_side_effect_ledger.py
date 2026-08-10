@@ -99,9 +99,19 @@ def test_composite_key_namespaces_are_isolated(
 
 
 def test_downgrade_drops_table(alembic_cfg: AlembicConfig, postgres_url: str) -> None:
+    # Pinned to EXPLICIT revisions, not `head` + `-1` (#410 PR2 final
+    # whole-branch review). `head` is a moving target: this test used to
+    # upgrade to head (0025 at the time) and step back one, which dropped
+    # `turn_side_effect_ledger`. PR2 added migration 0026, so `head` became
+    # 0026 and `-1` started dropping `tool_call_journal` instead — the
+    # assertion below then failed against a table the step had never
+    # touched. Every new migration would silently re-break its predecessor's
+    # downgrade test this way. Naming this migration's own revision and its
+    # parent makes the round-trip assert exactly what the test claims,
+    # independent of whatever lands after it.
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
-    command.upgrade(alembic_cfg, "head")
-    command.downgrade(alembic_cfg, "-1")
+    command.upgrade(alembic_cfg, "0025")
+    command.downgrade(alembic_cfg, "0024")
 
     engine = create_engine(sync_url, future=True)
     try:
