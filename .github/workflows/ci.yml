@@ -123,7 +123,7 @@ jobs:
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_py == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Ruff lint
         if: steps.check.outputs.has_py == 'true'
         run: uv run ruff check .
@@ -133,7 +133,7 @@ jobs:
         # black is being removed from dev-deps in the Slice 1 Task 1
         # pyproject.toml fixup.
         if: steps.check.outputs.has_py == 'true'
-        run: uv run ruff format --check .
+        run: uv run ruff format --check src tests
       - name: Mypy (strict)
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
         run: uv run mypy --strict src/ scripts/check_tag_t3.py
@@ -892,13 +892,13 @@ jobs:
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_py == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Ruff lint
         if: steps.check.outputs.has_py == 'true'
         run: uv run ruff check .
       - name: Ruff format check
         if: steps.check.outputs.has_py == 'true'
-        run: uv run ruff format --check .
+        run: uv run ruff format --check src tests
       - name: Mypy (strict)
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
         run: uv run mypy --strict src/ scripts/check_tag_t3.py
@@ -1010,13 +1010,13 @@ jobs:
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_py == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Ruff lint
         if: steps.check.outputs.has_py == 'true'
         run: uv run ruff check .
       - name: Ruff format check
         if: steps.check.outputs.has_py == 'true'
-        run: uv run ruff format --check .
+        run: uv run ruff format --check src tests
       - name: Mypy (strict, Linux target)
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
         # `--platform linux` pins the type-check to the DEPLOYMENT target's `os`
@@ -1212,7 +1212,7 @@ jobs:
           # repo path is what matters.
           export UV_PROJECT_ENVIRONMENT="$HOME/.wslvenv"
           uv python install 3.14
-          uv sync --frozen --dev
+          uv sync --locked --dev
       - name: Setup-script .sh tests UNDER WSL (over the mounted workspace)
         if: steps.check.outputs.has_py == 'true'
         shell: wsl-bash {0}
@@ -1359,7 +1359,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Install bubblewrap + jq for the launcher policy-resolver test
         # PR-S4-6: tests/integration/test_launcher_policy_resolver.py is
         # skipif-bwrap-missing locally (macOS dev) but MUST run in CI — it is
@@ -1551,7 +1551,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Install bubblewrap + jq for the launcher policy-resolver test
         # Same machinery as the amd64 `integration` job: bubblewrap is the real
         # sandbox the merge-blocking `test_launcher_policy_resolver.py` execs and
@@ -1683,7 +1683,7 @@ jobs:
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
@@ -2220,7 +2220,7 @@ jobs:
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
         id: bound_py
         if: steps.check.outputs.has_spawn == 'true'
@@ -2500,7 +2500,7 @@ jobs:
       - if: steps.check.outputs.has_coverage_corpus == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_coverage_corpus == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Re-run unit tests to seed combined coverage
         if: steps.check.outputs.has_coverage_corpus == 'true'
         # The combined coverage gate needs BOTH unit and integration data.
@@ -2983,7 +2983,7 @@ jobs:
       - if: steps.check.outputs.has_smoke == 'true'
         run: uv python install 3.14
       - if: steps.check.outputs.has_smoke == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Run smoke tests
         if: steps.check.outputs.has_smoke == 'true'
         # Gated smoke env vars: when present, the Discord-gateway smoke

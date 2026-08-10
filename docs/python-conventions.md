@@ -147,16 +147,20 @@ tests/smoke/test_<feature>.py
 ```python
 from __future__ import annotations  # always
 
+
 # PEP 604 unions
 def lookup(name: str | None) -> User | None: ...
+
 
 # PEP 585 built-in generics
 def all_users() -> list[User]: ...
 def by_id() -> dict[str, User]: ...
 
+
 # PEP 695 generics (Python 3.12+)
 class Cache[T]:
     def get(self, key: str) -> T | None: ...
+
 
 # Type-alias statement (PEP 695)
 type UserId = str
@@ -178,6 +182,7 @@ When you only care about shape, use `typing.Protocol`. When you need inheritance
 ```python
 from typing import Protocol
 
+
 class Provider(Protocol):
     async def complete(self, request: CompletionRequest) -> CompletionResponse: ...
 ```
@@ -194,6 +199,7 @@ them structurally (PEP 544), so test doubles are trivial stubs.
 # memory/_config_protocols.py
 from typing import Protocol
 from pydantic import PostgresDsn
+
 
 class MemoryDbConfig(Protocol):
     @property
@@ -275,6 +281,7 @@ Pick the right tool:
 ```python
 from pydantic import BaseModel, ConfigDict, Field
 
+
 class CompletionRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -293,6 +300,7 @@ class CompletionRequest(BaseModel):
 
 ```python
 from dataclasses import dataclass
+
 
 @dataclass(frozen=True, slots=True)
 class TurnId:
@@ -319,11 +327,14 @@ class AlfredError(Exception):
     """Root of the AlfredOS exception tree. Anything operator-actionable
     subclasses this so callers can decide what they handle vs. let propagate."""
 
+
 class SettingsError(AlfredError, ValueError):
     """Configuration could not be loaded."""
 
+
 class UnknownSecretError(AlfredError, KeyError):
     """Secret was requested but not registered."""
+
 
 class BudgetExhausted(AlfredError):
     """Daily budget cap was hit; orchestrator should pause."""
@@ -406,6 +417,7 @@ Python is multi-paradigm; we use FP where it earns its keep:
 ```python
 from functools import reduce
 from itertools import pairwise
+
 
 def total_cost(turns: Sequence[Turn]) -> float:
     return reduce(lambda acc, t: acc + t.cost_usd, turns, 0.0)
@@ -501,10 +513,10 @@ Don't use hypothesis for the sake of it. If you can name the property in one sen
 @pytest.fixture
 async def session(pg_session_factory):  # function-scoped, depends on session-scoped factory
     async with pg_session_factory() as s:
-        async with s.begin():            # outer transaction
-            await s.begin_nested()       # SAVEPOINT
+        async with s.begin():  # outer transaction
+            await s.begin_nested()  # SAVEPOINT
             yield s
-            await s.rollback()           # rolls back to the SAVEPOINT, then the outer
+            await s.rollback()  # rolls back to the SAVEPOINT, then the outer
 ```
 
 ### CLAUDE.md hard rule on security tests

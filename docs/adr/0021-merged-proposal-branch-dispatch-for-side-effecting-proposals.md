@@ -61,11 +61,13 @@ class ProcessedProposal(Base):
 
     # Forensic + replay-safety metadata.
     blob_sha: Mapped[str] = mapped_column(String(40), nullable=False)
-    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)  # merge-commit SHA, not blob SHA
+    commit_sha: Mapped[str] = mapped_column(
+        String(40), nullable=False
+    )  # merge-commit SHA, not blob SHA
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     result: Mapped[str] = mapped_column(String(32), nullable=False)  # closed vocab
     handler_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    failure_kind: Mapped[str | None] = mapped_column(String(48), nullable=True)   # closed vocab
+    failure_kind: Mapped[str | None] = mapped_column(String(48), nullable=True)  # closed vocab
     failure_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)  # DLP-redacted
     operator_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 ```
@@ -128,7 +130,7 @@ The framework wraps the handler call in `try/except Exception` for safety, recor
 @dataclass(frozen=True, slots=True)
 class ProposalContext:
     audit_writer: AuditWriter
-    effects: ProposalEffects   # Protocol: reset_breaker(component_id, operator_user_id) only
+    effects: ProposalEffects  # Protocol: reset_breaker(component_id, operator_user_id) only
     logger: structlog.BoundLogger
 ```
 

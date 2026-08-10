@@ -58,7 +58,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_e2e == 'true'
       - if: steps.check.outputs.has_e2e == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Load the bwrap userns AppArmor profile (#290)
         id: load_apparmor
         if: steps.check.outputs.has_e2e == 'true'
@@ -151,7 +151,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_adversarial == 'true'
       - if: steps.check.outputs.has_adversarial == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - if: steps.check.outputs.has_adversarial == 'true'
         run: uv run pytest tests/adversarial -q
 
@@ -186,7 +186,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
         if: steps.check.outputs.has_smoke == 'true'
       - if: steps.check.outputs.has_smoke == 'true'
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
       - name: Run the real-LLM smoke (bounded retry to absorb LLM nondeterminism)
         if: steps.check.outputs.has_smoke == 'true'
         # ALFRED_SMOKE_PROVIDER_KEY: a throwaway low-balance deepseek-chat key the

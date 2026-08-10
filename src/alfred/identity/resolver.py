@@ -419,8 +419,8 @@ class IdentityResolver:
         authorization: Authorization | None = None,
         language: str | None = None,
         daily_budget_usd: float | None = None,
-        rate_limit_per_min: int | None | Literal["unset"] = None,
-        rate_limit_per_day: int | None | Literal["unset"] = None,
+        rate_limit_per_min: int | Literal["unset"] | None = None,
+        rate_limit_per_day: int | Literal["unset"] | None = None,
         replace_operator: str | None = None,
     ) -> User:
         """Mutate a live user in place.
