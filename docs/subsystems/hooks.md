@@ -35,6 +35,7 @@ every recorded turn and changes nothing:
 ```python
 from alfred.hooks import hook, HookContext
 
+
 @hook("memory.episodic.record.after_flush", kind="post", tier="user-plugin")
 async def log_recorded_turn(ctx: HookContext) -> None:
     print(f"recorded turn for {ctx.input.user_id}")  # observe only
@@ -60,8 +61,7 @@ Inspect the active registry directly via the
 from alfred.hooks import get_registry
 
 regs = get_registry().subscribers_for("memory.episodic.record.after_flush", kind="post")
-assert any(s.origin_module == __name__ for s in regs), \
-    "my subscriber didn't register"
+assert any(s.origin_module == __name__ for s in regs), "my subscriber didn't register"
 ```
 
 `HookRegistry.subscribers_for(hookpoint, kind)` is the public-surface
@@ -140,6 +140,7 @@ uses.
 ```python
 # Self-check: is the hookpoint declared?
 from alfred.hooks import get_registry
+
 assert get_registry().hookpoint_meta("memory.episodic.record.before_db_write") is not None
 ```
 
@@ -161,7 +162,7 @@ fake_input = {"user_id": "alice", "content": "hello"}
 
 ctx = HookContext(
     action_id="memory.episodic.record",
-    hookpoint="memory.episodic.record.after_flush",       # the dispatcher rewrites the stage via for_stage()
+    hookpoint="memory.episodic.record.after_flush",  # the dispatcher rewrites the stage via for_stage()
     input=fake_input,
     correlation_id="test-corr-id",
     kind="post",
@@ -499,9 +500,11 @@ get_registry().register_hookpoint(
     fail_closed=True,
 )
 
+
 # Subscriber module — succeeds (operator tier IN the allow-list).
 @hook("memory.episodic.record.before_db_write", kind="pre", tier="operator")
 async def operator_redactor(ctx): ...
+
 
 # Subscriber module — refused at register time (user-plugin NOT in
 # allow-list). HookError + hooks.tier_rejected audit row.

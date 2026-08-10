@@ -42,12 +42,12 @@ dependencies = [
   "python-dotenv>=1.2.2",
   "sqlalchemy[asyncio]>=2.0.51",
   "asyncpg>=0.31.0",
-  "alembic>=1.18.4",
-  "openai>=2.43.0",
-  "anthropic>=0.111.0",
-  "textual>=8.2.7",
+  "alembic>=1.19.0",
+  "openai>=2.53.0",
+  "anthropic>=0.120.2",
+  "textual>=8.2.8",
   "structlog>=26.1.0",
-  "typer>=0.26.7",
+  "typer>=0.27.1",
   "babel>=2.18.0",  # i18n (Task 3.5)
   "unidecode>=1.4.0",  # slug derivation transliteration (PR A T8)
   "psycopg[binary]>=3.3.4",  # runtime: async LISTEN/NOTIFY (IdentityListener, PR A T12); sync identity resolver (via asyncio.to_thread)
@@ -64,25 +64,25 @@ dependencies = [
   # audit row uses cachetools.TTLCache. Slice-3+ may swap to a Redis-backed
   # equivalent for cross-process correctness; cachetools is the in-process
   # shape.
-  "cachetools>=7.1.4",
+  "cachetools>=7.1.7",
   # redis>=4.2 ships asyncio support in ``redis.asyncio`` natively (no extra
   # needed). ContentStore (spec §7.2, PR-S3-5) uses the GETDEL command, which
   # needs a Redis SERVER >=6.2 (the redis-py client method landed earlier); the
-  # deployed server is redis:8. Client floor kept at >=8.0.0 (latest major); no
+  # deployed server is redis:8. Client floor kept at >=8.1.0 (latest major); no
   # upper cap (the lock tracks latest).
-  "redis>=8.0.0",
+  "redis>=8.1.0",
   # PR-S3-3a: transport-layer Prometheus histograms (spec §7a.1 — perf-002 /
   # perf-009). Four histograms cover the four p99 budgets the supervisor
   # gates on (StdioTransport.dispatch, OutboundDlp.scan, InboundContentScanner.scan,
   # subprocess cold-start). Process-local default registry; the SigNoz /
   # OpenTelemetry bridge is independently configured in ops/.
-  "prometheus-client>=0.25.0",
+  "prometheus-client>=0.26.0",
   # PR-S3-5 (web.fetch): aiohttp is the HTTP client used by the
   # alfred-web-fetch plugin subprocess (plugins/alfred-web-fetch/
   # web_fetch_plugin.py). The plugin needs >=3.9 for
-  # ``ClientTimeout(connect=..., sock_read=...)``; floor raised to >=3.14.1
+  # ``ClientTimeout(connect=..., sock_read=...)``; floor raised to >=3.14.3
   # (latest) in this deps refresh. No upper cap (the lock tracks latest).
-  "aiohttp>=3.14.1",
+  "aiohttp>=3.14.3",
   # PR-S3-6 (err-002): GitPython powers the state.git grant-policy parser
   # (alfred.security.capability_gate._state_git_parser). The parser reads
   # the policies/grants/ tree at a known commit hash and projects it into
@@ -92,7 +92,7 @@ dependencies = [
   # has been stable since 3.1. No upper cap (the lock tracks latest), but
   # GitPython has not historically followed semver across majors, so review a
   # 4.x bump deliberately when CI surfaces it.
-  "GitPython>=3.1.50",
+  "GitPython>=3.1.58",
   # PyYAML is a genuine RUNTIME dependency: config loading
   # (alfred.cli.config), the daemon readiness probes
   # (alfred.cli.daemon._daemon_probes), and the policy loader/watcher
@@ -112,22 +112,22 @@ dev = [
   "pytest-asyncio>=1.4.0",
   "pytest-benchmark>=5.2.3",    # PR-C: micro-benches for the hooks dispatch perf gate
   "pytest-cov>=7.1.0",
-  "testcontainers[postgres,redis]>=4.14.2",
+  "testcontainers[postgres,redis]>=4.15.0",
   # #470: tests/integration/test_grafana_password_fail_closed.py imports `docker`
   # (docker-py) directly for the two immediately-exiting refusal arms (testcontainers'
   # DockerContainer helper assumes a long-lived container). Previously only a transitive
   # dep of testcontainers — declare it explicitly so the floor is pinned and a future
   # testcontainers bump that drops/relocates it doesn't silently break this suite.
-  "docker>=7.1.0",
-  "hypothesis>=6.155.6",      # property-based testing per docs/python-conventions.md
-  "mypy>=2.1.0",
-  "pyright>=1.1.410",       # secondary type-checker per ADR-0007
-  "ruff>=0.15.18",
+  "docker>=7.2.0",
+  "hypothesis>=6.165.2",      # property-based testing per docs/python-conventions.md
+  "mypy>=2.3.0",
+  "pyright>=1.1.411",       # secondary type-checker per ADR-0007
+  "ruff>=0.16.1",
   # black removed: `ruff format` replaces it per ADR-0007.
   "types-toml",
   "types-cachetools",  # PR D2: stubs for the TTLCache import in alfred.comms.discord
   "types-PyYAML",      # PR E: stubs for the YAML walker in tests/adversarial/conftest.py
-  "pre-commit>=4.6.0",        # for the pybabel extract hook (Task 3.5)
+  "pre-commit>=4.6.1",        # for the pybabel extract hook (Task 3.5)
   # dev/test only: testcontainers' built-in Postgres helper + alembic CLI
   # both default to psycopg2 for their sync sessions. Not used at runtime
   # (the production sync resolver uses psycopg3 above).
@@ -327,6 +327,22 @@ mypy_path = ["plugins/alfred_tui/src"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# ruff 0.16.0 formats Python code blocks inside Markdown files by default
+# (astral-sh/ruff release notes, 2026-07-23) — applied repo-wide in #577.
+# Excluded here: docs/superpowers/plans/** and specs/** are a historical
+# record of ALREADY-SHIPPED implementation work, not live reference docs —
+# many embedded snippets are "insert this fragment at this indentation"
+# instructions whose indentation IS the content (found in #577's own
+# review: ruff's markdown formatter dedents each fenced block
+# independently, silently stripping that cue — confirmed on 74 blocks
+# across 40 files, two of them in a still-active plan). Formatting these
+# files provides no benefit (nobody edits historical plans for style) and
+# real, demonstrated cost (CodeRabbit's own review of #577 raised 41
+# findings against these files' unchanged-but-now-reformatted embedded
+# code, all noise). docs/adr/**, docs/subsystems/**, and other live
+# reference docs are NOT excluded — those benefit from consistent
+# formatting like real source does.
+extend-exclude = ["docs/superpowers/plans/", "docs/superpowers/specs/"]
 
 [tool.ruff.lint]
 # Strict rule set per docs/python-conventions.md §Tooling. ADR-0007 ratifies.

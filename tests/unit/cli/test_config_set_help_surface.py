@@ -99,7 +99,13 @@ def test_help_renders_no_unsubstituted_placeholder(help_text: str) -> None:
 
     ``alfred.i18n.t`` swallows a missing-kwarg ``KeyError`` and returns the RAW template,
     so a help text reading "Keys: {keys}." would otherwise ship silently.
+
+    Checks for the literal ``{keys}`` placeholder specifically, not for curly
+    braces anywhere in the rendered help — Typer/Click's own CLI chrome
+    legitimately renders required positional arguments as ``{key}``/``{value}``
+    in the Usage line and Arguments table (confirmed: Typer 0.27.1), which a
+    blanket brace ban can't distinguish from a real i18n leak.
     """
-    assert "{" not in help_text and "}" not in help_text, (
-        f"`config set --help` leaked an un-substituted placeholder: {help_text!r}"
+    assert "{keys}" not in help_text, (
+        f"`config set --help` leaked an un-substituted `{{keys}}` placeholder: {help_text!r}"
     )

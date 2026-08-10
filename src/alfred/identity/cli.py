@@ -648,7 +648,7 @@ def unbind(
 # --------------------------------------------------------------------------- #
 
 
-def _coerce_rate_limit(raw: str | None) -> int | None | str:
+def _coerce_rate_limit(raw: str | None) -> int | str | None:
     """Map the CLI string for ``--rate-limit-per-{min,day}`` to a resolver kwarg.
 
     The resolver's :meth:`IdentityResolver.set_` accepts the literal
