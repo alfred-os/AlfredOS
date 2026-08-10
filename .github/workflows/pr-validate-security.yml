@@ -169,6 +169,12 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
+          # Pin the Trivy CLI binary explicitly rather than trust the
+          # action's default (v0.36.0 of the action defaults to Trivy
+          # v0.70.0; the action itself only bumps its default on a new
+          # action release). Bump this in lockstep with the action pin
+          # above when upgrading either.
+          version: v0.73.0
           # CRITICAL and HIGH fail the build; LOW/MEDIUM are reported as
           # informational. Once we have more deps and a more mature scanning
           # discipline, can tighten to MEDIUM+.
@@ -181,6 +187,7 @@ jobs:
         with:
           scan-type: config
           scan-ref: .
+          version: v0.73.0
           severity: CRITICAL,HIGH
           exit-code: "1"
           skip-dirs: .claude,.gemini,.cursor
