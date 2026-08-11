@@ -2117,8 +2117,13 @@ planner was even slightly non-deterministic between attempts.
 
 A new durable `tool_call_journal` table records the committed ordered
 tool-dispatch decision — `(adapter_id, inbound_id, call_index) ->
-(iteration, ToolCall)` — written immediately BEFORE each `dispatch_tool`
-call. Composite-keyed, not `(inbound_id, call_index)` alone (a design
+(iteration, ToolCall)`. `append_batch` commits the COMPLETE iteration's
+decisions in one atomic write, awaited to completion before ANY
+`dispatch_tool` call for that iteration begins — not one row per call
+(CodeRabbit review, PR #579, 2026-08-11: keep this embedded draft
+consistent with the canonical ADR-0063 and Line 52 above — the earlier
+wording reintroduced the exact crash window this journal exists to close).
+Composite-keyed, not `(inbound_id, call_index)` alone (a design
 correction found during the `/review-plan` fleet pass): `inbound_id` is a
 free-form, per-adapter-minted opaque string, so a two-column key would let
 two different adapters' turns collide and splice one turn's decided tool
