@@ -407,18 +407,17 @@ episodic/working-memory fix in place first.
 - **Unauthenticated `web.fetch` activation** (§3 item 6, new — must land BEFORE
   the authenticated follow-up below, not bundled with it): wire the operator
   web-fetch allowlist projection (`_list_allowlist_entries()`,
-  `src/alfred/cli/web.py:69`, currently a stub always returning `[]` — no
-  tracked issue exists for this yet, file one) and apply the one-broker-instance
+  `src/alfred/cli/web.py:69`, currently a stub always returning `[]` — see #582) and apply the one-broker-instance
   fix already researched here (§ item 2 correction): make `broker` /
   `secret_broker` OPTIONAL params on `_build_boot_outbound_dlp` and
   `_build_comms_boot_graph` (default: build internally, unchanged for every
   existing caller), then have `_commands.py`'s ONE production call site build
   the broker once and pass it to both — zero blast radius on the 6 existing
-  integration test files that call either function directly.
+  integration test files that call either function directly. See #583.
 - **Authenticated `web.fetch`** (§3.2): per-secret↔destination binding, populating
   `WEB_FETCH_AUTH_SECRET_ALLOWLIST`, the gateway re-scan positive-path residual.
   All three gates from the original #410 issue body carry forward unchanged to
-  that follow-up issue.
+  that follow-up issue. See #584.
 - **Group/channel reply addressing** (#24) — the live turn stays DM/1:1 (the
   #338 spec's FOLD-6 boundary; `InboundMessageNotification` still carries no
   channel/thread target id).
