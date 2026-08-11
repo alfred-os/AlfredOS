@@ -82,7 +82,7 @@ _README_UNDOCUMENTED_BACKLOG: frozenset[str] = frozenset(
         "cap-2026-009", "cap-2026-010", "cap-2026-011", "cap-2026-012",
         "cib-2026-006", "cib-2026-007", "de-2026-017", "de-2026-018",
         "de-2026-019",
-        "de-2026-020", "dlp-2026-001", "hk-2026-001", "hk-2026-002",
+        "de-2026-020", "hk-2026-001", "hk-2026-002",
         "hk-2026-003", "hk-2026-004", "hk-2026-005", "hk-2026-006",
         "pi-2026-001", "pi-2026-002", "pi-2026-003", "pi-2026-004",
         "pi-2026-005", "pi-2026-006", "pi-2026-007", "pi-2026-008",
@@ -99,8 +99,8 @@ _README_UNDOCUMENTED_BACKLOG: frozenset[str] = frozenset(
 # constant whose test says it must only shrink — visible in review instead of silent.
 # `_EXPECTED_BACKLOG_COUNT` is redundant with the digest but names the drift direction in
 # the failure message, which a bare hash mismatch cannot.
-_EXPECTED_BACKLOG_COUNT: int = 50
-_EXPECTED_BACKLOG_SHA256: str = "7c8c8bde4a6c9cb45f669caf14792f012e5c7cee42b9b402ccf666be3e9171fe"
+_EXPECTED_BACKLOG_COUNT: int = 49
+_EXPECTED_BACKLOG_SHA256: str = "1f62207aecb633a0546071f9605ced3fdcbaf6fb041d7a0eecd69ab67ec0a32e"
 
 
 def _source_filename(corpus_root: Path, payload: AdversarialPayload) -> str | None:
