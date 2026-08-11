@@ -2,16 +2,34 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Re-verified against `main` post-PR1/PR2 merge, 2026-08-11.** PR1 (#579,
+> merged 2026-08-11T03:57:27Z) and PR2 are both on `main`; **Prerequisites
+> below are satisfied.** The architecture holds — `Orchestrator.__init__`
+> already accepts `tool_registry`/`gate`/`outbound_dlp` (from #339, predating
+> #410) and `core.py`'s dispatch-seams guard + replay-journal `append_batch`
+> integration are live exactly as designed. Two concrete corrections were
+> needed and are applied inline below, each marked with a `> **Correction
+> (... 2026-08-11)**` callout: (1) `build_orchestrator` does NOT expose
+> `side_effect_ledger`/`replay_journal` as caller params — PR1/PR2 construct
+> both unconditionally inside it, so the Prerequisites line below ("alongside
+> PR1's `side_effect_ledger` and PR2's `replay_journal` params") is
+> imprecise — see Task 1; (2) the test file Task 1 targets doesn't exist
+> under its original name. Line numbers throughout (originally cited against
+> the 2026-08-07 pre-PR1/PR2 tree) have drifted — each has been re-verified
+> and either corrected or marked "verify against the live file."
+
 **Prerequisites: PR1 and PR2 must both be merged first** (found during
 `/review-plan` — neither prior plan stated this explicitly, though both are
-self-consistent once verified). Task 1's `build_orchestrator` widening
-inserts `tool_registry`/`gate`/`outbound_dlp` alongside PR1's
-`side_effect_ledger` and PR2's `replay_journal` params, which must already
-exist on `main`.
+self-consistent once verified). Task 1's `build_orchestrator` widening adds
+`tool_registry`/`gate`/`outbound_dlp` as three new params on
+`build_orchestrator` — PR1's `side_effect_ledger` and PR2's `replay_journal`
+are constructed unconditionally INSIDE that function, not exposed as params
+(see Task 1's correction), but the underlying `Orchestrator` class support
+for all five must already exist on `main`, which it does.
 
 **Goal:** Make the live comms turn (Discord + `alfred chat`) able to **act**, not just converse — the first genuinely live, working tool call on the comms path. Ships `clock.now` only. **`web.fetch` is deliberately NOT activated in this PR** — see Context below.
 
-**Architecture:** Widen `build_orchestrator` to accept the `(tool_registry, gate, outbound_dlp)` trio (currently always `None`), and wire a `ToolRegistry([build_clock_tool(now=...)])` — NOT `build_tool_registry`, which always builds `web.fetch` too — into the live daemon comms boot graph, reusing the `real_gate` and `outbound_dlp` already constructed there. This makes `core.py:973`'s all-three-or-none dispatch-seams guard reachable for the first time. **This PR also closes a dormant CLAUDE.md hard-rule-#4 gap in `tool_dispatch.py`'s `InternalToolSpec` branch (Task 2a)** — pre-existing since #339, but only reachable in production once this PR wires `clock.now` live, and squarely within the `alfred-security-engineer` sign-off this PR already requires as the comms path's first live tool dispatch.
+**Architecture:** Widen `build_orchestrator` to accept the `(tool_registry, gate, outbound_dlp)` trio (currently always `None`), and wire a `ToolRegistry([build_clock_tool(now=...)])` — NOT `build_tool_registry`, which always builds `web.fetch` too — into the live daemon comms boot graph, reusing the `real_gate` and `outbound_dlp` already constructed there. This makes `core.py`'s all-three-or-none dispatch-seams guard (currently ~`:1364`, verify against the live file — drifted from the original `:973` estimate as PR1/PR2 landed) reachable for the first time. **This PR also closes a dormant CLAUDE.md hard-rule-#4 gap in `tool_dispatch.py`'s `InternalToolSpec` branch (Task 2a)** — pre-existing since #339, but only reachable in production once this PR wires `clock.now` live, and squarely within the `alfred-security-engineer` sign-off this PR already requires as the comms path's first live tool dispatch.
 
 **Resolved by a PR1 design correction, recorded here for anyone reading this plan against an earlier draft:** this PR's original Architecture line claimed PR1's `side_effect_ledger`/`tool_registry` construction-time guard became an "obligation this PR must discharge." A `/review-plan` fleet pass found that combination would make the daemon fail to boot the instant this PR's Task 2 wired a real `tool_registry` alongside PR1's `side_effect_ledger` — four reviewers independently traced the same crash. The actual fix landed in PR1, not here: PR1 no longer gates the budget charge at all (the thing that guard was protecting), so the guard was dropped from the plan before any implementation — PR1's Task 4 never adds it (there is no shipped code to find or delete; this is plan-draft history, not a code change). This PR does not need to touch, satisfy, or work around any such guard — `Orchestrator.__init__` accepts `side_effect_ledger` and `tool_registry` together with no special interaction.
 
@@ -30,7 +48,7 @@ The original design assumed this PR would call `build_tool_registry` (`src/alfre
 ## Global Constraints
 
 - `mypy --strict` + `pyright` clean on every new/modified file.
-- CLAUDE.md hard rule #7: the dispatch-seams guard (`core.py:973`) stays a loud `raise`, never an `assert`.
+- CLAUDE.md hard rule #7: the dispatch-seams guard (`core.py`, ~`:1364` — verify against the live file) stays a loud `raise`, never an `assert`.
 - Dual-LLM boundary touched (the comms path's first live tool dispatch) — `alfred-security-engineer` sign-off, the full adversarial suite, and explicit 100% line+branch coverage on the boundary translator are release-blocking, per CLAUDE.md.
 - Conventional Commits. No `--no-verify`. `make check` before every push.
 - This PR does NOT touch `src/alfred/plugins/web_fetch/`, `build_tool_registry`, or `build_web_fetch_egress_extractor` — those stay exactly as PR2's Task 5 left the boot graph (constructed dark, unreachable).
@@ -39,10 +57,32 @@ The original design assumed this PR would call `build_tool_registry` (`src/alfre
 
 ### Task 1: Widen `build_orchestrator` for the tool-dispatch trio
 
+> **Correction (found while re-verifying this plan against `main` post-PR1/PR2
+> merge, 2026-08-11):** the file/test-pattern below in the original draft was
+> written against an ASSUMED PR1/PR2 shape that shipped differently. Two
+> concrete corrections:
+>
+> 1. `build_orchestrator` does **not** expose `side_effect_ledger` or
+>    `replay_journal` as caller-injectable parameters at all — PR1/PR2
+>    construct `PostgresTurnSideEffectLedger()` and
+>    `PostgresReplayJournal(session_scope=audit_session_scope)`
+>    **unconditionally, inline**, inside the `return Orchestrator(...)` call
+>    (`src/alfred/cli/_bootstrap.py:570-580`). There is no `replay_journal=`
+>    line to add the trio "alongside" — the trio is three genuinely NEW
+>    params, full stop.
+> 2. The test file `tests/unit/cli/test_bootstrap_build_orchestrator.py`
+>    does not exist. PR1/PR2's actual test file for `build_orchestrator` is
+>    `tests/unit/cli/test_build_orchestrator_wiring.py`, and it does NOT use
+>    the `MagicMock()`-as-`Settings` pattern this draft assumed — it uses a
+>    real `Settings()` (via `_base_env(monkeypatch)` setting two env vars)
+>    plus `monkeypatch.setattr(_bootstrap, "build_session_scope", ...)` /
+>    `monkeypatch.setattr(_bootstrap, "build_budget_guard", ...)`. Follow
+>    that file's existing convention below, not the original draft's.
+
 **Files:**
 
-- Modify: `src/alfred/cli/_bootstrap.py:459-517` (`build_orchestrator`)
-- Test: `tests/unit/cli/test_bootstrap_build_orchestrator.py` (created by PR1 Task 5)
+- Modify: `src/alfred/cli/_bootstrap.py` (`build_orchestrator`, currently defined `:487-580` — verify against the live file, do not assume the line number)
+- Test: `tests/unit/cli/test_build_orchestrator_wiring.py` (existing file — add to it, do not create a new one)
 
 **Interfaces:**
 
@@ -50,36 +90,24 @@ The original design assumed this PR would call `build_tool_registry` (`src/alfre
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/unit/cli/test_bootstrap_build_orchestrator.py`:
+Add to `tests/unit/cli/test_build_orchestrator_wiring.py`, following this file's existing `_base_env`/`_stub_resolver`/`_fake_scope` fixtures (defined near the top of the file — reuse them, do not redefine):
 
 ```python
-async def test_build_orchestrator_forwards_tool_dispatch_trio(monkeypatch: Any) -> None:
-    # Deliberately a PLAIN MagicMock, not MagicMock(spec=Settings): pydantic
-    # v2 model fields are not plain class attributes, so a spec'd mock does
-    # not know about them and raises AttributeError the instant
-    # build_budget_guard (called inside build_orchestrator) reads
-    # settings.per_call_max_usd. Same fix as PR1/PR2's equivalent tests in
-    # this file — see test_build_orchestrator_forwards_side_effect_ledger.
-    settings = MagicMock()
+def test_forwards_tool_dispatch_trio(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    settings = Settings()
+    monkeypatch.setattr(_bootstrap, "build_session_scope", lambda *_a, **_kw: _fake_scope())
+    monkeypatch.setattr(_bootstrap, "build_budget_guard", lambda _r, _s: MagicMock())
+
     tool_registry = MagicMock()
     gate = MagicMock()
     outbound_dlp = MagicMock()
 
-    @asynccontextmanager
-    async def _scope() -> Any:
-        yield MagicMock()
-
-    broker = MagicMock()
-    router = MagicMock()
-    resolver = MagicMock()
-    resolver.version_counter = 1
-
-    orch = build_orchestrator(
+    orch = _bootstrap.build_orchestrator(
         settings,
-        broker=broker,
-        router=router,
-        resolver=resolver,
-        session_scope=_scope,
+        broker=MagicMock(),
+        router=MagicMock(),
+        resolver=_stub_resolver(),
         tool_registry=tool_registry,
         gate=gate,
         outbound_dlp=outbound_dlp,
@@ -89,34 +117,27 @@ async def test_build_orchestrator_forwards_tool_dispatch_trio(monkeypatch: Any) 
     assert orch._outbound_dlp is outbound_dlp  # type: ignore[attr-defined]
 
 
-async def test_build_orchestrator_defaults_tool_dispatch_trio_to_none() -> None:
+def test_defaults_tool_dispatch_trio_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
     # Regression pin: every caller before this PR omits the trio and gets the
     # exact pre-#410-PR3 unwired state.
-    # Deliberately a PLAIN MagicMock, not MagicMock(spec=Settings) — same
-    # build_budget_guard/settings.per_call_max_usd AttributeError as above.
-    settings = MagicMock()
+    _base_env(monkeypatch)
+    settings = Settings()
+    monkeypatch.setattr(_bootstrap, "build_session_scope", lambda *_a, **_kw: _fake_scope())
+    monkeypatch.setattr(_bootstrap, "build_budget_guard", lambda _r, _s: MagicMock())
 
-    @asynccontextmanager
-    async def _scope() -> Any:
-        yield MagicMock()
-
-    orch = build_orchestrator(
-        settings,
-        broker=MagicMock(),
-        router=MagicMock(),
-        resolver=_resolver_with_version_counter(),
-        session_scope=_scope,
+    orch = _bootstrap.build_orchestrator(
+        settings, broker=MagicMock(), router=MagicMock(), resolver=_stub_resolver()
     )
     assert orch._tool_registry is None  # type: ignore[attr-defined]
     assert orch._gate is None  # type: ignore[attr-defined]
     assert orch._outbound_dlp is None  # type: ignore[attr-defined]
 ```
 
-(`_resolver_with_version_counter()` is a small local helper — check whether PR1/PR2's tests in this same file already define an equivalent `resolver` fixture and reuse it rather than duplicating; if not, a one-line `MagicMock()` with `.version_counter = 1` set, matching the pattern already used in this file's other tests, is sufficient.)
+(Check the exact keyword signature `_fake_build_session_scope` uses in this file's existing two tests before assuming `lambda *_a, **_kw` is sufficient — `build_session_scope` is called with a `role=` kwarg the lambda must accept; match the existing tests' monkeypatch signature exactly rather than a bare catch-all if `mypy --strict` complains.)
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/unit/cli/test_bootstrap_build_orchestrator.py -v -k tool_dispatch_trio`
+Run: `uv run pytest tests/unit/cli/test_build_orchestrator_wiring.py -v -k tool_dispatch_trio`
 Expected: FAIL — `TypeError: build_orchestrator() got an unexpected keyword argument 'tool_registry'`
 
 - [ ] **Step 3: Widen the signature**
@@ -131,36 +152,37 @@ from alfred.security.dlp import OutboundDlpProtocol
 
 (Check first whether any of these three are already imported in this file under a different alias or `TYPE_CHECKING` block — several sibling modules already import `CapabilityGate`/`OutboundDlpProtocol` for type annotations; do not introduce a duplicate import if one already exists.)
 
-Widen the signature (after PR2's `replay_journal` param) and forward the trio:
+Widen the signature — add the trio as three NEW params after `quarantined_extractor` (currently the last param, verify against the live file):
 
 ```python
-        replay_journal: ReplayJournal | None = None,
-        # #410 PR3: the tool-dispatch trio. All three additive + optional;
-        # `None` (every caller before this PR's Task 2 wiring) preserves
-        # today's unwired behaviour exactly — core.py:973's all-three-or-none
-        # guard stays unreachable for any partial combination.
-        tool_registry: ToolRegistry | None = None,
-        gate: CapabilityGate | None = None,
-        outbound_dlp: OutboundDlpProtocol | None = None,
-    ) -> Orchestrator:
+    quarantined_extractor: QuarantinedExtractorLike | None = None,
+    # #410 PR3: the tool-dispatch trio. All three additive + optional;
+    # `None` (every caller before this PR's Task 2 wiring) preserves
+    # today's unwired behaviour exactly — core.py's all-three-or-none guard
+    # (currently ~:1364, verify against the live file) stays unreachable for
+    # any partial combination.
+    tool_registry: ToolRegistry | None = None,
+    gate: CapabilityGate | None = None,
+    outbound_dlp: OutboundDlpProtocol | None = None,
+) -> Orchestrator:
 ```
 
-And in the `return Orchestrator(...)` call, add `tool_registry=tool_registry, gate=gate, outbound_dlp=outbound_dlp,` alongside the existing `replay_journal=replay_journal,` line.
+And in the `return Orchestrator(...)` call — which already unconditionally constructs `side_effect_ledger=PostgresTurnSideEffectLedger()` and `replay_journal=PostgresReplayJournal(session_scope=audit_session_scope)` (leave those two lines untouched) — add `tool_registry=tool_registry, gate=gate, outbound_dlp=outbound_dlp,` as three additional forwarded lines.
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `uv run pytest tests/unit/cli/test_bootstrap_build_orchestrator.py -v`
-Expected: PASS (every test in the file, including PR1's and PR2's)
+Run: `uv run pytest tests/unit/cli/test_build_orchestrator_wiring.py -v`
+Expected: PASS (every test in the file, including PR1's and PR2's two existing tests)
 
 - [ ] **Step 5: Type-check**
 
-Run: `uv run mypy src/alfred/cli/_bootstrap.py tests/unit/cli/test_bootstrap_build_orchestrator.py && uv run pyright src/alfred/cli/_bootstrap.py`
+Run: `uv run mypy src/alfred/cli/_bootstrap.py tests/unit/cli/test_build_orchestrator_wiring.py && uv run pyright src/alfred/cli/_bootstrap.py`
 Expected: no errors
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/alfred/cli/_bootstrap.py tests/unit/cli/test_bootstrap_build_orchestrator.py
+git add src/alfred/cli/_bootstrap.py tests/unit/cli/test_build_orchestrator_wiring.py
 git commit -m "feat(cli): widen build_orchestrator for the tool-dispatch trio (#410 PR3)"
 ```
 
@@ -168,9 +190,17 @@ git commit -m "feat(cli): widen build_orchestrator for the tool-dispatch trio (#
 
 ### Task 2: Wire `clock.now` into the live boot graph
 
+> **Correction (re-verified against `main` post-PR1/PR2 merge, 2026-08-11):**
+> the original Step 2 code block below showed `side_effect_ledger=...` and
+> `replay_journal=...` lines being ADDED to the `build_orchestrator(...)`
+> call. That's now wrong per Task 1's correction: `build_orchestrator`
+> constructs both of those unconditionally INSIDE itself — this call site
+> already gets them for free and must not pass either explicitly. Only the
+> new `tool_registry`/`gate`/`outbound_dlp` lines are added here.
+
 **Files:**
 
-- Modify: `src/alfred/cli/daemon/_comms_boot.py:747-816` (the forward-instructions region + the `build_orchestrator` call)
+- Modify: `src/alfred/cli/daemon/_comms_boot.py` (the forward-instructions region, currently `:746-771`, + the `build_orchestrator` call, currently `:794-813` — verify against the live file, do not assume line numbers)
 
 - [ ] **Step 1: Replace the stale forward-instructions comment**
 
@@ -239,15 +269,11 @@ from alfred.orchestrator.tool_registry import ToolRegistry
 
 - [ ] **Step 2: Wire the trio into the live `build_orchestrator` call**
 
-Replace the `orchestrator = build_orchestrator(...)` call's closing (PR1 added `side_effect_ledger=...`, PR2 added `replay_journal=...`):
+The existing `orchestrator = build_orchestrator(...)` call (verify its current closing against the live file — it presently ends with `quarantined_extractor=None,`) needs only the trio added; `side_effect_ledger`/`replay_journal` are NOT passed here (Task 1's correction — `build_orchestrator` builds both unconditionally itself):
 
 ```python
-            side_effect_ledger=PostgresTurnSideEffectLedger(
-                session_scope=build_boot_session_scope(settings)
-            ),
-            replay_journal=PostgresReplayJournal(
-                session_scope=build_boot_session_scope(settings)
-            ),
+            # extraction runs at the adapter->bridge boundary, not the orchestrator funnel
+            quarantined_extractor=None,
             # #410 PR3: the LIVE trio. `gate` and `outbound_dlp` are the SAME
             # already-constructed boot instances every other component here
             # reuses (real_gate / outbound_dlp params of this function) — no
@@ -404,7 +430,7 @@ git commit -m "fix(security): scan InternalToolSpec dispatch results through DLP
 
 - Modify: `tests/unit/orchestrator/test_act_loop.py` (`test_constructor_defaults_tool_seams_to_none` already covers the negative all-`None` case; this adds the positive all-wired case)
 
-The existing `core.py:973` guard (`if self._tool_registry is None or self._gate is None or self._outbound_dlp is None: raise ...`) has only ever been exercised with all three `None` (the pre-#410 state) or, via `test_act_loop.py`'s `TestActLoopOrderedDispatch`, all three wired via `_make_orchestrator(..., tool_registry=..., gate=..., outbound_dlp=...)` — but that test never asserts the GUARD ITSELF is bypassed correctly; it asserts dispatch behaviour. Add an explicit, minimal test naming the guard.
+The existing `core.py` guard (currently ~`:1364`, verify against the live file — confirmed present and unchanged in shape post-PR1/PR2, at `if self._tool_registry is None or self._gate is None or self._outbound_dlp is None: raise ...`) has only ever been exercised with all three `None` (the pre-#410 state) or, via `test_act_loop.py`'s `TestActLoopOrderedDispatch`, all three wired via `_make_orchestrator(..., tool_registry=..., gate=..., outbound_dlp=...)` — but that test never asserts the GUARD ITSELF is bypassed correctly; it asserts dispatch behaviour. Add an explicit, minimal test naming the guard.
 
 - [ ] **Step 1: Write the test**
 
@@ -412,7 +438,7 @@ The existing `core.py:973` guard (`if self._tool_registry is None or self._gate 
 async def test_dispatch_seams_guard_is_bypassed_when_all_three_wired(
     monkeypatch: Any,
 ) -> None:
-    """core.py:973's all-three-or-none guard never fires when genuinely all three are set."""
+    """core.py's all-three-or-none guard (~:1364) never fires when genuinely all three are set."""
     r0 = _tool_use_response(ToolCall(id="c0", name="clock.now", arguments={}))
     r1 = _text_response("the time is now")
     router = MagicMock()
@@ -457,9 +483,9 @@ git commit -m "test(orchestrator): pin the dispatch-seams guard's positive (all-
 
 - [ ] **Step 0: Extend the shared gate fixture with a `tool.dispatch` grant**
 
-**Critical, found during `/review-plan` (2026-08-07):** `_boot_stack`'s gate fixture (`_boot_gate(grant_downgrade=...)`, this same file) does not seed a `tool.dispatch` capability grant — it predates #410 and only every needed the downgrade + DLP-subscriber grants. `dispatch_tool` (`src/alfred/orchestrator/tool_dispatch.py`) calls `gate.check(plugin_id="alfred.orchestrator.tool_dispatch", hookpoint="tool.dispatch", requested_tier="system")` before dispatching anything, and `GatePolicy.check()` fails CLOSED on any unmatched grant (`src/alfred/security/capability_gate/policy.py`). Without this grant, Task 4's flagship test would silently exercise the gate-**denied** branch, not the success path it claims to prove — and nothing in the test as drafted would catch that (the router double ignores tool-result content and returns its fixed answer regardless).
+**Critical, found during `/review-plan` (2026-08-07), re-confirmed still true against `main` post-PR1/PR2 (2026-08-11):** `_boot_stack`'s gate fixture (`_boot_gate(*, grant_downgrade: bool)`, this same file, currently `:287-317`) still does not seed a `tool.dispatch` capability grant — it predates #410 and only ever needed the downgrade + DLP-subscriber grants. `dispatch_tool` (`src/alfred/orchestrator/tool_dispatch.py`) calls `gate.check(plugin_id="alfred.orchestrator.tool_dispatch", hookpoint="tool.dispatch", requested_tier="system")` before dispatching anything, and `GatePolicy.check()` fails CLOSED on any unmatched grant (`src/alfred/security/capability_gate/policy.py`). Without this grant, Task 4's flagship test would silently exercise the gate-**denied** branch, not the success path it claims to prove — and nothing in the test as drafted would catch that (the router double ignores tool-result content and returns its fixed answer regardless).
 
-Read `_boot_gate()`'s current body in this file, and `tests.helpers.gates.make_tool_dispatch_gate()` (the fixture this codebase already has for exactly this grant — used by `tests/integration/orchestrator/conftest.py`'s `_assembly_gate()`, which composes it onto ONE real `RealGate` alongside other grants, the established pattern to follow here). Extend `_boot_gate()` to ALSO seed the `tool.dispatch` grant `make_tool_dispatch_gate()` provides, composed onto the same `RealGate` instance `_boot_gate()` already returns — never a second gate object, and never a permissive shim (CLAUDE.md hard rule #2). This is additive: every existing test in this file that doesn't dispatch tools is unaffected by one more grant existing on the gate.
+**Concrete mechanism (verified against `tests/integration/orchestrator/conftest.py`'s `_assembly_gate()`, `:107-141` — the established precedent for composing `make_tool_dispatch_gate()`'s grants onto a different base gate):** `make_tool_dispatch_gate()` (`tests/helpers/gates.py:637`) returns a full `RealGate`, not a bare grant set — `_assembly_gate()` extracts its grants via `base = make_tool_dispatch_gate(); assert isinstance(base, RealGate); grants = set(base._policy.grants)`, unions in whatever else it needs, then rebuilds ONE `RealGate` from the union. Apply the same pattern inside `_boot_gate()`: call `make_tool_dispatch_gate(grant_downgrade=False)` (pass `grant_downgrade=False` — `_boot_gate()` already conditionally seeds its OWN `t3.downgrade_to_orchestrator` grant via its own `grant_downgrade` param; do not let the two params fight each other over the same grant), pull the single `tool.dispatch` `GrantRow` out of its `._policy.grants`, and add it to `_boot_gate()`'s existing local `grants` set before constructing the returned `RealGate` — never a second gate object, and never a permissive shim (CLAUDE.md hard rule #2). This is additive: every existing test in this file that doesn't dispatch tools is unaffected by one more grant existing on the gate.
 
 - [ ] **Step 1: Add a tool-call-then-answer router double**
 
@@ -670,7 +696,20 @@ git commit -m "docs(adr): ADR-0049 — supersede the empty-tool-registry premise
 
 **Files:** none (GitHub issues, not repo files)
 
-- [ ] **Step 1: File the allowlist-projection gap**
+> **Steps 1-2 are DONE — filed during PR0 bookkeeping, 2026-08-11, ahead of
+> this plan's execution** (the bookkeeping session filed them early rather
+> than waiting for PR3 to reach this task). Filed as:
+>
+> - **#582** — "web.fetch operator-allowlist projection is unwired
+>   (`_list_allowlist_entries` always returns `[]`)"
+> - **#583** — "Activate web.fetch on the live comms turn (unauthenticated) —
+>   blocked on the allowlist projection (#582)"
+>
+> Only **Step 3** (cross-reference the two issue numbers into the design
+> spec's §9) remains — do it as part of this PR, substituting `#582`/`#583`
+> for the two "file one" placeholders.
+
+- [x] **Step 1: File the allowlist-projection gap — DONE, filed as #582 (2026-08-11)**
 
 ```bash
 gh issue create --title "web.fetch operator-allowlist projection is unwired (_list_allowlist_entries always returns [])" --body "$(cat <<'EOF'
@@ -712,7 +751,7 @@ EOF
 )"
 ```
 
-- [ ] **Step 2: File the web.fetch activation follow-up (references the one-broker-instance fix already researched)**
+- [x] **Step 2: File the web.fetch activation follow-up (references the one-broker-instance fix already researched) — DONE, filed as #583 (2026-08-11)**
 
 ```bash
 gh issue create --title "Activate web.fetch on the live comms turn (unauthenticated) — blocked on the allowlist projection" --body "$(cat <<'EOF'
@@ -767,7 +806,14 @@ EOF
 
 - [ ] **Step 3: Cross-reference both new issues from the design spec**
 
-Update `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`'s §9 "Out of scope" bullets to replace "file one" with the actual issue numbers just created.
+Update `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`'s §9 "Out of scope" bullets to replace "file one" with the actual issue numbers: **#582** (allowlist-projection gap) and **#583** (web.fetch activation follow-up).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md
+git commit -m "docs(plan): cross-reference #582/#583 into the design spec's out-of-scope section (#410 PR3)"
+```
 
 ---
 
@@ -797,7 +843,7 @@ Per this repo's standing cadence, note the UAT pass/fail in the PR description b
 
 ## Definition of Done
 
-- [ ] All 7 tasks' tests pass: `uv run pytest tests/unit/cli/test_bootstrap_build_orchestrator.py tests/unit/orchestrator/test_act_loop.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py tests/adversarial -v`
+- [ ] All 7 tasks' tests pass: `uv run pytest tests/unit/cli/test_build_orchestrator_wiring.py tests/unit/orchestrator/test_act_loop.py tests/unit/orchestrator/test_tool_dispatch.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py tests/adversarial -v`
 - [ ] `make check` passes clean.
 - [ ] 100% line+branch coverage on `src/alfred/orchestrator/tool_dispatch.py` (dual-LLM boundary, release-blocking).
 - [ ] `alfred-security-engineer` sign-off obtained (dual-LLM boundary, first live comms-path tool dispatch).
