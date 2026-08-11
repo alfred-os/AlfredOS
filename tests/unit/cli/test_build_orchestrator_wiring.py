@@ -53,7 +53,7 @@ def test_default_scopes_are_role_scoped_and_the_ledger_is_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _base_env(monkeypatch)
-    settings = Settings()
+    settings = Settings()  # type: ignore[no-untyped-call]
     recorded_roles: list[ConnectionRole] = []
     captured_scopes: dict[ConnectionRole, Any] = {}
 
@@ -90,7 +90,7 @@ def test_injected_scopes_are_used_verbatim_no_default_builds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _base_env(monkeypatch)
-    settings = Settings()
+    settings = Settings()  # type: ignore[no-untyped-call]
     recorded_roles: list[ConnectionRole] = []
 
     def _fake_build_session_scope(
@@ -125,3 +125,43 @@ def test_injected_scopes_are_used_verbatim_no_default_builds(
     # The comms boot graph injects both scopes — the builder must not build
     # shadow ones (a shadow TURN engine would double the budgeted pool).
     assert recorded_roles == []
+
+
+def test_forwards_tool_dispatch_trio(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    settings = Settings()  # type: ignore[no-untyped-call]
+    monkeypatch.setattr(_bootstrap, "build_session_scope", lambda *_a, **_kw: _fake_scope())
+    monkeypatch.setattr(_bootstrap, "build_budget_guard", lambda _r, _s: MagicMock())
+
+    tool_registry = MagicMock()
+    gate = MagicMock()
+    outbound_dlp = MagicMock()
+
+    orch = _bootstrap.build_orchestrator(
+        settings,
+        broker=MagicMock(),
+        router=MagicMock(),
+        resolver=_stub_resolver(),
+        tool_registry=tool_registry,
+        gate=gate,
+        outbound_dlp=outbound_dlp,
+    )
+    assert orch._tool_registry is tool_registry
+    assert orch._gate is gate
+    assert orch._outbound_dlp is outbound_dlp
+
+
+def test_defaults_tool_dispatch_trio_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression pin: every caller before this PR omits the trio and gets the
+    # exact pre-#410-PR3 unwired state.
+    _base_env(monkeypatch)
+    settings = Settings()  # type: ignore[no-untyped-call]
+    monkeypatch.setattr(_bootstrap, "build_session_scope", lambda *_a, **_kw: _fake_scope())
+    monkeypatch.setattr(_bootstrap, "build_budget_guard", lambda _r, _s: MagicMock())
+
+    orch = _bootstrap.build_orchestrator(
+        settings, broker=MagicMock(), router=MagicMock(), resolver=_stub_resolver()
+    )
+    assert orch._tool_registry is None
+    assert orch._gate is None
+    assert orch._outbound_dlp is None

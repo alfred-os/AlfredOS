@@ -60,7 +60,10 @@ from alfred.security.dlp import OutboundDlp
 from alfred.security.secrets import SecretBroker, SecretBrokerConfigError
 
 if TYPE_CHECKING:
+    from alfred.hooks.capability import CapabilityGate
+    from alfred.orchestrator.tool_registry import ToolRegistry
     from alfred.providers.base import Provider
+    from alfred.security.dlp import OutboundDlpProtocol
 
 
 __all__ = [
@@ -493,6 +496,14 @@ def build_orchestrator(
     session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     audit_session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     quarantined_extractor: QuarantinedExtractorLike | None = None,
+    # #410 PR3: the tool-dispatch trio. All three additive + optional;
+    # `None` (every caller before this PR's Task 2 wiring) preserves
+    # today's unwired behaviour exactly — core.py's all-three-or-none guard
+    # (currently ~:1364, verify against the live file) stays unreachable for
+    # any partial combination.
+    tool_registry: ToolRegistry | None = None,
+    gate: CapabilityGate | None = None,
+    outbound_dlp: OutboundDlpProtocol | None = None,
 ) -> Orchestrator:
     """Assemble a privileged :class:`Orchestrator` from operator settings.
 
@@ -575,6 +586,9 @@ def build_orchestrator(
         budget=budget,
         episodic_factory=_episodic_factory,
         quarantined_extractor=quarantined_extractor,
+        tool_registry=tool_registry,
+        gate=gate,
+        outbound_dlp=outbound_dlp,
         side_effect_ledger=PostgresTurnSideEffectLedger(),
         replay_journal=PostgresReplayJournal(session_scope=audit_session_scope),
     )
