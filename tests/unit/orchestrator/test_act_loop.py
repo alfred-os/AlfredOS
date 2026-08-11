@@ -164,6 +164,34 @@ def test_constructor_defaults_tool_seams_to_none() -> None:
     assert orch._outbound_dlp is None
 
 
+async def test_dispatch_seams_guard_is_bypassed_when_all_three_wired(
+    monkeypatch: Any,
+) -> None:
+    """Named regression-pin for core.py's all-three-or-none guard (~:1364):
+    never fires when genuinely all three are set. Logically already entailed
+    by test_two_tool_turn_dispatches_in_order_then_returns's passing outcome
+    — this test exists to name the guard explicitly for readability, not to
+    add new coverage."""
+    r0 = _tool_use_response(ToolCall(id="c0", name="clock.now", arguments={}))
+    r1 = _text_response("the time is now")
+    router = MagicMock()
+    router.complete = AsyncMock(side_effect=[r0, r1])
+
+    async def _fake_dispatch(call: ToolCall, call_index: int, **kw: Any) -> str:
+        return "2026-08-07T00:00:00+00:00"
+
+    monkeypatch.setattr("alfred.orchestrator.core.dispatch_tool", _fake_dispatch)
+    orch = _make_orchestrator(
+        router=router,
+        budget=_make_no_op_budget(),
+        tool_registry=_fake_registry("clock.now"),
+        gate=MagicMock(),
+        outbound_dlp=MagicMock(),
+    )
+    reply = await _drive_turn(orch)
+    assert reply == "the time is now"
+
+
 def test_loop_constants_are_positive_ints() -> None:
     assert loop_constants.MAX_TOOL_ITERATIONS > 0
     assert loop_constants.MAX_TOOL_CALLS_PER_ITERATION > 0
