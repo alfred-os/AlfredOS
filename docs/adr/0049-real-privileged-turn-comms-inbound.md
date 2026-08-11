@@ -59,6 +59,13 @@ loop" as out of scope; #339 closed that mechanism separately for a reason.
 
 ## Decision
 
+> **Superseded in part by #410 PR3.** The "egress tools deferred... empty tool
+> registry" premise below no longer holds: the live comms turn now dispatches
+> `clock.now` for real. `web.fetch` remains deferred — not for the reason below
+> (tool-calling itself), but because its operator-allowlist projection is
+> unfinished (see `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`
+> §3 item 6). The original text is preserved for historical record.
+
 **Ship a real *conversational* privileged turn on comms inbound, egress tools
 deferred.** `RealTurnOrchestratorAdapter` (`src/alfred/comms_mcp/real_turn_adapter.py`)
 replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
@@ -181,6 +188,13 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
   (`tests/adversarial/prompt_injection/test_pi_2026_014_inbound_display_name_injection.py`).
 
 ### Neutral
+
+> **Superseded in part by #410 PR3.** The "egress tools deferred... empty tool
+> registry" premise below no longer holds: the live comms turn now dispatches
+> `clock.now` for real. `web.fetch` remains deferred — not for the reason below
+> (tool-calling itself), but because its operator-allowlist projection is
+> unfinished (see `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`
+> §3 item 6). The original text is preserved for historical record.
 
 - Egress tools, the deterministic-replay journal, and the
   [ADR-0048](0048-web-fetch-authenticated-fetch-secret-substitution.md) forward
