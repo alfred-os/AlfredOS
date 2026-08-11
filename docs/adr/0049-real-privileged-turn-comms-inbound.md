@@ -194,7 +194,12 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
 > `clock.now` for real. `web.fetch` remains deferred — not for the reason below
 > (tool-calling itself), but because its operator-allowlist projection is
 > unfinished (see `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`
-> §3 item 6). The original text is preserved for historical record.
+> §3 item 6). The bullet below also names the deterministic-replay journal as
+> explicitly deferred; that premise no longer holds either — the journal
+> ([ADR-0063](0063-deterministic-tool-call-replay-journal.md)) has been live
+> since #410 PR2 and is now genuinely exercised (fast-forward read + write) in
+> production by this PR's tool registry wiring. The original text is
+> preserved for historical record.
 
 - Egress tools, the deterministic-replay journal, and the
   [ADR-0048](0048-web-fetch-authenticated-fetch-secret-substitution.md) forward
