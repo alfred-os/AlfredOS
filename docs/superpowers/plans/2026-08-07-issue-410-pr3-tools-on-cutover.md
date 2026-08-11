@@ -17,6 +17,19 @@
 > under its original name. Line numbers throughout (originally cited against
 > the 2026-08-07 pre-PR1/PR2 tree) have drifted — each has been re-verified
 > and either corrected or marked "verify against the live file."
+>
+> **A full 6-agent `/review-plan` fleet pass (+ coordinator + Phase C
+> cross-checks) then ran against the re-verified plan, 2026-08-11.** 15
+> findings (0 Critical, 4 High, 8 Medium, 3 Low), all corroborated (6
+> cross-reviewer, 9 cross-check-confirmed, 0 disputed/retracted). One was
+> BLOCKING: `alfred-security-engineer` withheld sign-off pending Task 2a's
+> DLP fix gaining a totality wrapper (sec-001) — now fixed inline below. All
+> other findings are also fixed inline, each marked with its own
+> `/review-plan` correction callout. A third forward-looking issue (**#584**,
+> authenticated `web.fetch`) was filed alongside the two from PR0 bookkeeping.
+> This plan is now believed implementation-ready; per the coordinator's own
+> recommendation, a fast confirm-only pass (not a full re-review) is
+> sufficient before subagent-driven-development begins.
 
 **Prerequisites: PR1 and PR2 must both be merged first** (found during
 `/review-plan` — neither prior plan stated this explicitly, though both are
@@ -112,9 +125,9 @@ def test_forwards_tool_dispatch_trio(monkeypatch: pytest.MonkeyPatch) -> None:
         gate=gate,
         outbound_dlp=outbound_dlp,
     )
-    assert orch._tool_registry is tool_registry  # type: ignore[attr-defined]
-    assert orch._gate is gate  # type: ignore[attr-defined]
-    assert orch._outbound_dlp is outbound_dlp  # type: ignore[attr-defined]
+    assert orch._tool_registry is tool_registry
+    assert orch._gate is gate
+    assert orch._outbound_dlp is outbound_dlp
 
 
 def test_defaults_tool_dispatch_trio_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,12 +141,14 @@ def test_defaults_tool_dispatch_trio_to_none(monkeypatch: pytest.MonkeyPatch) ->
     orch = _bootstrap.build_orchestrator(
         settings, broker=MagicMock(), router=MagicMock(), resolver=_stub_resolver()
     )
-    assert orch._tool_registry is None  # type: ignore[attr-defined]
-    assert orch._gate is None  # type: ignore[attr-defined]
-    assert orch._outbound_dlp is None  # type: ignore[attr-defined]
+    assert orch._tool_registry is None
+    assert orch._gate is None
+    assert orch._outbound_dlp is None
 ```
 
 (Check the exact keyword signature `_fake_build_session_scope` uses in this file's existing two tests before assuming `lambda *_a, **_kw` is sufficient — `build_session_scope` is called with a `role=` kwarg the lambda must accept; match the existing tests' monkeypatch signature exactly rather than a bare catch-all if `mypy --strict` complains.)
+
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — finding rev-001, High):** the four assertions above deliberately carry NO `# type: ignore[attr-defined]` comments, unlike this same draft's earlier revision. `tool_registry`/`gate`/`outbound_dlp` are typed non-`Any` on `Orchestrator.__init__` and stored verbatim as `self._tool_registry`/etc — accessing them is not a type error, and this repo's `pyproject.toml` sets `warn_unused_ignores = true`. An unnecessary `# type: ignore` on a line mypy doesn't actually flag becomes ITS OWN error (`[unused-ignore]`) under that setting, which would fail this task's own Step 5. This file's existing tests already access equally-private `Orchestrator` attributes (e.g. `orch._side_effect_ledger`, `orch._replay_journal`) with zero ignore comments — follow that established convention.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -203,6 +218,8 @@ git commit -m "feat(cli): widen build_orchestrator for the tool-dispatch trio (#
 - Modify: `src/alfred/cli/daemon/_comms_boot.py` (the forward-instructions region, currently `:746-771`, + the `build_orchestrator` call, currently `:794-813` — verify against the live file, do not assume line numbers)
 
 - [ ] **Step 1: Replace the stale forward-instructions comment**
+
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — findings rev-002/sec-002/core-001/comms-001, the single most corroborated finding in the review, independently found by 4 of 6 reviewers, Medium):** this step must replace TWO stale comment blocks, not one. The second — a separate `#338 PR2 cutover` comment a few lines further down (live file, currently `:781-783`), sitting directly above the `router = (...)` assignment right before the `build_orchestrator(...)` call this task's Step 2 modifies — reads: `"Egress tools are DEFERRED (#338 scope): no tool_registry is passed, so the Act loop runs one completion and the (registry, gate, outbound_dlp) trio guard at core.py:973 is never reached."` Both claims in that sentence become false the instant this task's Step 2 lands (`tool_registry` IS now passed; the guard DOES become reachable — this PR's own headline claim), and it already cites the stale `core.py:973` line number. Left uncorrected, it sits at the exact composition site this plan's Definition of Done requires `alfred-security-engineer` sign-off on. Replace it in the same commit, e.g.: `"#410 PR3: the tool-dispatch trio (tool_registry/gate/outbound_dlp) IS now passed below — the (registry, gate, outbound_dlp) trio guard in core.py's Act loop is reachable for the first time on this path."`
 
 The current comment block (added by #338 PR2, describing calling `build_web_fetch_egress_extractor` + `build_tool_registry` "at the point it first needs a live `web.fetch`") is now inaccurate — this PR deliberately does NOT call either. Replace:
 
@@ -290,10 +307,20 @@ The existing `orchestrator = build_orchestrator(...)` call (verify its current c
 Run: `uv run mypy src/alfred/cli/daemon/_comms_boot.py && uv run pyright src/alfred/cli/daemon/_comms_boot.py`
 Expected: no errors
 
-- [ ] **Step 4: Run the existing boot-graph integration suite**
+- [ ] **Step 4: Run the existing boot-graph integration suite, and add a minimal smoke assertion for the real wiring**
+
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — finding test-002, Medium, cross-check confirmed by `alfred-comms-engineer`):** this task is otherwise the only one of Tasks 1/2a/3/4 with no assertion of its own — it wires `clock.now` into the REAL `_comms_boot.py` construction path but proves nothing about that wiring until Task 4, two tasks later. Task 3's guard test does NOT cover this gap either — it drives dispatch through `_make_orchestrator` + a monkeypatched `dispatch_tool`, a different construction path entirely from `_build_comms_boot_graph`. Close the gap cheaply by adding ONE assertion to `tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py` (the exact suite this step already runs, exposing `_CommsBootGraph.inbound_orchestrator`, a `RealTurnOrchestratorAdapter` whose `__init__` stores the constructed `Orchestrator` as `self._orchestrator`):
+>
+> ```python
+> assert "clock.now" in {
+>     d.name for d in graph.inbound_orchestrator._orchestrator._tool_registry.definitions()
+> }
+> ```
+>
+> This proves the real `_comms_boot.py` wiring actually threads a `clock.now`-bearing registry into the live orchestrator, using infrastructure this step already pays to spin up (real Postgres, real echo quarantine child) — cheaper than duplicating Task 4's integration setup. Scope note: this only covers the `tool_registry` leg, not `gate=real_gate`/`outbound_dlp=cast(...)` identity — that's fine, the full trio's behavioural correctness is still validated by Task 3 (guard bypass) and Task 4 (real dispatch).
 
 Run: `uv run pytest tests/integration/comms_mcp/test_real_turn_inbound_boundary.py tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py -v`
-Expected: every PRE-EXISTING test still passes. None of them exercise a tool call today, so none should change behaviour yet — Task 4 adds the first test that does.
+Expected: every PRE-EXISTING test still passes, plus the new smoke assertion above. Task 4 still adds the first test that exercises a REAL tool dispatch end-to-end — this step only proves the registry is wired, not that dispatch works.
 
 - [ ] **Step 5: Commit**
 
@@ -305,6 +332,12 @@ git commit -m "feat(cli): wire clock.now into the live comms boot graph (#410 PR
 ---
 
 ### Task 2a: Close the `InternalToolSpec` DLP-skip gap (found during `/review-plan` pass 2, 2026-08-07)
+
+> **BLOCKING correction (found during the `/review-plan` fleet pass, 2026-08-11 — finding sec-001, High, triple-confirmed: originating `alfred-security-engineer` + independent cross-check confirmations from `alfred-core-engineer` and `alfred-test-engineer`). Security sign-off was explicitly withheld pending this fix — do not implement Task 2a's Step 3 as originally drafted below without applying this correction first.**
+>
+> The originally-drafted Step 3 diff (further down) only wraps `dlp.scan(content)` in `try/except OutboundCanaryTripped` — it has NO totality wrapper for any OTHER exception `dlp.scan()` can raise. `OutboundDlp.scan()` (`src/alfred/security/dlp.py`) is DELIBERATELY DESIGNED to propagate non-canary failures rather than swallow them: a `broker.redact()` bug, DLP's own internal audit-sink callback (documented: "raises propagate per CLAUDE.md hard rule #7"), or a canary-matcher bug. Under the original draft, any such failure on the `InternalToolSpec` leg escapes `dispatch_tool` with **zero audit row** — contradicting the branch's own adjacent sec-003 comment ("an internal tool raising must NOT escape the chokepoint unaudited") and CLAUDE.md hard rule #7. This is exactly the "non-canary DLP fault" class the `ExternalToolSpec` leg's own comment (`tool_dispatch.py:311-317`) already names as something IT defends against, via an `audited`-flag totality wrapper this new code does not mirror. 100% branch coverage (Step 5, as originally drafted) CANNOT catch this — coverage tooling reports on lines/branches present in the file, not an absent `except` clause.
+>
+> **The fix:** mirror the `ExternalToolSpec` leg's `audited`-flag totality pattern on the `InternalToolSpec` leg too. Step 3's replacement code below has been corrected accordingly; Step 1's test has an added case for the non-canary path.
 
 **Files:**
 
@@ -334,7 +367,33 @@ async def test_internal_tool_dlp_canary_escalates() -> None:
     assert writer.rows[-1]["subject"]["dispatch_outcome"] == "dlp_canary"
     assert writer.rows[-1]["subject"]["result_tier"] == "T2"
     assert writer.rows[-1]["result"] == "quarantined"
+
+
+async def test_internal_tool_dlp_non_canary_fault_is_audited() -> None:
+    """#410 PR3 (sec-001 correction): a non-canary dlp.scan() failure on the
+    InternalToolSpec leg must still leave an audit row before propagating —
+    mirrors the ExternalToolSpec leg's existing totality-wrapper test
+    (test_non_serializable_downgrade_output_escalates)."""
+    writer = _CapturingAuditWriter()
+
+    class _RaisingDlp:
+        def scan(self, text: str) -> str:
+            raise ValueError("simulated broker.redact bug")
+
+    with pytest.raises(ValueError):
+        await _dispatch(
+            ToolCall(id="1", name="clock.now", arguments={}),
+            _int_spec(),
+            gate=make_tool_dispatch_gate(),
+            dlp=_RaisingDlp(),
+            writer=writer,
+        )
+    assert writer.rows[-1]["subject"]["dispatch_outcome"] == "unexpected_error"
+    assert writer.rows[-1]["subject"]["result_tier"] == "T2"
+    assert writer.rows[-1]["result"] == "fault"
 ```
+
+(Verify `_RaisingDlp`'s `scan` signature against the live `OutboundDlp`/`OutboundDlpProtocol` contract before implementing — match whatever the real interface expects.)
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -365,7 +424,7 @@ In `src/alfred/orchestrator/tool_dispatch.py`, the `InternalToolSpec` branch cur
         return content
 ```
 
-Replace the final `await _audit(...); return content` pair with a scoped DLP scan, leaving the existing `except Exception` totality arm above it untouched:
+Replace the final `await _audit(...); return content` pair with a scoped DLP scan, leaving the existing `except Exception` totality arm above it untouched. **Corrected per sec-001 (2026-08-11): the DLP-scan region needs its OWN totality wrapper too, mirroring the `ExternalToolSpec` leg's `audited`-flag pattern** — not just a bare `try/except OutboundCanaryTripped`:
 
 ```python
     if isinstance(spec, InternalToolSpec):
@@ -381,31 +440,54 @@ Replace the final `await _audit(...); return content` pair with a scoped DLP sca
                 result_tier="T2",
             )
             raise
-        # #410 PR3 (found during `/review-plan` pass 2, 2026-08-07): CLAUDE.md
-        # hard rule #4 requires every outbound path be DLP-scanned by default
-        # or carry a declared, test-verified exemption — this leg had
-        # neither. Mirror the ExternalToolSpec leg's scoped dlp.scan() +
-        # escalate-on-canary pattern below.
+        # #410 PR3 (found during `/review-plan` pass 2, 2026-08-07; totality
+        # wrapper added per `/review-plan` finding sec-001, 2026-08-11):
+        # CLAUDE.md hard rule #4 requires every outbound path be DLP-scanned
+        # by default or carry a declared, test-verified exemption — this leg
+        # had neither. Mirror the ExternalToolSpec leg's `audited`-flag
+        # totality pattern (tool_dispatch.py's downgrade+dlp.scan region),
+        # not just a bare try/except OutboundCanaryTripped — dlp.scan() is
+        # deliberately designed to propagate NON-canary failures too
+        # (broker.redact bugs, DLP's own internal audit-sink failures,
+        # canary-matcher bugs), and those must not escape unaudited either.
+        audited = False
         try:
-            clean = dlp.scan(content)
-        except OutboundCanaryTripped:
+            try:
+                clean = dlp.scan(content)
+            except OutboundCanaryTripped:
+                await _audit(
+                    dispatch_outcome="dlp_canary",
+                    result="quarantined",
+                    tool_name=spec.name,
+                    result_tier="T2",
+                )
+                audited = True
+                raise  # ESCALATE — a canary in an internal tool's T2 is a serious leak.
             await _audit(
-                dispatch_outcome="dlp_canary",
-                result="quarantined",
+                dispatch_outcome="dispatched",
+                result="success",
                 tool_name=spec.name,
                 result_tier="T2",
             )
-            raise  # ESCALATE — a canary in an internal tool's T2 is a serious leak.
-        await _audit(
-            dispatch_outcome="dispatched", result="success", tool_name=spec.name, result_tier="T2"
-        )
-        return clean
+            return clean
+        except Exception:
+            # sec-003 totality, again: a non-canary dlp.scan() fault (broker
+            # bug, DLP-internal audit-sink failure, canary-matcher bug) must
+            # still leave a loud terminal row before propagating.
+            if not audited:
+                await _audit(
+                    dispatch_outcome="unexpected_error",
+                    result="fault",
+                    tool_name=spec.name,
+                    result_tier="T2",
+                )
+            raise
 ```
 
-- [ ] **Step 4: Run to verify both the new and existing tests pass**
+- [ ] **Step 4: Run to verify both new tests (canary AND non-canary) and existing tests pass**
 
 Run: `uv run pytest tests/unit/orchestrator/test_tool_dispatch.py -v`
-Expected: PASS — including the pre-existing `test_internal_tool_dispatches_directly` (its `_NoopDlp()` fixture is an identity passthrough, so `content` and `clean` are byte-identical and the assertion `out == "13:00Z"` still holds).
+Expected: PASS — both `test_internal_tool_dlp_canary_escalates` and the corrected-fix's `test_internal_tool_dlp_non_canary_fault_is_audited`, plus the pre-existing `test_internal_tool_dispatches_directly` (its `_NoopDlp()` fixture is an identity passthrough, so `content` and `clean` are byte-identical and the assertion `out == "13:00Z"` still holds).
 
 - [ ] **Step 5: Coverage + type-check**
 
@@ -415,11 +497,22 @@ Expected: 100% line + branch on `tool_dispatch.py` (CLAUDE.md hard rule: trust-b
 Run: `uv run mypy src/alfred/orchestrator/tool_dispatch.py && uv run pyright src/alfred/orchestrator/tool_dispatch.py`
 Expected: no errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Add adversarial-corpus coverage for the InternalToolSpec DLP surface**
+
+> **Added per `/review-plan` finding test-001 (High, corroborated — cross-check confirmed by `alfred-security-engineer`, which added a sequencing note: write this AFTER Step 3's totality-wrapper fix is settled, so it can assert both outcomes below in one pass, not just the canary case).**
+
+Zero adversarial-corpus coverage exists today for the `InternalToolSpec` DLP-scan surface this task introduces/fixes (distinct from cap-2026-010's unknown-tool-name property, which Task 4 Step 6 already extends end-to-end). Add a new corpus entry under `tests/adversarial/` (follow this repo's existing corpus file/naming convention — check a sibling entry such as `test_cap_2026_010_011_dispatch_perimeter_injection.py` for the pattern) asserting BOTH outcomes through `dispatch_tool` on the `InternalToolSpec` leg:
+
+- A canary-bearing tool result → `dispatch_outcome="dlp_canary"`, `result="quarantined"`, escalated (`OutboundCanaryTripped` propagates).
+- A non-canary DLP fault (mirrors Step 1's `test_internal_tool_dlp_non_canary_fault_is_audited`) → `dispatch_outcome="unexpected_error"`, `result="fault"`, audited before propagating.
+
+Run: `uv run pytest tests/adversarial -q` — the new entry plus every pre-existing adversarial test must pass.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/alfred/orchestrator/tool_dispatch.py tests/unit/orchestrator/test_tool_dispatch.py
-git commit -m "fix(security): scan InternalToolSpec dispatch results through DLP (#410 PR3)"
+git add src/alfred/orchestrator/tool_dispatch.py tests/unit/orchestrator/test_tool_dispatch.py tests/adversarial/
+git commit -m "fix(security): scan InternalToolSpec dispatch results through DLP, with totality-wrapper audit coverage (#410 PR3)"
 ```
 
 ---
@@ -432,13 +525,19 @@ git commit -m "fix(security): scan InternalToolSpec dispatch results through DLP
 
 The existing `core.py` guard (currently ~`:1364`, verify against the live file — confirmed present and unchanged in shape post-PR1/PR2, at `if self._tool_registry is None or self._gate is None or self._outbound_dlp is None: raise ...`) has only ever been exercised with all three `None` (the pre-#410 state) or, via `test_act_loop.py`'s `TestActLoopOrderedDispatch`, all three wired via `_make_orchestrator(..., tool_registry=..., gate=..., outbound_dlp=...)` — but that test never asserts the GUARD ITSELF is bypassed correctly; it asserts dispatch behaviour. Add an explicit, minimal test naming the guard.
 
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — finding core-003, Low, cross-check confirmed by `alfred-test-engineer`):** the pre-existing `TestActLoopOrderedDispatch::test_two_tool_turn_dispatches_in_order_then_returns` ALREADY logically entails "the guard did not raise" — its outcome (a completed turn, `router.complete.await_count == 2`) is reachable only if the guard's single bare-raise branch didn't fire. The test below adds no coverage that test doesn't already provide, given the guard's trivial single-condition shape. Keep it, but as an honestly-framed **named regression-pin** (a readable, explicit anchor a future refactor can't silently break without a failure pointing at the right place) — not as new coverage.
+
 - [ ] **Step 1: Write the test**
 
 ```python
 async def test_dispatch_seams_guard_is_bypassed_when_all_three_wired(
     monkeypatch: Any,
 ) -> None:
-    """core.py's all-three-or-none guard (~:1364) never fires when genuinely all three are set."""
+    """Named regression-pin for core.py's all-three-or-none guard (~:1364):
+    never fires when genuinely all three are set. Logically already entailed
+    by test_two_tool_turn_dispatches_in_order_then_returns's passing outcome
+    — this test exists to name the guard explicitly for readability, not to
+    add new coverage."""
     r0 = _tool_use_response(ToolCall(id="c0", name="clock.now", arguments={}))
     r1 = _text_response("the time is now")
     router = MagicMock()
@@ -669,9 +768,11 @@ git commit -m "test(comms): real inbound message drives a real clock.now dispatc
 
 Run: `grep -ni "empty tool registry\|deferred" docs/adr/0049-real-privileged-turn-comms-inbound.md`
 
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — finding arch-001, Medium, cross-check confirmed by `alfred-reviewer`):** this grep returns MULTIPLE stale hits, not one — a "Neutral"-section "deferred journal" bullet goes stale too (PR3 activates the journal), separate from the Decision-section site Step 2 below targets. Add a superseding note at EVERY hit the grep surfaces, not just the first/most prominent one — re-run the grep after editing to confirm no stale hit was missed.
+
 - [ ] **Step 2: Add a superseding note**
 
-At the location Step 1 finds (fill in today's actual date at implementation time, not a placeholder), add:
+At each location Step 1 finds (fill in today's actual date at implementation time, not a placeholder), add:
 
 ```markdown
 > **Superseded in part by #410 PR3.** The "egress tools deferred... empty
@@ -683,16 +784,22 @@ At the location Step 1 finds (fill in today's actual date at implementation time
 > The original text is preserved for historical record.
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Update the comms subsystem deep-doc's matching stale premise**
+
+> **Added per `/review-plan` finding comms-002 (Medium, cross-check confirmed by `alfred-architect`, who weighted this AT LEAST as important as arch-001 given it's the operator-facing subsystem doc, not a historical ADR record — bundle into this same edit pass rather than deferring).**
+
+`docs/subsystems/comms.md` (its "PRIVILEGED side now runs a real LLM turn" paragraph, live file ~lines 385-393) carries the same "egress tools deferred" premise this task supersedes in ADR-0049 — after this PR it becomes materially misleading (`clock.now` is live; only `web.fetch`/egress specifically stays deferred). Update it to note `clock.now` genuinely dispatches post-PR3, with `web.fetch` specifically still deferred pending #582/#583/#584.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add docs/adr/0049-real-privileged-turn-comms-inbound.md
-git commit -m "docs(adr): ADR-0049 — supersede the empty-tool-registry premise (#410 PR3)"
+git add docs/adr/0049-real-privileged-turn-comms-inbound.md docs/subsystems/comms.md
+git commit -m "docs(adr): ADR-0049 — supersede the empty-tool-registry premise, and comms.md (#410 PR3)"
 ```
 
 ---
 
-### Task 6: File the two forward-looking issues
+### Task 6: File the two forward-looking issues (now three — see correction)
 
 **Files:** none (GitHub issues, not repo files)
 
@@ -705,9 +812,21 @@ git commit -m "docs(adr): ADR-0049 — supersede the empty-tool-registry premise
 > - **#583** — "Activate web.fetch on the live comms turn (unauthenticated) —
 >   blocked on the allowlist projection (#582)"
 >
-> Only **Step 3** (cross-reference the two issue numbers into the design
-> spec's §9) remains — do it as part of this PR, substituting `#582`/`#583`
-> for the two "file one" placeholders.
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 —
+> finding arch-002, High, cross-check confirmed by
+> `alfred-security-engineer`, who called the per-secret↔destination binding
+> "exactly the confused-deputy control the secret broker exists to
+> enforce"):** the design spec §9 promises a THIRD follow-up issue —
+> authenticated `web.fetch` (the ADR-0048 forward gates: per-secret↔destination
+> binding, the gateway re-scan positive-path residual) — that was never
+> filed. Filed during this same review-fix pass as:
+>
+> - **#584** — "Authenticated web.fetch: per-secret↔destination binding +
+>   gateway re-scan residual (ADR-0048 forward gates)"
+>
+> **Step 3** (cross-reference all three issue numbers into the design spec's
+> §9) remains — do it as part of this PR. See its correction below re: `#583`
+> and `#584` needing NEW text, not a placeholder substitution.
 
 - [x] **Step 1: File the allowlist-projection gap — DONE, filed as #582 (2026-08-11)**
 
@@ -804,15 +923,17 @@ EOF
 )"
 ```
 
-- [ ] **Step 3: Cross-reference both new issues from the design spec**
+- [ ] **Step 3: Cross-reference all three new issues from the design spec**
 
-Update `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`'s §9 "Out of scope" bullets to replace "file one" with the actual issue numbers: **#582** (allowlist-projection gap) and **#583** (web.fetch activation follow-up).
+> **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — findings rev-003/core-002, Low, both independently found the identical gap):** the design spec's §9 contains exactly ONE literal "file one" placeholder (currently at line 411, mapping to the allowlist-projection gap). There is no second placeholder site for the unauthenticated-activation follow-up, and — per this correction — no third for the authenticated follow-up either. Grep for `"file one"` and substitute `#582` at the single hit; for `#583` and `#584`, ADD new cross-referencing text near the relevant §9 bullets (the unauthenticated `web.fetch` bullet and the authenticated `web.fetch` bullet respectively) rather than trying to substitute a placeholder that doesn't exist for them.
+
+Update `docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md`'s §9 "Out of scope" bullets to cross-reference the actual issue numbers: **#582** (allowlist-projection gap, substitutes the one "file one" placeholder), **#583** (unauthenticated web.fetch activation, new text), and **#584** (authenticated web.fetch, ADR-0048 forward gates, new text).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-08-07-issue-410-tools-on-design.md
-git commit -m "docs(plan): cross-reference #582/#583 into the design spec's out-of-scope section (#410 PR3)"
+git commit -m "docs(plan): cross-reference #582/#583/#584 into the design spec's out-of-scope section (#410 PR3)"
 ```
 
 ---
@@ -833,7 +954,7 @@ Via a real Discord DM to the bot (or `alfred chat` if UAT is being done against 
 
 - The bot's reply reflects a real timestamp, not a hallucinated one.
 - `alfred audit graph --since 1h` (or `alfred audit log`) shows a `tool.dispatch` row for `clock.now` correlated with the turn's `orchestrator.turn` row.
-- No error, no refusal, no `dispatch_seams_unwired` string anywhere in `docker compose logs alfred-core --since 1h` (found during `/review-plan`: the original wording here — "no ... in the daemon logs" — named no concrete command; this is it, per this repo's `docker-compose.yaml` service name).
+- No `orchestrator.turn` fault/error row correlated with the UAT's `tool.dispatch` row in the audit graph (a POSITIVE assertion, consistent with Task 4 Step 2's own preference for positive assertions over "not a known failure string" checks). **Correction (found during the `/review-plan` fleet pass, 2026-08-11 — finding comms-003, Medium, cross-check confirmed by `alfred-test-engineer`):** the original wording here checked `docker compose logs alfred-core --since 1h` for the literal substring `dispatch_seams_unwired` — that is the i18n catalog KEY, not the rendered message. The live `en` catalog renders it as "Tool dispatch is not fully wired: registry, gate, and DLP must be configured together." — the key substring never appears in production logs via the normal caught-and-logged path, so the original check was vacuous (it would "pass" whether or not the guard fired). Use the audit-graph assertion above instead; if a log check is still wanted, grep for the RENDERED string ("Tool dispatch is not fully wired"), not the key.
 
 - [ ] **Step 4: Record the UAT result**
 
@@ -849,4 +970,5 @@ Per this repo's standing cadence, note the UAT pass/fail in the PR description b
 - [ ] `alfred-security-engineer` sign-off obtained (dual-LLM boundary, first live comms-path tool dispatch).
 - [ ] Manual UAT (Task 7) recorded pass.
 - [ ] `/review-plan` fleet run on this plan (and PR1's, PR2's) before implementation; full `/review-pr` fleet + CodeRabbit `full review` on the resulting PR before merge.
-- [ ] Both forward-looking issues (Task 6) filed and cross-referenced from the design spec.
+- [ ] All three forward-looking issues (#582/#583/#584, Task 6) filed and cross-referenced from the design spec.
+- [ ] New adversarial-corpus entry (Task 2a Step 6) covers both the canary and non-canary `InternalToolSpec` DLP-fault outcomes.
