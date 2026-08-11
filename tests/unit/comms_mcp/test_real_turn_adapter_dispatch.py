@@ -2,7 +2,8 @@
 
 Covers the ``dispatch`` leg: the pool-bracketed real turn (FOLD-3) + the
 DLP-scanned send, the benign-reply / halt-no-reply short-circuits, the
-BudgetError halt-no-raise leg, the turn-error audit-then-reraise leg, the
+BudgetError halt-no-raise leg, the OutboundCanaryTripped halt-no-raise leg
+(#410 PR3 — final-review I4 fix), the turn-error audit-then-reraise leg, the
 per-``(persona, slug)`` turn mutex (FOLD-R1, Critical), and the pre-bind
 ``RuntimeError`` (FOLD-R5). ``ingest`` / the downgrade leg are Task 1 scope —
 not re-exercised here.
@@ -23,6 +24,7 @@ from alfred.comms_mcp.real_turn_adapter import (
     _PreparedTurn,
     _RefusalReply,
 )
+from alfred.security.dlp import OutboundCanaryTripped
 from alfred.security.tiers import T2, tag
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.gates import make_quarantined_extract_chain_gate
@@ -164,6 +166,35 @@ async def test_dispatch_budget_error_audits_and_halts_no_reply_no_raise() -> Non
         if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
     ]
     assert stages == ["budget_denied"]
+    assert pool.released == [("alfred", "u-1")]  # released in finally
+
+
+async def test_dispatch_canary_tripped_audits_and_halts_no_reply_no_raise() -> None:
+    """#410 PR3 (I4 fix): an ``OutboundCanaryTripped`` out of ``dispatch_tool`` is
+    DETERMINISTIC (same content trips the same canary every replay) — like
+    ``BudgetError`` above, it must halt (no reply, no re-raise) rather than fall
+    into the generic ``turn_error`` leg, which would re-raise into the forwarded
+    path's bounded-replay handling and burn the poison ceiling reproducing an
+    identical trip. Inert today (``clock.now`` can't embed a canary token); this
+    pins the classification ahead of `web.fetch` (#583) making it load-bearing.
+    """
+    audit = _RecordingAudit()
+    sender = _RecordingSender()
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=OutboundCanaryTripped(token="canary-token-1")),  # noqa: S106
+        audit=audit,
+        sender=sender,
+        pool=pool,
+    )
+    await adapter.dispatch(_prepared())  # must NOT raise
+    assert sender.sent == []  # no reply leaked
+    stages = [
+        r["subject"]["refusal_stage"]
+        for r in audit.rows
+        if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ]
+    assert stages == ["dlp_canary_tripped"]
     assert pool.released == [("alfred", "u-1")]  # released in finally
 
 
