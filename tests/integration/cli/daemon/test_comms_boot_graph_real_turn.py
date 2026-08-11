@@ -245,6 +245,12 @@ async def test_graph_exposes_raw_resolver_and_real_turn_adapter(
             # process-global install_identity_factories is not re-fired.
             assert graph.resolver is not None
             assert hasattr(graph.resolver, "version_counter")
+            # #410 PR3: smoke test that the real comms boot wiring threads a
+            # clock.now-bearing registry into the live orchestrator.
+            assert "clock.now" in {
+                d.name
+                for d in graph.inbound_orchestrator._orchestrator._tool_registry.definitions()
+            }
     finally:
         if graph is not None:
             await graph.aclose()

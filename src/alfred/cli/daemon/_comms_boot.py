@@ -62,6 +62,8 @@ from alfred.comms_mcp.protocol import (
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.i18n import t
 from alfred.memory.db import ConnectionRole
+from alfred.orchestrator.builtin_tools import build_clock_tool
+from alfred.orchestrator.tool_registry import ToolRegistry
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_socket_transport import CommsSocketListener
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
@@ -743,44 +745,36 @@ async def _build_comms_boot_graph(
         # fallback).
         recorder = T3BodyRecorder(nonce=t3_nonce, staging=staging)
         extractor_bridge = CommsExtractorBridge(extractor=extractor, record_body=recorder)
-        # ── #339 SEAM (G7-2.5 PR2 / §5.3) ───────────────────────────────────
-        # The live ``web.fetch`` egress extractor is assembled by
-        # ``alfred.plugins.web_fetch.assembly.build_web_fetch_egress_extractor``,
-        # REUSING this same ``extractor`` + ``recorder`` (and the boot
-        # ``CapabilityGate``) — it must NOT spawn a second quarantined child
-        # (§4.3 one production extractor; CORE-4 shared-child HoL). The factory
-        # is NOT called here: ``dispatch_web_fetch`` has zero production callers
-        # until #339 wires the tool-calling loop (after G7-3), so building it at
-        # boot would be dangling, never-exercised construction. #339 calls the
-        # factory at the point it first needs a live ``web.fetch``, threading:
-        #   build_web_fetch_egress_extractor(
-        #       settings=settings, gate=<the boot CapabilityGate>,
-        #       extractor=extractor, recorder=recorder, outbound_dlp=<cast>,
-        #       audit_writer=audit,
-        #       session_scope=build_boot_session_scope(settings))
-        # The gateway relay address rides ``settings.egress_relay_url`` (PR2
-        # compose). An integration test over a loopback relay proves the wiring
-        # (test_web_fetch_assembly.py), per ADR-0041.
-        #
-        # SINGLETON CONTRACT (#339): the live caller MUST build the extractor ONCE
-        # here at composition and reuse that single instance — do NOT call
-        # build_web_fetch_egress_extractor per fetch. RelayEgressClient's in-flight
-        # concurrency semaphore is PER-INSTANCE, so a per-fetch factory call would
-        # give each fire its own semaphore and defeat the global cap (the "a burst
-        # cannot head-of-line the comms relay" guarantee).
+        # ── #410 PR3: clock.now only — web.fetch is DEFERRED ───────────────
+        # build_tool_registry (src/alfred/orchestrator/tool_assembly.py) would
+        # build BOTH web.fetch and clock.now, but web.fetch's operator-
+        # allowlist read side (alfred.cli.web._list_allowlist_entries) is an
+        # unfinished stub that unconditionally returns [] — AllowlistIntersection
+        # is a TRUE manifest ∩ operator ∩ session intersection, so an always-
+        # empty operator side makes web.fetch PERMANENTLY denied in production
+        # regardless of wiring. Shipping it wired-but-denied was rejected as
+        # indistinguishable from a bug. This PR constructs a minimal registry
+        # directly instead of calling build_tool_registry, sidestepping the
+        # web-fetch assembly (build_web_fetch_egress_extractor,
+        # RateLimiter/HandleCap/FetchDispatchConfig, the ADR-0048 one-broker-
+        # instance invariant) entirely — all of it is deferred to the
+        # unauthenticated-web.fetch-activation follow-up, tracked separately.
         # ────────────────────────────────────────────────────────────────────
+        tool_registry = ToolRegistry([build_clock_tool(now=lambda: datetime.now(UTC))])
         # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
         # runtime (its append/append_schema are the keyword forms the limiter calls);
         # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
         # same structural mismatch the per-adapter handlers below carry an ignore for.
         burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
+        # #410 PR3: the tool-dispatch trio (tool_registry/gate/outbound_dlp)
+        # IS now passed below — the (registry, gate, outbound_dlp) trio guard in
+        # core.py's Act loop is reachable for the first time on this path.
+        #
         # #338 PR2 cutover: the REAL privileged-turn adapter. Assemble the
         # Orchestrator by REUSING the graph's already-built broker + resolver
         # (FOLD-1 — never build_orchestrator(settings) bare, which double-builds
         # the broker + re-fires the process-global install_identity_factories) plus
-        # a freshly-built PROXIED router. Egress tools are DEFERRED (#338 scope):
-        # no tool_registry is passed, so the Act loop runs one completion and the
-        # (registry, gate, outbound_dlp) trio guard at core.py:973 is never reached.
+        # a freshly-built PROXIED router.
         # router_override is the OFFLINE test seam; production builds the real
         # proxied router (build_router -> EgressClient.from_settings raises
         # IOPlaneUnavailableError when ALFRED_EGRESS_PROXY_URL is unset; the
@@ -810,6 +804,14 @@ async def _build_comms_boot_graph(
             audit_session_scope=build_boot_session_scope(settings),
             # extraction runs at the adapter->bridge boundary, not the orchestrator funnel
             quarantined_extractor=None,
+            # #410 PR3: the LIVE trio. `gate` and `outbound_dlp` are the SAME
+            # already-constructed boot instances every other component here
+            # reuses (real_gate / outbound_dlp params of this function) — no
+            # new construction, no new broker, matching CLAUDE.md's "one
+            # production extractor, no throwaway construction" discipline.
+            tool_registry=tool_registry,
+            gate=real_gate,
+            outbound_dlp=cast("OutboundDlp", outbound_dlp),
         )
         working_memory_pool = build_working_memory_pool(
             settings,
