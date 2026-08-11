@@ -543,17 +543,22 @@ def build_orchestrator(
     path's synthesized per-turn ``(adapter_id, inbound_id)`` makes each gate
     trivially first-apply there.
 
-    #410 PR2 / ADR-0063: ``PostgresReplayJournal`` is armed unconditionally
+    #410 PR2/PR3 / ADR-0063: ``PostgresReplayJournal`` is armed unconditionally
     too, but for a DIFFERENT reason than the ledger above — it is not
-    "trivially first-apply", it is functionally INERT until PR3. Both of its
-    call sites in ``Orchestrator`` are gated on a live tool registry:
-    ``_fast_forward_journalled_calls`` returns early on
-    ``self._tool_registry is None`` before consulting the journal at all, and
-    the write site is reachable only from a completion carrying
+    "trivially first-apply", its liveness instead tracks whether a caller
+    wires a live ``tool_registry``. Both of its call sites in ``Orchestrator``
+    are gated on that registry: ``_fast_forward_journalled_calls`` returns
+    early on ``self._tool_registry is None`` before consulting the journal at
+    all, and the write site is reachable only from a completion carrying
     ``tool_calls``, which an empty registry's ``tools=()`` can never elicit.
-    This builder wires no ``tool_registry`` (PR3's job), so nothing here ever
-    reads or writes the table; arming it now keeps PR3's cutover to a
-    registry-wiring change alone rather than a simultaneous journal-wiring one.
+    ``tool_registry`` is now a real param on this builder (#410 PR3's Task 1),
+    and the daemon's production caller (``_comms_boot.py``'s
+    ``_build_comms_boot_graph``, PR3's Task 2) passes a live
+    ``ToolRegistry([build_clock_tool(...)])`` — so the journal is no longer
+    inert: it is actively read (fast-forward on resume) and written on every
+    tool-bearing comms/chat turn. Arming it unconditionally here, ahead of
+    PR3 landing, kept PR3's cutover to a registry-wiring change alone rather
+    than a simultaneous journal-wiring one.
     """
     # sec-001 / #370: this builder intentionally keeps the RAW ``build_broker``
     # (NOT the CLI ``build_broker_or_die``). ``build_orchestrator`` is the daemon
