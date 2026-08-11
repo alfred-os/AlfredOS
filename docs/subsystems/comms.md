@@ -386,11 +386,12 @@ egress of its own.
 retired the earlier "the real LLM lands in PR-S4-11c-2c" plan: `_build_comms_boot_graph`
 now wires `RealTurnOrchestratorAdapter` (`src/alfred/comms_mcp/real_turn_adapter.py`) as
 the `_OrchestratorLike` implementation, which gate-checks the T3→T2 downgrade
-(`downgrade_to_orchestrator`) and calls the real `Orchestrator.handle_user_message` —
-a genuine privileged-provider round trip, egress tools deferred. This is distinct from
-the quarantined child's own real-LLM graduation (`#340` PR2b-golive, ADR-0052), which
-landed separately and is governed by the paragraph above — both halves of the dual-LLM
-split now call real providers, each on its own side of the trust boundary.
+(`downgrade_to_orchestrator`) and calls the real `Orchestrator.handle_user_message`.
+As of `#410` PR3, the comms turn dispatches `clock.now` for real; `web.fetch` remains
+deferred pending completion of its operator-allowlist projection (see issues #582/#583/#584).
+This is distinct from the quarantined child's own real-LLM graduation (`#340` PR2b-golive,
+ADR-0052), which landed separately and is governed by the paragraph above — both halves
+of the dual-LLM split now call real providers, each on its own side of the trust boundary.
 
 **Fail-closed dev-host behaviour — operators read this before enabling a comms
 adapter.** The quarantined child is `[sandbox] kind = "full"` (bwrap), so a daemon
