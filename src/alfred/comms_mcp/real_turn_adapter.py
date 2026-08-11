@@ -37,6 +37,7 @@ from alfred.comms_mcp.protocol import OutboundMessageRequest
 from alfred.errors import AlfredError
 from alfred.i18n import set_language, t
 from alfred.orchestrator.core import _ALFRED_PERSONA_ID as _PERSONA
+from alfred.security.dlp import OutboundCanaryTripped
 from alfred.security.quarantine import (
     DowngradeDeniedError,
     Extracted,
@@ -82,8 +83,16 @@ _ADDRESSING_MODE: Literal["dm"] = "dm"
 # Closed-vocab refusal stages for the adapter-owned loud audit row. FOLD-R24:
 # `downgrade_malformed` (defensive text-type-guard) is DISTINCT from
 # `downgrade_denied` (gate policy deny). FOLD-R11: `send_failed` for the outbound leg.
+# #410 PR3 (I4 fix wave): `dlp_canary_tripped` for an `OutboundCanaryTripped` raised
+# out of `dispatch_tool` — deterministic like `budget_denied`, so it halts rather
+# than re-raising into the generic `turn_error` replay leg.
 _RefusalStage = Literal[
-    "downgrade_denied", "downgrade_malformed", "budget_denied", "turn_error", "send_failed"
+    "downgrade_denied",
+    "downgrade_malformed",
+    "budget_denied",
+    "dlp_canary_tripped",
+    "turn_error",
+    "send_failed",
 ]
 
 
@@ -351,12 +360,15 @@ class RealTurnOrchestratorAdapter:
 
         On the FORWARDED path this runs inside ``process_inbound_message``'s
         ``dispatch`` try/except (inbound.py:885): a re-raised turn error takes the
-        audited ``dispatch_failed`` + bounded-replay path. BudgetError + the
+        audited ``dispatch_failed`` + bounded-replay path. BudgetError, an
+        ``OutboundCanaryTripped`` DLP-canary trip (#410 PR3 — surfaces out of
+        ``dispatch_tool``'s totality wrapper on either tool leg), and the
         downgrade-deny (handled in ``ingest``) are DETERMINISTIC — the adapter
         audits them loudly and HALTS (no reply, no re-raise) so the frame commits
-        rather than burning the replay ceiling on a completion that will re-fail.
-        Genuinely transient turn errors (provider outage / deadline) DO re-raise so
-        the forwarded leg can retry within the poison ceiling.
+        rather than burning the replay ceiling on a completion that will re-fail
+        identically (same content, same canary token, every retry). Genuinely
+        transient turn errors (provider outage / deadline) DO re-raise so the
+        forwarded leg can retry within the poison ceiling.
 
         FOLD-R25: on a forwarded replay both this adapter's ``turn_error`` row AND
         the inbound path's ``dispatch_failed`` row write — INTENTIONAL: they are
@@ -400,6 +412,23 @@ class RealTurnOrchestratorAdapter:
                 # Deterministic: audit loudly + halt (no reply, no replay). FOLD-5.
                 await self._emit_refused(
                     note, canonical_user_id=ingested.user.slug, stage="budget_denied", exc=exc
+                )
+                return
+            except OutboundCanaryTripped as exc:
+                # #410 PR3 (I4 fix wave): also deterministic, same reasoning as
+                # BudgetError above — the SAME content trips the SAME canary on
+                # every replay, so letting this fall into the generic
+                # `except Exception` leg below would burn the poison ceiling (5
+                # replays) reproducing an identical DLP-canary event for zero
+                # benefit. Audit loudly + halt instead. Inert today (a `clock.now`
+                # timestamp cannot embed a canary token); becomes load-bearing the
+                # moment `web.fetch` goes live (#583), so the classification is
+                # fixed now while it is cheap to review, not deferred.
+                await self._emit_refused(
+                    note,
+                    canonical_user_id=ingested.user.slug,
+                    stage="dlp_canary_tripped",
+                    exc=exc,
                 )
                 return
             except Exception as exc:
