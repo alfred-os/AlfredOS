@@ -78,13 +78,17 @@ from alfred.memory.hooks_audit_sink import EpisodicAuditSink
 from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
 from alfred.memory.models import Base
 from alfred.orchestrator.core import _ALFRED_PERSONA_ID
-from alfred.providers.base import CompletionRequest, CompletionResponse
+from alfred.providers.base import CompletionRequest, CompletionResponse, ToolCall
 from alfred.providers.router import ProviderRouter
 from alfred.security import tiers as _tiers
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
-from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
+from tests.helpers.gates import (
+    _make_in_memory_backend,
+    _make_no_op_audit_sink,
+    make_tool_dispatch_gate,
+)
 from tests.helpers.routers import FixedAnswerRouter
 
 pytestmark = pytest.mark.integration
@@ -253,6 +257,49 @@ class _CapturingRouter(FixedAnswerRouter):
         return await super().complete(request)
 
 
+# ---------------------------------------------------------------------------
+# Tool-dispatch router double (#410 PR3 Task 4 — the comms path's first live
+# tool dispatch).
+# ---------------------------------------------------------------------------
+
+
+class _ToolCallThenAnswerRouter(FixedAnswerRouter):
+    """Requests ONE tool call on the first completion, answers (the
+    inherited fixed ``self.answer``) on the second.
+
+    Subclasses ``FixedAnswerRouter`` — required by ``_boot_stack``'s
+    concrete `FixedAnswerRouter | None` typing, matching this module's
+    existing ``_CapturingRouter(FixedAnswerRouter)`` precedent — rather than
+    a bare duck-typed double.
+    """
+
+    def __init__(self, *, tool_name: str, answer: str) -> None:
+        super().__init__(answer=answer)
+        self._tool_name = tool_name
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return CompletionResponse(
+                content="",
+                tokens_in=1,
+                tokens_out=1,
+                cost_usd=0.0,
+                model="tool-call-then-answer-test-double",
+                stop_reason="tool_use",
+                tool_calls=(ToolCall(id="tc-1", name=self._tool_name, arguments={}),),
+            )
+        return CompletionResponse(
+            content=self.answer,
+            tokens_in=1,
+            tokens_out=1,
+            cost_usd=0.0,
+            model="tool-call-then-answer-test-double",
+            stop_reason="end_turn",
+            tool_calls=(),
+        )
+
+
 class _OrderTrackingAuditWriter:
     """Delegates to a REAL ``AuditWriter`` while stamping every write with a shared ordinal.
 
@@ -288,10 +335,24 @@ def _boot_gate(*, grant_downgrade: bool) -> RealGate:
     """A REAL RealGate (CLAUDE.md hard rule #2 — never a permissive shim).
 
     Always grants the system-tier ``security.quarantined.extract`` chain (the
-    QuarantinedExtractor's post-stage DLP subscriber needs it to register);
-    ``grant_downgrade`` toggles the ``t3.downgrade_to_orchestrator`` grant this
-    adapter's ``ingest`` checks on every turn — ``False`` exercises the
-    downgrade-deny refusal leg.
+    QuarantinedExtractor's post-stage DLP subscriber needs it to register)
+    and the system-tier ``tool.dispatch`` chokepoint grant (#410 PR3:
+    ``dispatch_tool`` calls ``gate.check(plugin_id="alfred.orchestrator.tool_dispatch",
+    hookpoint="tool.dispatch", requested_tier="system")`` before dispatching
+    anything — without this grant every dispatch in this module would
+    silently take the ``gate_denied`` branch instead of the success/refusal
+    paths the tests below claim to prove). ``grant_downgrade`` toggles the
+    ``t3.downgrade_to_orchestrator`` grant this adapter's ``ingest`` checks on
+    every turn — ``False`` exercises the downgrade-deny refusal leg.
+
+    The ``tool.dispatch`` grant is pulled from ``make_tool_dispatch_gate()``
+    (``tests/helpers/gates.py``) rather than hand-rolled, so this fixture and
+    that canonical helper can never drift apart on the grant's fields — same
+    precedent as ``_assembly_gate()`` in
+    ``tests/integration/orchestrator/conftest.py``. Called with
+    ``grant_downgrade=False`` so its OWN (separately-toggled)
+    ``t3.downgrade_to_orchestrator`` grant never fights this function's own
+    ``grant_downgrade`` param over the same row.
     """
     grants = {
         GrantRow(
@@ -312,6 +373,14 @@ def _boot_gate(*, grant_downgrade: bool) -> RealGate:
                 proposal_branch="test-fixture",
             )
         )
+    tool_dispatch_base = make_tool_dispatch_gate(grant_downgrade=False)
+    assert isinstance(tool_dispatch_base, RealGate)
+    tool_dispatch_grants = set(tool_dispatch_base._policy.grants)
+    assert len(tool_dispatch_grants) == 1, (
+        "make_tool_dispatch_gate(grant_downgrade=False) grant-set shape changed "
+        "— re-verify this extraction still pulls exactly the tool.dispatch grant"
+    )
+    grants |= tool_dispatch_grants
     frozen = frozenset(grants)
     return RealGate(
         policy=GatePolicy(grants=frozen),
@@ -638,6 +707,79 @@ async def test_privileged_prompt_arrives_only_through_the_gate_checked_downgrade
         # (d) the marker never reached the planner — dropped by the extraction schema.
         for req in stack.captured_router.requests:
             assert _MARKER not in _all_message_text(req)
+
+
+# ---------------------------------------------------------------------------
+# #410 PR3 Task 4 — the comms path's first live tool dispatch, end-to-end.
+# ---------------------------------------------------------------------------
+
+
+async def test_real_inbound_message_dispatches_a_real_clock_now_tool_call(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#410 PR3: the comms path's first live tool dispatch, end-to-end.
+
+    A real inbound message, over the real boot graph (real Postgres, real
+    echo quarantine child, real WorkingMemoryPool, real audit log), drives a
+    completion that requests clock.now, dispatches it for real through
+    dispatch_tool -> ToolRegistry -> InternalToolSpec, feeds the result back,
+    and produces a final answer.
+    """
+    tool_call_router = _ToolCallThenAnswerRouter(tool_name="clock.now", answer="the time is now")
+    async with _boot_stack(postgres_url, monkeypatch, router=tool_call_router) as stack:
+        await stack.send_inbound(body={"text": "what time is it"})
+
+        assert len(stack.captured_router.requests) == 2  # planner call, then wrap-up
+        sent_replies = stack.sender.sent
+        assert len(sent_replies) == 1
+        assert "the time is now" in sent_replies[0].body[0]
+
+        # tool.dispatch audit row fired for the real dispatch.
+        rows = stack.audit_rows(event="tool.dispatch")
+        assert len(rows) == 1
+        assert rows[0]["subject"]["tool_name"] == "clock.now"
+        # Non-vacuous guard (found during /review-plan): without this, a
+        # regression to the gate-DENIED branch (the SPECIFIC failure mode
+        # Step 0 exists to prevent — clock.now IS registered, so a gate
+        # denial produces a DIFFERENT dispatch_outcome than "unknown_tool",
+        # e.g. something like "capability_denied" — verify the exact
+        # literal against src/alfred/orchestrator/tool_dispatch.py's real
+        # gate-check failure branch, do not guess) would pass this test
+        # silently, since the router double answers regardless of tool
+        # result content. Assert the SUCCESS-path dispatch_outcome/result
+        # POSITIVELY (read the real values dispatch_tool's happy path
+        # writes), not just "not a known failure string" — a positive
+        # assertion is the only one that can't be satisfied by an
+        # unanticipated third failure mode.
+        assert rows[0]["subject"]["dispatch_outcome"] == "dispatched"
+        assert rows[0]["result"] == "success"
+
+
+async def test_real_turn_refuses_a_hallucinated_tool_name_end_to_end(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#410 PR3: cap-2026-010's already-corpus-verified refusal
+    (test_cap_2026_010_011_dispatch_perimeter_injection.py) survives
+    end-to-end through the live boot graph — the first real exercise of
+    that property through a genuine live turn rather than a bare
+    dispatch_tool call.
+    """
+    hallucinating_router = _ToolCallThenAnswerRouter(
+        tool_name="definitely.not.a.registered.tool", answer="recovered anyway"
+    )
+    async with _boot_stack(postgres_url, monkeypatch, router=hallucinating_router) as stack:
+        await stack.send_inbound(body={"text": "do the impossible thing"})
+
+        # The turn RECOVERS — the planner gets the refusal string back as a
+        # tool result and still produces a final answer, never a crash or
+        # an escalated turn halt.
+        assert len(stack.sender.sent) == 1
+        assert "recovered anyway" in stack.sender.sent[0].body[0]
+
+        rows = stack.audit_rows(event="tool.dispatch")
+        assert len(rows) == 1
+        assert rows[0]["subject"]["dispatch_outcome"] == "unknown_tool"
+        assert rows[0]["result"] == "refused"
 
 
 # ---------------------------------------------------------------------------
