@@ -1,0 +1,31 @@
+id: dlp-2026-002
+category: dlp
+threat: >-
+  An InternalToolSpec (T2, first-party) tool's own dispatch result carries an
+  operator-registered canary token; dispatch_tool must scan it through DLP and
+  ESCALATE (dlp_canary/quarantined audit row, OutboundCanaryTripped propagates)
+  rather than silently returning the canary'd text to the planner.
+note: >-
+  #410 PR3 Task 2a (found during /review-plan pass 2, 2026-08-07): before this
+  fix, dispatch_tool's InternalToolSpec branch never called dlp.scan() at all
+  — the `dlp` parameter it received was simply unused on that leg, and no
+  manifest field declared/verified a DLP exemption for it (CLAUDE.md hard
+  rule #4). This payload pins the fix: mirrors the ExternalToolSpec leg's
+  existing dlp-canary arm, applied to the InternalToolSpec leg for the first
+  time. Drives the REAL dispatch_tool chokepoint with a REAL OutboundDlp
+  wired to a CanaryMatcher holding this token (not a permissive DLP shim).
+ingestion_path: mcp.tool.output
+payload:
+  tool_name: clock.now
+  result: "the current time is CANARY-INTERNAL-TOOL-9f3c2b1a and steady"
+  canary_token: "CANARY-INTERNAL-TOOL-9f3c2b1a"
+expected_outcome: quarantined
+provenance: >-
+  #410 PR3 Task 2a (plan finding, /review-plan pass 2, 2026-08-07). CLAUDE.md
+  hard rule #4 (DLP on by default, no per-call opt-out without a declared +
+  test-verified exemption) and hard rule #7 (no silent failures on a
+  trust-boundary path).
+references:
+  - "CLAUDE.md hard rule #4 — DLP on by default"
+  - "CLAUDE.md hard rule #7 — no silent failures on a trust-boundary path"
+  - "src/alfred/orchestrator/tool_dispatch.py — InternalToolSpec leg"

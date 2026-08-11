@@ -1,0 +1,38 @@
+id: dlp-2026-003
+category: dlp
+threat: >-
+  A non-canary dlp.scan() failure on the InternalToolSpec leg (e.g. a
+  broker.redact bug, a failure in DLP's own internal audit-sink callback, or
+  a canary-matcher bug) must still leave a loud terminal audit row
+  (unexpected_error/fault) before propagating — it must NOT escape the
+  tool-dispatch chokepoint unaudited.
+note: >-
+  #410 PR3 Task 2a correction (finding sec-001, High, triple-confirmed —
+  originating alfred-security-engineer + independent cross-checks from
+  alfred-core-engineer and alfred-test-engineer, 2026-08-11). The
+  originally-drafted fix wrapped ONLY `except OutboundCanaryTripped` around
+  the new dlp.scan() call on the InternalToolSpec leg — with no totality
+  wrapper for any OTHER exception dlp.scan() can raise. OutboundDlp.scan() is
+  deliberately designed to PROPAGATE non-canary failures (documented in
+  src/alfred/security/dlp.py: "raises propagate per CLAUDE.md hard rule #7"),
+  so under the original draft such a failure would escape dispatch_tool with
+  ZERO audit row. The corrected fix mirrors the ExternalToolSpec leg's
+  `audited`-flag totality wrapper. 100% branch coverage on tool_dispatch.py
+  cannot catch this class of gap — coverage tooling reports on lines/branches
+  PRESENT in the file, not an ABSENT except clause; only an adversarial
+  payload that actually drives the non-canary-fault path closes the gap.
+ingestion_path: mcp.tool.output
+payload:
+  tool_name: clock.now
+  simulated_fault: "broker.redact bug (ValueError), not a canary trip"
+expected_outcome: audit_row_emitted
+provenance: >-
+  #410 PR3 Task 2a (finding sec-001, High, triple-confirmed by
+  alfred-security-engineer + alfred-core-engineer + alfred-test-engineer
+  cross-checks, 2026-08-11 /review-plan fleet pass). CLAUDE.md hard rule #7
+  (no silent failures on a trust-boundary path).
+references:
+  - "CLAUDE.md hard rule #4 — DLP on by default"
+  - "CLAUDE.md hard rule #7 — no silent failures on a trust-boundary path"
+  - "src/alfred/orchestrator/tool_dispatch.py — InternalToolSpec leg totality wrapper"
+  - "src/alfred/security/dlp.py — OutboundDlp.scan() propagates non-canary faults by design"

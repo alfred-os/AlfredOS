@@ -218,6 +218,46 @@ async def test_internal_tool_dispatches_directly() -> None:
     assert writer.rows[-1]["result"] == "success"
 
 
+async def test_internal_tool_dlp_canary_escalates() -> None:
+    """The InternalToolSpec leg scans its T2 result too (#410 PR3 — was previously unscanned)."""
+    writer = _CapturingAuditWriter()
+    with pytest.raises(OutboundCanaryTripped):
+        await _dispatch(
+            ToolCall(id="1", name="clock.now", arguments={}),
+            _int_spec(),
+            gate=make_tool_dispatch_gate(),
+            dlp=_CanaryDlp(),
+            writer=writer,
+        )
+    assert writer.rows[-1]["subject"]["dispatch_outcome"] == "dlp_canary"
+    assert writer.rows[-1]["subject"]["result_tier"] == "T2"
+    assert writer.rows[-1]["result"] == "quarantined"
+
+
+async def test_internal_tool_dlp_non_canary_fault_is_audited() -> None:
+    """#410 PR3 (sec-001 correction): a non-canary dlp.scan() failure on the
+    InternalToolSpec leg must still leave an audit row before propagating —
+    mirrors the ExternalToolSpec leg's existing totality-wrapper test
+    (test_non_serializable_downgrade_output_escalates)."""
+    writer = _CapturingAuditWriter()
+
+    class _RaisingDlp:
+        def scan(self, text: str) -> str:
+            raise ValueError("simulated broker.redact bug")
+
+    with pytest.raises(ValueError):
+        await _dispatch(
+            ToolCall(id="1", name="clock.now", arguments={}),
+            _int_spec(),
+            gate=make_tool_dispatch_gate(),
+            dlp=_RaisingDlp(),
+            writer=writer,
+        )
+    assert writer.rows[-1]["subject"]["dispatch_outcome"] == "unexpected_error"
+    assert writer.rows[-1]["subject"]["result_tier"] == "T2"
+    assert writer.rows[-1]["result"] == "fault"
+
+
 async def test_t3_extracted_downgrades_and_dlp_scans() -> None:
     writer = _CapturingAuditWriter()
     out = await _dispatch(

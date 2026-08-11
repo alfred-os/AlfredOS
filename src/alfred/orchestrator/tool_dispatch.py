@@ -190,10 +190,48 @@ async def dispatch_tool(
                 result_tier="T2",
             )
             raise
-        await _audit(
-            dispatch_outcome="dispatched", result="success", tool_name=spec.name, result_tier="T2"
-        )
-        return content
+        # #410 PR3 (found during `/review-plan` pass 2, 2026-08-07; totality
+        # wrapper added per `/review-plan` finding sec-001, 2026-08-11):
+        # CLAUDE.md hard rule #4 requires every outbound path be DLP-scanned
+        # by default or carry a declared, test-verified exemption — this leg
+        # had neither. Mirror the ExternalToolSpec leg's `audited`-flag
+        # totality pattern (tool_dispatch.py's downgrade+dlp.scan region),
+        # not just a bare try/except OutboundCanaryTripped — dlp.scan() is
+        # deliberately designed to propagate NON-canary failures too
+        # (broker.redact bugs, DLP's own internal audit-sink failures,
+        # canary-matcher bugs), and those must not escape unaudited either.
+        audited = False
+        try:
+            try:
+                clean = dlp.scan(content)
+            except OutboundCanaryTripped:
+                await _audit(
+                    dispatch_outcome="dlp_canary",
+                    result="quarantined",
+                    tool_name=spec.name,
+                    result_tier="T2",
+                )
+                audited = True
+                raise  # ESCALATE — a canary in an internal tool's T2 is a serious leak.
+            await _audit(
+                dispatch_outcome="dispatched",
+                result="success",
+                tool_name=spec.name,
+                result_tier="T2",
+            )
+            return clean
+        except Exception:
+            # sec-003 totality, again: a non-canary dlp.scan() fault (broker
+            # bug, DLP-internal audit-sink failure, canary-matcher bug) must
+            # still leave a loud terminal row before propagating.
+            if not audited:
+                await _audit(
+                    dispatch_outcome="unexpected_error",
+                    result="fault",
+                    tool_name=spec.name,
+                    result_tier="T2",
+                )
+            raise
 
     # ExternalToolSpec — the T3 leg. ``dispatch_web_fetch`` already fused
     # fetch+extract and returns a T2 EgressExtractOutcome (spec §6.2).
