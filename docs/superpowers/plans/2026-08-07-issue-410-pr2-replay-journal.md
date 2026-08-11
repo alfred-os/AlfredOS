@@ -1393,6 +1393,22 @@ class TestReplayJournalFastForward:
         BETWEEN c0 and c1's dispatch rather than before either (the mocks
         don't observe each other's timing). Recording both operations into
         one shared list and asserting its exact order closes that gap.
+
+        Scope (CodeRabbit review, 2026-08-11): this test proves the
+        ORCHESTRATOR half of the crash-safety claim — that `_orient_and_act`
+        awaits `append_batch` to completion before entering the dispatch
+        loop, with both `dispatch_tool` and `append_batch` MOCKED (this
+        `monkeypatch.setattr` line replaces `dispatch_tool`; `journal` is a
+        `MagicMock`, not a real `PostgresReplayJournal`). It does not, by
+        itself, exercise a failure from the real `dispatch_tool` chokepoint
+        or prove a durable PostgreSQL commit. The other half — that a real
+        `PostgresReplayJournal.append_batch` durably persists a full
+        multi-call iteration atomically — is proven separately, against a
+        real database, by
+        `test_append_batch_writes_every_call_of_one_iteration_in_one_call`
+        in `tests/integration/test_replay_journal_postgres.py`. Composing
+        the two is the actual "central crash-safety claim" proof; neither
+        test alone claims to be it.
         """
         journal = MagicMock()
         journal.read = AsyncMock(return_value=())
@@ -1844,7 +1860,7 @@ from hypothesis import strategies as st
 
 @given(
     call_ids=st.lists(
-        st.text(alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd")), min_size=1, max_size=8),
+        st.text(alphabet=st.characters(categories=("Lu", "Ll", "Nd")), min_size=1, max_size=8),
         min_size=1,
         max_size=6,
         unique=True,
@@ -1990,13 +2006,32 @@ line, add:
 ```python
     # #410 PR2: the replay journal is armed unconditionally too, using the
     # SAME already-resolved audit_session_scope its sibling
-    # ForwardedDispatchAttemptStore uses (SIDE_EFFECT-role, not TURN).
+    # ForwardedDispatchAttemptStore uses (SIDE_EFFECT-role, not TURN). Verify
+    # it receives the scope built for that role, not the TURN-role scope.
     assert isinstance(orch._replay_journal, PostgresReplayJournal)
+    assert orch._replay_journal._session_scope is captured_scopes[ConnectionRole.SIDE_EFFECT]
 ```
 
 In `test_injected_scopes_are_used_verbatim_no_default_builds`, add the
-identical assertion immediately after that test's own
-`assert isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)` line.
+mirrored assertion immediately after that test's own
+`assert isinstance(orch._side_effect_ledger, PostgresTurnSideEffectLedger)` line:
+
+```python
+    # #410 PR2: the replay journal is armed unconditionally too, using the
+    # SAME already-resolved audit_session_scope its sibling
+    # ForwardedDispatchAttemptStore uses (SIDE_EFFECT-role, not TURN). Verify
+    # it receives exactly the injected scope, not a rebuilt one.
+    assert isinstance(orch._replay_journal, PostgresReplayJournal)
+    assert orch._replay_journal._session_scope is injected_audit_scope
+```
+
+CodeRabbit review, PR #579, 2026-08-11: an `isinstance`-only check on
+`_replay_journal` passes even if the wrong scope object is threaded
+through — a later commit ("test(cli): pin replay_journal's session_scope
+identity, not just its type") strengthened the shipped test past this
+Step 1 snapshot to assert exact scope-object identity, but this plan
+section was never updated to match. Both blocks above now mirror the
+shipped assertions verbatim.
 
 - [ ] **Step 2: Run to verify it fails**
 
