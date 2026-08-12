@@ -733,6 +733,38 @@ def test_bind_reclaims_fd_when_aclose_raises_after_dialing(
     b.close()
 
 
+@_posix_only
+def test_bind_exercises_deepseek_aclose_and_releases_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real DeepSeekProvider.aclose() properly closes its httpx client and releases the fd.
+
+    All other bind() fd-ownership tests use an Anthropic factory (the default). This test
+    pins that DeepSeek's aclose() path (required for resource cleanup in the quarantine child's
+    brokered-egress source) actually works end-to-end: the provider is constructed over the
+    passed fd, bind() exercises the real provider, aclose() fires, and the fd is released
+    without leak or double-close.
+    """
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())  # a real, closeable fd the source must reclaim
+    monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
+    a, b = _af_unix_socketpair()
+    deepseek_factory = _factory(provider_id="deepseek")
+    source = BrokeredProviderSource(deepseek_factory, a)
+
+    async def _drive() -> None:
+        async with source.bind(budget_seconds=_AMPLE_BUDGET_S) as provider:
+            assert provider.name == "deepseek"
+            # Deliberately do NOT dial; the source will close the never-dialed fd in finally.
+
+    anyio.run(_drive)
+    with pytest.raises(OSError):
+        os.close(victim)  # already reclaimed by the source — EBADF proves no leak, single close
+    keeper.close()
+    a.close()
+    b.close()
+
+
 def test_stream_aclose_marks_the_fd_released_on_the_backend() -> None:
     """The ownership signal is set by the real stream teardown, not asserted into existence:
     once the client's stream closes the socket, the backend reports the fd as released so the

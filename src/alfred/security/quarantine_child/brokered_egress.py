@@ -1,5 +1,5 @@
-"""Child-side per-call transport: the official Anthropic SDK over a bare TCP fd
-brokered by the core (#340 PR2b-golive, spike verdict M1).
+"""Child-side per-call transport: provider SDK over a bare TCP fd
+brokered by the core (#340 PR2b-golive, spike verdict M1, #587 provider dispatch).
 
 Egress-capable imports (httpx/httpcore/ssl/socket) live at THIS module's scope —
 allowlisted in the in-core HTTP-egress guard (``test_in_core_http_egress_guard``).
