@@ -230,6 +230,17 @@ class QuarantineMaxTokensInvalidFailure(_BootFailureBase):
     failure_reason: Literal["quarantine_max_tokens_invalid"] = "quarantine_max_tokens_invalid"
 
 
+class QuarantineProviderSeparationViolatedFailure(_BootFailureBase):
+    """#586: require_quarantine_provider_separation=True and the privileged/quarantine
+    provider ids collide at boot. Distinct failure_reason lets forensics tell an
+    operator-opted-in separation violation apart from every other boot refusal.
+    """
+
+    failure_reason: Literal["quarantine_provider_separation_violated"] = (
+        "quarantine_provider_separation_violated"
+    )
+
+
 class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     """An enabled comms adapter failed to spawn / handshake at boot (PR-S4-11b).
 
@@ -455,6 +466,7 @@ DaemonBootFailure = Annotated[
     | QuarantineChildSpawnFailedFailure
     | QuarantineProviderKeyUnsetFailure
     | QuarantineMaxTokensInvalidFailure
+    | QuarantineProviderSeparationViolatedFailure
     | CommsAdapterSpawnFailedFailure
     | CommsAdapterBindFailedFailure
     | CommsAdapterUnknownKindFailure
@@ -473,6 +485,7 @@ ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + #340 golive ``quarantine_provider_key_unset`` +
 #340 golive Task 15 ``quarantine_max_tokens_invalid`` +
+#586 ``quarantine_provider_separation_violated`` +
 PR-S4-11b ``comms_adapter_spawn_failed`` +
 ADR-0031 ``comms_adapter_bind_failed`` +
 #374 ``comms_adapter_unknown_kind`` +

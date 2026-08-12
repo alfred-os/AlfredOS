@@ -32,6 +32,7 @@ import typer
 
 from alfred.audit.audit_row_schemas import (
     COMMS_SOCKET_PEER_REJECTED_FIELDS,
+    DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS,
     DAEMON_CONTROL_PEER_REJECTED_FIELDS,
 )
 
@@ -39,6 +40,10 @@ from alfred.audit.audit_row_schemas import (
 # false-liveness defense: a forged/stale epoch is refused). Module-scope so the
 # boot-wiring unit tests can monkeypatch it.
 from alfred.bootstrap.lifecycle_epoch import current_boot_epoch
+
+# #586: assert_provider_separation() itself is unmodified (design spec §9) — only
+# this new call site + the local exception wrapper below.
+from alfred.bootstrap.quarantine import assert_provider_separation
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
     _emit_or_quarantine,
@@ -59,6 +64,7 @@ from alfred.cli.daemon._failures import (
 from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
 )
+from alfred.errors import AlfredError
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.i18n import t
 from alfred.memory.db import ConnectionRole
@@ -273,6 +279,15 @@ class _UnknownAdapterKindError(_CommsAdapterManifestError):
 # closed vocabulary), mirroring ``REQUIRED_CLASSIFIERS_BY_KIND`` / the promoter
 # factory — NOT the per-instance launcher id.
 _FORWARDED_INBOUND_KINDS: Final[tuple[str, ...]] = ("discord",)
+
+
+class QuarantineProviderSeparationCollisionError(AlfredError):
+    """#586: require_quarantine_provider_separation=True and the privileged/quarantine
+    provider ids collide. A distinct, catchable type so _commands.py's typed
+    except-cascade can route this through the audited _refuse_boot path —
+    assert_provider_separation() itself raises only the base AlfredError (unmodified,
+    design spec §9), which would otherwise escape uncaught past every arm (arch-002 /
+    sec-001 / test-001 — the #368 anti-pattern)."""
 
 
 class _ForwardedInboundRegistryMisconfiguredError(Exception):
@@ -621,6 +636,7 @@ class _CommsBootGraph:
 async def _build_comms_boot_graph(
     *,
     settings: Settings,
+    boot_id: str,
     audit: AuditWriter,
     outbound_dlp: OutboundDlpProtocol,
     t3_nonce: CapabilityGateNonce,
@@ -642,6 +658,12 @@ async def _build_comms_boot_graph(
     host the spawn raises ``QuarantineChildSpawnError``, which propagates so the
     daemon refuses to boot (the caller wraps it in an audited refusal) rather than
     silently degrading to a fixture (CLAUDE.md hard rule #7).
+
+    ``boot_id`` (#586, REQUIRED): the ``_commands.py``-minted per-boot correlation
+    id, threaded through so the opt-in provider-separation check's audited
+    not-enforced warning row (below) carries the SAME forensic-join-key every
+    other ``daemon.boot``/``daemon.lifecycle`` row does, rather than a random,
+    uncorrelated ``trace_id``.
 
     ``t3_nonce`` is the per-process authorised :class:`CapabilityGateNonce` the
     daemon minted + registered at boot. PR-S4-11c-2b CONSUMES it: it is injected
@@ -693,6 +715,39 @@ async def _build_comms_boot_graph(
     from alfred.plugins.web_fetch.content_store import ContentStore
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
+
+    # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
+    # refusal here can never leak a partially-constructed secret_broker/content_store —
+    # core-003/sec-003). assert_provider_separation() itself is unmodified (design
+    # spec §9) — only this call site, the re-raise, and the not-required+colliding
+    # audited-warning path are new.
+    if settings.require_quarantine_provider_separation:
+        try:
+            assert_provider_separation(
+                privileged_provider_id=settings.primary_provider,
+                quarantined_provider_id=settings.quarantine_provider,
+            )
+        except AlfredError as exc:
+            raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
+    elif settings.primary_provider.strip().lower() == settings.quarantine_provider.strip().lower():
+        log.warning(
+            "comms.comms_boot.quarantine_provider_separation_not_enforced",
+            privileged_provider=settings.primary_provider,
+            quarantine_provider=settings.quarantine_provider,
+        )
+        await _emit_or_quarantine(
+            audit,
+            fields=DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS,
+            schema_name="DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS",
+            event="daemon.boot.quarantine_provider_separation_not_enforced",
+            subject={
+                "boot_id": boot_id,
+                "privileged_provider": settings.primary_provider,
+                "quarantine_provider": settings.quarantine_provider,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            result="warned",
+        )
 
     secret_broker = build_broker(settings)
     resolver = install_identity_factories_for_settings(settings)

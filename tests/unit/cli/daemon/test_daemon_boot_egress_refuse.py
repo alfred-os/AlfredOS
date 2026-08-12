@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import structlog.testing
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
@@ -37,6 +38,7 @@ from alfred.security.quarantine import declare_hookpoints
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 from .conftest import FakeAuditWriter
+from .test_daemon_comms_spawn import _patch_comms_seams
 
 _ENABLED_ADAPTER = "alfred_comms_test"
 
@@ -243,3 +245,92 @@ def test_boot_refuses_on_identity_resolution_error(
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
     # The operator-facing message names the concrete remedy.
     assert "alfred user add" in result.output
+
+
+# ── (d) QuarantineProviderSeparationCollisionError — #586 opt-in enforcement ───────
+
+
+def test_boot_refuses_when_separation_required_and_providers_collide(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """require_quarantine_provider_separation=True + same provider -> refuse boot,
+    AUDITED (arch-002/sec-001/test-001 — this is the fix, not just 'raises AlfredError'):
+    proves _commands.py's except-cascade catches the new exception type and routes
+    it through _refuse_boot, not that SOME AlfredError propagates unhandled."""
+    del quarantine_registry  # installed via fixture side effect
+    del patch_quarantine_child_spawn  # in-proc fake child-IO; no real bwrap spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    # Settings.primary_provider defaults "deepseek"; force quarantine_provider to
+    # collide with it (Settings.quarantine_provider otherwise defaults "anthropic").
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2
+    reasons = _boot_failed_reasons(boot_success_env)
+    assert "quarantine_provider_separation_violated" in reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+
+
+def test_boot_proceeds_when_separation_required_and_providers_differ(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """require=True + the (default) distinct providers -> boots fine, no refusal."""
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
+    # primary_provider="deepseek" / quarantine_provider="anthropic" — the defaults —
+    # already differ; no override needed.
+    _patch_comms_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 0, result.output
+    assert _boot_failed_reasons(boot_success_env) == set()
+
+
+def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_collide(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """Default (require=False) + same provider -> boots, but WARNS AND audits
+    (CLAUDE.md hard rule #7 — no silent failures; not just a log line, also a
+    durable audit row via _emit_or_quarantine, since the security-relevant fact
+    would otherwise leave no queryable trace)."""
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    # ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION left unset -> default False.
+    _patch_comms_seams(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 0, result.output
+    warned = [
+        e
+        for e in logs
+        if e["event"] == "comms.comms_boot.quarantine_provider_separation_not_enforced"
+    ]
+    assert len(warned) == 1, f"expected one loud not-enforced warning, got {logs!r}"
+    warn_rows = boot_success_env.rows_for(
+        "DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS"
+    )
+    assert len(warn_rows) == 1, warn_rows
+    # sec-r2-001's oracle: the row must actually carry boot_id (not just exist),
+    # or a regression back to the boot_id-less shape would ship green.
+    assert warn_rows[0]["subject"]["boot_id"], warn_rows

@@ -522,6 +522,7 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
             )
             graph = await _build_comms_boot_graph(
                 settings=settings,
+                boot_id="s4-11b-e2e-proof",
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,

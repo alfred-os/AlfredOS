@@ -531,6 +531,7 @@ async def test_forwarded_discord_inbound_over_socket_reaches_core_dispatch(
             )
             graph = await _build_comms_boot_graph(
                 settings=settings,
+                boot_id="g6-7-6-a1-forward-proof",
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,

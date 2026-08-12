@@ -73,6 +73,7 @@ from alfred.cli.daemon._boot_audit import (
     _refuse_boot,
 )
 from alfred.cli.daemon._comms_boot import (
+    QuarantineProviderSeparationCollisionError,
     _build_comms_boot_graph,
     _CommsBootGraph,
     _ForwardedInboundRegistryMisconfiguredError,
@@ -110,6 +111,7 @@ from alfred.cli.daemon._failures import (
     QuarantineGrantMissingFailure,
     QuarantineMaxTokensInvalidFailure,
     QuarantineProviderKeyUnsetFailure,
+    QuarantineProviderSeparationViolatedFailure,
     RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
     SettingsInvalidFailure,
@@ -1041,6 +1043,7 @@ async def _start_async() -> None:
         try:
             comms_graph = await _build_comms_boot_graph(
                 settings=settings,
+                boot_id=boot_id,
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=t3_nonce,
@@ -1106,6 +1109,20 @@ async def _start_async() -> None:
                 audit,
                 QuarantineMaxTokensInvalidFailure(),
                 t("daemon.boot.quarantine_max_tokens_invalid"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except QuarantineProviderSeparationCollisionError as exc:
+            # #586: require_quarantine_provider_separation=True and the privileged
+            # + quarantine providers collide. REACHABLE via a real boot (an operator
+            # opted into the stricter dual-LLM posture and misconfigured it). REFUSE
+            # boot fail-closed (audited, exit 2) rather than let the bare AlfredError
+            # assert_provider_separation() raises propagate uncaught (the #368
+            # anti-pattern — arch-002/sec-001/test-001).
+            await _refuse_boot(
+                audit,
+                QuarantineProviderSeparationViolatedFailure(),
+                str(exc),
                 boot_id=boot_id,
                 environment_source=source,
             )

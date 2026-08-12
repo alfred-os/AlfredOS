@@ -632,6 +632,7 @@ async def test_real_bwrap_probe_spawn_forwarded_inbound_reaches_core_dispatch(
             )
             graph = await _build_comms_boot_graph(
                 settings=settings,
+                boot_id="g6-7-7-real-spawn-proof",
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,

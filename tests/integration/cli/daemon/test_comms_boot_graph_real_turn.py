@@ -231,6 +231,7 @@ async def test_graph_exposes_raw_resolver_and_real_turn_adapter(
 
             graph = await _build_comms_boot_graph(
                 settings=settings,
+                boot_id="338-pr2-t3-real-turn-adapter-proof",
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,
