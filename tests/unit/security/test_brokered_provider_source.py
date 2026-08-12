@@ -146,6 +146,7 @@ def test_factory_from_key_builds_deepseek_factory() -> None:
     assert "realkey" not in repr(f)
 
 
+@_posix_only
 def test_build_child_client_dispatches_to_deepseek() -> None:
     """provider_id='deepseek' constructs a DeepSeekProvider, not AnthropicProvider."""
     a, b = socket.socketpair()
@@ -171,6 +172,7 @@ def test_build_child_client_dispatches_to_deepseek() -> None:
         b.close()
 
 
+@_posix_only
 def test_build_child_client_deepseek_requires_base_url() -> None:
     """A DeepSeek dispatch with no base_url refuses loudly (HARD #7), never silently
     falls back to some default the operator didn't choose."""
@@ -245,6 +247,7 @@ def test_provider_source_capabilities_resolve_per_model() -> None:
         reasoner_peer.close()
 
 
+@_posix_only
 def test_build_child_client_refuses_unknown_provider_id() -> None:
     """An out-of-closed-set provider_id refuses loudly (HARD #7, sec-002) rather than
     silently falling through to the Anthropic branch — a two-way if/else cannot

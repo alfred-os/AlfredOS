@@ -192,3 +192,29 @@ def test_child_build_provider_refuses_unparseable_budget(
         child_main._build_provider("sk-quarantine-key")
     assert not isinstance(exc_info.value, ValueError)
     assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+# --------------------------------------------------------------------------- #
+# CHILD boundary — _build_provider reads the provider id + base_url (#587).
+# --------------------------------------------------------------------------- #
+
+
+def test_child_build_provider_reads_provider_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "https://api.deepseek.com/v1")
+    factory = child_main._build_provider("realkey")
+    assert factory.provider_id == "deepseek"
+    assert factory.base_url == "https://api.deepseek.com/v1"
+
+
+def test_child_build_provider_defaults_to_anthropic_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.delenv("ALFRED_QUARANTINE_PROVIDER", raising=False)
+    factory = child_main._build_provider("realkey")
+    assert factory.provider_id == "anthropic"
+    assert factory.base_url is None

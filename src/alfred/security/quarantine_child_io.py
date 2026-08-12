@@ -272,6 +272,8 @@ def _child_env(
     model: str | None = None,
     max_tokens: int | None = None,
     ssl_cert_file: str | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
 ) -> dict[str, str]:
     """Build the SCRUBBED child env (allowlist only — never ``dict(os.environ)``).
 
@@ -298,7 +300,12 @@ def _child_env(
     assignment of a caller value. Each key is set ONLY when its argument is
     provided, so a DORMANT/echo (``control_fd=False``) spawn — which passes none —
     yields the pre-golive env BYTE-FOR-BYTE (the ADR-0050 dormancy invariant;
-    ``test_child_env_live_is_dormant_plus_exactly_the_three_keys``).
+    ``test_child_env_live_is_dormant_plus_exactly_the_four_keys``).
+
+    **#587 provider dispatch.** ``provider`` -> ``ALFRED_QUARANTINE_PROVIDER`` and
+    ``base_url`` -> ``ALFRED_QUARANTINE_BASE_URL`` thread the same way — set ONLY
+    when non-``None``, so an anthropic (or dormant) spawn never carries
+    ``ALFRED_QUARANTINE_BASE_URL`` at all (only a DeepSeek spawn needs a base_url).
     """
     env = _scrubbed_base()
     env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(
@@ -320,6 +327,10 @@ def _child_env(
         env["ALFRED_QUARANTINE_MAX_TOKENS"] = str(max_tokens)
     if ssl_cert_file is not None:
         env["SSL_CERT_FILE"] = ssl_cert_file
+    if provider is not None:
+        env["ALFRED_QUARANTINE_PROVIDER"] = provider
+    if base_url is not None:
+        env["ALFRED_QUARANTINE_BASE_URL"] = base_url
     return env
 
 
@@ -1045,6 +1056,8 @@ async def spawn_quarantine_child_io(
     egress_config: EgressProxyConfig | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
     ssl_cert_file: str = _DEFAULT_SSL_CERT_FILE,
     refusal_recorder: SandboxRefusalRecorder | None = None,
 ) -> _SubprocessChildIO:
@@ -1147,7 +1160,13 @@ async def spawn_quarantine_child_io(
     # config into it; the DORMANT/echo (``control_fd=False``) spawn passes NONE, so
     # ``_child_env`` yields the pre-golive env byte-for-byte (ADR-0050 dormancy).
     child_env = (
-        _child_env(model=model, max_tokens=max_tokens, ssl_cert_file=ssl_cert_file)
+        _child_env(
+            model=model,
+            max_tokens=max_tokens,
+            ssl_cert_file=ssl_cert_file,
+            provider=provider,
+            base_url=base_url,
+        )
         if control_fd
         else _child_env()
     )

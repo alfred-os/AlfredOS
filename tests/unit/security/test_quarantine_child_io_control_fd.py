@@ -476,7 +476,12 @@ async def test_aclose_closes_the_parent_control_end() -> None:
 #: scrubbed child env. The dormant/echo (control_fd=False) spawn sets NONE of them —
 #: the ADR-0050 dormancy byte-identity invariant.
 _GOLIVE_ENV_KEYS = frozenset(
-    {"ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS", "SSL_CERT_FILE"}
+    {
+        "ALFRED_QUARANTINE_MODEL",
+        "ALFRED_QUARANTINE_MAX_TOKENS",
+        "SSL_CERT_FILE",
+        "ALFRED_QUARANTINE_PROVIDER",
+    }
 )
 
 
@@ -512,13 +517,38 @@ def test_child_env_live_carries_model_budget_and_ssl() -> None:
     assert env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-certificates.crt"
 
 
-def test_child_env_live_is_dormant_plus_exactly_the_three_keys(
+def test_child_env_live_sets_provider_and_base_url_when_given() -> None:
+    env = qcio._child_env(
+        model="deepseek-chat",
+        max_tokens=8192,
+        ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+        provider="deepseek",
+        base_url="https://api.deepseek.com/v1",
+    )
+    assert env["ALFRED_QUARANTINE_PROVIDER"] == "deepseek"
+    assert env["ALFRED_QUARANTINE_BASE_URL"] == "https://api.deepseek.com/v1"
+
+
+def test_child_env_live_omits_provider_and_base_url_when_none() -> None:
+    env = qcio._child_env(
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+        ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+    )
+    assert "ALFRED_QUARANTINE_PROVIDER" not in env
+    assert "ALFRED_QUARANTINE_BASE_URL" not in env
+
+
+def test_child_env_live_is_dormant_plus_exactly_the_four_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Live env == dormant env + EXACTLY the three golive keys (strict byte-identity).
+    """Live env == dormant env + EXACTLY the four golive keys (strict byte-identity).
 
-    Nothing else in the dormant env changes value; the live path only ADDS the three
+    Nothing else in the dormant env changes value; the live path only ADDS the four
     host-passed keys — the precise contract the ADR-0050 dormancy invariant rests on.
+    `base_url` is intentionally NOT part of this assertion: the anthropic default
+    never sets `ALFRED_QUARANTINE_BASE_URL` (only a DeepSeek spawn does), so it stays
+    out of the fixed four-key set this test pins.
     """
     for key in _GOLIVE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -527,6 +557,7 @@ def test_child_env_live_is_dormant_plus_exactly_the_three_keys(
         model="claude-haiku-4-5",
         max_tokens=8192,
         ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+        provider="anthropic",
     )
     assert set(live) - set(dormant) == _GOLIVE_ENV_KEYS
     for key in dormant:

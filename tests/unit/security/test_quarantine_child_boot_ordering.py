@@ -137,9 +137,18 @@ async def test_boot_fires_hello_build_fd4_ready_in_runtime_order(
     monkeypatch.setattr(child_main, "_read_provider_key_from_fd3", lambda: "sk-quarantine-key")
     monkeypatch.setattr(child_main, "emit_hello", lambda: calls.append("hello"))
 
+    class _DummyFactory:
+        """Minimal factory stub: ``BrokeredProviderSource.__init__`` reads
+        ``provider_id`` at construction time (#587's capability-resolution
+        dispatch), so a bare ``object()`` no longer satisfies it — only
+        ``provider_id`` matters here since the test never reaches a real
+        ``bind()``/extraction call."""
+
+        provider_id = "anthropic"
+
     def _fake_build(key: str) -> object:
         calls.append("build_provider")
-        return object()  # dummy factory — BrokeredProviderSource only stores it
+        return _DummyFactory()
 
     monkeypatch.setattr(child_main, "_build_provider", _fake_build)
 

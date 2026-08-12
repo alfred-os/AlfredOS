@@ -479,8 +479,16 @@ def _build_provider(key: str) -> _ProviderFactory:
             f"ALFRED_QUARANTINE_MAX_TOKENS must be > 0, got {max_tokens} — refusing to "
             "boot a child whose every extraction would fail its >0 validator (§20.2)"
         )
+    # #587: default "anthropic" when unset (matches Settings.quarantine_provider's
+    # default) — a dormant/unit spawn or a pre-#587 host omits this var entirely.
+    provider_id = os.environ.get("ALFRED_QUARANTINE_PROVIDER", "anthropic")
+    base_url = os.environ.get("ALFRED_QUARANTINE_BASE_URL")
     return _ProviderFactory.from_key(
-        key, provider_id="anthropic", model=model, max_tokens=max_tokens
+        key,
+        provider_id=provider_id,
+        model=model,
+        max_tokens=max_tokens,
+        base_url=base_url,
     )
 
 

@@ -679,7 +679,11 @@ async def _build_comms_boot_graph(
     )
     from alfred.cli.daemon._commands import build_boot_session_scope
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge, SyncIdentityResolverBridge
-    from alfred.comms_mcp.daemon_runtime import _build_comms_inbound_extractor
+    from alfred.comms_mcp.daemon_runtime import (
+        _build_comms_inbound_extractor,
+        _resolve_quarantine_base_url,
+        _resolve_quarantine_model,
+    )
     from alfred.comms_mcp.real_turn_adapter import RealTurnOrchestratorAdapter
     from alfred.memory.forwarded_dispatch_attempts import (
         PostgresForwardedDispatchAttemptStore,
@@ -729,6 +733,16 @@ async def _build_comms_boot_graph(
             # PRE-spawn. ``settings`` structurally satisfies EgressProxyConfig
             # (it exposes ``egress_proxy_url``) — the SAME field build_router reads.
             egress_config=settings,
+            # #587 prov-001 fix: the quarantine child's MODEL, provider id, and
+            # base_url are all resolved from ``settings.quarantine_provider`` HERE
+            # (not re-derived inside the builder) so a DeepSeek-configured child
+            # asks DeepSeek's API for a DeepSeek model id, never the hardcoded
+            # Anthropic quarantine model.
+            quarantine_provider=settings.quarantine_provider,
+            quarantine_model=_resolve_quarantine_model(settings.quarantine_provider, settings),
+            quarantine_base_url=_resolve_quarantine_base_url(
+                settings.quarantine_provider, settings
+            ),
         )
     except Exception:
         with suppress(Exception):

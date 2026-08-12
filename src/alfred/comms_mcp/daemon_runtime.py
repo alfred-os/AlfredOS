@@ -65,6 +65,7 @@ from alfred.security.quarantine import QuarantinedExtractor
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge
+    from alfred.config.settings import Settings
     from alfred.egress._config_protocols import EgressProxyConfig
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import ExtractionResult
@@ -395,6 +396,49 @@ def _resolve_quarantine_model_config() -> tuple[str, int]:
     return _QUARANTINE_MODEL, max_tokens
 
 
+def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
+    """The quarantine child's model id, provider-aware (#587 — prov-001 fix).
+
+    Anthropic keeps the existing hardcoded quarantine model (``_QUARANTINE_MODEL``,
+    "claude-haiku-4-5") — a fixed, cheap-model choice independent of the privileged
+    path's own model selection; there has never been a per-deployment Anthropic
+    quarantine-model setting. DeepSeek has no equivalent hardcoded quarantine
+    constant, so this reuses ``Settings.deepseek_model`` (the SAME setting the
+    privileged DeepSeek path already reads) rather than adding a second,
+    quarantine-specific DeepSeek model setting an operator would have to keep in
+    sync with the first — mirroring ``_resolve_quarantine_base_url``'s reuse of
+    ``Settings.deepseek_base_url`` below.
+    """
+    if provider_id == "deepseek":
+        return settings.deepseek_model
+    if provider_id == "anthropic":
+        return _QUARANTINE_MODEL
+    raise ValueError(
+        f"_resolve_quarantine_model: unsupported provider_id {provider_id!r} — "
+        "refusing to silently resolve the anthropic model for an out-of-closed-set "
+        "value (HARD #7, prov-r2-001)"
+    )
+
+
+def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | None:
+    """The quarantine child's base_url, when its provider needs one (#587).
+
+    Only DeepSeek's OpenAI-compatible endpoint requires an explicit base_url — Anthropic's
+    SDK has its own default. Reuses ``Settings.deepseek_base_url`` (the SAME setting the
+    privileged path already reads) rather than introducing a second, quarantine-specific
+    base-URL setting an operator would have to keep in sync with the first.
+    """
+    if provider_id == "deepseek":
+        return settings.deepseek_base_url
+    if provider_id == "anthropic":
+        return None
+    raise ValueError(
+        f"_resolve_quarantine_base_url: unsupported provider_id {provider_id!r} — "
+        "refusing to silently resolve None for an out-of-closed-set value "
+        "(HARD #7, prov-r2-001)"
+    )
+
+
 def _resolve_egress_config(egress_config: EgressProxyConfig) -> EgressProxyConfig:
     """Validate the quarantine child's egress proxy config; refuse boot if unusable.
 
@@ -438,6 +482,9 @@ async def _build_comms_inbound_extractor(
     staging: QuarantineStagingMap,
     environment: str,
     egress_config: EgressProxyConfig,
+    quarantine_provider: str,
+    quarantine_model: str,
+    quarantine_base_url: str | None,
 ) -> tuple[QuarantinedExtractor, QuarantineStdioTransport]:
     """Construct a REAL :class:`QuarantinedExtractor` over a LIVE quarantined child.
 
@@ -453,12 +500,17 @@ async def _build_comms_inbound_extractor(
     #340 PR2b-golive Task 8 (ADR-0050 Decision 8, the posture change under sign-off):
     the spawn is now ``control_fd=True``, carrying the child its fd-4 control channel
     plus the real-LLM provider config — ``egress_config`` (the ``EgressProxyConfig``
-    the child brokers its gateway socket through), the routing.yaml ``[quarantine]``
-    ``model`` + ``max_tokens`` (:func:`_resolve_quarantine_model_config`), and the
-    default system CA bundle. All three are non-secret, non-T3 config; the provider
-    KEY still crosses ONLY over fd 3. The per-extraction brokered-egress wiring (the
-    transport driving :meth:`_SubprocessChildIO.broker_sockets` before the extract
-    frame — connect-defer) landed in Task 9; Task 10 threads the durable
+    the child brokers its gateway socket through), the ``max_tokens`` budget
+    (:func:`_resolve_quarantine_model_config`), and the default system CA bundle. The
+    MODEL (``quarantine_model``) and the provider id / base_url (``quarantine_provider``
+    / ``quarantine_base_url``) are now resolved by the CALLER (#587 prov-001 fix —
+    :func:`_resolve_quarantine_model` / :func:`_resolve_quarantine_base_url`, both
+    provider-aware) and passed in as required params, rather than derived here from
+    the anthropic-only ``_resolve_quarantine_model_config``. All are non-secret,
+    non-T3 config; the provider KEY still crosses ONLY over fd 3. The per-extraction
+    brokered-egress wiring (the transport driving
+    :meth:`_SubprocessChildIO.broker_sockets` before the extract frame —
+    connect-defer) landed in Task 9; Task 10 threads the durable
     success/failure audit rows live by constructing an
     :class:`alfred.egress.broker_audit.EgressBrokerAuditor` here and passing it to
     the transport as ``broker_auditor=`` — the ``egress.broker.*`` hookpoints its
@@ -494,7 +546,14 @@ async def _build_comms_inbound_extractor(
     # model/budget mirror routing.yaml [quarantine], and `_resolve_egress_config` raises
     # IOPlaneUnavailableError here on an unset/blank OR non-blank-but-malformed egress proxy
     # (§20.2 fail-closed; malformed host:port now caught at BOOT — Task-9 boot/extraction parity).
-    model, max_tokens = _resolve_quarantine_model_config()
+    # #587 prov-001 fix: the MODEL is now provider-aware (the caller already
+    # resolved quarantine_provider/quarantine_model above the call — mirrors how
+    # quarantine_base_url is resolved by the caller, not re-derived here).
+    # `_resolve_quarantine_model_config()` still owns max_tokens validation
+    # (the routing.yaml-mirrored budget, `<=0` refuses boot) — only its MODEL
+    # return value is now superseded.
+    model = quarantine_model
+    _, max_tokens = _resolve_quarantine_model_config()
     resolved_egress = _resolve_egress_config(egress_config)
     # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await
     # to the fd-3-clobber window; the await below remains the only one that touches it.
@@ -519,6 +578,8 @@ async def _build_comms_inbound_extractor(
         egress_config=resolved_egress,
         model=model,
         max_tokens=max_tokens,
+        provider=quarantine_provider,
+        base_url=quarantine_base_url,
     )
     # Reap the just-spawned child if the (synchronous) transport/extractor
     # construction raises: this builder hasn't returned the transport yet, so the

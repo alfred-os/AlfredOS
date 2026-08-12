@@ -27,23 +27,28 @@ from __future__ import annotations
 import json
 import struct
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import SecretStr
 
 from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.comms_mcp import daemon_runtime as daemon_runtime_mod
 from alfred.comms_mcp.bootstrap import CommsBodyExtraction, CommsExtractorBridge
 from alfred.comms_mcp.daemon_runtime import (
+    _QUARANTINE_MODEL,
     CommsAdapterCrashedHookInvoker,
     CommsInboundOrchestratorAdapter,
     OutboundSenderLike,
     _build_comms_inbound_extractor,
+    _resolve_quarantine_base_url,
+    _resolve_quarantine_model,
 )
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
 from alfred.comms_mcp.inbound import _OrchestratorLike
 from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.config.settings import Settings
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.security import tiers as _tiers
 from alfred.security.dlp import OutboundDlp, OutboundDlpScanResult
@@ -444,6 +449,9 @@ async def test_build_extractor_drives_real_transport_over_spawned_child(
             staging=staging,
             environment="production",
             egress_config=_EgressCfg(),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
         # The builder returns the live transport too so the daemon can reap the
         # child on every exit path (CR #255); it owns the faked child-IO here.
@@ -519,6 +527,9 @@ async def test_build_extractor_reaps_child_when_construction_fails(
             staging=staging,
             environment="production",
             egress_config=_EgressCfg(),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
 
     assert len(spawned) == 1
@@ -573,6 +584,9 @@ async def test_build_extractor_reaps_child_when_transport_construction_fails(
             staging=QuarantineStagingMap(),
             environment="production",
             egress_config=_EgressCfg(),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
 
     assert len(spawned) == 1
@@ -628,6 +642,9 @@ async def test_extractor_injects_refusal_auditor(
             staging=QuarantineStagingMap(),
             environment="production",
             egress_config=_EgressCfg(),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
 
     recorder = seen["refusal_recorder"]
@@ -663,6 +680,49 @@ def test_resolve_quarantine_model_config_mirrors_routing_yaml() -> None:
     assert max_tokens == 8192
 
 
+# ---------------------------------------------------------------------------
+# #587 prov-001: _resolve_quarantine_model / _resolve_quarantine_base_url —
+# the provider-aware MODEL resolution fix, and its closed-set else:raise arm
+# (prov-r2-001, HARD #7 — never silently resolve an unknown provider_id).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_quarantine_model_returns_hardcoded_constant_for_anthropic() -> None:
+    settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
+    assert _resolve_quarantine_model("anthropic", settings) == _QUARANTINE_MODEL
+
+
+def test_resolve_quarantine_model_returns_deepseek_setting_for_deepseek() -> None:
+    settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
+    assert _resolve_quarantine_model("deepseek", settings) == settings.deepseek_model
+
+
+def test_resolve_quarantine_model_refuses_unknown_provider_id() -> None:
+    """prov-r2-001: an out-of-closed-set provider_id raises loud, never resolves
+    silently to the anthropic model (CLAUDE.md hard rule #7)."""
+    settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
+    with pytest.raises(ValueError, match="unsupported provider_id"):
+        _resolve_quarantine_model("openai", settings)
+
+
+def test_resolve_quarantine_base_url_returns_none_for_anthropic() -> None:
+    settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
+    assert _resolve_quarantine_base_url("anthropic", settings) is None
+
+
+def test_resolve_quarantine_base_url_returns_deepseek_setting_for_deepseek() -> None:
+    settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
+    assert _resolve_quarantine_base_url("deepseek", settings) == settings.deepseek_base_url
+
+
+def test_resolve_quarantine_base_url_refuses_unknown_provider_id() -> None:
+    """prov-r2-001: an out-of-closed-set provider_id raises loud, never resolves
+    silently to ``None`` (CLAUDE.md hard rule #7)."""
+    settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
+    with pytest.raises(ValueError, match="unsupported provider_id"):
+        _resolve_quarantine_base_url("openai", settings)
+
+
 async def test_build_extractor_spawns_control_fd_with_provider_config(
     fresh_registry_allow_system: HookRegistry,
     monkeypatch: pytest.MonkeyPatch,
@@ -694,6 +754,8 @@ async def test_build_extractor_spawns_control_fd_with_provider_config(
         egress_config: object = None,
         model: object = None,
         max_tokens: object = None,
+        provider: object = None,
+        base_url: object = None,
         ssl_cert_file: str = "",
         refusal_recorder: object = None,
     ) -> _EchoingChildDouble:
@@ -702,6 +764,8 @@ async def test_build_extractor_spawns_control_fd_with_provider_config(
             egress_config=egress_config,
             model=model,
             max_tokens=max_tokens,
+            provider=provider,
+            base_url=base_url,
         )
         return _EchoingChildDouble(provider_key=provider_key)
 
@@ -717,6 +781,9 @@ async def test_build_extractor_spawns_control_fd_with_provider_config(
         staging=QuarantineStagingMap(),
         environment="production",
         egress_config=cfg,
+        quarantine_provider="anthropic",
+        quarantine_model=_QUARANTINE_MODEL,
+        quarantine_base_url=None,
     )
     await transport.close()
 
@@ -724,6 +791,62 @@ async def test_build_extractor_spawns_control_fd_with_provider_config(
     assert seen["egress_config"] is cfg
     assert seen["model"] == "claude-haiku-4-5"
     assert seen["max_tokens"] == 8192
+
+
+async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepseek_provider(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prov-001 regression: a deepseek-configured extractor spawns with DeepSeek's
+    OWN model, never the hardcoded Anthropic quarantine model. Drives
+    _build_comms_inbound_extractor itself (the real production entry point), not
+    _spawn_real_child or a lower-level helper — this is the exact class of gap that
+    let the original bug hide behind a bypassed test harness."""
+    from alfred.security.dlp import OutboundDlp
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    captured: dict[str, object] = {}
+
+    async def _fake_spawn(**kwargs: object) -> _EchoingChildDouble:
+        captured.update(kwargs)
+        return _EchoingChildDouble(provider_key=cast(str, kwargs["provider_key"]))
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+    # A real Settings() (not _EgressCfg()) is needed here specifically to resolve
+    # deepseek_model — mirrors the plan's own daemon_runtime._resolve_quarantine_model.
+    # `environment` has no default (ADR-0053) and is not populated by a bare kwarg-less
+    # construction here, so it's passed explicitly alongside the required deepseek key.
+    settings = Settings(
+        deepseek_api_key=SecretStr("sk-real"), environment="test"
+    )  # deepseek_model defaults "deepseek-chat"
+    # match test_build_extractor_drives_real_transport_over_spawned_child's exact broker setup
+    broker = MagicMock()
+    broker.redact = MagicMock(side_effect=lambda x: x)
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+    audit_writer = MagicMock()
+    audit_writer.append_schema = AsyncMock()
+
+    _extractor, transport = await _build_comms_inbound_extractor(
+        audit_writer=audit_writer,
+        outbound_dlp=outbound_dlp,
+        secret_broker=broker,
+        staging=QuarantineStagingMap(),
+        environment="test",
+        egress_config=_EgressCfg(),
+        quarantine_provider="deepseek",
+        quarantine_model=_resolve_quarantine_model("deepseek", settings),
+        quarantine_base_url=_resolve_quarantine_base_url("deepseek", settings),
+    )
+    await transport.close()
+
+    assert captured["model"] == settings.deepseek_model
+    assert captured["model"] != _QUARANTINE_MODEL
 
 
 async def test_build_extractor_refuses_on_blank_egress_proxy_before_spawn(
@@ -766,6 +889,9 @@ async def test_build_extractor_refuses_on_blank_egress_proxy_before_spawn(
             staging=QuarantineStagingMap(),
             environment="production",
             egress_config=_EgressCfg(egress_proxy_url=""),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
     assert spawned == []
 
@@ -811,5 +937,8 @@ async def test_build_extractor_refuses_on_malformed_egress_proxy_before_spawn(
             staging=QuarantineStagingMap(),
             environment="production",
             egress_config=_EgressCfg(egress_proxy_url="http://alfred-gateway"),  # no :port
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
     assert spawned == []
