@@ -183,6 +183,7 @@ def test_build_child_client_rejects_missing_read_timeout() -> None:
         with pytest.raises(MissingReadTimeoutError):
             build_child_client(
                 a.detach(),
+                provider_id="anthropic",
                 model="claude-haiku-4-5",
                 api_key="stub",
                 timeout=httpx.Timeout(read=None, connect=5.0, write=5.0, pool=5.0),
@@ -402,6 +403,7 @@ def test_build_child_client_verifies_tls_against_the_system_store(
     a, b = socket.socketpair()
     provider, backend = build_child_client(
         a.detach(),
+        provider_id="anthropic",
         model="claude-haiku-4-5",
         api_key="stub",
         timeout=httpx.Timeout(8.0),
@@ -430,6 +432,7 @@ def test_build_child_client_is_single_use_no_keepalive_no_retry() -> None:
     a, b = socket.socketpair()
     provider, backend = build_child_client(
         a.detach(),
+        provider_id="anthropic",
         model="claude-haiku-4-5",
         api_key="stub",
         timeout=httpx.Timeout(8.0),

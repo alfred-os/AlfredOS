@@ -479,7 +479,9 @@ def _build_provider(key: str) -> _ProviderFactory:
             f"ALFRED_QUARANTINE_MAX_TOKENS must be > 0, got {max_tokens} — refusing to "
             "boot a child whose every extraction would fail its >0 validator (§20.2)"
         )
-    return _ProviderFactory.from_key(key, model=model, max_tokens=max_tokens)
+    return _ProviderFactory.from_key(
+        key, provider_id="anthropic", model=model, max_tokens=max_tokens
+    )
 
 
 async def _run_mcp_server(source: Any, *, reader: _FrameReader, writer: _FrameWriter) -> None:

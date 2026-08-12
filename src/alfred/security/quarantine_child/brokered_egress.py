@@ -55,6 +55,7 @@ from httpcore import AsyncNetworkBackend, AsyncNetworkStream
 from alfred.egress.control_fd_broker import recv_passed_fd, recv_passed_fd_nonblocking
 from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.base import ProviderCapability, ProviderUnavailableError
+from alfred.providers.deepseek import DeepSeekProvider
 
 _log = structlog.get_logger(__name__)
 
@@ -291,10 +292,22 @@ class _PassedFdTransport(httpx.AsyncHTTPTransport):
 
 
 def build_child_client(
-    fd: int, *, model: str, api_key: str, timeout: httpx.Timeout, budget_seconds: float
-) -> tuple[AnthropicProvider, PassedFdBackend]:
-    """Build the #339-seam AnthropicProvider over the passed fd. max_retries=0 (spike A2),
-    single connection, no keepalive, no redirects (E2). TLS terminates in-child (HARD #5).
+    fd: int,
+    *,
+    provider_id: str,
+    model: str,
+    api_key: str,
+    timeout: httpx.Timeout,
+    budget_seconds: float,
+    base_url: str | None = None,
+) -> tuple[AnthropicProvider | DeepSeekProvider, PassedFdBackend]:
+    """Build the #339-seam provider client over the passed fd, for either provider #587
+    supports. max_retries=0 (spike A2), single connection, no keepalive, no redirects
+    (E2). TLS terminates in-child (HARD #5). ``provider_id`` is the closed-set value
+    (``anthropic`` | ``deepseek``) the host already validated before spawn
+    (``_ALLOWED_QUARANTINED_PROVIDERS`` / the new ``ALFRED_QUARANTINE_PROVIDER``
+    setting) — this function trusts it rather than re-validating, since re-validating
+    here would duplicate the closed-set check instead of sharing it.
 
     The read component of ``timeout`` becomes the backend's per-syscall idle cap AND is
     injected into the httpx client. ``budget_seconds`` — what remains of the per-extraction
@@ -303,9 +316,29 @@ def build_child_client(
     backend = PassedFdBackend(fd, read_timeout=timeout.read, budget_seconds=budget_seconds)
     transport = _PassedFdTransport(backend)
     http_client = httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=timeout)
-    provider = AnthropicProvider.from_settings(
-        api_key=api_key, model=model, http_client=http_client, max_retries=0, timeout=timeout
-    )
+    if provider_id == "deepseek":
+        if base_url is None:
+            raise ValueError(
+                "build_child_client: provider_id='deepseek' requires base_url — refusing "
+                "to silently fall back to some default the operator did not choose (HARD #7)"
+            )
+        provider: AnthropicProvider | DeepSeekProvider = DeepSeekProvider.from_settings(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            http_client=http_client,
+            max_retries=0,
+            timeout=timeout,
+        )
+    elif provider_id == "anthropic":
+        provider = AnthropicProvider.from_settings(
+            api_key=api_key, model=model, http_client=http_client, max_retries=0, timeout=timeout
+        )
+    else:
+        raise ValueError(
+            f"build_child_client: unsupported provider_id {provider_id!r} — refusing to "
+            "silently construct either provider for an out-of-closed-set value (HARD #7, sec-002)"
+        )
     return provider, backend
 
 
@@ -325,43 +358,69 @@ class QuarantineChildBootError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _ProviderFactory:
-    """Frozen, key-free-repr builder for the child's per-attempt Anthropic provider (§8).
+    """Frozen, key-free-repr builder for the child's per-attempt provider client (§8, #587).
 
-    ``build(fd)`` assembles the #339-seam ``AnthropicProvider`` over ONE brokered TCP fd via
+    ``build(fd)`` assembles the #339-seam provider over ONE brokered TCP fd via
     ``build_child_client``. ``from_key`` is the child's SECONDARY refuse-boot guard (§20.2): an
     empty provider key means the child cannot build a real provider, so it refuses to boot with a
     loud :class:`QuarantineChildBootError` rather than silently degrading to a dead LLM (HARD #7).
-    The HOST pre-spawn key check (Task 6/7) is the PRIMARY guard; this is defence-in-depth.
+    The HOST pre-spawn key check (Task 6/7 of the original #340 plan) is the PRIMARY guard; this
+    is defence-in-depth.
     """
 
+    provider_id: str
     api_key: str
     model: str
     max_tokens: int
     timeout: httpx.Timeout | None
+    base_url: str | None = None
 
     @classmethod
-    def from_key(cls, key: str, *, model: str, max_tokens: int) -> _ProviderFactory:
+    def from_key(
+        cls,
+        key: str,
+        *,
+        provider_id: str,
+        model: str,
+        max_tokens: int,
+        base_url: str | None = None,
+    ) -> _ProviderFactory:
         if not key:
             raise QuarantineChildBootError(
                 "quarantine provider key is empty — refusing to boot a dead-LLM child (§20.2)"
             )
-        return cls(api_key=key, model=model, max_tokens=max_tokens, timeout=_CHILD_SDK_READ_TIMEOUT)
+        return cls(
+            provider_id=provider_id,
+            api_key=key,
+            model=model,
+            max_tokens=max_tokens,
+            timeout=_CHILD_SDK_READ_TIMEOUT,
+            base_url=base_url,
+        )
 
-    def build(self, fd: int, *, budget_seconds: float) -> tuple[AnthropicProvider, PassedFdBackend]:
+    def build(
+        self, fd: int, *, budget_seconds: float
+    ) -> tuple[AnthropicProvider | DeepSeekProvider, PassedFdBackend]:
         """Assemble the per-attempt client. ``budget_seconds`` is what remains of the
         extraction's wall-clock budget and becomes the attempt's absolute socket deadline."""
         return build_child_client(
             fd,
+            provider_id=self.provider_id,
             model=self.model,
             api_key=self.api_key,
             timeout=self.timeout or _CHILD_SDK_READ_TIMEOUT,
             budget_seconds=budget_seconds,
+            base_url=self.base_url,
         )
 
     def __repr__(self) -> str:
         # Key-free repr (anti-leak, the _DeterministicProvider discipline): the api_key must never
-        # reach a log line or a traceback frame (HARD #5 / no-secret-in-logs).
-        return f"_ProviderFactory(model={self.model!r}, max_tokens={self.max_tokens})"
+        # reach a log line or a traceback frame (HARD #5 / no-secret-in-logs). provider_id/base_url
+        # are non-secret and safe to include.
+        return (
+            f"_ProviderFactory(provider_id={self.provider_id!r}, model={self.model!r}, "
+            f"max_tokens={self.max_tokens})"
+        )
 
 
 @runtime_checkable
@@ -379,7 +438,9 @@ class ProviderSource(Protocol):
 
     def capabilities(self) -> frozenset[ProviderCapability]: ...
 
-    def bind(self, *, budget_seconds: float) -> AbstractAsyncContextManager[AnthropicProvider]: ...
+    def bind(
+        self, *, budget_seconds: float
+    ) -> AbstractAsyncContextManager[AnthropicProvider | DeepSeekProvider]: ...
 
     def drain_leftovers(self) -> None: ...
 
@@ -388,17 +449,35 @@ class BrokeredProviderSource:
     """Per-attempt provider binder over the fd-4 control channel (§8 wrapper-provider).
 
     Each :meth:`bind` receives ONE pre-brokered, gateway-connected TCP fd off-loop, assembles the
-    Anthropic SDK over it, and yields the provider for exactly one extraction attempt. On exit it
+    provider SDK over it, and yields the provider for exactly one extraction attempt. On exit it
     owns the fd's lifecycle (§8 D5): the httpx client's ``aclose`` is the SOLE fd owner once it has
     dialed; before any dial the source closes the raw fd itself. :meth:`drain_leftovers` sweeps any
     pre-brokered sockets an early-success retry loop never consumed.
     """
 
-    _CAPS = AnthropicProvider.CAPABILITIES  # model-invariant classvar — reading it is socket-free
-
     def __init__(self, factory: _ProviderFactory, control_end: socket.socket) -> None:
         self._factory = factory
         self._control_end = control_end
+        # #587: capabilities are resolved from the CONFIGURED provider/model, not a
+        # hardcoded classvar — DeepSeek's capabilities are model-aware
+        # (_capabilities_for_model), unlike Anthropic's flat CAPABILITIES. Resolved once
+        # here (construction time, socket-free) rather than per-call, matching the
+        # original classvar's "read it is socket-free" property.
+        #
+        # sec-002: this is a genuine 3-way closed-set dispatch (matching
+        # build_child_client's Step 3 fix), not a 2-way if/else — an out-of-set
+        # provider_id must refuse loudly here too, not silently resolve to
+        # DeepSeek's (frequently empty) capability set for an unknown value.
+        self._caps: frozenset[ProviderCapability]
+        if factory.provider_id == "anthropic":
+            self._caps = AnthropicProvider.CAPABILITIES
+        elif factory.provider_id == "deepseek":
+            self._caps = DeepSeekProvider._capabilities_for_model(factory.model)
+        else:
+            raise ValueError(
+                f"BrokeredProviderSource: unsupported provider_id {factory.provider_id!r} — "
+                "refusing to silently resolve either capability set (HARD #7, sec-002)"
+            )
 
     @property
     def max_tokens(self) -> int:
@@ -411,7 +490,7 @@ class BrokeredProviderSource:
         return self._factory.max_tokens
 
     def capabilities(self) -> frozenset[ProviderCapability]:
-        return self._CAPS
+        return self._caps
 
     def _recv_one_fd(self, deadline_at: float) -> tuple[bytes, int]:
         """Receive ONE brokered descriptor, bounded by the attempt deadline (never unbounded).
@@ -448,7 +527,9 @@ class BrokeredProviderSource:
             self._control_end.settimeout(None)
 
     @asynccontextmanager
-    async def bind(self, *, budget_seconds: float) -> AsyncIterator[AnthropicProvider]:
+    async def bind(
+        self, *, budget_seconds: float
+    ) -> AsyncIterator[AnthropicProvider | DeepSeekProvider]:
         """Bind ONE attempt's provider over ONE brokered socket.
 
         ``budget_seconds`` is what REMAINS of the extraction's wall-clock budget. The deadline
@@ -458,7 +539,7 @@ class BrokeredProviderSource:
         """
         deadline_at = time.monotonic() + budget_seconds
         _data, fd = await anyio.to_thread.run_sync(self._recv_one_fd, deadline_at)
-        provider: AnthropicProvider | None = None
+        provider: AnthropicProvider | DeepSeekProvider | None = None
         backend: PassedFdBackend | None = None
         try:
             # The REMAINING budget, not the original: the recv above already spent part of it.

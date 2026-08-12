@@ -33,7 +33,9 @@ import httpx
 import pytest
 
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd_nonblocking
+from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.base import ProviderCapability, ProviderUnavailableError
+from alfred.providers.deepseek import DeepSeekProvider
 from alfred.security.quarantine_child import brokered_egress as be
 from alfred.security.quarantine_child.brokered_egress import (
     BrokeredProviderSource,
@@ -82,9 +84,19 @@ def _af_unix_socketpair() -> tuple[socket.socket, socket.socket]:
     return socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 
 
-def _factory(timeout: httpx.Timeout | None = None) -> _ProviderFactory:
+def _factory(
+    timeout: httpx.Timeout | None = None,
+    *,
+    provider_id: str = "anthropic",
+    model: str | None = None,
+) -> _ProviderFactory:
     return _ProviderFactory(
-        api_key="super-secret", model="claude-haiku-4-5", max_tokens=8192, timeout=timeout
+        provider_id=provider_id,
+        api_key="super-secret",
+        model=model or ("claude-haiku-4-5" if provider_id == "anthropic" else "deepseek-chat"),
+        max_tokens=8192,
+        timeout=timeout,
+        base_url=None if provider_id == "anthropic" else "https://api.deepseek.com/v1",
     )
 
 
@@ -99,12 +111,16 @@ def test_factory_repr_hides_key() -> None:
 def test_factory_refuses_empty_key() -> None:
     """An empty provider key means the child cannot build a real provider — refuse boot (§20.2)."""
     with pytest.raises(QuarantineChildBootError):
-        _ProviderFactory.from_key("", model="claude-haiku-4-5", max_tokens=8192)
+        _ProviderFactory.from_key(
+            "", provider_id="anthropic", model="claude-haiku-4-5", max_tokens=8192
+        )
 
 
 def test_factory_from_key_builds_frozen_config() -> None:
     """A non-empty key yields a factory carrying the fixed child read-timeout ceiling."""
-    f = _ProviderFactory.from_key("realkey", model="claude-haiku-4-5", max_tokens=4096)
+    f = _ProviderFactory.from_key(
+        "realkey", provider_id="anthropic", model="claude-haiku-4-5", max_tokens=4096
+    )
     assert f.model == "claude-haiku-4-5"
     assert f.max_tokens == 4096
     assert f.timeout is be._CHILD_SDK_READ_TIMEOUT
@@ -113,6 +129,157 @@ def test_factory_from_key_builds_frozen_config() -> None:
 
 def test_quarantine_child_boot_error_is_runtime_error() -> None:
     assert issubclass(QuarantineChildBootError, RuntimeError)
+
+
+def test_factory_from_key_builds_deepseek_factory() -> None:
+    """A DeepSeek-configured factory carries its base_url and provider_id."""
+    f = _ProviderFactory.from_key(
+        "realkey",
+        provider_id="deepseek",
+        model="deepseek-chat",
+        max_tokens=4096,
+        base_url="https://api.deepseek.com/v1",
+    )
+    assert f.provider_id == "deepseek"
+    assert f.base_url == "https://api.deepseek.com/v1"
+    assert f.model == "deepseek-chat"
+    assert "realkey" not in repr(f)
+
+
+def test_build_child_client_dispatches_to_deepseek() -> None:
+    """provider_id='deepseek' constructs a DeepSeekProvider, not AnthropicProvider."""
+    a, b = socket.socketpair()
+    fd = a.detach()
+    try:
+        provider, _backend = be.build_child_client(
+            fd,
+            provider_id="deepseek",
+            model="deepseek-chat",
+            api_key="k",
+            timeout=be._CHILD_SDK_READ_TIMEOUT,
+            budget_seconds=5.0,
+            base_url="https://api.deepseek.com/v1",
+        )
+        assert isinstance(provider, DeepSeekProvider)
+    finally:
+        # test-r2-006: reclaim both the detached raw fd AND both socketpair ends —
+        # match this file's own established fd-ownership discipline (see e.g.
+        # test_factory_build_resolves_read_timeout / test_build_anchors_the_attempt_deadline
+        # _from_the_budget).
+        os.close(fd)
+        a.close()
+        b.close()
+
+
+def test_build_child_client_deepseek_requires_base_url() -> None:
+    """A DeepSeek dispatch with no base_url refuses loudly (HARD #7), never silently
+    falls back to some default the operator didn't choose."""
+    a, b = socket.socketpair()
+    fd = a.detach()
+    try:
+        with pytest.raises(ValueError, match="base_url"):
+            be.build_child_client(
+                fd,
+                provider_id="deepseek",
+                model="deepseek-chat",
+                api_key="k",
+                timeout=be._CHILD_SDK_READ_TIMEOUT,
+                budget_seconds=5.0,
+                base_url=None,
+            )
+    finally:
+        os.close(fd)
+        a.close()
+        b.close()
+
+
+def test_provider_source_capabilities_resolve_per_provider() -> None:
+    """BrokeredProviderSource.capabilities() reflects the CONFIGURED provider/model,
+    not a hardcoded Anthropic classvar — the #587 correctness gap the design doc named."""
+    anthropic_end, anthropic_peer = _af_unix_socketpair()
+    deepseek_end, deepseek_peer = _af_unix_socketpair()
+    try:
+        anthropic_source = BrokeredProviderSource(_factory(provider_id="anthropic"), anthropic_end)
+        deepseek_source = BrokeredProviderSource(_factory(provider_id="deepseek"), deepseek_end)
+        assert anthropic_source.capabilities() == AnthropicProvider.CAPABILITIES
+        assert deepseek_source.capabilities() == DeepSeekProvider._capabilities_for_model(
+            "deepseek-chat"
+        )
+        assert anthropic_source.capabilities() != deepseek_source.capabilities()
+    finally:
+        # test-r2-006: _af_unix_socketpair() returns BOTH ends — the peer end was
+        # discarded and leaked in the original draft; close all four sockets here.
+        anthropic_end.close()
+        anthropic_peer.close()
+        deepseek_end.close()
+        deepseek_peer.close()
+
+
+def test_provider_source_capabilities_resolve_per_model() -> None:
+    """DeepSeek's capabilities are MODEL-aware, not just provider-aware (test-005):
+    deepseek-chat and deepseek-reasoner have genuinely non-overlapping capability
+    sets. A regression that hardcodes the literal "deepseek-chat" into capability
+    resolution instead of reading `factory.model` would pass
+    `test_provider_source_capabilities_resolve_per_provider` unchanged — this test
+    is the one that actually pins model-awareness."""
+    chat_end, chat_peer = _af_unix_socketpair()
+    reasoner_end, reasoner_peer = _af_unix_socketpair()
+    try:
+        chat_source = BrokeredProviderSource(
+            _factory(provider_id="deepseek", model="deepseek-chat"), chat_end
+        )
+        reasoner_source = BrokeredProviderSource(
+            _factory(provider_id="deepseek", model="deepseek-reasoner"), reasoner_end
+        )
+        assert chat_source.capabilities() == DeepSeekProvider._capabilities_for_model(
+            "deepseek-chat"
+        )
+        assert reasoner_source.capabilities() == DeepSeekProvider._capabilities_for_model(
+            "deepseek-reasoner"
+        )
+        assert chat_source.capabilities() != reasoner_source.capabilities()
+    finally:
+        chat_end.close()
+        chat_peer.close()
+        reasoner_end.close()
+        reasoner_peer.close()
+
+
+def test_build_child_client_refuses_unknown_provider_id() -> None:
+    """An out-of-closed-set provider_id refuses loudly (HARD #7, sec-002) rather than
+    silently falling through to the Anthropic branch — a two-way if/else cannot
+    distinguish 'deepseek' from 'anything else', so this pins the 3-way dispatch."""
+    a, b = socket.socketpair()
+    fd = a.detach()
+    try:
+        with pytest.raises(ValueError, match="provider_id"):
+            be.build_child_client(
+                fd,
+                provider_id="openai",
+                model="gpt-4",
+                api_key="k",
+                timeout=be._CHILD_SDK_READ_TIMEOUT,
+                budget_seconds=5.0,
+            )
+    finally:
+        os.close(fd)
+        a.close()
+        b.close()
+
+
+def test_provider_source_construction_refuses_unknown_provider_id() -> None:
+    """test-r2-004: BrokeredProviderSource.__init__'s OWN closed-set refusal (sec-002)
+    is a distinct dispatch site from build_child_client's — this is the test that
+    actually exercises it, since none of the tests above construct a source with an
+    out-of-set provider_id. Required for the 100%-branch trust-boundary coverage
+    gate this task's Step 6 already demands."""
+    end, peer = _af_unix_socketpair()
+    try:
+        with pytest.raises(ValueError, match="provider_id"):
+            BrokeredProviderSource(_factory(provider_id="openai"), end)
+    finally:
+        end.close()
+        peer.close()
 
 
 @pytest.mark.skipif(
