@@ -389,3 +389,69 @@ class TestWithoutSourceIdentity:
         # Identity mirrors the corresponding UNWRAPPED stock source exactly — the
         # wrapper is invisible to pydantic-settings' own per-source bookkeeping.
         assert keys == ["EnvSettingsSource", "DotEnvSettingsSource", "SecretsSettingsSource"]
+
+
+class TestQuarantineProviderSettings:
+    """#586/#587: quarantine provider selection and enforcement settings."""
+
+    @staticmethod
+    def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Set up minimal env for Settings construction."""
+        monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+        monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
+
+    def test_quarantine_provider_defaults_to_anthropic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._base_env(monkeypatch)
+        settings = Settings()
+        assert settings.quarantine_provider == "anthropic"
+
+    def test_quarantine_provider_accepts_deepseek(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+        settings = Settings()
+        assert settings.quarantine_provider == "deepseek"
+
+    def test_quarantine_provider_rejects_unknown_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "openai")
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)):
+            Settings()
+
+    def test_require_quarantine_provider_separation_defaults_to_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._base_env(monkeypatch)
+        settings = Settings()
+        assert settings.require_quarantine_provider_separation is False
+
+    def test_require_quarantine_provider_separation_accepts_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
+        settings = Settings()
+        assert settings.require_quarantine_provider_separation is True
+
+    def test_quarantine_provider_literal_matches_allowed_quarantined_providers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Drift cross-check (prov-003): Settings.quarantine_provider's Literal values and
+        _validators._ALLOWED_QUARANTINED_PROVIDERS are two independently-maintained
+        closed sets (a THIRD copy also exists in alfred.state.proposal_payloads — not
+        cross-checked here, tracked as a separate follow-up). This test is the one thing
+        that actually catches the two drifting apart; a code comment alone would not."""
+        from typing import get_args
+
+        from alfred.cli._validators import _ALLOWED_QUARANTINED_PROVIDERS
+
+        self._base_env(monkeypatch)
+        literal_values = frozenset(
+            get_args(Settings.model_fields["quarantine_provider"].annotation)
+        )
+        assert literal_values == _ALLOWED_QUARANTINED_PROVIDERS

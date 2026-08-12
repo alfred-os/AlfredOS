@@ -209,6 +209,37 @@ class Settings(BaseSettings):
     primary_provider: str = "deepseek"
     fallback_provider: str = "anthropic"
 
+    # #587: the quarantine child's provider — closed set, kept in sync BY HAND with
+    # the CLI's existing quarantined-provider validator
+    # (alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS) — a Literal here cannot
+    # import that frozenset directly (mypy --strict needs a static literal), so
+    # test_quarantine_provider_literal_matches_allowed_quarantined_providers
+    # (tests/unit/config/, this task) is the drift detector, not this comment. A THIRD
+    # independent copy of this same two-value set exists in
+    # alfred.state.proposal_payloads (line ~155) — not cross-checked by this plan;
+    # unifying all three is follow-up debt, not blocking this task (prov-003).
+    # Defaults to "anthropic" — byte-for-byte today's behaviour for every deployment
+    # that doesn't set this.
+    quarantine_provider: Literal["anthropic", "deepseek"] = "anthropic"
+
+    # #586: opt-in enforcement that the quarantine and privileged providers differ.
+    # NOTE: no PRD section actually states this invariant today (arch-001/rev-001) —
+    # do NOT cite "PRD §6.4" here (that section is "Self-Improvement with Reviewer
+    # Gate", unrelated). See ADR-XXXX (Task 6 Step 0 of this plan — check `ls docs/adr/`
+    # for the next free number at implementation time) for the accurately-anchored
+    # record of this decision. Defaults to False: a home/self-hosted operator must
+    # never be forced into running two paid provider accounts. An enterprise
+    # deployment that wants the stricter posture sets this to True.
+    require_quarantine_provider_separation: bool = Field(
+        default=False,
+        description=(
+            "When True, refuse to boot if the quarantine and privileged providers "
+            "are the same id (see alfred.bootstrap.quarantine.assert_provider_separation). "
+            "Default False — same-provider is permitted, with an operator-facing warning "
+            "(see #586, ADR-XXXX)."
+        ),
+    )
+
     # Spec C / G7-3 (#333, ADR-0042): the core builds provider SDK clients with an
     # httpx proxy pointed at the gateway L7 CONNECT proxy (e.g. "http://alfred-gateway:8889").
     # MANDATORY — the connectivity-free core has no direct-egress fallback: an unset/blank
