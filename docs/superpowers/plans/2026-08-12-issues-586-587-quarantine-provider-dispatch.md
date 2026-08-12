@@ -69,9 +69,10 @@ def test_factory_from_key_builds_deepseek_factory() -> None:
 def test_build_child_client_dispatches_to_deepseek() -> None:
     """provider_id='deepseek' constructs a DeepSeekProvider, not AnthropicProvider."""
     a, b = socket.socketpair()
+    fd = a.detach()
     try:
         provider, backend = be.build_child_client(
-            a.detach(),
+            fd,
             provider_id="deepseek",
             model="deepseek-chat",
             api_key="k",
@@ -81,6 +82,11 @@ def test_build_child_client_dispatches_to_deepseek() -> None:
         )
         assert isinstance(provider, DeepSeekProvider)
     finally:
+        # test-r2-006: reclaim both the detached raw fd AND both socketpair ends —
+        # match this file's own established fd-ownership discipline (see e.g.
+        # test_factory_build_resolves_read_timeout / test_build_anchors_the_attempt_deadline_from_the_budget).
+        os.close(fd)
+        a.close()
         b.close()
 
 
@@ -88,10 +94,11 @@ def test_build_child_client_deepseek_requires_base_url() -> None:
     """A DeepSeek dispatch with no base_url refuses loudly (HARD #7), never silently
     falls back to some default the operator didn't choose."""
     a, b = socket.socketpair()
+    fd = a.detach()
     try:
         with pytest.raises(ValueError, match="base_url"):
             be.build_child_client(
-                a.detach(),
+                fd,
                 provider_id="deepseek",
                 model="deepseek-chat",
                 api_key="k",
@@ -100,6 +107,7 @@ def test_build_child_client_deepseek_requires_base_url() -> None:
                 base_url=None,
             )
     finally:
+        os.close(fd)
         a.close()
         b.close()
 
@@ -107,11 +115,21 @@ def test_build_child_client_deepseek_requires_base_url() -> None:
 def test_provider_source_capabilities_resolve_per_provider() -> None:
     """BrokeredProviderSource.capabilities() reflects the CONFIGURED provider/model,
     not a hardcoded Anthropic classvar — the #587 correctness gap the design doc named."""
-    anthropic_source = BrokeredProviderSource(_factory(provider_id="anthropic"), _af_unix_socketpair()[0])
-    deepseek_source = BrokeredProviderSource(_factory(provider_id="deepseek"), _af_unix_socketpair()[0])
-    assert anthropic_source.capabilities() == AnthropicProvider.CAPABILITIES
-    assert deepseek_source.capabilities() == DeepSeekProvider._capabilities_for_model("deepseek-chat")
-    assert anthropic_source.capabilities() != deepseek_source.capabilities()
+    anthropic_end, anthropic_peer = _af_unix_socketpair()
+    deepseek_end, deepseek_peer = _af_unix_socketpair()
+    try:
+        anthropic_source = BrokeredProviderSource(_factory(provider_id="anthropic"), anthropic_end)
+        deepseek_source = BrokeredProviderSource(_factory(provider_id="deepseek"), deepseek_end)
+        assert anthropic_source.capabilities() == AnthropicProvider.CAPABILITIES
+        assert deepseek_source.capabilities() == DeepSeekProvider._capabilities_for_model("deepseek-chat")
+        assert anthropic_source.capabilities() != deepseek_source.capabilities()
+    finally:
+        # test-r2-006: _af_unix_socketpair() returns BOTH ends — the peer end was
+        # discarded and leaked in the original draft; close all four sockets here.
+        anthropic_end.close()
+        anthropic_peer.close()
+        deepseek_end.close()
+        deepseek_peer.close()
 
 
 def test_provider_source_capabilities_resolve_per_model() -> None:
@@ -121,15 +139,21 @@ def test_provider_source_capabilities_resolve_per_model() -> None:
     resolution instead of reading `factory.model` would pass
     `test_provider_source_capabilities_resolve_per_provider` unchanged — this test
     is the one that actually pins model-awareness."""
-    chat_source = BrokeredProviderSource(
-        _factory(provider_id="deepseek", model="deepseek-chat"), _af_unix_socketpair()[0]
-    )
-    reasoner_source = BrokeredProviderSource(
-        _factory(provider_id="deepseek", model="deepseek-reasoner"), _af_unix_socketpair()[0]
-    )
-    assert chat_source.capabilities() == DeepSeekProvider._capabilities_for_model("deepseek-chat")
-    assert reasoner_source.capabilities() == DeepSeekProvider._capabilities_for_model("deepseek-reasoner")
-    assert chat_source.capabilities() != reasoner_source.capabilities()
+    chat_end, chat_peer = _af_unix_socketpair()
+    reasoner_end, reasoner_peer = _af_unix_socketpair()
+    try:
+        chat_source = BrokeredProviderSource(_factory(provider_id="deepseek", model="deepseek-chat"), chat_end)
+        reasoner_source = BrokeredProviderSource(
+            _factory(provider_id="deepseek", model="deepseek-reasoner"), reasoner_end
+        )
+        assert chat_source.capabilities() == DeepSeekProvider._capabilities_for_model("deepseek-chat")
+        assert reasoner_source.capabilities() == DeepSeekProvider._capabilities_for_model("deepseek-reasoner")
+        assert chat_source.capabilities() != reasoner_source.capabilities()
+    finally:
+        chat_end.close()
+        chat_peer.close()
+        reasoner_end.close()
+        reasoner_peer.close()
 
 
 def test_build_child_client_refuses_unknown_provider_id() -> None:
@@ -137,10 +161,11 @@ def test_build_child_client_refuses_unknown_provider_id() -> None:
     silently falling through to the Anthropic branch — a two-way if/else cannot
     distinguish 'deepseek' from 'anything else', so this pins the 3-way dispatch."""
     a, b = socket.socketpair()
+    fd = a.detach()
     try:
         with pytest.raises(ValueError, match="provider_id"):
             be.build_child_client(
-                a.detach(),
+                fd,
                 provider_id="openai",
                 model="gpt-4",
                 api_key="k",
@@ -148,11 +173,27 @@ def test_build_child_client_refuses_unknown_provider_id() -> None:
                 budget_seconds=5.0,
             )
     finally:
+        os.close(fd)
         a.close()
         b.close()
+
+
+def test_provider_source_construction_refuses_unknown_provider_id() -> None:
+    """test-r2-004: BrokeredProviderSource.__init__'s OWN closed-set refusal (sec-002)
+    is a distinct dispatch site from build_child_client's — this is the test that
+    actually exercises it, since none of the tests above construct a source with an
+    out-of-set provider_id. Required for the 100%-branch trust-boundary coverage
+    gate this task's Step 6 already demands."""
+    end, peer = _af_unix_socketpair()
+    try:
+        with pytest.raises(ValueError, match="provider_id"):
+            BrokeredProviderSource(_factory(provider_id="openai"), end)
+    finally:
+        end.close()
+        peer.close()
 ```
 
-Add the import `from alfred.providers.deepseek import DeepSeekProvider` to the test file's existing import block (`:22-44`).
+Add the imports `from alfred.providers.deepseek import DeepSeekProvider` and `import os` (if not already imported) to the test file's existing import block (`:22-44`).
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -351,7 +392,7 @@ Update the `bind()` method's local variable annotation (`:459-461`, BEFORE the `
 - [ ] **Step 5: Run to verify they pass**
 
 Run: `uv run pytest tests/unit/security/test_brokered_provider_source.py tests/unit/security/test_brokered_egress_transport.py -v`
-Expected: PASS — every pre-existing test (now passing `provider_id="anthropic"` via the updated `_factory()` helper and the two direct `from_key(...)` call sites) plus the six new tests from Step 1.
+Expected: PASS — every pre-existing test (now passing `provider_id="anthropic"` via the updated `_factory()` helper and the two direct `from_key(...)` call sites) plus the seven new tests from Step 1.
 
 - [ ] **Step 6: Type-check and coverage**
 
@@ -519,9 +560,11 @@ git commit -m "feat(config): add quarantine_provider + require_quarantine_provid
 
 Add to the quarantine_child_io test file (locate it first: `find tests -iname "*quarantine_child_io*"`), near any existing `_child_env` test:
 
+**Call `_child_env` via this file's established module alias, `qcio.` (rev-r2-001/test-r2-001, High) — a bare `_child_env(...)` call `NameError`s, since this file imports `from alfred.security import quarantine_child_io as qcio` and every existing call site uses `qcio._child_env(...)`, never a bare import:**
+
 ```python
 def test_child_env_live_sets_provider_and_base_url_when_given() -> None:
-    env = _child_env(
+    env = qcio._child_env(
         model="deepseek-chat", max_tokens=8192, ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
         provider="deepseek", base_url="https://api.deepseek.com/v1",
     )
@@ -530,7 +573,7 @@ def test_child_env_live_sets_provider_and_base_url_when_given() -> None:
 
 
 def test_child_env_live_omits_provider_and_base_url_when_none() -> None:
-    env = _child_env(model="claude-haiku-4-5", max_tokens=8192, ssl_cert_file="/etc/ssl/certs/ca-certificates.crt")
+    env = qcio._child_env(model="claude-haiku-4-5", max_tokens=8192, ssl_cert_file="/etc/ssl/certs/ca-certificates.crt")
     assert "ALFRED_QUARANTINE_PROVIDER" not in env
     assert "ALFRED_QUARANTINE_BASE_URL" not in env
 ```
@@ -575,7 +618,7 @@ def test_child_env_live_is_dormant_plus_exactly_the_four_keys(
 
 **Leave `test_routing_yaml_quarantine_provider_default_is_anthropic` (same file family, pins `routing.yaml`'s literal `provider: "anthropic"` string) UNCHANGED.** It is independently correct — the shipped YAML file still says `"anthropic"`, and that fact doesn't depend on whether anything reads it at runtime. It does NOT need a new assertion pinning it against `Settings.quarantine_provider`'s default: that Python-level default is pinned by its own field definition (Task 2), not by mirroring a YAML file the "mirror-the-YAML" drift-guard pattern was specifically built for the OLD pre-loader `_QUARANTINE_MODEL`-style mechanism, which `ALFRED_QUARANTINE_PROVIDER` does not use (it's a real `Settings` field, not a hardcoded constant standing in for an unbuilt YAML loader).
 
-Add to `tests/unit/security/test_max_tokens_guard.py` (test-004: this is the CONFIRMED live home of `_build_provider`'s existing test family — six tests named `test_child_build_provider_*`; the plan's original locate command for a `test_main`-shaped file returns zero results against the live tree). Name the two new tests to match that established family:
+Add to `tests/unit/security/test_max_tokens_guard.py` (test-004: this is the CONFIRMED live home of `_build_provider`'s existing test family — six tests named `test_child_build_provider_*`; the plan's original locate command for a `test_main`-shaped file returns zero results against the live tree). Name the two new tests to match that established family, and **call `_build_provider` via this file's established module alias, `child_main.` (rev-r2-001/test-r2-001, High) — a bare `_build_provider(...)` call `NameError`s, since this file imports `from alfred.security.quarantine_child import __main__ as child_main` and all six existing tests call `child_main._build_provider(...)`, never a bare import:**
 
 ```python
 def test_child_build_provider_reads_provider_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -583,7 +626,7 @@ def test_child_build_provider_reads_provider_from_env(monkeypatch: pytest.Monkey
     monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
     monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
     monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "https://api.deepseek.com/v1")
-    factory = _build_provider("realkey")
+    factory = child_main._build_provider("realkey")
     assert factory.provider_id == "deepseek"
     assert factory.base_url == "https://api.deepseek.com/v1"
 
@@ -592,7 +635,7 @@ def test_child_build_provider_defaults_to_anthropic_when_env_unset(monkeypatch: 
     monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-haiku-4-5")
     monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
     monkeypatch.delenv("ALFRED_QUARANTINE_PROVIDER", raising=False)
-    factory = _build_provider("realkey")
+    factory = child_main._build_provider("realkey")
     assert factory.provider_id == "anthropic"
     assert factory.base_url is None
 ```
@@ -727,7 +770,13 @@ def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
     """
     if provider_id == "deepseek":
         return settings.deepseek_model
-    return _QUARANTINE_MODEL
+    if provider_id == "anthropic":
+        return _QUARANTINE_MODEL
+    raise ValueError(
+        f"_resolve_quarantine_model: unsupported provider_id {provider_id!r} — "
+        "refusing to silently resolve the anthropic model for an out-of-closed-set "
+        "value (HARD #7, prov-r2-001)"
+    )
 
 
 def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | None:
@@ -738,10 +787,18 @@ def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | 
     privileged path already reads) rather than introducing a second, quarantine-specific
     base-URL setting an operator would have to keep in sync with the first.
     """
-    if provider_id != "deepseek":
+    if provider_id == "deepseek":
+        return settings.deepseek_base_url
+    if provider_id == "anthropic":
         return None
-    return settings.deepseek_base_url
+    raise ValueError(
+        f"_resolve_quarantine_base_url: unsupported provider_id {provider_id!r} — "
+        "refusing to silently resolve None for an out-of-closed-set value "
+        "(HARD #7, prov-r2-001)"
+    )
 ```
+
+**prov-r2-001 (Medium): both functions now use an explicit 3-way closed-set dispatch with a loud `else: raise`, matching Task 1's own `build_child_client`/`BrokeredProviderSource.__init__` discipline (sec-002) and the plan's Global Constraints.** The bare `if provider_id == "deepseek": ... else: <treat as anthropic>` shape these two functions originally used silently resolved ANY unrecognized string to the Anthropic path — unreachable via the one production call site (`Settings.quarantine_provider` is `Literal`-validated), but directly reachable from tests (Task 3 Step 7's own new test calls `_resolve_quarantine_model("deepseek", settings)` with a hardcoded string, not a validated `Settings` read) and NOT covered by the Definition of Done's 100%-coverage gate (`daemon_runtime.py` is not in that gate's file list, so a wrong silent default here would ship undetected). Add a test for the new `else: raise` arm on each function, e.g. `test_resolve_quarantine_model_refuses_unknown_provider_id` / `test_resolve_quarantine_base_url_refuses_unknown_provider_id`, alongside the existing tests in this step.
 
 (Verify whether `daemon_runtime.py` already imports `Settings` as a type — check the `if TYPE_CHECKING:` block near the top of the file; if not, add `from alfred.config.settings import Settings` under it, matching this file's existing lazy-type-import convention for size-sensitive modules.)
 
@@ -804,9 +861,21 @@ In `src/alfred/cli/daemon/_comms_boot.py`, update the `_build_comms_inbound_extr
 
 (`_resolve_quarantine_model` and `_resolve_quarantine_base_url` both need importing into `_comms_boot.py` from `daemon_runtime` — check the existing import block for `_build_comms_inbound_extractor` itself and add both new functions alongside it.)
 
-- [ ] **Step 7: Add the real-path regression test for prov-001**
+- [ ] **Step 7: Update the 7 pre-existing `_build_comms_inbound_extractor` calls in `tests/unit/comms_mcp/test_daemon_runtime.py`**
 
-**This test is release-blocking on its own — without it, the class of gap prov-001 found can hide behind a bypassed test harness again in the future.** Locate `_build_comms_inbound_extractor`'s existing unit-test coverage in `tests/unit/comms_mcp/test_daemon_runtime.py` (it already mocks `spawn_quarantine_child_io` at its import seam — read an existing passing test in that file first and match its exact mock/fixture shape). Add a test that drives `_build_comms_inbound_extractor` itself (not a lower-level helper) with `quarantine_provider="deepseek"` and asserts the mocked `spawn_quarantine_child_io` call received `model=settings.deepseek_model` — NOT the hardcoded `"claude-haiku-4-5"`:
+**core-r2-001 (High): the new `quarantine_provider`/`quarantine_model`/`quarantine_base_url` params added above have NO defaults — they are genuinely required (deliberately: a caller that forgets to pass them should not silently get the wrong model again, which is exactly prov-001's original bug). This breaks 7 pre-existing direct calls to `_build_comms_inbound_extractor(...)` in this file (confirmed live at lines 440, 515, 569, 624, 713, 762, 807), each of which currently passes only the 6 original kwargs and will `TypeError: missing 3 required keyword-only arguments` once Step 5 lands.** Before writing Step 8's new test, update all 7 existing calls to add the byte-for-byte-equivalent values these tests exercised before this change:
+
+```python
+        quarantine_provider="anthropic",
+        quarantine_model=_QUARANTINE_MODEL,
+        quarantine_base_url=None,
+```
+
+(`_QUARANTINE_MODEL` needs importing from `daemon_runtime` into this test file if not already available.) This is a mechanical, repeated addition to all 7 call sites — not a functional change to what each test exercises.
+
+- [ ] **Step 8: Add the real-path regression test for prov-001**
+
+**This test is release-blocking on its own — without it, the class of gap prov-001 found can hide behind a bypassed test harness again in the future.** `_build_comms_inbound_extractor` already has direct unit-test coverage in this file — read `test_build_extractor_drives_real_transport_over_spawned_child` (one of the 7 call sites from Step 7) in full first; it establishes this file's REAL construction idiom: a `MagicMock()` broker with `.redact`/`.has`/`.get` configured, wrapped as `outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)`; `audit_writer = MagicMock()` with `.append_schema = AsyncMock()`; the lightweight `_EgressCfg()` stub (not a real `Settings()`) for `egress_config`; and an `_EchoingChildDouble(provider_key=...)` returned from the faked spawn. Reuse that exact idiom — do not invent new fixture names. Add a test that drives `_build_comms_inbound_extractor` itself (not a lower-level helper) with `quarantine_provider="deepseek"` and asserts the mocked `spawn_quarantine_child_io` call received `model=settings.deepseek_model` — NOT the hardcoded `_QUARANTINE_MODEL`:
 
 ```python
 async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepseek_provider(
@@ -819,22 +888,28 @@ async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepsee
     let the original bug hide behind a bypassed test harness."""
     captured: dict[str, object] = {}
 
-    async def _fake_spawn(**kwargs: object) -> object:
+    async def _fake_spawn(**kwargs: object) -> _EchoingChildDouble:
         captured.update(kwargs)
-        return _FakeSubprocessChildIO()  # match this file's existing fake-child helper
+        return _EchoingChildDouble(provider_key=kwargs["provider_key"])
 
     monkeypatch.setattr(
         "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
     )
+    # A real Settings() (not _EgressCfg()) is needed here specifically to resolve
+    # deepseek_model — mirrors the plan's own daemon_runtime._resolve_quarantine_model.
     settings = Settings(deepseek_api_key=SecretStr("sk-real"))  # deepseek_model defaults "deepseek-chat"
+    broker = MagicMock()  # match test_build_extractor_drives_real_transport_over_spawned_child's exact broker setup
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)  # match that test's audit_sink fixture
+    audit_writer = MagicMock()
+    audit_writer.append_schema = AsyncMock()
 
     await _build_comms_inbound_extractor(
-        audit_writer=_fake_audit_writer(),  # match this file's existing fixtures
-        outbound_dlp=_fake_outbound_dlp(),
-        secret_broker=_fake_secret_broker(),
+        audit_writer=audit_writer,
+        outbound_dlp=outbound_dlp,
+        secret_broker=secret_broker,  # match that test's secret_broker fixture
         staging=QuarantineStagingMap(),
         environment="test",
-        egress_config=settings,
+        egress_config=_EgressCfg(),
         quarantine_provider="deepseek",
         quarantine_model=_resolve_quarantine_model("deepseek", settings),
         quarantine_base_url=_resolve_quarantine_base_url("deepseek", settings),
@@ -844,17 +919,17 @@ async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepsee
     assert captured["model"] != _QUARANTINE_MODEL
 ```
 
-(The fixture/fake names above are illustrative — match whatever this file's existing tests for `_build_comms_inbound_extractor` actually use for `audit_writer`/`outbound_dlp`/`secret_broker`/the fake child-IO return value; read an existing passing test in the same file first and copy its exact construction shape rather than guessing.)
+**Add the missing imports (rev-r2-002/test-r2-005, Medium — none of the following five symbols is imported anywhere in this file today, and this new test bare-references all of them):** `from alfred.config.settings import Settings`, `from pydantic import SecretStr`, and `from alfred.comms_mcp.daemon_runtime import _QUARANTINE_MODEL, _resolve_quarantine_base_url, _resolve_quarantine_model` (top-of-file, matching this file's existing import block at lines 25-53). `MagicMock`/`AsyncMock` are almost certainly already imported for the sibling test this one mirrors — verify and reuse rather than re-importing.
 
-- [ ] **Step 8: Run to verify everything passes**
+- [ ] **Step 9: Run to verify everything passes**
 
 Run: `uv run pytest tests/unit/security/test_quarantine_child_io_control_fd.py tests/unit/security/test_max_tokens_guard.py tests/unit/comms_mcp/test_daemon_runtime.py -v`
-Expected: PASS — all pre-existing tests (unaffected, since every new parameter defaults to `None`/is resolved to `"anthropic"`) plus every new test from Step 1 and Step 7.
+Expected: PASS — every pre-existing test in `test_quarantine_child_io_control_fd.py`/`test_max_tokens_guard.py` (unaffected, since `_child_env`/`spawn_quarantine_child_io`'s new `provider`/`base_url` params DO default to `None`), the 7 updated calls in `test_daemon_runtime.py` (Step 7 — these required explicit updates, they are not "unaffected"), plus every new test from Step 1 and Step 8.
 
 Run: `uv run pytest tests/unit/cli/daemon/ -v -k comms_boot`
 Expected: PASS — the one production call site's existing tests still green with the three new kwargs added.
 
-- [ ] **Step 9: Type-check and coverage**
+- [ ] **Step 10: Type-check and coverage**
 
 Run: `uv run mypy --strict src/alfred/comms_mcp/daemon_runtime.py src/alfred/security/quarantine_child_io.py src/alfred/security/quarantine_child/__main__.py src/alfred/cli/daemon/_comms_boot.py && uv run pyright <same files>`
 Expected: no errors.
@@ -862,10 +937,10 @@ Expected: no errors.
 Run the combined coverage gate for every touched trust-boundary file (check the Makefile for the exact target name first, matching this repo's established `make coverage-gates` convention — do not invent an ad hoc invocation).
 Expected: 100% line+branch maintained on every touched file under `src/alfred/security/`.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add src/alfred/comms_mcp/daemon_runtime.py src/alfred/security/quarantine_child_io.py src/alfred/security/quarantine_child/__main__.py src/alfred/cli/daemon/_comms_boot.py <every modified test file>
+git add src/alfred/comms_mcp/daemon_runtime.py src/alfred/security/quarantine_child_io.py src/alfred/security/quarantine_child/__main__.py src/alfred/cli/daemon/_comms_boot.py <every modified test file including tests/unit/comms_mcp/test_daemon_runtime.py>
 git commit -m "feat(security): thread ALFRED_QUARANTINE_PROVIDER end-to-end (model + base_url + provider id) from Settings to the spawned child (#587)"
 ```
 
@@ -877,9 +952,10 @@ git commit -m "feat(security): thread ALFRED_QUARANTINE_PROVIDER end-to-end (mod
 
 **Files:**
 
-- Modify: `src/alfred/cli/daemon/_comms_boot.py` (new local exception + the call site, placed at the TOP of `_build_comms_boot_graph`, before any I/O — see Step 3)
+- Modify: `src/alfred/cli/daemon/_comms_boot.py` (new local exception + the call site, placed at the TOP of `_build_comms_boot_graph`, before any I/O — see Step 3; the function's signature also gains a new `boot_id: str` param — see Step 3b / sec-r2-001)
 - Modify: `src/alfred/cli/daemon/_failures.py` (new `QuarantineProviderSeparationViolatedFailure`, registered in the `DaemonBootFailure` union)
-- Modify: `src/alfred/cli/daemon/_commands.py` (new `except` arm mapping the new exception to the new failure + `_refuse_boot()`, mirroring the eight existing arms at `:1041-1190`)
+- Modify: `src/alfred/cli/daemon/_commands.py` (new `except` arm mapping the new exception to the new failure + `_refuse_boot()`, mirroring the eight existing arms at `:1041-1190`; also updates the one `_build_comms_boot_graph(...)` call site to pass the now-required `boot_id=boot_id`)
+- Modify: `src/alfred/audit/audit_row_schemas.py` (new `DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS` constant, registered in `AUDIT_FIELDSET_ROSTER` — sec-r2-002)
 - Test: `tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py` (confirmed live location of the established hermetic pattern for "this fault used to be an uncaught #368-anti-pattern crash, now it's an audited refusal" tests — rev-003/test-002: the plan originally named a nonexistent `_settings_with()` helper and a nonexistent `tests/unit/` filename; the real file uses `CliRunner().invoke(daemon_app, ["start"])` + `monkeypatch.setenv(...)` + the `boot_success_env`/`quarantine_registry`/`patch_quarantine_child_spawn` fixtures + `_boot_failed_reasons(audit)`)
 
 **Interfaces:**
@@ -932,11 +1008,8 @@ def test_boot_proceeds_when_separation_required_and_providers_differ(
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
     # primary_provider="deepseek" / quarantine_provider="anthropic" — the defaults —
-    # already differ; no override needed. Match test_daemon_comms_spawn.py's
-    # _patch_comms_seams(monkeypatch) pattern (CommsStdioTransport/CommsPluginRunner
-    # fakes) so the boot completes past comms-adapter construction, not just past
-    # this new check — read that file's test_enabled_adapter_spawns_and_registers
-    # first and copy its exact success-path setup.
+    # already differ; no override needed.
+    _patch_comms_seams(monkeypatch)
 
     result = CliRunner().invoke(daemon_app, ["start"])
 
@@ -949,7 +1022,6 @@ def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_c
     boot_success_env: FakeAuditWriter,
     quarantine_registry: HookRegistry,
     patch_quarantine_child_spawn: list[Any],
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Default (require=False) + same provider -> boots, but WARNS AND audits
     (CLAUDE.md hard rule #7 — no silent failures; not just a log line, also a
@@ -961,20 +1033,22 @@ def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_c
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
     # ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION left unset -> default False.
-    # Same _patch_comms_seams(monkeypatch) note as the "differ" test above.
+    _patch_comms_seams(monkeypatch)
 
-    with caplog.at_level("WARNING"):
+    with structlog.testing.capture_logs() as logs:
         result = CliRunner().invoke(daemon_app, ["start"])
 
     assert result.exit_code == 0, result.output
-    assert any(
-        "quarantine_provider_separation_not_enforced" in record.message for record in caplog.records
-    )
+    warned = [e for e in logs if e["event"] == "comms.comms_boot.quarantine_provider_separation_not_enforced"]
+    assert len(warned) == 1, f"expected one loud not-enforced warning, got {logs!r}"
     warn_rows = boot_success_env.rows_for("DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS")
     assert len(warn_rows) == 1, warn_rows
+    # sec-r2-001's oracle: the row must actually carry boot_id (not just exist),
+    # or a regression back to the boot_id-less shape would ship green.
+    assert warn_rows[0]["subject"]["boot_id"], warn_rows
 ```
 
-(`_ENABLED_ADAPTER`, `CliRunner`, `daemon_app`, `HookRegistry`, `Any` are all already imported at the top of this file per its existing tests — match those imports rather than re-importing. The exact audit `schema_name`/`fields` constant name for the warn-path row is invented above as an example (`DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS`) — Step 3 below defines the real one; keep the test's constant in sync with whatever Step 3 actually names it.)
+(`_ENABLED_ADAPTER`, `CliRunner`, `daemon_app`, `HookRegistry`, `Any` are all already imported at the top of this file per its existing tests — match those imports rather than re-importing. Add two new imports: `import structlog.testing` (test-r2-003 — `caplog` does NOT observe this codebase's structlog events; two sibling files in this same package, `test_lifecycle_wire_send.py` and `test_max_tokens_guard.py`, both document this and use `structlog.testing.capture_logs()` instead) and `from .test_daemon_comms_spawn import _patch_comms_seams` (test-r2-002 — `_patch_comms_seams` patches `CommsStdioTransport`/`CommsPluginRunner` to fakes so a comms-enabled boot can actually reach `exit_code == 0` instead of constructing real transport objects; this is an established cross-test-module import in this file family — `test_daemon_promoter_wiring.py` already does the same `from .test_daemon_comms_spawn import (...)` pattern). The exact audit `schema_name`/`fields` constant name for the warn-path row is invented above as an example (`DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS`) — Step 3 below defines the real one; keep the test's constant in sync with whatever Step 3 actually names it.)
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -983,7 +1057,7 @@ Expected: FAIL — no such behavior exists yet (boot proceeds silently in all th
 
 - [ ] **Step 3: Add the local exception, the failure carrier, and the call site**
 
-**3a. In `src/alfred/cli/daemon/_comms_boot.py`**, add a new local exception near the existing `_ForwardedInboundRegistryMisconfiguredError` (`:276`, same file, same convention — a plain `Exception` subclass local to this module):
+**3a. In `src/alfred/cli/daemon/_comms_boot.py`**, add a new local exception near the existing `_ForwardedInboundRegistryMisconfiguredError` (`:276`) — module-scoped and not exported, matching that sibling's PLACEMENT convention. It deliberately does NOT mirror that sibling's base class, though: `_ForwardedInboundRegistryMisconfiguredError` is a plain `Exception`, while the new exception below inherits `AlfredError` on purpose, so a broader CLI-level `AlfredError` handler would still catch it as a fallback if this specific `except` arm were ever removed (arch-r2-003/rev-r2-004 — 5 of the cascade's other 8 exception types are themselves `AlfredError` subclasses, so this is the better-aligned choice, not a copy of `_ForwardedInboundRegistryMisconfiguredError`'s base class):
 
 ```python
 class QuarantineProviderSeparationCollisionError(AlfredError):
@@ -997,7 +1071,39 @@ class QuarantineProviderSeparationCollisionError(AlfredError):
 
 Add the imports: `from alfred.bootstrap.quarantine import assert_provider_separation` and `from alfred.errors import AlfredError` (check the existing import block for duplicates first).
 
-**3b. Add the call site at the very TOP of `_build_comms_boot_graph`** — immediately after the function's lazy-import block, BEFORE `secret_broker = build_broker(settings)` (core-003/core-004/sec-003: this is a pure `Settings`-field comparison with no I/O, so placing it here — before `secret_broker`/`content_store` even construct — sidesteps the `content_store` try/except leak-ordering question entirely, rather than requiring the check to land inside that block):
+**3b. First, widen `_build_comms_boot_graph`'s own signature to accept `boot_id` (sec-r2-001/rev-r2-003, High).** Its live signature (`src/alfred/cli/daemon/_comms_boot.py:619-628`) is `async def _build_comms_boot_graph(*, settings, audit, outbound_dlp, t3_nonce, policies_ref, real_gate, router_override=None) -> _CommsBootGraph:` — it has NO `boot_id` parameter today, unlike `_commands.py`, where `boot_id = str(uuid.uuid4())` is a local variable (set at `:672`) threaded into every `_refuse_boot(...)` call. Without this widening, the new audited-warning row below cannot carry a `boot_id`, breaking `alfred.audit.audit_row_schemas`'s documented forensic-join-key convention (every sibling `daemon.boot`/`daemon.lifecycle` row carries one) and silently defeating `_emit_or_quarantine`'s `trace_id=str(subject.get("boot_id", uuid.uuid4()))` correlation (`_boot_audit.py:179`) — the row would get a random, uncorrelated `trace_id` instead of joining the boot attempt it belongs to. Add `boot_id: str,` to the signature (after `settings` or wherever this file's keyword-only param ordering convention puts new required params):
+
+```python
+async def _build_comms_boot_graph(
+    *,
+    settings: Settings,
+    boot_id: str,
+    audit: AuditWriter,
+    outbound_dlp: OutboundDlpProtocol,
+    t3_nonce: CapabilityGateNonce,
+    policies_ref: object,
+    real_gate: CapabilityGate,
+    router_override: ProviderRouter | None = None,
+) -> _CommsBootGraph:
+```
+
+(Match the real live parameter type annotations exactly — the ones shown above are inferred from this file's own `TYPE_CHECKING` imports; verify each against the live signature before pasting.)
+
+**Update the one call site in `_commands.py`** (inside the `try:` at `:1041`, where `comms_graph = await _build_comms_boot_graph(...)` is called) to add the new kwarg, using the `boot_id` local variable already in scope at that point:
+
+```python
+            comms_graph = await _build_comms_boot_graph(
+                settings=settings,
+                boot_id=boot_id,
+                audit=audit,
+                outbound_dlp=outbound_dlp,
+                t3_nonce=t3_nonce,
+                policies_ref=snapshot_ref,
+                real_gate=real_gate,
+            )
+```
+
+**Add the call site at the very TOP of `_build_comms_boot_graph`** — immediately after the function's lazy-import block, BEFORE `secret_broker = build_broker(settings)` (core-003/core-004/sec-003: this is a pure `Settings`-field comparison with no I/O, so placing it here — before `secret_broker`/`content_store` even construct — sidesteps the `content_store` try/except leak-ordering question entirely, rather than requiring the check to land inside that block):
 
 ```python
     # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
@@ -1025,14 +1131,26 @@ Add the imports: `from alfred.bootstrap.quarantine import assert_provider_separa
             schema_name="DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS",
             event="daemon.boot.quarantine_provider_separation_not_enforced",
             subject={
+                "boot_id": boot_id,
                 "privileged_provider": settings.primary_provider,
                 "quarantine_provider": settings.quarantine_provider,
+                "occurred_at": datetime.now(UTC).isoformat(),
             },
             result="warned",
         )
 ```
 
-**Use the module's real logger variable, `log` (confirmed: `_comms_boot.py:101` — `log = structlog.get_logger(__name__)`), never `_log` (core-001/rev-010 — `_log` does not exist anywhere in this file and would `NameError`).** `audit: AuditWriter` and `_emit_or_quarantine` are already in scope/imported in this function (`_emit_or_quarantine` is imported at module scope from `_boot_audit`, per the existing import block at `:42-46`). Add a new `DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS` audit-row-schema constant (mirroring how `DAEMON_BOOT_FAILED_FIELDS`/`DAEMON_LIFECYCLE_FIELDS` are defined in `alfred.audit.audit_row_schemas` — read an existing one there first and copy its exact `frozenset[str]` shape) rather than reusing an unrelated existing schema; this is a genuinely new, security-relevant audited fact (an operator is running without the stricter posture despite a same-provider collision), not a cosmetic log line, per CLAUDE.md hard rule #7.
+**Use the module's real logger variable, `log` (confirmed: `_comms_boot.py:101` — `log = structlog.get_logger(__name__)`), never `_log` (core-001/rev-010 — `_log` does not exist anywhere in this file and would `NameError`).** `audit: AuditWriter` and `_emit_or_quarantine` are already in scope/imported in this function (`_emit_or_quarantine` is imported at module scope from `_boot_audit`, per the existing import block at `:42-46`); `datetime`/`UTC` are already imported (`:26`, used elsewhere in this file for `_CommsAdapterWireSpec`-adjacent timestamps).
+
+**In `src/alfred/audit/audit_row_schemas.py`**, add the new constant near `DAEMON_BOOT_FAILED_FIELDS`/`DAEMON_LIFECYCLE_FIELDS`, spelling out its exact field set (sec-r2-001 — do not leave this to "mirror the sibling shape" inference, since `append_schema` validates `fields` against `subject.keys()` symmetrically and any mismatch raises `ValueError` at test-run time):
+
+```python
+DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"boot_id", "privileged_provider", "quarantine_provider", "occurred_at"}
+)
+```
+
+**Register the new constant in `AUDIT_FIELDSET_ROSTER` (sec-r2-002, Medium — in the SAME commit).** This module's own docstring states the roster is enforced by a bidirectional AST-walk guard (`tests/unit/audit/test_slice_4_audit_row_fields.py`) that sweeps every `*_FIELDS` constant declared after the Slice-4 section marker (`~line 1655`, well before this new constant's insertion point) and fails if any such constant is missing a matching roster entry. Add `"DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS",` to the `AUDIT_FIELDSET_ROSTER` tuple (`:1657` onward), alongside `"DAEMON_BOOT_FAILED_FIELDS"`/`"DAEMON_LIFECYCLE_FIELDS"`.
 
 **3c. In `src/alfred/cli/daemon/_failures.py`**, add the new failure carrier near the other `Quarantine*Failure` classes:
 
@@ -1077,16 +1195,19 @@ Expected: PASS — the three new tests plus every pre-existing test in the file 
 
 - [ ] **Step 5: Type-check and coverage**
 
-Run: `uv run mypy --strict src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py && uv run pyright <same files>`
+Run: `uv run mypy --strict src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py src/alfred/audit/audit_row_schemas.py && uv run pyright <same files>`
 Expected: no errors.
 
-Run the combined coverage gate again (Task 3 Step 9's command).
+Run: `uv run pytest tests/unit/audit/test_slice_4_audit_row_fields.py -v`
+Expected: PASS — the bidirectional AST-walk guard confirms the new `DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS` constant is registered in `AUDIT_FIELDSET_ROSTER` (sec-r2-002).
+
+Run the combined coverage gate again (Task 3 Step 10's command).
 Expected: 100% line+branch maintained — all three new branches (refuse, boot-distinct, boot-with-warning) covered on `_comms_boot.py`, AND the new `except QuarantineProviderSeparationCollisionError` arm covered on `_commands.py`, not just one file.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py
+git add src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py src/alfred/audit/audit_row_schemas.py tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py
 git commit -m "feat(security): wire assert_provider_separation() as an audited, opt-in boot-time check, default off (#586)"
 ```
 
@@ -1114,7 +1235,31 @@ Extend (or add a sibling to) `_generate_and_install_ca` so a DeepSeek-scoped CA/
 
 The existing `_CannedAnthropicProxy` (`:333-542`) returns a hardcoded Anthropic Messages-API `tool_use` response shape (`_valid_extract_body`, `:246-271`). DeepSeek's API is OpenAI-compatible chat-completions — read `_CannedAnthropicProxy`'s full class body first (it's the loopback CONNECT-proxy/TLS-terminator this test drives), then add a `_CannedDeepSeekProxy` class mirroring its structure exactly, except:
 - The response body shape is an OpenAI-compatible chat-completion JSON object, not an Anthropic Messages-API `tool_use` block.
-- Since `deepseek-chat` does NOT have `NATIVE_CONSTRAINED_GENERATION` (confirmed: `provider_dispatch.py`'s own docstring states any provider without it, including deepseek-chat/deepseek-reasoner, uses `prompt_embedded_fallback` — the JSON_OBJECT_MODE branch this test's expected response shape might assume was REMOVED in fork (b)), the canned response must be shaped for the **prompt-embedded fallback** path, not a JSON-object/tool-call shape. Read `provider_dispatch.py`'s `prompt_embedded_fallback` handling first to determine the exact response shape it expects (likely: plain assistant-message text content containing the extraction JSON as a string, parsed downstream) before writing the canned response — do not guess this shape; if it's unclear from reading `provider_dispatch.py` alone, also read whatever unit test already exercises the `prompt_embedded_fallback` branch and copy its exact expected-response shape.
+- Since `deepseek-chat` does NOT have `NATIVE_CONSTRAINED_GENERATION` (confirmed: `provider_dispatch.py`'s own docstring states any provider without it, including deepseek-chat/deepseek-reasoner, uses `prompt_embedded_fallback` — the JSON_OBJECT_MODE branch this test's expected response shape might assume was REMOVED in fork (b)), the canned response must be shaped for the **prompt-embedded fallback** path, not a JSON-object/tool-call shape.
+
+**The response shape is spelled out below directly (test-r2-gap-001, Medium) — do not delegate shape-discovery to "read whatever unit test exercises the fallback branch."** That escape hatch does not resolve to anything usable: both candidate unit tests (`tests/unit/quarantine/test_quarantined_extractor_dispatch.py`'s `_text_response(content: str)` helper and `tests/unit/providers/test_deepseek.py`'s `MagicMock(message=MagicMock(content=...))`) fake at an abstraction level ABOVE the raw HTTP wire — neither shows the real openai-SDK `chat.completion` JSON envelope. The path that actually matters here is `DeepSeekProvider.complete()` (`src/alfred/providers/deepseek.py:305-366`), which `await self._client.chat.completions.create(**kwargs)`s the REAL openai SDK and reads `response.choices[0].message.content` / `response.choices[0].finish_reason` / `response.usage.prompt_tokens` — i.e. it needs a full OpenAI chat-completion JSON body over the wire, exactly analogous to how the existing `_CannedAnthropicProxy`'s `_valid_extract_body` is a full raw Anthropic Messages-API JSON body, not a `CompletionResponse`-shaped Python object. Use this literal canned body (the extraction payload embedded as a JSON string inside `message.content`, matching `_CANNED_TEXT`/`_CANNED_INTENT` from the existing Anthropic test's assertions):
+
+```python
+_DEEPSEEK_CANNED_CHAT_COMPLETION = {
+    "id": "chatcmpl-canned-extract",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "deepseek-chat",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({"text": _CANNED_TEXT, "intent": _CANNED_INTENT}),
+            },
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 21, "completion_tokens": 9, "total_tokens": 30},
+}
+```
+
+`_CannedDeepSeekProxy` (below) serves this dict as its JSON response body — mirroring exactly how `_CannedAnthropicProxy` serves `_valid_extract_body`.
 
 - [ ] **Step 2: Write the test**
 
@@ -1196,25 +1341,29 @@ git commit -m "test(security): real DeepSeek quarantine extraction, end-to-end v
 
 **Files:**
 
-- Create: `docs/adr/00XX-quarantine-provider-separation-is-opt-in.md` (check `ls docs/adr/` at implementation time for the next free number)
+- Create: `docs/adr/0064-quarantine-provider-separation-is-opt-in.md` (confirmed: `ADR-0063` is the latest as of this plan's writing — re-verify via `ls docs/adr/` at implementation time in case another ADR has landed since)
+- Modify: `docs/superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md` (a one-line "superseded by ADR-0064" pointer at the top of §5.4 only — arch-r2-001)
 - Modify: `config/routing.yaml`
 - Modify: `.env.example`
 - Modify: `docs/runbooks/slice-3-quarantined-llm.md`
 - Modify: `README.md`
 - Modify: `tests/unit/security/test_routing_yaml_quarantine_block.py` (docstring only — test-007)
 
-- [ ] **Step 0: Write an ADR recording the opt-in decision (arch-001/rev-001, disputed-confirmed Critical/High — fix regardless of which severity wins)**
+- [ ] **Step 0: Write an ADR recording the opt-in decision, and explicitly acknowledge/supersede the real prior decision it replaces (arch-001/rev-001, disputed-confirmed Critical/High; arch-r2-001, High; arch-r2-002, Low — fix all three together, same file)**
 
-Both `alfred-architect` and `alfred-reviewer` independently confirmed, on cross-check, that **no PRD section anywhere states a quarantine/privileged provider-separation "MUST differ" invariant.** `PRD.md §6.4` ("Self-Improvement with Reviewer Gate") is about the unrelated self-improvement reviewer agent running cross-provider from the primary orchestrator — a different pairing entirely. `PRD §7.1` ("Security & Prompt Injection Defense") describes the dual-LLM role split but contains no provider-diversity mandate either. The "spec §5.4 / PRD §6.4" citation this plan inherited (from `bootstrap/quarantine.py`'s pre-existing docstring, `config/routing.yaml`'s pre-existing comment, and this plan's own design spec) is a mis-citation that predates this PR — this plan must not propagate it into new locations, and should correct it where it's cheap to do so (Steps 1/2/3 below).
+Both `alfred-architect` and `alfred-reviewer` independently confirmed, on cross-check, that **no PRD section anywhere states a quarantine/privileged provider-separation "MUST differ" invariant.** `PRD.md §6.4` ("Self-Improvement with Reviewer Gate") is about the unrelated self-improvement reviewer agent running cross-provider from the primary orchestrator — a different pairing entirely. `PRD §7.1` ("Security & Prompt Injection Defense") describes the dual-LLM role split but contains no provider-diversity mandate either.
 
-This PR is effectively minting a brand-new architectural decision — "quarantine/privileged provider separation is opt-in, default OFF" — without an accurately-anchored record of it anywhere. Write a short ADR:
+**arch-r2-001 (High): it is wrong, however, to treat the inherited "spec §5.4 / PRD §6.4" citation as a single blanket mis-citation and debunk only the PRD half.** `docs/superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md` §5.4 ("Different provider from privileged (defence-in-depth)") is a REAL, deliberate PRIOR design decision, not a citation error (verified live, `:386-401`): it specifies (a) AlfredOS refuses to bootstrap by DEFAULT on a same-provider collision, (b) relaxing that requires an explicit `state.git` reviewer-gate proposal (`alfred config quarantined-provider <same-provider>`), not a plain `.env` flag, and (c) an approved relaxation must emit a RECURRING `supervisor.config_insecure`-shaped audit row at EVERY restart to keep signalling the weakened posture. This plan flips all three: default becomes permit-with-warning, the escape hatch becomes a self-service `Settings.require_quarantine_provider_separation=True` boolean with no reviewer gate at all, and a one-time-per-boot warning replaces the recurring signal. `bootstrap/quarantine.py`'s docstring, `config/routing.yaml`'s comment, and `docs/runbooks/slice-3-quarantined-llm.md` all currently cite spec §5.4 as live/binding; left untouched, that document stands uncorrected and now silently contradicts shipped behavior, with no pointer from it to the new ADR. (The underlying business call — opt-in, default off, so a self-hoster is never forced into two paid provider accounts — IS operator-ratified, per this same design spec's own §0/§3; this is not a request to reverse the decision, only to record it honestly as something being SUPERSEDED, not as filling a void that was always empty.)
+
+Write the ADR matching this repo's established house style (arch-r2-002 — sampled `docs/adr/0001`, `0057`, `0059`, `0063`: every existing ADR uses a title line + a metadata bullet block, `## Context` next; NONE uses a standalone `## Status` H2):
 
 ```markdown
-# ADR-00XX: Quarantine/privileged provider separation is opt-in, default off
+# ADR-0064: Quarantine/privileged provider separation is opt-in, default off
 
-## Status
-
-Accepted
+- **Status**: Accepted
+- **Date**: 2026-08-12
+- **Issue**: #586 / #587
+- **Supersedes**: docs/superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md §5.4
 
 ## Context
 
@@ -1222,47 +1371,84 @@ The dual-LLM split (PRD §5, §7.1) routes untrusted T3 content through a
 quarantined LLM, separate from the privileged orchestrator LLM. Whether the
 two must use DIFFERENT providers (not just different roles/processing paths)
 is a distinct question the PRD does not answer — no PRD section states a
-"providers must differ" requirement despite prior code comments
+"providers must differ" requirement, despite prior code comments
 (`alfred.bootstrap.quarantine`, `config/routing.yaml`) citing "spec §5.4 /
-PRD §6.4" for exactly that claim. That citation is wrong: PRD §6.4 covers
-the unrelated self-improvement reviewer-gate's own cross-provider
-requirement, and no other section fills the gap.
+PRD §6.4" for exactly that claim. PRD §6.4 covers the unrelated
+self-improvement reviewer-gate's own cross-provider requirement; no other
+PRD section fills the gap.
 
-`assert_provider_separation()` (added earlier, unmodified by #586/#587) has
-existed since before this decision, tested but with no real call site.
+The Slice-3 design spec's own §5.4 IS a real, prior, deliberate decision on
+this exact question, however — not a citation error to wave away. It
+specifies: (a) AlfredOS refuses to bootstrap BY DEFAULT when the quarantine
+and privileged providers collide; (b) relaxing that requires an explicit
+`state.git` reviewer-gate proposal (`alfred config quarantined-provider
+<provider>`), never a plain `.env` flag; (c) an approved relaxation emits a
+RECURRING `supervisor.config_insecure` audit row at every restart, to keep
+signalling the weakened posture rather than let it fade into an
+unremarkable steady state. `assert_provider_separation()` was built and
+tested against this spec, but never wired to a real call site until now.
+
+Since #586 landed, running a home/self-hosted deployment with two paid
+provider accounts (one per role) is understood to be an unreasonable
+default cost — confirmed by direct operator instruction: "nobody at home
+should have to" run two paid provider accounts. This ADR records the
+resulting decision and what it supersedes.
 
 ## Decision
 
 Provider separation between the quarantine and privileged LLMs is an
 OPT-IN, defence-in-depth posture (`Settings.require_quarantine_provider_separation`,
-default `False`), not a hard requirement. A home/self-hosted operator may
-run both roles on the same provider. An enterprise deployment that wants
-the stricter posture sets the flag to `True`, which refuses boot on a
-same-provider collision via `assert_provider_separation()`. When the flag
-is `False` and the providers collide, boot proceeds but the collision is
-logged AND audited (not silently accepted).
+default `False`) — REPLACING spec §5.4's default-refuse / reviewer-gated /
+recurring-audit-signal mechanism with a simpler one:
+
+- Default (`False`): same-provider is PERMITTED. A collision boots fine but
+  is logged AND audited once per boot (not a recurring per-restart signal —
+  see Consequences).
+- Opt-in (`True`): boot REFUSES on a same-provider collision via
+  `assert_provider_separation()`, audited through the normal
+  `daemon.boot.failed` refusal path — but the escape hatch is a plain
+  `.env` boolean, not a `state.git` reviewer-gated proposal.
+
+A home/self-hosted operator is never forced into running two paid provider
+accounts. An enterprise deployment that wants the stricter posture sets the
+flag to `True`.
 
 ## Consequences
 
+- **Weaker than spec §5.4 on three specific axes**, by deliberate choice:
+  no default-refuse, no reviewer gate on the escape hatch, and a one-time
+  per-boot audit signal instead of a recurring per-restart one. This ADR
+  is the record of that trade-off — not an oversight.
 - No PRD text needs to change — this ADR is the accurate record instead of
   a fabricated PRD citation.
-- Existing code comments/docs citing "spec §5.4 / PRD §6.4" for this
-  specific claim are corrected (not exhaustively — only where #586/#587
-  already touches the file; a full sweep is a separate follow-up) to cite
-  this ADR instead.
+- `config/routing.yaml`'s comment and `docs/runbooks/slice-3-quarantined-llm.md`
+  are corrected (Task 6 Steps 1/3 of the #586/#587 plan) to cite this ADR
+  instead of "spec §5.4 / PRD §6.4".
+- The Slice-3 design spec's §5.4 itself gets a one-line "superseded by
+  ADR-0064" pointer added at its top (this task, same commit) so the two
+  documents do not silently contradict each other.
 - `assert_provider_separation()`'s own docstring (`bootstrap/quarantine.py`)
   still carries the old citation — out of scope for this PR (design spec
   §9: reused as-is, unmodified) — filed as a follow-up doc-fix.
 
 ## Alternatives considered
 
-- **Hard-require separation always.** Rejected per the direct user
-  requirement that shaped #586: "nobody at home should have to" run two
-  paid provider accounts.
+- **Keep spec §5.4's mechanism as-is** (default-refuse, `state.git`
+  reviewer-gated relaxation, recurring audit signal). Rejected: the
+  `state.git` proposal flow for `quarantined-provider` doesn't exist yet
+  (component-not-wired, matching this project's broader "even where a
+  mechanism is documented, it may not be built" pattern), and a
+  self-hoster would be hard-blocked from booting at all until either that
+  flow ships or they configure two providers — unacceptable per the direct
+  operator instruction above.
+- **Hard-require separation always**, no opt-out. Rejected for the same
+  reason.
 - **Edit PRD.md to add the invariant.** PRD edits are human-gated in this
   repo; an ADR is the correct vehicle for a decision made during
   implementation, not a PRD edit made by an agent.
 ```
+
+**Add the superseding pointer to the spec document itself** — in `docs/superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md`, immediately below the `### 5.4 Different provider from privileged (defence-in-depth)` heading, add one line: `> **Superseded by [ADR-0064](../../adr/0064-quarantine-provider-separation-is-opt-in.md)** (#586/#587): this section's default-refuse / reviewer-gated posture was replaced with an opt-in, default-off posture. Kept here for historical record.` Do not edit anything else in this spec document — the rest of §5.4's text stays as the accurate historical record of what was decided at the time.
 
 - [ ] **Step 1: Fix `config/routing.yaml`'s `[quarantine]` comment**
 
@@ -1276,7 +1462,7 @@ Replace the comment above `provider: "anthropic"` (`:20-26`) — remove the fals
   # (the state.git reviewer-gate flow, docs/runbooks/slice-3-quarantined-llm.md) and
   # as documentation of the shipped default, but changing it alone does nothing.
   #
-  # Provider-separation enforcement (ADR-00XX — see Step 0 of this task; no PRD
+  # Provider-separation enforcement (ADR-0064 — see Step 0 of this task; no PRD
   # section states this invariant, do not re-cite "spec §5.4 / PRD §6.4") is
   # OPT-IN (#586): set ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true to
   # refuse boot on a same-provider collision. Default: permitted, with a warning.
@@ -1300,7 +1486,7 @@ Add near the existing `ALFRED_QUARANTINE_PROVIDER_API_KEY` entry:
 # #586: opt-in enforcement that the quarantine and privileged providers differ.
 # Default: false — same-provider is permitted (a warning is logged AND audited,
 # not just printed). Set true for the stricter defence-in-depth posture (see
-# ADR-00XX — Task 6 Step 0; do NOT cite "spec §5.4 / PRD §6.4", no PRD section
+# ADR-0064 — Task 6 Step 0; do NOT cite "spec §5.4 / PRD §6.4", no PRD section
 # states this invariant).
 # ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false
 ```
@@ -1314,7 +1500,7 @@ Also correct the existing note at `.env.example:225-227` ("There are NO ALFRED_Q
 In the "Provider configuration" section (`:36-63`):
 1. Fix the capability table's `deepseek` row — it currently claims `JSON_OBJECT_MODE` → `json_object_unconstrained`; per `provider_dispatch.py`'s own docstring, DeepSeek (chat or reasoner) actually uses `prompt_embedded_fallback` (no native constrained generation). Correct the row.
 2. Remove or correct the framing that `routing.yaml [quarantine].provider` "drives" runtime capability advertisement — it does not (Task 6 Step 1's finding); point instead at `ALFRED_QUARANTINE_PROVIDER`.
-3. Remove the "bootstrap-time check ... refuses to start" unconditional claim, replacing it with the opt-in framing (mirroring Step 1's fix) and citing ADR-00XX, not "spec §5.4 / PRD §6.4" (arch-001/rev-001).
+3. Remove the "bootstrap-time check ... refuses to start" unconditional claim, replacing it with the opt-in framing (mirroring Step 1's fix) and citing ADR-0064, not "spec §5.4 / PRD §6.4" (arch-001/rev-001).
 4. **Fix the same "openai" stale reference in this file's YAML snippet and capability table (rev-007, Medium)** — the snippet's `provider: "anthropic" # anthropic | deepseek | openai` comment and the capability table's `openai or unknown model -> prompt_embedded_fallback` row both name a provider this codebase does not support. Strip "openai" from both.
 
 - [ ] **Step 4: Rewrite (not just annotate) README's Quickstart provider-key callout**
@@ -1328,7 +1514,7 @@ the default DeepSeek-privileged setup this is an **Anthropic** key. You can
 set `ALFRED_QUARANTINE_PROVIDER=deepseek` to use DeepSeek for both roles
 instead; set `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` to make
 the stricter separation posture mandatory (refuses to boot on a collision)
-rather than advisory (see ADR-00XX).
+rather than advisory (see ADR-0064).
 ```
 
 - [ ] **Step 5: Fix the stale docstring in `tests/unit/security/test_routing_yaml_quarantine_block.py` (test-007, Low)**
@@ -1338,8 +1524,8 @@ This test module's own docstring (`:1-18`) carries the same stale unconditional-
 - [ ] **Step 6: Commit**
 
 ```bash
-git add docs/adr/00XX-quarantine-provider-separation-is-opt-in.md config/routing.yaml .env.example docs/runbooks/slice-3-quarantined-llm.md README.md tests/unit/security/test_routing_yaml_quarantine_block.py
-git commit -m "docs: correct quarantine-provider claims across routing.yaml, .env.example, the runbook, and README; add ADR-00XX (#586 #587)"
+git add docs/adr/0064-quarantine-provider-separation-is-opt-in.md docs/superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md config/routing.yaml .env.example docs/runbooks/slice-3-quarantined-llm.md README.md tests/unit/security/test_routing_yaml_quarantine_block.py
+git commit -m "docs: correct quarantine-provider claims across routing.yaml, .env.example, the runbook, and README; add ADR-0064 (#586 #587)"
 ```
 
 ---
@@ -1353,4 +1539,4 @@ git commit -m "docs: correct quarantine-provider claims across routing.yaml, .en
 - [ ] The Docker-only DeepSeek extraction test (Task 5) confirmed passing at least once before merge. **Reworded per test-008 (Low): this is NOT a discretionary manual side-quest** — the file it lives in (`tests/integration/test_quarantine_real_extract.py`) is already `_DOCKER_ONLY`-gated and its sibling tests already run automatically as REQUIRED checks on the `integration-privileged` (amd64) and `integration-privileged-arm64` (aarch64) CI legs (#269) — the new test is auto-discovered and gated by that SAME existing mechanism, not a separate manual step. A local Docker run (Task 5 Step 3) is a recommended pre-push sanity check on top of that, not the sole verification gate.
 - [ ] `/review-plan` fleet run on this plan before implementation; full `/review-pr` fleet + CodeRabbit `full review` on the resulting PR before merge.
 - [ ] Every existing test in every touched file still passes unmodified with both new settings at their defaults (byte-for-byte non-breaking requirement).
-- [ ] **Corrected per arch-001/rev-001 (disputed-confirmed Critical/High — the underlying fact is TRIPLE-confirmed regardless of which severity wins):** there is no PRD section anywhere that states a quarantine/privileged provider-separation "MUST differ" invariant — PRD §6.4 is "Self-Improvement with Reviewer Gate," an unrelated feature, and PRD §7.1 (the dual-LLM split itself) contains no provider-diversity mandate either. Do NOT flag "PRD §6.4 needs softening" to a human maintainer — that would misdirect them at the wrong section. Task 6 Step 0's new ADR-00XX is the accurate record of this decision; if PRD text should exist for this invariant at all, that is a separate, human-gated follow-up decision this plan does not resolve, not a "fix the wording" edit to an unrelated section.
+- [ ] **Corrected per arch-001/rev-001 (disputed-confirmed Critical/High — the underlying fact is TRIPLE-confirmed regardless of which severity wins):** there is no PRD section anywhere that states a quarantine/privileged provider-separation "MUST differ" invariant — PRD §6.4 is "Self-Improvement with Reviewer Gate," an unrelated feature, and PRD §7.1 (the dual-LLM split itself) contains no provider-diversity mandate either. Do NOT flag "PRD §6.4 needs softening" to a human maintainer — that would misdirect them at the wrong section. Task 6 Step 0's new ADR-0064 is the accurate record of this decision (which now also explicitly names what it supersedes — spec §5.4's default-refuse/reviewer-gated mechanism, per arch-r2-001); if PRD text should exist for this invariant at all, that is a separate, human-gated follow-up decision this plan does not resolve, not a "fix the wording" edit to an unrelated section.
