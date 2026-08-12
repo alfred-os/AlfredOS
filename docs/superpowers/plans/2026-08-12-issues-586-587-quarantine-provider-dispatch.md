@@ -549,7 +549,7 @@ git commit -m "feat(config): add quarantine_provider + require_quarantine_provid
 - Modify: `src/alfred/security/quarantine_child_io.py`
 - Modify: `src/alfred/security/quarantine_child/__main__.py`
 - Modify: `src/alfred/cli/daemon/_comms_boot.py`
-- Test: `tests/unit/comms_mcp/test_daemon_runtime.py` (verify `_resolve_quarantine_model_config`/`_build_comms_inbound_extractor`'s exact existing test coverage there first), `tests/unit/security/test_quarantine_child_io_control_fd.py` (confirmed live location of the `_child_env`/dormancy-invariant tests), `tests/unit/security/test_max_tokens_guard.py` (confirmed live location of `_build_provider`'s existing `test_child_build_provider_*` test family — test-004; the plan's original locate command for a `test_main`-shaped file returns nothing against the live tree).
+- Test: `tests/unit/comms_mcp/test_daemon_runtime.py` (verify `_resolve_quarantine_model_config`/`_build_comms_inbound_extractor`'s exact existing test coverage there first), `tests/unit/security/test_quarantine_child_io_control_fd.py` (confirmed live location of the `_child_env`/dormancy-invariant tests), `tests/unit/security/test_max_tokens_guard.py` (confirmed live location of `_build_provider`'s existing `test_child_build_provider_*` test family — test-004; the plan's original locate command for a `test_main`-shaped file returns nothing against the live tree), `tests/unit/egress/test_broker_audit_wiring.py` (pre-flight-scan finding, verified live: `test_auditor_is_threaded_into_transport` calls `_build_comms_inbound_extractor(...)` directly at `:230-237` with only the original 6 kwargs — an EIGHTH direct call site beyond the 7 in `test_daemon_runtime.py`, not otherwise caught by this task's own file list; see Step 7).
 
 **Interfaces:**
 
@@ -873,6 +873,37 @@ In `src/alfred/cli/daemon/_comms_boot.py`, update the `_build_comms_inbound_extr
 
 (`_QUARANTINE_MODEL` needs importing from `daemon_runtime` into this test file if not already available.) This is a mechanical, repeated addition to all 7 call sites — not a functional change to what each test exercises.
 
+**Pre-flight-scan finding: an EIGHTH direct call site exists outside this file.** `tests/unit/egress/test_broker_audit_wiring.py`'s `test_auditor_is_threaded_into_transport` calls `_build_comms_inbound_extractor(...)` directly at `:230-237`:
+
+```python
+        await _build_comms_inbound_extractor(
+            audit_writer=audit_writer,
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=QuarantineStagingMap(),
+            environment="production",
+            egress_config=_EgressCfg(),
+        )
+```
+
+Add the same three kwargs here too:
+
+```python
+        await _build_comms_inbound_extractor(
+            audit_writer=audit_writer,
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=QuarantineStagingMap(),
+            environment="production",
+            egress_config=_EgressCfg(),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
+        )
+```
+
+This file imports `_build_comms_inbound_extractor` INLINE inside the test function (`:189`, `from alfred.comms_mcp.daemon_runtime import _build_comms_inbound_extractor`) rather than at module scope — add `_QUARANTINE_MODEL` to that same inline import (`from alfred.comms_mcp.daemon_runtime import _build_comms_inbound_extractor, _QUARANTINE_MODEL`), matching this file's own established inline-import convention for this function rather than switching it to a top-of-file import.
+
 - [ ] **Step 8: Add the real-path regression test for prov-001**
 
 **This test is release-blocking on its own — without it, the class of gap prov-001 found can hide behind a bypassed test harness again in the future.** `_build_comms_inbound_extractor` already has direct unit-test coverage in this file — read `test_build_extractor_drives_real_transport_over_spawned_child` (one of the 7 call sites from Step 7) in full first; it establishes this file's REAL construction idiom: a `MagicMock()` broker with `.redact`/`.has`/`.get` configured, wrapped as `outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)`; `audit_writer = MagicMock()` with `.append_schema = AsyncMock()`; the lightweight `_EgressCfg()` stub (not a real `Settings()`) for `egress_config`; and an `_EchoingChildDouble(provider_key=...)` returned from the faked spawn. Reuse that exact idiom — do not invent new fixture names. Add a test that drives `_build_comms_inbound_extractor` itself (not a lower-level helper) with `quarantine_provider="deepseek"` and asserts the mocked `spawn_quarantine_child_io` call received `model=settings.deepseek_model` — NOT the hardcoded `_QUARANTINE_MODEL`:
@@ -923,8 +954,8 @@ async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepsee
 
 - [ ] **Step 9: Run to verify everything passes**
 
-Run: `uv run pytest tests/unit/security/test_quarantine_child_io_control_fd.py tests/unit/security/test_max_tokens_guard.py tests/unit/comms_mcp/test_daemon_runtime.py -v`
-Expected: PASS — every pre-existing test in `test_quarantine_child_io_control_fd.py`/`test_max_tokens_guard.py` (unaffected, since `_child_env`/`spawn_quarantine_child_io`'s new `provider`/`base_url` params DO default to `None`), the 7 updated calls in `test_daemon_runtime.py` (Step 7 — these required explicit updates, they are not "unaffected"), plus every new test from Step 1 and Step 8.
+Run: `uv run pytest tests/unit/security/test_quarantine_child_io_control_fd.py tests/unit/security/test_max_tokens_guard.py tests/unit/comms_mcp/test_daemon_runtime.py tests/unit/egress/test_broker_audit_wiring.py -v`
+Expected: PASS — every pre-existing test in `test_quarantine_child_io_control_fd.py`/`test_max_tokens_guard.py` (unaffected, since `_child_env`/`spawn_quarantine_child_io`'s new `provider`/`base_url` params DO default to `None`), the 7 updated calls in `test_daemon_runtime.py` plus the 1 updated call in `test_broker_audit_wiring.py` (Step 7 — these required explicit updates, they are not "unaffected"), plus every new test from Step 1 and Step 8.
 
 Run: `uv run pytest tests/unit/cli/daemon/ -v -k comms_boot`
 Expected: PASS — the one production call site's existing tests still green with the three new kwargs added.
@@ -940,7 +971,7 @@ Expected: 100% line+branch maintained on every touched file under `src/alfred/se
 - [ ] **Step 11: Commit**
 
 ```bash
-git add src/alfred/comms_mcp/daemon_runtime.py src/alfred/security/quarantine_child_io.py src/alfred/security/quarantine_child/__main__.py src/alfred/cli/daemon/_comms_boot.py <every modified test file including tests/unit/comms_mcp/test_daemon_runtime.py>
+git add src/alfred/comms_mcp/daemon_runtime.py src/alfred/security/quarantine_child_io.py src/alfred/security/quarantine_child/__main__.py src/alfred/cli/daemon/_comms_boot.py <every modified test file including tests/unit/comms_mcp/test_daemon_runtime.py and tests/unit/egress/test_broker_audit_wiring.py>
 git commit -m "feat(security): thread ALFRED_QUARANTINE_PROVIDER end-to-end (model + base_url + provider id) from Settings to the spawned child (#587)"
 ```
 
@@ -956,6 +987,7 @@ git commit -m "feat(security): thread ALFRED_QUARANTINE_PROVIDER end-to-end (mod
 - Modify: `src/alfred/cli/daemon/_failures.py` (new `QuarantineProviderSeparationViolatedFailure`, registered in the `DaemonBootFailure` union)
 - Modify: `src/alfred/cli/daemon/_commands.py` (new `except` arm mapping the new exception to the new failure + `_refuse_boot()`, mirroring the eight existing arms at `:1041-1190`; also updates the one `_build_comms_boot_graph(...)` call site to pass the now-required `boot_id=boot_id`)
 - Modify: `src/alfred/audit/audit_row_schemas.py` (new `DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS` constant, registered in `AUDIT_FIELDSET_ROSTER` — sec-r2-002)
+- Modify: 6 integration test files that call `_build_comms_boot_graph(...)` directly and must thread the new required `boot_id` kwarg (pre-flight-scan finding, verified live — `_build_comms_boot_graph` has exactly ONE production call site, `_commands.py`, already covered above, but these 6 test files bypass it and call the function itself): `tests/integration/cli/daemon/test_daemon_comms_inbound_turn.py`, `tests/integration/cli/daemon/test_chat_gateway_socket_turn.py`, `tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py`, `tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py`, `tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py`, `tests/integration/comms_mcp/test_real_turn_inbound_boundary.py` — see Step 3b.
 - Test: `tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py` (confirmed live location of the established hermetic pattern for "this fault used to be an uncaught #368-anti-pattern crash, now it's an audited refusal" tests — rev-003/test-002: the plan originally named a nonexistent `_settings_with()` helper and a nonexistent `tests/unit/` filename; the real file uses `CliRunner().invoke(daemon_app, ["start"])` + `monkeypatch.setenv(...)` + the `boot_success_env`/`quarantine_registry`/`patch_quarantine_child_spawn` fixtures + `_boot_failed_reasons(audit)`)
 
 **Interfaces:**
@@ -1103,6 +1135,17 @@ async def _build_comms_boot_graph(
             )
 ```
 
+**Update the 6 integration test call sites (pre-flight-scan finding).** `_build_comms_boot_graph` has no OTHER production call site, but these 6 test files call it directly, bypassing `_commands.py` entirely — each needs `boot_id=` added or it `TypeError`s once the param above becomes required. In every case, the same `graph` this call returns is passed a few lines later into a sibling boot-carrier call (`_spawn_comms_adapter`/`_listen_socket_comms_adapter`) that ALREADY passes a `boot_id="<literal>"` for that same logical boot attempt — reuse that exact literal on the `_build_comms_boot_graph` call too, so both calls correlate to the same boot_id rather than minting two different ones for one boot:
+
+- `tests/integration/cli/daemon/test_daemon_comms_inbound_turn.py:523` — add `boot_id="s4-11b-e2e-proof",` (matches the `_spawn_comms_adapter(..., boot_id="s4-11b-e2e-proof", ...)` call at `:546`, same `graph`).
+- `tests/integration/cli/daemon/test_chat_gateway_socket_turn.py:485` — add `boot_id="s4-g5-gateway-chain-proof",` (matches `_listen_socket_comms_adapter(..., boot_id="s4-g5-gateway-chain-proof", ...)` at `:506`; leave the file's second, unrelated `boot_id="s4-g5-gateway-chain-proof-rebind"` at `:661` untouched — it's a later rebind call, not this `_build_comms_boot_graph` call).
+- `tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py:532` — add `boot_id="g6-7-6-a1-forward-proof",` (matches `:554`).
+- `tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py:633` — add `boot_id="g6-7-7-real-spawn-proof",` (matches `:658`).
+- `tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py:232` — no existing later `boot_id` literal to reuse in this file; add `boot_id="338-pr2-t3-real-turn-adapter-proof",` (a fresh literal, matching this file-family's short-hyphenated-slug convention and this file's own docstring, "#338 PR2 Task 3").
+- `tests/integration/comms_mcp/test_real_turn_inbound_boundary.py:562` — no existing later `boot_id` literal to reuse in this file; add `boot_id="338-pr2-t5-inbound-boundary-proof",` (same convention, matching this file's own docstring, "#338 PR2 Task 5").
+
+Each is a one-line kwarg addition to an already-present `_build_comms_boot_graph(...)` call — not a functional change to what any of these tests exercise.
+
 **Add the call site at the very TOP of `_build_comms_boot_graph`** — immediately after the function's lazy-import block, BEFORE `secret_broker = build_broker(settings)` (core-003/core-004/sec-003: this is a pure `Settings`-field comparison with no I/O, so placing it here — before `secret_broker`/`content_store` even construct — sidesteps the `content_store` try/except leak-ordering question entirely, rather than requiring the check to land inside that block):
 
 ```python
@@ -1193,6 +1236,14 @@ Add the import: `from alfred.cli.daemon._comms_boot import QuarantineProviderSep
 Run: `uv run pytest tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py -v`
 Expected: PASS — the three new tests plus every pre-existing test in the file (unaffected, since the default `require_quarantine_provider_separation=False` + distinct default providers — `"deepseek"` vs `"anthropic"` — means the new code path is a no-op for every existing fixture that doesn't set the new env vars).
 
+**Verify the 6 integration test call sites updated above are not left broken.** These files are `_DOCKER_ONLY`/testcontainer-gated and will not fully execute locally, but a missing required `boot_id` kwarg is a `TypeError` at CALL time, not something Docker-gating hides — confirm each file at least collects and type-checks clean:
+
+Run: `uv run pytest tests/integration/cli/daemon/test_daemon_comms_inbound_turn.py tests/integration/cli/daemon/test_chat_gateway_socket_turn.py tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py --collect-only`
+Expected: clean collection, no errors (proves the `boot_id=` additions are syntactically and structurally correct even where the tests themselves skip locally for lack of Docker/Postgres).
+
+Run: `uv run mypy --strict tests/integration/cli/daemon/test_daemon_comms_inbound_turn.py tests/integration/cli/daemon/test_chat_gateway_socket_turn.py tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py`
+Expected: no errors — confirms none of the 6 calls is still missing the now-required `boot_id` argument.
+
 - [ ] **Step 5: Type-check and coverage**
 
 Run: `uv run mypy --strict src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py src/alfred/audit/audit_row_schemas.py && uv run pyright <same files>`
@@ -1207,7 +1258,7 @@ Expected: 100% line+branch maintained — all three new branches (refuse, boot-d
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py src/alfred/audit/audit_row_schemas.py tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py
+git add src/alfred/cli/daemon/_comms_boot.py src/alfred/cli/daemon/_failures.py src/alfred/cli/daemon/_commands.py src/alfred/audit/audit_row_schemas.py tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py tests/integration/cli/daemon/test_daemon_comms_inbound_turn.py tests/integration/cli/daemon/test_chat_gateway_socket_turn.py tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py tests/integration/cli/daemon/test_comms_boot_graph_real_turn.py tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py tests/integration/comms_mcp/test_real_turn_inbound_boundary.py
 git commit -m "feat(security): wire assert_provider_separation() as an audited, opt-in boot-time check, default off (#586)"
 ```
 
