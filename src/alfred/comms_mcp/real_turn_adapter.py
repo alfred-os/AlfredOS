@@ -15,9 +15,11 @@ failure (up to 5 duplicate paid completions).
 
 The downgrade gate-DENY, BudgetError, and turn-error legs each write a LOUD,
 content-free audit row owned by THIS adapter (``check_content_clearance`` writes no
-audit on a policy deny — FOLD-5 / CLAUDE.md hard rule #7). Egress tools are deferred
-(#338 conversational scope): the orchestrator runs with an empty tool registry, so
-the loop reduces to exactly one completion.
+audit on a policy deny — FOLD-5 / CLAUDE.md hard rule #7). Egress tools were
+conversational-scope-only through #338/#410 PR2; since #410 PR3 the orchestrator
+carries a live ``clock.now``-only tool registry, so the loop can genuinely iterate
+(``dispatch`` may run more than one completion per turn). ``web.fetch`` remains
+deferred (allowlist-projection gap, #582/#583).
 """
 
 from __future__ import annotations
@@ -397,7 +399,14 @@ class RealTurnOrchestratorAdapter:
         # FOLD-R1 (Critical): hold the per-key turn mutex across acquire -> turn ->
         # release so two same-user frames (the comms pump dispatches concurrently,
         # comms_runner.py:663) cannot race the ONE shared WorkingMemory buffer the
-        # pool hands out for this key.
+        # pool hands out for this key. Since #410 PR3, `handle_user_message` can
+        # genuinely iterate the Act loop (a live, non-empty tool registry), so this
+        # hold now spans a potentially multi-completion turn instead of exactly one
+        # completion — the key is shared across whichever platform a
+        # cross-platform-bound identity messages from, so a slow multi-iteration
+        # turn on one adapter can delay that same user's next turn on another.
+        # Small blast radius today (`clock.now` only); reassess once `web.fetch`
+        # (network-latency-bound, #583) is live.
         lock = await self._turn_lock_for(key)
         async with lock:
             wm = await self._pool.acquire(key)
