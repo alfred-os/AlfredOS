@@ -68,6 +68,16 @@ claim"): the allowlist entry *is* that declaration, and
 proven at construction time, not assumed at dispatch time. The allowlist is the surface a
 future first-party tool must earn a place on before its output can skip the T3 leg.
 
+> **Superseded in part by #410 PR3.** The claim above — that the internal <=T2 tool
+> "skips DLP" and that skip is itself the declared hard-rule-#4 exemption — no longer
+> holds. `dispatch_tool`'s `InternalToolSpec` leg now calls `dlp.scan()` unconditionally
+> (a totality-wrapper fix, tracked as sec-003/Task 2a during this epic's plan review),
+> closing a gap this ADR had mischaracterized as an intentional design choice rather
+> than an unaddressed rule-#4 obligation. The allowlist-gate reasoning in the first two
+> sentences still holds (construction-time tier enforcement is unchanged); only the
+> "therefore no DLP pass is needed" conclusion is retracted. The original text is
+> preserved for historical record.
+
 **4. Escalation vs. recoverable failure classification.** Every `dispatch_tool` branch
 writes exactly one `tool.dispatch` audit row (HARD rule #7) — audit subjects carry only
 closed-vocabulary tokens (`tool_name`, `call_id`, `call_index`, `result_tier`,
