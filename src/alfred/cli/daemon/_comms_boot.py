@@ -730,6 +730,23 @@ async def _build_comms_boot_graph(
     # copies of a security predicate drift, and a warn path that stopped agreeing with the
     # refuse path about what a collision IS would silently emit no operator signal for a
     # dual-LLM split that had quietly collapsed.
+    #
+    # devex-002 (#586/#587): emit the resolved quarantine posture UNCONDITIONALLY, before
+    # the branch below. Until this line the happy path — providers differ, or separation
+    # simply is not required — said NOTHING about which provider the quarantined child
+    # would dial: only a COLLISION produced any signal at all, so the operator whose
+    # config is fine had no boot-log evidence that their ALFRED_QUARANTINE_PROVIDER was
+    # even read. Placed here (rather than inside either arm) so it fires on every comms
+    # boot regardless of which arm runs, and before any I/O — a later refusal still
+    # leaves this breadcrumb behind. Non-secret closed-set routing config, safe to log
+    # (hard rule #5); ``alfred status`` renders the same two values for the operator who
+    # is not reading logs.
+    log.info(
+        "comms.comms_boot.quarantine_provider_resolved",
+        quarantine_provider=settings.quarantine_provider,
+        privileged_provider=settings.primary_provider,
+        require_separation=settings.require_quarantine_provider_separation,
+    )
     if settings.require_quarantine_provider_separation:
         try:
             assert_provider_separation(
@@ -737,6 +754,18 @@ async def _build_comms_boot_graph(
                 quarantined_provider_id=settings.quarantine_provider,
             )
         except AlfredError as exc:
+            # This blanket relabel is only HONEST because a collision is the sole
+            # AlfredError assert_provider_separation can still raise here. It also has a
+            # blank-id arm, checked BEFORE its collision test with its own distinct
+            # message — and that arm used to reach this line, reporting a merely-blank
+            # primary_provider to the operator and to the audit row as a
+            # "separation violated" collision (CodeRabbit, round 2). Both ids are now
+            # blank-proof upstream: quarantine_provider is a Literal, and
+            # Settings._reject_blank_primary_provider refuses a blank primary_provider at
+            # config load, onto the accurately-labelled settings_invalid boot refusal.
+            # If either of those two guarantees is ever relaxed, this relabel goes back to
+            # lying — restore an explicit blank check here first
+            # (test_boot_refuses_blank_primary_provider_as_settings_invalid pins it).
             raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
     elif provider_ids_collide(settings.primary_provider, settings.quarantine_provider):
         log.warning(

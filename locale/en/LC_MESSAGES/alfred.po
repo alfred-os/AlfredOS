@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-13 11:46+0100\n"
+"POT-Creation-Date: 2026-08-13 13:33+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -22,13 +22,13 @@ msgstr ""
 "land via `alfred plugin grant`. MUST NOT appear on production stacks: "
 "production wires RealGate against Postgres, not the in-process stub."
 
-#: src/alfred/bootstrap/quarantine.py:90
+#: src/alfred/bootstrap/quarantine.py:97
 msgid "bootstrap.providers_blank_error"
 msgstr ""
 "Both routing.yaml [quarantine] provider and the privileged provider id "
 "must be declared; refusing to boot with either side blank."
 
-#: src/alfred/bootstrap/quarantine.py:94
+#: src/alfred/bootstrap/quarantine.py:101
 msgid "bootstrap.providers_same_error"
 msgstr ""
 "routing.yaml [quarantine] provider must differ from the privileged "
@@ -333,11 +333,11 @@ msgstr ""
 "fallback. For daemon-specific status (PID, uptime, last boot event), see:"
 " alfred daemon status"
 
-#: src/alfred/cli/main.py:198
+#: src/alfred/cli/main.py:198 src/alfred/cli/main.py:219
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:201
+#: src/alfred/cli/main.py:201 src/alfred/cli/main.py:221
 msgid "status.no"
 msgstr "no"
 
@@ -345,52 +345,60 @@ msgstr "no"
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:203
+#: src/alfred/cli/main.py:222
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:204
+#: src/alfred/cli/main.py:223
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:205
+#: src/alfred/cli/main.py:224
+msgid "status.quarantine_provider"
+msgstr "quarantine provider: {provider}"
+
+#: src/alfred/cli/main.py:225
+msgid "status.quarantine_provider_separation"
+msgstr "quarantine provider separation enforced: {yes_or_no}"
+
+#: src/alfred/cli/main.py:226
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:220
+#: src/alfred/cli/main.py:241
 msgid "status.secrets_file_env_only"
 msgstr "secrets file: (none — environment variables only)"
 
-#: src/alfred/cli/main.py:222
+#: src/alfred/cli/main.py:243
 msgid "status.secrets_file"
 msgstr "secrets file: {path}"
 
-#: src/alfred/cli/main.py:224
+#: src/alfred/cli/main.py:245
 msgid "status.secrets_file_absent"
 msgstr "secrets file: {path} (not found — using environment variables)"
 
-#: src/alfred/cli/main.py:225
+#: src/alfred/cli/main.py:246
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:226
+#: src/alfred/cli/main.py:247
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:232
+#: src/alfred/cli/main.py:253
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:235
+#: src/alfred/cli/main.py:256
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:237
+#: src/alfred/cli/main.py:258
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
-#: src/alfred/cli/main.py:384 src/alfred/i18n/_slice_4_reserve.py:158
+#: src/alfred/cli/main.py:405 src/alfred/i18n/_slice_4_reserve.py:158
 msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
 "alfred chat needs the gateway. Start it with: alfred gateway start. If "
@@ -1191,7 +1199,7 @@ msgstr ""
 "compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:1169
-#: src/alfred/cli/daemon/_comms_boot.py:1123
+#: src/alfred/cli/daemon/_comms_boot.py:1152
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -1296,7 +1304,7 @@ msgstr ""
 "incident(s)){latest_crash}"
 
 #: src/alfred/cli/daemon/_comms_boot.py:418
-#: src/alfred/cli/daemon/_comms_boot.py:1072
+#: src/alfred/cli/daemon/_comms_boot.py:1101
 msgid "daemon.boot.comms_adapter_unknown_kind"
 msgstr ""
 "Comms adapter '{adapter_id}' declares unknown adapter_kind "
@@ -1306,7 +1314,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
 #: src/alfred/cli/daemon/_comms_boot.py:431
-#: src/alfred/cli/daemon/_comms_boot.py:1085
+#: src/alfred/cli/daemon/_comms_boot.py:1114
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -1314,7 +1322,7 @@ msgstr ""
 "and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack), or unset it from ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1323
+#: src/alfred/cli/daemon/_comms_boot.py:1352
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
@@ -1322,11 +1330,11 @@ msgstr ""
 "/ crash row, then re-run `alfred daemon start` (or `docker compose up -d`"
 " on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1337
+#: src/alfred/cli/daemon/_comms_boot.py:1366
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1433
+#: src/alfred/cli/daemon/_comms_boot.py:1462
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -1335,7 +1343,7 @@ msgstr ""
 "`comms-*.sock`, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1510
+#: src/alfred/cli/daemon/_comms_boot.py:1539
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -1344,7 +1352,7 @@ msgstr ""
 "day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1570
+#: src/alfred/cli/daemon/_comms_boot.py:1599
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -3399,17 +3407,17 @@ msgstr "Quarantine child egress broker is not configured."
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:1156
+#: src/alfred/security/quarantine_child_io.py:1163
 msgid "security.quarantine_child.provider_config_missing"
 msgstr ""
 "Refusing to spawn the live quarantine child without its provider model "
 "and token budget."
 
-#: src/alfred/security/quarantine_child_io.py:1241
+#: src/alfred/security/quarantine_child_io.py:1248
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:1292
+#: src/alfred/security/quarantine_child_io.py:1299
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "

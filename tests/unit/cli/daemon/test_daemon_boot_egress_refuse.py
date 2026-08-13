@@ -26,6 +26,7 @@ must now refuse boot audited (exit 2):
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -41,6 +42,45 @@ from .conftest import FakeAuditWriter
 from .test_daemon_comms_spawn import _patch_comms_seams
 
 _ENABLED_ADAPTER = "alfred_comms_test"
+
+# The three tests below drive a FULL, successful `alfred daemon start`. A completed
+# boot unconditionally binds the daemon control plane's 0600 AF_UNIX socket
+# (`_commands.py` -> `DaemonControlServer.start()` -> `bind_owner_only_unix_socket`),
+# and CPython does not expose `socket.AF_UNIX` on Windows at all — so they crash there
+# with an AttributeError no amount of plugin-layer mocking can avoid. The other seven
+# tests in this file refuse the boot inside `_build_comms_boot_graph`, well before any
+# POSIX syscall, so they keep running on Windows and this file stays MIXED (per-test
+# skipif, NOT the tests/_posix_only_tests.py whole-file registry). Same guard, same
+# reason as the three structurally identical full-boot tests in
+# test_daemon_boot_t3_nonce.py. Windows dev of this Linux-only surface is via WSL2.
+#
+# The Windows equivalents were investigated, not assumed (#586/#587 review), and
+# they DO exist — this guard is about what is BUILT, not about what is possible.
+#
+# Blocking the control plane specifically, today: CPython compiles out the
+# `sockaddr_un` marshalling on Windows behind the same `#ifdef` that drops the
+# `socket.AF_UNIX` constant (upstream gh-77589 is still open; its PR gh-137420
+# targets 3.16 and omits asyncio, while this repo pins 3.14), and
+# `asyncio.start_unix_server` — the API `DaemonControlServer` actually calls — is
+# defined only under `hasattr(socket, "AF_UNIX")`, so it is absent there
+# regardless. Named pipes are the true analogue and CAN carry the equivalent
+# contract: a DACL for the 0600 owner-only property, `GetNamedPipeClientProcessId`
+# for the `SO_PEERCRED` peer check.
+#
+# Porting the control plane alone would buy nothing while the sandbox backend
+# beneath it is unbuilt, though. #471 Phase 2 scopes the real Windows security
+# model: AppContainer for containment (omitting the `internetClient` capability is
+# the direct analogue of bwrap's `--unshare-net`) plus `WSADuplicateSocket` +
+# `DuplicateHandle` for the fd-4 broker (reproducing the SCM_RIGHTS contract —
+# hand over an already-connected socket the child never dials). Until that lands,
+# `kind:full` refuses in production on native Windows, so the quarantined child
+# these tests boot cannot run there at all. Native Windows is an explicit PRD
+# non-goal (PRD.md:602); the supported path is WSL2, which reports `uname -s` as
+# Linux and therefore takes the full bwrap path unchanged.
+_posix_boot_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+)
 
 
 @pytest.fixture
@@ -300,6 +340,46 @@ def test_boot_refuses_when_separation_required_and_providers_collide(
     assert "0064" in flat, flat
 
 
+def test_boot_refuses_blank_primary_provider_as_settings_invalid_not_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """A blank ``primary_provider`` is INVALID CONFIG, never a "collision" (CodeRabbit r2).
+
+    ``assert_provider_separation`` checks blank ids BEFORE the collision test and raises
+    its own distinct ``AlfredError`` for them — which ``_comms_boot``'s
+    ``except AlfredError`` relabelled as ``QuarantineProviderSeparationCollisionError``,
+    so an operator who merely left ``ALFRED_PRIMARY_PROVIDER`` empty was told the two
+    halves of the dual-LLM split collided and sent to change the WRONG env var.
+
+    The oracle is the NEGATIVE assertion as much as the positive one: exit 2 alone would
+    pass under the old mislabel, so this pins that the collision reason is ABSENT.
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", "")
+    # The separation check is what used to mislabel it, so arm that path explicitly.
+    monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
+    _patch_comms_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2, result.output
+    reasons = _boot_failed_reasons(boot_success_env)
+    assert "settings_invalid" in reasons, reasons
+    assert "quarantine_provider_separation_violated" not in reasons, reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # ...and the operator-facing copy names the field that is actually wrong, so the
+    # accurate reason token is not undone by a message that still says "collision".
+    flat = " ".join(result.output.split())
+    assert "primary_provider" in flat, flat
+
+
+@_posix_boot_only
 def test_boot_proceeds_when_separation_required_and_providers_differ(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -327,6 +407,53 @@ def test_boot_proceeds_when_separation_required_and_providers_differ(
     assert spawn_kwargs["base_url"] is None, spawn_kwargs
 
 
+@_posix_boot_only
+def test_happy_path_boot_logs_the_resolved_quarantine_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """devex-002: the NON-collision boot says which quarantine provider it resolved.
+
+    Before this line the only boot-time signal about the quarantine provider was a
+    COLLISION (the refusal log, or the not-enforced warning) — an operator whose config
+    was correct got nothing at all, and so had no way to confirm from the boot record
+    that ``ALFRED_QUARANTINE_PROVIDER`` had been read, let alone which value won.
+
+    Deliberately exercised on the arm where NEITHER collision branch runs (providers
+    differ, separation not required): that is precisely the path that used to be silent,
+    so a regression that moved the log inside either branch fails here.
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    # Defaults: primary_provider="deepseek", quarantine_provider="anthropic" (differ),
+    # ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION unset -> False.
+    _patch_comms_seams(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 0, result.output
+    resolved = [e for e in logs if e["event"] == "comms.comms_boot.quarantine_provider_resolved"]
+    assert len(resolved) == 1, f"expected one resolved line, got {logs!r}"
+    # Pin the VALUES, not just the event name: an event that fired with the wrong /
+    # missing provider would be worse than silence (it would read as confirmation).
+    assert resolved[0]["quarantine_provider"] == "anthropic", resolved
+    assert resolved[0]["privileged_provider"] == "deepseek", resolved
+    assert resolved[0]["require_separation"] is False, resolved
+    # Oracle guard: neither collision branch ran, so this line is the ONLY quarantine
+    # provider signal on this boot — the exact gap devex-002 named.
+    assert not [
+        e
+        for e in logs
+        if e["event"] == "comms.comms_boot.quarantine_provider_separation_not_enforced"
+    ], logs
+
+
+@_posix_boot_only
 def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_collide(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -400,6 +527,46 @@ def test_boot_refuses_audited_when_deepseek_base_url_is_blank(
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
     monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "")
+    _patch_comms_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2, result.output
+    assert "settings_invalid" in _boot_failed_reasons(boot_success_env)
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+
+
+def test_boot_refuses_audited_when_deepseek_model_is_blank(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """``ALFRED_DEEPSEEK_MODEL=`` refuses boot AUDITED (exit 2), not uncaught (exit 1).
+
+    The twin of the blank-``base_url`` case above, and the regression pin for a
+    5-source-corroborated round-2 finding: ``_resolve_quarantine_model``'s own blank
+    guard raises a bare ``ValueError`` that NOTHING in the boot cascade catches —
+    ``_build_comms_boot_graph`` re-raises unchanged, none of ``_commands.py``'s ~9 typed
+    arms is ``ValueError``/``Exception``, and ``start_daemon`` catches only
+    ``_BootRefusedError``. This scenario was empirically reproduced crashing
+    ``alfred daemon start`` with exit 1 and ZERO ``daemon.boot.failed`` rows — the #368
+    anti-pattern this whole file exists to pin.
+
+    ``Settings._reject_blank_deepseek_model`` is the fix: refusing at Settings
+    CONSTRUCTION routes it to the pre-existing audited ``settings_invalid`` refusal, and
+    protects the privileged ``build_router`` DeepSeek path in the same stroke (a
+    boot-path-local fix would not have).
+
+    The oracle is the AUDIT ROW, not just the exit code: an uncaught ``ValueError`` also
+    ends the process, but with no record an operator can read.
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", "")
     _patch_comms_seams(monkeypatch)
 
     result = CliRunner().invoke(daemon_app, ["start"])

@@ -670,6 +670,79 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("deepseek_model")
+    @classmethod
+    def _reject_blank_deepseek_model(cls, v: str) -> str:
+        """Reject a blank/whitespace ``ALFRED_DEEPSEEK_MODEL``.
+
+        The exact structural twin of ``_reject_blank_deepseek_base_url`` above, on the
+        OTHER ``deepseek_*`` field BOTH the privileged and the quarantined DeepSeek paths
+        reuse: ``build_router`` hands it to the privileged ``DeepSeekProvider``, and
+        (#587) ``_resolve_quarantine_model`` hands it to the quarantine child. Like its
+        sibling it is a required ``str`` with a real default, so no downstream ``is None``
+        refusal can ever fire for a blank — the value simply becomes an unusable model id
+        that every completion names, surfacing as an untyped per-call API failure the
+        quarantine dispatch retry loop LAUNDERS into a generic ``cannot_extract``
+        (CLAUDE.md hard rule #7).
+
+        This validator is the PRIMARY guard, added after ``_resolve_quarantine_model``'s
+        own resolver-level ``ValueError`` was found unreachable-from-safety: that
+        ``ValueError`` is caught by NO arm of the daemon boot cascade, so it escaped as
+        an uncaught crash (exit 1, ZERO ``daemon.boot.failed`` rows — the #368
+        anti-pattern), and it protected only the quarantine path, leaving ``build_router``
+        exposed. Refusing at Settings CONSTRUCTION routes both paths through the EXISTING
+        audited ``settings_invalid`` boot refusal (exit 2 + a real ``daemon.boot.failed``
+        row). Raw English, no ``t()``: Settings loads before the translator, exactly as
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
+        """
+        # Strip-and-STORE, not strip-only-to-test (CodeRabbit): returning the raw
+        # value let `" deepseek-chat "` pass the blank check and reach BOTH provider
+        # paths as an invalid model id — a 4xx per extraction, laundered by the
+        # quarantine dispatch loop into a generic `cannot_extract`, which is the exact
+        # boot-misconfig-wearing-a-runtime-failure-costume this validator exists to
+        # prevent. Matches `_validate_deepseek_base_url`'s handling of the same shape.
+        v = v.strip()
+        if not v:
+            raise ValueError(
+                "deepseek_model must not be blank — set ALFRED_DEEPSEEK_MODEL to a real "
+                "DeepSeek model id (default deepseek-chat) or leave it unset to take "
+                "that default"
+            )
+        return v
+
+    @field_validator("primary_provider")
+    @classmethod
+    def _reject_blank_primary_provider(cls, v: str) -> str:
+        """Reject a blank/whitespace ``ALFRED_PRIMARY_PROVIDER``.
+
+        Same shape as the two ``deepseek_*`` validators above, for a different reason.
+        ``primary_provider`` names the PRIVILEGED half of the dual-LLM split, and its one
+        security-load-bearing consumer is #586's provider-separation check in
+        ``alfred.cli.daemon._comms_boot``. That call site wraps EVERY ``AlfredError`` out
+        of ``assert_provider_separation`` into ``QuarantineProviderSeparationCollisionError``
+        — but ``assert_provider_separation`` raises a DISTINCT blank-id error BEFORE its
+        collision test, so a blank here surfaced to the operator and to the audit row as
+        ``quarantine_provider_separation_violated``: a collision report for a config where
+        nothing collided (CodeRabbit, round 2). Wrong-reason forensics is its own failure
+        — it sends the operator to change the wrong env var.
+
+        Refusing at Settings CONSTRUCTION gives the accurate answer through machinery that
+        already exists: the audited ``settings_invalid`` refusal, whose
+        ``daemon.boot.settings_invalid_field`` copy names ``primary_provider`` outright. It
+        also makes ``assert_provider_separation``'s blank arm unreachable from that call
+        site altogether (the sibling ``quarantine_provider`` is a ``Literal``, so it can
+        never be blank), which is what makes the collision relabel honest.
+
+        Raw English, no ``t()``: Settings loads before the translator. Non-secret.
+        """
+        if not v.strip():
+            raise ValueError(
+                "primary_provider must not be blank — set ALFRED_PRIMARY_PROVIDER to the "
+                "privileged provider id (default deepseek) or leave it unset to take "
+                "that default"
+            )
+        return v
+
     @field_validator("deepseek_api_key")
     @classmethod
     def _reject_placeholder_key(cls, v: SecretStr) -> SecretStr:

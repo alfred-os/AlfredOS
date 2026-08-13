@@ -710,20 +710,21 @@ def test_resolve_quarantine_model_refuses_blank_deepseek_model(blank: str) -> No
     """A blank deepseek model refuses PRE-SPAWN rather than laundering downstream.
 
     The exact analogue of ``test_resolve_quarantine_base_url_refuses_blank_deepseek_base_url``
-    below, on the OTHER ``Settings`` field the deepseek branch reuses — but with NO primary
-    guard behind it: unlike ``deepseek_base_url``, ``deepseek_model`` has no reject-blank
-    ``field_validator``, so a plain ``ALFRED_DEEPSEEK_MODEL=`` constructs a valid
-    ``Settings`` (asserted here by using the REAL constructor, not ``model_construct``)
-    and would thread an empty model id into the child env. Every extraction then fails at
-    the provider API, and the dispatch retry loop launders that into a generic
-    ``cannot_extract``.
+    below, on the OTHER ``Settings`` field the deepseek branch reuses — and, like it,
+    DEFENCE-IN-DEPTH behind the PRIMARY ``Settings._reject_blank_deepseek_model`` guard
+    (which is what an operator's ``ALFRED_DEEPSEEK_MODEL=`` actually trips, on the audited
+    ``settings_invalid`` boot path — see
+    ``test_boot_refuses_audited_when_deepseek_model_is_blank``). This one covers every
+    other route into the resolver — a directly-constructed config object, a future
+    settings source, a caller that is not ``Settings`` at all. Without it a blank model id
+    reaches the child env, every extraction names an unusable model, and the dispatch
+    retry loop launders that into a generic ``cannot_extract``.
+
+    Constructed via ``model_construct`` deliberately: it BYPASSES the Settings validator,
+    which is the only way to prove this guard is independent of the primary one rather
+    than dead code shadowed by it.
     """
-    settings = Settings(
-        deepseek_api_key=SecretStr("sk-test"), environment="test", deepseek_model=blank
-    )
-    # The blank really did survive Settings validation — this guard is not shadowed
-    # by a primary validator (which is what makes it load-bearing rather than dead).
-    assert settings.deepseek_model == blank
+    settings = Settings.model_construct(deepseek_model=blank)
     with pytest.raises(ValueError, match="blank"):
         _resolve_quarantine_model("deepseek", settings)
 
@@ -734,11 +735,11 @@ def test_resolve_quarantine_model_allows_blank_deepseek_model_for_anthropic() ->
     The anthropic branch returns the hardcoded ``_QUARANTINE_MODEL`` and never reads
     ``deepseek_model`` at all, so a blank there must NOT refuse — otherwise the pair
     above would stay green under a guard that broke every anthropic deployment whose
-    ``.env`` happens to blank an unrelated DeepSeek setting.
+    ``.env`` happens to blank an unrelated DeepSeek setting. ``model_construct`` for the
+    same reason as above: the primary ``Settings`` validator now rejects the blank, so
+    the real constructor could not build this case at all.
     """
-    settings = Settings(
-        deepseek_api_key=SecretStr("sk-test"), environment="test", deepseek_model=""
-    )
+    settings = Settings.model_construct(deepseek_model="")
     assert _resolve_quarantine_model("anthropic", settings) == _QUARANTINE_MODEL
 
 

@@ -32,6 +32,51 @@ def test_alfred_status_exits_zero(monkeypatch: MonkeyPatch) -> None:
     assert "deepseek" in result.stdout.lower()
 
 
+def test_alfred_status_reports_the_quarantine_provider(monkeypatch: MonkeyPatch) -> None:
+    """devex-002 (#586/#587): ``alfred status`` names the quarantine half of the split.
+
+    ``ALFRED_QUARANTINE_PROVIDER`` decides which provider the quarantined child dials
+    (and therefore which key it needs); ``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION``
+    decides whether a privileged/quarantined collision refuses boot or merely warns.
+    Neither was rendered anywhere, so an operator could only recover them by reading
+    ``.env`` back. Asserted on a NON-DEFAULT value so the test cannot pass on a
+    hardcoded string.
+    """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.stdout.split()).lower()
+    assert "quarantine provider: deepseek" in flat, flat
+    assert "quarantine provider separation enforced: yes" in flat, flat
+
+
+def test_alfred_status_reports_separation_not_enforced_by_default(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Oracle guard for the pair above: the default (permissive) posture renders "no".
+
+    Without this, a status line hardcoded to "yes" — or one reading the wrong field —
+    would keep the test above green while telling every default deployment that a
+    protection it does not have is switched on.
+    """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.delenv("ALFRED_QUARANTINE_PROVIDER", raising=False)
+    monkeypatch.delenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", raising=False)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.stdout.split()).lower()
+    assert "quarantine provider: anthropic" in flat, flat
+    assert "quarantine provider separation enforced: no" in flat, flat
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: os.getuid family (_validate_secrets_file_security calls "

@@ -501,3 +501,266 @@ class TestQuarantineProviderSettings:
         self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://proxy.internal/v1")
         assert Settings().deepseek_base_url == "https://proxy.internal/v1"
+
+    @pytest.mark.parametrize(
+        "credentialed",
+        [
+            "https://apikey:@relay.internal/v1",  # the nginx/Envoy inline-basic-auth shape
+            "https://user:hunter2@relay.internal:8443/v1",  # full user:pass
+            "https://token@relay.internal/v1",  # bare user, no password
+            "http://user:pass@127.0.0.1:8080",  # no path, plain http
+        ],
+    )
+    def test_deepseek_base_url_rejects_embedded_credentials(
+        self, monkeypatch: pytest.MonkeyPatch, credentialed: str
+    ) -> None:
+        """A userinfo-bearing ``ALFRED_DEEPSEEK_BASE_URL`` refuses at Settings construction.
+
+        Not a hypothetical: an egress-relay-fronted deployment fronting a self-hosted proxy
+        with inline basic auth (``https://apikey:@relay.internal/v1``) is the conventional
+        nginx/Envoy shape, and exactly the flexibility this setting exists to give. #587
+        threads the value into the quarantine child's SPAWN ENVIRONMENT as
+        ``ALFRED_QUARANTINE_BASE_URL``, so it would cross a process boundary and become
+        readable via ``/proc/<pid>/environ`` (CodeRabbit r3). Redacting the
+        ``_ProviderFactory`` repr fixed the DISPLAY of that value, not the data flow —
+        refusing at the boundary does, on the audited ``settings_invalid`` boot path.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", credentialed)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)) as exc_info:
+            Settings()
+
+        # The refusal must not itself become the leak it prevents. Asserted against the
+        # VALIDATOR'S OWN ``msg``, with pydantic's ``input`` echo excluded — the same
+        # ``errors(include_input=False)`` idiom, and the same reasoning, as
+        # ``alfred.cli.daemon._commands._settings_error_field_name``: pydantic's envelope
+        # re-prints the offending value for EVERY field on this model (the already-
+        # documented ``database_url``-DSN-password case), so the daemon boot path never
+        # interpolates ``str(exc)`` at all. What is in scope here is that the message this
+        # PR adds does not ALSO carry the credential into the one sink that does render it
+        # (``load_settings_or_die``'s interactive echo, operator-terminal only).
+        raised = exc_info.value
+        validation_error = raised if isinstance(raised, ValidationError) else raised.__cause__
+        assert isinstance(validation_error, ValidationError), raised
+        messages = " ".join(
+            error["msg"]
+            for error in validation_error.errors(include_input=False, include_url=False)
+        )
+        assert "hunter2" not in messages, messages
+        assert "apikey" not in messages, messages
+        # Actionable, not merely loud: names the field and where the credential belongs.
+        assert "deepseek_base_url" in messages, messages
+        assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" in messages, messages
+
+    @pytest.mark.parametrize(
+        "benign",
+        [
+            "https://api.deepseek.com/v1",  # the shipped default
+            "https://relay.internal",  # no path at all
+            "https://relay.internal:8443/team-a/v1",  # path-based routing prefix
+            "http://127.0.0.1:8080/v1",  # plain-http loopback relay
+        ],
+    )
+    def test_deepseek_base_url_accepts_urls_without_userinfo(
+        self, monkeypatch: pytest.MonkeyPatch, benign: str
+    ) -> None:
+        """Oracle guard: the credential check does not over-reach into a PATH.
+
+        A path (relay routing prefix) is legitimate for real proxy setups and is not
+        credential-shaped the way ``user:pass@`` is — an over-broad guard would refuse
+        working deployments, and the rejection tests above/below would stay green under
+        it. Each row here must still construct.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", benign)
+        assert Settings().deepseek_base_url == benign
+
+    @pytest.mark.parametrize(
+        "query_or_fragment",
+        [
+            "https://relay.internal/v1?api_key=sk-abcd1234",  # a real API-credential shape
+            "https://relay.internal/v1?region=eu",  # not credential-shaped, still rejected
+            "https://relay.internal/v1#token=sk-abcd1234",  # fragment, same exposure vector
+        ],
+    )
+    def test_deepseek_base_url_rejects_query_or_fragment(
+        self, monkeypatch: pytest.MonkeyPatch, query_or_fragment: str
+    ) -> None:
+        """A query string or fragment refuses too — CodeRabbit PR-review r1.
+
+        ``?api_key=...`` is at least as common a real credential shape as inline
+        userinfo, and empirically has NO legitimate function on this field: the openai
+        SDK's URL-joining silently drops everything from the query onward (verified via
+        ``AsyncOpenAI(base_url=...).base_url.join(...)`` — a query-bearing base_url never
+        reaches DeepSeek's API with its query OR its preceding path intact), while still
+        crossing into the child's spawn environment and this factory's repr. Pure risk,
+        zero function — reject it regardless of whether THIS particular value looks
+        credential-shaped, since the mechanism that would leak it doesn't care.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", query_or_fragment)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)) as exc_info:
+            Settings()
+        assert "deepseek_base_url" in str(exc_info.value)
+
+    def test_deepseek_base_url_rejects_an_unparseable_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An un-``urlsplit``-able value refuses too, typed and field-named.
+
+        Fail-closed: a URL we cannot parse is exactly the one we cannot prove is
+        credential-free. Letting ``urlsplit``'s own ``ValueError`` escape would still
+        refuse, but the operator would read "Invalid IPv6 URL" with no field name.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://[::1/v1")
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)) as exc_info:
+            Settings()
+        assert "deepseek_base_url" in str(exc_info.value)
+
+    def test_deepseek_base_url_rejects_a_malformed_port(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A syntactically-parseable URL with a non-numeric port still refuses.
+
+        ``urlsplit()`` itself does not eagerly validate the port — only touching the
+        lazy ``.port`` property does — so without this check a value like
+        ``https://host:notaport/v1`` would sail through Settings and only fail later,
+        deep in the httpx/openai SDK, as a confusing runtime error instead of a
+        boot-time refusal naming the field (CodeRabbit r4).
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://relay.internal:notaport/v1")
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)) as exc_info:
+            Settings()
+        assert "deepseek_base_url" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "unusable",
+        [
+            "not-a-url",  # no scheme, no hostname — parses "clean" with everything empty
+            "ftp://relay.internal/v1",  # a scheme the SDK cannot dial
+            "https://",  # scheme present, hostname empty
+        ],
+    )
+    def test_deepseek_base_url_rejects_scheme_or_hostname_missing(
+        self, monkeypatch: pytest.MonkeyPatch, unusable: str
+    ) -> None:
+        """A syntactically-valid-but-undialable URL refuses too.
+
+        Neither the blank check nor the credential check catches a value like
+        "not-a-url" (parses clean, no userinfo, but no scheme/host to dial either) —
+        it would otherwise reach the SAME laundered-into-``cannot_extract`` failure
+        mode the blank-value guard exists to prevent (CodeRabbit r4).
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", unusable)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)) as exc_info:
+            Settings()
+        assert "deepseek_base_url" in str(exc_info.value)
+
+    def test_deepseek_base_url_strips_surrounding_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A value with incidental leading/trailing whitespace is stored stripped.
+
+        Whitespace survives the ``not v.strip()`` blank check if it wraps real content
+        (e.g. a copy-paste artifact from ``.env``) — strip it before storing so the
+        stored value is exactly what gets threaded into HTTP clients and the child's
+        spawn environment, not a string with invisible leading/trailing bytes.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "  https://relay.internal/v1  ")
+        assert Settings().deepseek_base_url == "https://relay.internal/v1"
+
+    def test_deepseek_model_strips_surrounding_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sibling field gets the same strip-and-STORE treatment (CodeRabbit).
+
+        ``_reject_blank_deepseek_model`` originally tested ``v.strip()`` but returned
+        the RAW value, so ``" deepseek-chat "`` passed the blank check and reached both
+        the privileged and quarantine provider paths as an invalid model id — a 4xx on
+        every extraction, which the quarantine dispatch loop launders into a generic
+        ``cannot_extract``. That is precisely the boot-misconfiguration-wearing-a-
+        runtime-failure-costume this validator exists to stop, so the whitespace case
+        has to be pinned, not just the empty one.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", "  deepseek-chat  ")
+        assert Settings().deepseek_model == "deepseek-chat"
+
+    @pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
+    def test_deepseek_model_rejects_blank(
+        self, monkeypatch: pytest.MonkeyPatch, blank: str
+    ) -> None:
+        """A blank ``ALFRED_DEEPSEEK_MODEL`` refuses at Settings construction.
+
+        The structural twin of the ``deepseek_base_url`` pair above, on the other
+        ``deepseek_*`` field BOTH provider paths reuse — ``build_router`` for the
+        privileged DeepSeek client, ``_resolve_quarantine_model`` for the #587 quarantine
+        child. Nothing downstream can catch it: the field is a required ``str``, so no
+        ``is None`` refusal fires, and the blank simply becomes an unusable model id that
+        fails per call, where the quarantine retry loop launders it into a generic
+        ``cannot_extract``.
+
+        This validator is the PRIMARY guard specifically because the resolver-level
+        ``ValueError`` in ``_resolve_quarantine_model`` is caught by NO arm of the daemon
+        boot cascade — on its own it crashed the boot uncaught (exit 1, zero
+        ``daemon.boot.failed`` rows, the #368 anti-pattern). Refusing here routes it to
+        the audited ``settings_invalid`` refusal instead
+        (``test_boot_refuses_audited_when_deepseek_model_is_blank`` pins the end-to-end
+        boot behaviour).
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", blank)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)):
+            Settings()
+
+    def test_deepseek_model_accepts_a_real_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Oracle guard for the blank-rejection above: a normal override still passes,
+        so the test pair cannot both stay green under a validator that rejects
+        everything."""
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", "deepseek-reasoner")
+        assert Settings().deepseek_model == "deepseek-reasoner"
+
+    @pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
+    def test_primary_provider_rejects_blank(
+        self, monkeypatch: pytest.MonkeyPatch, blank: str
+    ) -> None:
+        """A blank ``ALFRED_PRIMARY_PROVIDER`` refuses at Settings construction.
+
+        Not a laundering problem like the ``deepseek_*`` pair above — a WRONG-REASON
+        problem. ``_comms_boot``'s separation check wraps every ``AlfredError`` out of
+        ``assert_provider_separation`` as a collision, but that function's blank-id arm
+        runs BEFORE its collision test, so a blank ``primary_provider`` was reported to
+        the operator and the audit row as ``quarantine_provider_separation_violated``
+        when nothing had collided. Refusing here answers accurately
+        (``settings_invalid``, field named) and makes that blank arm unreachable from
+        the call site.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", blank)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)):
+            Settings()
+
+    def test_primary_provider_accepts_a_real_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Oracle guard for the blank-rejection above: a normal override still passes."""
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", "anthropic")
+        assert Settings().primary_provider == "anthropic"

@@ -411,13 +411,20 @@ def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
 
     The BLANK-string guard (HARD #7) is the exact analogue of the one in
     ``_resolve_quarantine_base_url`` below, on the OTHER field the deepseek branch
-    reuses. Unlike ``deepseek_base_url``, ``deepseek_model`` has NO
-    reject-blank ``field_validator`` on ``Settings``, so ``ALFRED_DEEPSEEK_MODEL=""``
-    is accepted at config load, threaded into the child's ``ALFRED_QUARANTINE_MODEL``,
-    and surfaces only as an untyped per-extraction API failure that the dispatch
-    retry loop LAUNDERS into a generic ``cannot_extract`` — a boot-time
-    misconfiguration wearing a runtime-extraction-failure costume. Refusing here
-    keeps it pre-spawn and loud.
+    reuses — and, like it, is DEFENCE-IN-DEPTH, not the primary guard.
+    ``Settings._reject_blank_deepseek_model`` refuses ``ALFRED_DEEPSEEK_MODEL=""`` at
+    config-load time, which is what routes the misconfiguration onto the audited
+    ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row).
+
+    That ordering matters and was learned the hard way: this ``ValueError`` is caught
+    by NO arm of the daemon boot cascade (``_build_comms_boot_graph`` re-raises
+    unchanged; none of ``_commands.py``'s typed arms is ``ValueError``; ``start_daemon``
+    catches only ``_BootRefusedError``), so on its own it produced an uncaught crash —
+    exit 1 with ZERO audit rows, the #368 anti-pattern. It is kept because this function
+    is a public-ish resolution seam reachable from ``Settings.model_construct`` doubles
+    and future non-``Settings`` callers: without it a blank would be threaded into the
+    child's ``ALFRED_QUARANTINE_MODEL``, and every extraction would name an unusable
+    model and launder into a generic ``cannot_extract`` via the dispatch retry loop.
     """
     if provider_id == "deepseek":
         model = settings.deepseek_model

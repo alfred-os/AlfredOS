@@ -200,8 +200,29 @@ def status() -> None:
     else:
         yes_no = t("status.no")
         fallback_label = t("status.fallback_none")
+    # devex-002 (#586/#587): the quarantine half of the dual-LLM split was invisible
+    # everywhere. `ALFRED_QUARANTINE_PROVIDER` decides WHICH provider the quarantined
+    # child dials and which key it needs, and
+    # `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION` decides whether a privileged /
+    # quarantined collision refuses boot or merely warns — but until now an operator
+    # could only learn either by reading `.env` back or by grepping boot logs. Rendered
+    # next to the privileged provider lines because the two are only meaningful
+    # together (the separation posture is a statement ABOUT this pair).
+    #
+    # Both values are closed-set routing config, never a credential (hard rule #5).
+    # The separation flag renders through the same `status.yes`/`status.no` catalog
+    # entries the anthropic line uses, branched OUTSIDE the t() call so pybabel
+    # extracts each msgid separately (see the yes/no note above). A statement `if`,
+    # not a ternary: coverage.py cannot see the two arms of a conditional EXPRESSION,
+    # so a ternary here would let a never-exercised arm ship as covered.
+    if settings.require_quarantine_provider_separation:
+        separation_yes_no = t("status.yes")
+    else:
+        separation_yes_no = t("status.no")
     typer.echo(t("status.primary_provider", provider=settings.primary_provider))
     typer.echo(t("status.fallback_provider", provider=fallback_label))
+    typer.echo(t("status.quarantine_provider", provider=settings.quarantine_provider))
+    typer.echo(t("status.quarantine_provider_separation", yes_or_no=separation_yes_no))
     typer.echo(t("status.anthropic_configured", yes_or_no=yes_no))
     # #370 item 3: surface WHERE the broker resolved its file backend, grouped
     # with the credential line above, so a secrets problem doesn't send the
