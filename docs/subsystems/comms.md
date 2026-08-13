@@ -393,6 +393,8 @@ Every live comms/chat turn now builds a non-empty `tools` list, so `core.py`'s
 completions run at `temperature=0.0` rather than the previous `0.7` default —
 defence-in-depth for deterministic tool-call planning on top of the replay
 journal (§4/§12 of the tools-on design spec), not a substitute for it.
+The journal's `tool_call_journal` table has no retention/pruning path yet
+(`#581`) — this cutover is the first thing to write to it on a production path.
 This is distinct from the quarantined child's own real-LLM graduation (`#340` PR2b-golive,
 ADR-0052), which landed separately and is governed by the paragraph above — both halves
 of the dual-LLM split now call real providers, each on its own side of the trust boundary.
