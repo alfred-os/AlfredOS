@@ -198,8 +198,12 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
 > explicitly deferred; that premise no longer holds either — the journal
 > ([ADR-0063](0063-deterministic-tool-call-replay-journal.md)) has been live
 > since #410 PR2 and is now genuinely exercised (fast-forward read + write) in
-> production by this PR's tool registry wiring. The original text is
-> preserved for historical record.
+> production by this PR's tool registry wiring. That activation is exactly the
+> trigger [#581](https://github.com/alfred-os/AlfredOS/issues/581) named for the
+> shared prune-on-`commit_once` sweep: neither `tool_call_journal` nor
+> `turn_side_effect_ledger` has a retention path yet, so this PR is the first to
+> grow `tool_call_journal` on a production path — accepted here, still open
+> there. The original text is preserved for historical record.
 
 - Egress tools, the deterministic-replay journal, and the
   [ADR-0048](0048-web-fetch-authenticated-fetch-secret-substitution.md) forward
