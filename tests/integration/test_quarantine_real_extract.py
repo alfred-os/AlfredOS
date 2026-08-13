@@ -1226,7 +1226,12 @@ async def test_real_extract_deepseek_returns_extracted_via_prompt_embedded_fallb
                 "expected >= 1 decrypted request line from the canned DeepSeek proxy; "
                 "got none — the child never completed a tunnelled POST"
             )
-            assert all(line.startswith(b"POST /v1/chat/completions") for line in request_lines), (
+            assert all(
+                line.startswith(b"POST /v1/chat/completions HTTP/") for line in request_lines
+            ), (
+                # CodeRabbit r4: the bare prefix (no trailing delimiter) would also match
+                # an unintended ``/v1/chat/completions-suffix`` path — require the space
+                # before HTTP/ that the comment above already promised this assertion checks.
                 request_lines
             )
 
