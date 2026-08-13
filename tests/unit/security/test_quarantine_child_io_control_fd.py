@@ -221,10 +221,11 @@ async def test_control_fd_without_provider_config_refuses(
     assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
 
 
+@pytest.mark.parametrize("unusable", [None, "", " ", "\t", "\n"])
 async def test_control_fd_deepseek_without_base_url_refuses(
-    _spawn_capture: dict[str, Any],
+    _spawn_capture: dict[str, Any], unusable: str | None
 ) -> None:
-    """A deepseek live spawn with no ``base_url`` refuses PRE-FORK (CodeRabbit r2).
+    """A deepseek live spawn with no USABLE ``base_url`` refuses PRE-FORK (CodeRabbit r2/r3).
 
     DeepSeek's OpenAI-compatible client needs an explicit endpoint; ``_child_env`` sets
     ``ALFRED_QUARANTINE_BASE_URL`` only when the argument is non-``None``, so the same
@@ -232,6 +233,13 @@ async def test_control_fd_deepseek_without_base_url_refuses(
     ``build_child_client`` already refuses this combination — this guard just moves the
     refusal one step earlier, to before the fork, so no bwrap child is created only to be
     reaped.
+
+    The BLANK rows are not padding (r3): ``None`` was the only value the guard originally
+    caught, and a ``""``/whitespace argument takes the OPPOSITE path through ``_child_env``
+    — it is non-``None``, so the var is actually SET, and the child boots with an unusable
+    endpoint whose every extraction the dispatch retry loop launders into a generic
+    ``cannot_extract``. "Absent" and "present but empty" are the same fact to this guard and
+    must produce the same pre-fork refusal.
 
     ``proc is None`` is the load-bearing assertion, not merely the raised type: it is what
     distinguishes "refused pre-fork" from "spawned, then failed".
@@ -244,7 +252,7 @@ async def test_control_fd_deepseek_without_base_url_refuses(
             model="deepseek-chat",
             max_tokens=8192,
             provider="deepseek",
-            base_url=None,
+            base_url=unusable,
         )
     assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
 

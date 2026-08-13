@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-13 13:33+0100\n"
+"POT-Creation-Date: 2026-08-13 15:21+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3407,17 +3407,17 @@ msgstr "Quarantine child egress broker is not configured."
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:1163
+#: src/alfred/security/quarantine_child_io.py:1174
 msgid "security.quarantine_child.provider_config_missing"
 msgstr ""
 "Refusing to spawn the live quarantine child without its provider model "
 "and token budget."
 
-#: src/alfred/security/quarantine_child_io.py:1248
+#: src/alfred/security/quarantine_child_io.py:1259
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:1299
+#: src/alfred/security/quarantine_child_io.py:1310
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "

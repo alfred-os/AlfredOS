@@ -266,6 +266,12 @@ def test_build_provider_returns_factory_from_key(monkeypatch: pytest.MonkeyPatch
     no-socket property directly). The repr DOES carry every non-secret routing field
     (provider_id / model / max_tokens / base_url) — #587 made the last two per-deployment
     values, and a repr that hides them cannot diagnose a misrouted child.
+
+    ``base_url`` is asserted as scheme+HOST only: ``_redact_base_url`` is a default-deny
+    sanitiser that rebuilds the URL from the components affirmatively judged safe, and r3
+    dropped the path from that set (a path segment can carry a per-tenant token as readily
+    as a query param can). The endpoint's identity — which is what "diagnose a misrouted
+    child" needs — is the host.
     """
     from alfred.security.quarantine_child.brokered_egress import _ProviderFactory
 
@@ -280,7 +286,8 @@ def test_build_provider_returns_factory_from_key(monkeypatch: pytest.MonkeyPatch
     assert "deepseek" in rendered  # provider_id
     assert "deepseek-chat" in rendered  # model
     assert "8192" in rendered  # max_tokens
-    assert "https://api.deepseek.com/v1" in rendered  # base_url
+    assert "https://api.deepseek.com" in rendered  # base_url (path dropped — see docstring)
+    assert "/v1" not in rendered, rendered  # ...and the path really is gone
 
 
 async def test_write_boot_ready_emits_ready_frame_via_writer() -> None:

@@ -358,26 +358,38 @@ class QuarantineChildBootError(RuntimeError):
 
 
 def _redact_base_url(base_url: str | None) -> str | None:
-    """Strip every credential-shaped component from a ``base_url`` bound for a repr/log.
+    """Reduce a ``base_url`` bound for a repr/log to scheme + host + port, and nothing else.
 
-    Keeps scheme + host + path — enough to answer "which endpoint is this child dialling?",
-    the whole reason ``base_url`` is in :meth:`_ProviderFactory.__repr__` at all. Drops:
+    A DEFAULT-DENY sanitiser, not a userinfo-stripper with extras (CodeRabbit r3): it rebuilds
+    the URL from the ONLY components it has affirmatively judged safe rather than removing the
+    credential shapes it happens to know about — so a component nobody anticipated cannot ride
+    through unnoticed (the enumerate-vs-default-deny lesson). Kept:
+
+    * **scheme** and **host**/**port** — together they answer "which endpoint is this child
+      dialling?", the whole reason ``base_url`` is in :meth:`_ProviderFactory.__repr__` at all,
+      and they cannot carry an operator-supplied secret.
+
+    Dropped, without needing to prove any of them dangerous:
 
     * **userinfo** (``user:pass@``) — inline basic-auth, plausible for an egress-relay-fronted
       deployment and a literal credential;
     * **query string** — the other conventional place an API token rides in a URL;
+    * **path** — a relay routing prefix is the benign case, but a path segment is just as
+      capable of carrying a per-tenant token, and the host alone already identifies the
+      endpoint (r3: the diagnostic value of ``/v1`` does not pay for the exposure);
     * **fragment** — no diagnostic value, and no reason to trust its contents either.
-
-    A DEFAULT-DENY sanitiser, not a userinfo-stripper with extras: it rebuilds the URL from the
-    three components it has decided are safe rather than removing the credential shapes it
-    happens to know about, so a component nobody thought of cannot ride through (the
-    enumerate-vs-default-deny lesson).
 
     ``None`` (the anthropic path, which has no base_url) passes through as ``None`` so the repr
     still distinguishes "no endpoint configured" from "endpoint hidden". A URL that cannot be
     parsed yields a fixed opaque marker, NEVER the raw string: an unparseable value is precisely
     the one we cannot prove is credential-free. This function must not raise — it runs inside
     ``__repr__``, and a raising repr breaks the tracebacks it exists to make readable.
+
+    Second line of defence only, as of r3: ``Settings._validate_deepseek_base_url`` now refuses a
+    userinfo-bearing ``ALFRED_DEEPSEEK_BASE_URL`` at construction, so a credential should never
+    reach this function on a well-behaved host. This still runs — the child reads its base_url
+    from an env var it does not validate against ``Settings`` (§20.2's spawn-wiring-bug and
+    env-tampering cases), the same defence-in-depth rationale as the child's other guards.
     """
     if base_url is None:
         return None
@@ -404,7 +416,7 @@ def _redact_base_url(base_url: str | None) -> str | None:
         # tests instead of by the coverage gate: test_factory_repr_strips_credentials_from_
         # base_url carries a port, test_factory_repr_keeps_a_plain_base_url_intact does not.
         netloc = f"{host}:{parts.port}" if parts.port is not None else host
-        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+        return urlunsplit((parts.scheme, netloc, "", "", ""))
     except ValueError:
         # urlsplit raises on e.g. a malformed IPv6 literal or an out-of-range port.
         return "<unparseable-base-url>"

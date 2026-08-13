@@ -1150,15 +1150,26 @@ async def spawn_quarantine_child_io(
         # makes every live misconfiguration one loud pre-spawn failure of the same shape, and
         # costs no spawn (hard rule #7).
         #
-        # ``provider == "deepseek" and base_url is None`` joins the same guard (CodeRabbit r2).
+        # A deepseek spawn with no usable ``base_url`` joins the same guard (CodeRabbit r2).
         # DeepSeek's OpenAI-compatible client REQUIRES an explicit endpoint; anthropic's SDK
         # has its own default, so the check is provider-scoped rather than an unconditional
         # ``base_url is not None`` — a dormant or anthropic spawn passes ``None`` legitimately
         # and must keep passing. The child's own ``build_child_client`` already refuses this
         # combination, so this is DEFENCE-IN-DEPTH that fails one step earlier still: before
         # the fork, so no bwrap child is created only to be reaped.
+        #
+        # BLANK, not just ``None`` (CodeRabbit r3): ``_child_env`` sets the var for any
+        # non-``None`` argument, so a ``""``/whitespace base_url is FORWARDED — it survives
+        # this guard, reaches ``AsyncOpenAI(base_url="")``, and fails per extraction, where
+        # the dispatch retry loop launders it into a generic ``cannot_extract`` (hard rule
+        # #7). ``None`` and blank are the same fact here — "no endpoint" — so they take the
+        # same pre-fork refusal. (The child's ``_build_provider`` and the host's
+        # ``_resolve_quarantine_base_url`` both already treat blank as missing; this was the
+        # one layer in the chain that did not.)
         missing_core = model is None or max_tokens is None
-        missing_deepseek_base_url = provider == "deepseek" and base_url is None
+        missing_deepseek_base_url = provider == "deepseek" and (
+            base_url is None or not base_url.strip()
+        )
         if missing_core or missing_deepseek_base_url:
             raise QuarantineChildSpawnError(t("security.quarantine_child.provider_config_missing"))
 

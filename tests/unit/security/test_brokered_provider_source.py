@@ -138,19 +138,23 @@ def test_factory_repr_strips_credentials_from_base_url() -> None:
     # substring "token" would be a false positive — ``max_tokens`` is in the same repr.)
     assert "?" not in rendered, rendered
     assert "@" not in rendered, rendered
-    # Still diagnosable: scheme, host, port and path survive.
-    assert "relay.internal:8443/v1" in rendered, rendered
-    assert "https" in rendered, rendered
+    # r3: the PATH is dropped too. ``_redact_base_url`` is default-deny — it rebuilds from
+    # the components judged safe (scheme + host + port) rather than stripping the ones known
+    # to be risky, and a path segment can carry a per-tenant token just as a query param can.
+    assert "/v1" not in rendered, rendered
+    # Still diagnosable: scheme, host and port survive — enough to answer "which endpoint".
+    assert "https://relay.internal:8443" in rendered, rendered
 
 
 def test_factory_repr_keeps_a_plain_base_url_intact() -> None:
     """Oracle guard: the sanitiser is not a blanket redactor.
 
     Without this, a ``_redact_base_url`` that returned a constant would satisfy every
-    assertion in the test above while making the field useless.
+    assertion in the test above while making the field useless. The endpoint's HOST is
+    what survives (r3 drops the path), so that is what this pins.
     """
     rendered = repr(_factory(provider_id="deepseek"))
-    assert "https://api.deepseek.com/v1" in rendered, rendered
+    assert "https://api.deepseek.com" in rendered, rendered
 
 
 def test_factory_repr_renders_none_base_url_as_none() -> None:
