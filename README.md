@@ -62,6 +62,21 @@ alfred chat                 # start a TUI conversation
 >   `restart: unless-stopped`. This is deliberate — a keyless first run does not start.
 >   `bin/alfred-setup.sh` reports the missing key and exits 1; it cannot seed one for you.
 >
+> **The quarantine key must MATCH `ALFRED_QUARANTINE_PROVIDER`, and a mismatch is not caught
+> at boot.** It is a **separate credential**, never derived from or forwarded from
+> `ALFRED_DEEPSEEK_API_KEY` / `ALFRED_ANTHROPIC_API_KEY` — so with
+> `ALFRED_QUARANTINE_PROVIDER=deepseek` it must be its **own DeepSeek** key, not a copy of the
+> privileged one (copying it puts both halves of the dual-LLM split on one account; see
+> [ADR-0064](docs/adr/0064-quarantine-provider-separation-is-opt-in.md)). There is no
+> key-shape validation: boot checks only that the variable is non-empty, so a key belonging to
+> the _other_ provider passes every startup check and shows up only at the **first extraction**,
+> as a generic `provider_unavailable` typed refusal. The provider's own error text is
+> deliberately not carried into that refusal — the quarantine child handles T3 (untrusted)
+> content and provider error strings can echo request fragments, so surfacing them across that
+> boundary would be a leak channel. That redaction is by design, not a bug. Practically: if
+> extractions start failing right after you switch `ALFRED_QUARANTINE_PROVIDER`, suspect this
+> key first — the refusal will not name it.
+>
 > **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
 > (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so
 > that key is not needed and the core boots fine. That is not the quickstart above:

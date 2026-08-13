@@ -34,8 +34,11 @@ previously undocumented gaps:
    fails at the first real extraction call (Anthropic auth error), not at
    boot — a confusing, late failure.
 2. `assert_provider_separation()` (`src/alfred/bootstrap/quarantine.py`) — the
-   function meant to enforce PRD §6.4 / spec §5.4's "the quarantined provider
-   MUST differ from the privileged provider" — is fully implemented and
+   function meant to enforce the Slice-3 design spec §5.4 "the quarantined
+   provider MUST differ from the privileged provider" policy (superseded by
+   [ADR-0064](../../adr/0064-quarantine-provider-separation-is-opt-in.md);
+   retained here as the historical policy this work supersedes, not as a live
+   requirement) — is fully implemented and
    unit-tested but has **zero call sites in production code**. Nothing
    currently prevents (or would prevent, once provider selection is real)
    configuring the same provider for both roles.
@@ -267,16 +270,27 @@ call sites and reviewing them together is cheaper than sequencing):
   that the SAME provider now works by default (no separate Anthropic
   account required to just try the software), with a pointer to the new
   opt-in setting for anyone who wants the stricter posture.
-- PRD §6.4 wording: flag as needing a human-gated follow-up edit (this
-  design does not touch PRD.md directly — repo policy).
+- No PRD edit is needed. An earlier revision of this section proposed a
+  human-gated follow-up edit to PRD §6.4; that rested on the mistaken
+  attribution corrected above. PRD §6.4 is the self-improvement reviewer
+  gate's own cross-provider requirement and has nothing to say about
+  quarantine/privileged separation — so there is no PRD wording to fix.
+  ADR-0064 is the record instead.
 
 ## 9. Out of scope
 
 - OpenAI quarantine-provider support (§3 item 1).
 - The interactive setup wizard (§3 item 4) — separate, later piece; depends
   on this landing first.
-- Changing PRD §6.4's actual wording (human-gated).
+- Any PRD.md edit (human-gated repo policy) — and, per §8 above, none is
+  called for: no PRD section states a quarantine/privileged separation
+  invariant.
 - Any change to `assert_provider_separation()`'s own logic — reused as-is.
+  (One BEHAVIOUR-PRESERVING exception landed during the review-fix wave: the
+  normalised collision comparison was extracted into a `provider_ids_collide()`
+  helper in the same module, so the opt-in refuse path and the default warn path
+  share one definition of "same provider" instead of two hand-written copies. The
+  function's contract, messages and existing tests are unchanged.)
 
 ## 10. Risks & residuals
 

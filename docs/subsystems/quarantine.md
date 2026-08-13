@@ -352,10 +352,17 @@ with a non-vacuous control arm).
 `Provider.capabilities() -> frozenset[ProviderCapability]` governs
 which extraction path `QuarantinedExtractor` dispatches:
 
+The closed set is exactly two — `Settings.quarantine_provider` is
+`Literal["anthropic", "deepseek"]` (#587), and those are the only two provider
+adapters that exist (`src/alfred/providers/`). An earlier revision of this table
+also listed OpenAI with `NATIVE_CONSTRAINED_GENERATION`; there has never been an
+`OpenAIProvider` class, so that row described a provider option no operator could
+select. It is removed rather than marked "planned" — the same correction applied
+to `.env.example` and the Slice-3 runbook.
+
 | Provider | Mechanism | Capability |
 | --- | --- | --- |
 | Anthropic | Tool-use shape | `NATIVE_CONSTRAINED_GENERATION` |
-| OpenAI | Strict structured-outputs (`strict: true` mandatory) | `NATIVE_CONSTRAINED_GENERATION` |
 | DeepSeek-chat | JSON mode (declared, not dispatch-selected) | `JSON_OBJECT_MODE` |
 
 Dispatch is two-way, closed on `NATIVE_CONSTRAINED_GENERATION` alone

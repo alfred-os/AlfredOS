@@ -79,9 +79,20 @@ See [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md) for
 the full rationale (no PRD section states a "providers must differ"
 invariant — do not cite "spec §5.4 / PRD §6.4").
 
-Changing `routing.yaml [quarantine].provider` or `secret_id` is a
+**Which knob actually controls runtime behaviour today: `ALFRED_QUARANTINE_PROVIDER`,
+and only that one.** It is a plain, ungated `.env` setting — set it, restart, done. The
+reviewer-gated `alfred config quarantined-provider <provider>` flow described immediately
+below is **aspirational**: that `state.git` proposal flow does not exist yet, and even
+once it does it targets `routing.yaml [quarantine].provider`, which no loader reads
+(see the "does **not** drive runtime capability advertisement" note above). Read the next
+paragraph as the intended future shape, not as a step you can perform now — and do not
+read it as a gate protecting the provider choice, because there is none. ADR-0064's
+Alternatives section records why that flow was not adopted as the mechanism for this
+decision.
+
+Changing `routing.yaml [quarantine].provider` or `secret_id` is intended to be a
 reviewer-gated configuration change (`alfred config quarantined-provider
-<provider>`); it lands via the state.git proposal flow (spec §11.1). `model`
+<provider>`), landing via the state.git proposal flow (spec §11.1). `model`
 changes are lower blast-radius but still flow through the same gate.
 
 ## Environment setup
@@ -98,6 +109,34 @@ ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-ant-...
 The literal key never appears in `config/routing.yaml` — the file holds only
 the broker ID. The broker substitutes the key at subprocess spawn time,
 delivering it over fd 3 (spec §5.3). See `.env.example` for the template.
+
+> **The key must match `ALFRED_QUARANTINE_PROVIDER`, and nothing checks that it does.**
+> This is one shared variable serving both providers, so its correct content depends
+> entirely on the current `ALFRED_QUARANTINE_PROVIDER` value:
+>
+> | `ALFRED_QUARANTINE_PROVIDER` | `ALFRED_QUARANTINE_PROVIDER_API_KEY` must be |
+> | --- | --- |
+> | `anthropic` (default) | an Anthropic key (`sk-ant-…`) |
+> | `deepseek` | a **separate** DeepSeek key — not a copy of `ALFRED_DEEPSEEK_API_KEY` |
+>
+> It is never derived from, defaulted to, or forwarded from the privileged path's
+> `ALFRED_DEEPSEEK_API_KEY` / `ALFRED_ANTHROPIC_API_KEY`. Reusing the privileged
+> DeepSeek key here puts both halves of the dual-LLM split on one provider account —
+> the exact posture [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md)
+> makes an explicit, opt-out-able choice rather than an accident.
+>
+> **There is no key-shape validation and a mismatch is NOT caught at boot.** Boot checks
+> only that the variable is non-empty (`quarantine_provider_key_unset`); a key belonging to
+> the other provider passes every startup check. It surfaces at the **first extraction**, as
+> a generic `provider_unavailable` typed refusal — not as a boot error, and not with any
+> message naming the key. The provider's own error text is deliberately withheld from that
+> refusal and from the host-side log line: the quarantine child handles T3 (untrusted)
+> content and provider error strings can echo request fragments, so carrying them across
+> that boundary is a leak channel (see the `quarantine.child.provider_unavailable` log
+> site in `src/alfred/security/quarantine_child/provider_dispatch.py`, which omits the
+> exception message for exactly this reason). That redaction is working as intended, not a
+> reporting bug. **Triage rule:** extractions failing immediately after a provider switch,
+> with a healthy boot, means check this key first.
 
 ### macOS development
 

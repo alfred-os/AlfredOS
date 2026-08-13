@@ -91,8 +91,11 @@ and no plugin can acquire capabilities that were not explicitly granted.
 - `ProviderCapability` — `src/alfred/providers/base.py:22` — `StrEnum`
   whose values steer the quarantined-LLM extraction mode selection:
   `NATIVE_CONSTRAINED_GENERATION` → `native_constrained` tool-use shape
-  (Anthropic, OpenAI); no `NATIVE_CONSTRAINED_GENERATION` (including
-  DeepSeek's `JSON_OBJECT_MODE`) → `prompt_embedded_fallback` (#340
+  (Anthropic — the only shipped provider declaring it; an earlier revision
+  of this line also named OpenAI, which has never had a provider adapter
+  and is not in `Settings.quarantine_provider`'s closed
+  `Literal["anthropic", "deepseek"]`); no `NATIVE_CONSTRAINED_GENERATION`
+  (including DeepSeek's `JSON_OBJECT_MODE`) → `prompt_embedded_fallback` (#340
   fork b removed the DeepSeek json-object dispatch branch — see
   `docs/subsystems/quarantine.md`). Also pre-declares `TOOL_USE`,
   `VISION`, `LONG_CONTEXT_1M` for future routing. Shipped in PR-S3-4

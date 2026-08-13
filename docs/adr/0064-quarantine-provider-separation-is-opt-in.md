@@ -2,7 +2,8 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-12
-- **Issue**: #586 / #587
+- **Slice**: #586 / #587 (real quarantine-provider dispatch + opt-in provider-separation
+  enforcement)
 - **Supersedes**: docs/superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md §5.4
 
 ## Context
@@ -68,26 +69,64 @@ flag to `True`.
   ADR-0064" pointer added at its top (this task, same commit) so the two
   documents do not silently contradict each other.
 - `assert_provider_separation()`'s own docstring (`bootstrap/quarantine.py`)
-  still carries the old citation — out of scope for this PR (design spec
-  §9: reused as-is, unmodified) — tracked as follow-up doc-fix #588.
+  still carries the old citation — out of scope for this PR — tracked as
+  follow-up doc-fix [#588](https://github.com/alfred-os/AlfredOS/issues/588).
+  The function's BEHAVIOUR is likewise unchanged (design spec §9: reused
+  as-is); the one edit its module did receive is the extraction of its
+  normalised collision comparison into a `provider_ids_collide()` helper, so
+  the opt-in refuse path and the default warn path below share a single
+  definition of "same provider" rather than two hand-written copies that could
+  drift. Same contract, same messages, same tests.
 - **`require=true` checks the SETTING, not the runtime-resolved privileged
   provider — so it can pass while a real collision exists.** The check
   compares `Settings.primary_provider` against `Settings.quarantine_provider`.
-  `Settings.primary_provider` is not what determines the privileged provider in
-  production: `build_router` (`src/alfred/cli/_bootstrap.py`) hardcodes
-  DeepSeek as primary and wires Anthropic in as a live fallback whenever
-  `anthropic_api_key` is configured, entirely independent of the
-  `primary_provider` setting — which is otherwise read only for the
-  `alfred status` display string. Consequence, on the shipped defaults
-  (`primary_provider="deepseek"`, `quarantine_provider="anthropic"`):
-  `require=true` PASSES, yet the privileged router's Anthropic fallback is the
-  same provider the quarantine child uses, so a fallback-served privileged turn
-  and a quarantined extraction can land on one provider account. Accepted for
-  now — narrowing it means changing `assert_provider_separation()`'s signature
-  or `build_router`'s wiring, both of which the #586/#587 plan explicitly put
-  out of scope (design spec §9). Read the opt-in flag as "the two configured
-  provider SETTINGS differ", not as "no privileged path can ever reach the
-  quarantine provider".
+  The general root cause: **`Settings.primary_provider` is not read by
+  `build_router` under ANY configuration.** `build_router`
+  (`src/alfred/cli/_bootstrap.py`) hardcodes DeepSeek as primary and wires
+  Anthropic in as a live fallback whenever `anthropic_api_key` is configured;
+  it never consults the `primary_provider` field at all, which is otherwise
+  read only for the `alfred status` display string. So the check does not
+  merely have a blind spot on the shipped defaults — it is comparing against a
+  value that has no bearing on the privileged provider pair for ANY value an
+  operator sets. Two consequences follow:
+  - On the shipped defaults (`primary_provider="deepseek"`,
+    `quarantine_provider="anthropic"`): `require=true` PASSES, yet the
+    privileged router's Anthropic fallback is the same provider the quarantine
+    child uses, so a fallback-served privileged turn and a quarantined
+    extraction can land on one provider account.
+  - For ANY custom `primary_provider` value: the check reports on a setting the
+    router ignores, so a "PASS" is a false assurance and a refusal would be a
+    false alarm — in both directions the verdict is about config text, not about
+    the providers the system actually dials.
+
+  Accepted for now — narrowing it means changing `assert_provider_separation()`'s
+  signature or `build_router`'s wiring, both of which the #586/#587 plan explicitly
+  put out of scope (design spec §9).
+  [Issue #590](https://github.com/alfred-os/AlfredOS/issues/590) is the tracking
+  issue for narrowing the check to compare against `build_router`'s
+  actually-resolved provider pair. Until it lands, read the opt-in flag as "the
+  two configured provider SETTINGS differ", not as "no privileged path can ever
+  reach the quarantine provider".
+- **Directional trust (ADR-0053/ADR-0057) needs no bespoke code for the two new
+  settings — verified, not assumed.** #586 asked for an explicit directional-trust
+  check on `quarantine_provider` and `require_quarantine_provider_separation`
+  during design; this bullet records the answer rather than leaving the ask
+  silently unanswered. Both fields are ordinary `Settings` fields resolved through
+  pydantic-settings' DEFAULT source precedence — `init` kwargs > `os.environ`
+  (`ALFRED_*`) > `.env` > secrets file. `Settings.settings_customise_sources` IS
+  overridden, but only to strip the `environment` key out of every non-init source
+  (#469 Blocker 1); it does not touch these two fields or reorder the chain for
+  them. So a `.env` value can only fill a gap the process environment left empty
+  and can never override an `ALFRED_*` env var the launcher set. That is the
+  `os.environ > .env` direction [ADR-0053](0053-three-layer-environment-precedence.md)
+  §1 names as pydantic-settings' native behaviour and the direction
+  [ADR-0057](0057-directional-trust-for-the-launcher-environment.md)'s
+  directional-trust rule requires — obtained from the default precedence rather
+  than from new code. (The `/etc/alfred/environment` middle layer is specific to
+  `Settings.environment` and does not apply to these two fields; nothing about
+  them needs it.) Note this makes the *setting* tamper-ordered; it does not change
+  the limitation recorded in the bullet above about what the setting is compared
+  against.
 
 ## Alternatives considered
 
