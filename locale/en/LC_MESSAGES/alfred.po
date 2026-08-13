@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-11 23:40+0100\n"
+"POT-Creation-Date: 2026-08-13 14:12+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1173,7 +1173,7 @@ msgstr ""
 "-d` on the compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:1125
-#: src/alfred/cli/daemon/_comms_boot.py:1047
+#: src/alfred/cli/daemon/_comms_boot.py:1060
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -1278,7 +1278,7 @@ msgstr ""
 "incident(s)){latest_crash}"
 
 #: src/alfred/cli/daemon/_comms_boot.py:402
-#: src/alfred/cli/daemon/_comms_boot.py:996
+#: src/alfred/cli/daemon/_comms_boot.py:1009
 msgid "daemon.boot.comms_adapter_unknown_kind"
 msgstr ""
 "Comms adapter '{adapter_id}' declares unknown adapter_kind "
@@ -1288,7 +1288,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
 #: src/alfred/cli/daemon/_comms_boot.py:415
-#: src/alfred/cli/daemon/_comms_boot.py:1009
+#: src/alfred/cli/daemon/_comms_boot.py:1022
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -1296,7 +1296,11 @@ msgstr ""
 "and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack), or unset it from ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1247
+#: src/alfred/cli/daemon/_comms_boot.py:772
+msgid "daemon.comms.tools_wired"
+msgstr "Comms tool registry wired: {count} tool(s) ({tool_names})."
+
+#: src/alfred/cli/daemon/_comms_boot.py:1260
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
@@ -1304,11 +1308,11 @@ msgstr ""
 "/ crash row, then re-run `alfred daemon start` (or `docker compose up -d`"
 " on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1261
+#: src/alfred/cli/daemon/_comms_boot.py:1274
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1357
+#: src/alfred/cli/daemon/_comms_boot.py:1370
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -1317,7 +1321,7 @@ msgstr ""
 "`comms-*.sock`, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1434
+#: src/alfred/cli/daemon/_comms_boot.py:1447
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -1326,7 +1330,7 @@ msgstr ""
 "day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1494
+#: src/alfred/cli/daemon/_comms_boot.py:1507
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -1639,7 +1643,7 @@ msgstr ""
 "it. Refusing to boot."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:213
-#: src/alfred/comms_mcp/real_turn_adapter.py:392
+#: src/alfred/comms_mcp/real_turn_adapter.py:394
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
@@ -1648,15 +1652,15 @@ msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:246
-#: src/alfred/comms_mcp/real_turn_adapter.py:355
+#: src/alfred/comms_mcp/real_turn_adapter.py:357
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:249
+#: src/alfred/comms_mcp/real_turn_adapter.py:251
 msgid "comms.inbound.real_turn.extraction_refused"
 msgstr "Sorry, I couldn't process that message. Please try rephrasing."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:257
+#: src/alfred/comms_mcp/real_turn_adapter.py:259
 msgid "comms.inbound.real_turn.unexpected_extract_kind"
 msgstr "Unexpected extraction result kind reached the real-turn adapter."
 
@@ -2813,19 +2817,19 @@ msgstr "Invalid arguments for {tool}."
 msgid "orchestrator.tool.not_permitted"
 msgstr "Tool {tool} is not permitted."
 
-#: src/alfred/orchestrator/tool_dispatch.py:258
+#: src/alfred/orchestrator/tool_dispatch.py:263
 msgid "orchestrator.tool.rate_limited"
 msgstr "Tool {tool} is rate limited."
 
-#: src/alfred/orchestrator/tool_dispatch.py:266
+#: src/alfred/orchestrator/tool_dispatch.py:271
 msgid "orchestrator.tool.domain_not_allowed"
 msgstr "Tool {tool} refused: destination not allowed."
 
-#: src/alfred/orchestrator/tool_dispatch.py:295
+#: src/alfred/orchestrator/tool_dispatch.py:300
 msgid "orchestrator.tool.timeout"
 msgstr "Tool {tool} timed out."
 
-#: src/alfred/orchestrator/tool_dispatch.py:303
+#: src/alfred/orchestrator/tool_dispatch.py:308
 msgid "orchestrator.tool.error"
 msgstr "Tool {tool} failed."
 
@@ -2834,13 +2838,13 @@ msgstr "Tool {tool} failed."
 # so a tool-caller could not tell a well-classified action-deadline timeout
 # (the arm above) apart from a bug-shaped unexpected one (this key). Distinct
 # msgid so the two stay distinguishable at the planner boundary.
-#: src/alfred/orchestrator/tool_dispatch.py:323
+#: src/alfred/orchestrator/tool_dispatch.py:328
 msgid "orchestrator.tool.timeout_unexpected"
 msgstr ""
 "Tool {tool} timed out unexpectedly (internal fault); see the audit log "
 "(dispatch_outcome=unexpected_timeout)."
 
-#: src/alfred/orchestrator/tool_dispatch.py:343
+#: src/alfred/orchestrator/tool_dispatch.py:348
 msgid "orchestrator.tool.refused"
 msgstr "Tool {tool} refused: {reason}."
 
