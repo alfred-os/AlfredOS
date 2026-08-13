@@ -14,8 +14,10 @@ is what arms the check; left at its `false` default a collision boots, logged
 and audited once.
 
 These tests pin the predicate itself —
-:func:`alfred.bootstrap.quarantine.assert_provider_separation` — independently
-of whether a caller has armed it. Its opt-in boot call site is covered in
+:func:`alfred.bootstrap.quarantine.assert_provider_separation` and the
+:func:`alfred.bootstrap.quarantine.provider_ids_collide` helper it shares with the
+daemon boot graph's not-required WARN path — independently of whether a caller has
+armed it. Its opt-in boot call site is covered in
 ``tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py``.
 """
 
@@ -23,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from alfred.bootstrap.quarantine import assert_provider_separation
+from alfred.bootstrap.quarantine import assert_provider_separation, provider_ids_collide
 from alfred.errors import AlfredError
 
 
@@ -106,3 +108,73 @@ def test_assert_provider_separation_refuses_blank_quarantined() -> None:
             privileged_provider_id="deepseek",
             quarantined_provider_id="   ",
         )
+
+
+# --------------------------------------------------------------------------- #
+# provider_ids_collide — the SHARED collision predicate (#586 review fix).
+#
+# assert_provider_separation() (the require=True refuse path) and the daemon boot
+# graph's require=False WARN path in alfred.cli.daemon._comms_boot both call this
+# ONE function. Before the extraction the warn path re-implemented the
+# .strip().lower() comparison inline; these tests pin the shared predicate directly
+# so a future change to "what counts as the same provider" is caught here rather
+# than by whichever of the two call sites happened to keep a test.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("deepseek", "deepseek"),
+        ("DeepSeek", "deepseek"),
+        ("deepseek ", " deepseek"),
+        ("\tANTHROPIC\n", "anthropic"),
+        ("", "   "),
+    ],
+    ids=["identical", "case", "whitespace", "case-and-whitespace", "both-blank"],
+)
+def test_provider_ids_collide_true(a: str, b: str) -> None:
+    """Every shape of "the same provider written differently" collides.
+
+    ``("", "   ")`` is deliberate: two blank ids normalise equal, so the predicate
+    reports a collision. ``assert_provider_separation`` never observes that outcome
+    (it rejects a blank id first, with its own distinct message), but the warn path
+    does — and "both providers undeclared" is correctly a non-separated configuration,
+    not something to pass over in silence.
+    """
+    assert provider_ids_collide(a, b) is True
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("deepseek", "anthropic"),
+        ("anthropic", "deepseek"),
+        ("DeepSeek", " anthropic "),
+        ("deepseek", ""),
+    ],
+    ids=["defaults", "reversed", "normalised-distinct", "one-blank"],
+)
+def test_provider_ids_collide_false(a: str, b: str) -> None:
+    """Oracle guard: genuinely distinct ids do NOT collide.
+
+    Without this pair the collide-true tests above would stay green under a
+    predicate that returned ``True`` unconditionally — which would refuse every
+    boot under ``require=True`` and warn on every boot under ``require=False``.
+    """
+    assert provider_ids_collide(a, b) is False
+
+
+def test_provider_ids_collide_is_symmetric() -> None:
+    """Argument order must not change the verdict.
+
+    The two call sites pass their arguments in the same (privileged, quarantined)
+    order today, but nothing in the signature enforces that — a positional-argument
+    swap at either site must not change what the system considers separated.
+    """
+    assert provider_ids_collide("DeepSeek ", "deepseek") == provider_ids_collide(
+        "deepseek", "DeepSeek "
+    )
+    assert provider_ids_collide("deepseek", "anthropic") == provider_ids_collide(
+        "anthropic", "deepseek"
+    )

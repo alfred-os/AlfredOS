@@ -408,9 +408,29 @@ def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
     quarantine-specific DeepSeek model setting an operator would have to keep in
     sync with the first — mirroring ``_resolve_quarantine_base_url``'s reuse of
     ``Settings.deepseek_base_url`` below.
+
+    The BLANK-string guard (HARD #7) is the exact analogue of the one in
+    ``_resolve_quarantine_base_url`` below, on the OTHER field the deepseek branch
+    reuses. Unlike ``deepseek_base_url``, ``deepseek_model`` has NO
+    reject-blank ``field_validator`` on ``Settings``, so ``ALFRED_DEEPSEEK_MODEL=""``
+    is accepted at config load, threaded into the child's ``ALFRED_QUARANTINE_MODEL``,
+    and surfaces only as an untyped per-extraction API failure that the dispatch
+    retry loop LAUNDERS into a generic ``cannot_extract`` — a boot-time
+    misconfiguration wearing a runtime-extraction-failure costume. Refusing here
+    keeps it pre-spawn and loud.
     """
     if provider_id == "deepseek":
-        return settings.deepseek_model
+        model = settings.deepseek_model
+        if not model.strip():
+            raise ValueError(
+                "_resolve_quarantine_model: provider_id='deepseek' but "
+                f"deepseek_model is blank ({model!r}) — refusing to spawn a "
+                "quarantine child whose every extraction would name an unusable "
+                "model and launder into cannot_extract (HARD #7). Set "
+                "ALFRED_DEEPSEEK_MODEL to a real DeepSeek model id "
+                "(default deepseek-chat)"
+            )
+        return model
     if provider_id == "anthropic":
         return _QUARANTINE_MODEL
     raise ValueError(

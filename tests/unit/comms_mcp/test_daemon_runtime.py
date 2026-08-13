@@ -705,6 +705,43 @@ def test_resolve_quarantine_model_refuses_unknown_provider_id() -> None:
         _resolve_quarantine_model("openai", settings)
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_resolve_quarantine_model_refuses_blank_deepseek_model(blank: str) -> None:
+    """A blank deepseek model refuses PRE-SPAWN rather than laundering downstream.
+
+    The exact analogue of ``test_resolve_quarantine_base_url_refuses_blank_deepseek_base_url``
+    below, on the OTHER ``Settings`` field the deepseek branch reuses — but with NO primary
+    guard behind it: unlike ``deepseek_base_url``, ``deepseek_model`` has no reject-blank
+    ``field_validator``, so a plain ``ALFRED_DEEPSEEK_MODEL=`` constructs a valid
+    ``Settings`` (asserted here by using the REAL constructor, not ``model_construct``)
+    and would thread an empty model id into the child env. Every extraction then fails at
+    the provider API, and the dispatch retry loop launders that into a generic
+    ``cannot_extract``.
+    """
+    settings = Settings(
+        deepseek_api_key=SecretStr("sk-test"), environment="test", deepseek_model=blank
+    )
+    # The blank really did survive Settings validation — this guard is not shadowed
+    # by a primary validator (which is what makes it load-bearing rather than dead).
+    assert settings.deepseek_model == blank
+    with pytest.raises(ValueError, match="blank"):
+        _resolve_quarantine_model("deepseek", settings)
+
+
+def test_resolve_quarantine_model_allows_blank_deepseek_model_for_anthropic() -> None:
+    """Oracle guard: the blank-model refusal is deepseek-ONLY.
+
+    The anthropic branch returns the hardcoded ``_QUARANTINE_MODEL`` and never reads
+    ``deepseek_model`` at all, so a blank there must NOT refuse — otherwise the pair
+    above would stay green under a guard that broke every anthropic deployment whose
+    ``.env`` happens to blank an unrelated DeepSeek setting.
+    """
+    settings = Settings(
+        deepseek_api_key=SecretStr("sk-test"), environment="test", deepseek_model=""
+    )
+    assert _resolve_quarantine_model("anthropic", settings) == _QUARANTINE_MODEL
+
+
 def test_resolve_quarantine_base_url_returns_none_for_anthropic() -> None:
     settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
     assert _resolve_quarantine_base_url("anthropic", settings) is None

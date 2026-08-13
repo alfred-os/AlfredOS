@@ -1112,7 +1112,7 @@ async def _start_async() -> None:
                 boot_id=boot_id,
                 environment_source=source,
             )
-        except QuarantineProviderSeparationCollisionError:
+        except QuarantineProviderSeparationCollisionError as exc:
             # #586: require_quarantine_provider_separation=True and the privileged
             # + quarantine providers collide. REACHABLE via a real boot (an operator
             # opted into the stricter dual-LLM posture and misconfigured it). REFUSE
@@ -1126,6 +1126,21 @@ async def _start_async() -> None:
             # does NOT work (routing.yaml is not read at runtime) and a citation the
             # opt-in ADR-0064 supersedes. The catalogue message names the two env vars
             # that actually change the outcome.
+            #
+            # Log the two colliding ids (review fix): the t() operator message names the
+            # env vars to CHANGE but deliberately not the values, and the closed
+            # DAEMON_BOOT_FAILED_FIELDS schema carries only the reason token — so without
+            # this line the actual collision is nowhere in the boot record, while its
+            # require=False WARN sibling in _comms_boot.py logs both. Same
+            # purely-diagnostic shape as the quarantine_grant_missing log above: it does
+            # not touch the audited failure_reason token or the audit schema. The values
+            # are non-secret routing config (closed-set provider ids, never a key), so
+            # CLAUDE.md hard rule #5 is not in play.
+            log.error(
+                "daemon.boot.quarantine_provider_separation_violated",
+                privileged_provider=settings.primary_provider,
+                quarantine_provider=settings.quarantine_provider,
+            )
             await _refuse_boot(
                 audit,
                 QuarantineProviderSeparationViolatedFailure(),
@@ -1133,6 +1148,11 @@ async def _start_async() -> None:
                 boot_id=boot_id,
                 environment_source=source,
             )
+            # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
+            # line is unreachable defence-in-depth for the type checker's flow, matching
+            # the sibling _refuse_boot arms — and gives the now-bound ``exc`` a use, so
+            # the binding cannot be dropped as unused by a future cleanup.
+            raise AssertionError("unreachable") from exc  # pragma: no cover
         except _ForwardedInboundRegistryMisconfiguredError as exc:
             # Spec B G6-7-4 (#309): a forwarded-inbound kind in the receiver registry
             # needs a promoter the deterministic factory withheld (a structural

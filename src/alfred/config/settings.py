@@ -216,8 +216,9 @@ class Settings(BaseSettings):
     # test_quarantine_provider_literal_matches_allowed_quarantined_providers
     # (tests/unit/config/, this task) is the drift detector, not this comment. A THIRD
     # independent copy of this same two-value set exists in
-    # alfred.state.proposal_payloads (line ~155) — not cross-checked by this plan;
-    # unifying all three is follow-up debt, not blocking this task (prov-003).
+    # alfred.state.proposal_payloads (the Pydantic proposal-payload validator) — that
+    # same test now pins ALL THREE in one three-way equality (review fix), so widening
+    # the set for a new provider must touch every copy in one commit (prov-003).
     # Defaults to "anthropic" — byte-for-byte today's behaviour for every deployment
     # that doesn't set this.
     quarantine_provider: Literal["anthropic", "deepseek"] = "anthropic"

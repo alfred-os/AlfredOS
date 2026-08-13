@@ -147,11 +147,15 @@ def _check_domain(value: str) -> str:
     return value
 
 
-# Closed set: providers the quarantined-LLM config knob may name. Mirrors
-# :data:`alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS`; the
-# closed-set test in :mod:`tests.unit.state.test_proposal_payloads` pins
-# the two sources in lockstep so a new provider lands by widening both
-# constants in one commit.
+# Closed set: providers the quarantined-LLM config knob may name. THIRD copy of
+# this set, mirroring :data:`alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS`
+# and :attr:`alfred.config.settings.Settings.quarantine_provider`'s ``Literal``.
+# ``test_quarantine_provider_literal_matches_allowed_quarantined_providers``
+# (``tests/unit/config/test_settings.py``) is the drift gate that pins ALL THREE in
+# lockstep, so a new provider lands by widening every copy in one commit.
+# (An earlier version of this comment named a lockstep test in
+# ``tests.unit.state.test_proposal_payloads`` — no such test ever existed; the gate
+# now genuinely does, in the file named above.)
 _ALLOWED_QUARANTINED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "deepseek"})
 
 

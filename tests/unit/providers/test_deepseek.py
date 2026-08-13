@@ -528,3 +528,18 @@ async def test_complete_maps_rate_limit_error_to_provider_unavailable(
     req = CompletionRequest(messages=[Message(role="user", content="hi")])
     with pytest.raises(ProviderUnavailableError):
         await deepseek_provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_aclose_delegates_to_sdk_public_close(
+    deepseek_provider: DeepSeekProvider,
+) -> None:
+    """``aclose`` calls the SDK's documented public async close on the ``AsyncOpenAI`` handle
+    (which closes the underlying httpx client + its fd once dialed) — NOT the private
+    ``_client._client`` httpx handle. Mirrors ``test_aclose_delegates_to_sdk_public_close``
+    in test_anthropic.py: the brokered-egress child source (#340 PR2b-golive) awaits this as
+    the D5 sole-fd-owner teardown, and as of #587 the quarantine child can be a DeepSeek
+    child — so this path needs its own direct unit test, not just the transitive coverage a
+    heavier security-layer test gives it."""
+    await deepseek_provider.aclose()
+    deepseek_provider._client.close.assert_awaited_once()

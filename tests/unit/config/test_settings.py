@@ -441,20 +441,39 @@ class TestQuarantineProviderSettings:
     def test_quarantine_provider_literal_matches_allowed_quarantined_providers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Drift cross-check (prov-003): Settings.quarantine_provider's Literal values and
-        _validators._ALLOWED_QUARANTINED_PROVIDERS are two independently-maintained
-        closed sets (a THIRD copy also exists in alfred.state.proposal_payloads — not
-        cross-checked here, tracked as a separate follow-up). This test is the one thing
-        that actually catches the two drifting apart; a code comment alone would not."""
+        """Drift cross-check (prov-003): THREE independently-maintained copies of the
+        quarantine-provider closed set — Settings.quarantine_provider's Literal,
+        alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS (the CLI validator), and
+        alfred.state.proposal_payloads._ALLOWED_QUARANTINED_PROVIDERS (the Pydantic
+        proposal-payload validator, the non-CLI producer path) — must stay equal.
+
+        All three are pinned HERE because nothing else pins them: proposal_payloads'
+        own source comment claims a lockstep test in tests.unit.state.test_proposal_payloads,
+        but no such test exists (verified by grep at the time this was extended) — a
+        comment asserting a gate that isn't there is worse than no comment, so this test
+        is now that gate. Widening the closed set for a new provider must touch all three
+        constants in one commit or this fails.
+
+        A three-way equality, not a chain of two-way ones: a chain lets a middle copy be
+        edited and drag both ends along without the drift ever surfacing as a failure."""
         from typing import get_args
 
-        from alfred.cli._validators import _ALLOWED_QUARANTINED_PROVIDERS
+        from alfred.cli import _validators
+        from alfred.state import proposal_payloads
 
         self._base_env(monkeypatch)
         literal_values = frozenset(
             get_args(Settings.model_fields["quarantine_provider"].annotation)
         )
-        assert literal_values == _ALLOWED_QUARANTINED_PROVIDERS
+        assert (
+            literal_values
+            == _validators._ALLOWED_QUARANTINED_PROVIDERS
+            == proposal_payloads._ALLOWED_QUARANTINED_PROVIDERS
+        )
+        # Oracle guard: a three-way equality of three empty/None-ish objects would also
+        # pass. Pin the live content so the test cannot go vacuous if a refactor turns
+        # any copy into an empty container.
+        assert literal_values == frozenset({"anthropic", "deepseek"})
 
     @pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
     def test_deepseek_base_url_rejects_blank(

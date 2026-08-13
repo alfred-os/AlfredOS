@@ -269,12 +269,24 @@ def test_boot_refuses_when_separation_required_and_providers_collide(
     monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
     monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
 
-    result = CliRunner().invoke(daemon_app, ["start"])
+    with structlog.testing.capture_logs() as logs:
+        result = CliRunner().invoke(daemon_app, ["start"])
 
     assert result.exit_code == 2
     reasons = _boot_failed_reasons(boot_success_env)
     assert "quarantine_provider_separation_violated" in reasons
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The refusal must NAME the colliding ids somewhere in the boot record (review fix).
+    # The t() operator message names the env vars to change but not their values, and
+    # DAEMON_BOOT_FAILED_FIELDS is a closed schema carrying only the reason token — so
+    # the log line is the ONLY place the actual collision appears. Its require=False
+    # WARN sibling below already logs both; this pins the refuse path to parity.
+    violated = [
+        e for e in logs if e["event"] == "daemon.boot.quarantine_provider_separation_violated"
+    ]
+    assert len(violated) == 1, f"expected one loud violation log, got {logs!r}"
+    assert violated[0]["privileged_provider"] == "deepseek", violated
+    assert violated[0]["quarantine_provider"] == "deepseek", violated
     # The operator-facing message must be the t() catalogue string, NOT str(exc).
     # assert_provider_separation()'s own message names routing.yaml [quarantine] as the
     # remedy and cites "spec §5.4" — a remedy that does nothing (routing.yaml is not read

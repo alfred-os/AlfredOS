@@ -449,6 +449,13 @@ def _build_provider(key: str) -> _ProviderFactory:
     which refuses with a bare ``ValueError`` — a stdlib exception, raised after the
     control socket is built, in a function whose contract is that no such thing escapes.
 
+    ``ALFRED_QUARANTINE_BASE_URL`` (#587) is held to that same contract for the ONE
+    provider that needs it: ``deepseek``. An unset/blank value there does not fail at
+    all here — the OpenAI-compatible client constructs happily — so the child would
+    report ``ready`` and fail only on its FIRST extraction, laundered by the dispatch
+    retry loop into a generic ``cannot_extract``. The guard below keeps that fault on
+    the boot path where it belongs.
+
     The ``max_tokens > 0`` guard (Task 15, HARD #7) fires HERE — before the request loop
     that calls ``dispatch_extraction`` is ever entered — so a ``<= 0`` budget can never
     reach the retry loop, where the ``CompletionRequest`` ``>0`` validator's
@@ -515,6 +522,26 @@ def _build_provider(key: str) -> _ProviderFactory:
             "child that cannot resolve a provider (§20.2)"
         )
     base_url = os.environ.get("ALFRED_QUARANTINE_BASE_URL")
+    if provider_id == "deepseek" and not (base_url or "").strip():
+        # §20.2 SECONDARY refuse-boot (HARD #7), the SAME contract as the three guards
+        # above. DeepSeek's OpenAI-compatible client needs an explicit endpoint; Anthropic's
+        # SDK supplies its own default, so this is deepseek-ONLY by design. Without the
+        # guard an unset/blank base_url reaches ``AsyncOpenAI(base_url=None|"")``, which
+        # CONSTRUCTS fine — the child then reports ``ready`` and fails only on the FIRST
+        # EXTRACTION, where the dispatch retry loop LAUNDERS the per-call failure into a
+        # generic ``cannot_extract`` typed refusal. That turns a boot-config fault into a
+        # runtime-extraction fault wearing a costume — precisely the shape the sibling
+        # guards exist to prevent. The host's own pre-spawn
+        # ``_resolve_quarantine_base_url`` refuses the same case, so this closes the
+        # composed gap between the host's validation and this UNVALIDATED env read
+        # (spawn-wiring bug or manual env tampering). The value is host-set routing
+        # config (non-secret / non-T3), but it is not echoed — an unset/blank value has
+        # nothing to name.
+        raise QuarantineChildBootError(
+            "ALFRED_QUARANTINE_BASE_URL must be set for provider_id='deepseek' "
+            "and must not be blank (§20.2) — refusing to boot a child that would "
+            "fail its first extraction instead of its boot check"
+        )
     return _ProviderFactory.from_key(
         key,
         provider_id=provider_id,

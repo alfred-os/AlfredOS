@@ -368,6 +368,15 @@ class _ProviderFactory:
     is defence-in-depth.
     """
 
+    # ``provider_id`` stays ``str``, NOT ``Literal["anthropic", "deepseek"]``, deliberately
+    # (review question, answered empirically). Narrowing it type-checks only if the ONE
+    # producer — ``__main__._build_provider``, reading ``os.environ`` — inserts a ``cast``,
+    # because mypy cannot narrow ``str`` through the ``not in _SUPPORTED_PROVIDER_IDS``
+    # frozenset guard. That cast would assert to the type checker precisely the fact the
+    # runtime guard exists to VERIFY about an untrusted env read, and would leave a static
+    # "guarantee" a future reader could cite to delete the default-deny ``else: raise`` arms
+    # here and in ``BrokeredProviderSource.__init__``. The runtime guards are the real gate;
+    # the annotation must not pretend otherwise.
     provider_id: str
     api_key: str
     model: str

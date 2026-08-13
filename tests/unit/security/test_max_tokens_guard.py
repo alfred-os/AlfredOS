@@ -250,6 +250,57 @@ def test_child_build_provider_refuses_out_of_closed_set_provider(
     assert "anthropic" in str(exc_info.value) and "deepseek" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("blank", [None, "", " ", "\t", "\n"])
+def test_child_build_provider_refuses_deepseek_without_base_url(
+    monkeypatch: pytest.MonkeyPatch, blank: str | None
+) -> None:
+    """``provider_id='deepseek'`` with a missing/blank base_url refuses TYPED at boot.
+
+    Unlike the sibling guards, the absence of this one produced NO error at boot at all:
+    ``AsyncOpenAI(base_url=None|"")`` constructs happily, so the child reported ``ready``
+    and failed only on its FIRST extraction, where the dispatch retry loop LAUNDERS the
+    per-call failure into a generic ``cannot_extract`` typed refusal — a boot-config fault
+    wearing a runtime-extraction costume (HARD #7). The host's own pre-spawn
+    ``_resolve_quarantine_base_url`` refuses the same case; this closes the composed gap
+    for a spawn-wiring bug or manual env tampering.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    if blank is None:
+        monkeypatch.delenv("ALFRED_QUARANTINE_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", blank)
+    with pytest.raises(QuarantineChildBootError, match="ALFRED_QUARANTINE_BASE_URL") as exc_info:
+        child_main._build_provider("realkey")
+    # Typed, not a stdlib exception the operator has to decode (same contract as the
+    # provider-id and budget guards above).
+    assert not isinstance(exc_info.value, ValueError)
+    assert "deepseek" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("missing_base_url", [None, "", "  "])
+def test_child_build_provider_allows_anthropic_without_base_url(
+    monkeypatch: pytest.MonkeyPatch, missing_base_url: str | None
+) -> None:
+    """Oracle guard for the refusal above: the new check is deepseek-ONLY.
+
+    Anthropic's SDK supplies its own endpoint default, so a missing/blank
+    ``ALFRED_QUARANTINE_BASE_URL`` is the NORMAL anthropic case — today's shipped
+    default. Without this pair the refusal test would stay green under a guard that
+    rejected every provider and broke every existing deployment.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "anthropic")
+    if missing_base_url is None:
+        monkeypatch.delenv("ALFRED_QUARANTINE_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", missing_base_url)
+    factory = child_main._build_provider("realkey")
+    assert factory.provider_id == "anthropic"
+
+
 def test_child_supported_provider_ids_match_settings_literal() -> None:
     """The child's closed set stays equal to the host's ``Settings`` ``Literal``.
 

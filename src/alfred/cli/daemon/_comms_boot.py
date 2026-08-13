@@ -41,9 +41,12 @@ from alfred.audit.audit_row_schemas import (
 # boot-wiring unit tests can monkeypatch it.
 from alfred.bootstrap.lifecycle_epoch import current_boot_epoch
 
-# #586: assert_provider_separation() itself is unmodified (design spec §9) — only
-# this new call site + the local exception wrapper below.
-from alfred.bootstrap.quarantine import assert_provider_separation
+# #586: assert_provider_separation()'s own BEHAVIOUR is unmodified (design spec §9) —
+# this file adds the new call site + the local exception wrapper below. The one
+# exception to "unmodified" is provider_ids_collide(), extracted from inside
+# assert_provider_separation() so the not-required WARN path below shares the SAME
+# collision predicate instead of re-implementing the normalisation inline.
+from alfred.bootstrap.quarantine import assert_provider_separation, provider_ids_collide
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
     _emit_or_quarantine,
@@ -718,9 +721,15 @@ async def _build_comms_boot_graph(
 
     # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
     # refusal here can never leak a partially-constructed secret_broker/content_store —
-    # core-003/sec-003). assert_provider_separation() itself is unmodified (design
-    # spec §9) — only this call site, the re-raise, and the not-required+colliding
+    # core-003/sec-003). assert_provider_separation()'s behaviour is unmodified (design
+    # spec §9) — this call site, the re-raise, and the not-required+colliding
     # audited-warning path are new.
+    #
+    # The warn arm calls the SAME provider_ids_collide() predicate assert_provider_separation()
+    # uses internally, never a second inline copy of the .strip().lower() comparison: two
+    # copies of a security predicate drift, and a warn path that stopped agreeing with the
+    # refuse path about what a collision IS would silently emit no operator signal for a
+    # dual-LLM split that had quietly collapsed.
     if settings.require_quarantine_provider_separation:
         try:
             assert_provider_separation(
@@ -729,7 +738,7 @@ async def _build_comms_boot_graph(
             )
         except AlfredError as exc:
             raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
-    elif settings.primary_provider.strip().lower() == settings.quarantine_provider.strip().lower():
+    elif provider_ids_collide(settings.primary_provider, settings.quarantine_provider):
         log.warning(
             "comms.comms_boot.quarantine_provider_separation_not_enforced",
             privileged_provider=settings.primary_provider,

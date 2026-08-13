@@ -27,6 +27,32 @@ from alfred.errors import AlfredError
 from alfred.i18n import t
 
 
+def provider_ids_collide(a: str, b: str) -> bool:
+    """Return ``True`` when two provider ids name the SAME provider.
+
+    The single definition of "same provider" for the whole codebase (#586). Extracted
+    so the two call sites that need it — :func:`assert_provider_separation` below (the
+    ``require_quarantine_provider_separation=True`` refuse path) and the daemon boot
+    graph's ``require_quarantine_provider_separation=False`` *warn* path in
+    ``alfred.cli.daemon._comms_boot`` — cannot silently disagree about what a collision
+    IS. Before this helper the warn path re-implemented the normalisation inline; two
+    copies of a security predicate drift, and the drift is silent in the direction that
+    matters (a collision the warn path fails to notice is a dual-LLM split quietly
+    collapsed with no operator-facing signal at all).
+
+    Normalisation is ``.strip().lower()`` on both sides, so an accidental case /
+    whitespace mismatch in an operator's ``.env`` (``"DeepSeek"`` vs ``"deepseek "``)
+    does not read as two different providers.
+
+    Note the blank case: two blank ids normalise equal and therefore DO collide by this
+    predicate. :func:`assert_provider_separation` never reaches that outcome — it
+    rejects a blank id on either side first, with its own distinct message — so the
+    helper's blank behaviour is only observable on the warn path, where "both undeclared"
+    is correctly reported as a non-separated configuration rather than passed over.
+    """
+    return a.strip().lower() == b.strip().lower()
+
+
 def assert_provider_separation(
     *,
     privileged_provider_id: str,
@@ -41,10 +67,15 @@ def assert_provider_separation(
     enforcement.
 
     Closed-set: provider ids are normalised via ``.strip().lower()``
-    before the comparison so an accidental case / whitespace mismatch
-    in routing.yaml does not silently pass the check. Empty / blank
-    ids on either side fail too — the operator must declare BOTH
-    providers explicitly.
+    before the comparison — delegated to :func:`provider_ids_collide`
+    above, the ONE definition of "same provider", shared with the
+    daemon boot graph's not-required warn path — so an accidental
+    case / whitespace mismatch in routing.yaml does not silently pass
+    the check. Empty / blank ids on either side fail too, checked
+    HERE and before the collision test: the operator must declare BOTH
+    providers explicitly, and "both undeclared" must not be reported
+    as the (different, actionable-in-a-different-way) same-provider
+    error.
 
     Raises :class:`AlfredError` with a t() catalogue message; callers
     propagate this to the operator-facing CLI surface and the bootstrap
@@ -57,7 +88,7 @@ def assert_provider_separation(
     quarantined_normalised = quarantined_provider_id.strip().lower()
     if not privileged_normalised or not quarantined_normalised:
         raise AlfredError(t("bootstrap.providers_blank_error"))
-    if privileged_normalised == quarantined_normalised:
+    if provider_ids_collide(privileged_provider_id, quarantined_provider_id):
         raise AlfredError(
             t(
                 "bootstrap.providers_same_error",
