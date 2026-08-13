@@ -465,11 +465,15 @@ episodic/working-memory fix in place first.
   `clock.now` needs no broker/egress path (§3 item 6), so there is no
   `build_web_fetch_egress_extractor` singleton or `build_tool_registry` broker
   to assert on in this PR — those checks belong to the future web.fetch-
-  activation follow-up, not here. No new adversarial corpus entry: the
-  unknown-tool-name-refused property is already covered at the `dispatch_tool`
-  unit level by the existing `cap-2026-010` corpus entry (#339); PR3 extends
-  that SAME property end-to-end through the newly-live boot graph instead of
-  duplicating it. **Adversarial suite + explicit 100% line+branch on the
+  activation follow-up, not here. The unknown-tool-name-refused property is
+  already covered at the `dispatch_tool` unit level by the existing
+  `cap-2026-010` corpus entry (#339); PR3 extends that SAME property
+  end-to-end through the newly-live boot graph instead of duplicating it.
+  **Update (2026-08-11, Task 2a):** PR3 DID end up shipping two new adversarial
+  corpus entries — `dlp-2026-002`/`dlp-2026-003` — added by a later
+  `/review-plan` pass (sec-003) to close a real DLP-scan gap on the
+  `InternalToolSpec` leg discovered during plan review, not part of the
+  original PR3 scope described above. **Adversarial suite + explicit 100% line+branch on the
   boundary translator are release-blocking** (dual-LLM boundary touched, per
   CLAUDE.md hard rule). Real-provider behaviour is a **manual UAT**, not a
   per-commit paid call: real Discord message → real tool call → real answer.
