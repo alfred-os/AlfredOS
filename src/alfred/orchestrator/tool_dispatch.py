@@ -139,6 +139,45 @@ async def dispatch_tool(
             trace_id=correlation_id,
         )
 
+    class _TotalityGuard:
+        """Tracks whether a terminal audit row has been written for one
+        dispatch, so the outer fallback arm can tell "already classified" from
+        "never audited" (HARD rule #7) without double-auditing or losing a
+        classification (core-001/err-001, `/review-pr` on PR #585).
+
+        The flag is set BEFORE the audit write, not after: if that write
+        itself faults, the outer fallback must not retry with a
+        misclassified "unexpected_error" row that buries the real event
+        (e.g. an ``OutboundCanaryTripped``/clearance-denial). ``raise``
+        deliberately stays at each call site (never inside this helper) —
+        re-raising the active exception across a function boundary works in
+        Python, but keeping it lexically local to each ``except`` block is
+        one less thing to reason about in a trust-boundary chokepoint.
+        """
+
+        def __init__(self) -> None:
+            self.audited = False
+
+        async def escalate(
+            self, *, dispatch_outcome: str, result: str, tool_name: str, result_tier: str
+        ) -> None:
+            self.audited = True
+            await _audit(
+                dispatch_outcome=dispatch_outcome,
+                result=result,
+                tool_name=tool_name,
+                result_tier=result_tier,
+            )
+
+        async def fallback(self, *, tool_name: str, result_tier: str) -> None:
+            if not self.audited:
+                await _audit(
+                    dispatch_outcome="unexpected_error",
+                    result="fault",
+                    tool_name=tool_name,
+                    result_tier=result_tier,
+                )
+
     spec = registry.get(call.name)
     if spec is None:
         await _audit(
@@ -194,24 +233,18 @@ async def dispatch_tool(
         # wrapper added per `/review-plan` finding sec-001, 2026-08-11):
         # CLAUDE.md hard rule #4 requires every outbound path be DLP-scanned
         # by default or carry a declared, test-verified exemption — this leg
-        # had neither. Mirror the ExternalToolSpec leg's `audited`-flag
-        # totality pattern (tool_dispatch.py's downgrade+dlp.scan region),
-        # not just a bare try/except OutboundCanaryTripped — dlp.scan() is
-        # deliberately designed to propagate NON-canary failures too
-        # (broker.redact bugs, DLP's own internal audit-sink failures,
-        # canary-matcher bugs), and those must not escape unaudited either.
-        audited = False
+        # had neither. Mirror the ExternalToolSpec leg's `_TotalityGuard`
+        # pattern (tool_dispatch.py's downgrade+dlp.scan region), not just a
+        # bare try/except OutboundCanaryTripped — dlp.scan() is deliberately
+        # designed to propagate NON-canary failures too (broker.redact bugs,
+        # DLP's own internal audit-sink failures, canary-matcher bugs), and
+        # those must not escape unaudited either.
+        guard = _TotalityGuard()
         try:
             try:
                 clean = dlp.scan(content)
             except OutboundCanaryTripped:
-                # Flag set BEFORE the audit write (not after): if this write itself
-                # faults, the outer handler must not retry with a misclassified
-                # "unexpected_error" row that buries a real T3 canary trip — see
-                # the ExternalToolSpec leg's matching arms below for the same
-                # ordering and rationale.
-                audited = True
-                await _audit(
+                await guard.escalate(
                     dispatch_outcome="dlp_canary",
                     result="quarantined",
                     tool_name=spec.name,
@@ -229,13 +262,7 @@ async def dispatch_tool(
             # sec-003 totality, again: a non-canary dlp.scan() fault (broker
             # bug, DLP-internal audit-sink failure, canary-matcher bug) must
             # still leave a loud terminal row before propagating.
-            if not audited:
-                await _audit(
-                    dispatch_outcome="unexpected_error",
-                    result="fault",
-                    tool_name=spec.name,
-                    result_tier="T2",
-                )
+            await guard.fallback(tool_name=spec.name, result_tier="T2")
             raise
 
     # ExternalToolSpec — the T3 leg. ``dispatch_web_fetch`` already fused
@@ -355,10 +382,10 @@ async def dispatch_tool(
     # unexpected exception — a downgrade-side bug, a non-serialisable downgraded
     # value (``json.dumps`` TypeError), or a non-canary DLP fault — gets the
     # defensive ``unexpected_error``/``fault`` row before re-raising (sec-003,
-    # mirroring the dispatch arm above). ``audited`` records whether an inner arm
-    # already wrote the terminal row, so the broad arm never double-audits nor
-    # mislabels an already-classified refusal.
-    audited = False
+    # mirroring the dispatch arm above). ``_TotalityGuard`` records whether an
+    # inner arm already wrote the terminal row, so the broad arm never
+    # double-audits nor mislabels an already-classified refusal.
+    guard = _TotalityGuard()
     try:
         try:
             # Tightly scoped to the downgrade call ONLY: downgrade_to_orchestrator
@@ -366,11 +393,7 @@ async def dispatch_tool(
             # so this arm cannot mask any other AlfredError (sec-004 / FIX-8d).
             data = await downgrade_to_orchestrator(result.data, gate=gate, audit_writer=audit)
         except AlfredError:
-            # Flag set BEFORE the audit write: if this write itself faults, the
-            # outer handler must not retry with a misclassified "unexpected_error"
-            # row that buries a real clearance denial.
-            audited = True
-            await _audit(
+            await guard.escalate(
                 dispatch_outcome="downgrade_denied",
                 result="refused",
                 tool_name=external.name,
@@ -381,9 +404,7 @@ async def dispatch_tool(
         try:
             clean = dlp.scan(json.dumps(data))
         except OutboundCanaryTripped:
-            # Flag set BEFORE the audit write, same rationale as above.
-            audited = True
-            await _audit(
+            await guard.escalate(
                 dispatch_outcome="dlp_canary",
                 result="quarantined",
                 tool_name=external.name,
@@ -402,12 +423,6 @@ async def dispatch_tool(
         # sec-003 totality: an exception the specific arms did NOT already audit
         # (e.g. json.dumps on a non-serialisable value) must still leave a loud
         # terminal row before propagating. Already-audited refusals fall through
-        # untouched (``audited`` guard) so their classification is preserved.
-        if not audited:
-            await _audit(
-                dispatch_outcome="unexpected_error",
-                result="fault",
-                tool_name=external.name,
-                result_tier="T3",
-            )
+        # untouched (``guard.audited``) so their classification is preserved.
+        await guard.fallback(tool_name=external.name, result_tier="T3")
         raise
