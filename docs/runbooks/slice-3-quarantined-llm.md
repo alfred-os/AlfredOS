@@ -49,10 +49,19 @@ default `"anthropic"`), which determines which `ProviderCapability` flags the
 plugin advertises, which in turn determines the `ExtractionMode` the dispatch
 path selects:
 
-| `ALFRED_QUARANTINE_PROVIDER` | `ProviderCapability` | `ExtractionMode` |
+| `ALFRED_QUARANTINE_PROVIDER` | Declared `ProviderCapability` | `ExtractionMode` |
 | --- | --- | --- |
 | `anthropic` | `NATIVE_CONSTRAINED_GENERATION` | `native_constrained` |
-| `deepseek` (chat or reasoner) | none | `prompt_embedded_fallback` |
+| `deepseek` (`deepseek-chat`) | `JSON_OBJECT_MODE`, `TOOL_USE` | `prompt_embedded_fallback` |
+| `deepseek` (`deepseek-reasoner`, or any unknown model) | none | `prompt_embedded_fallback` |
+
+Both DeepSeek rows land on `prompt_embedded_fallback` because dispatch selects
+the mode on `NATIVE_CONSTRAINED_GENERATION` alone — neither `JSON_OBJECT_MODE`
+nor `TOOL_USE` participates in that decision, so `deepseek-chat`'s two declared
+capabilities are advertised but unused on the quarantine path. They are listed
+here because this table's job is to state what each provider actually declares
+(`_DEEPSEEK_MODEL_CAPABILITIES` in `src/alfred/providers/deepseek.py`); reading
+"none" for `deepseek-chat` would be simply wrong.
 
 `routing.yaml [quarantine].provider` stays as the alfred-config-proposal
 target (the state.git reviewer-gate flow below) and as documentation of the

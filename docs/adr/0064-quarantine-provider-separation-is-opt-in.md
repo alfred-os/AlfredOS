@@ -69,7 +69,25 @@ flag to `True`.
   documents do not silently contradict each other.
 - `assert_provider_separation()`'s own docstring (`bootstrap/quarantine.py`)
   still carries the old citation — out of scope for this PR (design spec
-  §9: reused as-is, unmodified) — filed as a follow-up doc-fix.
+  §9: reused as-is, unmodified) — tracked as follow-up doc-fix #588.
+- **`require=true` checks the SETTING, not the runtime-resolved privileged
+  provider — so it can pass while a real collision exists.** The check
+  compares `Settings.primary_provider` against `Settings.quarantine_provider`.
+  `Settings.primary_provider` is not what determines the privileged provider in
+  production: `build_router` (`src/alfred/cli/_bootstrap.py`) hardcodes
+  DeepSeek as primary and wires Anthropic in as a live fallback whenever
+  `anthropic_api_key` is configured, entirely independent of the
+  `primary_provider` setting — which is otherwise read only for the
+  `alfred status` display string. Consequence, on the shipped defaults
+  (`primary_provider="deepseek"`, `quarantine_provider="anthropic"`):
+  `require=true` PASSES, yet the privileged router's Anthropic fallback is the
+  same provider the quarantine child uses, so a fallback-served privileged turn
+  and a quarantined extraction can land on one provider account. Accepted for
+  now — narrowing it means changing `assert_provider_separation()`'s signature
+  or `build_router`'s wiring, both of which the #586/#587 plan explicitly put
+  out of scope (design spec §9). Read the opt-in flag as "the two configured
+  provider SETTINGS differ", not as "no privileged path can ever reach the
+  quarantine provider".
 
 ## Alternatives considered
 
