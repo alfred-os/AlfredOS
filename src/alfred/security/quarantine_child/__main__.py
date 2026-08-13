@@ -408,6 +408,15 @@ async def main() -> None:
     await _run_mcp_server(source, reader=reader, writer=writer)
 
 
+# #587: the closed set of provider ids the child can actually build (the same two
+# ``build_child_client`` / ``BrokeredProviderSource`` dispatch over, and the same two
+# ``Settings.quarantine_provider``'s ``Literal`` admits host-side — pinned equal by
+# ``test_child_supported_provider_ids_match_settings_literal``). Declared here rather
+# than imported from ``brokered_egress`` so the check stays on the child's egress-free
+# boot path with no extra module load.
+_SUPPORTED_PROVIDER_IDS = frozenset({"anthropic", "deepseek"})
+
+
 def _build_provider(key: str) -> _ProviderFactory:
     """Build the per-child provider FACTORY from the fd-3 key + spawn-env config.
 
@@ -433,6 +442,12 @@ def _build_provider(key: str) -> _ProviderFactory:
     failures on the §20.2 refuse-boot path, so both must present as ONE loud, typed,
     actionable shape that names the offending variable (HARD #7) — never a stdlib
     exception the operator has to decode, and never a silent model default.
+
+    ``ALFRED_QUARANTINE_PROVIDER`` (#587) is held to that SAME contract: it is validated
+    against :data:`_SUPPORTED_PROVIDER_IDS` here, before ``_ProviderFactory.from_key``.
+    Without that check an out-of-set id reaches ``BrokeredProviderSource.__init__``,
+    which refuses with a bare ``ValueError`` — a stdlib exception, raised after the
+    control socket is built, in a function whose contract is that no such thing escapes.
 
     The ``max_tokens > 0`` guard (Task 15, HARD #7) fires HERE — before the request loop
     that calls ``dispatch_extraction`` is ever entered — so a ``<= 0`` budget can never
@@ -482,6 +497,23 @@ def _build_provider(key: str) -> _ProviderFactory:
     # #587: default "anthropic" when unset (matches Settings.quarantine_provider's
     # default) — a dormant/unit spawn or a pre-#587 host omits this var entirely.
     provider_id = os.environ.get("ALFRED_QUARANTINE_PROVIDER", "anthropic")
+    if provider_id not in _SUPPORTED_PROVIDER_IDS:
+        # §20.2 SECONDARY refuse-boot (HARD #7), same shape as the KeyError and
+        # max_tokens guards above. Unreachable from a well-behaved HOST today —
+        # Settings.quarantine_provider is Literal-validated before it ever reaches this
+        # env var — but the guard closes the composed gap between the host's validation
+        # and this UNVALIDATED env read: a supervisor-side spawn-wiring bug or manual env
+        # tampering would otherwise carry an out-of-set id all the way to
+        # BrokeredProviderSource.__init__, which refuses with a bare stdlib ``ValueError``
+        # — exactly the "stdlib exception the operator has to decode" this function's
+        # contract promises never happens. Refusing HERE also keeps the refusal on the
+        # boot path (before ``ready``) rather than after the control socket is built.
+        # The value is host-set routing config (non-secret / non-T3), safe to echo.
+        raise QuarantineChildBootError(
+            f"ALFRED_QUARANTINE_PROVIDER must be one of "
+            f"{sorted(_SUPPORTED_PROVIDER_IDS)}, got {provider_id!r} — refusing to boot a "
+            "child that cannot resolve a provider (§20.2)"
+        )
     base_url = os.environ.get("ALFRED_QUARANTINE_BASE_URL")
     return _ProviderFactory.from_key(
         key,

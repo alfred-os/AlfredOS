@@ -427,9 +427,27 @@ def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | 
     SDK has its own default. Reuses ``Settings.deepseek_base_url`` (the SAME setting the
     privileged path already reads) rather than introducing a second, quarantine-specific
     base-URL setting an operator would have to keep in sync with the first.
+
+    The BLANK-string guard (HARD #7) is not redundant with ``build_child_client``'s
+    ``base_url is None`` refusal: ``Settings.deepseek_base_url`` is ``str``-typed and
+    always present, so that ``None`` check can never fire for the deepseek branch — but
+    ``ALFRED_DEEPSEEK_BASE_URL=""`` passes it, reaches ``AsyncOpenAI(base_url="")``, and
+    surfaces only as an untyped per-extraction failure that the dispatch retry loop
+    LAUNDERS into a generic ``cannot_extract`` — a boot-time misconfiguration wearing a
+    runtime-extraction-failure costume. Refusing here keeps it pre-spawn and loud.
     """
     if provider_id == "deepseek":
-        return settings.deepseek_base_url
+        base_url = settings.deepseek_base_url
+        if not base_url.strip():
+            raise ValueError(
+                "_resolve_quarantine_base_url: provider_id='deepseek' but "
+                f"deepseek_base_url is blank ({base_url!r}) — refusing to spawn a "
+                "quarantine child whose every extraction would fail an unusable "
+                "endpoint and launder into cannot_extract (HARD #7). Set "
+                "ALFRED_DEEPSEEK_BASE_URL to the DeepSeek API base "
+                "(default https://api.deepseek.com/v1)"
+            )
+        return base_url
     if provider_id == "anthropic":
         return None
     raise ValueError(

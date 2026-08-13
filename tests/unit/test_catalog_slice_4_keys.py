@@ -150,6 +150,11 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # #340 golive Task 15 (§17 / §20.2 fail-loud): a <=0 quarantine max_tokens budget
     # refuses boot pre-spawn rather than laundering into a cannot_extract typed refusal.
     "daemon.boot.quarantine_max_tokens_invalid",
+    # #586 (ADR-0064): with ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true, a
+    # privileged/quarantine provider collision refuses boot. Its own catalogue key
+    # rather than assert_provider_separation()'s raw message, which names routing.yaml
+    # (not read at runtime) and the superseded spec §5.4 as the remedy.
+    "daemon.boot.quarantine_provider_separation_violated",
     # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
     # in `alfred daemon start` output (not just an audit-log SQL query).
     "daemon.comms.adapter_spawned",

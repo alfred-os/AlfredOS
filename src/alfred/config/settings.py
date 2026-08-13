@@ -639,6 +639,36 @@ class Settings(BaseSettings):
             return tuple(part.strip() for part in value.split(",") if part.strip())
         return value
 
+    @field_validator("deepseek_base_url")
+    @classmethod
+    def _reject_blank_deepseek_base_url(cls, v: str) -> str:
+        """Reject a blank/whitespace ``ALFRED_DEEPSEEK_BASE_URL``.
+
+        The sibling ``_normalize_egress_proxy_url`` can map blank to ``None`` because
+        its field is optional and a downstream seam fails closed on ``None``. This field
+        is a required ``str`` with a real default, and BOTH consumers treat "present"
+        as "usable": ``build_router`` hands it to the privileged ``DeepSeekProvider``,
+        and (#587) ``_resolve_quarantine_base_url`` hands it to the quarantine child.
+        ``build_child_client``'s ``base_url is None`` refusal therefore cannot fire for
+        a blank — ``AsyncOpenAI(base_url="")`` constructs fine and only fails per call,
+        where the quarantine dispatch retry loop LAUNDERS it into a generic
+        ``cannot_extract`` (CLAUDE.md hard rule #7 — a boot-time misconfiguration wearing
+        a runtime-failure costume).
+
+        Refusing at Settings construction routes it to the EXISTING audited
+        ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row) rather
+        than an uncaught crash (exit 1, no audit row — the #368 anti-pattern). Raw
+        English, no ``t()``: Settings loads before the translator, exactly as
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
+        """
+        if not v.strip():
+            raise ValueError(
+                "deepseek_base_url must not be blank — set ALFRED_DEEPSEEK_BASE_URL to "
+                "the DeepSeek API base (default https://api.deepseek.com/v1) or leave it "
+                "unset to take that default"
+            )
+        return v
+
     @field_validator("deepseek_api_key")
     @classmethod
     def _reject_placeholder_key(cls, v: SecretStr) -> SecretStr:

@@ -437,10 +437,17 @@ class _FakeQuarantineChildIO:
     inbound turn is driven); ``aclose`` is an idempotent no-op.
     """
 
-    def __init__(self, *, provider_key: str) -> None:
+    def __init__(self, *, provider_key: str, spawn_kwargs: dict[str, Any] | None = None) -> None:
         # Recorded so a test can assert the key flowed into the spawn (the real
         # spawn delivers it over fd 3; here we only prove the seam carried it).
         self.provider_key = provider_key
+        # #586/#587: the remaining (non-secret) golive spawn kwargs — provider,
+        # base_url, model, max_tokens, control_fd, egress_config. Recorded rather than
+        # discarded so a BOOT-level test can prove an operator's `.env` provider choice
+        # survives the whole `.env` -> Settings -> _comms_boot -> builder -> spawn chain,
+        # not merely the daemon_runtime-unit hop. prov-001 was exactly a value that
+        # resolved correctly and then never reached the spawn call.
+        self.spawn_kwargs: dict[str, Any] = dict(spawn_kwargs or {})
         # Counts aclose() calls so a test can prove the daemon reaps the live child
         # on its exit paths (CR #255 — the boot graph's quarantine teardown).
         self.aclose_calls = 0
@@ -473,12 +480,14 @@ def patch_quarantine_child_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeQ
     spawned: list[_FakeQuarantineChildIO] = []
 
     async def _fake_spawn(
-        *, provider_key: str, refusal_recorder: object = None, **_golive: object
+        *, provider_key: str, refusal_recorder: object = None, **golive: Any
     ) -> _FakeQuarantineChildIO:
-        # ``**_golive`` absorbs the #340 PR2b-golive Task-8 spawn kwargs the builder
-        # now passes (control_fd / egress_config / model / max_tokens / ssl_cert_file);
-        # this boot-wiring fake proves the seam + key flow, not the golive config.
-        child = _FakeQuarantineChildIO(provider_key=provider_key)
+        # ``**golive`` absorbs the #340 PR2b-golive Task-8 spawn kwargs the builder
+        # passes (control_fd / egress_config / model / max_tokens / ssl_cert_file) plus
+        # #587's provider / base_url. They are RECORDED on the fake (not discarded) so a
+        # boot test can assert the golive config actually reached the spawn — see
+        # _FakeQuarantineChildIO.spawn_kwargs.
+        child = _FakeQuarantineChildIO(provider_key=provider_key, spawn_kwargs=golive)
         spawned.append(child)
         return child
 

@@ -415,11 +415,14 @@ class _ProviderFactory:
 
     def __repr__(self) -> str:
         # Key-free repr (anti-leak, the _DeterministicProvider discipline): the api_key must never
-        # reach a log line or a traceback frame (HARD #5 / no-secret-in-logs). provider_id/base_url
-        # are non-secret and safe to include.
+        # reach a log line or a traceback frame (HARD #5 / no-secret-in-logs). provider_id, model,
+        # max_tokens and base_url are all non-secret host-set routing config, so all four are
+        # included — the repr's job is to make a misrouted child diagnosable, and #587 made
+        # base_url a per-deployment variable rather than a constant, so omitting it would hide
+        # the exact axis most likely to be misconfigured.
         return (
             f"_ProviderFactory(provider_id={self.provider_id!r}, model={self.model!r}, "
-            f"max_tokens={self.max_tokens})"
+            f"max_tokens={self.max_tokens}, base_url={self.base_url!r})"
         )
 
 

@@ -1112,17 +1112,24 @@ async def _start_async() -> None:
                 boot_id=boot_id,
                 environment_source=source,
             )
-        except QuarantineProviderSeparationCollisionError as exc:
+        except QuarantineProviderSeparationCollisionError:
             # #586: require_quarantine_provider_separation=True and the privileged
             # + quarantine providers collide. REACHABLE via a real boot (an operator
             # opted into the stricter dual-LLM posture and misconfigured it). REFUSE
             # boot fail-closed (audited, exit 2) rather than let the bare AlfredError
             # assert_provider_separation() raises propagate uncaught (the #368
             # anti-pattern — arch-002/sec-001/test-001).
+            #
+            # A t() catalogue message, NOT str(exc), for the same reason as every
+            # sibling arm: assert_provider_separation()'s own message predates this
+            # branch and names routing.yaml [quarantine] + "spec §5.4" — a remedy that
+            # does NOT work (routing.yaml is not read at runtime) and a citation the
+            # opt-in ADR-0064 supersedes. The catalogue message names the two env vars
+            # that actually change the outcome.
             await _refuse_boot(
                 audit,
                 QuarantineProviderSeparationViolatedFailure(),
-                str(exc),
+                t("daemon.boot.quarantine_provider_separation_violated"),
                 boot_id=boot_id,
                 environment_source=source,
             )
