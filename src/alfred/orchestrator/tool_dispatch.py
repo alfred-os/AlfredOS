@@ -205,13 +205,18 @@ async def dispatch_tool(
             try:
                 clean = dlp.scan(content)
             except OutboundCanaryTripped:
+                # Flag set BEFORE the audit write (not after): if this write itself
+                # faults, the outer handler must not retry with a misclassified
+                # "unexpected_error" row that buries a real T3 canary trip — see
+                # the ExternalToolSpec leg's matching arms below for the same
+                # ordering and rationale.
+                audited = True
                 await _audit(
                     dispatch_outcome="dlp_canary",
                     result="quarantined",
                     tool_name=spec.name,
                     result_tier="T2",
                 )
-                audited = True
                 raise  # ESCALATE — a canary in an internal tool's T2 is a serious leak.
             await _audit(
                 dispatch_outcome="dispatched",
@@ -361,25 +366,29 @@ async def dispatch_tool(
             # so this arm cannot mask any other AlfredError (sec-004 / FIX-8d).
             data = await downgrade_to_orchestrator(result.data, gate=gate, audit_writer=audit)
         except AlfredError:
+            # Flag set BEFORE the audit write: if this write itself faults, the
+            # outer handler must not retry with a misclassified "unexpected_error"
+            # row that buries a real clearance denial.
+            audited = True
             await _audit(
                 dispatch_outcome="downgrade_denied",
                 result="refused",
                 tool_name=external.name,
                 result_tier="T3",
             )
-            audited = True
             raise  # ESCALATE — a clearance denial is a security refusal, not a result.
 
         try:
             clean = dlp.scan(json.dumps(data))
         except OutboundCanaryTripped:
+            # Flag set BEFORE the audit write, same rationale as above.
+            audited = True
             await _audit(
                 dispatch_outcome="dlp_canary",
                 result="quarantined",
                 tool_name=external.name,
                 result_tier="T3",
             )
-            audited = True
             raise  # ESCALATE — a canary in the EXTRACTED T2 is a serious leak.
 
         await _audit(
