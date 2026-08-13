@@ -275,6 +275,17 @@ def test_boot_refuses_when_separation_required_and_providers_collide(
     reasons = _boot_failed_reasons(boot_success_env)
     assert "quarantine_provider_separation_violated" in reasons
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The operator-facing message must be the t() catalogue string, NOT str(exc).
+    # assert_provider_separation()'s own message names routing.yaml [quarantine] as the
+    # remedy and cites "spec §5.4" — a remedy that does nothing (routing.yaml is not read
+    # at runtime) and a citation ADR-0064 supersedes. Whitespace-collapsed because the CLI
+    # renderer hard-wraps to the terminal width, so a raw substring can straddle a newline.
+    flat = " ".join(result.output.split())
+    assert "spec §5.4" not in flat, flat
+    assert "PRD §6.4" not in flat, flat
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in flat, flat
+    assert "ALFRED_QUARANTINE_PROVIDER=" in flat, flat
+    assert "0064" in flat, flat
 
 
 def test_boot_proceeds_when_separation_required_and_providers_differ(
@@ -285,7 +296,6 @@ def test_boot_proceeds_when_separation_required_and_providers_differ(
 ) -> None:
     """require=True + the (default) distinct providers -> boots fine, no refusal."""
     del quarantine_registry
-    del patch_quarantine_child_spawn
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
@@ -297,6 +307,12 @@ def test_boot_proceeds_when_separation_required_and_providers_differ(
 
     assert result.exit_code == 0, result.output
     assert _boot_failed_reasons(boot_success_env) == set()
+    # ...and the DEFAULT provider reached the spawn (the anthropic axis of the same
+    # end-to-end chain the deepseek test below pins).
+    assert len(patch_quarantine_child_spawn) == 1, patch_quarantine_child_spawn
+    spawn_kwargs = patch_quarantine_child_spawn[0].spawn_kwargs
+    assert spawn_kwargs["provider"] == "anthropic", spawn_kwargs
+    assert spawn_kwargs["base_url"] is None, spawn_kwargs
 
 
 def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_collide(
@@ -310,7 +326,6 @@ def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_c
     durable audit row via _emit_or_quarantine, since the security-relevant fact
     would otherwise leave no queryable trace)."""
     del quarantine_registry
-    del patch_quarantine_child_spawn
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
@@ -334,3 +349,49 @@ def test_boot_proceeds_with_warning_when_separation_not_required_and_providers_c
     # sec-r2-001's oracle: the row must actually carry boot_id (not just exist),
     # or a regression back to the boot_id-less shape would ship green.
     assert warn_rows[0]["subject"]["boot_id"], warn_rows
+    # #587 end-to-end: the operator's ALFRED_QUARANTINE_PROVIDER=deepseek must survive
+    # the WHOLE chain (`.env` -> Settings -> _comms_boot -> _build_comms_inbound_extractor
+    # -> spawn), not just the daemon_runtime-unit hop. prov-001 was a value that resolved
+    # correctly and then never reached the spawn — closing that at boot level too means a
+    # broken hop ANYWHERE in the chain fails a test.
+    assert len(patch_quarantine_child_spawn) == 1, patch_quarantine_child_spawn
+    spawn_kwargs = patch_quarantine_child_spawn[0].spawn_kwargs
+    # Literal expected values, NOT re-derived through _resolve_quarantine_* — an oracle
+    # that reused the resolver would pass even if the resolver itself were wrong.
+    assert spawn_kwargs["provider"] == "deepseek", spawn_kwargs
+    assert spawn_kwargs["base_url"] == "https://api.deepseek.com/v1", spawn_kwargs
+    assert spawn_kwargs["model"] == "deepseek-chat", spawn_kwargs
+
+
+def test_boot_refuses_audited_when_deepseek_base_url_is_blank(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """``ALFRED_DEEPSEEK_BASE_URL=`` refuses boot AUDITED (exit 2), not uncaught (exit 1).
+
+    A blank base_url is reachable operator misconfiguration, and it is invisible to
+    ``build_child_client``'s ``base_url is None`` guard: ``AsyncOpenAI(base_url="")``
+    constructs fine and fails only per call, where the quarantine dispatch retry loop
+    LAUNDERS it into a generic ``cannot_extract`` — a boot-time misconfiguration wearing
+    a runtime-failure costume (CLAUDE.md hard rule #7).
+
+    The oracle is the AUDIT ROW, not just the exit code: an uncaught ``ValueError`` out
+    of ``_resolve_quarantine_base_url`` would exit 1 with NO ``daemon.boot.failed`` row
+    (the #368 anti-pattern this file exists to pin). Refusing at Settings construction
+    routes it to the pre-existing ``settings_invalid`` refusal instead.
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "")
+    _patch_comms_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2, result.output
+    assert "settings_invalid" in _boot_failed_reasons(boot_success_env)
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []

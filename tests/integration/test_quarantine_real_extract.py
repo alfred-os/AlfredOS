@@ -112,6 +112,11 @@ _EXPECTED_CONNECT_PREFIX = f"CONNECT {_ORIGIN_HOST}:{_ORIGIN_PORT} HTTP/".encode
 # since this file has no existing precedent for parametrizing an _ORIGIN_HOST-keyed
 # fixture; a new sibling CA/proxy pair mirrors the Anthropic ones exactly instead.
 _DEEPSEEK_ORIGIN_HOST = "api.deepseek.com"
+# The DeepSeek-path counterpart of _EXPECTED_CONNECT_PREFIX. Same port: the child's
+# base_url is ``https://api.deepseek.com/v1``, so httpcore's proxy still CONNECTs to
+# :443. HARD #5 is a per-provider fact — the expected first bytes name the origin the
+# child dialled — so the assertion helper takes the prefix rather than hardcoding one.
+_EXPECTED_DEEPSEEK_CONNECT_PREFIX = f"CONNECT {_DEEPSEEK_ORIGIN_HOST}:{_ORIGIN_PORT} HTTP/".encode()
 
 _MODEL = "claude-haiku-4-5"
 _MAX_TOKENS = 8192
@@ -787,13 +792,26 @@ async def _spawn_real_child(
     )
 
 
-def _assert_hard5_first_bytes(proxy: _CannedAnthropicProxy, *, min_used: int) -> None:
+def _assert_hard5_first_bytes(
+    proxy: _CannedAnthropicProxy,
+    *,
+    min_used: int,
+    expected_prefix: bytes = _EXPECTED_CONNECT_PREFIX,
+) -> None:
     """HARD #5: every non-empty first-bytes blob is the child's CONNECT; >= min_used seen.
 
     Empty blobs are brokered sockets the child drained+closed without a byte (the
     unused pre-brokered sockets an early-success retry never consumed). NO blob may
     be anything other than the child's ``CONNECT`` line — a core-authored payload
     would appear here as non-CONNECT first bytes.
+
+    ``expected_prefix`` names the origin the CHILD is configured to dial (#587): the
+    assertion is "the first bytes are the child's CONNECT to ITS provider", which is a
+    per-provider fact, not a constant. It defaults to the Anthropic prefix because every
+    caller but one runs the Anthropic path; the DeepSeek test passes
+    :data:`_EXPECTED_DEEPSEEK_CONNECT_PREFIX`. Passing the wrong prefix fails loudly
+    (the CONNECT host would not match), so the default cannot weaken the check — it can
+    only make a mismatched call fail with an obvious message.
     """
     recorded = proxy.first_bytes()
     used = [fb for fb in recorded if fb]
@@ -803,9 +821,10 @@ def _assert_hard5_first_bytes(proxy: _CannedAnthropicProxy, *, min_used: int) ->
     )
     for blob in used:
         first_line = blob.split(b"\r\n", 1)[0]
-        assert blob.startswith(_EXPECTED_CONNECT_PREFIX), (
+        assert blob.startswith(expected_prefix), (
             "HARD #5: the core must write ZERO application bytes to the brokered "
-            f"socket — the first bytes must be the child's CONNECT, got {first_line!r}"
+            f"socket — the first bytes must be the child's CONNECT ({expected_prefix!r}), "
+            f"got {first_line!r}"
         )
 
 
@@ -1164,6 +1183,15 @@ async def test_real_extract_deepseek_returns_extracted_via_prompt_embedded_fallb
             assert isinstance(result, Extracted), result
             assert result.data == {"text": _CANNED_TEXT, "intent": _CANNED_INTENT}
             assert result.extraction_mode == "prompt_embedded_fallback"
+
+            # HARD #5 on the DeepSeek path too — the same discipline the six sibling
+            # Anthropic tests apply. The core must write ZERO application-layer bytes
+            # onto the brokered fd; the first bytes must be the CHILD's CONNECT, and
+            # here specifically a CONNECT to api.deepseek.com (proving the #587
+            # provider/base_url threading reached the WIRE, not just the spawn kwargs).
+            _assert_hard5_first_bytes(
+                proxy, min_used=1, expected_prefix=_EXPECTED_DEEPSEEK_CONNECT_PREFIX
+            )
 
             extract_rows = audit_writer.rows_for("quarantine.extract")
             assert len(extract_rows) == 1, extract_rows

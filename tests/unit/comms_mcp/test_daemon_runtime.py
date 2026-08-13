@@ -723,6 +723,28 @@ def test_resolve_quarantine_base_url_refuses_unknown_provider_id() -> None:
         _resolve_quarantine_base_url("openai", settings)
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_resolve_quarantine_base_url_refuses_blank_deepseek_base_url(blank: str) -> None:
+    """A blank deepseek base_url refuses PRE-SPAWN rather than laundering downstream.
+
+    Defence-in-depth behind the PRIMARY ``Settings._reject_blank_deepseek_base_url``
+    guard (which is what an operator's ``ALFRED_DEEPSEEK_BASE_URL=`` actually trips, on
+    the audited ``settings_invalid`` boot path). This one covers every other route into
+    the resolver — a directly-constructed ``Settings``, a future settings source, a
+    caller that builds its own config object. ``build_child_client``'s ``base_url is
+    None`` check cannot catch it (``""`` is not ``None``), so without this the blank
+    reaches ``AsyncOpenAI(base_url="")`` and surfaces as a per-extraction failure the
+    retry loop launders into ``cannot_extract``.
+
+    Constructed via ``model_construct`` deliberately: it BYPASSES the Settings validator,
+    which is the only way to prove this guard is independent of the primary one rather
+    than dead code shadowed by it.
+    """
+    settings = Settings.model_construct(deepseek_base_url=blank)
+    with pytest.raises(ValueError, match="blank"):
+        _resolve_quarantine_base_url("deepseek", settings)
+
+
 async def test_build_extractor_spawns_control_fd_with_provider_config(
     fresh_registry_allow_system: HookRegistry,
     monkeypatch: pytest.MonkeyPatch,
@@ -791,6 +813,12 @@ async def test_build_extractor_spawns_control_fd_with_provider_config(
     assert seen["egress_config"] is cfg
     assert seen["model"] == "claude-haiku-4-5"
     assert seen["max_tokens"] == 8192
+    # The provider AXES, not just the model axis: prov-001 was "a resolved value never
+    # reached the spawn call". `provider` and `base_url` are resolved the same way and
+    # threaded through the same kwargs, so they need the same oracle — otherwise deleting
+    # `provider=` / `base_url=` from the spawn call leaves the whole unit suite green.
+    assert seen["provider"] == "anthropic"
+    assert seen["base_url"] is None  # anthropic's SDK supplies its own endpoint
 
 
 async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepseek_provider(
@@ -847,6 +875,13 @@ async def test_build_comms_inbound_extractor_resolves_deepseek_model_for_deepsee
 
     assert captured["model"] == settings.deepseek_model
     assert captured["model"] != _QUARANTINE_MODEL
+    # prov-001 was ONE axis (model) of a three-axis threading. The other two are resolved
+    # identically and reach the child through the same **kwargs, so pin them here too:
+    # without these, deleting `provider=`/`base_url=` from daemon_runtime.py's
+    # spawn_quarantine_child_io(...) call reintroduces prov-001's exact shape (a child
+    # dialling Anthropic with a DeepSeek key/model) with the unit suite fully green.
+    assert captured["provider"] == "deepseek"
+    assert captured["base_url"] == settings.deepseek_base_url
 
 
 async def test_build_extractor_refuses_on_blank_egress_proxy_before_spawn(

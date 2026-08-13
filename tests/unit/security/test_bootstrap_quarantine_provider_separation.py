@@ -1,13 +1,22 @@
-"""Provider-separation invariant — AI-3 fix.
+"""Provider-separation predicate — AI-3 fix.
 
-``config/routing.yaml`` documents that the privileged provider and the
-quarantined provider "MUST differ" by default (spec §5.4, PRD §6.4).
-Prior to PR-S3-4 fixup the only enforcement was the routing.yaml
-comment — an operator who set both ids to the same value would boot a
-system where the dual-LLM split is structurally a single-LLM split.
+Separating the privileged provider from the quarantined one is
+defence-in-depth: with both set to the same provider, the dual-LLM split is
+structurally a single-LLM split, and one compromised provider account can see
+privileged orchestrator context and raw T3 content together.
 
-These tests pin the bootstrap-time assertion in
-:func:`alfred.bootstrap.quarantine.assert_provider_separation`.
+It is **opt-in**, NOT required by default — see
+[ADR-0064](../../../docs/adr/0064-quarantine-provider-separation-is-opt-in.md).
+Do not cite "spec §5.4 / PRD §6.4" for a must-differ invariant: no PRD section
+states one, and the design spec's §5.4 default-refuse / reviewer-gated
+mechanism is superseded by that ADR. `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true`
+is what arms the check; left at its `false` default a collision boots, logged
+and audited once.
+
+These tests pin the predicate itself —
+:func:`alfred.bootstrap.quarantine.assert_provider_separation` — independently
+of whether a caller has armed it. Its opt-in boot call site is covered in
+``tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py``.
 """
 
 from __future__ import annotations

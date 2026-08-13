@@ -263,15 +263,24 @@ def test_build_provider_returns_factory_from_key(monkeypatch: pytest.MonkeyPatch
 
     The frozen factory holds the api key but never exposes it in ``repr`` (HARD #5 /
     no-secret-in-logs), and constructs NO network client at boot (sbx-2026-024 pins the
-    no-socket property directly).
+    no-socket property directly). The repr DOES carry every non-secret routing field
+    (provider_id / model / max_tokens / base_url) — #587 made the last two per-deployment
+    values, and a repr that hides them cannot diagnose a misrouted child.
     """
     from alfred.security.quarantine_child.brokered_egress import _ProviderFactory
 
-    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-test-model")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
     monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "https://api.deepseek.com/v1")
     factory = quarantine_child._build_provider("sk-secret")
     assert isinstance(factory, _ProviderFactory)
-    assert "sk-secret" not in repr(factory)
+    rendered = repr(factory)
+    assert "sk-secret" not in rendered
+    assert "deepseek" in rendered  # provider_id
+    assert "deepseek-chat" in rendered  # model
+    assert "8192" in rendered  # max_tokens
+    assert "https://api.deepseek.com/v1" in rendered  # base_url
 
 
 async def test_write_boot_ready_emits_ready_frame_via_writer() -> None:

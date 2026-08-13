@@ -218,3 +218,50 @@ def test_child_build_provider_defaults_to_anthropic_when_env_unset(
     factory = child_main._build_provider("realkey")
     assert factory.provider_id == "anthropic"
     assert factory.base_url is None
+
+
+@pytest.mark.parametrize("bad", ["openai", "", "Anthropic", " deepseek", "deepseek\n"])
+def test_child_build_provider_refuses_out_of_closed_set_provider(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """An out-of-closed-set ``ALFRED_QUARANTINE_PROVIDER`` refuses TYPED at boot.
+
+    Same contract as the unset-var and unparseable-budget guards above: a boot-config
+    fault must present as :class:`QuarantineChildBootError`, never a stdlib exception the
+    operator has to decode. Before this guard the value flowed unvalidated into
+    ``BrokeredProviderSource.__init__``, which refuses with a bare ``ValueError`` — and
+    does so AFTER the fd-4 control socket is built, past the boot-refusal window.
+
+    Unreachable from a well-behaved host (``Settings.quarantine_provider`` is
+    ``Literal``-validated first), so this guard exists for the supervisor-spawn-wiring-bug
+    and env-tampering cases — the same defence-in-depth rationale as every other §20.2
+    SECONDARY refusal in this function. The case/whitespace variants are pinned
+    deliberately: the child does NOT normalise, so ``"Anthropic"`` is out-of-set here.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", bad)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("realkey")
+    assert not isinstance(exc_info.value, ValueError)
+    # Actionable: names the offending variable AND the closed set, so the operator does
+    # not have to read the source to learn what is admissible.
+    assert "ALFRED_QUARANTINE_PROVIDER" in str(exc_info.value)
+    assert "anthropic" in str(exc_info.value) and "deepseek" in str(exc_info.value)
+
+
+def test_child_supported_provider_ids_match_settings_literal() -> None:
+    """The child's closed set stays equal to the host's ``Settings`` ``Literal``.
+
+    The two live in different processes (host validates before spawn; the child
+    re-validates the env it is handed), so nothing else keeps them in step. If a future
+    provider is added host-side only, the child would refuse a value the host considers
+    valid — a boot failure with a confusing message; the reverse would silently reopen
+    the gap this guard closes.
+    """
+    from typing import get_args
+
+    from alfred.config.settings import Settings
+
+    host_literal = set(get_args(Settings.model_fields["quarantine_provider"].annotation))
+    assert host_literal == set(child_main._SUPPORTED_PROVIDER_IDS)

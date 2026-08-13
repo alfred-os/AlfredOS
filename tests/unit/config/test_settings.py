@@ -455,3 +455,30 @@ class TestQuarantineProviderSettings:
             get_args(Settings.model_fields["quarantine_provider"].annotation)
         )
         assert literal_values == _ALLOWED_QUARANTINED_PROVIDERS
+
+    @pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
+    def test_deepseek_base_url_rejects_blank(
+        self, monkeypatch: pytest.MonkeyPatch, blank: str
+    ) -> None:
+        """A blank ``ALFRED_DEEPSEEK_BASE_URL`` refuses at Settings construction.
+
+        Both consumers treat "present" as "usable" — ``build_router`` for the privileged
+        DeepSeek client, ``_resolve_quarantine_base_url`` for the #587 quarantine child —
+        and ``AsyncOpenAI(base_url="")`` constructs happily, failing only per call, where
+        the quarantine retry loop launders it into a generic ``cannot_extract``. Refusing
+        here puts the failure on the audited ``settings_invalid`` boot path instead.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", blank)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)):
+            Settings()
+
+    def test_deepseek_base_url_accepts_a_real_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Oracle guard for the blank-rejection above: a normal override still passes,
+        so the test pair cannot both stay green under a validator that rejects
+        everything."""
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://proxy.internal/v1")
+        assert Settings().deepseek_base_url == "https://proxy.internal/v1"
