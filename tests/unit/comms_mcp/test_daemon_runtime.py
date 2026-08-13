@@ -765,7 +765,7 @@ def test_resolve_quarantine_base_url_refuses_unknown_provider_id() -> None:
 def test_resolve_quarantine_base_url_refuses_blank_deepseek_base_url(blank: str) -> None:
     """A blank deepseek base_url refuses PRE-SPAWN rather than laundering downstream.
 
-    Defence-in-depth behind the PRIMARY ``Settings._reject_blank_deepseek_base_url``
+    Defence-in-depth behind the PRIMARY ``Settings._validate_deepseek_base_url``
     guard (which is what an operator's ``ALFRED_DEEPSEEK_BASE_URL=`` actually trips, on
     the audited ``settings_invalid`` boot path). This one covers every other route into
     the resolver — a directly-constructed ``Settings``, a future settings source, a

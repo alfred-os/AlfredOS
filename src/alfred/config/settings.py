@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
+from urllib.parse import urlsplit
 
 import structlog
 from pydantic import (
@@ -642,12 +643,43 @@ class Settings(BaseSettings):
 
     @field_validator("deepseek_base_url")
     @classmethod
-    def _reject_blank_deepseek_base_url(cls, v: str) -> str:
-        """Reject a blank/whitespace ``ALFRED_DEEPSEEK_BASE_URL``.
+    def _validate_deepseek_base_url(cls, v: str) -> str:
+        """Reject a blank/whitespace OR credential-bearing ``ALFRED_DEEPSEEK_BASE_URL``.
 
-        The sibling ``_normalize_egress_proxy_url`` can map blank to ``None`` because
-        its field is optional and a downstream seam fails closed on ``None``. This field
-        is a required ``str`` with a real default, and BOTH consumers treat "present"
+        **Credentials (CodeRabbit r3).** ``base_url`` is documented as non-secret routing
+        config, but the value an operator PUTS in it need not be: an egress-relay-fronted
+        deployment commonly fronts a self-hosted proxy with inline basic auth
+        (``https://apikey:@relay.internal/v1`` — the conventional nginx/Envoy shape), which
+        is precisely the flexibility this setting exists to give. #587 then threads the raw
+        value through ``_resolve_quarantine_base_url`` into the quarantine child's SPAWN
+        ENVIRONMENT as ``ALFRED_QUARANTINE_BASE_URL``, where it crosses a process boundary
+        and becomes readable via ``/proc/<pid>/environ`` and dumpable in a crash report.
+        Sanitising the ``_ProviderFactory`` repr (``_redact_base_url``) fixes the DISPLAY of
+        that value, not the DATA FLOW.
+
+        Refusing userinfo HERE closes it at the boundary instead — one check on the way in,
+        rather than a sanitiser at every place the value is later shown or transmitted (the
+        enumerate-vs-default-deny lesson). The message must not echo ``v`` — the offending
+        value is the credential.
+
+        **Query strings and fragments (CodeRabbit PR-review r1).** Also rejected, not just
+        userinfo — ``?api_key=...`` is at least as common a real-world API-credential shape
+        as inline userinfo, and unlike a path prefix it has NO legitimate function on this
+        field: empirically, ``AsyncOpenAI(base_url=...).base_url.join("chat/completions")``
+        SILENTLY DROPS everything from the query onward (verified: a base_url of
+        ``https://relay.internal/v1?region=eu`` joins to
+        ``https://relay.internal/chat/completions`` — losing BOTH the query AND the ``/v1``
+        path prefix it was attached to), so a query string never reaches DeepSeek's API
+        regardless of content. It still reaches the child's spawn environment and this
+        factory's repr, though (the same exposure vector as userinfo) — so it is pure risk
+        with zero function, not a "legitimate proxy setup" this validator needs to permit. A
+        bare PATH (no query, no fragment) is unaffected — ``https://relay.internal:8443/team-a/v1``
+        joins correctly and is exactly the "relay routing prefix" use case this setting exists
+        to support.
+
+        **Blanks.** The sibling ``_normalize_egress_proxy_url`` can map blank to ``None``
+        because its field is optional and a downstream seam fails closed on ``None``. This
+        field is a required ``str`` with a real default, and BOTH consumers treat "present"
         as "usable": ``build_router`` hands it to the privileged ``DeepSeekProvider``,
         and (#587) ``_resolve_quarantine_base_url`` hands it to the quarantine child.
         ``build_child_client``'s ``base_url is None`` refusal therefore cannot fire for
@@ -660,14 +692,64 @@ class Settings(BaseSettings):
         ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row) rather
         than an uncaught crash (exit 1, no audit row — the #368 anti-pattern). Raw
         English, no ``t()``: Settings loads before the translator, exactly as
-        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field NAME
+        (never the value, per the credentials note above).
         """
-        if not v.strip():
+        v = v.strip()
+        if not v:
             raise ValueError(
                 "deepseek_base_url must not be blank — set ALFRED_DEEPSEEK_BASE_URL to "
                 "the DeepSeek API base (default https://api.deepseek.com/v1) or leave it "
                 "unset to take that default"
             )
+        malformed = (
+            "deepseek_base_url is not a valid DeepSeek API base — set "
+            "ALFRED_DEEPSEEK_BASE_URL to a plain http(s)://host[:port][/path] (default "
+            "https://api.deepseek.com/v1). The value is not echoed here in case it "
+            "carries a credential"
+        )
+        try:
+            parts = urlsplit(v)
+            # ``.port`` is a lazy property that raises on a non-numeric/out-of-range port
+            # (e.g. ``https://host:notaport/v1``) — ``urlsplit()`` itself does not
+            # validate this eagerly, so touch it here or a malformed port sails through
+            # Settings and only fails later, deep in the httpx/openai SDK, as a confusing
+            # runtime error instead of a boot-time refusal naming the field (CodeRabbit r4).
+            _ = parts.port
+        except ValueError as exc:
+            # ``urlsplit``/``.port`` raise on e.g. a malformed IPv6 literal or a
+            # non-numeric port. Fail CLOSED and typed: a URL we cannot parse is exactly
+            # the one we cannot prove is credential-free, and letting the raw ValueError
+            # escape would surface pydantic's own rendering of the parse error instead of
+            # a message naming the field an operator must fix.
+            raise ValueError(malformed) from exc
+        if parts.username is not None:
+            raise ValueError(
+                "deepseek_base_url must not embed credentials — ALFRED_DEEPSEEK_BASE_URL "
+                "carries a 'user@' / 'user:password@' userinfo component, and #587 threads "
+                "this value into the quarantine child's spawn environment "
+                "(ALFRED_QUARANTINE_BASE_URL), where it is readable via /proc and can reach "
+                "a crash dump. Put the credential in ALFRED_DEEPSEEK_API_KEY (privileged "
+                "path) / ALFRED_QUARANTINE_PROVIDER_API_KEY (quarantine child) and set the "
+                "base URL to a bare scheme://host[:port][/path]"
+            )
+        if parts.query or parts.fragment:
+            raise ValueError(
+                "deepseek_base_url must not carry a query string or fragment — "
+                "ALFRED_DEEPSEEK_BASE_URL is silently truncated at the query by the openai "
+                "SDK's URL-joining (never reaches DeepSeek's API), yet still crosses into "
+                "the quarantine child's spawn environment and this factory's repr — pure "
+                "credential-exposure risk with no function. Use a bare "
+                "scheme://host[:port][/path]; put any credential in ALFRED_DEEPSEEK_API_KEY "
+                "/ ALFRED_QUARANTINE_PROVIDER_API_KEY instead"
+            )
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            # CodeRabbit r4: neither an eager parse failure NOR a credential check catches
+            # a syntactically-valid-but-unusable URL like "not-a-url" (scheme="", parses
+            # clean, no userinfo) or "ftp://host/v1" (a scheme the SDK cannot dial) — both
+            # would otherwise reach the SAME laundered-into-cannot_extract failure mode
+            # the blank-value guard above exists to prevent.
+            raise ValueError(malformed)
         return v
 
     @field_validator("deepseek_model")
@@ -675,7 +757,7 @@ class Settings(BaseSettings):
     def _reject_blank_deepseek_model(cls, v: str) -> str:
         """Reject a blank/whitespace ``ALFRED_DEEPSEEK_MODEL``.
 
-        The exact structural twin of ``_reject_blank_deepseek_base_url`` above, on the
+        The structural twin of ``_validate_deepseek_base_url``'s blank arm above, on the
         OTHER ``deepseek_*`` field BOTH the privileged and the quarantined DeepSeek paths
         reuse: ``build_router`` hands it to the privileged ``DeepSeekProvider``, and
         (#587) ``_resolve_quarantine_model`` hands it to the quarantine child. Like its
