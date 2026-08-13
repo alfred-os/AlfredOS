@@ -246,3 +246,35 @@ def test_shell_set_quarantine_provider_beats_a_valid_dotenv_value(tmp_path: Path
     )
     assert code == 1, "a bad shell override must fail even with a valid .env value"
     assert "openai" in err
+
+
+def test_explicitly_empty_shell_quarantine_provider_does_not_fall_back_to_dotenv(
+    tmp_path: Path,
+) -> None:
+    """An EXPORTED-BUT-EMPTY shell var is the compose default, not "consult .env" (CodeRabbit r2).
+
+    docker-compose.yaml forwards ``ALFRED_QUARANTINE_PROVIDER:
+    ${ALFRED_QUARANTINE_PROVIDER:-anthropic}``. Under compose an explicitly-empty shell var
+    still WINS over ``.env`` and the container therefore receives the ``anthropic`` default —
+    ``.env`` is never consulted. The gate's ``${VAR:-$(read_env_var VAR)}`` collapsed that
+    case into "unset" (``:-`` fires on empty as well as unset) and validated the ``.env``
+    value instead: a value the stack will not use.
+
+    Discriminating by construction: ``.env`` holds an OUT-OF-SET value, so the two behaviours
+    give opposite verdicts. Under the old ``:-`` the gate read ``openai`` from ``.env`` and
+    exited 1; under ``${VAR+x}`` it resolves the compose default and exits 0. (The same
+    scenario with a VALID ``.env`` value passes either way, so it could not tell fixed from
+    broken and is deliberately not the pin here.)
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=openai\n",
+        extra_env={"ALFRED_QUARANTINE_PROVIDER": ""},
+    )
+    assert code == 0, (
+        "an explicitly-empty shell var means the container takes the anthropic default; "
+        f"the gate must not validate the unused .env value. stderr: {err}"
+    )
+    assert "openai" not in err, err

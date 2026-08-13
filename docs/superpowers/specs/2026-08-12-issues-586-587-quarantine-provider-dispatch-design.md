@@ -172,10 +172,16 @@ call sites and reviewing them together is cheaper than sequencing):
 
 - Add `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION` (bool, default
   `false`) as a real setting.
-- At the same point `daemon_runtime.py` resolves the quarantine provider id
-  (Piece A), when this setting is `true`, call the existing
+- At the top of `_build_comms_boot_graph` in
+  `src/alfred/cli/daemon/_comms_boot.py` — BEFORE any I/O, so a refusal can
+  never leak a partially-constructed secret broker or content store — when
+  this setting is `true`, call the existing
   `assert_provider_separation(privileged_provider_id=..., quarantined_provider_id=...)`
   — refuses boot on a collision, exactly as already implemented and tested.
+  (As implemented. An earlier draft of this spec placed the call in
+  `daemon_runtime.py`, next to the Piece A provider-id resolution; the boot
+  graph is where the audited refusal cascade and the boot-scoped audit writer
+  actually live, so the check moved there and the resolvers stayed pure.)
 - When `false` (default) and the ids DO collide: boot proceeds (today's de
   facto behaviour, now intentional rather than accidental), but this must
   not be silent — emit an operator-facing warning (structured log line, or
@@ -193,11 +199,12 @@ call sites and reviewing them together is cheaper than sequencing):
 .env: ALFRED_QUARANTINE_PROVIDER=deepseek
       ALFRED_QUARANTINE_PROVIDER_API_KEY=<key>
       ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false   (default)
-  -> daemon_runtime.py boot resolution:
-       - resolve quarantine provider id (closed-set validated) + key (existing presence check)
+  -> _comms_boot.py `_build_comms_boot_graph` (top of the function, pre-I/O):
        - IF require_separation: assert_provider_separation(privileged_id, quarantined_id)
                                   -> refuse boot (AlfredError) on collision
          ELSE IF ids collide: emit operator-facing warning, continue
+  -> daemon_runtime.py boot resolution:
+       - resolve quarantine provider id (closed-set validated) + key (existing presence check)
        - spawn quarantine child; provider id + model threaded via spawn env
   -> quarantine_child/__main__.py: reads provider id from env
        -> brokered_egress.py: branch on provider id

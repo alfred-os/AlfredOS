@@ -247,7 +247,29 @@ fi
 # .env (the same precedence the quarantine-key branch below documents), so checking .env
 # alone would validate a value the stack will not actually use. Unset is FINE — Settings
 # defaults to "anthropic" — so only a set-but-out-of-set value is a problem.
-quarantine_provider="${ALFRED_QUARANTINE_PROVIDER:-$(read_env_var ALFRED_QUARANTINE_PROVIDER)}"
+#
+# `${VAR+x}`, NOT `${VAR:-...}` (CodeRabbit r2). `:-` fires on unset AND on set-but-empty,
+# which collapses two cases docker compose keeps distinct: `ALFRED_QUARANTINE_PROVIDER:
+# ${ALFRED_QUARANTINE_PROVIDER:-anthropic}` in docker-compose.yaml means an EXPLICITLY
+# EMPTY shell var still wins over `.env` and lands the container on the "anthropic"
+# default. Under `:-` this script instead fell through and validated the `.env` value —
+# a value the stack would not use — so an operator with `ALFRED_QUARANTINE_PROVIDER=""`
+# exported and `ALFRED_QUARANTINE_PROVIDER=deepseek` in `.env` got the wrong answer from
+# setup. `+x` tests SET-NESS only, so the two cases stay apart.
+#
+# The `anthropic`/`deepseek` literals below are a FOURTH hand-maintained copy of this
+# closed set (the three Python copies — Settings.quarantine_provider's Literal, the CLI
+# validator, and the proposal-payload validator — are pinned against each other by
+# tests/unit/config/test_settings.py::
+#   TestSettings::test_quarantine_provider_literal_matches_allowed_quarantined_providers).
+# Bash cannot import that frozenset, and deriving it would cost far more than a 2-value
+# list is worth, so this comment is the link: WIDENING THE CLOSED SET FOR A NEW PROVIDER
+# MUST UPDATE THIS BRANCH TOO — that Python test will not fail for you if you forget.
+if [[ -n "${ALFRED_QUARANTINE_PROVIDER+x}" ]]; then
+  quarantine_provider="${ALFRED_QUARANTINE_PROVIDER:-anthropic}"
+else
+  quarantine_provider="$(read_env_var ALFRED_QUARANTINE_PROVIDER)"
+fi
 if [[ -n "$quarantine_provider" ]] &&
    [[ "$quarantine_provider" != "anthropic" && "$quarantine_provider" != "deepseek" ]]; then
   add_config_problem "ALFRED_QUARANTINE_PROVIDER is '${quarantine_provider}', which is not a supported value. It must be exactly 'anthropic' or 'deepseek' (lowercase, no quotes) — or left unset to use the 'anthropic' default. Any other value refuses boot on the settings_invalid path. See .env.example and docs/runbooks/slice-3-quarantined-llm.md."
