@@ -1285,6 +1285,7 @@ _DEEPSEEK_ORIGIN_HOST = "api.deepseek.com"
 Extend (or add a sibling to) `_generate_and_install_ca` so a DeepSeek-scoped CA/cert pair with `SAN=DNS:api.deepseek.com` can be generated the same way the Anthropic one is — mirror the existing function's exact structure, changing only the SAN.
 
 The existing `_CannedAnthropicProxy` (`:333-542`) returns a hardcoded Anthropic Messages-API `tool_use` response shape (`_valid_extract_body`, `:246-271`). DeepSeek's API is OpenAI-compatible chat-completions — read `_CannedAnthropicProxy`'s full class body first (it's the loopback CONNECT-proxy/TLS-terminator this test drives), then add a `_CannedDeepSeekProxy` class mirroring its structure exactly, except:
+
 - The response body shape is an OpenAI-compatible chat-completion JSON object, not an Anthropic Messages-API `tool_use` block.
 - Since `deepseek-chat` does NOT have `NATIVE_CONSTRAINED_GENERATION` (confirmed: `provider_dispatch.py`'s own docstring states any provider without it, including deepseek-chat/deepseek-reasoner, uses `prompt_embedded_fallback` — the JSON_OBJECT_MODE branch this test's expected response shape might assume was REMOVED in fork (b)), the canned response must be shaped for the **prompt-embedded fallback** path, not a JSON-object/tool-call shape.
 
@@ -1549,6 +1550,7 @@ Also correct the existing note at `.env.example:225-227` ("There are NO ALFRED_Q
 - [ ] **Step 3: Fix the four stale claims in `docs/runbooks/slice-3-quarantined-llm.md`**
 
 In the "Provider configuration" section (`:36-63`):
+
 1. Fix the capability table's `deepseek` row — it currently claims `JSON_OBJECT_MODE` → `json_object_unconstrained`; per `provider_dispatch.py`'s own docstring, DeepSeek (chat or reasoner) actually uses `prompt_embedded_fallback` (no native constrained generation). Correct the row.
 2. Remove or correct the framing that `routing.yaml [quarantine].provider` "drives" runtime capability advertisement — it does not (Task 6 Step 1's finding); point instead at `ALFRED_QUARANTINE_PROVIDER`.
 3. Remove the "bootstrap-time check ... refuses to start" unconditional claim, replacing it with the opt-in framing (mirroring Step 1's fix) and citing ADR-0064, not "spec §5.4 / PRD §6.4" (arch-001/rev-001).
