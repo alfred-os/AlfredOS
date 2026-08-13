@@ -395,6 +395,17 @@ defence-in-depth for deterministic tool-call planning on top of the replay
 journal (§4/§12 of the tools-on design spec), not a substitute for it.
 The journal's `tool_call_journal` table has no retention/pruning path yet
 (`#581`) — this cutover is the first thing to write to it on a production path.
+Every completion in a (now genuinely possible, up to `MAX_TOOL_ITERATIONS`) multi-
+iteration turn resends the full system prompt + tool definitions with no
+`cache_control:ephemeral` marker anywhere in the provider layer — a real latency/cost
+cost, cheap while `clock.now`'s schema is trivial, worth revisiting before `web.fetch`
+(#583) lands a larger one. A new `dlp_canary_tripped` refusal stage was also added
+(deterministic halt, no reply sent — same pattern as the other refusal legs below);
+see [ADR-0049](../adr/0049-real-privileged-turn-comms-inbound.md) for the full
+refusal-stage enumeration. Replay/fast-forward of a resumed turn re-dispatches any
+`InternalToolSpec` call for real (non-memoized, an accepted gap since `#410` PR2) —
+previously dead code, now reachable in production for the first time since this
+cutover is what makes a non-empty registry co-occur with a replayed turn.
 This is distinct from the quarantined child's own real-LLM graduation (`#340` PR2b-golive,
 ADR-0052), which landed separately and is governed by the paragraph above — both halves
 of the dual-LLM split now call real providers, each on its own side of the trust boundary.
