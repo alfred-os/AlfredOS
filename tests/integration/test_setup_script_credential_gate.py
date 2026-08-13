@@ -167,3 +167,82 @@ def test_empty_env_file_reports_both(tmp_path: Path) -> None:
     assert code == 1
     assert "ALFRED_DEEPSEEK_API_KEY" in err
     assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" in err
+
+
+# --------------------------------------------------------------------------- #
+# #587: ALFRED_QUARANTINE_PROVIDER is a CLOSED SET the gate was blind to.
+#
+# The gate validated the quarantine KEY while ignoring the setting that decides
+# which key is even correct, so a typo (`Anthropic`, `openai`, a quoted value)
+# passed setup and surfaced as a settings_invalid crash-loop.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["openai", "Anthropic", "DeepSeek", "gpt-4", "none"],
+)
+def test_out_of_closed_set_quarantine_provider_is_reported(tmp_path: Path, bad: str) -> None:
+    """An out-of-set value fails the gate, in the SAME accumulated report as everything else.
+
+    Case variants are pinned deliberately: ``Settings.quarantine_provider`` is a
+    ``Literal["anthropic", "deepseek"]`` with no case/whitespace normalisation, so
+    ``Anthropic`` really does refuse boot. A gate that accepted it would be worse than
+    no gate — it would actively certify a value that crash-loops.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        f"ALFRED_QUARANTINE_PROVIDER={bad}\n",
+    )
+    assert code == 1, f"{bad!r} must not pass the gate"
+    assert "ALFRED_QUARANTINE_PROVIDER" in err
+    # Actionable: names the offending value AND the admissible set.
+    assert "anthropic" in err and "deepseek" in err
+    assert bad in err
+
+
+@pytest.mark.parametrize("good", ["anthropic", "deepseek"])
+def test_supported_quarantine_provider_passes(tmp_path: Path, good: str) -> None:
+    """Oracle guard: both real values pass.
+
+    Without this the refusal test above would stay green under a check that rejected
+    every value and hard-blocked every operator who set the knob at all.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        f"ALFRED_QUARANTINE_PROVIDER={good}\n",
+    )
+    assert code == 0, err
+
+
+def test_unset_quarantine_provider_passes(tmp_path: Path) -> None:
+    """Unset is the shipped default (``anthropic``), not a problem to report."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\nALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n",
+    )
+    assert code == 0, err
+    assert "ALFRED_QUARANTINE_PROVIDER is" not in err
+
+
+def test_shell_set_quarantine_provider_beats_a_valid_dotenv_value(tmp_path: Path) -> None:
+    """The gate must check the value the STACK will use, not the one `.env` happens to hold.
+
+    docker compose gives the shell environment precedence over `.env` (the same precedence
+    the quarantine-key branch documents). A gate reading `.env` alone would certify the
+    dotenv value and wave through a broken shell override — so this pins the direction:
+    a bad shell value fails even though `.env` is valid.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n",
+        extra_env={"ALFRED_QUARANTINE_PROVIDER": "openai"},
+    )
+    assert code == 1, "a bad shell override must fail even with a valid .env value"
+    assert "openai" in err

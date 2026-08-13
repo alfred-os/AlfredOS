@@ -235,6 +235,24 @@ elif [[ "$deepseek_key" == "sk-..." ]]; then
   add_config_problem "ALFRED_DEEPSEEK_API_KEY is still the literal 'sk-...' placeholder from .env.example. Replace it with a real DeepSeek API key from https://platform.deepseek.com."
 fi
 
+# #587: ALFRED_QUARANTINE_PROVIDER selects WHICH provider the quarantine child dials, and
+# is a CLOSED SET — Settings.quarantine_provider is Literal["anthropic", "deepseek"], with
+# no case/whitespace normalisation, so `Anthropic`, `openai`, or a stray-quoted value fails
+# pydantic validation and the core exits on the audited settings_invalid boot path. Until
+# this check existed the script validated the quarantine KEY while being entirely blind to
+# the setting that decides which key is even correct — so a typo here sailed through setup
+# and surfaced as a crash-loop.
+#
+# Shell env first, then .env: docker compose gives the shell environment precedence over
+# .env (the same precedence the quarantine-key branch below documents), so checking .env
+# alone would validate a value the stack will not actually use. Unset is FINE — Settings
+# defaults to "anthropic" — so only a set-but-out-of-set value is a problem.
+quarantine_provider="${ALFRED_QUARANTINE_PROVIDER:-$(read_env_var ALFRED_QUARANTINE_PROVIDER)}"
+if [[ -n "$quarantine_provider" ]] &&
+   [[ "$quarantine_provider" != "anthropic" && "$quarantine_provider" != "deepseek" ]]; then
+  add_config_problem "ALFRED_QUARANTINE_PROVIDER is '${quarantine_provider}', which is not a supported value. It must be exactly 'anthropic' or 'deepseek' (lowercase, no quotes) — or left unset to use the 'anthropic' default. Any other value refuses boot on the settings_invalid path. See .env.example and docs/runbooks/slice-3-quarantined-llm.md."
+fi
+
 # #340 PR2b-golive: the quarantined (dual-LLM) child now makes REAL provider calls, so
 # ALFRED_QUARANTINE_PROVIDER_API_KEY became a hard boot requirement — the core resolves
 # it pre-spawn and exits 2 with `quarantine_provider_key_unset` when unset.
