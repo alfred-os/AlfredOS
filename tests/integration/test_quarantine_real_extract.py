@@ -107,6 +107,12 @@ _ORIGIN_PORT = 443
 # The exact first line the stub MUST see on a used brokered socket (HARD #5).
 _EXPECTED_CONNECT_PREFIX = f"CONNECT {_ORIGIN_HOST}:{_ORIGIN_PORT} HTTP/".encode()
 
+# #587: the DeepSeek origin host, for the prompt-embedded-fallback proof below —
+# a SEPARATE constant (not a parametrization of the Anthropic-only fixtures above)
+# since this file has no existing precedent for parametrizing an _ORIGIN_HOST-keyed
+# fixture; a new sibling CA/proxy pair mirrors the Anthropic ones exactly instead.
+_DEEPSEEK_ORIGIN_HOST = "api.deepseek.com"
+
 _MODEL = "claude-haiku-4-5"
 _MAX_TOKENS = 8192
 # NON-EMPTY so the child's Section 20.2 secondary refuse-boot guard does not fire;
@@ -226,6 +232,72 @@ def _canned_ca(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     """
     certdir = tmp_path_factory.mktemp("canned_anthropic_ca")
     return _generate_and_install_ca(certdir)
+
+
+def _generate_and_install_deepseek_ca(certdir: Path) -> tuple[Path, Path]:
+    """Generate a throwaway CA + an ``api.deepseek.com`` server cert; install the CA.
+
+    #587: a sibling of :func:`_generate_and_install_ca`, mirroring its structure
+    exactly (same openssl invocations, same cert-shape requirements — see that
+    function's docstring) with only the SAN swapped to :data:`_DEEPSEEK_ORIGIN_HOST`.
+
+    A SIBLING function (not a parametrized extension of the Anthropic one) so this
+    installs under a DIFFERENT trust-anchor filename
+    (``alfred-t14-canned-deepseek-ca.crt`` vs. the Anthropic fixture's
+    ``alfred-t14-canned-ca.crt``) — both module-scoped CA fixtures can coexist in
+    the SAME container's trust store across a full-file run without one's
+    ``update-ca-certificates`` install clobbering the other's trust-anchor file
+    (same basename would mean whichever fixture instantiates LAST wins, silently
+    untrusting the other CA for any connection still to come).
+    """
+    ca_key = certdir / "ca.key"
+    ca_crt = certdir / "ca.crt"
+    srv_key = certdir / "server.key"
+    srv_csr = certdir / "server.csr"
+    srv_crt = certdir / "server.crt"
+    srv_ext = certdir / "server.ext"
+
+    def _openssl(*args: str) -> None:
+        subprocess.run(["openssl", *args], check=True, capture_output=True)  # noqa: S607, S603
+
+    _openssl(
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(ca_key), "-out", str(ca_crt),
+        "-subj", "/CN=alfred-t14-canned-deepseek-CA", "-days", "2",
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+    )  # fmt: skip
+    _openssl(
+        "req", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(srv_key), "-out", str(srv_csr), "-subj", f"/CN={_DEEPSEEK_ORIGIN_HOST}",
+    )  # fmt: skip
+    srv_ext.write_text(
+        "basicConstraints=CA:FALSE\n"
+        "keyUsage=digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n"
+        f"subjectAltName=DNS:{_DEEPSEEK_ORIGIN_HOST}\n"
+    )
+    _openssl(
+        "x509", "-req", "-in", str(srv_csr), "-CA", str(ca_crt), "-CAkey", str(ca_key),
+        "-CAcreateserial", "-out", str(srv_crt), "-days", "2", "-extfile", str(srv_ext),
+    )  # fmt: skip
+
+    trust_anchor = Path("/usr/local/share/ca-certificates/alfred-t14-canned-deepseek-ca.crt")
+    trust_anchor.write_bytes(ca_crt.read_bytes())
+    subprocess.run(["update-ca-certificates"], check=True, capture_output=True)  # noqa: S607
+    return srv_crt, srv_key
+
+
+@pytest.fixture(scope="module")
+def _canned_deepseek_ca(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """Module-scoped: generate + install the DeepSeek-SAN CA once for the deepseek test.
+
+    Mirrors ``_canned_ca`` exactly, using ``_generate_and_install_deepseek_ca`` /
+    ``_DEEPSEEK_ORIGIN_HOST`` instead of the Anthropic CA generator/host. Only
+    instantiated when the ``_DOCKER_ONLY``-gated deepseek test actually runs.
+    """
+    certdir = tmp_path_factory.mktemp("canned_deepseek_ca")
+    return _generate_and_install_deepseek_ca(certdir)
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +614,63 @@ class _CannedAnthropicProxy:
         self.settle()
 
 
+# #587: the DeepSeek-shaped canned response — a full OpenAI chat-completion JSON
+# body (NOT an Anthropic Messages tool_use block), matching exactly what
+# ``DeepSeekProvider.complete()`` (src/alfred/providers/deepseek.py) reads off the
+# wire via the real openai SDK: ``response.choices[0].message.content`` /
+# ``.finish_reason`` / ``response.usage.prompt_tokens``. deepseek-chat has no
+# ``NATIVE_CONSTRAINED_GENERATION`` capability (provider_dispatch.py's own
+# docstring: the JSON_OBJECT_MODE branch was removed in fork (b), so any provider
+# without that capability — including deepseek-chat/deepseek-reasoner — dispatches
+# via prompt_embedded_fallback), so ``message.content`` carries the extraction
+# payload as a bare JSON string the host parses directly (provider_dispatch.py's
+# ``_validate_response`` does ``json.loads(raw)`` with no unwrapping) — exactly
+# analogous to how ``_valid_extract_body`` above is a full raw Anthropic body, not
+# a ``CompletionResponse``-shaped Python object.
+_DEEPSEEK_CANNED_CHAT_COMPLETION = {
+    "id": "chatcmpl-canned-extract",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "deepseek-chat",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({"text": _CANNED_TEXT, "intent": _CANNED_INTENT}),
+            },
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 21, "completion_tokens": 9, "total_tokens": 30},
+}
+
+
+def _always_valid_deepseek(_index: int) -> bytes:
+    return _http_response(json.dumps(_DEEPSEEK_CANNED_CHAT_COMPLETION).encode("utf-8"))
+
+
+class _CannedDeepSeekProxy(_CannedAnthropicProxy):
+    """Same loopback CONNECT-proxy/TLS-terminator as :class:`_CannedAnthropicProxy`.
+
+    #587: a SUBCLASS, not a byte-for-byte duplicate of the ~200-line parent — the
+    CONNECT/TLS-terminate/HARD-#5-first-bytes-record/reject-toggle/settle/close
+    machinery is identical for either provider (this stub only ever blind-terminates
+    a TLS tunnel and replies with whatever ``responder`` returns); duplicating that
+    security-sensitive threading/TLS logic would create two copies that could drift
+    silently (this repo's own drift-trap lesson: a shared helper fails loud, N
+    copies drift silently). The ONLY difference from the Anthropic proxy is the
+    default ``responder``, which here serves the OpenAI-chat-completion-shaped
+    :data:`_DEEPSEEK_CANNED_CHAT_COMPLETION` body instead of the Anthropic
+    ``tool_use`` body.
+    """
+
+    def __init__(
+        self, cert: Path, key: Path, responder: _Responder = _always_valid_deepseek
+    ) -> None:
+        super().__init__(cert, key, responder=responder)
+
+
 class _ProxyCfg:
     """A minimal :class:`~alfred.egress._config_protocols.EgressProxyConfig` stub."""
 
@@ -632,14 +761,29 @@ def _count_open_fds() -> int:
     return sum(1 for _ in Path("/proc/self/fd").iterdir())
 
 
-async def _spawn_real_child(proxy: _CannedAnthropicProxy) -> _SubprocessChildIO:
-    """Spawn the REAL golive quarantine child wired to the canned-Anthropic stub."""
+async def _spawn_real_child(
+    proxy: _CannedAnthropicProxy | _CannedDeepSeekProxy,
+    *,
+    provider: str = "anthropic",
+    model: str = _MODEL,
+    base_url: str | None = None,
+) -> _SubprocessChildIO:
+    """Spawn the REAL golive quarantine child wired to the canned provider stub.
+
+    #587: ``provider``/``model``/``base_url`` thread straight into
+    ``spawn_quarantine_child_io`` (Task 3 already added those params there — this
+    helper only forwards them). Defaults reproduce the pre-#587 Anthropic call
+    shape byte-for-byte, so every pre-existing ``_spawn_real_child(proxy)`` call
+    site in this file is unaffected.
+    """
     return await spawn_quarantine_child_io(
         provider_key=_PLACEHOLDER_KEY,
         control_fd=True,
         egress_config=_ProxyCfg(proxy.host, proxy.port),
-        model=_MODEL,
+        model=model,
         max_tokens=_MAX_TOKENS,
+        provider=provider,
+        base_url=base_url,
     )
 
 
@@ -974,6 +1118,56 @@ async def test_pi_2026_015_schema_break_reply_is_refused_end_to_end(
             # The child DID reach the provider (a real CONNECT happened) before the
             # orchestrator refused the schema-broken reply — HARD #5 still holds.
             _assert_hard5_first_bytes(proxy, min_used=1)
+    finally:
+        if child_io is not None:
+            await child_io.aclose()
+        proxy.close()
+
+
+# ---------------------------------------------------------------------------
+# #587: a real bwrap child, configured for DeepSeek (an OpenAI-compatible
+# transport, not the Anthropic-shaped default), extracts via the
+# prompt-embedded-fallback path — the release-blocking proof that Piece A's
+# transport-parametrization (build_child_client / _ProviderFactory) genuinely
+# works against DeepSeek's real wire shape end to end through a real bwrap
+# child, not just that the branch type-checks.
+# ---------------------------------------------------------------------------
+
+
+@_DOCKER_ONLY
+@pytest.mark.usefixtures("_launcher_environment")
+@pytest.mark.asyncio
+async def test_real_extract_deepseek_returns_extracted_via_prompt_embedded_fallback(
+    _canned_deepseek_ca: tuple[Path, Path],
+) -> None:
+    """#587: a real bwrap child, configured for DeepSeek, extracts via the
+    prompt-embedded-fallback path (deepseek-chat has no native constrained generation)."""
+    cert, key = _canned_deepseek_ca
+    proxy = _CannedDeepSeekProxy(cert, key)
+    child_io: _SubprocessChildIO | None = None
+    try:
+        # rev-004 fix: base_url is REQUIRED here — Task 1's build_child_client
+        # raises ValueError on provider_id="deepseek" + base_url=None (its own new
+        # HARD #7 refusal). Omitting it would make this "proves DeepSeek genuinely
+        # works" test hit that refusal instead of extracting.
+        child_io = await _spawn_real_child(
+            proxy,
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+        )
+        async with _extraction_stack(child_io) as (bridge, audit_writer):
+            proxy.settle()
+            result = await bridge.extract(
+                body=_INBOUND_BODY, canonical_user_id="alice", source_tier="T3"
+            )
+            assert isinstance(result, Extracted), result
+            assert result.data == {"text": _CANNED_TEXT, "intent": _CANNED_INTENT}
+            assert result.extraction_mode == "prompt_embedded_fallback"
+
+            extract_rows = audit_writer.rows_for("quarantine.extract")
+            assert len(extract_rows) == 1, extract_rows
+            assert extract_rows[0]["result"] == "extracted", extract_rows
     finally:
         if child_io is not None:
             await child_io.aclose()
