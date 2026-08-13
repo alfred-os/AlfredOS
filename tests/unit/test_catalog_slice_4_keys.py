@@ -158,6 +158,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # (the peer `alfred chat` connects later).
     "daemon.boot.comms_socket_bind_failed",
     "daemon.comms.adapter_listening",
+    # /review-pr on PR #585 (devex-001): boot-output line confirming the live
+    # tool registry actually got wired into the comms boot graph — the PR's
+    # headline change had zero operator-visible confirmation before this.
+    "daemon.comms.tools_wired",
     # FIX 4 (PR-S4-11b review): >1 enabled comms adapter is unsupported in
     # this cut (outbound acks would cross-route) — refuse boot.
     "daemon.boot.comms_multi_adapter_unsupported",
