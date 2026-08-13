@@ -49,7 +49,8 @@ skipped either gate.
 **2. `result_tier` defaults to T3; only a hardcoded allowlist may claim less.**
 `ToolSpec.result_tier` (`tool_registry.py`) defaults to `"T3"` for every
 `ExternalToolSpec`. A tool may declare `result_tier="T2"` (the `InternalToolSpec`
-direct-dispatch path — no quarantine-extract, no DLP) only if its name is in
+direct-dispatch path — no quarantine-extract; `dlp.scan()` still applies, per the
+Decision 3 amendment below) only if its name is in
 `FIRST_PARTY_LE_T2_TOOL_ALLOWLIST` (`tool_registry.py:26`, currently `{"clock.now"}`) —
 a frozen, hardcoded set a plugin manifest can never add to. `ToolRegistry.__init__`
 enforces this at construction: a spec claiming <=T2 outside the allowlist raises

@@ -398,7 +398,7 @@ The journal's `tool_call_journal` table has no retention/pruning path yet
 Every completion in a (now genuinely possible, up to `MAX_TOOL_ITERATIONS`) multi-
 iteration turn resends the full system prompt + tool definitions with no
 `cache_control:ephemeral` marker anywhere in the provider layer — a real latency/cost
-cost, cheap while `clock.now`'s schema is trivial, worth revisiting before `web.fetch`
+penalty, cheap while `clock.now`'s schema is trivial, worth revisiting before `web.fetch`
 (#583) lands a larger one. A new `dlp_canary_tripped` refusal stage was also added
 (deterministic halt, no reply sent — same pattern as the other refusal legs below);
 see [ADR-0049](../adr/0049-real-privileged-turn-comms-inbound.md) for the full
