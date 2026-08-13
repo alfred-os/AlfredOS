@@ -66,7 +66,7 @@ import getpass
 import json
 import os
 import struct
-from collections.abc import AsyncIterator, Coroutine, Iterator
+from collections.abc import AsyncIterator, Coroutine, Iterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
 
@@ -587,7 +587,7 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
             # commit (just awaited above) and the outbound ack actually reaching
             # the plugin's buffer, unlike the old echo path's near-synchronous ack.
             deadline = asyncio.get_running_loop().time() + _TIMEOUT_S
-            delivered: dict[str, Any] = {}
+            delivered: Mapping[str, object] = {}
             while asyncio.get_running_loop().time() < deadline:
                 delivered = await runner.send_request("adapter.health", {})
                 if int(str(delivered["queue_depth"])) >= 1:

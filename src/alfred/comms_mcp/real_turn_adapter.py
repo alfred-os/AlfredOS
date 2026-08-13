@@ -520,3 +520,11 @@ class RealTurnOrchestratorAdapter:
                     notification, canonical_user_id=canonical_user_id, stage="send_failed", exc=exc
                 )
             raise
+
+
+# mypy --strict (--no-implicit-reexport): ``_PERSONA`` is imported (aliased) from
+# ``alfred.orchestrator.core`` above, not defined here, so a consuming test that
+# does ``from alfred.comms_mcp.real_turn_adapter import _PERSONA`` needs an
+# explicit re-export declaration (mirrors this package's own
+# ``comms_mcp/__init__.py`` ``__all__`` convention).
+__all__ = ["_PERSONA"]

@@ -538,7 +538,7 @@ class _RealStack:
             identity_resolver=self.graph.resolver_bridge,  # type: ignore[arg-type]
             orchestrator=self.graph.inbound_orchestrator,
             burst_limiter=self.graph.burst_limiter,  # type: ignore[arg-type]
-            audit_writer=self.audit,  # type: ignore[arg-type]
+            audit_writer=self.audit,
             secret_broker=self.graph.secret_broker,  # type: ignore[arg-type]
             commit_at_dispatch_edge=commit_at_dispatch_edge,
             idempotency_store=idempotency_store,
@@ -866,7 +866,7 @@ async def test_forwarded_crash_injection_replays_exactly_twice_with_bounded_resi
         # The un-rolled-back residual: the FIRST (failed) turn's user+assistant
         # append already landed in the shared in-process deque — nothing
         # unwinds it when the send fails downstream of the pool release.
-        pool = stack.graph.inbound_orchestrator._pool  # type: ignore[attr-defined]
+        pool = stack.graph.inbound_orchestrator._pool
         key = (_PERSONA, _ALICE_SLUG)
         wm = await pool.acquire(key)
         turns_after_failure = await wm.turns()
@@ -897,7 +897,7 @@ async def test_forwarded_crash_injection_replays_exactly_twice_with_bounded_resi
 
         # The residual is DOUBLE-APPEND, never cross-user: only alice's key was
         # ever touched (never crosses a user partition).
-        assert set(stack.graph.inbound_orchestrator._pool._entries.keys()) == {key}  # type: ignore[attr-defined]
+        assert set(stack.graph.inbound_orchestrator._pool._entries.keys()) == {key}
         wm = await pool.acquire(key)
         turns_after_replay = await wm.turns()
         await pool.release(key, wm)
@@ -1011,7 +1011,7 @@ async def test_concurrent_same_user_turns_are_serialized_by_the_per_key_mutex(
         router.release()
         await asyncio.wait_for(asyncio.gather(task_a, task_b), _TIMEOUT_S)
 
-        pool = stack.graph.inbound_orchestrator._pool  # type: ignore[attr-defined]
+        pool = stack.graph.inbound_orchestrator._pool
         key = (_PERSONA, _ALICE_SLUG)
         wm = await pool.acquire(key)
         turns = await wm.turns()

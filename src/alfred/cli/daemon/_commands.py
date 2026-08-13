@@ -1688,3 +1688,20 @@ def _render_live_adapter_status() -> None:
                 latest_crash=latest,
             )
         )
+
+
+# mypy --strict (--no-implicit-reexport): the names below are IMPORTED into this
+# module from elsewhere (``_comms_boot.py`` / ``_boot_audit.py``), not defined
+# here, so several test files that do ``from alfred.cli.daemon._commands import
+# ...`` on them need an explicit re-export declaration (mirrors
+# ``_daemon_control_client.py``'s / ``_daemon_control_server.py``'s existing
+# ``__all__`` convention in this same package). Names DEFINED directly in this
+# module (``start_daemon`` / ``build_boot_session_scope`` / etc.) need no entry
+# here — only names re-exported from ANOTHER module trigger the check.
+__all__ = [
+    "LifecycleBroadcaster",
+    "_CommsBootGraph",
+    "_build_comms_boot_graph",
+    "_listen_socket_comms_adapter",
+    "_spawn_comms_adapter",
+]
