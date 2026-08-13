@@ -385,6 +385,8 @@ The existing AST-scan at `tests/unit/security/test_no_direct_env_reads.py` is ex
 
 ### 5.4 Different provider from privileged (defence-in-depth)
 
+> **Superseded by [ADR-0064](../../adr/0064-quarantine-provider-separation-is-opt-in.md)** (#586/#587): this section's default-refuse / reviewer-gated posture was replaced with an opt-in, default-off posture. Kept here for historical record.
+
 The quarantined LLM uses a different provider from the privileged orchestrator by default (PRD §6.4 reviewer-agent requirement: "Different provider from primary by default"). `alfred config quarantined-provider <provider>` proposals go through state.git reviewer-gate (§11.1). Default: if privileged uses DeepSeek (ADR-0001), quarantined uses Anthropic Claude Haiku; if privileged uses Anthropic, quarantined uses DeepSeek.
 
 **Config file anchor:** quarantined-provider binding lives in `config/routing.yaml` under a new `[quarantine]` block:

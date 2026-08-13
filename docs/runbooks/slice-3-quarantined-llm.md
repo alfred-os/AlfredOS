@@ -37,30 +37,43 @@ audit row. A manifest with `subscriber_tier` set to any T0–T3 string raises
 
 ```yaml
 quarantine:
-  provider: "anthropic"        # anthropic | deepseek | openai
+  provider: "anthropic"        # anthropic | deepseek
   model: "claude-haiku-4-5"   # fast + cheap; adequate for structured extraction
   secret_id: "quarantine_provider_api_key"
 ```
 
-`provider` drives which `ProviderCapability` flags the plugin advertises,
-which determines the `ExtractionMode` the dispatch path selects:
+This `routing.yaml` value does **not** drive runtime capability advertisement
+— no loader reads it yet ("slice 4+"). The actual runtime source of truth is
+the `ALFRED_QUARANTINE_PROVIDER` .env setting (`Settings.quarantine_provider`,
+default `"anthropic"`), which determines which `ProviderCapability` flags the
+plugin advertises, which in turn determines the `ExtractionMode` the dispatch
+path selects:
 
-| `provider` | `ProviderCapability` | `ExtractionMode` |
+| `ALFRED_QUARANTINE_PROVIDER` | `ProviderCapability` | `ExtractionMode` |
 | --- | --- | --- |
 | `anthropic` | `NATIVE_CONSTRAINED_GENERATION` | `native_constrained` |
-| `deepseek` (chat model) | `JSON_OBJECT_MODE` | `json_object_unconstrained` |
-| `openai` or unknown model | none | `prompt_embedded_fallback` |
+| `deepseek` (chat or reasoner) | none | `prompt_embedded_fallback` |
 
-The quarantined provider **should** differ from the privileged provider
-(defence-in-depth, spec §5.4). If both sides use the same provider, a
+`routing.yaml [quarantine].provider` stays as the alfred-config-proposal
+target (the state.git reviewer-gate flow below) and as documentation of the
+shipped default, but changing it alone does nothing until the loader lands.
+
+The quarantined provider **should** differ from the privileged provider by
+default (defence-in-depth, ADR-0064). If both sides use the same provider, a
 compromised provider API could see both T0–T2 orchestrator context and T3
 raw content at the same time — the failure mode that the split exists to
-prevent.
+prevent. This is **opt-in**, not enforced by default: set
+`ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` to make AlfredOS refuse
+to boot on a same-provider collision. Left at its default (`false`),
+same-provider is permitted — logged and audited once per boot, not blocked.
+See [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md) for
+the full rationale (no PRD section states a "providers must differ"
+invariant — do not cite "spec §5.4 / PRD §6.4").
 
-Changing `provider` or `secret_id` is a reviewer-gated configuration change
-(`alfred config quarantined-provider <provider>`); it lands via the
-state.git proposal flow (spec §11.1). `model` changes are lower blast-radius
-but still flow through the same gate.
+Changing `routing.yaml [quarantine].provider` or `secret_id` is a
+reviewer-gated configuration change (`alfred config quarantined-provider
+<provider>`); it lands via the state.git proposal flow (spec §11.1). `model`
+changes are lower blast-radius but still flow through the same gate.
 
 ## Environment setup
 

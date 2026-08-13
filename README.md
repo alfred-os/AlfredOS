@@ -51,12 +51,16 @@ alfred chat                 # start a TUI conversation
 >   `.env.example`. This key is required regardless of which comms adapters are enabled. Get one
 >   from <https://platform.deepseek.com>.
 > - **`ALFRED_QUARANTINE_PROVIDER_API_KEY`** — the credential for the quarantined half of the
->   dual-LLM split, which now makes real provider calls. The quarantined provider **must differ**
->   from the privileged one (`config/routing.yaml`), so with the default DeepSeek-privileged setup
->   this is an **Anthropic** key — get one from <https://console.anthropic.com>. With it unset the
->   core exits 2 (`quarantine_provider_key_unset`) and crash-loops under `restart: unless-stopped`.
->   This is deliberate — a keyless first run does not start. `bin/alfred-setup.sh` reports the
->   missing key and exits 1; it cannot seed one for you.
+>   dual-LLM split, which now makes real provider calls. The quarantined provider **should differ**
+>   from the privileged one by default (`config/routing.yaml` / `ALFRED_QUARANTINE_PROVIDER`) — so
+>   with the default DeepSeek-privileged setup this is an **Anthropic** key — get one from
+>   <https://console.anthropic.com>. You can set `ALFRED_QUARANTINE_PROVIDER=deepseek` to use
+>   DeepSeek for both roles instead; set `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` to
+>   make the stricter separation posture mandatory (refuses to boot on a collision) rather than
+>   advisory (see [ADR-0064](docs/adr/0064-quarantine-provider-separation-is-opt-in.md)). With the
+>   key unset the core exits 2 (`quarantine_provider_key_unset`) and crash-loops under
+>   `restart: unless-stopped`. This is deliberate — a keyless first run does not start.
+>   `bin/alfred-setup.sh` reports the missing key and exits 1; it cannot seed one for you.
 >
 > **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
 > (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so

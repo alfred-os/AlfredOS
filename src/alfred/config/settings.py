@@ -225,18 +225,17 @@ class Settings(BaseSettings):
     # #586: opt-in enforcement that the quarantine and privileged providers differ.
     # NOTE: no PRD section actually states this invariant today (arch-001/rev-001) —
     # do NOT cite "PRD §6.4" here (that section is "Self-Improvement with Reviewer
-    # Gate", unrelated). See ADR-XXXX (Task 6 Step 0 of this plan — check `ls docs/adr/`
-    # for the next free number at implementation time) for the accurately-anchored
-    # record of this decision. Defaults to False: a home/self-hosted operator must
-    # never be forced into running two paid provider accounts. An enterprise
-    # deployment that wants the stricter posture sets this to True.
+    # Gate", unrelated). See ADR-0064 for the accurately-anchored record of this
+    # decision. Defaults to False: a home/self-hosted operator must never be
+    # forced into running two paid provider accounts. An enterprise deployment
+    # that wants the stricter posture sets this to True.
     require_quarantine_provider_separation: bool = Field(
         default=False,
         description=(
             "When True, refuse to boot if the quarantine and privileged providers "
             "are the same id (see alfred.bootstrap.quarantine.assert_provider_separation). "
             "Default False — same-provider is permitted, with an operator-facing warning "
-            "(see #586, ADR-XXXX)."
+            "(see #586, ADR-0064)."
         ),
     )
 
