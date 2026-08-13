@@ -98,7 +98,10 @@ replaces `CommsInboundOrchestratorAdapter` in `_build_comms_boot_graph`
 - **Adapter-owned loud, content-free audit rows on every deny/error leg**
   (`COMMS_INBOUND_TURN_REFUSED_FIELDS`, `audit_row_schemas.py:1450`): downgrade-denied,
   downgrade-malformed (a distinct stage from a policy deny), budget-denied,
-  turn-error, and send-failed. Each is keyed by the peppered `inbound_id_hash`
+  turn-error, send-failed, and (added by #410 PR3's I4 fix) `dlp_canary_tripped` — a
+  deterministic halt, classified the same way as `budget_denied` rather than falling
+  into the generic `turn_error`/replay path, since the same content trips the same
+  canary on every replay. Each is keyed by the peppered `inbound_id_hash`
   (`audit_hash.hash_inbound_id`), never the raw id; `error_class` is the exception's
   class name, never `str(exc)` (which could embed T3-derived text).
 - **A per-`(persona, canonical_user_id)` turn mutex serialises the whole
