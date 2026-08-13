@@ -761,6 +761,19 @@ async def _build_comms_boot_graph(
         # unauthenticated-web.fetch-activation follow-up, tracked separately.
         # ────────────────────────────────────────────────────────────────────
         tool_registry = ToolRegistry([build_clock_tool(now=lambda: datetime.now(UTC))])
+        # devex finding on PR #585's /review-pr: the cutover this whole PR ships had
+        # zero operator-visible confirmation at boot — only dev-facing docs recorded
+        # it. One-time echo, mirroring the adapter_spawned/adapter_listening pattern
+        # below, so an operator can confirm the cutover took effect without reading
+        # source or digging through audit rows.
+        _tool_names = sorted(d.name for d in tool_registry.definitions())
+        typer.echo(
+            t(
+                "daemon.comms.tools_wired",
+                count=len(_tool_names),
+                tool_names=", ".join(_tool_names),
+            )
+        )
         # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
         # runtime (its append/append_schema are the keyword forms the limiter calls);
         # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
