@@ -437,6 +437,11 @@ class _CannedAnthropicProxy:
         self._tls_ctx.load_cert_chain(str(cert), str(key))
         self._lock = threading.Lock()
         self._first_bytes: list[bytes] = []
+        # #587 r3: the DECRYPTED request line of each tunnelled POST, e.g.
+        # ``b"POST /v1/chat/completions HTTP/1.1"``. ``_first_bytes`` only ever sees the
+        # plaintext CONNECT (host:port), which cannot show that the configured base_url's
+        # PATH reached the provider's real endpoint — only this can.
+        self._request_lines: list[bytes] = []
         self._post_index = 0
         self._threads: list[threading.Thread] = []
         self._reject = False
@@ -537,20 +542,27 @@ class _CannedAnthropicProxy:
         return buf
 
     @staticmethod
-    def _drain_http_request(tls: ssl.SSLSocket) -> None:
+    def _drain_http_request(tls: ssl.SSLSocket) -> bytes:
         """Read the child's ``POST`` request (headers + Content-Length body).
 
         Reading the whole request before replying keeps the child's SDK from seeing
         a reset mid-write. Over TLS the response closes the connection, so there is
         no over-read hazard here (unlike the plaintext CONNECT read above).
+
+        Returns the decrypted REQUEST LINE (e.g. ``b"POST /v1/chat/completions HTTP/1.1"``)
+        so a caller can assert the tunnelled request reached the provider's real endpoint
+        path, or ``b""`` when the peer EOF'd before a complete header block arrived. A
+        mid-BODY EOF still returns the line — the request line was fully observed, and the
+        truncated body is not what this records.
         """
         buf = b""
         while b"\r\n\r\n" not in buf:
             chunk = tls.recv(4096)
             if not chunk:
-                return
+                return b""
             buf += chunk
         header, _, rest = buf.partition(b"\r\n\r\n")
+        request_line = header.split(b"\r\n", 1)[0]
         needed = 0
         for line in header.split(b"\r\n"):
             if line.lower().startswith(b"content-length:"):
@@ -559,8 +571,9 @@ class _CannedAnthropicProxy:
         while needed > 0:
             chunk = tls.recv(min(4096, needed))
             if not chunk:
-                return
+                return request_line
             needed -= len(chunk)
+        return request_line
 
     def _handle(self, conn: socket.socket) -> None:
         conn.settimeout(_STUB_RECV_TIMEOUT_S)
@@ -578,8 +591,10 @@ class _CannedAnthropicProxy:
                 conn.close()
             return
         try:
-            self._drain_http_request(tls)
+            request_line = self._drain_http_request(tls)
             with self._lock:
+                if request_line:
+                    self._request_lines.append(request_line)
                 index = self._post_index
                 self._post_index += 1
             with suppress(OSError, ssl.SSLError):
@@ -593,6 +608,11 @@ class _CannedAnthropicProxy:
     def first_bytes(self) -> list[bytes]:
         with self._lock:
             return list(self._first_bytes)
+
+    def request_lines(self) -> list[bytes]:
+        """The decrypted request line of every tunnelled POST this stub served (#587 r3)."""
+        with self._lock:
+            return list(self._request_lines)
 
     def post_count(self) -> int:
         with self._lock:
@@ -1191,6 +1211,23 @@ async def test_real_extract_deepseek_returns_extracted_via_prompt_embedded_fallb
             # provider/base_url threading reached the WIRE, not just the spawn kwargs).
             _assert_hard5_first_bytes(
                 proxy, min_used=1, expected_prefix=_EXPECTED_DEEPSEEK_CONNECT_PREFIX
+            )
+
+            # r3: the CONNECT prefix above proves only which HOST:PORT the child dialled.
+            # This proves the configured base_url's PATH reached DeepSeek's real endpoint:
+            # ``AsyncOpenAI(base_url="https://api.deepseek.com/v1")`` +
+            # ``chat.completions.create`` must produce ``POST /v1/chat/completions``. A
+            # base_url that lost its ``/v1``, or a provider branch that fell through to
+            # Anthropic's ``/v1/messages``, would satisfy every other assertion in this
+            # test and fail here. Prefix-matched, not equality: the trailing ``HTTP/1.1``
+            # is httpx's protocol choice, not part of the contract under test.
+            request_lines = proxy.request_lines()
+            assert request_lines, (
+                "expected >= 1 decrypted request line from the canned DeepSeek proxy; "
+                "got none — the child never completed a tunnelled POST"
+            )
+            assert all(line.startswith(b"POST /v1/chat/completions") for line in request_lines), (
+                request_lines
             )
 
             extract_rows = audit_writer.rows_for("quarantine.extract")

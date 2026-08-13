@@ -212,9 +212,19 @@ def test_child_build_provider_reads_provider_from_env(monkeypatch: pytest.Monkey
 def test_child_build_provider_defaults_to_anthropic_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Unset ``ALFRED_QUARANTINE_PROVIDER`` -> the anthropic default, with no base_url.
+
+    Both vars are ``delenv``'d, not just the provider (CodeRabbit r3): ``_build_provider``
+    reads ``ALFRED_QUARANTINE_BASE_URL`` straight from ``os.environ``, so
+    ``factory.base_url is None`` would otherwise assert a fact about the TEST RUNNER's
+    environment being clean rather than about the function's behaviour — and it is exactly
+    the environment of a real daemon host (which legitimately has the var set for a
+    DeepSeek deployment) that would break the assumption.
+    """
     monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-haiku-4-5")
     monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
     monkeypatch.delenv("ALFRED_QUARANTINE_PROVIDER", raising=False)
+    monkeypatch.delenv("ALFRED_QUARANTINE_BASE_URL", raising=False)
     factory = child_main._build_provider("realkey")
     assert factory.provider_id == "anthropic"
     assert factory.base_url is None
