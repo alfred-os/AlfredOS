@@ -108,6 +108,126 @@ def test_factory_repr_hides_key() -> None:
     assert "super-secret" not in repr(_factory())
 
 
+def test_factory_repr_strips_credentials_from_base_url() -> None:
+    """A credential-bearing ``base_url`` must not survive into the repr (CodeRabbit r2).
+
+    ``base_url`` became a per-deployment value in #587, and a per-deployment URL can carry
+    inline basic-auth userinfo (``user:pass@``) or a token query param — both of which would
+    then appear in any traceback frame or log line capturing this repr. HARD #5's subject is
+    the SECRET, not the literal field name ``api_key``.
+
+    Asserts the credential is ABSENT *and* the diagnostic content is PRESENT: a repr that
+    dropped ``base_url`` entirely would pass a bare "not in" check while destroying the
+    misconfiguration-diagnosis the field is carried for.
+    """
+    factory = _ProviderFactory(
+        provider_id="deepseek",
+        api_key="super-secret",
+        model="deepseek-chat",
+        max_tokens=8192,
+        timeout=None,
+        base_url="https://relay-user:hunter2@relay.internal:8443/v1?token=abcd1234",
+    )
+
+    rendered = repr(factory)
+
+    assert "hunter2" not in rendered, rendered
+    assert "relay-user" not in rendered, rendered
+    assert "abcd1234" not in rendered, rendered
+    # Structural, not just value-wise: no query string survived at all. (Asserting on the
+    # substring "token" would be a false positive — ``max_tokens`` is in the same repr.)
+    assert "?" not in rendered, rendered
+    assert "@" not in rendered, rendered
+    # Still diagnosable: scheme, host, port and path survive.
+    assert "relay.internal:8443/v1" in rendered, rendered
+    assert "https" in rendered, rendered
+
+
+def test_factory_repr_keeps_a_plain_base_url_intact() -> None:
+    """Oracle guard: the sanitiser is not a blanket redactor.
+
+    Without this, a ``_redact_base_url`` that returned a constant would satisfy every
+    assertion in the test above while making the field useless.
+    """
+    rendered = repr(_factory(provider_id="deepseek"))
+    assert "https://api.deepseek.com/v1" in rendered, rendered
+
+
+def test_factory_repr_renders_none_base_url_as_none() -> None:
+    """The anthropic path has no base_url; the repr must still say so distinguishably.
+
+    ``None`` must not collapse into an empty string or the opaque unparseable marker —
+    "no endpoint configured" and "endpoint hidden" are different facts to an operator.
+    """
+    assert "base_url=None" in repr(_factory(provider_id="anthropic"))
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "http://[::1/v1",  # malformed IPv6 literal — urlsplit raises ValueError
+        "https://host:notaport/v1",  # non-numeric port — .port raises ValueError
+    ],
+)
+def test_factory_repr_never_leaks_an_unparseable_base_url(hostile: str) -> None:
+    """An unparseable base_url yields the opaque marker, never the raw string.
+
+    Fail-closed: a value we cannot parse is exactly the value we cannot prove is
+    credential-free, so it must not be echoed verbatim as a "best effort". And the repr must
+    not RAISE — ``__repr__`` raising would break the very tracebacks it exists to make
+    readable (a repr that explodes is worse than one that redacts).
+    """
+    factory = _ProviderFactory(
+        provider_id="deepseek",
+        api_key="super-secret",
+        model="deepseek-chat",
+        max_tokens=8192,
+        timeout=None,
+        base_url=hostile,
+    )
+
+    rendered = repr(factory)
+
+    assert "unparseable-base-url" in rendered, rendered
+    assert hostile not in rendered, rendered
+
+
+@pytest.mark.parametrize(
+    "no_scheme_or_host",
+    [
+        "relay.internal/v1?token=abc",  # no "://" — urlsplit treats it all as a path
+        "not-a-url",  # same shape, no path separator either
+    ],
+)
+def test_factory_repr_marks_a_schemeless_hostless_base_url_unparseable(
+    no_scheme_or_host: str,
+) -> None:
+    """A THIRD outcome, distinct from a clean redaction or a raised ValueError.
+
+    CodeRabbit PR-review r1: ``urlsplit`` does not raise on a value with no "://" — it
+    parses "cleanly" with ``scheme=""``/``hostname=None``, and the pre-fix code collapsed
+    that to ``urlunsplit(("", "", "", "", ""))`` == ``""``. The repr then rendered
+    ``base_url=''``, which reads as "no endpoint configured" (the ``None`` case) rather
+    than "endpoint hidden" (this function's actual verdict on a value it cannot
+    affirmatively judge safe). No credential escapes in either version — path and query
+    are discarded regardless — this pins the DIAGNOSTIC fact, not a leak.
+    """
+    factory = _ProviderFactory(
+        provider_id="deepseek",
+        api_key="super-secret",
+        model="deepseek-chat",
+        max_tokens=8192,
+        timeout=None,
+        base_url=no_scheme_or_host,
+    )
+
+    rendered = repr(factory)
+
+    assert "unparseable-base-url" in rendered, rendered
+    assert "base_url=''" not in rendered, rendered
+    assert no_scheme_or_host not in rendered, rendered
+
+
 def test_factory_refuses_empty_key() -> None:
     """An empty provider key means the child cannot build a real provider — refuse boot (§20.2)."""
     with pytest.raises(QuarantineChildBootError):

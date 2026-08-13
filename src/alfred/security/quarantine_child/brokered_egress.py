@@ -44,6 +44,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from urllib.parse import urlsplit, urlunsplit
 
 import anyio
 import anyio.to_thread  # explicit submodule bind so pyright resolves run_sync (not a re-export)
@@ -356,6 +357,59 @@ class QuarantineChildBootError(RuntimeError):
     """
 
 
+def _redact_base_url(base_url: str | None) -> str | None:
+    """Strip every credential-shaped component from a ``base_url`` bound for a repr/log.
+
+    Keeps scheme + host + path — enough to answer "which endpoint is this child dialling?",
+    the whole reason ``base_url`` is in :meth:`_ProviderFactory.__repr__` at all. Drops:
+
+    * **userinfo** (``user:pass@``) — inline basic-auth, plausible for an egress-relay-fronted
+      deployment and a literal credential;
+    * **query string** — the other conventional place an API token rides in a URL;
+    * **fragment** — no diagnostic value, and no reason to trust its contents either.
+
+    A DEFAULT-DENY sanitiser, not a userinfo-stripper with extras: it rebuilds the URL from the
+    three components it has decided are safe rather than removing the credential shapes it
+    happens to know about, so a component nobody thought of cannot ride through (the
+    enumerate-vs-default-deny lesson).
+
+    ``None`` (the anthropic path, which has no base_url) passes through as ``None`` so the repr
+    still distinguishes "no endpoint configured" from "endpoint hidden". A URL that cannot be
+    parsed yields a fixed opaque marker, NEVER the raw string: an unparseable value is precisely
+    the one we cannot prove is credential-free. This function must not raise — it runs inside
+    ``__repr__``, and a raising repr breaks the tracebacks it exists to make readable.
+    """
+    if base_url is None:
+        return None
+    try:
+        parts = urlsplit(base_url)
+        # ``hostname``/``port``, not ``netloc``: netloc still carries the userinfo.
+        host = parts.hostname or ""
+        if not parts.scheme or not host:
+            # CodeRabbit r1 (PR review): a THIRD outcome distinct from the two the
+            # docstring names — a value that parses cleanly (no exception) but carries
+            # no scheme and no host, e.g. "relay.internal/v1?token=abc" (no "://", so
+            # urlsplit treats the whole thing as a path — scheme="" hostname=None).
+            # Without this check the two lines below collapse it to urlunsplit(("", "",
+            # "", "", "")) == "" — the repr then renders base_url='', which reads as
+            # "no endpoint configured" (the None case) rather than "endpoint hidden"
+            # (this function's whole purpose). No credential escapes either way (path
+            # and query are still discarded), but fail closed to the marker for the
+            # SAME reason as the except arm below: a value we cannot affirmatively
+            # judge safe gets the opaque marker, not a blank string that reads as a
+            # different fact.
+            return "<unparseable-base-url>"
+        # A ternary under protest (ruff SIM108 rejects the statement form here). coverage.py
+        # cannot see the arms of a conditional EXPRESSION, so BOTH are pinned by explicit
+        # tests instead of by the coverage gate: test_factory_repr_strips_credentials_from_
+        # base_url carries a port, test_factory_repr_keeps_a_plain_base_url_intact does not.
+        netloc = f"{host}:{parts.port}" if parts.port is not None else host
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except ValueError:
+        # urlsplit raises on e.g. a malformed IPv6 literal or an out-of-range port.
+        return "<unparseable-base-url>"
+
+
 @dataclass(frozen=True, slots=True)
 class _ProviderFactory:
     """Frozen, key-free-repr builder for the child's per-attempt provider client (§8, #587).
@@ -424,14 +478,20 @@ class _ProviderFactory:
 
     def __repr__(self) -> str:
         # Key-free repr (anti-leak, the _DeterministicProvider discipline): the api_key must never
-        # reach a log line or a traceback frame (HARD #5 / no-secret-in-logs). provider_id, model,
-        # max_tokens and base_url are all non-secret host-set routing config, so all four are
-        # included — the repr's job is to make a misrouted child diagnosable, and #587 made
-        # base_url a per-deployment variable rather than a constant, so omitting it would hide
-        # the exact axis most likely to be misconfigured.
+        # reach a log line or a traceback frame (HARD #5 / no-secret-in-logs). provider_id, model
+        # and max_tokens are non-secret host-set routing config and appear verbatim — the repr's
+        # job is to make a misrouted child diagnosable.
+        #
+        # base_url is included but SANITIZED (round 2). #587 made it a per-deployment variable
+        # rather than a constant, so omitting it would hide the axis most likely to be
+        # misconfigured — but a per-deployment URL is exactly the kind of value that can carry
+        # inline basic-auth userinfo (``https://user:pass@relay/v1``, entirely plausible behind an
+        # egress relay) or a credential-shaped query parameter. HARD #5's subject is the SECRET,
+        # not the field name it happens to live in, so those components are stripped here rather
+        # than trusted to be absent.
         return (
             f"_ProviderFactory(provider_id={self.provider_id!r}, model={self.model!r}, "
-            f"max_tokens={self.max_tokens}, base_url={self.base_url!r})"
+            f"max_tokens={self.max_tokens}, base_url={_redact_base_url(self.base_url)!r})"
         )
 
 

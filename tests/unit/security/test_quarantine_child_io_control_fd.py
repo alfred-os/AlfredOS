@@ -221,6 +221,70 @@ async def test_control_fd_without_provider_config_refuses(
     assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
 
 
+async def test_control_fd_deepseek_without_base_url_refuses(
+    _spawn_capture: dict[str, Any],
+) -> None:
+    """A deepseek live spawn with no ``base_url`` refuses PRE-FORK (CodeRabbit r2).
+
+    DeepSeek's OpenAI-compatible client needs an explicit endpoint; ``_child_env`` sets
+    ``ALFRED_QUARANTINE_BASE_URL`` only when the argument is non-``None``, so the same
+    late-and-obscure shape as the model/max_tokens case above applies. The CHILD's own
+    ``build_child_client`` already refuses this combination — this guard just moves the
+    refusal one step earlier, to before the fork, so no bwrap child is created only to be
+    reaped.
+
+    ``proc is None`` is the load-bearing assertion, not merely the raised type: it is what
+    distinguishes "refused pre-fork" from "spawned, then failed".
+    """
+    with pytest.raises(QuarantineChildSpawnError):
+        await spawn_quarantine_child_io(
+            provider_key="k",
+            control_fd=True,
+            egress_config=_Cfg(),
+            model="deepseek-chat",
+            max_tokens=8192,
+            provider="deepseek",
+            base_url=None,
+        )
+    assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("deepseek", "https://api.deepseek.com/v1"),  # deepseek WITH its endpoint
+        ("anthropic", None),  # anthropic legitimately has none
+        (None, None),  # provider unthreaded (pre-#587 caller shape)
+    ],
+)
+async def test_control_fd_base_url_guard_is_deepseek_scoped(
+    _spawn_capture: dict[str, Any], provider: str | None, base_url: str | None
+) -> None:
+    """Oracle guard: the new base_url check must not become an unconditional requirement.
+
+    Anthropic's SDK supplies its own endpoint, and a ``provider=None`` caller predates #587
+    entirely — an over-broad ``base_url is not None`` guard would refuse both and take the
+    default deployment down. Each row here is a live spawn that MUST still succeed.
+    """
+    io = await spawn_quarantine_child_io(
+        provider_key="k",
+        control_fd=True,
+        egress_config=_Cfg(),
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+        provider=provider,
+        base_url=base_url,
+    )
+    try:
+        assert _spawn_capture["proc"] is not None
+    finally:
+        await io.aclose()
+
+
 async def test_dormant_spawn_still_ignores_provider_config(
     _spawn_capture: dict[str, Any],
 ) -> None:
@@ -529,14 +593,36 @@ def test_child_env_live_sets_provider_and_base_url_when_given() -> None:
     assert env["ALFRED_QUARANTINE_BASE_URL"] == "https://api.deepseek.com/v1"
 
 
-def test_child_env_live_omits_provider_and_base_url_when_none() -> None:
+def test_child_env_live_omits_provider_and_base_url_when_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting both keys is CONSTRUCTION behaviour, not a clean-environment artifact.
+
+    ``_child_env`` builds a scrubbed ALLOWLIST — it must never read the host's own
+    ``ALFRED_QUARANTINE_*`` vars. Asserting absence in a pristine environment could not tell
+    "the function never sets these" apart from "the function inherits them and there happened
+    to be nothing to inherit" (CodeRabbit r2): the daemon process legitimately HAS both vars
+    set in production, so the ambient-clean version of this test was green for the wrong
+    reason on the only environment that matters.
+
+    Poisoning ``os.environ`` first makes the two hypotheses give different answers. The values
+    are deliberately conspicuous so a leak is unmistakable in the failure output.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "https://example.invalid/v1")
+
     env = qcio._child_env(
         model="claude-haiku-4-5",
         max_tokens=8192,
         ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
     )
-    assert "ALFRED_QUARANTINE_PROVIDER" not in env
-    assert "ALFRED_QUARANTINE_BASE_URL" not in env
+
+    assert "ALFRED_QUARANTINE_PROVIDER" not in env, env
+    assert "ALFRED_QUARANTINE_BASE_URL" not in env, env
+    # Value-level too: a future refactor could re-add the keys under different names or
+    # copy the values onto some other allowlisted key. Nothing from the ambient env leaks.
+    assert "deepseek" not in env.values(), env
+    assert "https://example.invalid/v1" not in env.values(), env
 
 
 def test_child_env_live_is_dormant_plus_exactly_the_four_keys(

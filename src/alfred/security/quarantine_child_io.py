@@ -1140,20 +1140,27 @@ async def spawn_quarantine_child_io(
         raise QuarantineChildSpawnError(t("security.quarantine_child.child_module_not_allowed"))
     if control_fd and egress_config is None:
         raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
-    if (
-        control_fd
-        and child_module in _MODULES_REQUIRING_PROVIDER_CONFIG
-        and (model is None or max_tokens is None)
-    ):
+    if control_fd and child_module in _MODULES_REQUIRING_PROVIDER_CONFIG:
         # SYMMETRY with the egress guard above. ``_child_env`` sets each provider-config var
         # ONLY when its argument is non-``None`` (the ADR-0050 dormancy invariant), so a live
-        # spawn missing either one produces a child that boots without it and fails LATE and
+        # spawn missing any of them produces a child that boots without it and fails LATE and
         # obscurely: ``_build_provider`` ``KeyError``s on ``ALFRED_QUARANTINE_MODEL`` at boot,
         # and a missing ``ALFRED_QUARANTINE_MAX_TOKENS`` ``KeyError``s inside the extract loop
         # — AFTER the two-frame handshake already reported the child healthy. Refusing here
         # makes every live misconfiguration one loud pre-spawn failure of the same shape, and
         # costs no spawn (hard rule #7).
-        raise QuarantineChildSpawnError(t("security.quarantine_child.provider_config_missing"))
+        #
+        # ``provider == "deepseek" and base_url is None`` joins the same guard (CodeRabbit r2).
+        # DeepSeek's OpenAI-compatible client REQUIRES an explicit endpoint; anthropic's SDK
+        # has its own default, so the check is provider-scoped rather than an unconditional
+        # ``base_url is not None`` — a dormant or anthropic spawn passes ``None`` legitimately
+        # and must keep passing. The child's own ``build_child_client`` already refuses this
+        # combination, so this is DEFENCE-IN-DEPTH that fails one step earlier still: before
+        # the fork, so no bwrap child is created only to be reaped.
+        missing_core = model is None or max_tokens is None
+        missing_deepseek_base_url = provider == "deepseek" and base_url is None
+        if missing_core or missing_deepseek_base_url:
+            raise QuarantineChildSpawnError(t("security.quarantine_child.provider_config_missing"))
 
     # Build the scrubbed child env ONCE, up front (no ``await``, no fd op — safe
     # anywhere). The LIVE (``control_fd=True``) spawn threads the golive provider
