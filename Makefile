@@ -96,6 +96,11 @@ test-unit: ## Run unit tests only (fast; no Docker).
 	else \
 		echo "::notice::no tests/unit/ yet — skipping test-unit"; \
 	fi
+	@if [ -d plugins/alfred_tui/tests ]; then \
+		uv run pytest plugins/alfred_tui/tests -q; \
+	else \
+		echo "::notice::no plugins/alfred_tui/tests/ yet — skipping TUI plugin unit tests"; \
+	fi
 
 # -m "not real_llm" deselects the nightly-only real-LLM smoke
 # (test_act_loop_real_llm_smoke.py) from this local/CI broad run to avoid
