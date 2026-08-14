@@ -228,6 +228,36 @@ class _NotificationView:
         return self._prepared.egress.inbound_id
 
 
+@dataclass(frozen=True, slots=True)
+class _TurnSucceeded:
+    """``dispatch``'s pool-bracketed turn completed normally (perf-001, PR #594).
+
+    Carries the orchestrator's answer OUT of the ``async with lock:`` block so
+    the outbound send (already outside the mutex, FOLD-R11) can run once the
+    per-user lock has released — unchanged from before this fix.
+    """
+
+    answer: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnFailed:
+    """``dispatch``'s pool-bracketed turn hit a refusal/error leg (perf-001, PR #594).
+
+    Before this fix, each refusal leg's ``await self._notify_turn_failed(...)``
+    (up to a 2.0s wire-send timeout) ran INSIDE ``async with lock:`` — holding
+    the per-(persona, slug) turn mutex hostage to a wedged-but-connected
+    client, unlike the successful-turn ``_send`` call which was already
+    outside the lock. This type carries the notify stage + (optional)
+    exception-to-reraise OUT of the lock so ``dispatch`` can notify (and, on
+    the ``turn_error`` leg, re-raise) AFTER the mutex has released, while
+    preserving each leg's original notify-then-{return,raise} ORDER.
+    """
+
+    stage: _RefusalStage
+    reraise: Exception | None
+
+
 class RealTurnOrchestratorAdapter:
     """The ``_OrchestratorLike`` the live comms-inbound path drives (#338 PR2)."""
 
@@ -489,6 +519,13 @@ class RealTurnOrchestratorAdapter:
         ``turn.failed`` sent on attempt 1 of a bounded-replay-eligible turn would
         be a LIE the moment a later attempt succeeds — this ordering must be
         revisited in the same commit that widens ``TURN_STATE_CLIENT_KINDS``.
+
+        perf-001 (PR #594): the ``budget_denied`` / ``dlp_canary_tripped`` /
+        ``turn_error`` legs' ``_notify_turn_failed`` call (up to a 2.0s wire-send
+        timeout) runs AFTER the ``async with lock:`` block below has released —
+        mirroring the successful-turn ``_send`` call's existing outside-the-mutex
+        placement. Each leg's audit-write-then-notify-then-{return,raise} ORDER
+        is unchanged; only the LOCK boundary moved. See ``_TurnFailed``.
         """
         sender = self._require_sender()
         if isinstance(ingested, _HaltNoReply):
@@ -527,6 +564,7 @@ class RealTurnOrchestratorAdapter:
         # Small blast radius today (`clock.now` only); reassess once `web.fetch`
         # (network-latency-bound, #583) is live.
         lock = await self._turn_lock_for(key)
+        outcome: _TurnSucceeded | _TurnFailed
         async with lock:
             wm = await self._pool.acquire(key)
             try:
@@ -536,17 +574,15 @@ class RealTurnOrchestratorAdapter:
                     working_memory=wm,
                     egress_context=ingested.egress,
                 )
+                outcome = _TurnSucceeded(answer)
             except BudgetError as exc:
                 # Deterministic: audit loudly + halt (no reply, no replay). FOLD-5.
                 await self._emit_refused(
                     note, canonical_user_id=ingested.user.slug, stage="budget_denied", exc=exc
                 )
-                # #593: notify AFTER the audit write, still inside the lock/try so
-                # `finally: await self._pool.release(...)` below still runs.
-                await self._notify_turn_failed(
-                    sender, adapter_id=ingested.adapter_id, stage="budget_denied"
-                )
-                return
+                # perf-001 (PR #594): the notify (and the `return` it precedes) now
+                # happens AFTER the lock releases below — see `_TurnFailed`.
+                outcome = _TurnFailed(stage="budget_denied", reraise=None)
             except OutboundCanaryTripped as exc:
                 # #410 PR3 (I4 fix wave): also deterministic, same reasoning as
                 # BudgetError above — the SAME content trips the SAME canary on
@@ -563,12 +599,8 @@ class RealTurnOrchestratorAdapter:
                     stage="dlp_canary_tripped",
                     exc=exc,
                 )
-                # #593: notify AFTER the audit write, still inside the lock/try so
-                # `finally: await self._pool.release(...)` below still runs.
-                await self._notify_turn_failed(
-                    sender, adapter_id=ingested.adapter_id, stage="dlp_canary_tripped"
-                )
-                return
+                # perf-001 (PR #594): notify deferred past lock release, as above.
+                outcome = _TurnFailed(stage="dlp_canary_tripped", reraise=None)
             except Exception as exc:
                 # Unknown/transient: audit loudly, then RE-RAISE so the forwarded
                 # path's dispatch_failed handler + bounded replay take over (direct
@@ -578,16 +610,28 @@ class RealTurnOrchestratorAdapter:
                 await self._emit_refused(
                     note, canonical_user_id=ingested.user.slug, stage="turn_error", exc=exc
                 )
-                # #593: notify BEFORE the raise so the client is released even on
-                # the leg that re-raises. `_notify_turn_failed` NEVER raises, so
-                # this cannot replace/mask `exc` — the forwarded replay path still
-                # sees the original turn fault verbatim.
-                await self._notify_turn_failed(
-                    sender, adapter_id=ingested.adapter_id, stage="turn_error"
-                )
-                raise
+                # perf-001 (PR #594): `exc` is carried out via `_TurnFailed.reraise`
+                # and re-raised AFTER the lock releases + the notify below runs —
+                # the audit-write-then-notify-then-raise ORDER is unchanged, only
+                # the lock boundary moved. `_notify_turn_failed` NEVER raises, so
+                # this still cannot replace/mask `exc` — the forwarded replay path
+                # still sees the original turn fault verbatim.
+                outcome = _TurnFailed(stage="turn_error", reraise=exc)
             finally:
                 await self._pool.release(key, wm)
+
+        # perf-001 (PR #594): notify (and, on `turn_error`, the re-raise) run
+        # HERE — after the mutex above has released — instead of inside it. A
+        # wedged-but-connected client's up-to-2s wire wait no longer holds the
+        # per-(persona, slug) turn lock hostage, matching the successful-turn
+        # `_send` call's existing outside-the-mutex placement below.
+        if isinstance(outcome, _TurnFailed):
+            await self._notify_turn_failed(
+                sender, adapter_id=ingested.adapter_id, stage=outcome.stage
+            )
+            if outcome.reraise is not None:
+                raise outcome.reraise
+            return
 
         # Send OUTSIDE the mutex (the buffer work is done) but with its own
         # audited envelope (FOLD-R11): a scan/send failure gets a loud adapter row
@@ -597,7 +641,7 @@ class RealTurnOrchestratorAdapter:
             sender,
             ingested.adapter_id,
             ingested.target_platform_id,
-            answer,
+            outcome.answer,
             notification=note,
             canonical_user_id=ingested.user.slug,
         )

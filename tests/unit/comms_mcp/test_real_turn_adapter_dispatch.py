@@ -12,6 +12,7 @@ not re-exercised here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 from typing import get_args
 
@@ -509,6 +510,79 @@ async def test_notify_timeout_is_bounded_and_does_not_hang_the_halt(monkeypatch)
         entry.get("event") == "comms.inbound.real_turn.turn_failed_notify_timeout"
         for entry in captured
     ), captured
+
+
+class _EventGatedHangingNotifySender:
+    """``send_outbound`` records; ``send_turn_state`` signals ``notify_started``
+    then hangs until cancelled.
+
+    Lets a test wait DETERMINISTICALLY (no sleep-loop polling) for ``dispatch``
+    to have reached — and be blocked inside — the notify call, so it can then
+    assert on state that must already be true by that point (perf-001, PR #594).
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+        self.notify_started = asyncio.Event()
+
+    async def send_outbound(self, request: object) -> dict[str, object]:
+        self.sent.append(request)
+        return {}
+
+    async def send_turn_state(self, notification: object) -> None:
+        self.notify_started.set()
+        await asyncio.sleep(10)  # far longer than any test-scoped timeout
+
+
+async def test_dispatch_releases_lock_before_notify_wire_wait_on_budget_denied() -> None:
+    """perf-001 (PR #594): the ``budget_denied`` halt leg's up-to-2s notify wire
+    wait must NOT hold the per-(persona, slug) turn mutex. Drives a hanging
+    ``send_turn_state`` and proves the lock is already free — and
+    ``_pool.release`` has already run — WHILE ``dispatch`` is still blocked
+    inside the (never-completing) notify call.
+    """
+    sender = _EventGatedHangingNotifySender()
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=BudgetError("over")), sender=sender, pool=pool
+    )
+    task = asyncio.create_task(adapter.dispatch(_prepared()))
+    try:
+        await asyncio.wait_for(sender.notify_started.wait(), timeout=1.0)
+        # `dispatch` is now parked inside the hanging notify call — prove the
+        # lock already released and the working-memory buffer already returned,
+        # i.e. WITHOUT waiting for (let alone the full 2.0s of) the notify.
+        assert pool.released == [("alfred", "u-1")]
+        assert adapter._turn_locks[("alfred", "u-1")].locked() is False
+        assert not task.done()  # confirms we really caught it mid-notify
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_dispatch_releases_lock_before_notify_wire_wait_on_turn_error() -> None:
+    """Same proof as above for the trickier ``turn_error`` leg, which notifies
+    THEN re-raises: the lock must release (and the re-raise must not yet have
+    happened) while ``dispatch`` is still parked inside the notify call —
+    confirming the reraise, like the notify, now runs only after the mutex
+    (and the ``finally: await self._pool.release(...)`` it wraps) has cleared.
+    """
+    sender = _EventGatedHangingNotifySender()
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=RuntimeError("provider down")), sender=sender, pool=pool
+    )
+    task = asyncio.create_task(adapter.dispatch(_prepared()))
+    try:
+        await asyncio.wait_for(sender.notify_started.wait(), timeout=1.0)
+        assert pool.released == [("alfred", "u-1")]
+        assert adapter._turn_locks[("alfred", "u-1")].locked() is False
+        assert not task.done()  # the RuntimeError has not been re-raised yet
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def test_notify_skipped_for_non_client_adapter_kind() -> None:
