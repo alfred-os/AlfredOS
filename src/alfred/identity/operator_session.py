@@ -60,12 +60,48 @@ from alfred.security._hkdf import hkdf_expand
 
 _log = structlog.get_logger(__name__)
 
-# ``O_NOFOLLOW`` / ``O_DIRECTORY`` are POSIX-only; on Windows they are
-# absent and the open-time symlink/dir refusal is not enforced (Windows
-# operators are directed at the WSL2 path — PR-S4-10). Falling back to 0
-# keeps the module importable on Windows CI runners.
+# ``O_NOFOLLOW`` / ``O_DIRECTORY`` are POSIX-only. The ``getattr`` fallback is
+# load-bearing for IMPORT: these are module-scope constants, so a bare
+# ``os.O_NOFOLLOW`` here would make ``import alfred.identity.operator_session``
+# raise on Windows and take down collection of every module that imports it.
+# (Contrast ``alfred.cli.daemon._daemon_pidfile``, which references the flag
+# INSIDE a function and therefore keeps the bare form — the dominant pattern,
+# see also ``alfred.policies.load``.)
+#
+# But a 0 fallback silently DISABLES a security control: OR-ing 0 into the
+# open flags means the symlink refusal (``O_NOFOLLOW``) and the is-a-directory
+# refusal (``O_DIRECTORY``) simply do not happen. Importability must not buy
+# itself a weakened check, so ``load_session_file`` refuses outright rather
+# than opening the operator's session file with the guarantees missing — see
+# ``_require_posix_open_guarantees``. Windows operators are directed at the
+# WSL2 path (PR-S4-10), where these flags are present and nothing degrades.
 _O_NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
+
+
+def _require_posix_open_guarantees() -> None:
+    """Refuse rather than open the session file with degraded protections.
+
+    ``load_session_file``'s entire TOCTOU discipline rests on two POSIX open
+    flags and on ``dir_fd``. Where they are absent (Windows), OR-ing the 0
+    fallbacks would still *open the file* — just without the symlink and
+    directory refusals the docstring promises, on the path that authenticates
+    the operator. Fail closed instead.
+
+    ``NotImplementedError`` deliberately, not a new ``OperatorSession*`` type:
+    ``os.open(..., dir_fd=...)`` already raises exactly that on Windows a few
+    lines later (``os.supports_dir_fd`` is empty there), so this refuses with
+    the same type callers would otherwise see — only earlier, before any FD is
+    opened, and with a message that names the cause instead of surfacing a bare
+    "dir_fd unavailable on this platform".
+    """
+    if not _O_NOFOLLOW or not _O_DIRECTORY:
+        raise NotImplementedError(
+            "load_session_file requires POSIX O_NOFOLLOW + O_DIRECTORY to enforce its "
+            "symlink/directory refusals; this platform exposes neither, so the file "
+            "would be opened without them. Use the WSL2 path on Windows (PR-S4-10)."
+        )
+
 
 # Upper bound on the session-file size. A legitimate file is a few hundred
 # bytes; the cap refuses a planted multi-megabyte file before it is parsed
@@ -337,6 +373,7 @@ def load_session_file(path: Path) -> OperatorSessionFile:
         OperatorSessionBadFileOwner: uid/gid mismatch.
         OperatorSessionMalformed: bytes did not parse as a session file.
     """
+    _require_posix_open_guarantees()
     parent = path.parent
     try:
         parent_fd = os.open(parent, os.O_RDONLY | _O_DIRECTORY)

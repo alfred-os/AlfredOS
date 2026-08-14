@@ -231,3 +231,61 @@ def test_bad_file_owner_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
     with pytest.raises(OperatorSessionBadFileOwner):
         load_session_file(path)
+
+
+@pytest.mark.parametrize(
+    ("nofollow", "directory"),
+    # ``1`` stands for "flag present" — the guard is a truthiness check, so the
+    # real flag VALUE is irrelevant here. Deliberately not referencing
+    # ``os.O_NOFOLLOW`` at module scope: that would make this decorator itself
+    # raise on a host without the attribute, which is precisely the condition
+    # under test (and would break collection rather than exercise the guard).
+    [
+        (0, 1),  # no symlink refusal
+        (1, 0),  # no is-a-directory refusal
+        (0, 0),  # neither (the real Windows shape)
+    ],
+)
+def test_refuses_when_posix_open_guarantees_are_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nofollow: int, directory: int
+) -> None:
+    """A platform lacking O_NOFOLLOW/O_DIRECTORY refuses instead of opening degraded.
+
+    ``_O_NOFOLLOW``/``_O_DIRECTORY`` fall back to ``0`` so the module stays
+    IMPORTABLE on Windows (they are module-scope constants — a bare
+    ``os.O_NOFOLLOW`` would break collection of everything importing this
+    module). The hazard that fallback creates: OR-ing ``0`` into the open flags
+    still opens the operator's session file, just without the symlink and
+    is-a-directory refusals this loader's whole TOCTOU discipline rests on.
+
+    Pinning the refusal is what makes "importable" stop meaning "silently
+    weaker". Without this test the degraded path is unreachable-by-luck rather
+    than unreachable-by-design: nothing in the suite exercises it, because the
+    real platform that triggers it (Windows) has this entire file
+    collect-ignored (``tests/_posix_only_tests.py``).
+
+    Each row asserts NO file descriptor was opened before the refusal — a guard
+    that fired only after the ``os.open`` would defeat the point.
+    """
+    path = _write_secure(tmp_path, _serialize_to_file_bytes(_session()))
+    monkeypatch.setattr("alfred.identity.operator_session._O_NOFOLLOW", nofollow)
+    monkeypatch.setattr("alfred.identity.operator_session._O_DIRECTORY", directory)
+
+    opened: list[object] = []
+    real_open = os.open
+    monkeypatch.setattr(os, "open", lambda *a, **kw: (opened.append(a), real_open(*a, **kw))[1])
+
+    with pytest.raises(NotImplementedError, match="O_NOFOLLOW"):
+        load_session_file(path)
+    assert opened == [], "refused only AFTER opening an fd — the guard is too late"
+
+
+def test_posix_open_guarantees_present_here_so_the_loader_proceeds(tmp_path: Path) -> None:
+    """Oracle guard: the refusal above is conditional, not unconditional.
+
+    Without this pair, a ``_require_posix_open_guarantees`` that raised
+    unconditionally would satisfy every row of the test above while breaking
+    every real POSIX load.
+    """
+    path = _write_secure(tmp_path, _serialize_to_file_bytes(_session()))
+    assert load_session_file(path).user_id == 1

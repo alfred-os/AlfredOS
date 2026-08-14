@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-13 15:21+0100\n"
+"POT-Creation-Date: 2026-08-14 10:43+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2162,7 +2162,7 @@ msgstr ""
 
 # CR-227 round-2 finding 4: best-effort macOS machine-id cache-write failure.
 #: src/alfred/i18n/_slice_4_reserve.py:100
-#: src/alfred/identity/operator_session.py:523
+#: src/alfred/identity/operator_session.py:560
 msgid "operator_session.machine_id.cache_write_failed"
 msgstr ""
 "Could not cache the machine-id at {path}; continuing with the in-memory "
