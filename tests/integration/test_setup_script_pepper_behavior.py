@@ -23,6 +23,12 @@ postgres health-check, ...). To stay scoped to the bootstrap, this
 test executes only the bootstrap section directly via ``bash -c`` with
 the inlined snippet — same source-of-truth as the script body, but
 without dragging in the docker dependencies.
+
+Also covers, at the bottom of this file, a real-execution regression for
+the "Bootstrapping operator identity" step's ``ALFRED_OPERATOR_NAME``
+whitespace-trim fix (final-review fix 1 on #591/#592/#593's combined PR) —
+it rides on the same ``bash``-slicing technique and lives here rather than
+in a new file, per that fix's own scoping note.
 """
 
 from __future__ import annotations
@@ -40,7 +46,8 @@ from pathlib import Path
 
 import pytest
 
-from tests._setup_script_helpers import slice_shell_function
+from alfred.config.operator_env import operator_display_name
+from tests._setup_script_helpers import slice_shell_function, slice_shell_step
 
 pytestmark = [pytest.mark.integration]
 
@@ -441,3 +448,119 @@ def test_bootstrap_refuses_on_pepper_drift(
     # Neither side is silently rewritten when the bootstrap refuses.
     assert _read_dotenv_pepper(tmp_path) == _PEPPER_ONE
     assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_TWO
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix 1: the "Bootstrapping operator identity" step's non-TTY
+# ALFRED_OPERATOR_NAME resolution must trim whitespace BEFORE applying the
+# `${name:-operator}` default — exactly matching
+# `alfred.config.operator_env.operator_display_name()`'s `.strip() or
+# "operator"` normalization. Without the trim, a whitespace-padded .env
+# value (e.g. `ALFRED_OPERATOR_NAME="   Bruce  "`, or an all-whitespace
+# `"   "`) sails through untrimmed into the `user bind ... --id "$name"`
+# call a few lines further down, while the real TUI client sends the
+# Python-normalized value — reproducing the exact #592 identity mismatch
+# this whole step exists to prevent.
+#
+# This does NOT drive the full Docker-based operator-bootstrap flow (which
+# needs a running Postgres + the alfred-core image) — it isolates just the
+# resolution statement, plus its two real helper functions (`read_env_var`,
+# `trim_ws`), sliced straight out of bin/alfred-setup.sh the same way
+# `_run_bootstrap_in_tmpdir` above isolates `_pepper_bootstrap`.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_operator_name_line() -> str:
+    """Pull the non-TTY ``ALFRED_OPERATOR_NAME`` resolution statement out of
+    the real "Bootstrapping operator identity" step.
+
+    Anchored on ``slice_shell_step`` (same fail-loud-on-drift contract the
+    pepper-bootstrap tests above rely on via ``_bootstrap_block``) plus a
+    regex for the specific assignment line — not a hand-copied
+    re-implementation — so a rewritten, renamed, or removed trim call fails
+    this test loudly instead of silently exercising stale text. The regex
+    anchors on the literal ``name="$(read_env_var ALFRED_OPERATOR_NAME)"``
+    prefix, which only the non-TTY branch's line has (the TTY branch's
+    equivalent line assigns ``default_name``, and the TTY branch's own
+    ``name=`` line reads from ``$default_name``, not ``read_env_var``
+    directly) — so this can't accidentally match the wrong branch.
+    """
+    step_block = slice_shell_step(_SETUP_SH, "Bootstrapping operator identity")
+    match = re.search(
+        r'^\s*name="\$\(read_env_var ALFRED_OPERATOR_NAME\)".*$',
+        step_block,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise ValueError(
+            "non-TTY ALFRED_OPERATOR_NAME resolution line not found in the "
+            '"Bootstrapping operator identity" step of bin/alfred-setup.sh — '
+            "the fix may have been reworded; update this test's anchor to match."
+        )
+    return match.group(0)
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("   Bruce  ", "Bruce"),
+        ("   ", "operator"),
+        ("", "operator"),
+        ("Bruce", "Bruce"),
+    ],
+    ids=["padded-name", "whitespace-only", "empty", "no-padding"],
+)
+def test_operator_name_resolution_trims_like_operator_display_name(
+    bash_available: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_value: str,
+    expected: str,
+) -> None:
+    """A whitespace-padded ``.env`` value resolves the SAME on both sides.
+
+    Two independent checks per case: the shell result matches a literal
+    expected value, AND it matches the real Python
+    ``operator_display_name()`` helper for the same input — the latter is
+    what the TUI client actually sends when it binds/notifies, so agreement
+    there is the load-bearing invariant (not just two hand-copied
+    expectations that could drift together).
+
+    Pre-fix, this would have failed on the ``padded-name`` and
+    ``whitespace-only`` cases: the old
+    ``name="$(read_env_var ALFRED_OPERATOR_NAME)"; name="${name:-operator}"``
+    only defaults on a LITERALLY empty value, so ``"   Bruce  "`` would have
+    resolved to the untrimmed ``"   Bruce  "`` (not ``"Bruce"``) and
+    ``"   "`` would have resolved to the untrimmed ``"   "`` (not
+    ``"operator"``) — both diverging from ``operator_display_name()``.
+    """
+    (tmp_path / ".env").write_text(f'ALFRED_OPERATOR_NAME="{env_value}"\n')
+    script = (
+        slice_shell_function(_SETUP_SH, "read_env_var() {")
+        + slice_shell_function(_SETUP_SH, "trim_ws() {")
+        + _resolve_operator_name_line()
+        + '\nprintf "%s" "$name"\n'
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(tmp_path),
+        timeout=10,
+    )
+    assert result.returncode == 0, (
+        f"resolution snippet failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.stdout == expected, (
+        f"shell resolved ALFRED_OPERATOR_NAME={env_value!r} to {result.stdout!r}, "
+        f"expected {expected!r}"
+    )
+
+    monkeypatch.setenv("ALFRED_OPERATOR_NAME", env_value)
+    python_value = operator_display_name()
+    assert result.stdout == python_value, (
+        "shell and Python operator-name normalizers DISAGREE for "
+        f"ALFRED_OPERATOR_NAME={env_value!r}: shell={result.stdout!r} python={python_value!r} — "
+        "this is the exact #592 identity-mismatch shape this step exists to prevent"
+    )

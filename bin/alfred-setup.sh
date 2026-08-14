@@ -69,6 +69,20 @@ read_env_var() {
   grep -E "^${key}=" .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true
 }
 
+# `trim_ws VALUE` strips leading/trailing whitespace via sed. `read_env_var`
+# returns a `.env` value AS-IS — a whitespace-padded entry like
+# `ALFRED_OPERATOR_NAME="   Bruce  "` comes back padded. Python's
+# `alfred.config.operator_env.operator_display_name()` normalizes with
+# `.strip() or "operator"`, so it trims BEFORE deciding whether the value
+# counts as unset. Any shell-side caller that reads the same env var and
+# applies `${var:-operator}` directly (without this trim first) would
+# normalize differently for a padded value — matters wherever the result is
+# compared against, or fed into, something the Python side also computes
+# (see the operator-identity bootstrap below, #592).
+trim_ws() {
+  printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 # #469 Blocker 2 Task 5: make the opt-in coherent. docker-compose.yaml now defaults
 # ALFRED_GATEWAY_HOSTED_ADAPTERS to [] (Discord is opt-in), so setting a real Discord
 # token alone no longer enables Discord — an operator's single action (the token) must
@@ -501,14 +515,29 @@ _pepper_bootstrap() {
   fi
 
   if [[ -n "$env_pepper" ]]; then
-    _pepper_write_file "$env_pepper"
+    # `_pepper_bootstrap` is invoked as `_pepper_bootstrap || _pepper_status=$?`
+    # at the call site below, which — a classic bash gotcha — disables `set -e`
+    # propagation for EVERY command inside this function's body (bash must run
+    # the whole function to know its exit status before deciding whether to
+    # take the `||` branch). A write failure here (unwritable target_file,
+    # disk full, ...) would otherwise fall through silently to the trailing
+    # `echo`, which is itself always exit-0 — so the function would report
+    # success having written nothing. `|| return 1` makes the failure explicit
+    # and propagates it as `_pepper_bootstrap`'s own non-zero return.
+    if ! _pepper_write_file "$env_pepper"; then
+      printf 'ERROR: failed to write audit.hash_pepper into %s\n' "$target_file" >&2
+      return 1
+    fi
     echo "Mirrored the .env audit.hash_pepper into ${target_file} (host-side tooling reads the file)."
     return 0
   fi
   if [[ -n "$file_pepper" ]]; then
     # The pre-#591 upgrade path: an existing host seed is carried into .env, NOT
     # regenerated, so existing audit rows stay correlatable.
-    _pepper_write_env "$file_pepper"
+    if ! _pepper_write_env "$file_pepper"; then
+      printf 'ERROR: failed to write ALFRED_AUDIT_HASH_PEPPER into .env\n' >&2
+      return 1
+    fi
     echo "Mirrored the ${target_file} audit.hash_pepper into .env (docker-compose forwards it to alfred-core)."
     return 0
   fi
@@ -518,8 +547,17 @@ _pepper_bootstrap() {
     return 1
   fi
   pepper_value="$(openssl rand -hex 32)"
-  _pepper_write_file "$pepper_value"
-  _pepper_write_env "$pepper_value"
+  if ! _pepper_write_file "$pepper_value"; then
+    printf 'ERROR: failed to write audit.hash_pepper into %s\n' "$target_file" >&2
+    return 1
+  fi
+  if ! _pepper_write_env "$pepper_value"; then
+    # target_file already has the pepper at this point (the write above
+    # succeeded) but .env does not — the two are now OUT OF SYNC. Never echo
+    # the pepper value itself into an error message.
+    printf 'ERROR: failed to write ALFRED_AUDIT_HASH_PEPPER into .env; %s already has a pepper written to it, so the two are now OUT OF SYNC — reconcile by hand and re-run.\n' "$target_file" >&2
+    return 1
+  fi
   echo "Seeded audit.hash_pepper into ${target_file} and .env."
 }
 
@@ -585,10 +623,21 @@ if [[ "$has_operator" == "0" ]]; then
     # default to the SAME lowercase `operator` every other layer defaults to —
     # .env.example:36, docker-compose.yaml:182, migration 0004. A capital-O here
     # would seed a display_name the TUI client never sends.
-    name="$(read_env_var ALFRED_OPERATOR_NAME)"; name="${name:-operator}"
+    #
+    # `trim_ws` BEFORE the `${name:-operator}` default so a whitespace-padded
+    # `.env` value (e.g. `ALFRED_OPERATOR_NAME="   Bruce  "` or `"   "`)
+    # normalizes exactly like `operator_env.operator_display_name()`'s
+    # `.strip() or "operator"` — trim first, THEN decide unset. Without this,
+    # `${name:-operator}` only catches a literally-empty value, so a
+    # whitespace-only entry would sail through untrimmed into the `user bind
+    # ... --id "$name"` call below while the real TUI client sends the
+    # Python-normalized ("operator") value — the exact #592 mismatch this
+    # step exists to prevent.
+    name="$(read_env_var ALFRED_OPERATOR_NAME)"; name="$(trim_ws "$name")"; name="${name:-operator}"
     echo "Non-TTY context: using ALFRED_OPERATOR_NAME='$name'."
   else
-    default_name="$(read_env_var ALFRED_OPERATOR_NAME)"; default_name="${default_name:-operator}"
+    default_name="$(read_env_var ALFRED_OPERATOR_NAME)"
+    default_name="$(trim_ws "$default_name")"; default_name="${default_name:-operator}"
     read -r -p "Operator display name [${default_name}]: " name
     name="${name:-$default_name}"
   fi
