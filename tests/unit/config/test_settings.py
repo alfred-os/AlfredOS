@@ -764,3 +764,64 @@ class TestQuarantineProviderSettings:
         self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", "anthropic")
         assert Settings().primary_provider == "anthropic"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "not-a-real-secret-primary-provider-test-placeholder",
+            "openai",
+            "Anthropic",
+            "not-a-provider",
+        ],
+    )
+    def test_primary_provider_rejects_unsupported_value(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """A ``primary_provider`` outside the closed set refuses at Settings construction.
+
+        CodeRabbit (Major/Security): before ``primary_provider`` was a ``Literal``, ANY
+        non-blank string passed here and reached several boot-time log/audit lines
+        verbatim (``comms.comms_boot.quarantine_provider_resolved`` among them) under the
+        claim that the field was "non-secret closed-set routing config". A credential
+        mistakenly pasted into ``ALFRED_PRIMARY_PROVIDER`` — the placeholder-shaped case
+        here stands in for that — would have been logged. Closing the set at the type
+        level means a credential-shaped value never reaches ANY consumer, log site or
+        otherwise; ``test_boot_refuses_credential_shaped_primary_provider_without_logging_it``
+        in ``test_daemon_boot_egress_refuse.py`` pins the end-to-end no-log-line
+        guarantee. Case-sensitive on purpose, matching ``quarantine_provider``'s sibling
+        Literal and ``alfred.cli._validators.validate_quarantined_provider`` —
+        ``"Anthropic"`` is therefore also a rejection case, not just structurally invalid
+        values.
+        """
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", value)
+        from pydantic import ValidationError
+
+        with pytest.raises((ValidationError, SettingsError)):
+            Settings()
+
+    def test_primary_provider_literal_matches_quarantine_provider_literal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Drift cross-check: ``primary_provider``'s closed set must match
+        ``quarantine_provider``'s (pinned to the CLI + proposal-payload copies by
+        ``test_quarantine_provider_literal_matches_allowed_quarantined_providers`` above).
+
+        Both fields draw from the same universe — the two provider adapters this
+        codebase actually implements (``src/alfred/providers/``) — so a widened
+        ``quarantine_provider`` set that leaves ``primary_provider`` behind (or vice
+        versa) is a drift this test catches, kept independent of the three-way pin above
+        so neither test's failure is masked by the other's.
+        """
+        from typing import get_args
+
+        self._base_env(monkeypatch)
+        primary_literal_values = frozenset(
+            get_args(Settings.model_fields["primary_provider"].annotation)
+        )
+        quarantine_literal_values = frozenset(
+            get_args(Settings.model_fields["quarantine_provider"].annotation)
+        )
+        assert primary_literal_values == quarantine_literal_values
+        # Oracle guard: pin the live content so this cannot go vacuous.
+        assert primary_literal_values == frozenset({"anthropic", "deepseek"})

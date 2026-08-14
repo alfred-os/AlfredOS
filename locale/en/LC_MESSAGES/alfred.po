@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-14 14:34+0100\n"
+"POT-Creation-Date: 2026-08-14 22:09+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -22,13 +22,13 @@ msgstr ""
 "land via `alfred plugin grant`. MUST NOT appear on production stacks: "
 "production wires RealGate against Postgres, not the in-process stub."
 
-#: src/alfred/bootstrap/quarantine.py:97
+#: src/alfred/bootstrap/quarantine.py:98
 msgid "bootstrap.providers_blank_error"
 msgstr ""
 "Both routing.yaml [quarantine] provider and the privileged provider id "
 "must be declared; refusing to boot with either side blank."
 
-#: src/alfred/bootstrap/quarantine.py:101
+#: src/alfred/bootstrap/quarantine.py:102
 msgid "bootstrap.providers_same_error"
 msgstr ""
 "routing.yaml [quarantine] provider must differ from the privileged "

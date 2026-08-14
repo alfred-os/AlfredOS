@@ -698,9 +698,9 @@ async def enforce_quarantine_provider_separation(
             # message — and that arm used to reach this line, reporting a merely-blank
             # primary_provider to the operator and to the audit row as a
             # "separation violated" collision (CodeRabbit, round 2). Both ids are now
-            # blank-proof upstream: quarantine_provider is a Literal, and
-            # Settings._reject_blank_primary_provider refuses a blank primary_provider at
-            # config load, onto the accurately-labelled settings_invalid boot refusal.
+            # blank-proof upstream: quarantine_provider and primary_provider are both
+            # Literal fields, so a blank (or unsupported) value refuses at Settings
+            # construction, onto the accurately-labelled settings_invalid boot refusal.
             # If either of those two guarantees is ever relaxed, this relabel goes back to
             # lying — restore an explicit blank check here first
             # (test_boot_refuses_blank_primary_provider_as_settings_invalid pins it).

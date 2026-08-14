@@ -385,6 +385,49 @@ def test_boot_refuses_blank_primary_provider_as_settings_invalid_not_collision(
     assert "primary_provider" in flat, flat
 
 
+def test_boot_refuses_credential_shaped_primary_provider_without_logging_it(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """A credential-shaped ``primary_provider`` refuses at Settings construction — and
+    because that refusal happens before ``_comms_boot`` ever runs, the value never
+    reaches ``comms.comms_boot.quarantine_provider_resolved`` or any other boot-time log
+    line (CodeRabbit, Major/Security). Before ``primary_provider`` was a ``Literal``, a
+    bare ``str`` field let ANY value — including one an operator pasted from a
+    credential by mistake — through to those lines under a "closed-set, safe to log"
+    claim the field did not actually satisfy. The Literal closes the class at the
+    source, not just the one log call CodeRabbit flagged; see
+    ``test_primary_provider_rejects_unsupported_value`` in ``test_settings.py`` for the
+    unit-level pin of the same guarantee.
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    credential = "not-a-real-secret-primary-provider-test-placeholder"
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", credential)
+    _patch_comms_seams(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2, result.output
+    reasons = _boot_failed_reasons(boot_success_env)
+    assert "settings_invalid" in reasons, reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    resolved = [e for e in logs if e["event"] == "comms.comms_boot.quarantine_provider_resolved"]
+    assert resolved == [], resolved
+    # The credential-shaped value must not leak into ANY log line's event or fields,
+    # nor into the operator-facing CLI output — which still names the field, per
+    # test_boot_refuses_blank_primary_provider_as_settings_invalid_not_collision above.
+    flat = " ".join(result.output.split())
+    assert credential not in flat, flat
+    assert "primary_provider" in flat, flat
+    assert not any(credential in repr(entry) for entry in logs), logs
+
+
 @_posix_boot_only
 def test_boot_proceeds_when_separation_required_and_providers_differ(
     monkeypatch: pytest.MonkeyPatch,
@@ -589,13 +632,15 @@ def test_boot_refuses_on_collision_even_with_no_comms_adapter_enabled(
 ) -> None:
     """The opt-in separation check must not be gated on comms being enabled.
 
-    `_build_comms_boot_graph` — where the check lives — is called from
-    `_start_async` inside `if settings.comms_enabled_adapters:`. So a daemon with
-    `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true`, colliding providers and
-    NO enabled adapter booted clean: the operator opted into a security posture,
-    got a green boot, and the control never ran. Same false-all-clear shape as the
-    compose-forwarding gap the whole-branch review caught, and it is this PR's own
-    feature rather than inherited debt, so it is fixed here rather than filed.
+    Before this fix, `_build_comms_boot_graph` is where the check lived, and that
+    function is called from `_start_async` inside `if settings.comms_enabled_adapters:`.
+    So a daemon with `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true`, colliding
+    providers and NO enabled adapter booted clean: the operator opted into a security
+    posture, got a green boot, and the control never ran. Same false-all-clear shape as
+    the compose-forwarding gap the whole-branch review caught, and it is this PR's own
+    feature rather than inherited debt, so it is fixed here rather than filed. The check
+    now lives in `enforce_quarantine_provider_separation` (`_commands.py`), called
+    unconditionally before the adapters branch.
 
     No `quarantine_registry` / `patch_quarantine_child_spawn` fixtures: with no
     adapter there is no quarantined extractor to build and no child to spawn — the

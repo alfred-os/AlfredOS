@@ -207,7 +207,23 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-sonnet-4-6"
-    primary_provider: str = "deepseek"
+
+    # The privileged half of the dual-LLM split. Was a bare ``str`` until CodeRabbit
+    # flagged that several boot-time log/audit sites (``_comms_boot.py``,
+    # ``_commands.py``) treat this value as "non-secret closed-set routing config,
+    # safe to log" — a claim that was only true of the sibling ``quarantine_provider``
+    # Literal below, not of an unconstrained string. An operator who fat-fingered a
+    # credential into ALFRED_PRIMARY_PROVIDER would have had it echoed verbatim into
+    # every one of those lines. Closed to the SAME two ids as ``quarantine_provider``
+    # (the only provider adapters this codebase implements — see
+    # ``src/alfred/providers/``); a Literal also makes the old dedicated
+    # blank-rejection validator redundant (blank is simply not a member) and retires
+    # the wrong-reason-forensics bug that validator existed to fix (a blank id used to
+    # reach ``assert_provider_separation``'s own blank-id arm and get relabelled as a
+    # provider COLLISION). Note this narrows the ACCEPTED VALUES only —
+    # ``build_router`` still hardcodes DeepSeek as primary and never reads this field
+    # for real routing (ADR-0064); #590 tracks closing that gap.
+    primary_provider: Literal["anthropic", "deepseek"] = "deepseek"
     fallback_provider: str = "anthropic"
 
     # #587: the quarantine child's provider — closed set, kept in sync BY HAND with
@@ -788,39 +804,6 @@ class Settings(BaseSettings):
             raise ValueError(
                 "deepseek_model must not be blank — set ALFRED_DEEPSEEK_MODEL to a real "
                 "DeepSeek model id (default deepseek-chat) or leave it unset to take "
-                "that default"
-            )
-        return v
-
-    @field_validator("primary_provider")
-    @classmethod
-    def _reject_blank_primary_provider(cls, v: str) -> str:
-        """Reject a blank/whitespace ``ALFRED_PRIMARY_PROVIDER``.
-
-        Same shape as the two ``deepseek_*`` validators above, for a different reason.
-        ``primary_provider`` names the PRIVILEGED half of the dual-LLM split, and its one
-        security-load-bearing consumer is #586's provider-separation check in
-        ``alfred.cli.daemon._comms_boot``. That call site wraps EVERY ``AlfredError`` out
-        of ``assert_provider_separation`` into ``QuarantineProviderSeparationCollisionError``
-        — but ``assert_provider_separation`` raises a DISTINCT blank-id error BEFORE its
-        collision test, so a blank here surfaced to the operator and to the audit row as
-        ``quarantine_provider_separation_violated``: a collision report for a config where
-        nothing collided (CodeRabbit, round 2). Wrong-reason forensics is its own failure
-        — it sends the operator to change the wrong env var.
-
-        Refusing at Settings CONSTRUCTION gives the accurate answer through machinery that
-        already exists: the audited ``settings_invalid`` refusal, whose
-        ``daemon.boot.settings_invalid_field`` copy names ``primary_provider`` outright. It
-        also makes ``assert_provider_separation``'s blank arm unreachable from that call
-        site altogether (the sibling ``quarantine_provider`` is a ``Literal``, so it can
-        never be blank), which is what makes the collision relabel honest.
-
-        Raw English, no ``t()``: Settings loads before the translator. Non-secret.
-        """
-        if not v.strip():
-            raise ValueError(
-                "primary_provider must not be blank — set ALFRED_PRIMARY_PROVIDER to the "
-                "privileged provider id (default deepseek) or leave it unset to take "
                 "that default"
             )
         return v

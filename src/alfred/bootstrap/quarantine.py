@@ -51,11 +51,12 @@ def provider_ids_collide(a: str, b: str) -> bool:
     is correctly reported as a non-separated configuration rather than passed over.
 
     As of the round-2 fix wave neither id can actually BE blank on the daemon boot path:
-    ``Settings.quarantine_provider`` is a ``Literal`` and
-    ``Settings._reject_blank_primary_provider`` refuses a blank privileged id at config
-    load (a blank one used to reach the boot graph and get relabelled as a collision).
-    The blank arms here are retained as defence-in-depth for callers that do not come
-    through ``Settings`` — this helper is deliberately import-light and config-agnostic.
+    both ``Settings.quarantine_provider`` and ``Settings.primary_provider`` are
+    ``Literal`` fields, so a blank (or any other out-of-set) value refuses at Settings
+    construction rather than reaching the boot graph and getting relabelled as a
+    collision. The blank arms here are retained as defence-in-depth for callers that do
+    not come through ``Settings`` — this helper is deliberately import-light and
+    config-agnostic.
     """
     return a.strip().lower() == b.strip().lower()
 
