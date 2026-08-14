@@ -462,10 +462,43 @@ _pepper_from_file() {
     "$target_file" | head -1 || true
 }
 
-# Append-if-absent ONLY — never rewrite an existing value (spec §8.10:
-# rotating the pepper invalidates cross-row correlation).
+# Append-if-absent (or overwrite-if-blank) ONLY — never rewrite an existing
+# REAL value (spec §8.10: rotating the pepper invalidates cross-row
+# correlation).
 _pepper_write_file() {
-  grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null && return 0
+  local existing
+  existing="$(_pepper_from_file)"
+  if [[ -n "$existing" ]]; then
+    # A real (non-blank) value is already present. Keep it untouched.
+    return 0
+  fi
+  if grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
+    # #594 sec-002: the key exists but its captured value is blank (e.g. an
+    # operator hand-set `"audit.hash_pepper" = ""` — a scenario
+    # _pepper_from_file's own docstring anticipates). Overwrite that blank
+    # entry in place rather than treating "key present" as "already
+    # configured". Rebuilt line-by-line via printf, same as _pepper_write_env
+    # above and for the same reason: the incoming value is not hex-constrained
+    # on the mirrored-from-.env path, so it must never be fed through sed/awk
+    # substitution syntax.
+    local tmp_file line replaced=0
+    tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
+    if ! {
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$replaced" -eq 0 && "$line" =~ ^\"?${pepper_key}\"?[[:space:]]*= ]]; then
+          printf '"%s" = "%s"\n' "$pepper_key" "$1"
+          replaced=1
+        else
+          printf '%s\n' "$line"
+        fi
+      done < "$target_file"
+    } > "$tmp_file"; then
+      rm -f "$tmp_file"
+      return 1
+    fi
+    mv "$tmp_file" "$target_file" || return 1
+    return 0
+  fi
   # Quote the dotted key so tomllib reads it as a flat string key
   # (cross-cutting BLOCKER closure).
   printf '"%s" = "%s"\n' "$pepper_key" "$1" >> "$target_file"
@@ -474,15 +507,39 @@ _pepper_write_file() {
 # #591: mirror the pepper into .env so docker-compose can forward it to
 # alfred-core as ALFRED_AUDIT_HASH_PEPPER. Mirrors the Grafana admin-password
 # seed's shape exactly: present-but-empty is the normal `cp .env.example .env`
-# state, so the sed-replace branch is the NORMAL path and append is only the
+# state, so the update branch is the NORMAL path and append is only the
 # fallback for a pre-#591 .env that predates this key. `umask 077` covers
-# sed's temp/backup file; .env itself is already 0600 from the unconditional
-# chmod near the top of this script. The pepper is hex-only, so it can never
-# contain a sed delimiter or `&` that would need escaping. NEVER echoed.
+# the temp file this update writes; .env itself is already 0600 from the
+# unconditional chmod near the top of this script. NEVER echoed.
 _pepper_write_env() {
   if grep -qE "^[[:space:]]*${pepper_env_key}=" .env 2>/dev/null; then
-    ( umask 077 && sed -i.bak "s|^[[:space:]]*${pepper_env_key}=.*|${pepper_env_key}=$1|" .env ) \
-      && rm -f .env.bak
+    # #594 sec-001: the mirrored-from-secrets.toml value is NOT hex-constrained
+    # (only the freshly-generated-via-openssl branch below is guaranteed
+    # [0-9a-f]{64} — this branch carries forward whatever an operator hand-set
+    # in secrets.toml). A sed `s///` replacement string treats `&` as "insert
+    # the matched text" and `\N` as a backreference, so interpolating an
+    # arbitrary value there can silently corrupt .env while sed still exits 0
+    # (empirically reproduced: a pepper of "ab&cd" against
+    # "ALFRED_AUDIT_HASH_PEPPER=" wrote back "abALFRED_AUDIT_HASH_PEPPER=cd").
+    # Rebuild .env line-by-line instead: the value only ever reaches
+    # `printf '%s'`, which performs no replacement/backreference expansion on
+    # its arguments.
+    local tmp_env line replaced=0
+    tmp_env="$(umask 077 && mktemp .env.XXXXXX)" || return 1
+    if ! {
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$replaced" -eq 0 && "$line" =~ ^[[:space:]]*${pepper_env_key}= ]]; then
+          printf '%s=%s\n' "$pepper_env_key" "$1"
+          replaced=1
+        else
+          printf '%s\n' "$line"
+        fi
+      done < .env
+    } > "$tmp_env"; then
+      rm -f "$tmp_env"
+      return 1
+    fi
+    mv "$tmp_env" .env
   else
     # Trailing-newline guard (#469 Blocker 2 CodeRabbit finding): without it a
     # .env whose last byte is not \n glues the new key onto the previous line.
@@ -492,7 +549,15 @@ _pepper_write_env() {
 }
 
 _pepper_bootstrap() {
-  _pepper_ensure_target
+  # #594: guard the same way the write helpers below already are — a failed
+  # chmod 600 (permission denied, read-only filesystem, file owned by
+  # someone else) must not let the bootstrap proceed as if the target were
+  # properly secured.
+  if ! _pepper_ensure_target; then
+    printf 'ERROR: failed to prepare %s for the audit.hash_pepper bootstrap (chmod 600 failed?)\n' \
+      "$target_file" >&2
+    return 1
+  fi
   local env_pepper file_pepper
   env_pepper="$(read_env_var "$pepper_env_key")"
   file_pepper="$(_pepper_from_file)"
@@ -583,10 +648,17 @@ else
     echo "ERROR: audit.hash_pepper bootstrap lock ${lock_dir} held >30s — refusing to race." >&2
     exit 1
   fi
-  # Lock released; the other invocation already bootstrapped (or
-  # already-configured case). Just verify the key is present.
-  if ! grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
-    _pepper_bootstrap
+  # Lock released. #594 sec-003: always re-invoke the idempotent
+  # _pepper_bootstrap rather than inferring "already done" from a single
+  # plane. The winner writes target_file THEN .env; if it crashed between the
+  # two writes, target_file alone showing the key present would wrongly look
+  # "done" and leave .env unpopulated with nothing to self-heal it until some
+  # later, unrelated run. _pepper_bootstrap is a cheap no-op when both planes
+  # already agree, so re-running it here costs nothing in the common case and
+  # closes the crash-window gap in the rare one.
+  _pepper_bootstrap || _pepper_status=$?
+  if [[ -n "${_pepper_status:-}" ]] && [[ "$_pepper_status" -ne 0 ]]; then
+    exit "$_pepper_status"
   fi
 fi
 

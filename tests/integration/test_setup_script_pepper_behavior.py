@@ -421,6 +421,62 @@ def test_bootstrap_file_only_mirrors_into_dotenv_without_regenerating(
     assert "into .env" in result.stdout, f"no mirror-into-.env banner in stdout: {result.stdout!r}"
 
 
+@pytest.mark.parametrize(
+    "pepper_value",
+    [
+        pytest.param("prefix-ab&cd-suffix", id="ampersand"),
+        pytest.param(r"prefix-ab\cd-suffix", id="backslash"),
+        pytest.param("prefix-ab|cd-suffix", id="pipe-sed-delimiter"),
+        pytest.param(_PEPPER_ONE, id="clean-hex-baseline"),
+    ],
+)
+def test_bootstrap_file_only_mirrors_sed_metacharacter_pepper_byte_for_byte(
+    bash_available: str,
+    tmp_path: Path,
+    pepper_value: str,
+) -> None:
+    """#594 sec-001 regression: a hand-set secrets.toml pepper containing sed
+    replacement-string metacharacters must round-trip into .env BYTE-FOR-BYTE.
+
+    ``_pepper_from_file``'s extraction is a bare regex capture, not a TOML
+    parser or a hex validator — an operator's hand-edited secrets.toml (a
+    scenario the README explicitly supports) can carry a pepper containing
+    ``&`` (sed's "insert the matched text" token), a backslash (a sed
+    backreference introducer), or ``|`` (the sed delimiter this script used
+    to substitute with). Before the fix, ``_pepper_write_env``'s
+    ``sed -i "s|...|...|"`` interpolated that value straight into the
+    replacement string: `&` silently expanded to the matched text (sed still
+    exited 0), corrupting .env while the bootstrap printed its normal success
+    banner. The fix rebuilds .env line-by-line via ``printf '%s'`` instead,
+    which performs no replacement/backreference expansion on its arguments.
+
+    Read the raw bytes back (not through ``_read_secrets_toml_pepper``'s
+    ``tomllib.load``) for the secrets.toml side: a couple of these
+    parametrized values are not valid TOML escape sequences on their own,
+    since the seeded file simulates arbitrary hand-edited content rather than
+    a TOML-escaped string — exactly what the production sed-regex extraction
+    in ``_pepper_from_file`` also never validates.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(f'"audit.hash_pepper" = "{pepper_value}"\n')
+    before = target.read_bytes()
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    got = _read_dotenv_pepper(tmp_path)
+    assert got == pepper_value, (
+        f".env pepper corrupted in transit: expected {pepper_value!r}, got {got!r}"
+    )
+    after = target.read_bytes()
+    assert before == after, (
+        "secrets.toml was mutated by the .env-only mirror (must be a .env-only write): "
+        f"before={before!r} after={after!r}"
+    )
+
+
 def test_bootstrap_refuses_on_pepper_drift(
     bash_available: str,
     tmp_path: Path,
