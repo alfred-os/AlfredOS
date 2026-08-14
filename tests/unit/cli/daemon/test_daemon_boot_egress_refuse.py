@@ -428,6 +428,40 @@ def test_boot_refuses_credential_shaped_primary_provider_without_logging_it(
     assert not any(credential in repr(entry) for entry in logs), logs
 
 
+def test_boot_refuses_unsupported_primary_provider_naming_the_accepted_values(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """devex-001 on the daemon-boot surface: before this fix, a rejected
+    ``primary_provider`` named the FIELD but never its accepted values — an
+    operator who mistyped a closed-set value had no clue "anthropic" and
+    "deepseek" were the only options, unlike the CLI-level
+    ``validate_quarantined_provider`` validator, which already listed them.
+    ``daemon.boot.settings_invalid_field_choices`` closes that gap: pydantic's
+    own ``literal_error`` context is schema-derived (the Literal's declared
+    members), never operator input, so it is safe to surface alongside the
+    field name.
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", "openai")
+    _patch_comms_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2, result.output
+    reasons = _boot_failed_reasons(boot_success_env)
+    assert "settings_invalid" in reasons, reasons
+    flat = " ".join(result.output.split())
+    assert "primary_provider" in flat, flat
+    assert "anthropic" in flat, flat
+    assert "deepseek" in flat, flat
+
+
 @_posix_boot_only
 def test_boot_proceeds_when_separation_required_and_providers_differ(
     monkeypatch: pytest.MonkeyPatch,
@@ -639,8 +673,9 @@ def test_boot_refuses_on_collision_even_with_no_comms_adapter_enabled(
     posture, got a green boot, and the control never ran. Same false-all-clear shape as
     the compose-forwarding gap the whole-branch review caught, and it is this PR's own
     feature rather than inherited debt, so it is fixed here rather than filed. The check
-    now lives in `enforce_quarantine_provider_separation` (`_commands.py`), called
-    unconditionally before the adapters branch.
+    now lives in `enforce_quarantine_provider_separation` — defined in `_comms_boot.py`
+    alongside the graph builder it was hoisted out of, and called from `_commands.py`
+    unconditionally, before the adapters branch.
 
     No `quarantine_registry` / `patch_quarantine_child_spawn` fixtures: with no
     adapter there is no quarantined extractor to build and no child to spawn — the

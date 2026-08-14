@@ -194,6 +194,7 @@ def status() -> None:
     # phantom msgid (e.g. ``"status.yes" if x else "status.no"`` extracts
     # as ``status.yesstatus.no``). Branch outside the call so each literal
     # appears as its own extractable msgid.
+    fallback_label: str
     if anthropic_configured:
         yes_no = t("status.yes")
         fallback_label = settings.fallback_provider

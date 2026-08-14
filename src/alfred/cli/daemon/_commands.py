@@ -45,7 +45,6 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 import typer
-from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import (
@@ -62,6 +61,7 @@ from alfred.bootstrap.nonce_factory import (
     T3NonceAlreadyRegisteredError,
     create_and_register_t3_nonce,
 )
+from alfred.cli._settings_errors import daemon_boot_settings_message
 from alfred.cli.daemon._audit_fallback import build_boot_audit_writer
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
@@ -194,7 +194,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from alfred.audit.log import AuditWriter
-    from alfred.config.settings import Settings, SettingsError
+    from alfred.config.settings import Settings
 
     # sec-001 (#256 PR-3): annotation-only here (``socket_listeners:
     # list[CommsSocketListener]`` in _start_async). Kept under TYPE_CHECKING so the
@@ -376,7 +376,8 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult]:
       some OTHER required field (a secret, a DSN, a numeric bound) is invalid,
       NOT the environment. Raises ``_SettingsInvalidError`` carrying a
       CURATED message (never raw ``str(exc)`` — DLP: a ``database_url``
-      failure can echo a DSN password) built by ``_bootstrap_settings_message``.
+      failure can echo a DSN password) built by
+      :func:`alfred.cli._settings_errors.daemon_boot_settings_message`.
 
     sec-001: the caller has already built the AuditWriter, so every raise
     here is converted by the async caller into the audited-then-exit refusal.
@@ -396,7 +397,7 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult]:
         settings = Settings(environment=result.value)  # type: ignore[no-untyped-call]  # reason: Settings.__init__ untyped pending task-17
     except SettingsError as exc:
         raise _SettingsInvalidError(
-            _bootstrap_settings_message(exc), source=result.source.value
+            daemon_boot_settings_message(exc), source=result.source.value
         ) from exc
     return settings, result
 
@@ -441,82 +442,6 @@ def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
             value=load_result.unrecognised_value or "",
         )
     return t("daemon.boot.environment_not_set")
-
-
-def _settings_error_field_name(exc: SettingsError) -> str | None:
-    """Extract the offending dotted FIELD PATH from a chained pydantic ``ValidationError``.
-
-    M2 (fleet review): ``ValidationError.errors()[].loc`` is the field path pydantic
-    itself attributes the failure to — safe to surface, unlike ``.msg``/``.input``,
-    either of which can carry the invalid VALUE (a custom validator's ``ValueError``
-    text can embed it, e.g. a ``database_url`` failure quoting the DSN). ``loc`` is
-    excluded from that risk: it names WHERE validation failed, never what value was
-    there. ``Settings.__init__`` chains the original exception via ``raise
-    SettingsError(str(exc)) from exc``, so ``exc.__cause__`` is the real
-    ``ValidationError`` on a genuine ``Settings()`` construction failure. Returns
-    ``None`` when no such chain exists (e.g. a test double raising ``SettingsError``
-    directly with no ``from``) or the cause is not a ``ValidationError`` — the caller
-    falls back to the fully generic message rather than guess — except for a model-level
-    (``loc=()``) error whose TYPE is a deliberately-authored ``PydanticCustomError`` slug,
-    which is returned as the DLP-safe category (#410 PR1).
-    """
-    cause = exc.__cause__
-    if not isinstance(cause, ValidationError):
-        return None
-    errors = cause.errors(include_url=False, include_context=False, include_input=False)
-    if not errors:
-        return None
-    loc = errors[0]["loc"]
-    if not loc:
-        # #410 PR1 (fleet finding H-3): a model-level validator reports
-        # loc=(). A DELIBERATELY-SLUGGED PydanticCustomError (e.g. the
-        # db-pool budget validator's "db_pool_connection_budget_exceeded")
-        # carries its category in the error TYPE — a value-free identifier
-        # authored as a string literal in settings.py, safe to surface under
-        # the same never-a-value contract as the field path below. Pydantic's
-        # own wrappers for bare `raise ValueError/AssertionError` arrive as
-        # the generic "value_error"/"assertion_error" types, which name
-        # nothing — those (and only those) still degrade to the generic
-        # message.
-        error_type = errors[0]["type"]
-        if error_type not in {"value_error", "assertion_error"}:
-            return error_type
-        return None
-    return ".".join(str(part) for part in loc)
-
-
-def _bootstrap_settings_message(exc: SettingsError) -> str:
-    """Pick the curated operator-facing message for a post-env ``Settings()`` failure.
-
-    Mirrors ``alfred.cli._bootstrap.load_settings_or_die``'s placeholder-vs-
-    generic branch, but the generic arm NEVER interpolates ``str(exc)``. This
-    message does NOT land in the audit row — ``_refuse_boot``'s fixed subject
-    shape only ever carries ``boot_id`` / ``attempted_at`` / ``failure_reason``
-    / ``environment_source``; the message itself reaches
-    ``typer.echo(..., err=True)`` (stderr), which for a daemon running as a
-    background service is commonly captured into durable container/system
-    logs (journald, ``docker logs``) rather than watched live by an operator —
-    unlike the interactive CLI bootstrap path this mirrors, which only ever
-    echoes to a first-run operator's own terminal. DLP: a ``database_url``/DSN
-    validation failure's ``str(exc)`` can echo a password, and CLAUDE.md hard
-    rule #1 (never log secrets) applies to that stderr/log sink just as much
-    as to a structlog line. ``daemon.boot.settings_invalid`` names the fix +
-    the ``alfred daemon start`` / ``docker compose up -d`` re-run — not
-    ``/etc/alfred`` (the environment was already resolved by the time this
-    runs; the fault is in some OTHER Settings field).
-
-    M2 (fleet review): when the FIELD NAME is safely recoverable
-    (:func:`_settings_error_field_name` — the pydantic ``loc``, never the value),
-    the curated ``daemon.boot.settings_invalid_field`` variant names it, saving the
-    operator a `grep` through the compose logs to find which field is wrong. Still
-    NEVER interpolates ``str(exc)`` or any value — only the field's dotted PATH.
-    """
-    if "placeholder_api_key" in str(exc):
-        return t("error.placeholder_api_key")
-    field = _settings_error_field_name(exc)
-    if field is not None:
-        return t("daemon.boot.settings_invalid_field", field=field)
-    return t("daemon.boot.settings_invalid")
 
 
 def _start_core_metrics_server(boot_id: str) -> None:

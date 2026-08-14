@@ -311,18 +311,187 @@ def test_child_build_provider_allows_anthropic_without_base_url(
     assert factory.provider_id == "anthropic"
 
 
-def test_child_supported_provider_ids_match_settings_literal() -> None:
-    """The child's closed set stays equal to the host's ``Settings`` ``Literal``.
+# --------------------------------------------------------------------------- #
+# CHILD boundary — _base_url_rejection_reason / _build_provider's credential-
+# component check on a PRESENT base_url (CodeRabbit, Major).
+# --------------------------------------------------------------------------- #
 
-    The two live in different processes (host validates before spawn; the child
-    re-validates the env it is handed), so nothing else keeps them in step. If a future
-    provider is added host-side only, the child would refuse a value the host considers
-    valid — a boot failure with a confusing message; the reverse would silently reopen
-    the gap this guard closes.
+# The nginx/Envoy inline-basic-auth shape a self-hosted relay conventionally
+# uses — a literal credential in the URL. Secrets are distinctive, non-dictionary
+# strings deliberately: the rejection message's own static example text names the
+# userinfo SHAPE ("user:password@"), and a fixture using literal "pass" as its
+# secret would spuriously match that unrelated prose instead of proving a real leak.
+_CREDENTIAL_BEARING_BASE_URLS = (
+    "https://apikey:@relay.internal/v1",
+    "https://user:not-a-real-secret-hunter2@relay.internal:8443/v1",
+    "https://not-a-real-secret-token9k2m@relay.internal/v1",
+    "http://user:not-a-real-secret-pw7x4q@127.0.0.1:8080",
+)
+_UNUSABLE_BASE_URLS = (
+    "https://[::1/v1",  # urlsplit itself raises
+    "https://relay.internal:notaport/v1",  # only .port raises
+    "not-a-url",
+    "ftp://relay.internal/v1",
+    "https://",
+)
+_QUERY_OR_FRAGMENT_BASE_URLS = (
+    "https://relay.internal/v1?api_key=sk-abcd1234",
+    "https://relay.internal/v1?region=eu",
+    "https://relay.internal/v1#token=sk-abcd1234",
+)
+_BENIGN_BASE_URLS = (
+    "https://api.deepseek.com/v1",
+    "https://relay.internal",
+    "https://relay.internal:8443/team-a/v1",
+    "http://127.0.0.1:8080/v1",
+)
+
+
+@pytest.mark.parametrize("bad_url", _CREDENTIAL_BEARING_BASE_URLS)
+def test_child_build_provider_refuses_credential_bearing_base_url(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """A present ``ALFRED_QUARANTINE_BASE_URL`` carrying inline userinfo refuses TYPED
+    at boot — the composed host/child gap ``_validate_deepseek_base_url`` closes
+    host-side for the SAME field name (``ALFRED_DEEPSEEK_BASE_URL``), applied here for
+    this UNVALIDATED env read (spawn-wiring bug or manual env tampering).
+
+    The refusal message itself must not become the leak: asserted by extracting the
+    userinfo fragment (``hunter2``, ``apikey``, ``token``) from each fixture and
+    confirming it never appears in the raised message.
     """
-    from typing import get_args
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", bad_url)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("realkey")
+    assert not isinstance(exc_info.value, ValueError)
+    assert "ALFRED_QUARANTINE_BASE_URL" in str(exc_info.value)
+    userinfo = bad_url.split("//", 1)[1].split("@", 1)[0]
+    assert userinfo not in str(exc_info.value)
 
+
+@pytest.mark.parametrize("bad_url", _QUERY_OR_FRAGMENT_BASE_URLS)
+def test_child_build_provider_refuses_query_or_fragment_base_url(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """A query string or fragment is refused on default-deny grounds: the openai SDK
+    silently truncates the URL at the query before dialling (zero function), yet the
+    full value still sits in this child's ``/proc``-readable spawn environment."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", bad_url)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("realkey")
+    assert not isinstance(exc_info.value, ValueError)
+    assert "ALFRED_QUARANTINE_BASE_URL" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("bad_url", _UNUSABLE_BASE_URLS)
+def test_child_build_provider_refuses_unusable_base_url(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """Covers both the ``except ValueError`` arm (an unparseable URL / bad port) and
+    the scheme/hostname arm (a syntactically-valid-but-undialable URL) —
+    ``_base_url_rejection_reason``'s two remaining default-deny paths."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", bad_url)
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("realkey")
+    assert not isinstance(exc_info.value, ValueError)
+    assert "ALFRED_QUARANTINE_BASE_URL" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("good_url", _BENIGN_BASE_URLS)
+def test_child_build_provider_accepts_benign_base_urls(
+    monkeypatch: pytest.MonkeyPatch, good_url: str
+) -> None:
+    """Oracle guard for the three rejection tests above: a normal relay/proxy URL —
+    no userinfo, no query, no fragment, a real scheme and hostname — still boots.
+    Without this, all three rejection tests would stay green under a guard that
+    rejects every base_url."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", good_url)
+    factory = child_main._build_provider("realkey")
+    assert factory.base_url == good_url
+
+
+def test_child_build_provider_strips_base_url_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strip-and-STORE, matching ``Settings._validate_deepseek_base_url``: passing the
+    raw value on would thread invisible leading/trailing bytes into the SDK client."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "  https://relay.internal/v1  ")
+    factory = child_main._build_provider("realkey")
+    assert factory.base_url == "https://relay.internal/v1"
+
+
+def test_child_build_provider_refuses_credentialed_base_url_on_anthropic_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The credential-component check is deliberately NOT provider-scoped, unlike the
+    blank-base_url guard: a well-behaved host never sends a base_url at all on the
+    anthropic path, so the only way anthropic sees one here is the same wiring-bug /
+    tampering case every §20.2 SECONDARY guard exists for — and the ``/proc`` +
+    crash-dump exposure does not care which provider later reads the variable."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "anthropic")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "https://user:hunter2@relay.internal/v1")
+    with pytest.raises(QuarantineChildBootError) as exc_info:
+        child_main._build_provider("realkey")
+    assert not isinstance(exc_info.value, ValueError)
+    assert "hunter2" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [*_CREDENTIAL_BEARING_BASE_URLS, *_QUERY_OR_FRAGMENT_BASE_URLS, *_UNUSABLE_BASE_URLS],
+)
+def test_child_base_url_guard_agrees_with_settings_validator_on_rejection(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """Anti-drift pin: the child's own duplicated validation
+    (:func:`_base_url_rejection_reason`) and the host's
+    ``Settings._validate_deepseek_base_url`` must reject the SAME corpus. Not shared
+    code on purpose (importing ``alfred.config.settings`` into the child would drag
+    the whole ``pydantic_settings`` model onto its egress-free boot path, against the
+    ADR-0030 reachable-surface bound) — this test is the anti-drift device that buys
+    back what not sharing the code costs: one corpus, two independent oracles."""
+    from pydantic import ValidationError
+
+    from alfred.config.settings import Settings, SettingsError
+
+    assert child_main._base_url_rejection_reason(url) is not None
+
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
+    monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", url)
+    with pytest.raises((ValidationError, SettingsError)):
+        Settings()  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("url", _BENIGN_BASE_URLS)
+def test_child_base_url_guard_agrees_with_settings_validator_on_acceptance(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """The acceptance half of the parity pin above — both oracles must also AGREE on
+    what is fine, or the "agrees on rejection" half alone could pass under a child
+    guard that simply rejects everything."""
     from alfred.config.settings import Settings
 
-    host_literal = set(get_args(Settings.model_fields["quarantine_provider"].annotation))
-    assert host_literal == set(child_main._SUPPORTED_PROVIDER_IDS)
+    assert child_main._base_url_rejection_reason(url) is None
+
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
+    monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", url)
+    assert Settings().deepseek_base_url == url  # type: ignore[call-arg]

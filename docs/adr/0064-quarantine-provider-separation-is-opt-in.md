@@ -94,10 +94,13 @@ flag to `True`.
     privileged router's Anthropic fallback is the same provider the quarantine
     child uses, so a fallback-served privileged turn and a quarantined
     extraction can land on one provider account.
-  - For ANY custom `primary_provider` value: the check reports on a setting the
-    router ignores, so a "PASS" is a false assurance and a refusal would be a
-    false alarm — in both directions the verdict is about config text, not about
-    the providers the system actually dials.
+  - For either of the two values `primary_provider` can now take — the field was
+    closed to `Literal["anthropic", "deepseek"]` in this same PR
+    (`src/alfred/config/settings.py`), so there is no open "custom value" domain
+    left — the check reports on a setting the router ignores, so a "PASS" is a
+    false assurance and a refusal would be a false alarm — in both directions the
+    verdict is about config text, not about the providers the system actually
+    dials.
 
   Accepted for now — narrowing it means changing `assert_provider_separation()`'s
   signature or `build_router`'s wiring, both of which the #586/#587 plan explicitly

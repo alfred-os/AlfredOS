@@ -32,9 +32,9 @@ from structlog.types import EventDict
 
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetGuard
+from alfred.cli._settings_errors import cli_settings_error_lines
 from alfred.config.settings import Settings, SettingsError
 from alfred.egress.client import EgressClient
-from alfred.i18n import t
 from alfred.identity import (
     IdentityResolver,
     IdentityVersionCounter,
@@ -96,9 +96,17 @@ def load_settings_or_die() -> Settings:
       replaced the literal ``sk-...``. We surface a dedicated translatable
       message because "configuration is invalid" alongside a wall of pydantic
       detail buries the actual fix (edit one line in .env).
-    * Anything else — generic ``t("error.config_invalid")`` with the raw
-      pydantic detail so the operator can fix the offending field without
-      grepping a stack trace.
+    * Anything else — a curated, value-free message from
+      :func:`alfred.cli._settings_errors.cli_settings_error_lines`. It NEVER
+      interpolates ``str(exc)``: pydantic's ``ValidationError.__str__()`` embeds
+      ``input_value=<raw input>`` verbatim, so ``ALFRED_PRIMARY_PROVIDER=<a
+      credential>`` + ``alfred status`` used to print that credential in full to
+      stdout (and thence to shell history / terminal scrollback / any ``| tee``).
+      This path is reached by every top-level command except
+      ``alfred daemon start`` (``status``, ``chat``, ``login``, ``supervisor *``,
+      ``user *``, ``operator-session *``) — which is why it was the WIDER of the
+      two exposures the ``primary_provider`` Literal closed only half of (#589).
+      CLAUDE.md hard rule #1.
     """
     try:
         # Settings.__init__ is annotated `# type: ignore[no-untyped-def]` in
@@ -107,14 +115,8 @@ def load_settings_or_die() -> Settings:
         # justification at the call site rather than swallow it silently.
         return Settings()  # type: ignore[no-untyped-call]  # reason: Settings.__init__ is untyped pending task-17.
     except SettingsError as exc:
-        # `placeholder_api_key` is a sentinel raised by the deepseek_api_key
-        # validator. Match on substring rather than exact equality because
-        # pydantic decorates the message with loc/path context.
-        if "placeholder_api_key" in str(exc):
-            typer.echo(t("error.placeholder_api_key"))
-            raise typer.Exit(code=2) from exc
-        typer.echo(t("error.config_invalid", detail=str(exc)))
-        typer.echo(t("hint.copy_env_example"))
+        for line in cli_settings_error_lines(exc):
+            typer.echo(line)
         raise typer.Exit(code=2) from exc
 
 

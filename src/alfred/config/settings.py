@@ -224,19 +224,37 @@ class Settings(BaseSettings):
     # ``build_router`` still hardcodes DeepSeek as primary and never reads this field
     # for real routing (ADR-0064); #590 tracks closing that gap.
     primary_provider: Literal["anthropic", "deepseek"] = "deepseek"
-    fallback_provider: str = "anthropic"
 
-    # #587: the quarantine child's provider — closed set, kept in sync BY HAND with
-    # the CLI's existing quarantined-provider validator
-    # (alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS) — a Literal here cannot
-    # import that frozenset directly (mypy --strict needs a static literal), so
-    # test_quarantine_provider_literal_matches_allowed_quarantined_providers
-    # (tests/unit/config/, this task) is the drift detector, not this comment. A THIRD
-    # independent copy of this same two-value set exists in
-    # alfred.state.proposal_payloads (the Pydantic proposal-payload validator) — that
-    # same test now pins ALL THREE in one three-way equality (review fix), so widening
-    # the set for a new provider must touch every copy in one commit (prov-003).
-    # Defaults to "anthropic" — byte-for-byte today's behaviour for every deployment
+    # The runtime fallback provider's id. Closed to the SAME two-member set as
+    # ``primary_provider`` above (the only adapters ``src/alfred/providers/``
+    # implements), for the same reason and by the same mechanism — a Literal, not a
+    # hand-written validator. It was the last bare ``str`` with the identical
+    # "closed-set routing config, safe to echo" shape, and it IS echoed: ``alfred.cli.
+    # main``'s ``status.fallback_provider`` line prints ``settings.fallback_provider``
+    # on the SUCCESS path whenever it validates — so before this field closed, a
+    # credential-shaped value simply validated (there was nothing to reject it) and
+    # printed in full on every ``alfred status``. Safe to land only AFTER #589's
+    # shared settings-error rendering (``alfred.cli._settings_errors``) closed the
+    # OTHER echo path: narrowing this field earlier would have turned every rejected
+    # value into a fresh ``ValidationError``, routing it straight into
+    # ``load_settings_or_die``'s then-still-raw ``str(exc)`` echo — the exact leak
+    # ``primary_provider``'s own Literal reopened on the interactive CLI path before
+    # that fix landed. Display-only today: ``build_router`` hardcodes Anthropic as
+    # the fallback and never reads this field (ADR-0064); #590 tracks closing that
+    # gap for both provider-selection fields together.
+    fallback_provider: Literal["anthropic", "deepseek"] = "anthropic"
+
+    # #587: the quarantine child's provider — one of SIX hand-maintained copies of this
+    # closed set (a Literal cannot import a frozenset; mypy --strict needs a static
+    # literal). The other five: primary_provider's and fallback_provider's Literals
+    # above, alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS,
+    # alfred.state.proposal_payloads._ALLOWED_QUARANTINED_PROVIDERS, and
+    # alfred.security.quarantine_child.__main__._SUPPORTED_PROVIDER_IDS. ONE test pins
+    # all six equal — test_provider_closed_set_copies_stay_in_lockstep
+    # (tests/unit/config/test_settings.py) — and its docstring records why widening the
+    # set also requires implementing the new provider at all four quarantine-dispatch
+    # sites in the SAME commit (prov-001). This comment is the pointer; the test is the
+    # gate. Defaults to "anthropic" — byte-for-byte today's behaviour for every deployment
     # that doesn't set this.
     quarantine_provider: Literal["anthropic", "deepseek"] = "anthropic"
 
@@ -573,16 +591,17 @@ class Settings(BaseSettings):
 
         Raised as :class:`PydanticCustomError` (a ``ValueError`` subclass),
         NOT a bare ``ValueError`` — deliberately. A model-level validator
-        reports ``loc=()``, and the daemon boundary
-        (``alfred.cli.daemon._commands._settings_error_field_name``) refuses
-        to interpolate ``str(exc)`` for DLP reasons, so a bare raise would be
+        reports ``loc=()``, and the value-free renderer
+        (``alfred.cli._settings_errors.settings_error_field``) refuses to
+        interpolate ``str(exc)`` for DLP reasons, so a bare raise would be
         swallowed into the fully generic ``daemon.boot.settings_invalid``
         message. The custom error TYPE slug
         (``db_pool_connection_budget_exceeded``) is the value-free category
         that boundary surfaces instead — the operator learns WHICH constraint
         refused the boot without any configured number reaching a log sink.
-        The full message (numbers included) still reaches the interactive
-        path via ``load_settings_or_die``'s ``str(exc)`` echo.
+        No surface renders the full message any more (#589): the interactive
+        path (``load_settings_or_die``) now uses the same value-free renderer
+        as the daemon-boot path, so the slug is what BOTH surfaces show.
         """
         total = self.db_turn_pool_max_connections + self.db_side_pool_max_connections
         if total > DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET:

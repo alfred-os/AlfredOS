@@ -751,11 +751,12 @@ async def _build_comms_boot_graph(
     daemon refuses to boot (the caller wraps it in an audited refusal) rather than
     silently degrading to a fixture (CLAUDE.md hard rule #7).
 
-    ``boot_id`` (#586, REQUIRED): the ``_commands.py``-minted per-boot correlation
-    id, threaded through so the opt-in provider-separation check's audited
-    not-enforced warning row (below) carries the SAME forensic-join-key every
-    other ``daemon.boot``/``daemon.lifecycle`` row does, rather than a random,
-    uncorrelated ``trace_id``.
+    The #586 provider-separation gate does NOT run here. It lives in the sibling
+    :func:`enforce_quarantine_provider_separation` above, which ``_commands.py``
+    calls unconditionally on every boot — comms-enabled or not (7213f2f6). It used
+    to run inside this function and took a ``boot_id`` parameter purely to stamp its
+    audited not-enforced warning row; both moved out together, which is why this
+    signature no longer carries one.
 
     ``t3_nonce`` is the per-process authorised :class:`CapabilityGateNonce` the
     daemon minted + registered at boot. PR-S4-11c-2b CONSUMES it: it is injected

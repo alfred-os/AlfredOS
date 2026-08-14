@@ -430,7 +430,8 @@ class SettingsInvalidFailure(_BootFailureBase):
     The operator-facing message is instead a curated, generic catalog string
     (``daemon.boot.settings_invalid``) naming the fix + the re-run command, mirroring
     ``alfred.cli._bootstrap.load_settings_or_die``'s placeholder-vs-generic branch
-    without ever interpolating the exception detail.
+    without ever interpolating the exception detail — both surfaces render through
+    the shared ``alfred.cli._settings_errors`` module (#589).
     """
 
     failure_reason: Literal["settings_invalid"] = "settings_invalid"

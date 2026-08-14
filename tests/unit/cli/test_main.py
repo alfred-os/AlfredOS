@@ -77,6 +77,128 @@ def test_alfred_status_reports_separation_not_enforced_by_default(
     assert "quarantine provider separation enforced: no" in flat, flat
 
 
+def test_alfred_status_refuses_credential_shaped_primary_provider_without_echoing_it(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """#589: the actual end-to-end regression. ``alfred status`` — standing in for
+    every top-level command that goes through ``alfred.cli._bootstrap.load_settings_
+    or_die`` except ``alfred daemon start`` (``chat``, ``login``, ``supervisor *``,
+    ``user *``, ``operator-session *``) — used to echo a credential-shaped
+    ``ALFRED_PRIMARY_PROVIDER`` in FULL via pydantic's ``ValidationError.__str__()``
+    (which embeds ``input_value=<raw input>`` for a rejected Literal). The
+    daemon-boot path was fixed first and had its own test
+    (``test_boot_refuses_credential_shaped_primary_provider_without_logging_it``,
+    ``tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py``) — this is the
+    WIDER exposure that fix left open, reproduced and closed here.
+    """
+    credential = "not-a-real-secret-primary-provider-test-placeholder"
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", credential)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 2, result.output
+    flat = " ".join(result.output.split())
+    assert credential not in flat, flat
+    assert "input_value" not in flat, flat
+    assert "primary_provider" in flat, flat
+    assert "anthropic" in flat and "deepseek" in flat, flat
+
+
+def test_alfred_status_refuses_credential_shaped_quarantine_provider_without_echoing_it(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Sibling of the test above: ``quarantine_provider`` became a ``Literal`` in an
+    EARLIER commit of this same PR and carried the identical exposure the whole
+    time — the leak was never specific to ``primary_provider``, it was specific to
+    ``load_settings_or_die``'s renderer, which is what actually got fixed."""
+    credential = "not-a-real-secret-quarantine-provider-test-placeholder"
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", credential)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 2, result.output
+    flat = " ".join(result.output.split())
+    assert credential not in flat, flat
+    assert "input_value" not in flat, flat
+    assert "quarantine_provider" in flat, flat
+    assert "anthropic" in flat and "deepseek" in flat, flat
+
+
+def test_alfred_status_refuses_credential_shaped_deepseek_base_url_without_echoing_it(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """test-003 (review-fleet, deferred here rather than to a boot-log test):
+    ``deepseek_base_url`` is never interpolated into a boot-log line (unlike
+    ``primary_provider`` before its fix), so the daemon-boot surface has no
+    equivalent leak to close — ``load_settings_or_die``'s interactive echo is the
+    ONLY real sink for this field, and this same fix closes it too.
+    ``_validate_deepseek_base_url`` already strips userinfo/malformed components
+    with a value-free message of its own; this pins that BOTH layers hold —
+    the validator's own discipline AND the renderer's.
+    """
+    credential_bearing = "https://user:hunter2@relay.internal/v1"
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", credential_bearing)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 2, result.output
+    flat = " ".join(result.output.split())
+    assert "hunter2" not in flat, flat
+    assert credential_bearing not in flat, flat
+    assert "input_value" not in flat, flat
+    assert "deepseek_base_url" in flat, flat
+
+
+def test_alfred_status_refuses_credential_shaped_fallback_provider_without_echoing_it(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """sec-002/test-002 (review-fleet): ``fallback_provider`` had the identical
+    "closed-set routing config, safe to echo" shape ``primary_provider`` did before
+    ITS fix — but a DIFFERENT mechanism: as a bare ``str``, a credential-shaped
+    value simply VALIDATED (there was nothing to reject it) and was echoed in full
+    on ``alfred status``'s SUCCESS path (``status.fallback_provider``), no
+    exception involved at all. Now a ``Literal``, the same value fails Settings
+    construction and renders through the same value-free renderer as every other
+    closed-set provider field.
+    """
+    credential = "not-a-real-secret-fallback-provider-test-placeholder"
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_FALLBACK_PROVIDER", credential)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 2, result.output
+    flat = " ".join(result.output.split())
+    assert credential not in flat, flat
+    assert "input_value" not in flat, flat
+    assert "fallback_provider" in flat, flat
+    assert "anthropic" in flat and "deepseek" in flat, flat
+
+
+def test_alfred_status_missing_required_key_names_the_field_not_the_value(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Pins the named-field-without-choices arm end to end: a required field with
+    no accepted-value set (not a Literal) still gets a curated, field-named
+    message — never pydantic's raw envelope."""
+    monkeypatch.delenv("ALFRED_DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 2, result.output
+    flat = " ".join(result.output.split())
+    assert "deepseek_api_key" in flat, flat
+    assert "input_value" not in flat, flat
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: os.getuid family (_validate_secrets_file_security calls "

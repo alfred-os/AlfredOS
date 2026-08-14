@@ -287,11 +287,22 @@ quarantine:
   max_tokens_per_extraction: 8192
 ```
 
+The `[quarantine]` block above is documentation only — nothing loads
+`routing.yaml` at runtime (nor does anything load `config/alfred.toml`,
+despite an earlier version of this doc implying otherwise). The real
+runtime source of truth is `.env`: `ALFRED_QUARANTINE_PROVIDER`
+(`Settings.quarantine_provider`, default `anthropic`) selects the
+quarantined provider, and `ALFRED_PRIMARY_PROVIDER`
+(`Settings.primary_provider`, default `deepseek`) selects the
+privileged one.
+
 The bootstrap-time check in
 `alfred.bootstrap.quarantine.assert_provider_separation` refuses to
-start when the privileged and quarantined provider IDs collide. By
-default `config/alfred.toml [provider]` selects the privileged
-provider; `routing.yaml [quarantine]` must select a different one.
+start when the two collide, but only when opted in via
+`ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` (ADR-0064). The
+default (`false`) permits a same-provider configuration — a home/
+self-hosted operator is never forced into running two paid provider
+accounts — and logs + audits the collision instead of refusing boot.
 
 Provider capabilities determine the `ExtractionMode` the quarantined
 LLM uses:

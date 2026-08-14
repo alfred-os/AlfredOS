@@ -11,14 +11,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from pydantic import ValidationError
-from pydantic_core import InitErrorDetails, PydanticCustomError
 from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
-from alfred.cli.daemon._commands import _settings_error_field_name
-from alfred.config.settings import SettingsError
 from alfred.i18n import t
 
 
@@ -211,93 +207,19 @@ def test_settings_invalid_names_offending_field_without_leaking_value(
     assert subject["failure_reason"] == "settings_invalid"
 
 
-def test_settings_error_field_name_none_when_cause_has_no_errors() -> None:
-    """``_settings_error_field_name`` defensive branch: a chained ``ValidationError``
-    whose own ``errors()`` is empty falls back to ``None`` instead of indexing
-    ``errors[0]``.
-
-    A REAL ``Settings()`` construction failure can never produce this shape — pydantic
-    only raises ``ValidationError`` when there is at least one line error, so there is
-    no natural (non-synthetic) call path through ``Settings()`` that reaches it. It is
-    still a reachable pydantic-core STATE, not dead code: any caller holding a
-    ``ValidationError`` reference (a test double, a future pydantic version, a
-    library that re-raises one after filtering its errors) can construct exactly this
-    shape via pydantic's own public ``ValidationError.from_exception_data`` — the same
-    constructor pydantic's own test suite uses to build ``ValidationError`` instances
-    without a full model round-trip. Unit-testing the helper directly (rather than
-    contorting a real ``Settings()`` call to reach it) keeps the test deterministic and
-    scoped to the guard being verified.
-    """
-    cause = ValidationError.from_exception_data("Settings", [])
-    try:
-        raise SettingsError("settings blew up") from cause
-    except SettingsError as exc:
-        assert _settings_error_field_name(exc) is None
-
-
-def test_settings_error_field_name_none_when_loc_is_empty() -> None:
-    """``_settings_error_field_name`` defensive branch: a chained ``ValidationError``
-    whose single error has an empty ``loc`` tuple falls back to ``None`` instead of
-    joining an empty path into an empty-string field name.
-
-    Unlike the empty-``errors()`` sibling above, this shape IS reachable through a
-    real pydantic model failure — a ``model_validator(mode="after")`` that raises
-    reports ``loc=()`` (verified directly against pydantic: a minimal model with such
-    a validator produces ``errors() == [{"type": "value_error", "loc": (), ...}]``).
-    ``Settings`` has a model-level connection-budget validator (#410 PR1), so this
-    shape IS reachable — but the guard exists so a model-level validator raised as
-    a BARE ``ValueError`` degrades to the generic ``daemon.boot.settings_invalid``
-    message rather than rendering an empty field name — a deliberately-slugged
-    ``PydanticCustomError`` instead surfaces its category slug (#410 PR1; see the
-    sibling test below). Built via pydantic's own ``ValidationError.from_exception_data``
-    for the same determinism/scoping reason as the sibling test.
-    """
-    line_errors: list[InitErrorDetails] = [
-        InitErrorDetails(
-            type=PydanticCustomError("value_error", "model-level failure"),
-            loc=(),
-            input="irrelevant",
-        )
-    ]
-    cause = ValidationError.from_exception_data("Settings", line_errors)
-    try:
-        raise SettingsError("settings blew up") from cause
-    except SettingsError as exc:
-        assert _settings_error_field_name(exc) is None
-
-
-def test_settings_error_field_name_surfaces_a_custom_slug_at_empty_loc() -> None:
-    """#410 PR1 (fleet finding H-3): a model-level (``loc=()``) refusal raised
-    as a deliberately-slugged ``PydanticCustomError`` surfaces its slug — the
-    DLP-safe category naming WHICH constraint failed — instead of degrading to
-    the fully generic message. The sibling test above still holds: a BARE
-    ``ValueError`` raise arrives as pydantic's generic ``value_error`` wrapper
-    type, which names nothing and stays swallowed. Slugs are authored string
-    literals in settings.py — never interpolated from a value — so this is
-    the same value-free contract as the M2 field-name variant."""
-    line_errors: list[InitErrorDetails] = [
-        InitErrorDetails(
-            type=PydanticCustomError("db_pool_connection_budget_exceeded", "over budget"),
-            loc=(),
-            input="irrelevant",
-        )
-    ]
-    cause = ValidationError.from_exception_data("Settings", line_errors)
-    try:
-        raise SettingsError("settings blew up") from cause
-    except SettingsError as exc:
-        assert _settings_error_field_name(exc) == "db_pool_connection_budget_exceeded"
-
-
 def test_placeholder_api_key_settings_error_shows_curated_hint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``_bootstrap_settings_message``'s placeholder-key branch (#469 Blocker 1
-    devops-004): a ``SettingsError`` whose message contains ``placeholder_api_key``
-    (the operator copied ``.env.example`` but never edited the DeepSeek key) gets
-    the SAME curated ``error.placeholder_api_key`` hint the interactive CLI
-    bootstrap path (``alfred.cli._bootstrap.load_settings_or_die``) shows — not the
-    generic ``daemon.boot.settings_invalid`` fallback the sibling tests above cover.
+    """``alfred.cli._settings_errors.daemon_boot_settings_message``'s placeholder-key
+    branch (#469 Blocker 1 devops-004): a ``SettingsError`` whose message contains
+    ``placeholder_api_key`` (the operator copied ``.env.example`` but never edited
+    the DeepSeek key) gets the SAME curated ``error.placeholder_api_key`` hint the
+    interactive CLI bootstrap path (``alfred.cli._bootstrap.load_settings_or_die``)
+    shows — not the generic ``daemon.boot.settings_invalid`` fallback. The renderer's
+    own branch logic (field-name/choices extraction, the defensive edge cases) is
+    unit-tested directly in ``tests/unit/cli/test_settings_error_messages.py`` (#589);
+    this test stays here because it drives a REAL ``daemon start`` boot, pinning the
+    end-to-end wiring rather than the renderer in isolation.
     """
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.chdir(tmp_path)

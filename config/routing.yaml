@@ -12,9 +12,12 @@
 # provider must match or the plugin receives plugin.load_refused at handshake
 # (spec §5.4, index plan §3 cross-PR contract).
 
-# Primary (privileged) provider — governed by config/alfred.toml [provider].
-# Repeated here for documentation; alfred.toml is the authoritative source.
-# primary_provider: "deepseek"  # informational only; set in alfred.toml
+# Primary (privileged) provider — NOT configured here, and NOT in config/alfred.toml
+# either (nothing loads that file; its [provider] block is inert). The runtime source
+# of truth is the ALFRED_PRIMARY_PROVIDER .env setting (Settings.primary_provider,
+# a Literal["anthropic", "deepseek"], default "deepseek"). Even that is read only by
+# `alfred status` and the opt-in separation check below — build_router still hardcodes
+# DeepSeek as privileged (ADR-0064; #590 tracks closing that gap).
 
 quarantine:
   # Provider for the quarantined LLM. NOTE (#587): this routing.yaml value is NOT
