@@ -701,6 +701,87 @@ class LinkUnavailableNotification(_WireModel):
     """
 
 
+# ---------------------------------------------------------------------------
+# Core -> client turn-state control frames (#593)
+# ---------------------------------------------------------------------------
+# DIRECTION: core -> CLIENT, PASS-THROUGH. Unlike the ``link.*`` family above
+# (gateway-ORIGINATED) and unlike ``daemon.lifecycle.*`` / ``daemon.comms.ack`` /
+# ``core.adapter.spawn_grant`` (core-originated but gateway-CONSUMED), this frame
+# ORIGINATES in the core and is RELAYED opaquely by the gateway to the client.
+# ``GatewayCoreLink._route_unit`` consumes ONLY four named constants; every other
+# method falls through to ``_payload_relay``, so the gateway needs NO change and
+# MUST NOT gain one — a gateway arm for this method would break the
+# payload-blindness invariant (hard rule #5).
+#
+# The method name deliberately does NOT use the ``daemon.``/``core.``/``gateway.``
+# prefixes: every one of those is a CONSUMED namespace on some leg. ``turn.*`` is
+# a fresh, client-terminal namespace parallel to ``link.*``.
+TURN_FAILED: Final[str] = "turn.failed"
+
+TurnFailureStage = Literal["refused", "budget_exhausted", "internal_error"]
+"""CLOSED client-facing vocabulary for a turn that produced no reply (#593).
+
+DELIBERATELY NOT ``real_turn_adapter._RefusalStage``. That Literal is the private
+AUDIT taxonomy: it is forensic, it has already widened twice, and it will widen
+again. Three reasons the wire gets its own, narrower vocabulary:
+
+1. WIRE VOCABULARIES WIDEN WITH THEIR CONSUMER, NOT AHEAD OF IT. Aliasing the
+   wire to a private audit enum means every future audit-only stage silently
+   becomes a wire value with no client mapping — an unmapped stage renders
+   NOTHING, i.e. the exact silence #593 exists to close.
+2. NO SECURITY-CONTROL ORACLE. ``downgrade_denied`` / ``dlp_canary_tripped`` name
+   the guard that fired. Telling a sender WHICH control refused them is a free
+   boundary-probing oracle. The client-facing family is coarse ON PURPOSE:
+   everything policy/quarantine/DLP collapses to ``refused``.
+3. NOT EVERY AUDIT STAGE IS CLIENT-MEANINGFUL. ``downgrade_malformed`` is a
+   host-side defensive bug guard (the operator did nothing wrong — maps to
+   ``internal_error``); ``send_failed`` is structurally un-notifiable (its own
+   wire just failed).
+
+``budget_exhausted`` is the ONE fine-grained value, kept because it is the only
+failure the human can ACT on. Widen this Literal only alongside a client that
+renders the new member.
+"""
+
+
+class TurnFailedNotification(_WireModel):
+    """Core->client: the turn this client's last inbound started produced no reply.
+
+    A pure STATE signal. NO ``adapter_id`` (the runner IS the address — same
+    reasoning as :class:`LinkReconnectingNotification`), NO ``inbound_id``
+    correlation (the TUI is structurally 1:1/single-turn — a correlation field
+    would be an un-exercised wire surface), and NO ``str`` field of ANY kind.
+
+    The standing objection recorded on :class:`LinkReconnectingNotification`
+    applies here VERBATIM and is the reason ``stage`` is a CLOSED ``Literal``
+    rather than a ``reason``/``detail``/``message`` string: an open ``str`` here
+    would be a standing invitation to smuggle a core-supplied / T3-derived reason
+    into a client-visible frame, and operator text on the wire breaks the i18n
+    rule that operator strings are rendered via ``t()`` from a closed vocabulary,
+    never sent as raw text. A closed Literal is a finite HOST-AUTHORED vocabulary
+    with no channel for payload-derived bytes; the client renders its OWN
+    localized copy from the stage. ``extra="forbid"`` + ``frozen`` reject any
+    smuggled field loudly.
+    """
+
+    stage: TurnFailureStage
+
+
+TURN_STATE_CLIENT_KINDS: Final[frozenset[str]] = frozenset({"tui"})
+"""Adapter kinds whose plugin TERMINATES ``turn.*`` client-state frames.
+
+FAIL-CLOSED capability table (same shelf as ``BODY_FIELD_BY_KIND``). A kind NOT
+listed here has no ``turn.failed`` consumer: e.g. the Discord plugin's server
+answers an UNKNOWN id-less notification with a spurious ``id: null`` JSON-RPC
+error frame (``DiscordServer.dispatch`` / ``_method_not_found`` in
+``plugins/alfred_discord/server.py`` — it lacks the TUI's
+``comms.tui.notification_ignored`` arm in
+``plugins/alfred_tui/src/alfred_tui/server.py``), so sending it a frame it does
+not speak would produce spurious garbage back up the wire. Add a kind here ONLY
+in the same commit as its client-side handler.
+"""
+
+
 __all__ = [
     "BODY_FIELD_BY_KIND",
     "DAEMON_COMMS_ACK",
@@ -716,6 +797,8 @@ __all__ = [
     "LINK_RECONNECTING",
     "LINK_RESTORED",
     "LINK_UNAVAILABLE",
+    "TURN_FAILED",
+    "TURN_STATE_CLIENT_KINDS",
     "AdapterBreakerOpenNotification",
     "AdapterCrashedNotification",
     "AdapterDownNotification",
@@ -748,6 +831,8 @@ __all__ = [
     "ReadyNotification",
     "ScannedOutboundBody",
     "SeqAckCapability",
+    "TurnFailedNotification",
+    "TurnFailureStage",
     "_OutboundDelivered",
     "_OutboundRetryable",
     "_OutboundTerminal",
