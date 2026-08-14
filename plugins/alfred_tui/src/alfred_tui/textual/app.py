@@ -22,16 +22,17 @@ introduced by the move.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Final, Protocol, assert_never
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.widgets import Input, RichLog, Static
 
-from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_UNAVAILABLE
+from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_UNAVAILABLE, TurnFailureStage
 from alfred.i18n import t
 
 # Map the gateway's id-less ``link.*`` STATE method (Spec A G5 / ADR-0031) to the
@@ -59,6 +60,37 @@ def _reserve_banner_catalog_keys() -> None:
     t("tui.banner.reconnecting")
     t("tui.banner.restored")
     t("tui.banner.unavailable")
+
+
+# Historical value from the deleted in-process TUI (PR-S4-10 removed it along
+# with the rest of the old turn lifecycle). Must comfortably exceed a
+# multi-completion Act-loop turn (live since #410 PR3), not just one
+# completion — a tight timeout would fire mid-turn on legitimate multi-step
+# work and paint a false failure.
+TURN_TIMEOUT_SECONDS: Final[float] = 90.0
+
+
+def _turn_failure_message(stage: TurnFailureStage) -> str:
+    """Localized operator copy for a core turn-failure stage (#593).
+
+    Deliberately NOT the ``_LINK_STATE_BANNER_KEY`` dict + ``t(variable)`` +
+    ``_reserve_banner_catalog_keys`` anchor shape used above for the banner:
+    each arm here is a LITERAL ``t("...")`` call, so ``pybabel extract`` sees
+    all three msgids statically without needing a separate reservation
+    function.
+
+    Exhaustive via ``assert_never`` over the CLOSED wire ``TurnFailureStage``
+    Literal — a future stage added to the wire type without a decision here
+    is a type-check failure, not a silent unrendered turn state.
+    """
+    match stage:
+        case "refused":
+            return t("tui.turn_failed.refused")
+        case "budget_exhausted":
+            return t("tui.turn_failed.budget_exhausted")
+        case "internal_error":
+            return t("tui.turn_failed.internal_error")
+    assert_never(stage)  # pragma: no cover
 
 
 class _SessionLike(Protocol):
@@ -99,6 +131,13 @@ class AlfredTuiApp(App[None]):
     # off-loop ``call_from_thread`` (the cohost pump shares this loop).
     _link_banner_key: reactive[str | None] = reactive[str | None](None)
 
+    # The turn-in-flight indicator. `True` between the operator pressing Enter
+    # and whichever of {reply, turn.failed, watchdog} lands first. A Textual
+    # `reactive` so every mutation drives `watch__turn_pending` on the app's
+    # OWN loop — the wire pump shares that loop, so this is a DIRECT set,
+    # never `call_from_thread` (same M1 discipline as `_link_banner_key`).
+    _turn_pending: reactive[bool] = reactive[bool](default=False)
+
     BINDINGS = [  # noqa: RUF012  # Textual reads BINDINGS off the class; mutable is the documented contract.
         # Footer descriptions are operator-facing and go through t() per
         # CLAUDE.md i18n hard rule #1. Existing tui.* catalog keys (unchanged
@@ -107,9 +146,16 @@ class AlfredTuiApp(App[None]):
         Binding("ctrl+q", "quit", t("tui.binding.quit"), show=True),
     ]
 
-    def __init__(self, *, session: _SessionLike) -> None:
+    def __init__(
+        self, *, session: _SessionLike, turn_timeout_seconds: float = TURN_TIMEOUT_SECONDS
+    ) -> None:
         super().__init__()
         self._session = session
+        self._turn_timeout_seconds = turn_timeout_seconds
+        # Plain instance state, not a reactive — a `Timer` handle is not a
+        # render input, and tearing one down on every reactive-diff cycle
+        # would be spurious churn.
+        self._turn_watchdog: Timer | None = None
 
     def compose(self) -> ComposeResult:
         # The reconnect banner is mounted hidden (``display=False``); it is shown
@@ -132,15 +178,70 @@ class AlfredTuiApp(App[None]):
         """
         self.query_one("#user_input", Input).focus()
 
+    def _arm_turn_watchdog(self) -> None:
+        """One-shot watchdog for the in-flight turn. Replaces any prior timer.
+
+        Uses Textual's ``self.set_timer`` — NOT ``asyncio.wait_for`` — because
+        the turn is no longer locally awaitable: ``inbound.message`` is a
+        fire-and-forget wire notification, so there is no local coroutine to
+        wrap in a timeout. The watchdog is a separate, independently-scheduled
+        callback racing the reply/failure paths, not a wrapper around them.
+        """
+        self._stop_turn_watchdog()
+        self._turn_watchdog = self.set_timer(
+            self._turn_timeout_seconds, self._on_turn_timeout, name="alfred-turn-watchdog"
+        )
+
+    def _stop_turn_watchdog(self) -> None:
+        if self._turn_watchdog is not None:
+            self._turn_watchdog.stop()
+            self._turn_watchdog = None
+
+    def _end_turn(self) -> None:
+        """Release the in-flight turn: stop the watchdog, re-enable + refocus input."""
+        self._stop_turn_watchdog()
+        self._turn_pending = False
+
+    def _on_turn_timeout(self) -> None:
+        """No reply inside the budget: tell the operator and release the input.
+
+        Idempotence guard: ``Timer.stop()`` cannot un-queue a callback the
+        message pump has ALREADY scheduled onto this tick, so a reply that
+        lands in the SAME tick as the expiry can still reach here after
+        ``_end_turn()`` already ran (via ``write_outbound`` or
+        ``set_turn_failed``). This guard is LOAD-BEARING, not defensive
+        padding: without it, a same-tick reply-then-timeout ordering would
+        re-paint a timeout line — and re-arm nothing, since
+        ``self._turn_pending`` is already ``False`` — for a turn that in fact
+        completed, which is a lie to the operator.
+        """
+        self._turn_watchdog = None
+        if not self._turn_pending:
+            return
+        self._end_turn()
+        self.query_one("#conversation_log", RichLog).write(
+            f"[bold red]{t('tui.turn_timeout', seconds=int(self._turn_timeout_seconds))}[/]"
+        )
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter: feed the typed line to the session as one keystroke-batch.
 
         Empty submissions are dropped (the session's flush is a no-op on an
-        empty buffer too — belt and braces). The line is echoed into the log so
-        the operator sees their own turn, mirroring the Slice-1 affordance.
+        empty buffer too — belt and braces). One turn at a time: while a turn
+        is already pending, a submission is dropped WITHOUT clearing/echoing
+        the typed text — ``watch__turn_pending`` already disables the Input,
+        but a queued event can still arrive after the disable takes effect, so
+        this is belt-and-braces, not the primary guard. Nothing typed is lost.
+
+        The line is echoed into the log so the operator sees their own turn
+        (mirroring the Slice-1 affordance), THEN the turn is marked pending
+        and the "thinking..." line written — in that order, so the echo
+        always precedes the pending indicator in the transcript.
         """
         text = event.value.strip()
         if not text:
+            return
+        if self._turn_pending:
             return
         log = self.query_one("#conversation_log", RichLog)
         # ``text`` is operator-typed and echoed into a ``markup=True`` RichLog;
@@ -149,8 +250,24 @@ class AlfredTuiApp(App[None]):
         # legitimate markup. (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold cyan]{t('tui.label_you')}[/]: {escape(text)}")
         event.input.value = ""
-        await self._session.consume_user_input(text)
-        await self._session.flush_keystroke_batch()
+        self._turn_pending = True  # -> watcher: disable + .busy
+        log.write(f"[dim]{t('tui.thinking')}[/]")
+        self._arm_turn_watchdog()
+        try:
+            await self._session.consume_user_input(text)
+            await self._session.flush_keystroke_batch()
+        except Exception as exc:
+            # The inbound never reached the wire. No reply can ever come, so
+            # release the turn NOW rather than making the operator wait out
+            # the full watchdog for a failure we already know about. The
+            # rendered line carries the exception CLASS NAME only, never
+            # `str(exc)` (which could leak transport internals into the
+            # transcript). Re-raised: this is a dead local wire, and
+            # swallowing it here would be the exact silent-failure shape
+            # #593 is about.
+            self._end_turn()
+            log.write(f"[bold red]{t('tui.alfred_error', error=type(exc).__name__)}[/]")
+            raise
 
     def write_outbound(self, body: str) -> None:
         """Paint a host-delivered outbound message into the conversation log.
@@ -158,7 +275,12 @@ class AlfredTuiApp(App[None]):
         Called from the ``outbound.message`` wire handler (via the session's
         render hook). Synchronous: a RichLog write is non-blocking and the
         outbound handler awaits nothing on the render itself.
+
+        Also ENDS the in-flight turn (#593): the reply arriving IS turn
+        completion. A host-pushed outbound with no pending turn is a harmless
+        no-op (a reactive set to its current value does not fire the watcher).
         """
+        self._end_turn()
         log = self.query_one("#conversation_log", RichLog)
         # ``body`` is host-delivered persona output that can carry T3-derived
         # content; escape it so console markup in the body renders literally
@@ -166,6 +288,21 @@ class AlfredTuiApp(App[None]):
         # app-controlled label prefix keeps its legitimate markup.
         # (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold green]{t('tui.label_alfred')}[/]: {escape(body)}")
+
+    def set_turn_failed(self, stage: TurnFailureStage) -> None:
+        """Render the core's turn-failure state and release the in-flight turn.
+
+        Implements the ``_AppLike.set_turn_failed`` Protocol member declared
+        in ``cohost.py`` (Task 13). Rendered into the CONVERSATION LOG, not
+        the ``#link_banner``: a failed turn is a transcript event, not a
+        connection state, and must remain visible above the next turn (a
+        banner would be overwritten/cleared by the NEXT link-state change,
+        silently erasing the record that this turn failed).
+        """
+        self._end_turn()
+        self.query_one("#conversation_log", RichLog).write(
+            f"[bold red]{_turn_failure_message(stage)}[/]"
+        )
 
     def set_link_state(self, method: str) -> None:
         """Update the reconnect banner from a gateway ``link.*`` state method.
@@ -197,3 +334,17 @@ class AlfredTuiApp(App[None]):
             return
         banner.update(t(banner_key))
         banner.display = True
+
+    def watch__turn_pending(self, pending: bool) -> None:  # noqa: FBT001 - Textual's watch_<name>(value) calling convention is positional; not this app's API to redesign.
+        """Disable + dim the input while a turn is in flight; restore on completion.
+
+        ``#user_input.busy`` (the CSS rule declared above, orphaned since the
+        in-process TUI was deleted) is what makes the disabled state VISIBLE.
+        Textual blurs a widget when it is disabled, so the completion edge
+        must re-``focus()`` or the operator's next keystrokes go nowhere.
+        """
+        user_input = self.query_one("#user_input", Input)
+        user_input.set_class(pending, "busy")
+        user_input.disabled = pending
+        if not pending:
+            user_input.focus()

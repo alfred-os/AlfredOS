@@ -9,16 +9,26 @@ calling an in-process orchestrator.
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
-from alfred_tui.textual.app import AlfredTuiApp
+from alfred_tui.textual.app import AlfredTuiApp, _turn_failure_message
 from textual.widgets import Input, RichLog, Static
 
 from alfred.comms_mcp.protocol import (
     LINK_RECONNECTING,
     LINK_RESTORED,
     LINK_UNAVAILABLE,
+    TurnFailureStage,
 )
 from alfred.i18n import t
+
+# A short watchdog for tests that need to observe a real expiry (or merely
+# avoid leaving a live 90s `Timer` task running past `run_test()`'s teardown
+# — see `test_enter_submits_input_to_session` below, which does not itself
+# care about the watchdog but would otherwise leave one armed for the
+# duration of the real 90s default).
+_FAST_TIMEOUT_SECONDS = 0.05
 
 
 def _plain_text(log: RichLog) -> str:
@@ -46,10 +56,31 @@ class _RecordingSession:
         self.flushed += 1
 
 
+class _FailingSession:
+    """Structural ``_SessionLike`` double whose flush never reaches the wire.
+
+    Simulates a dead local transport (``consume_user_input``/``flush_keystroke_batch``
+    raising) so ``on_input_submitted``'s except-branch (#593) can be exercised: the
+    inbound never reaches the wire, so no reply can ever come, and the turn must be
+    ended immediately rather than left pending for the full watchdog window.
+    """
+
+    async def consume_user_input(self, _chunk: str) -> None:
+        # The exact message is asserted to NOT appear in the rendered line —
+        # only the exception CLASS NAME should reach the operator.
+        raise RuntimeError("transport internals: fd 7 broken pipe detail")
+
+    async def flush_keystroke_batch(self) -> None:  # pragma: no cover - unreachable
+        raise AssertionError("consume_user_input should have raised first")
+
+
 @pytest.mark.asyncio
 async def test_enter_submits_input_to_session() -> None:
     session = _RecordingSession()
-    app = AlfredTuiApp(session=session)
+    # A short watchdog so this test does not leave a live 90s `Timer` task
+    # running inside `run_test()`'s teardown (#593 watchdog — this test
+    # predates it and does not itself exercise it).
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_FAST_TIMEOUT_SECONDS)
     async with app.run_test() as pilot:
         app.query_one("#user_input", Input).value = "hello alfred"
         await pilot.press("enter")
@@ -185,3 +216,260 @@ def _plain_text_static(banner: Static) -> str:
         return renderable.plain
     # Any other Rich renderable: render to a throwaway console and read the glyphs.
     return "".join(seg.text for seg in Console().render(renderable)).rstrip("\n")
+
+
+# ---------------------------------------------------------------------------
+# Turn-in-flight indicator + watchdog + turn-failure rendering (#593).
+#
+# Before this task, `alfred chat` echoed the operator's message and then went
+# completely silent — no "thinking..." indicator, no error, no timeout, ever.
+# These tests cover the client-side half: the `.busy` CSS class actually
+# getting toggled, the watchdog actually firing when nothing answers, and a
+# core-reported `turn.failed` actually reaching the transcript.
+# ---------------------------------------------------------------------------
+
+
+# A watchdog timeout comfortably longer than the real wall-clock overhead of
+# a `pilot.press()` + `pilot.pause()` round trip (Textual's `pilot.pause()`
+# idle-detection loop alone costs tens of milliseconds — see
+# `textual._wait.wait_for_idle`), so tests that assert the turn is STILL
+# pending after normal message-loop processing never race the watchdog
+# itself. Only the dedicated watchdog tests below use `_FAST_TIMEOUT_SECONDS`.
+_MODERATE_TIMEOUT_SECONDS = 5.0
+
+
+def _user_input(app: AlfredTuiApp) -> Input:
+    return app.query_one("#user_input", Input)
+
+
+def _log(app: AlfredTuiApp) -> RichLog:
+    return app.query_one("#conversation_log", RichLog)
+
+
+async def _submit(app: AlfredTuiApp, text: str) -> None:
+    """Drive ``on_input_submitted`` directly with a synthetic ``Input.Submitted``.
+
+    Deterministic and free of ``pilot.press()``'s real-time key-dispatch +
+    idle-wait overhead (`Pilot.pause()`'s no-delay form polls CPU idleness in
+    real time — see `textual._wait.wait_for_idle`) — important for the
+    watchdog tests below, where that overhead alone could rival a
+    deliberately-short timeout. The real keyboard path (key press ->
+    ``Input`` posts ``Submitted`` -> this handler) is already covered
+    end-to-end by ``test_enter_submits_input_to_session`` above; these tests
+    are about what happens once the handler runs, not the dispatch mechanism
+    itself.
+    """
+    input_widget = _user_input(app)
+    input_widget.value = text
+    await app.on_input_submitted(Input.Submitted(input=input_widget, value=text))
+
+
+@pytest.mark.asyncio
+async def test_enter_marks_turn_pending_and_disables_input() -> None:
+    """Pressing Enter marks the turn pending and disables + dims the input.
+
+    `_RecordingSession` never produces a reply on its own, so after the
+    handler returns the turn is still (correctly) pending — nothing has
+    ended it yet.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        _user_input(app).value = "hello alfred"
+        await pilot.press("enter")
+        await pilot.pause()
+        input_widget = _user_input(app)
+        assert app._turn_pending is True
+        assert input_widget.disabled is True
+        assert input_widget.has_class("busy")
+
+
+@pytest.mark.asyncio
+async def test_enter_writes_the_thinking_line() -> None:
+    """The "thinking..." line is written after the operator's own echoed line."""
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        _user_input(app).value = "hello alfred"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = _plain_text(_log(app))
+    you_index = rendered.index(t("tui.label_you"))
+    thinking_index = rendered.index(t("tui.thinking"))
+    assert you_index < thinking_index, "the operator's echo must precede the thinking line"
+
+
+@pytest.mark.asyncio
+async def test_outbound_reply_clears_pending_and_refocuses_input() -> None:
+    """A host-delivered reply ends the pending turn and restores focus + enabled state."""
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "hello alfred")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: the turn really was pending
+
+        app.write_outbound("hello back from alfred")
+        await pilot.pause()
+
+        input_widget = _user_input(app)
+        assert app._turn_pending is False
+        assert input_widget.disabled is False
+        assert not input_widget.has_class("busy")
+        assert app.focused is input_widget
+
+
+@pytest.mark.asyncio
+async def test_second_enter_while_pending_is_ignored_and_preserves_typed_text() -> None:
+    """A second submission while a turn is pending is dropped, not echoed/cleared.
+
+    The second ``_submit`` exercises the guard directly rather than relying on
+    the disabled widget to block the keystroke — the guard inside the handler
+    is BELT-AND-BRACES for a queued event landing after the disable takes
+    effect, and this test exercises that guard path directly regardless of the
+    widget's interactive-disabled state.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        assert app._turn_pending is True
+        lines_before = _plain_text(_log(app))
+
+        # A second submission arrives while the first turn is still pending —
+        # exactly the "queued event after disable" shape the guard defends.
+        await _submit(app, "second message, should be ignored")
+        await pilot.pause()
+
+        assert session.consumed == ["first message"], "second submission must not reach the session"
+        assert session.flushed == 1
+        lines_after = _plain_text(_log(app))
+        assert lines_after == lines_before, (
+            "no new line should be written for the ignored submission"
+        )
+        assert _user_input(app).value == "second message, should be ignored", (
+            "typed text must NOT be cleared for a dropped submission"
+        )
+
+
+@pytest.mark.asyncio
+async def test_turn_watchdog_fires_and_writes_the_timeout_line() -> None:
+    """No reply within the budget: the watchdog ends the turn and paints a timeout line."""
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_FAST_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "hello alfred")
+
+        # Outlive the short watchdog window by a comfortable margin — a real
+        # `asyncio.sleep`, during which the app's own message loop keeps
+        # running and eventually processes the watchdog's queued callback.
+        await pilot.pause(_FAST_TIMEOUT_SECONDS * 20)
+
+        input_widget = _user_input(app)
+        assert app._turn_pending is False
+        assert input_widget.disabled is False
+        rendered = _plain_text(_log(app))
+    expected = t("tui.turn_timeout", seconds=int(_FAST_TIMEOUT_SECONDS))
+    assert expected in rendered
+
+
+@pytest.mark.asyncio
+async def test_watchdog_does_not_fire_after_a_reply_arrives() -> None:
+    """A reply that beats the watchdog prevents the timeout line from ever appearing."""
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_FAST_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        # `_submit` + `write_outbound` back-to-back, with no `pilot.pause()`
+        # (real time) in between, so the reply reaches `_end_turn()` — and
+        # stops the watchdog `Timer` — as close to instantly as possible
+        # after arming, leaving the short window as little chance as
+        # possible to have already fired.
+        await _submit(app, "hello alfred")
+        app.write_outbound("a reply that beats the clock")
+        await pilot.pause()
+        assert app._turn_pending is False
+        assert app._turn_watchdog is None, "the watchdog Timer must be stopped, not merely ignored"
+
+        # Outlive the watchdog window; if the timer were not truly stopped,
+        # this is where a stray timeout line would appear.
+        await pilot.pause(_FAST_TIMEOUT_SECONDS * 20)
+
+        rendered = _plain_text(_log(app))
+    expected = t("tui.turn_timeout", seconds=int(_FAST_TIMEOUT_SECONDS))
+    assert expected not in rendered
+    assert "a reply that beats the clock" in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", get_args(TurnFailureStage))
+async def test_set_turn_failed_renders_localized_copy_and_clears_pending(
+    stage: TurnFailureStage,
+) -> None:
+    """A core ``turn.failed`` notification paints the matching copy and ends the turn."""
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "hello alfred")
+        await pilot.pause()
+        assert app._turn_pending is True
+
+        app.set_turn_failed(stage)
+        await pilot.pause()
+
+        input_widget = _user_input(app)
+        assert app._turn_pending is False
+        assert input_widget.disabled is False
+        rendered = _plain_text(_log(app))
+    assert _turn_failure_message(stage) in rendered
+
+
+def test_turn_failure_message_is_exhaustive_over_the_wire_literal() -> None:
+    """``_turn_failure_message`` handles every stage the closed wire Literal allows.
+
+    A future stage added to ``TurnFailureStage`` without a corresponding
+    ``match`` arm here would hit the ``assert_never`` fallthrough, which
+    raises at runtime — turning a silently-unrendered turn state into an
+    immediate, loud test failure instead.
+    """
+    for stage in get_args(TurnFailureStage):
+        message = _turn_failure_message(stage)
+        assert isinstance(message, str)
+        assert message  # never blank
+
+
+@pytest.mark.asyncio
+async def test_flush_failure_paints_error_class_and_reraises() -> None:
+    """A dead local wire ends the turn immediately, renders the exception CLASS
+    NAME (never ``str(exc)``), and re-raises rather than swallowing the fault.
+
+    ``_submit`` calls ``on_input_submitted`` directly (not via a simulated
+    keypress dispatched through Textual's message pump), so the ``raise`` in
+    its except-branch propagates straight out of this ``await`` — exactly
+    where ``pytest.raises`` catches it — rather than being intercepted by
+    Textual's own ``_handle_exception``/panic machinery, which would put the
+    app into a teardown state this test has no need to reason about.
+    """
+    session = _FailingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        with pytest.raises(RuntimeError):
+            await _submit(app, "hello alfred")
+        await pilot.pause()
+        input_widget = _user_input(app)
+        rendered = _plain_text(_log(app))
+        assert app._turn_pending is False, "a local send failure must end the turn immediately"
+        assert input_widget.disabled is False
+        # `t("tui.alfred_error", ...)` (computed the same way here — not
+        # hardcoded) rather than asserting the literal substring "RuntimeError":
+        # the `tui.alfred_error` catalog key is currently OBSOLETE (Task 15
+        # regenerates it), so `t()` falls back to the bare key and does NOT
+        # interpolate `error=...` at all yet. Computing the expectation via
+        # `t()` keeps this assertion correct both now (bare key, no exception
+        # name visible) and after Task 15 restores the msgid (class name
+        # visible) — either way it must be the CLASS NAME going in, never
+        # `str(exc)`.
+        assert t("tui.alfred_error", error="RuntimeError") in rendered
+        assert "transport internals" not in rendered, (
+            "str(exc) must never reach the operator-facing transcript"
+        )
