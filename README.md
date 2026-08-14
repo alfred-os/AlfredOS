@@ -70,7 +70,7 @@ alfred chat                 # start a TUI conversation
 >   This is deliberate — a keyless first run does not start. `bin/alfred-setup.sh` reports the
 >   missing key and exits 1; it cannot seed one for you.
 >
-> **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
+> **Precisely:** the *quarantine*-key refuse-boot is gated on comms being enabled
 > (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so
 > that key is not needed and the core boots fine. That is not the quickstart above:
 > `docker-compose.yaml` defaults `ALFRED_COMMS_ENABLED_ADAPTERS` to `["alfred_tui"]`, so the
@@ -82,7 +82,7 @@ alfred chat                 # start a TUI conversation
 (`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a
 one-shot command runner. One-off subcommands still work via
 `docker compose run --rm alfred-core <cmd>` (`migrate`, `user add`, `chat`, …) because
-`run` overrides the service `command`. **Run `bin/alfred-setup.sh` _before_
+`run` overrides the service `command`. **Run `bin/alfred-setup.sh` *before*
 `docker compose up -d`**: it seeds the `audit.hash_pepper` (into **both** `.env` and
 `~/.config/alfred/secrets.toml` — `.env` is what reaches the container, the file is what
 host-side `alfred` commands read; the script keeps them identical and refuses if they
@@ -299,7 +299,7 @@ permanent.
 
 - **Compose (the default deployment): unaffected.** `docker-compose.yaml`
   substitutes `ALFRED_ENVIRONMENT` from your host shell or host `.env` into a
-  container _environment variable_ before the container starts, so inside the
+  container *environment variable* before the container starts, so inside the
   container it arrives as the fully-trusted env-var source. `development` and
   `test` work normally.
 - **Bare host, configured only through `.env`:** the shipped `production` default
@@ -362,7 +362,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
-For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain _why_ the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
+For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain *why* the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
 
 If you (or an AI agent) are contributing to this repository, also read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 

@@ -29,7 +29,7 @@ frame, and neither fits what #593 needs:
   itself (epoch reconciliation, ack-driven buffer trim, credential relay),
   and never forwards the raw frame past the gateway.
 
-#593's problem is a THIRD, previously-uncovered direction: before this PR,
+Issue #593's problem is a THIRD, previously-uncovered direction: before this PR,
 `alfred chat` gave the operator zero feedback on ANY turn-failure path — no
 "thinking..." indicator, no error, ever (the gap the whole combined PR
 exists to close). The signal that closes it — "the turn you just started

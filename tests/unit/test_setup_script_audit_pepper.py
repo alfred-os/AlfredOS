@@ -91,7 +91,8 @@ def test_setup_script_audit_pepper_is_idempotent() -> None:
     """
     pepper_block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
     assert '"$env_pepper" == "$file_pepper"' in pepper_block, (
-        f"No idempotency guard (env/file equality check) around audit.hash_pepper seed:\n{pepper_block}"
+        "No idempotency guard (env/file equality check) around audit.hash_pepper "
+        f"seed:\n{pepper_block}"
     )
     assert "already configured" in pepper_block, (
         f"equality guard present but no-op message missing/renamed:\n{pepper_block}"
@@ -127,7 +128,8 @@ def test_setup_script_refuses_on_pepper_drift() -> None:
     assert "return 1" in block, "no non-zero return in the pepper bootstrap step"
     assert "DIFFERS" in block, (
         "no drift-refusal error message in the pepper bootstrap step — "
-        "a differing .env/secrets.toml pepper pair must be surfaced to the operator, not picked silently"
+        "a differing .env/secrets.toml pepper pair must be surfaced to the "
+        "operator, not picked silently"
     )
 
 
