@@ -477,6 +477,54 @@ def test_bootstrap_file_only_mirrors_sed_metacharacter_pepper_byte_for_byte(
     )
 
 
+def test_bootstrap_file_only_single_quoted_real_pepper_survives_byte_identical(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """#594 sec-002 regression-fix proof: a SINGLE-quoted real pepper in
+    secrets.toml must never be silently overwritten.
+
+    ``_pepper_from_file``'s value-extraction regex only recognizes
+    DOUBLE-quoted TOML strings (``"([^"]*)"``), but TOML also allows
+    single-quoted literal strings (``'...'``) — valid, ``tomllib``-parseable,
+    and a shape an operator could easily hand-set. A first version of the
+    #594 sec-002 fix asked ``_pepper_from_file`` "is a real value already
+    here?" and treated "the extraction regex didn't match" as "must be
+    blank" — so a single-quoted REAL value looked indistinguishable from a
+    genuinely blank one, and ``_pepper_write_file`` silently OVERWROTE it
+    with a freshly-generated pepper while ``_pepper_bootstrap`` printed its
+    normal "Seeded audit.hash_pepper..." success message. That is strictly
+    worse than the bug the original fix was closing (failing to WRITE a
+    value vs. silently DESTROYING one) — exactly the failure mode the whole
+    PR's "refuse rather than silently invalidate audit correlation" design
+    principle (spec §8.10) exists to prevent.
+
+    The (corrected) fix in ``_pepper_write_file`` no longer infers "blank"
+    from a failed extraction: it positively matches the literal ``= ""``
+    shape before entering the overwrite branch, and treats every other
+    shape — including single-quoted — as "a value is already here", left
+    completely untouched. Confirmed to FAIL against the pre-fix regression
+    commit by direct isolated-function testing (see fix-1-report.md); this
+    pytest case pins the same invariant against the real, real script.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    real_value = "c3" * 32  # a plausible real 64-hex-char pepper
+    target.write_text(f"\"audit.hash_pepper\" = '{real_value}'\n")
+    before = target.read_bytes()
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    after = target.read_bytes()
+    assert before == after, (
+        "secrets.toml's single-quoted real pepper was overwritten — this is "
+        "the #594 sec-002 destructive-overwrite regression: "
+        f"before={before!r} after={after!r}"
+    )
+
+
 def test_bootstrap_refuses_on_pepper_drift(
     bash_available: str,
     tmp_path: Path,

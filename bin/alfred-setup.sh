@@ -466,26 +466,37 @@ _pepper_from_file() {
 # REAL value (spec §8.10: rotating the pepper invalidates cross-row
 # correlation).
 _pepper_write_file() {
-  local existing
-  existing="$(_pepper_from_file)"
-  if [[ -n "$existing" ]]; then
-    # A real (non-blank) value is already present. Keep it untouched.
-    return 0
-  fi
   if grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
-    # #594 sec-002: the key exists but its captured value is blank (e.g. an
-    # operator hand-set `"audit.hash_pepper" = ""` — a scenario
-    # _pepper_from_file's own docstring anticipates). Overwrite that blank
-    # entry in place rather than treating "key present" as "already
-    # configured". Rebuilt line-by-line via printf, same as _pepper_write_env
-    # above and for the same reason: the incoming value is not hex-constrained
-    # on the mirrored-from-.env path, so it must never be fed through sed/awk
+    # #594 sec-002 (fix-2, regression fix): the key is present. Only overwrite
+    # when the value is SPECIFICALLY a blank double-quoted string (`= ""`) —
+    # never merely because a general-purpose value-extraction regex failed to
+    # match. A first version of this fix called _pepper_from_file (whose
+    # regex only recognizes DOUBLE-quoted TOML strings) and treated "didn't
+    # match" as "must be blank" — but TOML also allows SINGLE-quoted literal
+    # strings (`'...'`), which tomllib parses fine. A hand-set
+    # `"audit.hash_pepper" = 'a-real-hex-value'` would fail to match that
+    # extraction regex too, and got silently OVERWRITTEN with a fresh
+    # openssl-generated value while reporting success — destroying a real
+    # pepper, which is strictly worse than the original bug (failing to fill
+    # in a blank one). Positively detect the blank case with a dedicated
+    # pattern instead; every other shape (single-quoted, non-blank
+    # double-quoted, malformed, ...) is treated as "a value is already here"
+    # and left completely untouched — the same behavior this function had
+    # before #594 sec-002 for every one of those shapes.
+    if ! grep -qE "^\"?${pepper_key}\"?[[:space:]]*=[[:space:]]*\"\"[[:space:]]*\$" "$target_file" 2>/dev/null; then
+      return 0
+    fi
+    # Blank double-quoted entry (e.g. an operator hand-set
+    # `"audit.hash_pepper" = ""`) — overwrite it in place. Rebuilt
+    # line-by-line via printf, same as _pepper_write_env above and for the
+    # same reason: the incoming value is not hex-constrained on the
+    # mirrored-from-.env path, so it must never be fed through sed/awk
     # substitution syntax.
     local tmp_file line replaced=0
     tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
     if ! {
       while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$replaced" -eq 0 && "$line" =~ ^\"?${pepper_key}\"?[[:space:]]*= ]]; then
+        if [[ "$replaced" -eq 0 && "$line" =~ ^\"?${pepper_key}\"?[[:space:]]*=[[:space:]]*\"\"[[:space:]]*$ ]]; then
           printf '"%s" = "%s"\n' "$pepper_key" "$1"
           replaced=1
         else
