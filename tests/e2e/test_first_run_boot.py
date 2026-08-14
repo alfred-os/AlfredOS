@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -205,9 +206,38 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
             )
 
             # (3) A late step ran: the hash_pepper bootstrap wrote the redirected secrets file.
-            assert secrets_file.is_file() and "audit.hash_pepper" in secrets_file.read_text(), (
+            secrets_text = secrets_file.read_text()
+            assert secrets_file.is_file() and "audit.hash_pepper" in secrets_text, (
                 "setup.sh did not bootstrap audit.hash_pepper into ALFRED_SECRETS_FILE — the "
                 "provisioning did not reach the late secret-seed step."
+            )
+
+            # (4) #591: the SAME pepper value must ALSO reach .env — the carrier docker-compose
+            # forwards to alfred-core as ALFRED_AUDIT_HASH_PEPPER — not just the host secrets
+            # file. This is the strongest end-to-end proof #591 admits: a real setup.sh
+            # execution reconciling two real files, not a unit-level mock of _pepper_write_env.
+            # Values are compared as a bool (not `assert x == y`) so a failure never dumps the
+            # raw hex pepper into pytest's assertion-rewrite output — scrub_env_secrets above
+            # only reaches captured subprocess text, not a Python-level assert diff (sec-003).
+            secrets_pepper = re.search(
+                r'^"?audit\.hash_pepper"?\s*=\s*"([0-9a-f]{64})"', secrets_text, re.MULTILINE
+            )
+            assert secrets_pepper, (
+                f"{secrets_file} has an audit.hash_pepper key but its value did not match the "
+                "expected [0-9a-f]{64} shape."
+            )
+            env_pepper = re.search(
+                r"^ALFRED_AUDIT_HASH_PEPPER=([0-9a-f]{64})$", env_file.read_text(), re.MULTILINE
+            )
+            assert env_pepper, (
+                f"{env_file} has no ALFRED_AUDIT_HASH_PEPPER=<64-hex> line — setup.sh's #591 "
+                "mirror-to-.env step (_pepper_write_env) did not run."
+            )
+            peppers_match = secrets_pepper.group(1) == env_pepper.group(1)
+            assert peppers_match, (
+                "audit.hash_pepper differs between the secrets file and .env — setup.sh wrote "
+                "two DIFFERENT values instead of mirroring the SAME pepper to both (value not "
+                "printed here; see the comment above)."
             )
         finally:
             _compose.down_project(setup_project)
