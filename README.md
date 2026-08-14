@@ -41,6 +41,18 @@ alfred chat                 # start a TUI conversation
 > `alfred user add` step — running one after setup fails with `OperatorAlreadyExists` (exit 2).
 > Set `ALFRED_OPERATOR_NAME` in `.env` before `bin/alfred-setup.sh` for a custom display name.
 
+> **If your first `alfred chat` message never gets a reply**, the TUI's identity and the
+> seeded one have diverged. The TUI authenticates as `ALFRED_OPERATOR_NAME` (default
+> `operator`) — the same value migration `0004` seeded as the `tui` platform identity.
+> Migration `0004` runs **once**, so *changing* `ALFRED_OPERATOR_NAME` after your first
+> `docker compose up -d` breaks the match. Either restore the old value in `.env`, or
+> rebind:
+>
+> ```sh
+> docker compose run --rm alfred-core user unbind <your-operator-slug> --platform tui
+> docker compose run --rm alfred-core user bind   <your-operator-slug> --platform tui --id "$ALFRED_OPERATOR_NAME"
+> ```
+
 > **Two provider keys are required before the first `docker compose up -d`.**
 > `bin/alfred-setup.sh` validates both up front and refuses to proceed (exit 1), listing every
 > problem at once, if either is missing (or, for the DeepSeek key, still the `sk-...` placeholder):
@@ -71,7 +83,10 @@ alfred chat                 # start a TUI conversation
 one-shot command runner. One-off subcommands still work via
 `docker compose run --rm alfred-core <cmd>` (`migrate`, `user add`, `chat`, …) because
 `run` overrides the service `command`. **Run `bin/alfred-setup.sh` _before_
-`docker compose up -d`**: it seeds the `audit.hash_pepper` and provisions secrets the
+`docker compose up -d`**: it seeds the `audit.hash_pepper` (into **both** `.env` and
+`~/.config/alfred/secrets.toml` — `.env` is what reaches the container, the file is what
+host-side `alfred` commands read; the script keeps them identical and refuses if they
+drift) and provisions secrets the
 daemon requires to boot. Skip it and the daemon refuse-boots and, under
 `restart: unless-stopped`, crash-loops. The script seeds what it can and warns about
 what it cannot — `ALFRED_QUARANTINE_PROVIDER_API_KEY` has to come from you.
@@ -191,7 +206,7 @@ Operator workflow for a fresh deploy:
    ID. Then on the host:
 
    ```sh
-   alfred user bind --slug <your-operator-slug> --platform discord --platform-id <snowflake>
+   alfred user bind <your-operator-slug> --platform discord --id <snowflake>
    ```
 
    The setup script offers an interactive prompt for this in its final
@@ -232,10 +247,11 @@ ADR-0012). If you already keep secrets there — or your `~/.config` is a git re
   container uid/gid directly; `chmod 600` on the host applies inside
   the container too. The setup script runs `export UID GID` because
   macOS bash 3.2 does not export `UID` by default.
-- **Linux:** `user: "${UID:-1000}:${GID:-1000}"` in
-  `docker-compose.yaml` resolves to the operator's real uid/gid; the
-  bind-mount's `chmod 600` is enforced by the kernel exactly as on the
-  host.
+- **Linux:** the container no longer remaps to the host operator's uid/gid — the
+  `user: "${UID:-1000}:${GID:-1000}"` compose override was deleted in commit
+  `76f044e3`. `alfred-core` now always runs as the fixed non-root `alfred` user
+  baked into the image (`docker/alfred-core.Dockerfile`), regardless of the
+  host operator's uid/gid.
 - **WSL2:** same as Linux, with the caveat that running `docker compose`
   from PowerShell (vs `wsl`) sees a different uid namespace. Run the
   setup script from inside WSL to keep the perms consistent.

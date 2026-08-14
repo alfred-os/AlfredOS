@@ -579,13 +579,18 @@ fi
 has_operator="$(printf '%s' "$user_list_json" | jq -r '[.[] | select(.authorization=="operator")] | length')"
 if [[ "$has_operator" == "0" ]]; then
   # Non-TTY guard: under CI / piped stdin we cannot prompt — fall back to
-  # ALFRED_OPERATOR_NAME from .env (or the literal "Operator" if unset).
+  # ALFRED_OPERATOR_NAME from .env (or the literal "operator" if unset).
   if [[ ! -t 0 ]]; then
-    name="${ALFRED_OPERATOR_NAME:-Operator}"
+    # #592: read `.env` (what compose and migration 0004 see), not the shell, and
+    # default to the SAME lowercase `operator` every other layer defaults to —
+    # .env.example:36, docker-compose.yaml:182, migration 0004. A capital-O here
+    # would seed a display_name the TUI client never sends.
+    name="$(read_env_var ALFRED_OPERATOR_NAME)"; name="${name:-operator}"
     echo "Non-TTY context: using ALFRED_OPERATOR_NAME='$name'."
   else
-    read -r -p "Operator display name [Operator]: " name
-    name="${name:-Operator}"
+    default_name="$(read_env_var ALFRED_OPERATOR_NAME)"; default_name="${default_name:-operator}"
+    read -r -p "Operator display name [${default_name}]: " name
+    name="${name:-$default_name}"
   fi
   budget="$(read_env_var ALFRED_DAILY_BUDGET_USD)"
   budget="${budget:-1.0}"
@@ -605,6 +610,13 @@ if [[ "$has_operator" == "0" ]]; then
   if [[ "$slug" != "$display_lower" ]]; then
     echo "  (Slug differs from display-lowercase; use '$slug' in future CLI commands.)"
   fi
+  # #592: `user add` creates no platform_identities row — only migration 0004 does.
+  # On this fallback path (migration 0004 did NOT install the operator) the TUI would
+  # otherwise have nothing to resolve against. Bind it here so both paths end in the
+  # same state. The platform_id is the DISPLAY NAME, matching migration 0004 and
+  # alfred.config.operator_env.operator_display_name() — NOT the slug.
+  docker compose run --rm alfred-core user bind "$slug" --platform tui --id "$name"
+  echo "Bound the TUI platform identity '$name' to operator '$slug'."
 else
   echo "Operator user already exists; skipping create."
   slug="$(printf '%s' "$user_list_json" | jq -r '[.[] | select(.authorization=="operator")][0].slug')"
@@ -620,11 +632,27 @@ if [[ -t 0 ]]; then
   read -r -p "Discord snowflake to bind now (blank to skip): " snowflake
   snowflake="$(printf '%s' "$snowflake" | tr -d '[:space:]')"
   if [[ -n "$snowflake" ]]; then
-    docker compose run --rm alfred-core user bind \
-      --slug "$slug" \
+    # `slug` is POSITIONAL and the id flag is `--id` (src/alfred/identity/cli.py:559).
+    # The old `--slug X --platform-id Y` form named two flags that do not exist, so
+    # Typer exited 2 with "No such option" and `set -e` killed the script here.
+    # Pinned by tests/unit/test_setup_script_cli_invocations.py (Task 5).
+    #
+    # Idempotency: `bind` is NOT idempotent — a re-run that re-enters the same
+    # snowflake raises UserAlreadyBoundError, and a snowflake owned by someone else
+    # raises PlatformIdInUseError. Both surface as the CLI's exit 2. Classify on the
+    # EXIT CODE, never on the message text (the message is translated — i18n rule):
+    # 0 = bound, 2 = an identity-level refusal the operator should read verbatim,
+    # anything else = a real failure worth aborting on.
+    bind_rc=0
+    bind_out="$(docker compose run --rm alfred-core user bind "$slug" \
       --platform discord \
-      --platform-id "$snowflake"
-    echo "Bound snowflake $snowflake to operator $slug."
+      --id "$snowflake" 2>&1)" || bind_rc=$?
+    case "$bind_rc" in
+      0) echo "Bound snowflake $snowflake to operator $slug." ;;
+      2) warn "Discord bind refused (already bound, or that snowflake belongs to another user). The CLI said:"
+         printf '%s\n' "$bind_out" >&2 ;;
+      *) fail "user bind failed (exit $bind_rc): $bind_out" ;;
+    esac
     # #309 preflight: gateway-hosted Discord needs the token core-side, or the gateway
     # ABORTS at first spawn (loud + audited, but it takes the relay down — #331). Refuse
     # to bring Discord up without it rather than ship a green stack with a dead bot.
