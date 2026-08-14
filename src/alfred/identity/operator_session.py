@@ -68,40 +68,30 @@ _log = structlog.get_logger(__name__)
 # INSIDE a function and therefore keeps the bare form — the dominant pattern,
 # see also ``alfred.policies.load``.)
 #
-# But a 0 fallback silently DISABLES a security control: OR-ing 0 into the
-# open flags means the symlink refusal (``O_NOFOLLOW``) and the is-a-directory
-# refusal (``O_DIRECTORY``) simply do not happen. Importability must not buy
-# itself a weakened check, so ``load_session_file`` refuses outright rather
-# than opening the operator's session file with the guarantees missing — see
-# ``_require_posix_open_guarantees``. Windows operators are directed at the
-# WSL2 path (PR-S4-10), where these flags are present and nothing degrades.
+# Read plainly, a 0 fallback looks like a silent security downgrade: OR-ing 0
+# into the open flags drops the symlink (``O_NOFOLLOW``) and is-a-directory
+# (``O_DIRECTORY``) refusals. It is worth stating explicitly why that exposure
+# is NOT reachable, so nobody "fixes" it the way this PR first tried to and
+# breaks a working path (see below).
+#
+# ``load_session_file`` cannot complete a DEGRADED-BUT-SUCCESSFUL load on a
+# platform missing these flags, because the same platforms lack ``dir_fd``
+# support: ``os.supports_dir_fd`` is empty on Windows, so the
+# ``os.open(..., dir_fd=parent_fd)`` below raises ``NotImplementedError``
+# regardless of the flag values. The file is never read with weakened
+# protections — the call fails first.
+#
+# What DOES work on such a platform is the benign miss: a non-existent parent
+# dir raises ``FileNotFoundError`` -> ``OperatorSessionMissing``, which the
+# operator-session CLI relies on to report "not logged in". An earlier revision
+# of this PR added an upfront "refuse if the flags are absent" guard; it turned
+# that working path into a hard error and reddened the Windows CI leg
+# (``tests/unit/cli/test_operator_session_cli.py``). Do not re-add it: refusing
+# here buys no security (the degraded open is already impossible) and costs a
+# path that legitimately works. Windows operators are directed at WSL2
+# (PR-S4-10), where both flags are present and nothing degrades at all.
 _O_NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
-
-
-def _require_posix_open_guarantees() -> None:
-    """Refuse rather than open the session file with degraded protections.
-
-    ``load_session_file``'s entire TOCTOU discipline rests on two POSIX open
-    flags and on ``dir_fd``. Where they are absent (Windows), OR-ing the 0
-    fallbacks would still *open the file* — just without the symlink and
-    directory refusals the docstring promises, on the path that authenticates
-    the operator. Fail closed instead.
-
-    ``NotImplementedError`` deliberately, not a new ``OperatorSession*`` type:
-    ``os.open(..., dir_fd=...)`` already raises exactly that on Windows a few
-    lines later (``os.supports_dir_fd`` is empty there), so this refuses with
-    the same type callers would otherwise see — only earlier, before any FD is
-    opened, and with a message that names the cause instead of surfacing a bare
-    "dir_fd unavailable on this platform".
-    """
-    if not _O_NOFOLLOW or not _O_DIRECTORY:
-        raise NotImplementedError(
-            "load_session_file requires POSIX O_NOFOLLOW + O_DIRECTORY to enforce its "
-            "symlink/directory refusals; this platform exposes neither, so the file "
-            "would be opened without them. Use the WSL2 path on Windows (PR-S4-10)."
-        )
-
 
 # Upper bound on the session-file size. A legitimate file is a few hundred
 # bytes; the cap refuses a planted multi-megabyte file before it is parsed
@@ -373,7 +363,6 @@ def load_session_file(path: Path) -> OperatorSessionFile:
         OperatorSessionBadFileOwner: uid/gid mismatch.
         OperatorSessionMalformed: bytes did not parse as a session file.
     """
-    _require_posix_open_guarantees()
     parent = path.parent
     try:
         parent_fd = os.open(parent, os.O_RDONLY | _O_DIRECTORY)
