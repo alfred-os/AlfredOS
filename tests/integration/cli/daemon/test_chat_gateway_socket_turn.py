@@ -53,15 +53,17 @@ import os
 import struct
 from collections.abc import AsyncIterator, Coroutine, Iterator
 from contextlib import asynccontextmanager, suppress
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import pytest
 from alfred_tui.cohost import _make_socket_inbound_sink, _serve_wire
+from alfred_tui.render import build_app
 from alfred_tui.server import TuiServer
 from alfred_tui.session import TuiSession
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from textual.widgets import Input, RichLog
 
 from alfred.audit.log import AuditWriter
 from alfred.bootstrap.lifecycle_epoch import mint_boot_epoch, reset_boot_epoch_for_tests
@@ -73,6 +75,7 @@ from alfred.cli.daemon._commands import (
     _CommsBootGraph,
     _listen_socket_comms_adapter,
 )
+from alfred.comms_mcp.protocol import TurnFailureStage
 from alfred.config.settings import Settings
 
 # The gateway halves the test drives DIRECTLY (so a deterministic clock can be
@@ -85,6 +88,7 @@ from alfred.gateway.process import build_tui_leg, wire_leg_scheduler
 from alfred.gateway.relay import GatewayRelay
 from alfred.hooks.boot import install_boot_hook_registry
 from alfred.hooks.registry import get_registry, set_registry
+from alfred.i18n import t
 from alfred.identity import Authorization, Platform
 from alfred.identity.models import PlatformIdentity, User
 from alfred.memory.hooks_audit_sink import EpisodicAuditSink
@@ -131,6 +135,20 @@ _LAUNCHER_REQUIRES_ROOT = os.uname().sysname == "Linux" and os.geteuid() != 0
 # chokepoint + wrapped in a valid OutboundMessageRequest (G5 #237 / hard rule
 # #4); the cohost renders ``body[0]``.
 _ACK_CONTENT = "scripted-real-turn-answer"
+
+# Task 16 (#593 proof): a daily cap strictly below Settings.per_call_max_usd's
+# 0.10 default (never overridden by ``_boot_env``), so the orchestrator's
+# iteration-0 budget PRE-CHECK (``BudgetGuard.would_exceed`` reading THIS row
+# via the SAME resolver instance the daemon boot graph installs) trips a REAL
+# ``BudgetError`` — no mock, the actual guard math against a real seeded
+# Postgres row. Must stay > 0 (the ``users.daily_budget_usd`` DB CHECK).
+_NEAR_ZERO_DAILY_BUDGET_USD: Final[float] = 0.01
+
+# The router's canned reply for the budget-block proof below — MUST NEVER be
+# rendered: the pre-check's ``BudgetError`` fires BEFORE the turn's first
+# ``router.complete()`` call, so this string appearing in the transcript would
+# mean the refusal did not actually halt the turn before a real completion.
+_UNREACHABLE_ANSWER: Final[str] = "unreachable-router-answer-budget-block-proof"
 
 
 class _EchoingChildDouble:
@@ -264,7 +282,7 @@ def _boot_gate_with_tui_load_grant() -> RealGate:
     )
 
 
-def _seed_bound_user(sync_url: str) -> None:
+def _seed_bound_user(sync_url: str, *, alice_daily_budget_usd: float = 5.0) -> None:
     """Seed a Discord-bound ``alice`` so the resolver maps the inbound to her.
 
     The TUI inbound path resolves the binding via the resolver bridge, which maps
@@ -283,6 +301,11 @@ def _seed_bound_user(sync_url: str) -> None:
     platform binding (there must be exactly ONE ``authorization=operator`` row;
     ``alice`` stays STANDARD so this proof does not conflate "the addressed user"
     with "the household operator").
+
+    ``alice_daily_budget_usd`` (Task 16, #593): overridable so the turn-failure
+    proof can seed a cap BELOW ``Settings.per_call_max_usd`` and force a REAL
+    ``BudgetError`` out of the real ``BudgetGuard`` — every other caller keeps
+    the original ``5.0`` (comfortably above the 0.10 per-call cap).
     """
     sync_engine = create_engine(sync_url, future=True)
     try:
@@ -292,7 +315,7 @@ def _seed_bound_user(sync_url: str) -> None:
                 slug=_CANONICAL_SLUG,
                 display_name=_CANONICAL_SLUG,
                 authorization=Authorization.STANDARD.value,
-                daily_budget_usd=5.0,
+                daily_budget_usd=alice_daily_budget_usd,
                 language=_USER_LANGUAGE,
             )
             session.add(user)
@@ -318,15 +341,21 @@ def _seed_bound_user(sync_url: str) -> None:
 
 
 @asynccontextmanager
-async def _boot_audit_writer(postgres_url: str) -> AsyncIterator[AuditWriter]:
-    """Create the schema, seed the user, and yield a real Postgres AuditWriter."""
+async def _boot_audit_writer(
+    postgres_url: str, *, alice_daily_budget_usd: float = 5.0
+) -> AsyncIterator[AuditWriter]:
+    """Create the schema, seed the user, and yield a real Postgres AuditWriter.
+
+    ``alice_daily_budget_usd`` forwards to :func:`_seed_bound_user` (Task 16,
+    #593) — see its docstring.
+    """
     engine = create_async_engine(postgres_url, future=True)
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
         sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
-        _seed_bound_user(sync_url)
+        _seed_bound_user(sync_url, alice_daily_budget_usd=alice_daily_budget_usd)
 
         sm = async_sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -679,6 +708,315 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
             assert rendered == [_ACK_CONTENT], rendered
     finally:
         # Reap EVERY acquired resource on EVERY exit path (mirror the inbound-turn
+        # proof's discipline) regardless of how far boot got.
+        gateway_shutdown.set()
+        supervisor.shutdown_event.set()
+        optional_tasks: tuple[asyncio.Task[None] | None, ...] = (relay_task, cohost_wire_task)
+        for maybe_task in optional_tasks:
+            if maybe_task is not None:
+                maybe_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(maybe_task, timeout=_TIMEOUT_S)
+        if cohost_transport is not None:
+            with suppress(Exception):
+                await cohost_transport.close()
+        if gateway_client_listener is not None:
+            with suppress(Exception):
+                await gateway_client_listener.aclose()
+        for registered_task in supervisor.registered:
+            registered_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(registered_task, timeout=_TIMEOUT_S)
+        if listener is not None:
+            with suppress(Exception):
+                await listener.aclose()
+        if graph is not None:
+            with suppress(Exception):
+                await graph.aclose()
+        set_registry(prior_registry)
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(prior_nonce)
+        reset_boot_epoch_for_tests()
+
+
+def _richlog_text(log: RichLog) -> str:
+    """The visible plain text of a RichLog, stripped of Rich style metadata.
+
+    Mirrors ``plugins/alfred_tui/tests/test_textual_app.py``'s ``_plain_text``
+    helper: ``str(strip)`` renders the Strip *repr* (Segment + Style noise),
+    which would let a markup assertion pass on style attributes rather than
+    literal glyphs, so this joins each strip's ``Segment.text`` instead.
+    """
+    return "\n".join("".join(seg.text for seg in strip) for strip in log.lines)
+
+
+@pytest.mark.skipif(
+    _LAUNCHER_REQUIRES_ROOT,
+    reason="parity with the launcher-spawn legs; runs locally + on the root CI runner",
+)
+@pytest.mark.usefixtures("_boot_env")
+async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 16 (#591/#592/#593) — the composition PROOF: a real refusal reaches a real TUI.
+
+    Drives a real turn through the SAME cohost -> gateway -> daemon chain the
+    sibling proof above exercises, but this time the seeded ``alice`` row's
+    ``daily_budget_usd`` (:data:`_NEAR_ZERO_DAILY_BUDGET_USD`) sits BELOW
+    ``Settings.per_call_max_usd``'s ``0.10`` default, so the orchestrator's
+    iteration-0 budget pre-check trips a REAL ``BudgetError``
+    (``alfred.budget.guard.BudgetGuard.would_exceed`` reading the REAL seeded
+    row via the SAME resolver instance the daemon boot graph installs) — no
+    mock, no forced exception, the actual guard math against a real Postgres
+    row. This mirrors how ``tests/integration/test_audit_persistence.py``'s
+    ``test_budget_block_audit_row_survives_rollback`` forces the SAME
+    ``BudgetError`` class (there via a mocked ``BudgetGuard``; here via the
+    real one).
+
+    Tasks 9-12 wired the server-side ``turn.failed`` notify off that refusal
+    leg; Tasks 13-15 wired the client-side routing + rendering + i18n catalog.
+    THIS is the one test proving all of it composes as a working system end to
+    end: the REAL :class:`alfred_tui.textual.app.AlfredTuiApp` (driven under
+    Textual's ``run_test()`` pilot — never a recording double) submits a real
+    keystroke through its OWN ``on_input_submitted`` handler; the inbound
+    crosses the real socket chain; the daemon's
+    ``RealTurnOrchestratorAdapter.dispatch`` catches the ``BudgetError``,
+    audits it, and sends ``turn.failed``; the gateway relays it UNTOUCHED
+    (Task 10's own proof); the cohost's ``_serve_wire`` pump routes it to
+    ``app.set_turn_failed``; and the app paints the localized
+    ``tui.turn_failed.budget_exhausted`` copy AND re-enables ``#user_input`` —
+    the two acceptance assertions below.
+
+    Self-review (this test is NOT one that would pass regardless of Task 12's
+    notify wiring): if ``_notify_turn_failed`` were never called — e.g. Task
+    12's ``except BudgetError`` arm reverted to a bare re-raise — the app's
+    ``_turn_pending`` reactive would never flip back to ``False`` (nothing
+    else ends the turn: no reply is ever sent, since the pre-check halts
+    before the first ``router.complete()``), so the ``_wait_for`` poll below
+    raises ``TimeoutError`` after ``_TIMEOUT_S`` (20s) — well inside the app's
+    own 90s watchdog window. A reverted Task 12 fails this test LOUD with a
+    timeout, not a silent pass.
+
+    KNOWN GAP surfaced while writing this test, reported (not fixed) here per
+    Task 16's brief: the ``_boot_env`` fixture above still pins ``$USER`` to
+    ``_PLATFORM_USER_ID`` with a comment claiming "the platform_user_id the
+    TUI session stamps comes from $USER" — true before Task 1 (#592,
+    ``b338841f``), which repointed ``TuiSession.flush_keystroke_batch``'s
+    ``platform_user_id`` at ``alfred.config.operator_env.operator_display_name()``
+    (``$ALFRED_OPERATOR_NAME``, default ``"operator"``) and never updated this
+    fixture. Left as-is, the sibling proof above (and this test) silently never
+    resolve to the seeded ``alice`` binding — no exception, no audit row, just
+    a T3-promotion wait that times out. This test sets the CORRECT env var
+    itself (below) rather than relying on the stale fixture; the sibling test
+    is UNAFFECTED — it still relies on the (broken) fixture alone. See the
+    Task 16 report for the full anomaly writeup.
+    """
+    settings = Settings()  # type: ignore[no-untyped-call]  # env-driven; mirrors daemon boot
+    # KNOWN GAP workaround (see docstring above): `_boot_env` only pins the
+    # PRE-#592 `$USER` mechanism; the client now reads `$ALFRED_OPERATOR_NAME`
+    # via `operator_display_name()`. Set the CURRENT mechanism here, scoped to
+    # THIS test only — `_boot_env`'s stale `$USER` pin is left untouched
+    # (reported to the controller, not fixed, per Task 16's brief).
+    monkeypatch.setenv("ALFRED_OPERATOR_NAME", _PLATFORM_USER_ID)
+    sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
+
+    # Mint the per-boot epoch the daemon carrier's lifecycle.start handshake carries
+    # (the gateway captures + reconciles it). Reset on teardown so a sibling starts clean.
+    mint_boot_epoch()
+
+    prior_registry = get_registry()
+    with _NONCE_LOCK:
+        prior_nonce = _tiers._AUTHORIZED_T3_NONCE
+    gate = _boot_gate_with_tui_load_grant()
+    supervisor = _RecordingSupervisor()
+    broadcaster = LifecycleBroadcaster()
+
+    graph: _CommsBootGraph | None = None
+    listener: CommsSocketListener | None = None
+    # Gateway halves + cohost — reaped in the finally regardless of how far we got.
+    gateway_client_listener: GatewayClientListener | None = None
+    relay_task: asyncio.Task[None] | None = None
+    gateway_shutdown = asyncio.Event()
+    cohost_transport: Any = None
+    cohost_wire_task: asyncio.Task[None] | None = None
+
+    # Deterministic reconnect clock (M3, unused on the happy handshake path here
+    # but kept for parity with the sibling proof's GatewayCoreLink construction).
+    async def _instant_sleep(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    def _no_jitter(hi: float) -> float:
+        return hi
+
+    try:
+        async with _boot_audit_writer(
+            postgres_url, alice_daily_budget_usd=_NEAR_ZERO_DAILY_BUDGET_USD
+        ) as audit:
+            install_boot_hook_registry(gate, sink=EpisodicAuditSink(audit=audit))
+
+            # ---- Build the daemon comms graph (real Postgres, real path) ----
+            outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
+            with _NONCE_LOCK:
+                nonce = CapabilityGateNonce()
+                _tiers._set_authorized_t3_nonce(nonce)
+
+            async def _fake_spawn(
+                *, provider_key: str, refusal_recorder: object = None, **_golive: object
+            ) -> _EchoingChildDouble:
+                return _EchoingChildDouble(provider_key=provider_key)
+
+            monkeypatch.setattr(
+                "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+            )
+            graph = await _build_comms_boot_graph(
+                settings=settings,
+                audit=audit,
+                outbound_dlp=outbound_dlp,
+                t3_nonce=nonce,
+                policies_ref=None,
+                real_gate=gate,
+                # The budget pre-check halts the turn BEFORE its first
+                # `router.complete()` call, so this override is never actually
+                # invoked — the test seam still requires SOME router so boot
+                # never reaches the real, egress-proxied build_router. Its
+                # answer is the sentinel this test asserts never renders.
+                router_override=cast(ProviderRouter, FixedAnswerRouter(answer=_UNREACHABLE_ANSWER)),
+            )
+
+            # ---- Boot the REAL daemon socket carrier (binds comms-tui.sock) ----
+            listener = await _listen_socket_comms_adapter(
+                adapter_id=_ADAPTER_ID,
+                settings=settings,
+                audit=audit,
+                gate=gate,
+                supervisor=supervisor,  # type: ignore[arg-type]
+                graph=graph,
+                boot_id="s593-turn-failed-chain-proof",
+                environment_source="env_var",
+                broadcaster=broadcaster,
+            )
+            assert len(supervisor.registered) == 1
+
+            # ---- Start the REAL gateway: dial comms-tui.sock, bind comms-gateway.sock ----
+            gateway_client_listener = GatewayClientListener()
+            await gateway_client_listener.bind()
+
+            tui_leg = build_tui_leg()
+            core_link = GatewayCoreLink(
+                client_listener=gateway_client_listener,
+                dial_adapter_id="tui",
+                sleep=_instant_sleep,
+                jitter=_no_jitter,
+                shutdown_event=gateway_shutdown,
+                tui_leg=tui_leg,
+            )
+            gateway_scheduler = wire_leg_scheduler(core_link, tui_leg)
+
+            # ---- Dial the gateway from the cohost (over comms-gateway.sock) ----
+            async def _accept_and_handshake_client() -> Any:
+                await gateway_client_listener.accept()
+                client_transport = gateway_client_listener.transport
+                assert client_transport is not None
+                client_seq_enabled = await _gateway_client_handshake(client_transport)
+                return client_transport, client_seq_enabled
+
+            accept_task = asyncio.ensure_future(_accept_and_handshake_client())
+            cohost_transport = await dial_comms_socket("gateway")
+
+            # ---- Build the REAL TuiSession + AlfredTuiApp (Task 16's brief: a
+            # real AlfredTuiApp under run_test(), NOT a recording double) and
+            # cross-wire it into the wire pump exactly as alfred_tui.cohost.
+            # run_cohosted does in production (build_app + _serve_wire's
+            # on_turn_failed callback routed to app.set_turn_failed). ----
+            session = TuiSession(notify=_make_socket_inbound_sink(cohost_transport))
+            app = build_app(session)  # cross-wires session.render_outbound -> app.write_outbound
+            tui_server = TuiServer(session=session)
+
+            async def _route_turn_failed(stage: TurnFailureStage) -> None:
+                app.set_turn_failed(stage)
+
+            cohost_wire_task = asyncio.ensure_future(
+                _serve_wire(cohost_transport, tui_server, on_turn_failed=_route_turn_failed)
+            )
+
+            client_transport, client_seq_enabled = await asyncio.wait_for(
+                accept_task, timeout=_TIMEOUT_S
+            )
+            assert isinstance(client_seq_enabled, bool)
+            assert client_seq_enabled is False
+
+            # ---- Build + run the REAL relay (core leg dial + handshake + pump) ----
+            relay = GatewayRelay(
+                core_link=core_link,
+                client_transport=client_transport,
+                client_seq_enabled=client_seq_enabled,
+                scheduler=gateway_scheduler,
+            )
+            relay_task = asyncio.ensure_future(relay.run())
+
+            # The core leg must reach UP and HOLD (same discipline as the sibling
+            # proof — see its comment for why the "stayed up" re-check matters).
+            await _wait_for(lambda: core_link._core_epoch is not None, _TIMEOUT_S)
+            await asyncio.sleep(0.2)
+            assert core_link._machine.state is GatewayLinkState.UP, (
+                "gateway core leg did not HOLD UP after the handshake — "
+                f"link state: {core_link._machine.state}"
+            )
+
+            # ---- ACT: submit a REAL keystroke through the REAL AlfredTuiApp
+            # under Textual's run_test() pilot — not a raw session call. ----
+            async with app.run_test() as pilot:
+                input_widget = app.query_one("#user_input", Input)
+                input_widget.value = _INBOUND_CONTENT
+                await pilot.press("enter")
+                await pilot.pause()
+
+                # Everything downstream is real local sockets + a real (fast)
+                # Postgres testcontainer with NO network latency, so the whole
+                # refusal round trip can complete WITHIN this single
+                # `pilot.pause()` — `on_input_submitted`'s own
+                # `await self._session.flush_keystroke_batch()` yields the loop
+                # mid-send, and the concurrently-running wire pump can drive the
+                # daemon's reply all the way back to `app.set_turn_failed` before
+                # that await even returns. So `_turn_pending` may ALREADY be
+                # `False` here — asserting `True` at this exact instant would be
+                # racy, not a real precondition. The pending indicator is instead
+                # proven below via TRANSCRIPT ORDER (deterministic regardless of
+                # timing): the echoed "You: ..." + "thinking..." lines must
+                # precede the turn-failure line, or the turn was never actually
+                # marked pending before being released.
+
+                # ASSERT (real Postgres): the inbound crossed cohost -> gateway
+                # -> daemon and the daemon promoted it to T3 — the extract +
+                # downgrade path ran before the budget pre-check that refuses it.
+                await _wait_for(lambda: bool(_fetch_t3_promotion_rows(sync_url)), _TIMEOUT_S)
+
+                # The daemon's real BudgetGuard refused the turn; its
+                # turn.failed notification crossed daemon -> gateway (relayed
+                # untouched) -> cohost's wire pump -> app.set_turn_failed,
+                # which ends the pending turn.
+                await _wait_for(lambda: app._turn_pending is False, _TIMEOUT_S)
+                await pilot.pause()
+
+                log_text = _richlog_text(app.query_one("#conversation_log", RichLog))
+                # The pending indicator DID engage, in the right order, before
+                # being released — the "pending" half of #593's proof.
+                you_index = log_text.index(t("tui.label_you"))
+                thinking_index = log_text.index(t("tui.thinking"))
+                failed_index = log_text.index(t("tui.turn_failed.budget_exhausted"))
+                assert you_index < thinking_index < failed_index, log_text
+                # Non-vacuity: the turn never reached a real completion — the
+                # router's canned reply must be ABSENT (the pre-check halted
+                # before router.complete() could ever be called).
+                assert _UNREACHABLE_ANSWER not in log_text
+
+                # (1) the localized budget_exhausted copy reached the transcript
+                # (already proven present above by the ``.index()`` lookup) and
+                # (2) #user_input is re-enabled, not left disabled forever.
+                assert app.query_one("#user_input", Input).disabled is False
+    finally:
+        # Reap EVERY acquired resource on EVERY exit path (mirror the sibling
         # proof's discipline) regardless of how far boot got.
         gateway_shutdown.set()
         supervisor.shutdown_event.set()
