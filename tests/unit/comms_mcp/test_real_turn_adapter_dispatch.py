@@ -11,18 +11,25 @@ not re-exercised here.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
+import structlog.testing
 
 from alfred.budget.guard import BudgetError
 from alfred.comms_mcp import audit_hash
+from alfred.comms_mcp import real_turn_adapter as real_turn_adapter_mod
+from alfred.comms_mcp.protocol import TurnFailedNotification
 from alfred.comms_mcp.real_turn_adapter import (
     RealTurnOrchestratorAdapter,
+    _client_turn_failure_stage,
     _HaltNoReply,
     _InboundUser,
     _PreparedTurn,
     _RefusalReply,
+    _RefusalStage,
 )
 from alfred.security.dlp import OutboundCanaryTripped
 from alfred.security.tiers import T2, tag
@@ -151,7 +158,7 @@ async def test_dispatch_refusal_sends_benign_reply() -> None:
 async def test_dispatch_halt_sends_nothing() -> None:
     sender = _RecordingSender()
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
-    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied"))
+    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
     assert sender.sent == []
 
 
@@ -335,3 +342,203 @@ async def test_dispatch_bad_ingested_raises_runtime_error() -> None:
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"))
     with pytest.raises(RuntimeError):
         await adapter.dispatch(object())
+
+
+# ---------------------------------------------------------------------------
+# #593: client-visible turn-failure notify wiring (Task 12)
+# ---------------------------------------------------------------------------
+
+
+class _RaisingSendOutboundSender:
+    """``send_outbound`` always fails; ``send_turn_state`` RECORDS (never raises).
+
+    Used to prove the ``send_failed`` leg never even attempts a notify call —
+    a sender that raised on ``send_turn_state`` too (like ``_RaisingSender``
+    above) couldn't distinguish "notify not called" from "notify called and
+    its exception was swallowed".
+    """
+
+    def __init__(self) -> None:
+        self.turn_states_sent: list[object] = []
+
+    async def send_outbound(self, request: object) -> dict[str, object]:
+        raise ConnectionError("wire down")
+
+    async def send_turn_state(self, notification: object) -> None:
+        self.turn_states_sent.append(notification)
+
+
+class _WireFaultOnNotifySender:
+    """``send_outbound`` succeeds (records); ``send_turn_state`` raises a given
+    wire fault every time. Parameterises the class-of-fault so both the
+    "logged, halt still returns" and "does not replace the turn-error reraise"
+    tests can drive a real member of ``_NOTIFY_WIRE_EXCEPTIONS``."""
+
+    def __init__(self, fault: Exception) -> None:
+        self.sent: list[object] = []
+        self._fault = fault
+
+    async def send_outbound(self, request: object) -> dict[str, object]:
+        self.sent.append(request)
+        return {}
+
+    async def send_turn_state(self, notification: object) -> None:
+        raise self._fault
+
+
+class _HangingNotifySender:
+    """``send_turn_state`` never completes — proves the notify bound fires."""
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    async def send_outbound(self, request: object) -> dict[str, object]:
+        self.sent.append(request)
+        return {}
+
+    async def send_turn_state(self, notification: object) -> None:
+        await asyncio.sleep(10)  # far longer than any test-scoped timeout
+
+
+async def test_dispatch_halt_notifies_client_turn_failed() -> None:
+    sender = _RecordingSender()
+    adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
+    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+    assert sender.sent == []  # still no TEXT reply
+    assert sender.turn_states_sent == [TurnFailedNotification(stage="refused")]
+
+
+async def test_dispatch_budget_error_notifies_budget_exhausted() -> None:
+    sender = _RecordingSender()
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=BudgetError("over")), sender=sender, pool=pool
+    )
+    await adapter.dispatch(_prepared())  # must NOT raise
+    assert sender.turn_states_sent == [TurnFailedNotification(stage="budget_exhausted")]
+
+
+async def test_dispatch_canary_tripped_notifies_refused_not_the_control_name() -> None:
+    """#593 anti-oracle proof: an ``OutboundCanaryTripped`` must never leak the
+    control name onto the wire. The client only ever sees the coarse ``refused``
+    stage — the literal string ``"canary"`` must appear NOWHERE in the sent frame.
+    """
+    sender = _RecordingSender()
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=OutboundCanaryTripped(token="canary-token-1")),  # noqa: S106
+        sender=sender,
+        pool=pool,
+    )
+    await adapter.dispatch(_prepared())  # must NOT raise
+    assert len(sender.turn_states_sent) == 1
+    notification = sender.turn_states_sent[0]
+    assert notification.stage == "refused"
+    assert "canary" not in notification.model_dump_json().lower()  # anti-oracle
+
+
+async def test_dispatch_turn_error_notifies_then_still_reraises() -> None:
+    sender = _RecordingSender()
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=RuntimeError("provider down")), sender=sender, pool=pool
+    )
+    with pytest.raises(RuntimeError):
+        await adapter.dispatch(_prepared())
+    assert sender.turn_states_sent == [TurnFailedNotification(stage="internal_error")]
+
+
+async def test_dispatch_send_failure_does_not_notify() -> None:
+    """#593: the ``send_failed`` leg deliberately does NOT notify (see the
+    comment in ``_send``'s except block) — the send that just failed used the
+    SAME wire, so a notify down it is near-certain to fail too, and this leg
+    re-raises, so a late-succeeding retry could deliver the real answer AFTER a
+    false turn-failed signal."""
+    sender = _RaisingSendOutboundSender()
+    adapter = _adapter(orchestrator=_Orchestrator(answer="hi"), sender=sender)
+    with pytest.raises(ConnectionError):
+        await adapter.dispatch(_prepared())
+    assert sender.turn_states_sent == []
+
+
+async def test_notify_wire_failure_is_logged_and_does_not_break_the_halt() -> None:
+    """A ``send_turn_state`` wire fault on the ``budget_denied`` halt leg is
+    LOGGED and swallowed — ``dispatch`` still returns cleanly (no reply leaked,
+    no exception propagates)."""
+    sender = _WireFaultOnNotifySender(BrokenPipeError("client hung up"))
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=BudgetError("over")), sender=sender, pool=pool
+    )
+    with structlog.testing.capture_logs() as captured:
+        await adapter.dispatch(_prepared())  # must NOT raise
+    assert sender.sent == []
+    assert any(
+        entry.get("event") == "comms.inbound.real_turn.turn_failed_notify_failed"
+        and entry.get("log_level") == "warning"
+        and entry.get("error_class") == "BrokenPipeError"
+        for entry in captured
+    ), captured
+
+
+async def test_notify_wire_failure_does_not_replace_the_turn_error_reraise() -> None:
+    """A wire fault out of the notify call on the ``turn_error`` leg must NOT
+    replace the ORIGINAL turn exception: it is caught+logged INSIDE
+    ``_notify_turn_failed`` (never escapes it), so the ``raise`` in ``dispatch``
+    still re-raises the real fault, not a transport exception."""
+    pool = _Pool()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=RuntimeError("provider down")),
+        sender=_WireFaultOnNotifySender(OSError("client socket gone")),
+        pool=pool,
+    )
+    with pytest.raises(RuntimeError, match="provider down"):
+        await adapter.dispatch(_prepared())
+
+
+async def test_notify_timeout_is_bounded_and_does_not_hang_the_halt(monkeypatch) -> None:
+    """A wedged-but-connected client (``send_turn_state`` never returns) must
+    not hold the halt leg hostage — ``asyncio.wait_for``'s bound fires and the
+    halt still returns promptly."""
+    monkeypatch.setattr(real_turn_adapter_mod, "_NOTIFY_TIMEOUT_SECONDS", 0.01)
+    sender = _HangingNotifySender()
+    adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
+    with structlog.testing.capture_logs() as captured:
+        await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+    assert any(
+        entry.get("event") == "comms.inbound.real_turn.turn_failed_notify_timeout"
+        for entry in captured
+    ), captured
+
+
+async def test_notify_skipped_for_non_client_adapter_kind() -> None:
+    """``adapter_id="discord"`` is not in ``TURN_STATE_CLIENT_KINDS`` — the
+    debug-log-and-skip arm fires and NOTHING is sent to it."""
+    sender = _RecordingSender()
+    adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
+    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="discord"))
+    assert sender.turn_states_sent == []
+
+
+async def test_notify_turn_failed_skips_non_notifiable_stage_directly() -> None:
+    """Defensive completeness: ``_notify_turn_failed`` handles EVERY
+    ``_RefusalStage`` value generically, including ``send_failed`` (whose
+    mapped client stage is ``None``) even though no production call site ever
+    passes it that stage (the ``send_failed`` leg deliberately never calls this
+    helper — see ``_send``'s except block). A direct call proves the
+    ``client_stage is None`` short-circuit is safe/inert on its own rather than
+    leaving it gated by the file's 100% coverage requirement but unexercised.
+    """
+    sender = _RecordingSender()
+    adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
+    await adapter._notify_turn_failed(sender, adapter_id="tui", stage="send_failed")
+    assert sender.turn_states_sent == []
+
+
+def test_client_turn_failure_stage_is_total_over_refusal_stage() -> None:
+    """Every member of the real ``_RefusalStage`` maps without hitting
+    ``assert_never`` — the exhaustiveness guarantee ``_client_turn_failure_stage``
+    exists to provide (a future refusal stage added without a client decision
+    must be a type-check failure here, never a silent drop)."""
+    for stage in get_args(_RefusalStage):
+        _client_turn_failure_stage(stage)  # must not raise

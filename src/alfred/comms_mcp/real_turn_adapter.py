@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, assert_never
 from uuid import uuid4
 
 import structlog
@@ -35,10 +35,16 @@ import structlog
 from alfred.audit import audit_row_schemas  # FOLD-R10
 from alfred.budget.guard import BudgetError
 from alfred.comms_mcp import audit_hash  # FOLD-R10: audit_hash lives in comms_mcp, NOT alfred.audit
-from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.comms_mcp.protocol import (
+    TURN_STATE_CLIENT_KINDS,
+    OutboundMessageRequest,
+    TurnFailedNotification,
+    TurnFailureStage,
+)
 from alfred.errors import AlfredError
 from alfred.i18n import set_language, t
 from alfred.orchestrator.core import _ALFRED_PERSONA_ID as _PERSONA
+from alfred.plugins.comms_wire import CommsProtocolError
 from alfred.security.dlp import OutboundCanaryTripped
 from alfred.security.quarantine import (
     DowngradeDeniedError,
@@ -97,6 +103,41 @@ _RefusalStage = Literal[
     "send_failed",
 ]
 
+# Wire-send faults that are LOGGED-not-fatal on the best-effort notify path.
+# NEVER `Exception` — a real bug surfaces loud; NEVER `BaseException` —
+# `CancelledError` must propagate.
+_NOTIFY_WIRE_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
+    BrokenPipeError,
+    ConnectionResetError,
+    CommsProtocolError,
+    OSError,
+)
+
+# A wedged-but-connected client must not hold the turn leg.
+_NOTIFY_TIMEOUT_SECONDS: Final[float] = 2.0
+
+
+def _client_turn_failure_stage(stage: _RefusalStage) -> TurnFailureStage | None:
+    """Map the private AUDIT stage to the CLOSED client-facing wire stage (#593).
+
+    ``None`` == deliberately not client-notifiable. Exhaustive over
+    ``_RefusalStage`` via ``assert_never``: a future refusal stage added
+    WITHOUT a client decision is a type-check failure here, never a silent
+    drop — which is exactly the #593 regression shape.
+    """
+    match stage:
+        case "downgrade_denied" | "dlp_canary_tripped":
+            # COARSE on purpose: never name the control that fired.
+            return "refused"
+        case "budget_denied":
+            return "budget_exhausted"
+        case "downgrade_malformed" | "turn_error":
+            return "internal_error"
+        case "send_failed":
+            # NOT notifiable — the client-side watchdog is the backstop.
+            return None
+    assert_never(stage)  # pragma: no cover
+
 
 class _HasInboundIdentity(Protocol):
     """Structural shape ``_emit_refused`` reads off its ``notification`` arg.
@@ -152,9 +193,15 @@ class _RefusalReply:
 
 @dataclass(frozen=True, slots=True)
 class _HaltNoReply:
-    """``ingest`` output for a security/budget deny — audited, NOTHING is sent."""
+    """``ingest`` output for a security/budget deny — audited, NO REPLY is sent.
+
+    ``adapter_id`` (#593) is carried so ``dispatch`` can address the client-visible
+    turn-failure NOTIFICATION at the right adapter kind. It is NOT a reply address
+    (there is no reply) and NOT on the wire — the frame carries no ``adapter_id``.
+    """
 
     stage: _RefusalStage
+    adapter_id: str
 
 
 type _IngestOutcome = _PreparedTurn | _RefusalReply | _HaltNoReply
@@ -271,7 +318,7 @@ class RealTurnOrchestratorAdapter:
             await self._emit_refused(
                 notification, canonical_user_id=canonical_user_id, stage="downgrade_denied", exc=exc
             )
-            return _HaltNoReply(stage="downgrade_denied")
+            return _HaltNoReply(stage="downgrade_denied", adapter_id=notification.adapter_id)
 
         text = cleared.get("text")
         if not isinstance(text, str):  # defensive: the CommsBodyExtraction schema pins text:str
@@ -282,7 +329,7 @@ class RealTurnOrchestratorAdapter:
                 stage="downgrade_malformed",
                 exc=AlfredError("downgraded payload missing str 'text'"),
             )
-            return _HaltNoReply(stage="downgrade_malformed")
+            return _HaltNoReply(stage="downgrade_malformed", adapter_id=notification.adapter_id)
 
         content = tag(T2, text, source="comms.inbound")
         user = _InboundUser(slug=canonical_user_id, display_name=display_name, language=language)
@@ -345,6 +392,65 @@ class RealTurnOrchestratorAdapter:
             trace_id=inbound_id_hash,
         )
 
+    async def _notify_turn_failed(
+        self,
+        sender: OutboundSenderLike,
+        *,
+        adapter_id: str,
+        stage: _RefusalStage,
+    ) -> None:
+        """Best-effort client-visible turn-failure signal (#593). NEVER raises.
+
+        The AUTHORITATIVE record is the audit row ``_emit_refused`` already wrote
+        BEFORE this call; this frame is a UX affordance whose failure backstop is
+        the client's own turn watchdog. A wire fault here is LOUD-but-contained:
+
+        * On the ``_HaltNoReply`` legs, raising would convert a DETERMINISTIC halt
+          into a re-raise -> the forwarded path's replay -> duplicate paid
+          completions that re-fail identically. Exactly what `_HaltNoReply` exists
+          to prevent.
+        * On the ``turn_error`` leg, raising would REPLACE the re-raise of the
+          real turn fault with a transport fault — losing the fault the replay
+          path is supposed to act on.
+
+        ``CancelledError`` is outside the caught tuple and propagates.
+        """
+        if adapter_id not in TURN_STATE_CLIENT_KINDS:
+            _log.debug(
+                "comms.inbound.real_turn.turn_state_unsupported_kind",
+                adapter_id=adapter_id,
+                refusal_stage=stage,
+            )
+            return
+        client_stage = _client_turn_failure_stage(stage)
+        if client_stage is None:
+            return
+        try:
+            await asyncio.wait_for(
+                sender.send_turn_state(TurnFailedNotification(stage=client_stage)),
+                timeout=_NOTIFY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            _log.warning(
+                "comms.inbound.real_turn.turn_failed_notify_timeout",
+                adapter_id=adapter_id,
+                refusal_stage=stage,
+                timeout_s=_NOTIFY_TIMEOUT_SECONDS,
+            )
+        except _NOTIFY_WIRE_EXCEPTIONS as exc:
+            _log.warning(
+                "comms.inbound.real_turn.turn_failed_notify_failed",
+                adapter_id=adapter_id,
+                refusal_stage=stage,
+                error_class=type(exc).__name__,  # CLASS NAME, never str(exc)
+            )
+        else:
+            _log.info(
+                "comms.inbound.real_turn.turn_failed_notified",
+                adapter_id=adapter_id,
+                turn_failure_stage=client_stage,
+            )
+
     def _require_sender(self) -> OutboundSenderLike:
         """Return the bound sender or raise loudly (no silent failure, rule #7).
 
@@ -376,9 +482,22 @@ class RealTurnOrchestratorAdapter:
         the inbound path's ``dispatch_failed`` row write — INTENTIONAL: they are
         distinct events (adapter-semantic turn fault vs inbound-transport dispatch
         fault) and both are content-free.
+
+        #593 precondition: the ``turn_error`` leg's notify-then-raise ordering
+        below is only correct because ``TURN_STATE_CLIENT_KINDS`` does not (yet)
+        include any hosted/forwarded adapter kind. If one is ever added, a
+        ``turn.failed`` sent on attempt 1 of a bounded-replay-eligible turn would
+        be a LIE the moment a later attempt succeeds — this ordering must be
+        revisited in the same commit that widens ``TURN_STATE_CLIENT_KINDS``.
         """
         sender = self._require_sender()
         if isinstance(ingested, _HaltNoReply):
+            # #593: the frame is committed and NOTHING is sent — but the operator
+            # must not be left staring at a dead prompt. Signal the STATE (no text
+            # on the wire) so the client can release its pending turn.
+            await self._notify_turn_failed(
+                sender, adapter_id=ingested.adapter_id, stage=ingested.stage
+            )
             return
         if isinstance(ingested, _RefusalReply):
             await self._send(
@@ -422,6 +541,11 @@ class RealTurnOrchestratorAdapter:
                 await self._emit_refused(
                     note, canonical_user_id=ingested.user.slug, stage="budget_denied", exc=exc
                 )
+                # #593: notify AFTER the audit write, still inside the lock/try so
+                # `finally: await self._pool.release(...)` below still runs.
+                await self._notify_turn_failed(
+                    sender, adapter_id=ingested.adapter_id, stage="budget_denied"
+                )
                 return
             except OutboundCanaryTripped as exc:
                 # #410 PR3 (I4 fix wave): also deterministic, same reasoning as
@@ -439,6 +563,11 @@ class RealTurnOrchestratorAdapter:
                     stage="dlp_canary_tripped",
                     exc=exc,
                 )
+                # #593: notify AFTER the audit write, still inside the lock/try so
+                # `finally: await self._pool.release(...)` below still runs.
+                await self._notify_turn_failed(
+                    sender, adapter_id=ingested.adapter_id, stage="dlp_canary_tripped"
+                )
                 return
             except Exception as exc:
                 # Unknown/transient: audit loudly, then RE-RAISE so the forwarded
@@ -448,6 +577,13 @@ class RealTurnOrchestratorAdapter:
                 # cancellation tears down cleanly.
                 await self._emit_refused(
                     note, canonical_user_id=ingested.user.slug, stage="turn_error", exc=exc
+                )
+                # #593: notify BEFORE the raise so the client is released even on
+                # the leg that re-raises. `_notify_turn_failed` NEVER raises, so
+                # this cannot replace/mask `exc` — the forwarded replay path still
+                # sees the original turn fault verbatim.
+                await self._notify_turn_failed(
+                    sender, adapter_id=ingested.adapter_id, stage="turn_error"
                 )
                 raise
             finally:
@@ -519,4 +655,11 @@ class RealTurnOrchestratorAdapter:
                 await self._emit_refused(
                     notification, canonical_user_id=canonical_user_id, stage="send_failed", exc=exc
                 )
+            # #593: NO client turn-failure notify here, deliberately. The send
+            # that just failed used THIS SAME WIRE, so a notify down the same
+            # seam is near-certain to fail too; and this leg RE-RAISES, so on the
+            # forwarded path a successful retry could deliver the real answer
+            # AFTER we told the operator the turn failed — a false negative worse
+            # than silence. The client-side turn watchdog is the correct backstop
+            # for a dead-wire failure.
             raise
