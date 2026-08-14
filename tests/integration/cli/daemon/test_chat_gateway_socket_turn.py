@@ -800,28 +800,8 @@ async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
     raises ``TimeoutError`` after ``_TIMEOUT_S`` (20s) — well inside the app's
     own 90s watchdog window. A reverted Task 12 fails this test LOUD with a
     timeout, not a silent pass.
-
-    KNOWN GAP surfaced while writing this test, reported (not fixed) here per
-    Task 16's brief: the ``_boot_env`` fixture above still pins ``$USER`` to
-    ``_PLATFORM_USER_ID`` with a comment claiming "the platform_user_id the
-    TUI session stamps comes from $USER" — true before Task 1 (#592,
-    ``b338841f``), which repointed ``TuiSession.flush_keystroke_batch``'s
-    ``platform_user_id`` at ``alfred.config.operator_env.operator_display_name()``
-    (``$ALFRED_OPERATOR_NAME``, default ``"operator"``) and never updated this
-    fixture. Left as-is, the sibling proof above (and this test) silently never
-    resolve to the seeded ``alice`` binding — no exception, no audit row, just
-    a T3-promotion wait that times out. This test sets the CORRECT env var
-    itself (below) rather than relying on the stale fixture; the sibling test
-    is UNAFFECTED — it still relies on the (broken) fixture alone. See the
-    Task 16 report for the full anomaly writeup.
     """
     settings = Settings()  # type: ignore[no-untyped-call]  # env-driven; mirrors daemon boot
-    # KNOWN GAP workaround (see docstring above): `_boot_env` only pins the
-    # PRE-#592 `$USER` mechanism; the client now reads `$ALFRED_OPERATOR_NAME`
-    # via `operator_display_name()`. Set the CURRENT mechanism here, scoped to
-    # THIS test only — `_boot_env`'s stale `$USER` pin is left untouched
-    # (reported to the controller, not fixed, per Task 16's brief).
-    monkeypatch.setenv("ALFRED_OPERATOR_NAME", _PLATFORM_USER_ID)
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
 
     # Mint the per-boot epoch the daemon carrier's lifecycle.start handshake carries
