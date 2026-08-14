@@ -49,20 +49,32 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILE = _REPO_ROOT / "docker-compose.yaml"
 
 
-def _config_env(extra_env: dict[str, str]) -> dict[str, Any]:
-    """Return the resolved ``alfred-gateway`` ``environment`` mapping from a real
+def _config_env(
+    extra_env: dict[str, str],
+    *,
+    service: str = "alfred-gateway",
+    strip_from_base_env: str = "ALFRED_GATEWAY_HOSTED_ADAPTERS",
+) -> dict[str, Any]:
+    """Return the resolved ``environment`` mapping for ``service`` from a real
     ``docker compose config`` run, hermetic against any ambient ``.env`` OR shell env.
+
+    ``service`` and ``strip_from_base_env`` default to the original
+    ``alfred-gateway`` / ``ALFRED_GATEWAY_HOSTED_ADAPTERS`` pair this helper was
+    written for (#469 Blocker 2); #591's audit-hash-pepper tests pass
+    ``service="alfred-core"`` and ``strip_from_base_env="ALFRED_AUDIT_HASH_PEPPER"``
+    instead, since that secret is core-only (never forwarded to the gateway — see
+    ``tests/unit/test_compose_invariants.py::test_audit_hash_pepper_never_reaches_the_gateway``).
 
     CodeRabbit finding 4 (#469 Blocker 2 PR review): ``--env-file /dev/null`` below only
     blocks an ambient ``.env`` FILE — the child process still inherits ``os.environ``,
-    so an ``ALFRED_GATEWAY_HOSTED_ADAPTERS`` already exported in a developer's or CI
-    runner's shell would silently shadow the shipped default and the default-case test
-    would never actually exercise the ``[]`` fallback it claims to prove. Strip that one
-    key out of the inherited base environment unconditionally, THEN layer ``extra_env``
-    on top — so the default-case call (``extra_env={}``) is hermetic regardless of the
-    ambient shell, while the override-case call still sets it explicitly.
+    so a variable already exported in a developer's or CI runner's shell would silently
+    shadow the shipped default and the default-case test would never actually exercise
+    the fallback it claims to prove. Strip ``strip_from_base_env`` out of the inherited
+    base environment unconditionally, THEN layer ``extra_env`` on top — so the
+    default-case call (``extra_env={}``) is hermetic regardless of the ambient shell,
+    while the override-case call still sets it explicitly.
     """
-    base_env = {k: v for k, v in os.environ.items() if k != "ALFRED_GATEWAY_HOSTED_ADAPTERS"}
+    base_env = {k: v for k, v in os.environ.items() if k != strip_from_base_env}
     result = subprocess.run(
         [
             "docker",
@@ -85,7 +97,7 @@ def _config_env(extra_env: dict[str, str]) -> dict[str, Any]:
         env={**base_env, **extra_env},
     )
     config = json.loads(result.stdout)
-    env = config["services"]["alfred-gateway"]["environment"]
+    env = config["services"][service]["environment"]
     assert isinstance(env, dict), (
         f"expected a dict[str, str] environment shape from this Compose version, got "
         f"{type(env)!r} — see the module docstring's measured-shape note; the accessor "
@@ -122,3 +134,39 @@ def test_default_case_is_hermetic_against_ambient_shell_env(
     """
     monkeypatch.setenv("ALFRED_GATEWAY_HOSTED_ADAPTERS", '["alfred_discord"]')
     assert _config_env({})["ALFRED_COMMS_ENABLED_ADAPTERS"] == "[]"
+
+
+def test_audit_hash_pepper_interpolates_from_the_underscore_variable() -> None:
+    """#591: the only proof that a DOT survives in the container env-block KEY position
+    while its value is SOURCED from an underscore-named ``.env`` VARIABLE.
+
+    A YAML-text test (``tests/unit/test_compose_invariants.py``) can confirm the
+    ``"ALFRED_AUDIT.HASH_PEPPER": ${ALFRED_AUDIT_HASH_PEPPER:-}`` source line exists
+    verbatim, but only the real Compose interpolation engine can prove
+    ``${ALFRED_AUDIT_HASH_PEPPER:-}`` actually resolves onto the dotted key rather than,
+    say, Compose choking on the dot or silently dropping the entry.
+    """
+    env = _config_env(
+        {"ALFRED_AUDIT_HASH_PEPPER": "deadbeefcafebabedeadbeefcafebabe"},
+        service="alfred-core",
+        strip_from_base_env="ALFRED_AUDIT_HASH_PEPPER",
+    )
+    assert env["ALFRED_AUDIT.HASH_PEPPER"] == "deadbeefcafebabedeadbeefcafebabe"
+
+
+def test_audit_hash_pepper_default_is_empty_not_an_error() -> None:
+    """No ``ALFRED_AUDIT_HASH_PEPPER`` set -> the dotted key interpolates to ``""``, not
+    a Compose "invalid interpolation format" error.
+
+    A dot is illegal in interpolation VARIABLE position (``${ALFRED_AUDIT.HASH_PEPPER}``
+    would be rejected), which is exactly why the underscore carrier variable exists. The
+    ``:-`` default keeps a keyless checkout usable — refusal belongs at the AlfredOS
+    boot layer (``MissingAuditHashPepperError``), not as Compose-level noise before the
+    app ever starts.
+    """
+    env = _config_env(
+        {},
+        service="alfred-core",
+        strip_from_base_env="ALFRED_AUDIT_HASH_PEPPER",
+    )
+    assert env["ALFRED_AUDIT.HASH_PEPPER"] == ""

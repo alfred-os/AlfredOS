@@ -175,6 +175,30 @@ services:
       # Mirrors the provider keys; the gateway/child never hold a vault key. NOTE:
       # discord_bot_token is _PREFER_FILE, so a mounted secrets.toml would SHADOW this.
       ALFRED_DISCORD_BOT_TOKEN: ${ALFRED_DISCORD_BOT_TOKEN:-}
+      # #591: the master HMAC pepper. EVERY comms inbound turn hashes the platform
+      # user id with it (inbound.py hash_platform_user_id at the T3 promotion, the
+      # binding-request row, and the forwarded leg), so an unset pepper is not a
+      # degraded mode — it is `MissingAuditHashPepperError` on the operator's FIRST
+      # message, every message, forever. `bin/alfred-setup.sh` seeds it and the README
+      # says so; before this line that promise was only ever kept on the HOST.
+      #
+      # THE KEY HAS A DOT; THE VARIABLE HAS AN UNDERSCORE. This is not a typo and the
+      # two are not interchangeable:
+      #   * the CONTAINER key must be `ALFRED_AUDIT.HASH_PEPPER`, because
+      #     SecretBroker.get() computes `f"ALFRED_{name.upper()}"` over the secret id
+      #     `audit.hash_pepper` and does NO dot->underscore normalisation
+      #     (src/alfred/security/secrets.py:657). A dotted env var is legal in execve
+      #     and in os.environ; only shells refuse to *expand* one.
+      #   * the `.env` VARIABLE must be `ALFRED_AUDIT_HASH_PEPPER`, because
+      #     `${ALFRED_AUDIT.HASH_PEPPER:-}` is rejected by Compose with "invalid
+      #     interpolation format" — a dot is not a legal interpolation identifier.
+      # Pinned by tests/unit/test_compose_invariants.py + the real `docker compose
+      # config` proof in tests/integration/test_gateway_hosted_adapters_compose_interpolation.py.
+      #
+      # `audit.hash_pepper` is NOT in _PREFER_FILE, so env WINS over secrets.toml.
+      # That is why bin/alfred-setup.sh treats `.env` as the source of truth and
+      # mirrors into secrets.toml, not the other way round.
+      "ALFRED_AUDIT.HASH_PEPPER": ${ALFRED_AUDIT_HASH_PEPPER:-}
       # Reuse the same Postgres credentials so `.env` is the single source of
       # truth. The default chain mirrors the alfred-postgres service so the
       # two containers always agree on the DSN.
