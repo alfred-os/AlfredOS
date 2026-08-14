@@ -59,42 +59,43 @@ def test_setup_script_seeds_audit_hash_pepper() -> None:
 def test_setup_script_audit_pepper_is_idempotent() -> None:
     """Re-running the script with an existing pepper MUST NOT clobber it.
 
-    The bootstrap step guards with ``grep -q "^audit.hash_pepper..."`` and
-    exits the seed branch when the value already exists. Rotating the
-    pepper invalidates cross-row correlation per spec §8.10.
+    Rotating the pepper invalidates cross-row correlation per spec §8.10, so
+    ``_pepper_bootstrap``'s reconcile logic (#591) MUST no-op — not
+    regenerate, not rewrite either side — when ``.env`` and ``secrets.toml``
+    already agree. The governing check is the equality branch
+    ``if [[ "$env_pepper" == "$file_pepper" ]]``, which leads straight to the
+    ``"already configured"`` no-op message.
 
-    Anchored on the ``step`` MARKER, not on the first textual occurrence of
-    ``audit.hash_pepper``. The old anchor keyed on the first line mentioning the
-    string anywhere in the script, so any earlier PROSE mention — a comment in an
-    unrelated step — silently relocated the slice onto text that was never the
-    bootstrap, and the guard assertion then failed (or, worse, passed against the
-    wrong block). #340 PR2b-golive tripped exactly that when the .env credential
-    gate gained a comment contrasting itself with the pepper. The marker is
-    unambiguous and moves only when the step itself does.
+    Sliced with ``slice_shell_step`` (cuts at the next ``step "..."``
+    marker) rather than a fixed-line-count window: a magic ``lines_after=N``
+    is fragile against the block growing (as it did when #591 added three
+    new helper functions between the marker and this guard) and, worse, a
+    generic guard-pattern list (``"grep -q"``, ``"[[ -z"``, ...) can pass by
+    coincidence against an unrelated helper's grep sitting inside the window
+    rather than the real dispatch path this test exists to pin. Matching the
+    literal equality-check text instead means the test can only pass if the
+    real governing branch is actually present, and fails if it is ever
+    removed, renamed, or reworked into a different comparison shape.
+
+    Anchored on the ``step`` MARKER (via ``slice_shell_step``), not on the
+    first textual occurrence of ``audit.hash_pepper``: the old anchor keyed
+    on the first line mentioning the string anywhere in the script, so any
+    earlier PROSE mention — a comment in an unrelated step — silently
+    relocated the slice onto text that was never the bootstrap, and the
+    guard assertion then failed (or, worse, passed against the wrong block).
+    #340 PR2b-golive tripped exactly that when the .env credential gate
+    gained a comment contrasting itself with the pepper. The marker is
+    unambiguous and moves only when the step itself does; ``slice_shell_step``
+    also fails loudly (``ValueError``) if the marker is ever renamed or
+    removed, rather than silently slicing an empty block.
     """
-    content = _SETUP_SH.read_text()
-    marker = 'step "Bootstrapping audit.hash_pepper secret"'
-    assert marker in content, (
-        f"pepper bootstrap step marker not found ({marker!r}) — the step was renamed "
-        f"or removed; every assertion below would slice an empty block and pass vacuously"
+    pepper_block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
+    assert '"$env_pepper" == "$file_pepper"' in pepper_block, (
+        f"No idempotency guard (env/file equality check) around audit.hash_pepper seed:\n{pepper_block}"
     )
-    # #591: the pepper-reconcile rewrite inserted three new helper functions
-    # (_pepper_from_file, _pepper_write_file, _pepper_write_env) between the
-    # step marker and _pepper_bootstrap's real "already configured" no-op
-    # branch, pushing that branch to ~90 lines past the marker. lines_after=60
-    # would only catch the guard by coincidence (via an unrelated grep -q in
-    # one of the new helpers); 90 reliably covers the actual governing check.
-    pepper_block = _slice_around(content, marker, lines_before=2, lines_after=90)
-    assert any(
-        guard in pepper_block
-        for guard in (
-            "grep -q",
-            "[[ -z",
-            "[ -z ",
-            "if ! ",
-            "test -n",
-        )
-    ), f"No idempotency guard around audit.hash_pepper seed:\n{pepper_block}"
+    assert "already configured" in pepper_block, (
+        f"equality guard present but no-op message missing/renamed:\n{pepper_block}"
+    )
 
 
 def test_setup_script_seeds_the_pepper_into_dotenv_too() -> None:
