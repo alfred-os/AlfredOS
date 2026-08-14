@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from alfred.security.secrets import SUPPORTED_SECRETS
+from tests._setup_script_helpers import slice_shell_step
 
 _SETUP_SH = Path("bin/alfred-setup.sh")
 
@@ -77,7 +78,13 @@ def test_setup_script_audit_pepper_is_idempotent() -> None:
         f"pepper bootstrap step marker not found ({marker!r}) — the step was renamed "
         f"or removed; every assertion below would slice an empty block and pass vacuously"
     )
-    pepper_block = _slice_around(content, marker, lines_before=2, lines_after=60)
+    # #591: the pepper-reconcile rewrite inserted three new helper functions
+    # (_pepper_from_file, _pepper_write_file, _pepper_write_env) between the
+    # step marker and _pepper_bootstrap's real "already configured" no-op
+    # branch, pushing that branch to ~90 lines past the marker. lines_after=60
+    # would only catch the guard by coincidence (via an unrelated grep -q in
+    # one of the new helpers); 90 reliably covers the actual governing check.
+    pepper_block = _slice_around(content, marker, lines_before=2, lines_after=90)
     assert any(
         guard in pepper_block
         for guard in (
@@ -88,6 +95,39 @@ def test_setup_script_audit_pepper_is_idempotent() -> None:
             "test -n",
         )
     ), f"No idempotency guard around audit.hash_pepper seed:\n{pepper_block}"
+
+
+def test_setup_script_seeds_the_pepper_into_dotenv_too() -> None:
+    """#591: the bootstrap writes ALFRED_AUDIT_HASH_PEPPER into .env, not just secrets.toml.
+
+    docker-compose.yaml forwards ALFRED_AUDIT_HASH_PEPPER from .env into
+    alfred-core as ALFRED_AUDIT.HASH_PEPPER (#591 part 1, already landed). If
+    the setup script never populates the .env side, the container boots with
+    an unset pepper and every *_hash audit write raises
+    MissingAuditHashPepperError on the operator's first message.
+    """
+    block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
+    assert "ALFRED_AUDIT_HASH_PEPPER" in block, (
+        "ALFRED_AUDIT_HASH_PEPPER missing from the pepper bootstrap step — "
+        ".env would never receive the pepper docker-compose forwards to alfred-core"
+    )
+
+
+def test_setup_script_refuses_on_pepper_drift() -> None:
+    """#591: a pepper that DIFFERS between .env and secrets.toml must refuse, not pick one.
+
+    audit.hash_pepper is not in _PREFER_FILE, so alfred-core always uses the
+    .env value while host-side ``alfred`` commands use the file. Silently
+    picking one over the other would invalidate every *_hash audit row
+    written under whichever value lost (spec §8.10) — the reconcile logic
+    must return non-zero and tell the operator to reconcile by hand instead.
+    """
+    block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
+    assert "return 1" in block, "no non-zero return in the pepper bootstrap step"
+    assert "DIFFERS" in block, (
+        "no drift-refusal error message in the pepper bootstrap step — "
+        "a differing .env/secrets.toml pepper pair must be surfaced to the operator, not picked silently"
+    )
 
 
 def test_setup_script_pepper_file_mode_0600() -> None:

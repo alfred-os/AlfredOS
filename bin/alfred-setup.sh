@@ -420,6 +420,12 @@ step "Bootstrapping audit.hash_pepper secret"
 pepper_key="audit.hash_pepper"
 target_file="${ALFRED_SECRETS_FILE:-$secrets_file}"
 lock_dir="${target_file}.lock"
+# #591: the .env carrier for the dotted container key docker-compose forwards
+# as ALFRED_AUDIT.HASH_PEPPER. Nothing reads this name directly — see the
+# docker-compose.yaml comment next to ALFRED_AUDIT_HASH_PEPPER for the
+# alfred-core side of this contract (dotted container key vs underscored
+# .env variable are NOT interchangeable; Compose cannot interpolate a dot).
+pepper_env_key="ALFRED_AUDIT_HASH_PEPPER"
 
 # PR #215 sec-1 closure: chmod 600 the target_file directly (the outer
 # $secrets_file chmod only covered the default path).
@@ -430,21 +436,91 @@ _pepper_ensure_target() {
   chmod 600 "$target_file"
 }
 
+# #591: print the existing pepper VALUE (not just presence) out of the broker
+# secrets file. Accepts both the quoted dotted key this script writes
+# (``"audit.hash_pepper" = "..."``) and the unquoted spelling an operator's
+# hand-edited file might use. ``|| true`` binds to the whole pipeline so a
+# SIGPIPE from `head -1` truncating the stream can never trip `pipefail`
+# (same idiom as `read_env_var` above).
+_pepper_from_file() {
+  [[ -f "$target_file" ]] || return 0
+  sed -n -E 's/^[[:space:]]*"?audit\.hash_pepper"?[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' \
+    "$target_file" | head -1 || true
+}
+
+# Append-if-absent ONLY — never rewrite an existing value (spec §8.10:
+# rotating the pepper invalidates cross-row correlation).
+_pepper_write_file() {
+  grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null && return 0
+  # Quote the dotted key so tomllib reads it as a flat string key
+  # (cross-cutting BLOCKER closure).
+  printf '"%s" = "%s"\n' "$pepper_key" "$1" >> "$target_file"
+}
+
+# #591: mirror the pepper into .env so docker-compose can forward it to
+# alfred-core as ALFRED_AUDIT_HASH_PEPPER. Mirrors the Grafana admin-password
+# seed's shape exactly: present-but-empty is the normal `cp .env.example .env`
+# state, so the sed-replace branch is the NORMAL path and append is only the
+# fallback for a pre-#591 .env that predates this key. `umask 077` covers
+# sed's temp/backup file; .env itself is already 0600 from the unconditional
+# chmod near the top of this script. The pepper is hex-only, so it can never
+# contain a sed delimiter or `&` that would need escaping. NEVER echoed.
+_pepper_write_env() {
+  if grep -qE "^[[:space:]]*${pepper_env_key}=" .env 2>/dev/null; then
+    ( umask 077 && sed -i.bak "s|^[[:space:]]*${pepper_env_key}=.*|${pepper_env_key}=$1|" .env ) \
+      && rm -f .env.bak
+  else
+    # Trailing-newline guard (#469 Blocker 2 CodeRabbit finding): without it a
+    # .env whose last byte is not \n glues the new key onto the previous line.
+    if [[ -s .env ]] && [[ -n "$(tail -c1 .env)" ]]; then printf '\n' >> .env; fi
+    ( umask 077 && printf '%s=%s\n' "$pepper_env_key" "$1" >> .env )
+  fi
+}
+
 _pepper_bootstrap() {
   _pepper_ensure_target
-  if grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
-    echo "audit.hash_pepper already configured in ${target_file}; leaving alone."
+  local env_pepper file_pepper
+  env_pepper="$(read_env_var "$pepper_env_key")"
+  file_pepper="$(_pepper_from_file)"
+
+  if [[ -n "$env_pepper" && -n "$file_pepper" ]]; then
+    if [[ "$env_pepper" == "$file_pepper" ]]; then
+      echo "audit.hash_pepper already configured in .env and ${target_file}; leaving alone."
+      return 0
+    fi
+    # Refuse rather than pick. audit.hash_pepper is not in _PREFER_FILE, so the
+    # .env value is what alfred-core actually uses; a host-side 'alfred' command
+    # would use the OTHER one. Two peppers = two incompatible HMAC planes:
+    # operator-session tokens minted under one are unverifiable under the
+    # other, and platform_user_id_hash rows stop correlating (spec §8.10).
+    # Auto-picking would silently invalidate one side; only the operator knows
+    # which value is the real one.
+    printf 'ERROR: %s\n' \
+      "audit.hash_pepper DIFFERS between .env (${pepper_env_key}) and ${target_file}. alfred-core uses the .env value (env wins over file for this secret); host-side 'alfred' commands use the file. Reconcile them by hand — copy the value you want to KEEP into the other file — then re-run. Choosing for you would silently invalidate every *_hash audit row written under the other value." >&2
+    return 1
+  fi
+
+  if [[ -n "$env_pepper" ]]; then
+    _pepper_write_file "$env_pepper"
+    echo "Mirrored the .env audit.hash_pepper into ${target_file} (host-side tooling reads the file)."
     return 0
   fi
+  if [[ -n "$file_pepper" ]]; then
+    # The pre-#591 upgrade path: an existing host seed is carried into .env, NOT
+    # regenerated, so existing audit rows stay correlatable.
+    _pepper_write_env "$file_pepper"
+    echo "Mirrored the ${target_file} audit.hash_pepper into .env (docker-compose forwards it to alfred-core)."
+    return 0
+  fi
+
   if ! command -v openssl >/dev/null 2>&1; then
     openssl_missing_message "bootstrap audit.hash_pepper"
     return 1
   fi
   pepper_value="$(openssl rand -hex 32)"
-  # Quote the dotted key so tomllib reads it as a flat string key
-  # (cross-cutting BLOCKER closure).
-  printf '"%s" = "%s"\n' "$pepper_key" "$pepper_value" >> "$target_file"
-  echo "Seeded audit.hash_pepper into ${target_file}."
+  _pepper_write_file "$pepper_value"
+  _pepper_write_env "$pepper_value"
+  echo "Seeded audit.hash_pepper into ${target_file} and .env."
 }
 
 # mkdir-lock: POSIX atomic. Acquire, run, release.

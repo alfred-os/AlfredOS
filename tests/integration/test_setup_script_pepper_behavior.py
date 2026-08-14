@@ -96,16 +96,35 @@ def _run_bootstrap_in_tmpdir(
 
     ``stub_openssl=True`` shadows ``openssl`` in PATH with a stub that
     always exits 127 — exercises the openssl-missing branch.
+
+    #591: the reconcile block reads/writes a relative ``.env`` via
+    ``read_env_var`` / ``_pepper_write_env`` — never an absolute path.
+    ``cwd=str(tmpdir)`` below is therefore load-bearing, not cosmetic:
+    without it, ``.env`` resolves against the *pytest process's* cwd (the
+    real repo root), and this test would read from and WRITE TO the
+    developer's actual ``.env`` on disk. Do not remove it.
     """
     bootstrap = _bootstrap_block()
     secrets_dir = tmpdir / ".config" / "alfred"
     secrets_dir.mkdir(parents=True, exist_ok=True)
     target_file = secrets_dir / "secrets.toml"
+    # A fresh `cp .env.example .env` (the "Ensuring .env exists" step, earlier
+    # in the real script but not part of this sliced block) leaves
+    # ALFRED_AUDIT_HASH_PEPPER present-but-empty. Mirror that baseline here so
+    # every test starts from the same shape unless it seeds a specific value
+    # itself before calling this helper (env-only / file-only / drift arms).
+    env_file = tmpdir / ".env"
+    if not env_file.exists():
+        env_file.write_text("ALFRED_AUDIT_HASH_PEPPER=\n")
     # Prelude defines the variables the bootstrap block expects from
     # the surrounding script (secrets_file from "Priming secrets bind-
-    # mount"; step helper as a no-op shim).
+    # mount"; step helper as a no-op shim) plus read_env_var, which the
+    # reconcile block now calls but which is defined elsewhere in the real
+    # script (outside this slice), same reason _openssl_missing_message_func
+    # is prepended below.
     prelude = (
         f'secrets_file="{target_file}"\nstep() {{ echo "==> $*"; }}\n'
+        + slice_shell_function(_SETUP_SH, "read_env_var() {")
         + _openssl_missing_message_func()
     )
     script = prelude + bootstrap
@@ -132,6 +151,15 @@ def _run_bootstrap_in_tmpdir(
             "echo",
             "ls",
             "rm",
+            # #591: read_env_var / _pepper_from_file / _pepper_write_env pull
+            # in sed, tail, head, tr, cut — all needed even on the
+            # openssl-missing path, since the reconcile reads run BEFORE the
+            # openssl availability check.
+            "sed",
+            "tail",
+            "head",
+            "tr",
+            "cut",
         )
         for tool in whitelist:
             tool_path = shutil.which(tool)
@@ -154,8 +182,39 @@ def _run_bootstrap_in_tmpdir(
         errors="surrogateescape",
         check=False,
         env=env,
+        cwd=str(tmpdir),
         timeout=30,
     )
+
+
+def _read_dotenv_pepper(tmpdir: Path) -> str | None:
+    """Pull ``ALFRED_AUDIT_HASH_PEPPER``'s value out of ``tmpdir/.env``, or ``None``."""
+    env_file = tmpdir / ".env"
+    if not env_file.is_file():
+        return None
+    for line in env_file.read_text().splitlines():
+        if line.startswith("ALFRED_AUDIT_HASH_PEPPER="):
+            return line.split("=", 1)[1].strip().strip("\"'")
+    return None
+
+
+def _read_secrets_toml_pepper(tmpdir: Path) -> str | None:
+    """Pull ``audit.hash_pepper``'s value out of ``tmpdir``'s ``secrets.toml``, or ``None``."""
+    target = tmpdir / ".config" / "alfred" / "secrets.toml"
+    if not target.is_file():
+        return None
+    with target.open("rb") as fh:
+        data = tomllib.load(fh)
+    value = data.get("audit.hash_pepper")
+    return value if isinstance(value, str) else None
+
+
+# Two distinct, valid 64-hex-char pepper values for the reconcile-matrix tests
+# below. Neither needs to come from openssl — the mirror/drift branches never
+# call it, and hardcoding keeps those tests independent of an openssl_available
+# skip they don't otherwise need.
+_PEPPER_ONE = "a1" * 32
+_PEPPER_TWO = "b2" * 32
 
 
 @pytest.fixture
@@ -266,3 +325,119 @@ def test_bootstrap_friendly_error_when_openssl_missing(
     assert any(hint in result.stderr for hint in distro_hints), (
         f"no per-distro install hint in stderr: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #591: .env <-> secrets.toml reconcile matrix.
+#
+# docker-compose.yaml forwards ALFRED_AUDIT_HASH_PEPPER from .env into
+# alfred-core; host-side `alfred` commands read secrets.toml. The bootstrap
+# must keep the two in sync without ever silently discarding an existing
+# value in either place (spec §8.10: rotating the pepper invalidates every
+# prior *_hash audit row). The five cases are: both empty (generate fresh,
+# write both), env-only, file-only, both-equal (covered by
+# test_bootstrap_is_idempotent_no_rotation above), and both-differ (refuse).
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_generates_and_writes_same_pepper_to_both(
+    bash_available: str,
+    openssl_available: str,
+    tmp_path: Path,
+) -> None:
+    """With nothing configured anywhere, the bootstrap seeds ONE fresh pepper
+    into BOTH .env and secrets.toml — not two independently-generated values.
+
+    If the two seeds ever diverged, the container (.env) and the host CLI
+    (secrets.toml) would verify *_hash audit rows against two different HMAC
+    planes from the very first run.
+    """
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    env_value = _read_dotenv_pepper(tmp_path)
+    file_value = _read_secrets_toml_pepper(tmp_path)
+    assert env_value is not None and re.fullmatch(r"[0-9a-f]{64}", env_value), (
+        f".env pepper missing or not 64-hex-char: {env_value!r}"
+    )
+    assert file_value == env_value, (
+        f".env pepper {env_value!r} != secrets.toml pepper {file_value!r} on a fresh bootstrap"
+    )
+
+
+def test_bootstrap_env_only_mirrors_into_secrets_file(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """A pepper already in .env (nothing yet in secrets.toml) is mirrored
+    into the broker file, because host-side ``alfred`` commands read the
+    file, not .env.
+    """
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_ONE, (
+        "secrets.toml pepper was not mirrored from .env"
+    )
+    assert "Mirrored the .env audit.hash_pepper" in result.stdout, (
+        f"no mirror banner in stdout: {result.stdout!r}"
+    )
+
+
+def test_bootstrap_file_only_mirrors_into_dotenv_without_regenerating(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """A pre-existing host pepper (already in secrets.toml, nothing in .env
+    yet) is carried into .env UNCHANGED — never regenerated.
+
+    Spec §8.10 upgrade-path proof: this is the pre-#591 -> post-#591
+    upgrade path. Regenerating here would silently invalidate every *_hash
+    audit row already written under the pre-existing value.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "secrets.toml").write_text(f'"audit.hash_pepper" = "{_PEPPER_ONE}"\n')
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert _read_dotenv_pepper(tmp_path) == _PEPPER_ONE, (
+        ".env pepper was not mirrored from secrets.toml, or was changed in transit"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_ONE, (
+        "secrets.toml pepper was regenerated/changed — value MUST be preserved unchanged"
+    )
+    assert "into .env" in result.stdout, f"no mirror-into-.env banner in stdout: {result.stdout!r}"
+
+
+def test_bootstrap_refuses_on_pepper_drift(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """A DIFFERENT pepper in .env vs secrets.toml must refuse, not pick one silently.
+
+    audit.hash_pepper is not in _PREFER_FILE, so alfred-core always uses the
+    .env value while host-side ``alfred`` commands use the file — auto-picking
+    would silently invalidate every *_hash audit row written under whichever
+    value lost (spec §8.10).
+    """
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(f'"audit.hash_pepper" = "{_PEPPER_TWO}"\n')
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+    assert result.returncode != 0, (
+        f"drift should refuse, not exit 0:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert ".env" in result.stderr, f"drift error doesn't mention .env: {result.stderr!r}"
+    assert str(target) in result.stderr, (
+        f"drift error doesn't mention the secrets.toml path {target}: {result.stderr!r}"
+    )
+    # Neither side is silently rewritten when the bootstrap refuses.
+    assert _read_dotenv_pepper(tmp_path) == _PEPPER_ONE
+    assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_TWO
