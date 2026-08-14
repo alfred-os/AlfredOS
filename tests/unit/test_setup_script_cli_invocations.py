@@ -307,6 +307,10 @@ def _validate_leaf_argv(command: TyperCommand, argv: list[str]) -> str | None:
     form); a non-flag option consumes the next token as its value while a
     boolean flag does not (``gateway adapters --wait-ready discord`` is the
     real example pinning this — ``--wait-ready`` must NOT eat ``discord``).
+    Every REQUIRED option must actually appear (a required option silently
+    added to a command, with the script left unmodified, is the same shape
+    of drift as a rename — the script/README would omit a flag the CLI now
+    demands, and `alfred` would refuse with a "Missing option" error).
     Remaining positionals are counted against the command's ``TyperArgument``
     arity: this is what would have caught the historical `bind --slug X`
     bug even had `--slug` existed as a real option — `bind` is still
@@ -327,6 +331,7 @@ def _validate_leaf_argv(command: TyperCommand, argv: list[str]) -> str | None:
             flag_only.update(strings)
 
     positionals: list[str] = []
+    used_flags: set[str] = set()
     i = 0
     while i < len(argv):
         next_arg = argv[i]
@@ -334,6 +339,7 @@ def _validate_leaf_argv(command: TyperCommand, argv: list[str]) -> str | None:
             name = next_arg.split("=", 1)[0]
             if name not in allowed_flags:
                 return f"has no option {name!r}"
+            used_flags.add(name)
             i += 1
             if "=" in next_arg:
                 continue
@@ -344,6 +350,14 @@ def _validate_leaf_argv(command: TyperCommand, argv: list[str]) -> str | None:
         else:
             positionals.append(next_arg)
             i += 1
+
+    missing_required = [
+        opt.opts[0]
+        for opt in options
+        if opt.required and used_flags.isdisjoint([*opt.opts, *opt.secondary_opts])
+    ]
+    if missing_required:
+        return f"is missing required option(s) {missing_required!r}"
 
     n = len(positionals)
     required_arity = 0
@@ -519,3 +533,29 @@ def test_validator_accepts_the_fixed_bind_invocation() -> None:
     assert len(invocations) == 1, invocations
     error = _check_invocation(tree, invocations[0])
     assert error is None, f"Validator incorrectly rejected the fixed invocation: {error}"
+
+
+_MISSING_REQUIRED_OPTION_SETUP_SH = """\
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose run --rm alfred-core user bind x --platform discord
+"""
+
+
+def test_validator_rejects_a_bind_invocation_missing_a_required_option() -> None:
+    """Self-review gap check: syntactically-valid-looking argv that simply omits a
+    required option (here `--id`) must also be caught — not just unknown flags and
+    positional-count mismatches. This is the shape a *newly-added* required option
+    would take: the script stays textually unchanged but the CLI now demands
+    something it doesn't provide.
+    """
+    tree = _command_tree()
+    invocations, _entrypoint_skipped = _extract_setup_script_invocations(
+        _MISSING_REQUIRED_OPTION_SETUP_SH
+    )
+    assert len(invocations) == 1, invocations
+    error = _check_invocation(tree, invocations[0])
+    assert error is not None, (
+        "Validator failed to reject `user bind x --platform discord` — it is missing "
+        "the required `--id` option and should have been flagged."
+    )
