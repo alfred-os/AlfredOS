@@ -525,6 +525,67 @@ def test_bootstrap_file_only_single_quoted_real_pepper_survives_byte_identical(
     )
 
 
+def test_bootstrap_file_only_single_quoted_real_pepper_mirrors_into_env_not_a_fresh_value(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """#594 sec-002-drift regression test: a single-quoted real pepper must
+    round-trip into .env as ITSELF across two bootstrap runs — not a
+    freshly-generated, divergent value.
+
+    Before widening ``_pepper_from_file``'s extraction regex to recognize
+    single-quoted TOML literal strings (it previously only recognized
+    double-quoted), a single-quoted hand-set secrets.toml pepper made
+    ``_pepper_bootstrap`` believe secrets.toml held NO pepper at all (even
+    though the byte-identity test above confirms secrets.toml itself was
+    correctly left untouched by the earlier #594 sec-002 fix). On a first
+    run this silently mirrored a FRESH, unintended value into .env instead
+    of the operator's real one — exit 0, "Seeded audit.hash_pepper into
+    secrets.toml and .env" printed, even though secrets.toml was never
+    touched. On a second run, the env/file "DIFFERS" drift-refusal never
+    fired either, because its own precondition (``-n "$file_pepper"``)
+    shared the identical blind spot — so the mismatch between the
+    operator's real secrets.toml pepper and the fresh, wrong .env value
+    would persist forever, silently, with alfred-core (which reads .env)
+    permanently running on a pepper the operator never set or approved.
+    This is exactly the "two incompatible HMAC planes" scenario the whole
+    reconcile design (spec §8.10) exists to catch — created silently
+    instead of refused loudly.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    real_value = "c3" * 32  # a plausible real 64-hex-char pepper
+    target.write_text(f"\"audit.hash_pepper\" = '{real_value}'\n")
+
+    first = _run_bootstrap_in_tmpdir(tmp_path)
+    assert first.returncode == 0, (
+        f"first bootstrap run failed:\nstdout: {first.stdout}\nstderr: {first.stderr}"
+    )
+    assert _read_dotenv_pepper(tmp_path) == real_value, (
+        ".env got a DIFFERENT (freshly-generated) pepper instead of the "
+        f"operator's real secrets.toml value after the first run: "
+        f".env={_read_dotenv_pepper(tmp_path)!r} secrets.toml={real_value!r}"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == real_value, (
+        "secrets.toml's single-quoted real pepper was mutated on the first run"
+    )
+
+    second = _run_bootstrap_in_tmpdir(tmp_path)
+    assert second.returncode == 0, (
+        f"second bootstrap run failed:\nstdout: {second.stdout}\nstderr: {second.stderr}"
+    )
+    assert "DIFFERS" not in second.stderr, (
+        f"second run raised a spurious env/file drift-refusal: {second.stderr!r}"
+    )
+    assert _read_dotenv_pepper(tmp_path) == real_value, (
+        ".env pepper changed/diverged further on the second (should-be-idempotent) run"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == real_value, (
+        "secrets.toml pepper changed on the second (should-be-idempotent) run"
+    )
+
+
 def test_bootstrap_refuses_on_pepper_drift(
     bash_available: str,
     tmp_path: Path,

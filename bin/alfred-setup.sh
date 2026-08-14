@@ -453,12 +453,25 @@ _pepper_ensure_target() {
 # #591: print the existing pepper VALUE (not just presence) out of the broker
 # secrets file. Accepts both the quoted dotted key this script writes
 # (``"audit.hash_pepper" = "..."``) and the unquoted spelling an operator's
-# hand-edited file might use. ``|| true`` binds to the whole pipeline so a
-# SIGPIPE from `head -1` truncating the stream can never trip `pipefail`
-# (same idiom as `read_env_var` above).
+# hand-edited file might use, AND both TOML string forms tomllib accepts for
+# a flat string value: double-quoted basic strings (``"..."``) and
+# single-quoted literal strings (``'...'``). #594 sec-002-drift: a
+# single-quoted hand-set value used to read back as empty here (the regex
+# only recognized the double-quoted form), which made _pepper_bootstrap
+# think secrets.toml had no pepper at all and silently mirror a FRESH,
+# unintended value into .env on every run instead of the operator's real
+# one — the env/file "DIFFERS" drift-refusal never fired either, since its
+# own precondition (`-n "$file_pepper"`) shared the identical blind spot.
+# Deliberately does NOT handle multi-line/triple-quoted TOML strings —
+# implausible for a one-line hex secret, not worth the added regex
+# complexity. ``|| true`` binds to the whole pipeline so a SIGPIPE from
+# `head -1` truncating the stream can never trip `pipefail` (same idiom as
+# `read_env_var` above).
 _pepper_from_file() {
   [[ -f "$target_file" ]] || return 0
-  sed -n -E 's/^[[:space:]]*"?audit\.hash_pepper"?[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' \
+  sed -n -E \
+    -e 's/^[[:space:]]*"?audit\.hash_pepper"?[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' \
+    -e "s/^[[:space:]]*\"?audit\.hash_pepper\"?[[:space:]]*=[[:space:]]*'([^']*)'.*/\1/p" \
     "$target_file" | head -1 || true
 }
 
