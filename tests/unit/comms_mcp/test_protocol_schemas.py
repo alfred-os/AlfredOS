@@ -9,7 +9,7 @@ is a ``UUID`` not a string.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import get_args
+from typing import Literal, get_args, get_origin
 from uuid import uuid4
 
 import pytest
@@ -361,18 +361,58 @@ def test_turn_failed_notification_frozen() -> None:
         notification.stage = "internal_error"
 
 
+def _is_closed_literal(annotation: object) -> bool:
+    """True if ``annotation`` is a ``Literal[...]`` type (a closed enumeration).
+
+    Deliberately a POSITIVE allowlist, not an ``annotation is not str`` identity
+    check: a bare identity check against ``str`` is a bypass — a declared
+    ``str | None`` (or ``list[str]``, ``dict[str, str]``, ...) field sails
+    straight through it, because none of those annotations literally ``is``
+    ``str`` even though every one of them still carries free text onto the
+    wire. What :class:`protocol.TurnFailedNotification`'s docstring actually
+    promises is narrower than "not str" — it is "every field is a closed
+    enumeration" — so assert that directly.
+    """
+    return get_origin(annotation) is Literal
+
+
 def test_turn_failed_notification_has_no_str_fields() -> None:
-    """No field on the frame is a bare ``str`` — the "no free text on the wire" rule.
+    """Every field on the frame is a closed ``Literal`` — the "no free text on the wire" rule.
 
     Walks ``model_fields`` rather than special-casing ``stage`` by name, so the
-    guard still means something if the model ever grows a second field: a future
-    ``str`` addition trips this test instead of silently reintroducing a
-    smuggling channel.
+    guard still means something if the model ever grows a second field: a
+    future non-Literal addition (``str``, ``str | None``, ``list[str]``, ...)
+    trips this test instead of silently reintroducing a smuggling channel. See
+    ``test_turn_failed_notification_str_field_bypass_is_caught`` immediately
+    below for proof this check actually catches the ``str | None`` shape a
+    bare ``annotation is not str`` identity check would miss.
     """
     fields = protocol.TurnFailedNotification.model_fields
     assert fields, "expected at least one field to make this a real check"
     for name, field in fields.items():
-        assert field.annotation is not str, f"{name} is a bare str field"
+        assert _is_closed_literal(field.annotation), (
+            f"{name} is not a closed Literal (annotation={field.annotation!r})"
+        )
+
+
+def test_turn_failed_notification_str_field_bypass_is_caught() -> None:
+    """Regression: ``_is_closed_literal`` catches what a bare ``is not str`` check missed.
+
+    A prior version of this guard used ``field.annotation is not str``, which
+    passes right through a declared ``detail: str | None = None`` field — the
+    exact "just an optional note" shape a future task (Tasks 11-14 build
+    directly on this frame) might innocently add. This constructs a throwaway
+    sibling frame with that exact shape and asserts the tightened check flags
+    it, so the guard cannot quietly regress to vacuous again.
+    """
+
+    class _StrLeakProbe(protocol._WireModel):
+        stage: protocol.TurnFailureStage
+        detail: str | None = None
+
+    fields = _StrLeakProbe.model_fields
+    flagged = {name for name, field in fields.items() if not _is_closed_literal(field.annotation)}
+    assert flagged == {"detail"}
 
 
 def test_turn_state_client_kinds_subset_of_adapter_kind() -> None:
