@@ -45,7 +45,10 @@ from alfred.comms_mcp.protocol import (
     LINK_RECONNECTING,
     LINK_RESTORED,
     LINK_UNAVAILABLE,
+    TURN_FAILED,
     InboundMessageNotification,
+    TurnFailedNotification,
+    TurnFailureStage,
 )
 from alfred.plugins.comms_socket_transport import (
     CommsPeerAuthError,
@@ -85,6 +88,16 @@ class _AppLike(Protocol):
         A SYNCHRONOUS reactive set (the app mutates a Textual ``reactive``); the
         co-host calls it on the SAME loop as ``run_async()`` (one ``TaskGroup``),
         so there is no ``call_from_thread`` hop (M1).
+        """
+        ...
+
+    def set_turn_failed(self, stage: TurnFailureStage) -> None:
+        """Render/clear turn-failure feedback from a core ``turn.failed`` stage (#593).
+
+        Protocol member only — Task 14 implements the real body on
+        :class:`alfred_tui.textual.app.AlfredTuiApp`. Declared here so the co-host's
+        wiring (and this task's tests) have a structural target to bind against
+        before that lands.
         """
         ...
 
@@ -134,6 +147,17 @@ async def _noop_link_state(_state: str) -> None:
     """
 
 
+# The core's client-TERMINAL turn-state control frame (#593). Kept in its OWN
+# branch rather than folded into `_LINK_STATE_METHODS`: this frame carries a
+# PAYLOAD (the closed `stage` Literal) the pump must Pydantic-validate, whereas
+# a `link.*` frame is method-only.
+type _OnTurnFailed = Callable[[TurnFailureStage], Awaitable[None]]
+
+
+async def _noop_turn_failed(_stage: TurnFailureStage) -> None:
+    """Default: drop the signal (no turn-state consumer wired)."""
+
+
 def _make_socket_inbound_sink(
     transport: _TransportLike,
 ) -> Callable[[InboundMessageNotification], Awaitable[None]]:
@@ -164,6 +188,7 @@ async def _serve_wire(
     server: TuiServer,
     *,
     on_link_state: _OnLinkState = _noop_link_state,
+    on_turn_failed: _OnTurnFailed = _noop_turn_failed,
 ) -> None:
     """Read request frames off the socket, dispatch them, write responses back.
 
@@ -190,6 +215,14 @@ async def _serve_wire(
     id-bearing ``link.*`` is logged LOUD (``gateway.cohost.id_bearing_link_frame``) and
     falls through to the normal ``dispatch`` path (which answers/handles the ``id``)
     rather than being silently swallowed (CLAUDE.md hard rule #7).
+
+    The core's client-TERMINAL ``turn.failed`` control frame (#593) is routed in its
+    OWN branch, immediately after the ``link.*`` allowlist and before ``dispatch``:
+    unlike ``link.*`` (method-only), this frame carries a PAYLOAD (the closed
+    ``stage`` Literal) that must be Pydantic-validated. An id-bearing ``turn.failed``
+    is the same wire-contract violation as an id-bearing ``link.*`` frame and is
+    handled identically — logged LOUD and left to fall through to ``dispatch``
+    rather than silently answered-and-dropped.
 
     ``server.dispatch`` returns a response frame for a well-formed REQUEST, but
     ``None`` for an id-less NOTIFICATION with an unknown method (Spec A G3-2 #237: the
@@ -223,6 +256,22 @@ async def _serve_wire(
                 _log.info("comms.tui.link_state", state=method)
                 await on_link_state(method)
                 continue
+        if method == TURN_FAILED:
+            if "id" in frame_dict:
+                # Same wire-contract violation shape as an id-bearing `link.*`
+                # frame: taking this branch would `continue` WITHOUT answering
+                # the id. Log LOUD and fall through to `dispatch` instead.
+                _log.warning("comms.tui.id_bearing_turn_frame", method=method)
+            else:
+                # Validate AT THE WIRE: a forged/typo'd stage is a loud
+                # ValidationError here, propagated exactly like a malformed frame
+                # out of `read_frame` — never a silently-unrendered turn state.
+                # The frame comes from the same-uid peer-authed core, so a bad
+                # stage is a code defect, not something to swallow.
+                note = TurnFailedNotification.model_validate(frame_dict.get("params") or {})
+                _log.info("comms.tui.turn_failed", stage=note.stage)
+                await on_turn_failed(note.stage)
+                continue
         response = await server.dispatch(frame_dict)
         if response is not None:
             # An id-less notification (unknown method) dispatches to ``None`` — skip
@@ -236,6 +285,7 @@ async def run_cohosted(
     dial: _Dial = dial_comms_socket,
     build_app_fn: _BuildApp = build_app,
     on_link_state: _OnLinkState = _noop_link_state,
+    on_turn_failed: _OnTurnFailed = _noop_turn_failed,
 ) -> int:
     """Dial the daemon and co-host the Textual app + the socket serve loop.
 
@@ -254,6 +304,12 @@ async def run_cohosted(
     (M1: the pump and ``app.run_async()`` share one ``TaskGroup``/loop, so no
     ``call_from_thread``). A test may inject its own recording callback to keep the
     app/pump seam isolated.
+
+    ``on_turn_failed`` is the parallel callback the wire pump invokes with a core
+    ``turn.failed`` stage (#593). Wired IDENTICALLY to ``on_link_state``: left at the
+    :func:`_noop_turn_failed` default (production), the co-host routes it to the
+    constructed app's ``set_turn_failed``; a test may inject its own recording
+    callback to keep the app/pump seam isolated.
 
     Construction order breaks the session<->app render-hook cycle: the session is
     built FIRST with the socket inbound sink, then ``build_app_fn`` cross-wires the
@@ -300,10 +356,28 @@ async def run_cohosted(
 
         link_state_cb = _paint_banner
 
+    # Default wiring (production): route a core ``turn.failed`` stage to the app's
+    # turn-failure feedback. Same shape as the banner wiring above — a test that
+    # injected its own callback keeps it.
+    turn_failed_cb: _OnTurnFailed = on_turn_failed
+    if turn_failed_cb is _noop_turn_failed:
+
+        async def _render_turn_failed(stage: TurnFailureStage) -> None:
+            app.set_turn_failed(stage)
+
+        turn_failed_cb = _render_turn_failed
+
     try:
         async with asyncio.TaskGroup() as tg:
             app_task = tg.create_task(app.run_async())
-            wire_task = tg.create_task(_serve_wire(transport, server, on_link_state=link_state_cb))
+            wire_task = tg.create_task(
+                _serve_wire(
+                    transport,
+                    server,
+                    on_link_state=link_state_cb,
+                    on_turn_failed=turn_failed_cb,
+                )
+            )
 
             # The app task owns the lifecycle: when the operator quits, end the wire
             # pump too (it would otherwise block forever on the daemon's socket).

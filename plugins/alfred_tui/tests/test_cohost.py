@@ -19,6 +19,7 @@ import pytest
 from alfred_tui.cohost import _make_socket_inbound_sink, _serve_wire, run_cohosted
 from alfred_tui.server import TuiServer
 from alfred_tui.session import TuiSession
+from pydantic import ValidationError
 
 from alfred.comms_mcp.errors import DaemonUnavailableError
 from alfred.comms_mcp.protocol import OutboundMessageRequest
@@ -390,6 +391,155 @@ async def test_link_methods_are_absent_from_the_plugin_method_set() -> None:
     assert "link.reconnecting" not in methods
     assert "link.restored" not in methods
     assert "link.unavailable" not in methods
+
+
+# ---------------------------------------------------------------------------
+# Core ``turn.failed`` control frame -> turn callback (#593).
+# ---------------------------------------------------------------------------
+
+
+async def test_serve_loop_routes_turn_failed_frame_to_the_turn_callback() -> None:
+    """A core ``turn.failed`` id-less frame invokes ``on_turn_failed`` with the stage.
+
+    Mirrors the ``link.*`` banner routing test, but for the payload-bearing
+    ``turn.failed`` frame: the pump Pydantic-validates ``params`` against
+    :class:`TurnFailedNotification` and hands the closed ``stage`` Literal to the
+    callback — never relayed/dispatched/acked (client-terminal, same as ``link.*``).
+    """
+    stages: list[str] = []
+
+    async def _record(stage: str) -> None:
+        stages.append(stage)
+
+    class _SpyServer:
+        async def dispatch(self, request: dict[str, Any]) -> dict[str, Any] | None:
+            raise AssertionError(f"turn.failed frame must not reach dispatch: {request!r}")
+
+    transport = _FakeTransport(
+        inbound=[{"jsonrpc": "2.0", "method": "turn.failed", "params": {"stage": "refused"}}]
+    )
+    await _serve_wire(transport, _SpyServer(), on_turn_failed=_record)  # type: ignore[arg-type]
+
+    assert stages == ["refused"]
+    assert transport.sent == []  # client-terminal: no reply/ack written back
+
+
+async def test_serve_loop_id_bearing_turn_failed_frame_is_not_silently_dropped() -> None:
+    """An id-BEARING ``turn.failed`` frame is a wire-contract violation — NOT dropped.
+
+    Same shape as the id-bearing ``link.*`` case: ``turn.failed`` is spec'd id-LESS.
+    A frame that carries an ``id`` bypasses the turn-callback branch (which would
+    otherwise ``continue`` WITHOUT answering the ``id``) and falls through to
+    ``dispatch`` instead — here, a ``Method not found`` for the unknown method, but
+    the ``id`` IS answered.
+    """
+    stages: list[str] = []
+
+    async def _record(stage: str) -> None:
+        stages.append(stage)
+
+    transport = _FakeTransport(
+        inbound=[
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "turn.failed",
+                "params": {"stage": "refused"},
+            }
+        ]
+    )
+    await _serve_wire(transport, TuiServer(session=TuiSession()), on_turn_failed=_record)
+
+    # NOT routed to the turn callback — the id-bearing frame bypassed it.
+    assert stages == []
+    # The id was ANSWERED (not silently dropped).
+    assert len(transport.sent) == 1
+    assert transport.sent[0]["id"] == 9
+    assert transport.sent[0]["error"]["code"] == -32601  # Method not found
+
+
+async def test_serve_loop_malformed_turn_failed_stage_raises_loud() -> None:
+    """A forged/typo'd ``stage`` value raises ``ValidationError`` — never swallowed.
+
+    ``TurnFailedNotification.model_validate`` is called AT THE WIRE; the frame comes
+    from the same-uid peer-authed core, so a bad stage is a code defect, not
+    something to log-and-continue past.
+    """
+    transport = _FakeTransport(
+        inbound=[
+            {
+                "jsonrpc": "2.0",
+                "method": "turn.failed",
+                "params": {"stage": "not_a_real_stage"},
+            }
+        ]
+    )
+    with pytest.raises(ValidationError):
+        await _serve_wire(transport, TuiServer(session=TuiSession()))
+
+
+async def test_turn_failed_is_absent_from_the_plugin_method_set() -> None:
+    """``turn.failed`` is NOT in the plugin's closed method set (it is client-terminal).
+
+    Routed by the pump's own branch, never dispatched, so it must not also be a
+    request method ``TuiServer.dispatch`` would answer.
+    """
+    methods = TuiServer(session=TuiSession()).list_methods()
+    assert "turn.failed" not in methods
+
+
+async def test_link_state_frame_does_not_invoke_the_turn_callback() -> None:
+    """A ``link.*`` frame invokes ONLY the banner callback, never the turn callback.
+
+    Allowlist narrowness: the two branches are gated on disjoint method sets, so a
+    frame routed by one must never also fire the other's callback.
+    """
+    banner_states: list[str] = []
+    turn_stages: list[str] = []
+
+    async def _record_banner(state: str) -> None:
+        banner_states.append(state)
+
+    async def _record_turn(stage: str) -> None:
+        turn_stages.append(stage)
+
+    transport = _FakeTransport(
+        inbound=[{"jsonrpc": "2.0", "method": "link.reconnecting", "params": {}}]
+    )
+    await _serve_wire(
+        transport,
+        TuiServer(session=TuiSession()),
+        on_link_state=_record_banner,
+        on_turn_failed=_record_turn,
+    )
+
+    assert banner_states == ["link.reconnecting"]
+    assert turn_stages == []
+
+
+async def test_turn_failed_frame_does_not_invoke_the_link_callback() -> None:
+    """Converse of the above: a ``turn.failed`` frame never fires the banner callback."""
+    banner_states: list[str] = []
+    turn_stages: list[str] = []
+
+    async def _record_banner(state: str) -> None:
+        banner_states.append(state)
+
+    async def _record_turn(stage: str) -> None:
+        turn_stages.append(stage)
+
+    transport = _FakeTransport(
+        inbound=[{"jsonrpc": "2.0", "method": "turn.failed", "params": {"stage": "refused"}}]
+    )
+    await _serve_wire(
+        transport,
+        TuiServer(session=TuiSession()),
+        on_link_state=_record_banner,
+        on_turn_failed=_record_turn,
+    )
+
+    assert turn_stages == ["refused"]
+    assert banner_states == []
 
 
 # ---------------------------------------------------------------------------
