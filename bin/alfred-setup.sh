@@ -557,12 +557,12 @@ fi
 # behind the DeepSeek placeholder check's `exit 1`, so on a stock first run (a verbatim
 # `cp .env.example .env`) it was never reached at all.
 
-# Export UID and GID so the compose `user: "${UID:-1000}:${GID:-1000}"`
-# substitution picks up the operator's real uid/gid. macOS bash 3.2
-# does NOT export UID by default, and GID is rarely exported on any
-# shell. Without the explicit `export`, compose falls back to
-# 1000:1000 which collides with the host operator on non-1000-uid
-# systems and breaks the `chmod 600` enforcement on the bind-mount.
+# NOTE: compose's `user: "${UID:-1000}:${GID:-1000}"` substitution — which this
+# export used to feed — was deleted in commit `76f044e3`. `alfred-core` now
+# always runs as the fixed non-root `alfred` user baked into
+# `docker/alfred-core.Dockerfile` (`useradd --system` + `USER alfred`), not the
+# host operator's uid/gid. Nothing in this repo reads `$UID`/`$GID` anymore;
+# left as a harmless no-op rather than risking an unrelated behavior change here.
 export UID
 GID="$(id -g)"
 export GID
