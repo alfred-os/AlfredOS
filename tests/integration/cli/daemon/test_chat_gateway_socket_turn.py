@@ -388,9 +388,12 @@ def _boot_env(
     monkeypatch.setenv("ALFRED_AUDIT.HASH_PEPPER", _AUDIT_HASH_PEPPER)
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ADAPTER_ID}"]')
     monkeypatch.setenv("ALFRED_PLUGIN_UID", _LAUNCHER_TEST_UID)
-    # The platform_user_id the TUI session stamps comes from $USER; pin it to the
+    # #592 (b338841f): the platform_user_id the TUI session stamps comes from
+    # alfred.config.operator_env.operator_display_name(), which reads
+    # $ALFRED_OPERATOR_NAME (defaulting to "operator" when unset/blank) — NOT
+    # $USER, which nothing has read here since that refactor. Pin it to the
     # seeded binding so the resolver maps the inbound to alice deterministically.
-    monkeypatch.setenv("USER", _PLATFORM_USER_ID)
+    monkeypatch.setenv("ALFRED_OPERATOR_NAME", _PLATFORM_USER_ID)
     yield
 
 
