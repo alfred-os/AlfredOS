@@ -580,3 +580,34 @@ def test_boot_refuses_audited_when_deepseek_model_is_blank(
     assert result.exit_code == 2, result.output
     assert "settings_invalid" in _boot_failed_reasons(boot_success_env)
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+
+
+@_posix_boot_only
+def test_boot_refuses_on_collision_even_with_no_comms_adapter_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+) -> None:
+    """The opt-in separation check must not be gated on comms being enabled.
+
+    `_build_comms_boot_graph` — where the check lives — is called from
+    `_start_async` inside `if settings.comms_enabled_adapters:`. So a daemon with
+    `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true`, colliding providers and
+    NO enabled adapter booted clean: the operator opted into a security posture,
+    got a green boot, and the control never ran. Same false-all-clear shape as the
+    compose-forwarding gap the whole-branch review caught, and it is this PR's own
+    feature rather than inherited debt, so it is fixed here rather than filed.
+
+    No `quarantine_registry` / `patch_quarantine_child_spawn` fixtures: with no
+    adapter there is no quarantined extractor to build and no child to spawn — the
+    refusal has to fire before any of that, which is the point.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.delenv("ALFRED_COMMS_ENABLED_ADAPTERS", raising=False)
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")  # collides with primary
+    monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code == 2, result.output
+    assert "quarantine_provider_separation_violated" in _boot_failed_reasons(boot_success_env)
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []

@@ -484,7 +484,6 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
             )
             graph = await _build_comms_boot_graph(
                 settings=settings,
-                boot_id="s4-g5-gateway-chain-proof",
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,

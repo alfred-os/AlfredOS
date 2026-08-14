@@ -636,10 +636,99 @@ class _CommsBootGraph:
                 await self.content_store.close()
 
 
+async def enforce_quarantine_provider_separation(
+    *, settings: Settings, audit: AuditWriter, boot_id: str
+) -> None:
+    """#586: the opt-in provider-separation gate, run on EVERY daemon boot.
+
+    Lived inside :func:`_build_comms_boot_graph` until CodeRabbit pointed out that
+    ``_start_async`` only calls that builder under ``if settings.comms_enabled_adapters``.
+    So a daemon with ``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true``, colliding
+    providers and NO enabled adapter booted CLEAN: the operator opted into a security
+    posture, got a green boot, and the control never ran — the same false-all-clear
+    shape as the compose-forwarding gap the whole-branch review caught, this time on
+    this PR's own feature. Hoisted here and called unconditionally so whether comms is
+    enabled cannot decide whether a security gate applies.
+
+    Raises:
+        QuarantineProviderSeparationCollisionError: separation required and the ids
+            collide. A distinct, catchable type so ``_commands.py`` routes it through
+            the audited ``_refuse_boot`` path instead of letting
+            ``assert_provider_separation``'s bare ``AlfredError`` escape uncaught (the
+            #368 anti-pattern).
+    """
+    # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
+    # refusal here can never leak a partially-constructed secret_broker/content_store —
+    # core-003/sec-003). assert_provider_separation()'s behaviour is unmodified (design
+    # spec §9) — this call site, the re-raise, and the not-required+colliding
+    # audited-warning path are new.
+    #
+    # The warn arm calls the SAME provider_ids_collide() predicate assert_provider_separation()
+    # uses internally, never a second inline copy of the .strip().lower() comparison: two
+    # copies of a security predicate drift, and a warn path that stopped agreeing with the
+    # refuse path about what a collision IS would silently emit no operator signal for a
+    # dual-LLM split that had quietly collapsed.
+    #
+    # devex-002 (#586/#587): emit the resolved quarantine posture UNCONDITIONALLY, before
+    # the branch below. Until this line the happy path — providers differ, or separation
+    # simply is not required — said NOTHING about which provider the quarantined child
+    # would dial: only a COLLISION produced any signal at all, so the operator whose
+    # config is fine had no boot-log evidence that their ALFRED_QUARANTINE_PROVIDER was
+    # even read. Placed here (rather than inside either arm) so it fires on every comms
+    # boot regardless of which arm runs, and before any I/O — a later refusal still
+    # leaves this breadcrumb behind. Non-secret closed-set routing config, safe to log
+    # (hard rule #5); ``alfred status`` renders the same two values for the operator who
+    # is not reading logs.
+    log.info(
+        "comms.comms_boot.quarantine_provider_resolved",
+        quarantine_provider=settings.quarantine_provider,
+        privileged_provider=settings.primary_provider,
+        require_separation=settings.require_quarantine_provider_separation,
+    )
+    if settings.require_quarantine_provider_separation:
+        try:
+            assert_provider_separation(
+                privileged_provider_id=settings.primary_provider,
+                quarantined_provider_id=settings.quarantine_provider,
+            )
+        except AlfredError as exc:
+            # This blanket relabel is only HONEST because a collision is the sole
+            # AlfredError assert_provider_separation can still raise here. It also has a
+            # blank-id arm, checked BEFORE its collision test with its own distinct
+            # message — and that arm used to reach this line, reporting a merely-blank
+            # primary_provider to the operator and to the audit row as a
+            # "separation violated" collision (CodeRabbit, round 2). Both ids are now
+            # blank-proof upstream: quarantine_provider is a Literal, and
+            # Settings._reject_blank_primary_provider refuses a blank primary_provider at
+            # config load, onto the accurately-labelled settings_invalid boot refusal.
+            # If either of those two guarantees is ever relaxed, this relabel goes back to
+            # lying — restore an explicit blank check here first
+            # (test_boot_refuses_blank_primary_provider_as_settings_invalid pins it).
+            raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
+    elif provider_ids_collide(settings.primary_provider, settings.quarantine_provider):
+        log.warning(
+            "comms.comms_boot.quarantine_provider_separation_not_enforced",
+            privileged_provider=settings.primary_provider,
+            quarantine_provider=settings.quarantine_provider,
+        )
+        await _emit_or_quarantine(
+            audit,
+            fields=DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS,
+            schema_name="DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS",
+            event="daemon.boot.quarantine_provider_separation_not_enforced",
+            subject={
+                "boot_id": boot_id,
+                "privileged_provider": settings.primary_provider,
+                "quarantine_provider": settings.quarantine_provider,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            result="warned",
+        )
+
+
 async def _build_comms_boot_graph(
     *,
     settings: Settings,
-    boot_id: str,
     audit: AuditWriter,
     outbound_dlp: OutboundDlpProtocol,
     t3_nonce: CapabilityGateNonce,
@@ -718,74 +807,6 @@ async def _build_comms_boot_graph(
     from alfred.plugins.web_fetch.content_store import ContentStore
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
-
-    # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
-    # refusal here can never leak a partially-constructed secret_broker/content_store —
-    # core-003/sec-003). assert_provider_separation()'s behaviour is unmodified (design
-    # spec §9) — this call site, the re-raise, and the not-required+colliding
-    # audited-warning path are new.
-    #
-    # The warn arm calls the SAME provider_ids_collide() predicate assert_provider_separation()
-    # uses internally, never a second inline copy of the .strip().lower() comparison: two
-    # copies of a security predicate drift, and a warn path that stopped agreeing with the
-    # refuse path about what a collision IS would silently emit no operator signal for a
-    # dual-LLM split that had quietly collapsed.
-    #
-    # devex-002 (#586/#587): emit the resolved quarantine posture UNCONDITIONALLY, before
-    # the branch below. Until this line the happy path — providers differ, or separation
-    # simply is not required — said NOTHING about which provider the quarantined child
-    # would dial: only a COLLISION produced any signal at all, so the operator whose
-    # config is fine had no boot-log evidence that their ALFRED_QUARANTINE_PROVIDER was
-    # even read. Placed here (rather than inside either arm) so it fires on every comms
-    # boot regardless of which arm runs, and before any I/O — a later refusal still
-    # leaves this breadcrumb behind. Non-secret closed-set routing config, safe to log
-    # (hard rule #5); ``alfred status`` renders the same two values for the operator who
-    # is not reading logs.
-    log.info(
-        "comms.comms_boot.quarantine_provider_resolved",
-        quarantine_provider=settings.quarantine_provider,
-        privileged_provider=settings.primary_provider,
-        require_separation=settings.require_quarantine_provider_separation,
-    )
-    if settings.require_quarantine_provider_separation:
-        try:
-            assert_provider_separation(
-                privileged_provider_id=settings.primary_provider,
-                quarantined_provider_id=settings.quarantine_provider,
-            )
-        except AlfredError as exc:
-            # This blanket relabel is only HONEST because a collision is the sole
-            # AlfredError assert_provider_separation can still raise here. It also has a
-            # blank-id arm, checked BEFORE its collision test with its own distinct
-            # message — and that arm used to reach this line, reporting a merely-blank
-            # primary_provider to the operator and to the audit row as a
-            # "separation violated" collision (CodeRabbit, round 2). Both ids are now
-            # blank-proof upstream: quarantine_provider is a Literal, and
-            # Settings._reject_blank_primary_provider refuses a blank primary_provider at
-            # config load, onto the accurately-labelled settings_invalid boot refusal.
-            # If either of those two guarantees is ever relaxed, this relabel goes back to
-            # lying — restore an explicit blank check here first
-            # (test_boot_refuses_blank_primary_provider_as_settings_invalid pins it).
-            raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
-    elif provider_ids_collide(settings.primary_provider, settings.quarantine_provider):
-        log.warning(
-            "comms.comms_boot.quarantine_provider_separation_not_enforced",
-            privileged_provider=settings.primary_provider,
-            quarantine_provider=settings.quarantine_provider,
-        )
-        await _emit_or_quarantine(
-            audit,
-            fields=DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS,
-            schema_name="DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS",
-            event="daemon.boot.quarantine_provider_separation_not_enforced",
-            subject={
-                "boot_id": boot_id,
-                "privileged_provider": settings.primary_provider,
-                "quarantine_provider": settings.quarantine_provider,
-                "occurred_at": datetime.now(UTC).isoformat(),
-            },
-            result="warned",
-        )
 
     secret_broker = build_broker(settings)
     resolver = install_identity_factories_for_settings(settings)

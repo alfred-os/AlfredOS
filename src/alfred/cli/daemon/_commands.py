@@ -82,6 +82,7 @@ from alfred.cli.daemon._comms_boot import (
     _make_control_reject_auditor,
     _resolve_adapter_carrier_kind,
     _spawn_comms_adapter,
+    enforce_quarantine_provider_separation,
 )
 from alfred.cli.daemon._daemon_control_server import DaemonControlServer
 from alfred.cli.daemon._daemon_pidfile import (
@@ -1032,6 +1033,60 @@ async def _start_async() -> None:
     # broadcast through it after the (authoritative) audit row. Zero registrations in
     # the normal boot (the peer connects on-demand) → a clean DEBUG no-op.
     lifecycle_broadcaster = LifecycleBroadcaster()
+
+    # #586 (CodeRabbit): the opt-in provider-separation gate runs on EVERY boot,
+    # OUTSIDE the `if settings.comms_enabled_adapters` below. It used to live inside
+    # `_build_comms_boot_graph`, which that `if` gates — so a daemon with
+    # ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true, colliding providers and no
+    # enabled adapter booted CLEAN: the operator opted into a security posture, got a
+    # green boot, and the control never ran. Whether comms is enabled must not decide
+    # whether a security gate applies. Placed before write_pidfile/supervisor.start so
+    # a refusal still has no daemon-up side effects.
+    try:
+        await enforce_quarantine_provider_separation(
+            settings=settings, audit=audit, boot_id=boot_id
+        )
+    except QuarantineProviderSeparationCollisionError as exc:
+        # #586: require_quarantine_provider_separation=True and the privileged
+        # + quarantine providers collide. REACHABLE via a real boot (an operator
+        # opted into the stricter dual-LLM posture and misconfigured it). REFUSE
+        # boot fail-closed (audited, exit 2) rather than let the bare AlfredError
+        # assert_provider_separation() raises propagate uncaught (the #368
+        # anti-pattern — arch-002/sec-001/test-001).
+        #
+        # A t() catalogue message, NOT str(exc), for the same reason as every
+        # sibling arm: assert_provider_separation()'s own message predates this
+        # branch and names routing.yaml [quarantine] + "spec §5.4" — a remedy that
+        # does NOT work (routing.yaml is not read at runtime) and a citation the
+        # opt-in ADR-0064 supersedes. The catalogue message names the two env vars
+        # that actually change the outcome.
+        #
+        # Log the two colliding ids (review fix): the t() operator message names the
+        # env vars to CHANGE but deliberately not the values, and the closed
+        # DAEMON_BOOT_FAILED_FIELDS schema carries only the reason token — so without
+        # this line the actual collision is nowhere in the boot record, while its
+        # require=False WARN sibling in _comms_boot.py logs both. Same
+        # purely-diagnostic shape as the quarantine_grant_missing log above: it does
+        # not touch the audited failure_reason token or the audit schema. The values
+        # are non-secret routing config (closed-set provider ids, never a key), so
+        # CLAUDE.md hard rule #5 is not in play.
+        log.error(
+            "daemon.boot.quarantine_provider_separation_violated",
+            privileged_provider=settings.primary_provider,
+            quarantine_provider=settings.quarantine_provider,
+        )
+        await _refuse_boot(
+            audit,
+            QuarantineProviderSeparationViolatedFailure(),
+            t("daemon.boot.quarantine_provider_separation_violated"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
+        # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
+        # line is unreachable defence-in-depth for the type checker's flow, matching
+        # the sibling _refuse_boot arms — and gives the now-bound ``exc`` a use, so
+        # the binding cannot be dropped as unused by a future cleanup.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
     if settings.comms_enabled_adapters:
         # PR-S4-11c-2b: the comms-graph build now SPAWNS the live bwrap quarantined
         # child (``spawn_quarantine_child_io`` inside ``_build_comms_inbound_extractor``).
@@ -1043,7 +1098,6 @@ async def _start_async() -> None:
         try:
             comms_graph = await _build_comms_boot_graph(
                 settings=settings,
-                boot_id=boot_id,
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=t3_nonce,
@@ -1112,47 +1166,6 @@ async def _start_async() -> None:
                 boot_id=boot_id,
                 environment_source=source,
             )
-        except QuarantineProviderSeparationCollisionError as exc:
-            # #586: require_quarantine_provider_separation=True and the privileged
-            # + quarantine providers collide. REACHABLE via a real boot (an operator
-            # opted into the stricter dual-LLM posture and misconfigured it). REFUSE
-            # boot fail-closed (audited, exit 2) rather than let the bare AlfredError
-            # assert_provider_separation() raises propagate uncaught (the #368
-            # anti-pattern — arch-002/sec-001/test-001).
-            #
-            # A t() catalogue message, NOT str(exc), for the same reason as every
-            # sibling arm: assert_provider_separation()'s own message predates this
-            # branch and names routing.yaml [quarantine] + "spec §5.4" — a remedy that
-            # does NOT work (routing.yaml is not read at runtime) and a citation the
-            # opt-in ADR-0064 supersedes. The catalogue message names the two env vars
-            # that actually change the outcome.
-            #
-            # Log the two colliding ids (review fix): the t() operator message names the
-            # env vars to CHANGE but deliberately not the values, and the closed
-            # DAEMON_BOOT_FAILED_FIELDS schema carries only the reason token — so without
-            # this line the actual collision is nowhere in the boot record, while its
-            # require=False WARN sibling in _comms_boot.py logs both. Same
-            # purely-diagnostic shape as the quarantine_grant_missing log above: it does
-            # not touch the audited failure_reason token or the audit schema. The values
-            # are non-secret routing config (closed-set provider ids, never a key), so
-            # CLAUDE.md hard rule #5 is not in play.
-            log.error(
-                "daemon.boot.quarantine_provider_separation_violated",
-                privileged_provider=settings.primary_provider,
-                quarantine_provider=settings.quarantine_provider,
-            )
-            await _refuse_boot(
-                audit,
-                QuarantineProviderSeparationViolatedFailure(),
-                t("daemon.boot.quarantine_provider_separation_violated"),
-                boot_id=boot_id,
-                environment_source=source,
-            )
-            # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
-            # line is unreachable defence-in-depth for the type checker's flow, matching
-            # the sibling _refuse_boot arms — and gives the now-bound ``exc`` a use, so
-            # the binding cannot be dropped as unused by a future cleanup.
-            raise AssertionError("unreachable") from exc  # pragma: no cover
         except _ForwardedInboundRegistryMisconfiguredError as exc:
             # Spec B G6-7-4 (#309): a forwarded-inbound kind in the receiver registry
             # needs a promoter the deterministic factory withheld (a structural

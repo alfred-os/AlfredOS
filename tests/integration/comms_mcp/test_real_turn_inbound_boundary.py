@@ -630,7 +630,6 @@ async def _boot_stack(
 
             graph = await _build_comms_boot_graph(
                 settings=settings,
-                boot_id="338-pr2-t5-inbound-boundary-proof",
                 audit=cast(AuditWriter, tracked_audit),
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,
