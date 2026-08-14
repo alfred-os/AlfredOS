@@ -545,6 +545,8 @@ def test_operator_name_resolution_trims_like_operator_display_name(
         ["bash", "-c", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
         cwd=str(tmp_path),
         timeout=10,
