@@ -61,7 +61,12 @@ def quarantine_registry() -> Iterator[HookRegistry]:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
+        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
+        "happens to fire first, so this reason cannot rot if any one of them is ported."
+    ),
 )
 def test_boot_registers_authorized_t3_nonce(
     monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +101,12 @@ def test_boot_registers_authorized_t3_nonce(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
+        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
+        "happens to fire first, so this reason cannot rot if any one of them is ported."
+    ),
 )
 def test_boot_threads_same_nonce_into_comms_graph(
     monkeypatch: pytest.MonkeyPatch,
@@ -167,7 +177,12 @@ def test_boot_threads_same_nonce_into_comms_graph(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
+        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
+        "happens to fire first, so this reason cannot rot if any one of them is ported."
+    ),
 )
 def test_boot_does_not_double_call_factory(
     monkeypatch: pytest.MonkeyPatch,

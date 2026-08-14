@@ -43,16 +43,17 @@ from .test_daemon_comms_spawn import _patch_comms_seams
 
 _ENABLED_ADAPTER = "alfred_comms_test"
 
-# The three tests below drive a FULL, successful `alfred daemon start`. A completed
-# boot unconditionally binds the daemon control plane's 0600 AF_UNIX socket
-# (`_commands.py` -> `DaemonControlServer.start()` -> `bind_owner_only_unix_socket`),
-# and CPython does not expose `socket.AF_UNIX` on Windows at all — so they crash there
-# with an AttributeError no amount of plugin-layer mocking can avoid. The other seven
-# tests in this file refuse the boot inside `_build_comms_boot_graph`, well before any
-# POSIX syscall, so they keep running on Windows and this file stays MIXED (per-test
-# skipif, NOT the tests/_posix_only_tests.py whole-file registry). Same guard, same
-# reason as the three structurally identical full-boot tests in
-# test_daemon_boot_t3_nonce.py. Windows dev of this Linux-only surface is via WSL2.
+# The three tests below drive a FULL, successful `alfred daemon start`, which on
+# Windows crosses a CHAIN of POSIX-only gates: `write_pidfile`'s bare
+# `os.O_NOFOLLOW` (`_commands.py:1268`) raises first, and were that ported, the
+# control plane's 0600 AF_UNIX socket (`:1356` -> `DaemonControlServer.start()` ->
+# `bind_owner_only_unix_socket`) would raise next — `socket.AF_UNIX` is not exposed
+# by CPython on Windows. Verified empirically, not inferred from line numbers: with
+# only `os.O_NOFOLLOW` deleted on a POSIX host these fail at the pidfile; the
+# t3_nonce siblings behave identically. The other seven tests in this file refuse
+# the boot inside `_build_comms_boot_graph`, well before any POSIX syscall, so they
+# keep running on Windows and this file stays MIXED (per-test skipif, NOT the
+# tests/_posix_only_tests.py whole-file registry).
 #
 # The Windows equivalents were investigated, not assumed (#586/#587 review), and
 # they DO exist — this guard is about what is BUILT, not about what is possible.
@@ -79,7 +80,12 @@ _ENABLED_ADAPTER = "alfred_comms_test"
 # Linux and therefore takes the full bwrap path unchanged.
 _posix_boot_only = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
+        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
+        "happens to fire first, so this reason cannot rot if any one of them is ported."
+    ),
 )
 
 
