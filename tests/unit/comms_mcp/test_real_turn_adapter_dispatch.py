@@ -54,10 +54,14 @@ def _wire_audit_hash_pepper() -> object:
 class _RecordingSender:
     def __init__(self) -> None:
         self.sent: list[object] = []
+        self.turn_states_sent: list[object] = []
 
     async def send_outbound(self, request):
         self.sent.append(request)
         return {}
+
+    async def send_turn_state(self, notification):
+        self.turn_states_sent.append(notification)
 
 
 class _RecordingAudit:
@@ -224,6 +228,9 @@ async def test_dispatch_send_failure_audits_send_failed_and_reraises() -> None:
         async def send_outbound(self, request):
             raise ConnectionError("wire down")
 
+        async def send_turn_state(self, notification):
+            raise ConnectionError("wire down")
+
     adapter = _adapter(
         orchestrator=_Orchestrator(answer="hi"), audit=audit, sender=_RaisingSender()
     )
@@ -252,6 +259,9 @@ async def test_dispatch_refusal_send_failure_reraises_without_audit() -> None:
 
     class _RaisingSender:
         async def send_outbound(self, request):
+            raise ConnectionError("wire down")
+
+        async def send_turn_state(self, notification):
             raise ConnectionError("wire down")
 
     adapter = _adapter(

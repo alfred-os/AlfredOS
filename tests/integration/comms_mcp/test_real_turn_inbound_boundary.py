@@ -206,10 +206,14 @@ class _ExtractionAwareChildDouble:
 class _RecordingSender:
     def __init__(self) -> None:
         self.sent: list[Any] = []
+        self.turn_states_sent: list[Any] = []
 
     async def send_outbound(self, request: Any) -> dict[str, object]:
         self.sent.append(request)
         return {}
+
+    async def send_turn_state(self, notification: Any) -> None:
+        self.turn_states_sent.append(notification)
 
 
 class _FlakyOnceSender:
@@ -231,11 +235,17 @@ class _FlakyOnceSender:
             raise ConnectionError("simulated crash-injection: outbound send failed")
         return await self._inner.send_outbound(request)
 
+    async def send_turn_state(self, notification: Any) -> None:
+        await self._inner.send_turn_state(notification)
+
 
 class _RaisingSender:
     """Always raises — the FOLD-5 ``send_failed`` integration leg."""
 
     async def send_outbound(self, request: Any) -> dict[str, object]:
+        raise ConnectionError("simulated wire failure")
+
+    async def send_turn_state(self, notification: Any) -> None:
         raise ConnectionError("simulated wire failure")
 
 

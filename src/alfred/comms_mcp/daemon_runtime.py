@@ -55,7 +55,7 @@ from uuid import uuid4
 import structlog
 
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
-from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.comms_mcp.protocol import OutboundMessageRequest, TurnFailedNotification
 from alfred.errors import AlfredError
 from alfred.hooks.context import HookContext
 from alfred.hooks.registry import SYSTEM_OPERATOR_TIERS
@@ -130,6 +130,15 @@ class OutboundSenderLike(Protocol):
     """
 
     async def send_outbound(self, request: OutboundMessageRequest) -> Mapping[str, object]: ...
+
+    async def send_turn_state(self, notification: TurnFailedNotification) -> None:
+        """Push an id-less core->client turn-state frame (#593).
+
+        Distinct from :meth:`send_outbound`: NO ``id``, NO awaited response, NO DLP
+        scan (there is no text — the frame carries a closed ``Literal`` only), and
+        NO adapter addressing (the runner behind this seam IS the address).
+        """
+        ...
 
 
 class CommsInboundOrchestratorAdapter:

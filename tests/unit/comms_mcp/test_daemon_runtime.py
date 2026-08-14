@@ -43,7 +43,7 @@ from alfred.comms_mcp.daemon_runtime import (
 )
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
 from alfred.comms_mcp.inbound import _OrchestratorLike
-from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.comms_mcp.protocol import OutboundMessageRequest, TurnFailedNotification
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.security import tiers as _tiers
 from alfred.security.dlp import OutboundDlp, OutboundDlpScanResult
@@ -144,10 +144,14 @@ class _RecordingSender:
 
     def __init__(self) -> None:
         self.requests: list[OutboundMessageRequest] = []
+        self.turn_states: list[TurnFailedNotification] = []
 
     async def send_outbound(self, request: OutboundMessageRequest) -> Mapping[str, object]:
         self.requests.append(request)
         return {"platform_message_id": "msg-1"}
+
+    async def send_turn_state(self, notification: TurnFailedNotification) -> None:
+        self.turn_states.append(notification)
 
 
 class _SpyingOutboundDlp:

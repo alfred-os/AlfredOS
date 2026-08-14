@@ -161,10 +161,14 @@ class _RecordingAuditWriter:
 class _RecordingSender:
     def __init__(self) -> None:
         self.sent: list[Any] = []
+        self.turn_state_sent: list[Any] = []
 
     async def send_outbound(self, request: Any) -> dict[str, object]:
         self.sent.append(request)
         return {}
+
+    async def send_turn_state(self, notification: Any) -> None:
+        self.turn_state_sent.append(notification)
 
 
 def _build_real_orchestrator(router: FixedAnswerRouter) -> Orchestrator:
