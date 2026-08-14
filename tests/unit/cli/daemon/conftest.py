@@ -103,6 +103,34 @@ class FakeSupervisor:
         return coro
 
 
+@pytest.fixture(autouse=True)
+def _reset_fake_supervisor_last_instance() -> Iterator[None]:
+    """Reset ``FakeSupervisor.last_instance`` before every daemon-boot test.
+
+    "The #255 isolation quirk" (already named as such in comments in this package,
+    e.g. ``test_daemon_comms_spawn.py`` and ``test_daemon_promoter_wiring.py``):
+    ``FakeSupervisor.last_instance`` is a bare ``ClassVar`` set in ``__init__`` and
+    never cleared, so a test whose boot refuses BEFORE ``Supervisor()`` is ever
+    constructed reads whatever supervisor the PREVIOUS test in collection order
+    happened to leave behind — ``None`` if that prior test never got that far
+    either, or a live (possibly pump-populated) instance if it did. On Linux CI
+    this accidentally self-heals via file/test ordering; on Windows CI (or any
+    reordering — pytest-randomly, ``-p no:randomly`` overrides, a new test file
+    sorting differently) it does not, and the resulting failure looks like a
+    coroutine leak or a missing supervisor in a test that changed nothing.
+
+    Autouse and RESET-AT-SETUP (not just at teardown) so every test — including
+    ones that never construct a real ``FakeSupervisor`` at all — starts from a
+    known ``None`` baseline, matching a fresh pytest process. Sibling tests that
+    tolerate a genuinely absent supervisor already spell that out as
+    ``assert sup is None or sup.registered_tasks == []``; this fixture is what
+    makes ``sup is None`` the actual, deterministic outcome for a pre-Supervisor
+    refusal, instead of an accident of ordering.
+    """
+    FakeSupervisor.last_instance = None
+    yield
+
+
 @pytest.fixture
 def fake_audit_writer() -> FakeAuditWriter:
     return FakeAuditWriter()

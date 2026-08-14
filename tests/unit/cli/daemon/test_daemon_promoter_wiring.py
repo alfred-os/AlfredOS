@@ -270,9 +270,12 @@ def test_boot_refuses_fail_closed_on_misconfigured_promoter(
     assert result.exit_code == 2, result.output
 
     sup = FakeSupervisor.last_instance
-    assert sup is not None
-    # The pump was NEVER registered — fail-closed, not parked-with-misconfig.
-    assert sup.registered_tasks == []
+    # The pump was NEVER registered — fail-closed, not parked-with-misconfig. The
+    # refusal fires before Supervisor() is even constructed; isolation-robust: with
+    # FakeSupervisor.last_instance reset per test (conftest.py's
+    # _reset_fake_supervisor_last_instance), `sup is None` is this test's own
+    # deterministic outcome, not an accident of execution order.
+    assert sup is None or sup.registered_tasks == []
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}

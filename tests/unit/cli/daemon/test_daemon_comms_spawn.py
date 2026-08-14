@@ -401,10 +401,12 @@ def test_boot_refuses_fail_closed_on_quarantine_child_spawn_failure(
     assert result.exit_code == 2
 
     sup = FakeSupervisor.last_instance
-    assert sup is not None
     # The pump was NEVER registered — the refusal happens during the comms-graph
-    # build, BEFORE supervisor.start / the spawn loop.
-    assert sup.registered_tasks == []
+    # build, BEFORE Supervisor() is even constructed (isolation-robust: with
+    # FakeSupervisor.last_instance reset per test, this test's own boot never
+    # sets it, so `sup is None` is the deterministic outcome, not an accident of
+    # execution order — see _reset_fake_supervisor_last_instance in conftest.py).
+    assert sup is None or sup.registered_tasks == []
     # A loud daemon.boot.failed row with the EXACT fail-closed reason (not just
     # "some refusal") — catches a wrong-refusal-arm regression (CR #255).
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
@@ -626,10 +628,10 @@ def test_boot_refuses_on_multiple_enabled_adapters(
     assert result.exit_code == 2
 
     sup = FakeSupervisor.last_instance
-    assert sup is not None
     # No pump registered + no runner constructed — the refusal happened before
-    # any adapter spawned (fail-closed, never a parked cross-routed graph).
-    assert sup.registered_tasks == []
+    # Supervisor() is even constructed (fail-closed, never a parked cross-routed
+    # graph). Isolation-robust: see _reset_fake_supervisor_last_instance.
+    assert sup is None or sup.registered_tasks == []
     assert _FakeRunner.instances == []
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
