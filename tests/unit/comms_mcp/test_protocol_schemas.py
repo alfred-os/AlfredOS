@@ -420,6 +420,32 @@ def test_turn_state_client_kinds_subset_of_adapter_kind() -> None:
     assert protocol.adapter_kind >= protocol.TURN_STATE_CLIENT_KINDS
 
 
+def test_turn_state_client_kinds_is_exactly_tui() -> None:
+    """Tripwire: widening this set voids TWO documented acceptances.
+
+    Exact equality, NOT a subset check — the sibling
+    ``test_turn_state_client_kinds_subset_of_adapter_kind`` passes happily if a
+    remote kind is added, so it cannot serve as the tripwire.
+
+    Both acceptances below hold ONLY because the sole listed kind is the
+    operator-local TUI (0600 AF_UNIX socket, 0700 runtime dir, SO_PEERCRED
+    same-uid -- ADR-0031), i.e. the party that submits a turn and the party
+    that observes the resulting ``turn.failed`` frame are the same operator:
+
+    1. ADR-0064 Negative/accepted -- the ``TurnFailureStage`` collapse is
+       CONTENT-coarsening only. ``downgrade_denied`` (pre-privileged-turn) and
+       ``dlp_canary_tripped`` (post-privileged-turn) are separable by frame
+       ARRIVAL LATENCY. Accepted because no remote party can observe it.
+    2. ``RealTurnOrchestratorAdapter.dispatch``'s docstring -- the
+       ``turn_error`` leg's notify-then-raise ordering, which becomes a LIE on
+       any bounded-replay-eligible forwarded adapter.
+
+    If this test fails you are adding a client kind. Re-derive BOTH before
+    changing this assertion.
+    """
+    assert frozenset({"tui"}) == protocol.TURN_STATE_CLIENT_KINDS
+
+
 def test_turn_failed_method_is_not_gateway_consumed() -> None:
     """``turn.failed`` must stay OUTSIDE the gateway's four consumed method names.
 

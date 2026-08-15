@@ -150,6 +150,69 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
   behavior — no `turn.failed` send, no client-visible signal beyond
   whatever that adapter already has — until its own client-side handler
   lands in the same commit that adds it to the table.
+- **The stage collapse is content-coarsening, not timing-coarsening — accepted,
+  with a tripwire.** `downgrade_denied` and `dlp_canary_tripped` produce
+  byte-identical `turn.failed` frames (pinned by `cib-2026-009`), but they do
+  not ARRIVE at the same time: `downgrade_denied` fires from the capability
+  gate in `ingest` (`real_turn_adapter.py`), which is reached after the
+  quarantined extract but before the privileged turn, while
+  `dlp_canary_tripped` fires only from inside `handle_user_message` after at
+  least one further privileged completion. A client that samples enough turns
+  can separate the two legs on latency and so recover the phase boundary the
+  coarse `"refused"` value hides. The same applies to `downgrade_malformed`
+  vs. `turn_error` inside `"internal_error"`, though `turn_error`'s latency
+  distribution (anything from an instant config fault to a 60s provider
+  timeout) largely swallows the distinction.
+
+  **Accepted for the current threat model**, on four grounds:
+  (1) `TURN_STATE_CLIENT_KINDS` contains only `"tui"`, whose transport is a
+  0600 AF_UNIX socket under a 0700 runtime dir with `SO_PEERCRED` same-uid
+  enforcement (ADR-0031, `src/alfred/plugins/_local_socket.py`) — the only
+  party who can submit a turn AND observe the frame is the operator, who
+  already reads the full-fidelity `_RefusalStage` verbatim out of the
+  `comms.inbound.real_turn.refused` structured-log line (the surface
+  `docs/runbooks/slice-3-operator-migration.md` names as sanctioned while
+  `alfred audit log` is stubbed), so no privilege is gained — and who is in
+  any case shown turn latency directly by `tui.thinking_elapsed`, the
+  90s watchdog line, and the `alfred_comms_inbound_dispatch_seconds`
+  histogram; (2) the collapse has one reachable member today —
+  `dlp_canary_tripped` is inert until `web.fetch` (#583) ships a tool whose
+  output can carry a canary token (`real_turn_adapter.py`, the
+  `OutboundCanaryTripped` leg's own comment); (3) the marginal bit ("did my
+  input pass the downgrade gate?") is already leaked with perfect fidelity by
+  the presence or absence of a reply on the success path, and is not closable
+  on any channel that answers questions at all; (4) the obvious mitigation — a
+  minimum-latency floor — cannot work here: the slow leg is an unbounded LLM
+  turn (`read=60.0`, `max_retries=2`, 1..N completions), so no fixed floor
+  separates the distributions, while a floor large enough to try would delay
+  every legitimate fast policy refusal and regress the exact responsiveness
+  gap #593 exists to close.
+
+  **Tripwire.** This acceptance is void the moment `TURN_STATE_CLIENT_KINDS`
+  gains any non-local kind, because a remote client is a party that can both
+  submit turns and observe frame arrival. That widening commit MUST re-derive
+  this analysis alongside the `turn_error` notify-then-raise ordering caveat
+  in `RealTurnOrchestratorAdapter.dispatch`'s docstring, which is void at the
+  same moment and for a related reason.
+  `tests/unit/comms_mcp/test_protocol_schemas.py::test_turn_state_client_kinds_is_exactly_tui`
+  pins the set by exact equality so the widening cannot land silently.
+- **`TurnFailedNotification` carries no `adapter_id` because "the runner IS
+  the address" — an assumption that holds only while exactly one adapter is
+  bound.** `RealTurnOrchestratorAdapter` holds a single `_sender` slot
+  (`src/alfred/comms_mcp/real_turn_adapter.py:304`), rebound last-writer-wins
+  by each `bind_outbound_sender` call at boot
+  (`real_turn_adapter.py:317-319`, invoked once per adapter at
+  `src/alfred/cli/daemon/_comms_boot.py:1186-1187`); with two adapters
+  wired, adapter-A's turn would dispatch its `turn.failed` frame through
+  adapter-B's runner — a cross-route the daemon's own boot-time comment
+  names explicitly (`# FIX 4`, `src/alfred/cli/daemon/_commands.py:990-1006`).
+  Accepted today because boot fail-closed refuses more than one enabled
+  comms adapter (`CommsMultiAdapterUnsupportedFailure`,
+  `src/alfred/cli/daemon/_commands.py:1000-1007`; exit 2, audited) — the
+  same guard that keeps the timing acceptance above from becoming live.
+  Shares the exact tripwire moment: per-adapter inbound routing
+  (PR-S4-11c) must reintroduce `adapter_id`-scoped outbound dispatch in the
+  same commit that lifts the single-adapter boot refusal, not after.
 
 ## Alternatives considered
 
