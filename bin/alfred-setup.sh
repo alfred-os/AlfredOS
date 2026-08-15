@@ -700,8 +700,23 @@ _pepper_write_file() {
 # fallback for a pre-#591 .env that predates this key. `umask 077` covers
 # the temp file this update writes; .env itself is already 0600 from the
 # unconditional chmod near the top of this script. NEVER echoed.
+#
+# #594 R2: the anchors below are `^${pepper_env_key}=` — byte-identical to
+# `read_env_var`'s (`^${key}=`), with NO `[[:space:]]*` allowance. They used to
+# allow leading whitespace while the reader did not, which is the same
+# reader/writer divergence as the TOML-side root cause, in miniature: with
+# `  ALFRED_AUDIT_HASH_PEPPER=<operator value>` in .env, `read_env_var` returned
+# nothing (so `env_pepper` read empty and the DIFFERS drift-refusal could not
+# fire), while this writer's grep MATCHED and overwrote the operator's value in
+# place with the secrets.toml one. Narrowed the WRITER to the reader rather
+# than the reverse: `read_env_var` is shared by five other call sites in this
+# script and widening it would ripple. An indented .env entry is now
+# consistently invisible to both, and the append branch adds a proper column-0
+# line — which Compose's dotenv (last occurrence wins) then uses.
+# $pepper_env_key is [A-Z_] only, so it carries no ERE metacharacters and needs
+# no escaping analogous to $pepper_key_re.
 _pepper_write_env() {
-  if grep -qE "^[[:space:]]*${pepper_env_key}=" .env 2>/dev/null; then
+  if grep -qE "^${pepper_env_key}=" .env 2>/dev/null; then
     # #594 sec-001: the mirrored-from-secrets.toml value is NOT hex-constrained
     # (only the freshly-generated-via-openssl branch below is guaranteed
     # [0-9a-f]{64} — this branch carries forward whatever an operator hand-set
@@ -717,7 +732,7 @@ _pepper_write_env() {
     tmp_env="$(umask 077 && mktemp .env.XXXXXX)" || return 1
     if ! {
       while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$replaced" -eq 0 && "$line" =~ ^[[:space:]]*${pepper_env_key}= ]]; then
+        if [[ "$replaced" -eq 0 && "$line" =~ ^${pepper_env_key}= ]]; then
           printf '%s=%s\n' "$pepper_env_key" "$1"
           replaced=1
         else

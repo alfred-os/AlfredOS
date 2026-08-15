@@ -951,6 +951,50 @@ def test_bootstrap_appends_above_a_trailing_table_not_inside_it(
     )
 
 
+def test_bootstrap_does_not_clobber_an_indented_dotenv_pepper(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """An INDENTED ``.env`` entry is not silently overwritten by the file mirror.
+
+    Same reader/writer anchor divergence as the TOML-side root cause, in
+    miniature: ``read_env_var`` anchors ``^KEY=`` with no whitespace allowance,
+    while ``_pepper_write_env`` used to anchor ``^[[:space:]]*KEY=`` WITH one.
+    So an indented ``.env`` entry read back as empty — which meant the
+    ``DIFFERS`` drift-refusal could not fire (its own precondition shares the
+    reader) — and the file-only mirror branch then ran and rewrote the
+    operator's value IN PLACE with the secrets.toml one. Byte-for-byte the
+    sec-002-drift bug the round-3 fix closed on the file side, still open on the
+    ``.env`` side until now.
+
+    The writer is narrowed to the reader rather than the reverse: ``read_env_var``
+    is shared by five other call sites in the script and widening it would
+    ripple. The indented line is now consistently invisible to both, and the
+    append branch adds a proper column-0 line — which Compose's dotenv
+    (last occurrence wins) is what actually gets used.
+    """
+    (tmp_path / ".env").write_text(f"  ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "secrets.toml").write_text(f'"audit.hash_pepper" = "{_PEPPER_TWO}"\n')
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    env_text = (tmp_path / ".env").read_text()
+    assert f"  ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}" in env_text, (
+        "the operator's indented .env pepper was rewritten in place — the "
+        f"pre-#594-R2 silent-clobber bug:\n{env_text}"
+    )
+    # The effective (column-0, last-occurrence) value is the mirrored one, and
+    # both the shell reader and Compose agree on it.
+    assert _read_dotenv_pepper(tmp_path) == _PEPPER_TWO, (
+        f"no column-0 .env entry was appended for the mirror:\n{env_text}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Final-review fix 1: the "Bootstrapping operator identity" step's non-TTY
 # ALFRED_OPERATOR_NAME resolution must trim whitespace BEFORE applying the
