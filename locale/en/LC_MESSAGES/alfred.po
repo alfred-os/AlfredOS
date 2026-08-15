@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 03:00+0100\n"
+"POT-Creation-Date: 2026-08-15 08:46+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3627,23 +3627,32 @@ msgstr ""
 # keys were marked obsolete and dropped at compile time, leaving operators
 # with raw "tui.label_you:" keys. The extract now scans `src/alfred plugins`
 # and these are restored as active msgids with their English msgstr.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:145
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:146
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:158
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:159
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:173
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:205
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:233
-#: plugins/alfred_tui/tests/test_textual_app.py:373
-#: plugins/alfred_tui/tests/test_textual_app.py:399
-#: plugins/alfred_tui/tests/test_textual_app.py:451
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:302
+#: plugins/alfred_tui/tests/test_textual_app.py:380
+#: plugins/alfred_tui/tests/test_textual_app.py:406
+#: plugins/alfred_tui/tests/test_textual_app.py:458
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:261
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:332
+#: plugins/alfred_tui/tests/test_textual_app.py:354
+#: plugins/alfred_tui/tests/test_textual_app.py:737
+#: plugins/alfred_tui/tests/test_textual_app.py:744
+#: plugins/alfred_tui/tests/test_textual_app.py:763
+#: plugins/alfred_tui/tests/test_textual_app.py:776
+msgid "tui.turn_still_pending"
+msgstr "Still working on your last message..."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:341
 #: plugins/alfred_tui/tests/test_textual_app.py:297
 msgid "tui.label_you"
 msgstr "you"
@@ -3653,19 +3662,29 @@ msgstr "you"
 # msgstr is CORRECTED here — the old "; cancelled" clause is false under the
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
 # reply can still render).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:264
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:349
 #: plugins/alfred_tui/tests/test_textual_app.py:298
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:279
-#: plugins/alfred_tui/tests/test_textual_app.py:635
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:365
+#: plugins/alfred_tui/tests/test_textual_app.py:642
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:345
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:431
 msgid "tui.label_alfred"
 msgstr "alfred"
+
+# #594 Fix-10 -- live, non-logged elapsed-time counter + rate-limited
+# dropped-keystroke acknowledgement. Added by hand following the same
+# procedure Task 15 used for tui.turn_timeout/tui.turn_failed.* above: a
+# real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
+# reconciles the `#:` source-location comments.
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:502
+#: plugins/alfred_tui/tests/test_textual_app.py:693
+msgid "tui.thinking_elapsed"
+msgstr "Alfred is thinking... ({seconds}s)"
 
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""

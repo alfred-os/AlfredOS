@@ -328,6 +328,12 @@ async def test_second_enter_while_pending_is_ignored_and_preserves_typed_text() 
     is BELT-AND-BRACES for a queued event landing after the disable takes
     effect, and this test exercises that guard path directly regardless of the
     widget's interactive-disabled state.
+
+    Since #594 Fix-10 the FIRST such drop writes exactly one rate-limited
+    ``tui.turn_still_pending`` ack line (see the dedicated Fix-10 test section
+    below for the rate-limiting behaviour itself) — this test only asserts
+    that the drop is otherwise a genuine no-op: no session traffic, no typed
+    text loss, and no OTHER/additional transcript line.
     """
     session = _RecordingSession()
     app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
@@ -345,8 +351,9 @@ async def test_second_enter_while_pending_is_ignored_and_preserves_typed_text() 
         assert session.consumed == ["first message"], "second submission must not reach the session"
         assert session.flushed == 1
         lines_after = _plain_text(_log(app))
-        assert lines_after == lines_before, (
-            "no new line should be written for the ignored submission"
+        assert lines_after == lines_before + "\n" + t("tui.turn_still_pending"), (
+            "the only new content for the dropped submission must be the "
+            "one-time rate-limited ack line"
         )
         assert _user_input(app).value == "second message, should be ignored", (
             "typed text must NOT be cleared for a dropped submission"
@@ -636,3 +643,137 @@ async def test_flush_failure_paints_error_class_and_reraises() -> None:
         assert "transport internals" not in rendered, (
             "str(exc) must never reach the operator-facing transcript"
         )
+
+
+# ---------------------------------------------------------------------------
+# Live elapsed-time counter + rate-limited dropped-keystroke ack (#594 Fix-10).
+#
+# The operator's own calibration: the elapsed-time indicator must be a live
+# widget SEPARATE from the transcript (never a new RichLog line), while a
+# dropped second Enter DOES deserve exactly one RichLog line -- rate-limited
+# so mashing Enter doesn't spam the transcript.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_elapsed_counter_hidden_before_any_turn_starts() -> None:
+    """No turn yet: the live elapsed-time counter widget is not displayed."""
+    app = AlfredTuiApp(session=_RecordingSession())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = app.query_one("#turn_status", Static)
+        assert status.display is False
+
+
+@pytest.mark.asyncio
+async def test_elapsed_counter_shows_after_a_tick_and_is_never_logged() -> None:
+    """After >=1 real tick, the counter shows plausible elapsed text as a
+    LIVE WIDGET -- and that exact text never reaches the RichLog transcript.
+
+    This is the operator's explicit instruction ("shouldn't be logged, I
+    want an elapsed time counter that isn't logged") locked into a test:
+    the assertion on ``rendered_log`` below is what would fail if the
+    counter were implemented as a new ``RichLog`` line instead of the
+    separate ``#turn_status`` widget.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "hello alfred")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: turn genuinely pending
+
+        # Outlive at least one 1s tick of the elapsed-counter's repeating
+        # timer by a comfortable real-time margin.
+        await pilot.pause(1.1)
+
+        status = app.query_one("#turn_status", Static)
+        assert status.display is True
+        assert app._turn_elapsed_seconds >= 1, "at least one tick must have landed"
+        expected = t("tui.thinking_elapsed", seconds=app._turn_elapsed_seconds)
+        assert _plain_text_static(status) == expected
+
+        rendered_log = _plain_text(_log(app))
+    assert expected not in rendered_log, (
+        "the elapsed-time counter must never be written into the RichLog transcript"
+    )
+
+
+@pytest.mark.asyncio
+async def test_elapsed_counter_hidden_again_after_turn_ends() -> None:
+    """A normal reply ends the turn and re-hides the elapsed-time counter."""
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "hello alfred")
+        await pilot.pause(1.1)
+        status = app.query_one("#turn_status", Static)
+        assert status.display is True  # sanity: it was showing while pending
+
+        app.write_outbound("hello back from alfred")
+        await pilot.pause()
+
+        assert status.display is False
+
+
+@pytest.mark.asyncio
+async def test_second_drop_while_pending_writes_exactly_one_rate_limited_ack_line() -> None:
+    """The FIRST dropped Enter while a turn is pending writes ONE dim ack
+    line into the transcript; a SECOND dropped Enter during the SAME pending
+    turn adds no further line (rate-limited, #594 Fix-10).
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        assert app._turn_pending is True
+
+        # Second Enter while pending: the FIRST drop for this turn, earns
+        # exactly one ack line.
+        await _submit(app, "second message, dropped")
+        await pilot.pause()
+        rendered = _plain_text(_log(app))
+        assert rendered.count(t("tui.turn_still_pending")) == 1
+
+        # Third Enter while still pending: a SECOND drop for this same
+        # turn, must add no further line.
+        await _submit(app, "third message, dropped")
+        await pilot.pause()
+        rendered = _plain_text(_log(app))
+    assert rendered.count(t("tui.turn_still_pending")) == 1, (
+        "a second dropped keystroke in the same pending turn must not add another ack line"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_turn_gets_its_own_fresh_dropped_keystroke_ack() -> None:
+    """The one-time ack flag resets per-turn: a NEW pending turn earns its
+    own fresh ack rather than staying permanently exhausted after the first
+    ever drop (#594 Fix-10).
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        await _submit(app, "dropped during first turn")
+        await pilot.pause()
+        rendered = _plain_text(_log(app))
+        assert rendered.count(t("tui.turn_still_pending")) == 1
+
+        app.write_outbound("reply ending the first turn")
+        await pilot.pause()
+        assert app._turn_pending is False  # sanity: the first turn really ended
+
+        await _submit(app, "second message")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: a new turn is genuinely pending
+        await _submit(app, "dropped during second turn")
+        await pilot.pause()
+
+        rendered = _plain_text(_log(app))
+    assert rendered.count(t("tui.turn_still_pending")) == 2, (
+        "a NEW pending turn must get its own fresh one-time ack, not stay "
+        "permanently exhausted after the first ever drop"
+    )

@@ -413,6 +413,10 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     "tui.turn_failed.refused": ({}, ("could not process",)),
     "tui.turn_failed.budget_exhausted": ({}, ("budget",)),
     "tui.turn_failed.internal_error": ({}, ("went wrong",)),
+    # #594 Fix-10 -- live elapsed-time counter (non-logged, separate widget)
+    # + rate-limited dropped-keystroke acknowledgement (logged, once per turn).
+    "tui.thinking_elapsed": ({"seconds": 12}, ("thinking", "12")),
+    "tui.turn_still_pending": ({}, ("still working",)),
 }
 
 

@@ -120,6 +120,7 @@ class AlfredTuiApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #link_banner { dock: top; width: 100%; padding: 0 1; background: $warning; color: $text; }
+    #turn_status { dock: top; width: 100%; padding: 0 1; color: $text-muted; }
     #conversation_log { height: 1fr; border: solid white; padding: 1; }
     #user_input { dock: bottom; }
     #user_input.busy { background: $boost; color: $text-muted; }
@@ -137,6 +138,18 @@ class AlfredTuiApp(App[None]):
     # OWN loop — the wire pump shares that loop, so this is a DIRECT set,
     # never `call_from_thread` (same M1 discipline as `_link_banner_key`).
     _turn_pending: reactive[bool] = reactive[bool](default=False)
+
+    # Seconds elapsed since the current turn began, ticked by a repeating
+    # timer while `_turn_pending` is `True` (#594 Fix-10). `always_update`
+    # is deliberate: the reset-to-0 at the START of a new turn (see
+    # `on_input_submitted`) must repaint even when the PREVIOUS turn's own
+    # elapsed count happened to already be 0 (the very first turn of the
+    # app's lifetime) — without it, that one turn's counter would stay
+    # hidden until the first tick a full second later instead of showing
+    # "0s" immediately alongside the pending indicator. This drives a
+    # SEPARATE, non-logged widget (`#turn_status`) — deliberately NOT new
+    # `RichLog` lines; see `watch__turn_elapsed_seconds`.
+    _turn_elapsed_seconds: reactive[int] = reactive[int](default=0, always_update=True)
 
     BINDINGS = [  # noqa: RUF012  # Textual reads BINDINGS off the class; mutable is the documented contract.
         # Footer descriptions are operator-facing and go through t() per
@@ -156,10 +169,21 @@ class AlfredTuiApp(App[None]):
         # render input, and tearing one down on every reactive-diff cycle
         # would be spurious churn.
         self._turn_watchdog: Timer | None = None
+        # Same reasoning as `_turn_watchdog` above: the REPEATING timer handle
+        # that drives the live elapsed-time counter (#594 Fix-10) is plain
+        # instance state, not a reactive.
+        self._turn_elapsed_timer: Timer | None = None
         # How many watchdog-abandoned turns the client still owes exactly one
         # late completion signal (a reply or a `turn.failed`) for. See
         # `_resolve_pending_turn`.
         self._stale_turns_awaiting_signal: int = 0
+        # Whether the operator has already been told (via ONE dim log line)
+        # that their last keystroke was dropped because a turn is still
+        # pending. Reset to `False` at the start of each new turn (see
+        # `on_input_submitted`) so a NEW pending turn gets its own fresh
+        # one-time acknowledgement rather than being permanently exhausted
+        # after the first ever drop (#594 Fix-10).
+        self._drop_acked_for_current_turn: bool = False
 
     def compose(self) -> ComposeResult:
         # The reconnect banner is mounted hidden (``display=False``); it is shown
@@ -168,6 +192,14 @@ class AlfredTuiApp(App[None]):
         banner = Static(id="link_banner")
         banner.display = False
         yield banner
+        # The live elapsed-time counter (#594 Fix-10). Mounted hidden, same as
+        # the banner above; shown by ``watch__turn_elapsed_seconds`` while a
+        # turn is pending and re-hidden by ``_end_turn`` on completion. Docked
+        # top like the banner, but mounted AFTER it so the two stack rather
+        # than overlap (Textual docks in mount order along the same edge).
+        turn_status = Static(id="turn_status")
+        turn_status.display = False
+        yield turn_status
         yield Vertical(
             RichLog(id="conversation_log", highlight=True, markup=True, wrap=True),
             Input(placeholder=t("tui.input_placeholder"), id="user_input"),
@@ -201,10 +233,47 @@ class AlfredTuiApp(App[None]):
             self._turn_watchdog.stop()
             self._turn_watchdog = None
 
+    def _arm_turn_elapsed_timer(self) -> None:
+        """Start the repeating 1s tick driving the live elapsed-time counter.
+
+        Unlike ``_arm_turn_watchdog``'s one-shot ``set_timer`` (fires once,
+        at the timeout budget), this needs to fire every second for as long
+        as the turn is pending, so it uses ``set_interval`` instead. Any
+        prior timer is stopped first so a resubmission never accumulates
+        stray running timers.
+        """
+        self._stop_turn_elapsed_timer()
+        self._turn_elapsed_timer = self.set_interval(
+            1.0, self._tick_turn_elapsed, name="alfred-turn-elapsed-tick"
+        )
+
+    def _stop_turn_elapsed_timer(self) -> None:
+        if self._turn_elapsed_timer is not None:
+            self._turn_elapsed_timer.stop()
+            self._turn_elapsed_timer = None
+
+    def _tick_turn_elapsed(self) -> None:
+        """One second has passed on the current turn: bump the live counter.
+
+        The increment alone is enough to repaint: mutating a ``reactive``
+        drives ``watch__turn_elapsed_seconds`` on this same tick.
+        """
+        self._turn_elapsed_seconds += 1
+
     def _end_turn(self) -> None:
-        """Release the in-flight turn: stop the watchdog, re-enable + refocus input."""
+        """Release the in-flight turn: stop the watchdog + elapsed timer, hide
+        the elapsed-counter widget, re-enable + refocus input.
+
+        Hooking the elapsed-counter hide here (rather than in
+        ``watch__turn_pending``/``watch__turn_elapsed_seconds``) covers all
+        three ways a turn can end — a normal reply, a core-reported
+        ``turn.failed``, and a watchdog timeout — since all three already
+        funnel through this one method.
+        """
         self._stop_turn_watchdog()
+        self._stop_turn_elapsed_timer()
         self._turn_pending = False
+        self.query_one("#turn_status", Static).display = False
 
     def _on_turn_timeout(self) -> None:
         """No reply inside the budget: tell the operator and release the input.
@@ -243,6 +312,12 @@ class AlfredTuiApp(App[None]):
         but a queued event can still arrive after the disable takes effect, so
         this is belt-and-braces, not the primary guard. Nothing typed is lost.
 
+        The FIRST drop while a turn is pending writes ONE dim reassurance
+        line into the transcript (rate-limited, #594 Fix-10) — an operator
+        mashing Enter while Alfred is still thinking gets told once, not
+        spammed once per keystroke. ``_drop_acked_for_current_turn`` gates
+        this and is reset per-turn below.
+
         The line is echoed into the log so the operator sees their own turn
         (mirroring the Slice-1 affordance), THEN the turn is marked pending
         and the "thinking..." line written — in that order, so the echo
@@ -252,6 +327,11 @@ class AlfredTuiApp(App[None]):
         if not text:
             return
         if self._turn_pending:
+            if not self._drop_acked_for_current_turn:
+                self.query_one("#conversation_log", RichLog).write(
+                    f"[dim]{t('tui.turn_still_pending')}[/]"
+                )
+                self._drop_acked_for_current_turn = True
             return
         log = self.query_one("#conversation_log", RichLog)
         # ``text`` is operator-typed and echoed into a ``markup=True`` RichLog;
@@ -261,8 +341,14 @@ class AlfredTuiApp(App[None]):
         log.write(f"[bold cyan]{t('tui.label_you')}[/]: {escape(text)}")
         event.input.value = ""
         self._turn_pending = True  # -> watcher: disable + .busy
+        # Fresh per-turn state (#594 Fix-10): the elapsed counter must not
+        # carry over the PREVIOUS turn's count, and a new turn earns its own
+        # one-time dropped-keystroke acknowledgement.
+        self._turn_elapsed_seconds = 0
+        self._drop_acked_for_current_turn = False
         log.write(f"[dim]{t('tui.thinking')}[/]")
         self._arm_turn_watchdog()
+        self._arm_turn_elapsed_timer()
         try:
             await self._session.consume_user_input(text)
             await self._session.flush_keystroke_batch()
@@ -394,6 +480,27 @@ class AlfredTuiApp(App[None]):
             return
         banner.update(t(banner_key))
         banner.display = True
+
+    def watch__turn_elapsed_seconds(self, elapsed: int) -> None:
+        """Paint the live elapsed-time counter while a turn is in flight.
+
+        Deliberately a SEPARATE ``#turn_status`` ``Static`` widget, not a new
+        ``RichLog`` line: the operator explicitly did not want this
+        informational tick logged into the transcript (#594 Fix-10) — see
+        ``test_elapsed_counter_shows_after_a_tick_and_is_never_logged``.
+
+        Guarded on ``_turn_pending``: a reactive-diff firing outside a
+        pending turn (e.g. Textual's own ``init=True`` watcher call at mount
+        time, which fires once with the default value ``0`` while
+        ``_turn_pending`` is still ``False``) must not paint or reveal the
+        widget. Hiding it again on completion is ``_end_turn``'s job, not
+        this watcher's — this method only ever shows/updates, never hides.
+        """
+        if not self._turn_pending:
+            return
+        status = self.query_one("#turn_status", Static)
+        status.update(t("tui.thinking_elapsed", seconds=elapsed))
+        status.display = True
 
     def watch__turn_pending(self, pending: bool) -> None:  # noqa: FBT001 - Textual's watch_<name>(value) calling convention is positional; not this app's API to redesign.
         """Disable + dim the input while a turn is in flight; restore on completion.
