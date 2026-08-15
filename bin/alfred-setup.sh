@@ -946,9 +946,17 @@ _pepper_bootstrap() {
   if ! _pepper_refuse_unusable_shapes; then
     return 1
   fi
-  local env_pepper file_pepper pepper_value raw_env_pepper raw_env_pepper_peeled
+  local env_pepper file_pepper pepper_value raw_env_pepper raw_env_pepper_peeled raw_file_pepper
   env_pepper="$(read_env_var "$pepper_env_key")"
   file_pepper="$(_pepper_from_file)"
+  # #594 Task S2 review round 3: keep the UNTRIMMED file-side capture too.
+  # _pepper_from_file's sed already consumes the TOML quote delimiters (its
+  # own capture group), so — unlike the .env leg — there is no "delimiter
+  # vs embedded" ambiguity to resolve on this side; the only risk is the
+  # `trim_ws` two lines down silently discarding leading/trailing
+  # whitespace BEFORE the graph-check below ever sees it. See the raw_file_
+  # pepper check after the .env-leg raw checks.
+  raw_file_pepper="$file_pepper"
   # The pepper is hex-only; surrounding whitespace in a hand-edited .env is
   # never part of the value. Trim before comparing so a padded-but-identical
   # pair does not trip the drift refusal below.
@@ -982,10 +990,42 @@ _pepper_bootstrap() {
       raw_env_pepper_peeled="${raw_env_pepper#\'}"
       raw_env_pepper_peeled="${raw_env_pepper_peeled%\'}" ;;
   esac
+  # #594 Task S2 review round 3: whitespace immediately INSIDE the
+  # delimiter pair (`KEY="hex "`, `KEY=" hex"`) survives the peel above —
+  # there's no quote left there for the *[\"\']* check to catch — AND is
+  # invisible to `_pepper_refuse_unsafe_value`'s graph check below, because
+  # that check runs on `env_pepper`, which gets its OWN independent
+  # `trim_ws` earlier in this function. Compose forwards that whitespace
+  # unchanged (it strips only the delimiter quotes, never interior
+  # content), so a leading/trailing-inside-the-quotes space is a real,
+  # silent divergence: this script would mirror the TRIMMED value while
+  # alfred-core receives the padded one. Interior (non-edge) whitespace is
+  # NOT re-checked here — it already fails the standard graph check below,
+  # since trim_ws never touches the middle of a string.
   case "$raw_env_pepper_peeled" in
     *[\"\']*)
       printf 'ERROR: %s\n' \
         "the audit.hash_pepper value in .env (${pepper_env_key}) contains a \" or ' character that is not acting as the value's own outer delimiter. This script's .env reader silently deletes every quote character before the value is ever compared or mirrored, but Compose's dotenv parser only strips a single MATCHED surrounding pair and leaves an embedded quote in place — so alfred-core would receive a different value than what this script would write into ${target_file}. alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in .env to a value without an embedded \" or ' character, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+    [[:space:]]*|*[[:space:]])
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in .env (${pepper_env_key}) has leading or trailing whitespace inside its quote delimiters. Compose's dotenv parser preserves that whitespace — it only strips the surrounding quote characters, never interior content — but this script trims it away before comparing or mirroring, so alfred-core would receive a padded value while host-side tooling would end up with the trimmed one. alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in .env without leading/trailing whitespace inside the quotes, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+  esac
+
+  # #594 Task S2 review round 3 (same bug, file leg): the mirror-image gap.
+  # `file_pepper`'s trim above (needed for the DIFFERS-comparison forgiving
+  # of incidental padding) runs BEFORE `_pepper_refuse_unsafe_value` below
+  # ever sees it, so leading/trailing whitespace inside a TOML string —
+  # which `tomllib` (the real consumer) decodes as part of the value,
+  # verbatim, not trimmed — would be silently laundered out of what this
+  # script compares and mirrors into .env. Check the UNTRIMMED capture.
+  # Interior (non-edge) whitespace is, again, already caught by the
+  # standard graph check on the trimmed value below.
+  case "$raw_file_pepper" in
+    [[:space:]]*|*[[:space:]])
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in ${target_file} has leading or trailing whitespace inside its TOML string. tomllib (the real consumer, via SecretBroker) decodes that whitespace as part of the value, but this script trims it away before comparing or mirroring — so host-side 'alfred' commands (reading ${target_file} through the broker) would receive a padded value while .env would end up with the trimmed one. alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in ${target_file} without leading/trailing whitespace inside the quotes, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
       return 1 ;;
   esac
 

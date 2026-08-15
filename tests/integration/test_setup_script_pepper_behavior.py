@@ -1200,6 +1200,104 @@ def test_bootstrap_seeds_a_fresh_pepper_when_the_dotenv_value_is_an_empty_quoted
     )
 
 
+@pytest.mark.parametrize(
+    "dotenv_line",
+    [
+        pytest.param(
+            f'ALFRED_AUDIT_HASH_PEPPER="{_PEPPER_ONE} "', id="trailing-space-double-quoted"
+        ),
+        pytest.param(
+            f"ALFRED_AUDIT_HASH_PEPPER=' {_PEPPER_ONE}'", id="leading-space-single-quoted"
+        ),
+    ],
+)
+def test_bootstrap_refuses_a_dotenv_pepper_with_whitespace_inside_the_quote_delimiters(
+    bash_available: str,
+    tmp_path: Path,
+    dotenv_line: str,
+) -> None:
+    """#594 Task S2 review round 3 finding: whitespace immediately INSIDE a
+    matched quote pair must still refuse, even though the pair itself is a
+    legitimate delimiter (see the ``_matched_quote_pair`` accept-test above).
+
+    The round-3 peel logic correctly stops treating ``KEY="hex"`` as unsafe
+    — but ``raw_env_pepper`` is ``trim_ws``'d BEFORE the peel runs, so that
+    trim only strips whitespace OUTSIDE any quotes; whitespace trapped
+    INSIDE the pair (``KEY="hex "``) survives the peel with no quote left
+    for the quote-check to catch, and is invisible to
+    ``_pepper_refuse_unsafe_value``'s ``[[:graph:]]`` check too, because
+    that check runs on ``env_pepper``, which gets its OWN independent
+    ``trim_ws`` earlier in the function — silently laundering the padding
+    before the safety gate ever sees it. Compose forwards that whitespace
+    UNCHANGED (it strips only the delimiter quotes, never interior
+    content), so this is a real, silent two-HMAC-planes divergence: this
+    script would mirror the trimmed value while alfred-core receives the
+    padded one.
+    """
+    (tmp_path / ".env").write_text(f"{dotenv_line}\n")
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        "whitespace inside a quote-delimited .env pepper must refuse, not exit 0:\n"
+        f"stdout: {result.stdout}"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) is None, (
+        "secrets.toml was written despite the refusal"
+    )
+    assert "Seeded" not in result.stdout and "Mirrored" not in result.stdout, (
+        f"a success banner leaked despite the refusal: {result.stdout!r}"
+    )
+    assert _PEPPER_ONE not in result.stdout and _PEPPER_ONE not in result.stderr, (
+        "the refusal echoed the pepper value itself — it must report only the "
+        f"offending CONDITION: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_bootstrap_refuses_a_secrets_toml_pepper_with_whitespace_inside_its_toml_string(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """#594 Task S2 review round 3 finding (file leg, mirror image of the
+    ``.env``-leg test above): whitespace inside a TOML basic string's
+    delimiters must refuse, not silently mirror the trimmed value.
+
+    ``_pepper_from_file``'s sed capture already consumes the TOML quote
+    characters, so there is no "delimiter vs. embedded" ambiguity here as
+    there is on the ``.env`` leg — but ``file_pepper`` gets its own
+    ``trim_ws`` (needed so a padded-but-otherwise-identical env/file pair
+    doesn't spuriously trip the DIFFERS refusal) BEFORE
+    ``_pepper_refuse_unsafe_value``'s graph check ever runs on it.
+    ``tomllib`` (the real consumer, via ``SecretBroker``) decodes a TOML
+    basic string's content verbatim, whitespace included — it does not
+    trim it — so a value like ``"audit.hash_pepper" = "<hex> "`` would
+    silently diverge: host-side ``alfred`` commands (reading the file via
+    the broker) get the padded value, while this script would mirror the
+    trimmed one into ``.env``.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(f'"audit.hash_pepper" = "{_PEPPER_ONE} "\n')
+    before = target.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        "whitespace inside a secrets.toml pepper's TOML string must refuse, not exit 0:\n"
+        f"stdout: {result.stdout}"
+    )
+    assert target.read_bytes() == before, "secrets.toml was modified despite the refusal"
+    assert _read_dotenv_pepper(tmp_path) == "", ".env was written despite the refusal"
+    assert "Seeded" not in result.stdout and "Mirrored" not in result.stdout, (
+        f"a success banner leaked despite the refusal: {result.stdout!r}"
+    )
+    assert _PEPPER_ONE not in result.stdout and _PEPPER_ONE not in result.stderr, (
+        "the refusal echoed the pepper value itself — it must report only the "
+        f"offending CONDITION: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
 def test_bootstrap_appends_above_a_trailing_table_not_inside_it(
     bash_available: str,
     openssl_available: str,
