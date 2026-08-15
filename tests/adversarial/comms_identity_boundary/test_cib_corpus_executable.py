@@ -345,31 +345,43 @@ async def test_cib_009_turn_failed_stage_coarsening_hides_which_control_fired() 
     from alfred.security.dlp import OutboundCanaryTripped
     from tests.unit.comms_mcp.test_real_turn_adapter_dispatch import (
         _adapter,
+        _FakeAuditHashBroker,
         _Orchestrator,
         _Pool,
         _prepared,
         _RecordingSender,
     )
 
-    # Leg A: downgrade_denied. `ingest` already decided this upstream of the
-    # turn -- `dispatch` short-circuits on the bare `_HaltNoReply` outcome
-    # without ever calling the orchestrator.
-    sender_a = _RecordingSender()
-    adapter_a = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender_a)
-    await adapter_a.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+    # Leg B's `_emit_refused` (see below) hashes `canonical_user_id` via
+    # `audit_hash`, which raises `AuditHashBrokerNotWiredError` unless a
+    # broker is wired first (real_turn_adapter.py's FOLD-R12 invariant).
+    # Unlike cib-001..008, this test doesn't drive `process_inbound_message`
+    # (which wires the real broker as a production side effect) -- wire an
+    # explicit fake here so this test is self-sufficient and does not depend
+    # on state a preceding test in this file happened to leave behind.
+    audit_hash.set_broker_for_test(_FakeAuditHashBroker())
+    try:
+        # Leg A: downgrade_denied. `ingest` already decided this upstream of the
+        # turn -- `dispatch` short-circuits on the bare `_HaltNoReply` outcome
+        # without ever calling the orchestrator.
+        sender_a = _RecordingSender()
+        adapter_a = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender_a)
+        await adapter_a.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
 
-    # Leg B: dlp_canary_tripped. This halt is decided INSIDE `dispatch`'s
-    # `async with lock:` turn-running block, when the orchestrator's own call
-    # raises `OutboundCanaryTripped` -- so it is driven via a real `_prepared()`
-    # turn rather than a pre-built `_HaltNoReply`.
-    sender_b = _RecordingSender()
-    pool_b = _Pool()
-    adapter_b = _adapter(
-        orchestrator=_Orchestrator(exc=OutboundCanaryTripped(token="canary-oracle-probe")),  # noqa: S106
-        sender=sender_b,
-        pool=pool_b,
-    )
-    await adapter_b.dispatch(_prepared())  # deterministic halt -- must NOT raise
+        # Leg B: dlp_canary_tripped. This halt is decided INSIDE `dispatch`'s
+        # `async with lock:` turn-running block, when the orchestrator's own call
+        # raises `OutboundCanaryTripped` -- so it is driven via a real `_prepared()`
+        # turn rather than a pre-built `_HaltNoReply`.
+        sender_b = _RecordingSender()
+        pool_b = _Pool()
+        adapter_b = _adapter(
+            orchestrator=_Orchestrator(exc=OutboundCanaryTripped(token="canary-oracle-probe")),  # noqa: S106
+            sender=sender_b,
+            pool=pool_b,
+        )
+        await adapter_b.dispatch(_prepared())  # deterministic halt -- must NOT raise
+    finally:
+        audit_hash.reset_for_test()
 
     assert len(sender_a.turn_states_sent) == 1
     assert len(sender_b.turn_states_sent) == 1
