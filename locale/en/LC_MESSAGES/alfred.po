@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 02:05+0100\n"
+"POT-Creation-Date: 2026-08-15 03:00+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1643,7 +1643,7 @@ msgstr ""
 "it. Refusing to boot."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:221
-#: src/alfred/comms_mcp/real_turn_adapter.py:587
+#: src/alfred/comms_mcp/real_turn_adapter.py:599
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
@@ -1652,7 +1652,7 @@ msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:254
-#: src/alfred/comms_mcp/real_turn_adapter.py:520
+#: src/alfred/comms_mcp/real_turn_adapter.py:532
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
