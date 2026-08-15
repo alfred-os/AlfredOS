@@ -8,9 +8,13 @@
 #                       stays up and shares the `alfred_run` socket volume.
 #                       `docker compose run --rm alfred-core <cmd>` still works
 #                       for one-off subcommands (migrate, user add, chat, …) —
-#                       `run` overrides `command`. Requires a seeded
-#                       audit.hash_pepper (bin/alfred-setup.sh) before `up -d`,
-#                       or the daemon refuse-boots and (under restart) crash-loops.
+#                       `run` overrides `command`. Boot-to-healthy needs a
+#                       migrated database + a seeded operator
+#                       (bin/alfred-setup.sh) — without either the daemon
+#                       refuse-boots and (under restart) crash-loops.
+#                       `audit.hash_pepper` resolves lazily on first hash use
+#                       and does NOT gate boot (see the alfred-core service
+#                       block below for detail).
 #
 # The compose service is named exactly `alfred-postgres` because the i18n
 # string `hint.is_compose_up` advertises that name to operators.
