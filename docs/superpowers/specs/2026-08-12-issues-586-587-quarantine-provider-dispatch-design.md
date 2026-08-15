@@ -151,9 +151,10 @@ call sites and reviewing them together is cheaper than sequencing):
   deployment that doesn't set it — additive, non-breaking).
 - `daemon_runtime.py` resolves this alongside the existing model resolution,
   threads it to the spawned quarantine child via spawn env (mirroring
-  `ALFRED_QUARANTINE_MODEL`'s existing pattern exactly — new env var name
-  TBD at implementation time, e.g. reusing `ALFRED_QUARANTINE_PROVIDER`
-  end-to-end, verify no collision with the operator-facing setting name).
+  `ALFRED_QUARANTINE_MODEL`'s existing pattern exactly — **as implemented**,
+  `ALFRED_QUARANTINE_PROVIDER` is reused end-to-end, spawn env included; no
+  collision with the operator-facing setting name, since it names the same
+  value at both ends of the same trust boundary).
 - `brokered_egress.py`'s provider-construction seam (currently a hardcoded
   `AnthropicProvider.from_settings(...)` call) becomes a small branch: read
   the threaded provider id, construct `AnthropicProvider` or

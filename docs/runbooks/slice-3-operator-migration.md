@@ -308,9 +308,13 @@ check below. On the compose stack it is doubly inert:
 bind-mounted (the service mounts only `alfred_state_git` and
 `alfred_run`) — so the variable never reaches the container and
 `Settings.primary_provider` always takes its `deepseek` default there.
+`ALFRED_FALLBACK_PROVIDER` (`Settings.fallback_provider`, default
+`anthropic`) has the identical gap, for the identical reason: also
+absent from `alfred-core`'s forwarded environment, also read only by
+`alfred status` and the separation check, never by `build_router`.
 See [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md);
 [#590](https://github.com/alfred-os/AlfredOS/issues/590) tracks wiring
-the field to the router.
+both fields to the router.
 
 The bootstrap-time check in
 `alfred.bootstrap.quarantine.assert_provider_separation` refuses to
