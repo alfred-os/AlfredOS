@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 14:25+0100\n"
+"POT-Creation-Date: 2026-08-15 20:48+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1643,7 +1643,7 @@ msgstr ""
 "it. Refusing to boot."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:221
-#: src/alfred/comms_mcp/real_turn_adapter.py:619
+#: src/alfred/comms_mcp/real_turn_adapter.py:700
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
@@ -1652,15 +1652,15 @@ msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:254
-#: src/alfred/comms_mcp/real_turn_adapter.py:548
+#: src/alfred/comms_mcp/real_turn_adapter.py:603
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:352
+#: src/alfred/comms_mcp/real_turn_adapter.py:398
 msgid "comms.inbound.real_turn.extraction_refused"
 msgstr "Sorry, I couldn't process that message. Please try rephrasing."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:360
+#: src/alfred/comms_mcp/real_turn_adapter.py:407
 msgid "comms.inbound.real_turn.unexpected_extract_kind"
 msgstr "Unexpected extraction result kind reached the real-turn adapter."
 
@@ -3636,7 +3636,7 @@ msgstr "Quit"
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:444
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:459
 #: plugins/alfred_tui/tests/test_textual_app.py:380
 #: plugins/alfred_tui/tests/test_textual_app.py:406
 #: plugins/alfred_tui/tests/test_textual_app.py:462
@@ -3646,7 +3646,7 @@ msgstr ""
 "No response within {seconds}s. Try again, or check the daemon logs if it "
 "recurs."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:474
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:489
 #: plugins/alfred_tui/tests/test_textual_app.py:354
 #: plugins/alfred_tui/tests/test_textual_app.py:941
 #: plugins/alfred_tui/tests/test_textual_app.py:948
@@ -3655,7 +3655,7 @@ msgstr ""
 msgid "tui.turn_still_pending"
 msgstr "Still working on your last message..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:483
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:498
 #: plugins/alfred_tui/tests/test_textual_app.py:297
 msgid "tui.label_you"
 msgstr "you"
@@ -3666,17 +3666,17 @@ msgstr "you"
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
 # reply can still render; tui.alfred_error's msgstr was later re-punctuated
 # by #594 R7 to match the tui.* convention -- see that msgid below).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:491
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:506
 #: plugins/alfred_tui/tests/test_textual_app.py:298
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:507
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:522
 #: plugins/alfred_tui/tests/test_textual_app.py:846
 msgid "tui.alfred_error"
 msgstr "Alfred error: {error}."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:579
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:601
 msgid "tui.label_alfred"
 msgstr "alfred"
 
@@ -3685,7 +3685,7 @@ msgstr "alfred"
 # procedure Task 15 used for tui.turn_timeout/tui.turn_failed.* above: a
 # real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
 # reconciles the `#:` source-location comments.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:650
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:672
 #: plugins/alfred_tui/tests/test_textual_app.py:897
 msgid "tui.thinking_elapsed"
 msgstr "Alfred is thinking... ({seconds}s)"

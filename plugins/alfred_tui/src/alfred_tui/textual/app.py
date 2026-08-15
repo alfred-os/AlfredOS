@@ -308,13 +308,28 @@ class AlfredTuiApp(App[None]):
         behaviour (one late signal ends the current turn early), which is
         bounded to one turn instead of being permanent. One window is the
         right length in BOTH directions: the core serializes a session's
-        turns behind a per-``(persona, slug)`` mutex and starts sending each
-        turn's signal only after releasing it (see ``_resolve_pending_turn``),
-        so a late signal that IS still coming arrives before the next turn's
-        own signal — and the next turn cannot outlive one more watchdog
-        window without arming its own debt. Longer would widen the
-        mis-attribution surface; shorter would risk discarding a genuine late
-        signal.
+        turns behind a per-``(persona, slug)`` mutex, and — since arc-001's
+        ordering barrier (``RealTurnOrchestratorAdapter.
+        _await_turn_ordering_barrier``, PR #594 Task S1) — starts sending
+        EVERY turn's signal (not just a turn that ran real work) only after
+        releasing that mutex (see ``_resolve_pending_turn``), so a late
+        signal that IS still coming arrives before the next turn's own
+        signal — and the next turn cannot outlive one more watchdog window
+        without arming its own debt. Longer would widen the mis-attribution
+        surface; shorter would risk discarding a genuine late signal.
+
+        Worth stating explicitly, because it is easy to over-read this
+        counter as an ORDERING fix rather than a STATE one: it is
+        order-INSENSITIVE by construction (whichever signal arrives first
+        discharges a debt, whichever arrives second ends the turn — see
+        ``_resolve_pending_turn``), so it self-corrects state regardless of
+        arrival order. It does NOT correct which line prints first in the
+        transcript — that is purely a function of the core's send order.
+        arc-001 (PR #594 Task S1) was a real bug where two ingest-resolved
+        outcomes could signal out of order; this counter neither detected
+        nor could have repaired it, because it does not look at order at
+        all. It had to be fixed server-side, in
+        ``RealTurnOrchestratorAdapter.dispatch``.
         """
         self._stale_turns_awaiting_signal += 1
         self._stale_debt_expiries.append(
@@ -523,24 +538,31 @@ class AlfredTuiApp(App[None]):
 
         What IS available, with no wire tag at all, is a COUNT. The core
         serializes one session's turns behind a per-(persona, slug) mutex
-        (``RealTurnOrchestratorAdapter.dispatch``, FOLD-R1) and only starts
-        sending a turn's notify/reply AFTER releasing that mutex, with no
-        ``await`` in between — so a later turn cannot even begin server-side
-        processing, let alone have ITS OWN signal reach the wire, until every
-        earlier turn's signal for that session has already been sent. That
-        guarantees the ``_stale_turns_awaiting_signal`` late signals — one per
-        watchdog-abandoned turn — arrive, in order, before the CURRENTLY
-        pending turn's own signal. Consume that backlog first, without
-        touching ``_turn_pending``/the watchdog; only once it is empty does a
-        completion signal end the turn that is actually still pending.
+        (``RealTurnOrchestratorAdapter.dispatch``, FOLD-R1) for the
+        ``_PreparedTurn`` outcome, and — since arc-001's ordering barrier
+        (``_await_turn_ordering_barrier``, PR #594 Task S1) — takes an
+        acquire-then-release pass over that SAME mutex for the two
+        ingest-resolved outcomes (``_HaltNoReply`` / ``_RefusalReply``) that
+        carry no turn work of their own. Either way, a turn's notify/reply is
+        only initiated AFTER that turn's hold on the mutex has released,
+        with no ``await`` in between — so a later same-key turn's own signal
+        cannot reach the wire until every earlier same-key turn's signal has
+        already been sent. That guarantees the ``_stale_turns_awaiting_signal``
+        late signals — one per watchdog-abandoned turn — arrive, in order,
+        before the CURRENTLY pending turn's own signal. Consume that backlog
+        first, without touching ``_turn_pending``/the watchdog; only once it
+        is empty does a completion signal end the turn that is actually
+        still pending.
 
         This is a CROSS-MODULE contract, not something enforceable from this
         file alone: see the ``DOWNSTREAM CONTRACT`` note on
         ``real_turn_adapter._TurnFailed`` and the matching note on
         ``RealTurnOrchestratorAdapter.dispatch``
         (``src/alfred/comms_mcp/real_turn_adapter.py``), and the regression
-        test that would fail if that ordering ever regressed:
-        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
+        tests that would fail if that ordering ever regressed:
+        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``,
+        ``test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn``, and
+        ``test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn``, all
         in ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``.
 
         That ordering contract says WHEN a late signal arrives relative to the

@@ -74,7 +74,12 @@ async def test_dispatch_refusal_sends_benign_reply() -> None:
     sender = _RecordingSender()
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
     await adapter.dispatch(
-        _RefusalReply(reply="benign", adapter_id="tui", target_platform_id="plat-9")
+        _RefusalReply(
+            reply="benign",
+            adapter_id="tui",
+            target_platform_id="plat-9",
+            canonical_user_id="u-1",
+        )
     )
     assert len(sender.sent) == 1
     assert sender.sent[0].body[0] == "benign"
@@ -83,7 +88,9 @@ async def test_dispatch_refusal_sends_benign_reply() -> None:
 async def test_dispatch_halt_sends_nothing() -> None:
     sender = _RecordingSender()
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
-    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+    await adapter.dispatch(
+        _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+    )
     assert sender.sent == []
 
 
@@ -201,7 +208,12 @@ async def test_dispatch_refusal_send_failure_reraises_without_audit() -> None:
     )
     with pytest.raises(ConnectionError):
         await adapter.dispatch(
-            _RefusalReply(reply="benign", adapter_id="tui", target_platform_id="plat-9")
+            _RefusalReply(
+                reply="benign",
+                adapter_id="tui",
+                target_platform_id="plat-9",
+                canonical_user_id="u-1",
+            )
         )
     refusal_rows = [
         r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
@@ -267,6 +279,71 @@ async def test_dispatch_bad_ingested_raises_runtime_error() -> None:
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"))
     with pytest.raises(RuntimeError):
         await adapter.dispatch(object())
+
+
+async def test_halt_no_reply_with_no_bound_sender_halts_loudly_without_raising() -> None:
+    """CodeRabbit finding, folded into arc-001's fix (root-cause report §2,
+    PR #594 Task S1): an unbound sender must NOT turn a DETERMINISTIC halt
+    into a re-raise.
+
+    Before this fix ``dispatch`` called the raising ``_require_sender()``
+    unconditionally at the top, so a ``_HaltNoReply`` dispatched before
+    ``bind_outbound_sender`` ran would raise ``RuntimeError`` — which the
+    forwarded path's bounded-replay envelope would treat as a transient
+    fault and retry up to 5 times, re-writing the identical
+    ``downgrade_denied``/``downgrade_malformed`` audit row on every attempt.
+    Exactly the replay-amplification ``_HaltNoReply`` exists to prevent.
+
+    Unreachable in production today (``bind_outbound_sender`` runs
+    synchronously before the pump starts,
+    ``src/alfred/cli/daemon/_comms_boot.py:1186-1187``) — this is a
+    genuinely separate, narrower concern from arc-001's ordering bug that
+    happens to live in the same 8 lines, not the ordering bug itself. See
+    the sibling test below: ``_RefusalReply`` keeps the raising
+    ``_require_sender()`` deliberately, because it has a reply to deliver.
+    """
+    adapter = RealTurnOrchestratorAdapter(
+        orchestrator=_Orchestrator(answer="unused"),
+        working_memory_pool=_Pool(),
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
+        audit_writer=_RecordingAudit(),
+        outbound_dlp=identity_outbound_dlp(),
+        extractor_bridge=SimpleNamespace(),
+    )
+    with structlog.testing.capture_logs() as captured:
+        await adapter.dispatch(  # must NOT raise
+            _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+        )
+    assert any(
+        entry.get("event") == "comms.daemon_runtime.sender_unbound"
+        and entry.get("log_level") == "error"
+        for entry in captured
+    ), captured
+
+
+async def test_refusal_reply_with_no_bound_sender_still_raises() -> None:
+    """Sibling to the halt test above: ``_RefusalReply`` keeps
+    ``_require_sender()`` DELIBERATELY — it has a reply to DELIVER, so
+    fail-loud (raise) is the correct posture there, unlike the halt leg's
+    must-not-amplify-a-replay posture.
+    """
+    adapter = RealTurnOrchestratorAdapter(
+        orchestrator=_Orchestrator(answer="unused"),
+        working_memory_pool=_Pool(),
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
+        audit_writer=_RecordingAudit(),
+        outbound_dlp=identity_outbound_dlp(),
+        extractor_bridge=SimpleNamespace(),
+    )
+    with pytest.raises(RuntimeError):
+        await adapter.dispatch(
+            _RefusalReply(
+                reply="benign",
+                adapter_id="tui",
+                target_platform_id="plat-9",
+                canonical_user_id="u-1",
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +427,9 @@ class _HangingNotifySender:
 async def test_dispatch_halt_notifies_client_turn_failed() -> None:
     sender = _RecordingSender()
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
-    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+    await adapter.dispatch(
+        _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+    )
     assert sender.sent == []  # still no TEXT reply
     assert sender.turn_states_sent == [TurnFailedNotification(stage="refused")]
 
@@ -510,7 +589,9 @@ async def test_notify_timeout_is_bounded_and_does_not_hang_the_halt(monkeypatch)
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
     started = time.monotonic()
     with structlog.testing.capture_logs() as captured:
-        await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+        await adapter.dispatch(
+            _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+        )
     elapsed = time.monotonic() - started
     assert any(
         entry.get("event") == "comms.inbound.real_turn.turn_failed_notify_timeout"
@@ -623,6 +704,26 @@ class _OrderProvingOrchestrator:
         return "turn 2 answer"
 
 
+class _ParkThenSucceedOrchestrator:
+    """Turn 1's ``handle_user_message`` call parks mid-processing (holding the
+    per-key turn lock) until explicitly released, then SUCCEEDS — unlike
+    ``_OrderProvingOrchestrator`` above, whose turn 1 FAILS. The
+    arc-001 ordering-barrier tests below need turn 1 to reach ``_send`` (not
+    ``_notify_turn_failed``), so the event-KIND assertion (``send`` vs
+    ``notify``) actually distinguishes "turn 1 signalled" from "turn 2
+    signalled" rather than both legs producing the same kind of sender call.
+    """
+
+    def __init__(self) -> None:
+        self.turn_1_started = asyncio.Event()
+        self.release_turn_1 = asyncio.Event()
+
+    async def handle_user_message(self, *, user, content, working_memory, egress_context=None):
+        self.turn_1_started.set()
+        await self.release_turn_1.wait()
+        return "turn 1 answer"
+
+
 class _OrderRecordingSender:
     """Records BOTH ``send_outbound`` and ``send_turn_state`` calls into ONE
     ordered log, so cross-call-type ordering (an earlier turn's ``turn.failed``
@@ -655,7 +756,7 @@ def _prepared_with_content(text: str) -> _PreparedTurn:
 
 
 async def test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent() -> None:
-    """Cross-module proof for a client-side assumption (#594 follow-up finding).
+    """Cross-module proof for a client-side assumption — the IN-LOCK control case.
 
     ``AlfredTuiApp._resolve_pending_turn`` (``plugins/alfred_tui/src/alfred_tui/
     textual/app.py``) treats a stale/late completion signal for a
@@ -663,14 +764,30 @@ async def test_dispatch_notifies_same_key_turns_in_submission_order_even_when_co
     still-pending turn's own signal — with NO wire-level correlation of any
     kind available to actually distinguish them. That assumption rests
     entirely on THIS module: the per-``(persona, slug)`` turn lock (FOLD-R1)
-    serializes two same-key turns' PROCESSING, and — since PR #594's
-    lock-boundary move — the notify/send call for each turn only starts AFTER
-    that turn's own ``async with lock:`` block has exited, with no ``await``
-    in between. See the matching contract comment on ``dispatch`` /
-    ``_TurnFailed`` / ``_TurnSucceeded`` above: do not add an ``await``
-    between lock release and notify/send initiation, and do not loosen the
-    per-key lock to allow same-key concurrency, without revisiting this test
-    and the TUI's debt-counter design.
+    serializes two same-key turns' PROCESSING, and the notify/send call for
+    each turn only starts AFTER that turn's own ``async with lock:`` block
+    has exited, with no ``await`` in between.
+
+    IMPORTANT SCOPE NOTE: this test drives two ``_PreparedTurn`` outcomes —
+    both turns run real (albeit stubbed) turn work UNDER the lock. It is the
+    control case (root-cause report's EXP3): it proves lock-boundary
+    ordering holds when both turns actually touch the lock, but it does
+    **not**, on its own, prove the cross-module contract for the whole
+    ``ingest`` union — it never exercises an ingest-resolved outcome
+    (``_HaltNoReply`` / ``_RefusalReply``). Before arc-001's fix (PR #594
+    Task S1) those two outcomes never touched the lock at all, so THIS test
+    passing was consistent with the contract being false for them — which is
+    exactly what happened (see root-cause-arc-001-turn-order-race.md). Do
+    NOT treat this test alone as proof of the contract; the two tests below,
+    ``test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn`` and
+    ``test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn``, cover
+    the ingest-resolved outcomes and are what actually pin arc-001 closed.
+
+    See the matching contract comment on ``dispatch`` / ``_TurnFailed`` /
+    ``_TurnSucceeded`` above: do not add an ``await`` between lock release
+    and notify/send initiation, and do not loosen the per-key lock to allow
+    same-key concurrency, without revisiting this test (and its two
+    ingest-resolved siblings below) and the TUI's debt-counter design.
 
     This test dispatches turn 1 (fails -> ``send_turn_state``) and turn 2
     (succeeds -> ``send_outbound``) for the SAME key, with turn 1 deliberately
@@ -718,12 +835,138 @@ async def test_dispatch_notifies_same_key_turns_in_submission_order_even_when_co
     assert sent.body[0] == "turn 2 answer"  # DLP-scanned body, index 0 is the text
 
 
+async def test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn() -> None:
+    """arc-001 (root-cause-arc-001-turn-order-race.md §1, PR #594 Task S1) —
+    THE regression pin: this test FAILS on pre-fix HEAD.
+
+    Before this fix, ``_HaltNoReply`` never touched the per-key lock at all
+    — ``ingest()`` decided the outcome upstream of ``dispatch``'s mutex, and
+    the halt leg notified immediately. So turn 2's halt-notify could reach
+    the sender BEFORE turn 1's own, still-in-flight, lock-holding answer: a
+    LATER same-key turn's client-visible signal jumping an EARLIER one's
+    queue. Reproduced by execution against the real adapter (report §1.2,
+    EXP1).
+
+    This test parks turn 1 mid-processing (genuinely holding the lock,
+    proven via ``.locked()``), issues turn 2's ``_HaltNoReply`` dispatch
+    WHILE it is held, and asserts turn 2 (a) does not complete and (b) sends
+    NOTHING to the sender until turn 1 releases — then that turn 1's
+    ``send`` precedes turn 2's ``notify`` once it does, proving turn 2
+    genuinely waited on the ordering barrier rather than happening not to
+    race ahead in an untimed race.
+    """
+    sender = _OrderRecordingSender()
+    orchestrator = _ParkThenSucceedOrchestrator()
+    pool = _Pool()
+    adapter = _adapter(orchestrator=orchestrator, sender=sender, pool=pool)
+
+    task_1 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 1")))
+    await asyncio.wait_for(orchestrator.turn_1_started.wait(), timeout=1.0)
+
+    # Turn 1 is now parked mid-processing, holding the per-key lock. Issue
+    # turn 2's HALT dispatch WHILE turn 1 is still in flight.
+    task_2 = asyncio.create_task(
+        adapter.dispatch(
+            _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+        )
+    )
+    await asyncio.sleep(0)  # let turn 2 run up to the barrier and block on it
+    assert adapter._turn_locks[("alfred", "u-1")].locked() is True
+    assert not task_2.done(), "turn 2 must genuinely block on the ordering barrier"
+    assert sender.events == [], "neither turn may have signaled the sender yet"
+
+    orchestrator.release_turn_1.set()
+    await asyncio.gather(task_1, task_2)
+
+    assert [kind for kind, _ in sender.events] == ["send", "notify"], (
+        "turn 1's answer must reach the sender strictly before turn 2's "
+        "halt-notify, even though turn 2's dispatch was already in flight "
+        "and waiting on the ordering barrier"
+    )
+
+
+async def test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn() -> None:
+    """arc-001 sibling for the ``_RefusalReply`` outcome (report §1.3) —
+    WIDER than the originally-filed ``_HaltNoReply`` finding, because
+    ``_RefusalReply`` carries REAL reply text, not a content-free state
+    frame: a mis-ordering here is a genuine transcript misattribution an
+    operator could act on, not just a swapped state signal.
+    """
+    sender = _OrderRecordingSender()
+    orchestrator = _ParkThenSucceedOrchestrator()
+    pool = _Pool()
+    adapter = _adapter(orchestrator=orchestrator, sender=sender, pool=pool)
+
+    task_1 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 1")))
+    await asyncio.wait_for(orchestrator.turn_1_started.wait(), timeout=1.0)
+
+    task_2 = asyncio.create_task(
+        adapter.dispatch(
+            _RefusalReply(
+                reply="benign",
+                adapter_id="tui",
+                target_platform_id="plat-9",
+                canonical_user_id="u-1",
+            )
+        )
+    )
+    await asyncio.sleep(0)  # let turn 2 run up to the barrier and block on it
+    assert adapter._turn_locks[("alfred", "u-1")].locked() is True
+    assert not task_2.done(), "turn 2 must genuinely block on the ordering barrier"
+    assert sender.events == [], "neither turn may have signaled the sender yet"
+
+    orchestrator.release_turn_1.set()
+    await asyncio.gather(task_1, task_2)
+
+    assert [kind for kind, _ in sender.events] == ["send", "send"]
+    bodies = [event.body[0] for _, event in sender.events]  # DLP-scanned body, index 0 is text
+    assert bodies == ["turn 1 answer", "benign"], (
+        "turn 1's own answer must reach the sender before turn 2's refusal "
+        "reply, even though turn 2's dispatch was already in flight and "
+        "waiting on the ordering barrier"
+    )
+
+
+async def test_ordering_barrier_does_not_block_a_different_canonical_user() -> None:
+    """The barrier is per-key: a DIFFERENT canonical user's halt must not be
+    delayed by an in-flight ``u-1`` turn — no cross-session head-of-line
+    blocking (report §5.3/§5.4, validated by execution as
+    ``repro_arc001b.py``'s cross-key-isolation experiment).
+    """
+    sender = _OrderRecordingSender()
+    orchestrator = _ParkThenSucceedOrchestrator()
+    pool = _Pool()
+    adapter = _adapter(orchestrator=orchestrator, sender=sender, pool=pool)
+
+    task_1 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 1")))
+    await asyncio.wait_for(orchestrator.turn_1_started.wait(), timeout=1.0)
+    assert adapter._turn_locks[("alfred", "u-1")].locked() is True
+
+    other_user_halt = _HaltNoReply(
+        stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-2"
+    )
+    # A hang here (rather than a clean return) would mean the barrier keyed
+    # on the wrong thing and re-introduced cross-session head-of-line
+    # blocking — so this timeout is the actual assertion, not padding.
+    await asyncio.wait_for(adapter.dispatch(other_user_halt), timeout=1.0)
+
+    assert [kind for kind, _ in sender.events] == ["notify"], (
+        "a different canonical user's halt must complete without waiting on "
+        "u-1's in-flight turn lock"
+    )
+
+    orchestrator.release_turn_1.set()
+    await task_1
+
+
 async def test_notify_skipped_for_non_client_adapter_kind() -> None:
     """``adapter_id="discord"`` is not in ``TURN_STATE_CLIENT_KINDS`` — the
     debug-log-and-skip arm fires and NOTHING is sent to it."""
     sender = _RecordingSender()
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
-    await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="discord"))
+    await adapter.dispatch(
+        _HaltNoReply(stage="downgrade_denied", adapter_id="discord", canonical_user_id="u-1")
+    )
     assert sender.turn_states_sent == []
 
 
@@ -912,7 +1155,12 @@ async def test_dlp_scan_failure_on_the_refusal_reply_leg_notifies_without_an_aud
     )
     with pytest.raises(RuntimeError, match="vault unreachable"):
         await adapter.dispatch(
-            _RefusalReply(reply="benign", adapter_id="tui", target_platform_id="plat-9")
+            _RefusalReply(
+                reply="benign",
+                adapter_id="tui",
+                target_platform_id="plat-9",
+                canonical_user_id="u-1",
+            )
         )
     assert [
         r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"

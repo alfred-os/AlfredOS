@@ -213,6 +213,47 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
   Shares the exact tripwire moment: per-adapter inbound routing
   (PR-S4-11c) must reintroduce `adapter_id`-scoped outbound dispatch in the
   same commit that lifts the single-adapter boot refusal, not after.
+- **The client's zero-correlation design depends on a SERVER-SIDE
+  submission-order guarantee, not a wire one — and that guarantee needed a
+  second mechanism to actually hold (arc-001, PR #594 Task S1).**
+  `_resolve_pending_turn`'s stale-turn debt counter
+  (`plugins/alfred_tui/src/alfred_tui/textual/app.py`) has no wire-level way
+  to tell "this signal is for my currently-pending turn" from "this is a
+  late signal for a watchdog-abandoned one" — it relies entirely on the core
+  sending one session's turn-completion signals in submission order. Before
+  this PR that was true only for the `_PreparedTurn` outcome:
+  `RealTurnOrchestratorAdapter.ingest`'s two ingest-resolved outcomes
+  (`_HaltNoReply` / `_RefusalReply`) never touched the per-`(persona, slug)`
+  mutex at all, so a later same-key turn's refusal could signal the client
+  before an earlier same-key turn's own answer, reproduced by execution
+  against the real adapter
+  (`root-cause-arc-001-turn-order-race.md`). The fix is a per-key ORDERING
+  BARRIER (`RealTurnOrchestratorAdapter._await_turn_ordering_barrier`): both
+  ingest-resolved outcomes now acquire-then-immediately-release the same
+  mutex as a pure ordering fence before their notify/send, giving them the
+  identical acquire-then-signal shape the `_PreparedTurn` leg already had —
+  no turn work runs under the barrier, and it releases before the
+  notify/send so the timing-side-channel acceptance above is unaffected.
+  This is the mechanism that keeps rejected option (b) — a wire correlation
+  token added to `TurnFailedNotification` — properly CLOSED rather than
+  merely unconsidered: the zero-correlation design this ADR commits to
+  (Decision 3) is sound only because the server independently guarantees
+  submission order; had that guarantee stayed silently false, the honest
+  fix eventually would have been the wire change this ADR explicitly
+  rejects.
+
+  **Tripwire (in addition to the one above).** The ordering barrier is a
+  per-key acquire-then-release of the SAME mutex a `_PreparedTurn` holds for
+  the duration of a turn. Today that is inert wire-time cost — an
+  uncontended `asyncio.Lock` acquire/release is effectively free — because
+  `TURN_STATE_CLIENT_KINDS == frozenset({"tui"})` and the TUI is a
+  daemon-spawned stdio adapter on the direct, non-`commit_at_dispatch_edge`
+  path, so no forwarded frame is ever held open on the barrier. The moment
+  `TURN_STATE_CLIENT_KINDS` gains a non-local kind, a refusal for that
+  adapter would be genuinely DELAYED until an in-flight same-key
+  `_PreparedTurn` releases the lock. Re-derive this alongside the existing
+  tripwire above, which the same widening commit already has to revisit for
+  the timing-side-channel acceptance.
 
 ## Alternatives considered
 

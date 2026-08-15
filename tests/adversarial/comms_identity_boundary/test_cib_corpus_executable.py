@@ -366,7 +366,9 @@ async def test_cib_009_turn_failed_stage_coarsening_hides_which_control_fired() 
         # without ever calling the orchestrator.
         sender_a = _RecordingSender()
         adapter_a = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender_a)
-        await adapter_a.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+        await adapter_a.dispatch(
+            _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+        )
 
         # Leg B: dlp_canary_tripped. This halt is decided INSIDE `dispatch`'s
         # `async with lock:` turn-running block, when the orchestrator's own call

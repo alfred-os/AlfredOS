@@ -181,11 +181,20 @@ class _PreparedTurn:
 
 @dataclass(frozen=True, slots=True)
 class _RefusalReply:
-    """``ingest`` output for a quarantine ``TypedRefusal`` — send a benign reply."""
+    """``ingest`` output for a quarantine ``TypedRefusal`` — send a benign reply.
+
+    ``canonical_user_id`` (arc-001, PR #594 Task S1) is carried so ``dispatch``
+    can key ``_await_turn_ordering_barrier`` at the SAME ``(persona, slug)``
+    the ``_PreparedTurn`` leg locks on. Internal only, mirroring
+    ``_HaltNoReply``'s existing note below — NOT a reply address and NOT on
+    the wire; ``TurnFailedNotification`` and ``OutboundMessageRequest`` carry
+    no such field.
+    """
 
     reply: str
     adapter_id: str
     target_platform_id: str
+    canonical_user_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,10 +204,16 @@ class _HaltNoReply:
     ``adapter_id`` (#593) is carried so ``dispatch`` can address the client-visible
     turn-failure NOTIFICATION at the right adapter kind. It is NOT a reply address
     (there is no reply) and NOT on the wire — the frame carries no ``adapter_id``.
+
+    ``canonical_user_id`` (arc-001, PR #594 Task S1) is carried for the same
+    reason as ``_RefusalReply`` above: it keys ``_await_turn_ordering_barrier``
+    at the same ``(persona, slug)`` a ``_PreparedTurn`` for this user would
+    lock on. Internal only, NOT on the wire.
     """
 
     stage: _RefusalStage
     adapter_id: str
+    canonical_user_id: str
 
 
 type _IngestOutcome = _PreparedTurn | _RefusalReply | _HaltNoReply
@@ -250,8 +265,10 @@ class _TurnFailed:
     the ``turn_error`` leg, re-raise) AFTER the mutex has released, while
     preserving each leg's original notify-then-{return,raise} ORDER.
 
-    DOWNSTREAM CONTRACT (#594 follow-up finding): the TUI plugin's stale-turn
-    debt counter (``AlfredTuiApp._resolve_pending_turn``,
+    DOWNSTREAM CONTRACT (#594 follow-up finding, CLOSED by arc-001's ordering
+    barrier — PR #594 Task S1, see ``_await_turn_ordering_barrier`` below):
+    the TUI plugin's stale-turn debt counter
+    (``AlfredTuiApp._resolve_pending_turn``,
     ``plugins/alfred_tui/src/alfred_tui/textual/app.py``) has no wire-level
     way to tell "this reply/turn.failed is for the turn I'm currently
     waiting on" apart from "this is a late signal for a turn my watchdog
@@ -259,23 +276,52 @@ class _TurnFailed:
     module sends one session's turn-completion signals to the sender in
     SUBMISSION order, even when two dispatches for the same ``(persona,
     slug)`` key are in flight "concurrently" from the caller's perspective.
-    That guarantee rests on TWO invariants living here, both load-bearing for
-    a module the TUI never imports or type-checks against:
+    That guarantee now genuinely covers ALL THREE ``ingest`` outcomes —
+    ``_PreparedTurn``, ``_RefusalReply``, and ``_HaltNoReply`` alike (before
+    arc-001's fix it covered only the first: the two ingest-resolved outcomes
+    never touched the per-key lock at all, so a later same-key turn's
+    refusal could signal the client before an earlier same-key turn's own
+    answer — reproduced by execution against the real adapter). It rests on
+    TWO invariants living here, both load-bearing for a module the TUI never
+    imports or type-checks against:
 
     1. the per-key ``asyncio.Lock`` (FOLD-R1) serializes same-key turns'
-       PROCESSING — a later turn cannot even START running the orchestrator
-       until every earlier same-key turn has released the lock;
-    2. no ``await`` sits between a turn's ``async with lock:`` block exiting
-       and that turn's notify/send call being INITIATED (see the
-       ``perf-001`` note on ``dispatch`` below) — so a later turn's own
-       signal cannot reach the sender before an earlier turn's.
+       PROCESSING — a later ``_PreparedTurn`` cannot even START running the
+       orchestrator until every earlier same-key turn has released the lock.
+       ``_RefusalReply``/``_HaltNoReply`` carry no turn work to serialize, so
+       each instead AWAITS ``_await_turn_ordering_barrier`` — an
+       acquire-then-immediately-release of the SAME per-key lock, purely as
+       an ordering fence — before its own notify/send, giving it the
+       identical acquire-then-signal SHAPE the ``_PreparedTurn`` leg already
+       had;
+    2. no ``await`` sits between a turn's lock release (the ``async with
+       lock:`` block exiting for ``_PreparedTurn``, or the barrier's
+       ``async with lock: pass`` returning for the other two outcomes) and
+       that turn's notify/send call being INITIATED (see the ``perf-001``
+       note on ``dispatch`` below) — so a later turn's own signal cannot
+       reach the sender before an earlier turn's.
+
+    One caveat inherent to the mechanism, not a bug: the lock gives
+    ARRIVAL-AT-LOCK order, not SUBMISSION order — two same-key turns whose
+    ``ingest()`` durations differ enough could in principle reach the lock
+    out of the order they were submitted in. Immaterial in practice (the TUI
+    can only have two turns outstanding at all once a 90s watchdog timeout
+    has already separated them — see ``on_input_submitted`` in ``app.py``),
+    but worth naming precisely rather than overselling "submission order" as
+    a literal guarantee.
 
     Do not introduce an ``await`` between lock release and notify/send
-    initiation, and do not loosen the per-``(persona, slug)`` lock to allow
-    same-key concurrency, without first re-reading
-    ``AlfredTuiApp._resolve_pending_turn`` and
-    ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py::test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
-    — the latter fails loudly if this ordering ever regresses.
+    initiation on ANY of the three outcomes, and do not loosen the
+    per-``(persona, slug)`` lock to allow same-key concurrency, without first
+    re-reading ``AlfredTuiApp._resolve_pending_turn`` and the tests that pin
+    this ordering in
+    ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``:
+    ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
+    (the in-lock <-> in-lock case, unchanged since before arc-001),
+    ``test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn``, and
+    ``test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn`` (the
+    two ingest-resolved outcomes against an earlier in-lock turn) — all three
+    fail loudly if this ordering ever regresses.
     """
 
     stage: _RefusalStage
@@ -352,6 +398,7 @@ class RealTurnOrchestratorAdapter:
                 reply=t("comms.inbound.real_turn.extraction_refused"),
                 adapter_id=notification.adapter_id,
                 target_platform_id=notification.platform_user_id,
+                canonical_user_id=canonical_user_id,
             )
 
         # FOLD-R23: explicit raise, not `assert` (stripped under python -O; matches
@@ -372,7 +419,11 @@ class RealTurnOrchestratorAdapter:
             await self._emit_refused(
                 notification, canonical_user_id=canonical_user_id, stage="downgrade_denied", exc=exc
             )
-            return _HaltNoReply(stage="downgrade_denied", adapter_id=notification.adapter_id)
+            return _HaltNoReply(
+                stage="downgrade_denied",
+                adapter_id=notification.adapter_id,
+                canonical_user_id=canonical_user_id,
+            )
 
         text = cleared.get("text")
         if not isinstance(text, str):  # defensive: the CommsBodyExtraction schema pins text:str
@@ -383,7 +434,11 @@ class RealTurnOrchestratorAdapter:
                 stage="downgrade_malformed",
                 exc=AlfredError("downgraded payload missing str 'text'"),
             )
-            return _HaltNoReply(stage="downgrade_malformed", adapter_id=notification.adapter_id)
+            return _HaltNoReply(
+                stage="downgrade_malformed",
+                adapter_id=notification.adapter_id,
+                canonical_user_id=canonical_user_id,
+            )
 
         content = tag(T2, text, source="comms.inbound")
         user = _InboundUser(slug=canonical_user_id, display_name=display_name, language=language)
@@ -584,28 +639,54 @@ class RealTurnOrchestratorAdapter:
         placement. Each leg's audit-write-then-notify-then-{return,raise} ORDER
         is unchanged; only the LOCK boundary moved. See ``_TurnFailed``.
 
-        DO NOT add an ``await`` between the ``async with lock:`` block below
-        releasing and the notify/``_send`` call that follows it (``_send``'s
-        own scan-FAILURE legs are the one documented exception — see its
-        docstring), and do not let
-        two same-``(persona, slug)``-key turns process concurrently — a
+        DO NOT add an ``await`` between a turn's lock release and the
+        notify/``_send`` call that follows it — for ``_PreparedTurn`` that is
+        the ``async with lock:`` block below releasing; for ``_HaltNoReply``
+        and ``_RefusalReply`` it is ``_await_turn_ordering_barrier`` (below)
+        returning (``_send``'s own scan-FAILURE legs are the one documented
+        exception — see its docstring). Two same-``(persona, slug)``-key
+        turns can no longer signal the client out of submission order, full
+        stop — arc-001 (PR #594 Task S1) closed the gap where this held only
+        for a ``_PreparedTurn``-vs-``_PreparedTurn`` pairing: the two
+        ingest-resolved outcomes now take the SAME ordering barrier instead
+        of running turn work under the lock, so EVERY pairing is covered. A
         downstream client (the TUI's stale-turn debt counter) depends on
-        notify/send order matching submission order for one session with NO
-        wire-level correlation available to check it itself. See the longer
-        note on ``_TurnFailed`` above and
-        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
+        this: it has NO wire-level correlation available to check it itself.
+        See the longer note on ``_TurnFailed`` above and
+        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``,
+        ``test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn``,
+        and ``test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn``
         in ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``.
         """
-        sender = self._require_sender()
         if isinstance(ingested, _HaltNoReply):
             # #593: the frame is committed and NOTHING is sent — but the operator
             # must not be left staring at a dead prompt. Signal the STATE (no text
             # on the wire) so the client can release its pending turn.
+            #
+            # arc-001 (PR #594 Task S1): read the sender BEFORE the barrier, but
+            # do not raise on it yet — a wiring precondition (unbound sender) must
+            # not turn this DETERMINISTIC halt into a re-raise that the forwarded
+            # path's bounded replay would amplify into up to 5 duplicate
+            # quarantined extracts re-writing the identical audit row (the
+            # CodeRabbit finding folded into this fix, root-cause report §2).
+            # The barrier itself runs UNCONDITIONALLY — even with no sender bound
+            # there is still an ordering contract to honour for whichever other
+            # same-key turn eventually does have one.
+            sender = self._sender
+            await self._await_turn_ordering_barrier(ingested.canonical_user_id)
+            if sender is None:
+                _log.error("comms.daemon_runtime.sender_unbound")
+                return
             await self._notify_turn_failed(
                 sender, adapter_id=ingested.adapter_id, stage=ingested.stage
             )
             return
         if isinstance(ingested, _RefusalReply):
+            # This leg genuinely cannot proceed without a sender — there is a
+            # reply to DELIVER, unlike the halt leg above, so fail-loud (raise)
+            # via `_require_sender()` is the correct posture here.
+            sender = self._require_sender()
+            await self._await_turn_ordering_barrier(ingested.canonical_user_id)
             await self._send(
                 sender,
                 ingested.adapter_id,
@@ -618,6 +699,7 @@ class RealTurnOrchestratorAdapter:
         if not isinstance(ingested, _PreparedTurn):  # defensive — the ingest union is closed
             raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
 
+        sender = self._require_sender()
         set_language(ingested.user.language)
         key = (_PERSONA, ingested.user.slug)
         note = _NotificationView(ingested)
@@ -720,6 +802,51 @@ class RealTurnOrchestratorAdapter:
             canonical_user_id=ingested.user.slug,
         )
 
+    async def _await_turn_ordering_barrier(self, canonical_user_id: str) -> None:
+        """Acquire-then-release the per-key turn mutex as a PURE ordering fence.
+
+        arc-001 (PR #594 Task S1): ``ingest``'s two ingest-resolved outcomes
+        (``_HaltNoReply`` / ``_RefusalReply``) carry no turn work and so never
+        touched the per-``(persona, slug)`` lock at all — which meant a later
+        same-key turn's refusal could reach the client before an earlier
+        same-key turn's own answer, even though the earlier turn was still
+        genuinely running (and provably still holding the lock) when the
+        later one's ``ingest()`` finished. Reproduced by execution against the
+        real adapter (root-cause report, root-cause-arc-001-turn-order-race.md
+        §1.2/§1.3).
+
+        This helper closes that gap WITHOUT running any turn work under the
+        lock — ``ingest()`` staying lock-free is itself load-bearing (the
+        authoritative ``_emit_refused`` audit row must be written promptly,
+        not queued behind a possibly-long-running earlier turn) — and WITHOUT
+        notifying from inside the lock either (that would re-break perf-001:
+        a wedged-but-connected client holding the per-key mutex for up to
+        ``_NOTIFY_TIMEOUT_SECONDS``). Three properties, all load-bearing:
+
+        1. **No turn work runs under this lock.** The body is a bare
+           ``async with lock: pass`` — its only job is to make an
+           ingest-resolved outcome wait behind any earlier same-key turn
+           still holding the lock, exactly as a ``_PreparedTurn`` for the
+           same key would.
+        2. **The lock releases BEFORE the notify/send that follows this
+           call**, not after — so perf-001's "a wedged client never holds
+           the per-key mutex" property survives unchanged. Only the ORDER of
+           who reaches (and clears) the barrier first is what this buys.
+        3. **Returning from this coroutine is NOT a suspension point.**
+           ``asyncio.Lock.release()`` (invoked by the ``async with`` block's
+           ``__aexit__``) is synchronous, and the function has no further
+           ``await`` after that — so the caller's following
+           ``await self._notify_turn_failed(...)`` / ``await self._send(...)``
+           is still initiated in the same run-slice as the barrier's release.
+           That is what the "no await between lock release and notify
+           initiation" invariant (see ``_TurnFailed``) actually requires: the
+           ONLY suspension point this helper introduces is the ``acquire()``
+           wait for a contended lock, never anything after it clears.
+        """
+        lock = await self._turn_lock_for((_PERSONA, canonical_user_id))
+        async with lock:
+            pass
+
     async def _turn_lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
         """Get-or-create the per-(persona, slug) turn mutex (FOLD-R1)."""
         async with self._locks_guard:
@@ -771,16 +898,36 @@ class RealTurnOrchestratorAdapter:
         load-bearing for the TUI's stale-turn debt counter; see the contract
         note on ``_TurnFailed`` and
         ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``.
-        The scan-FAILURE legs are the one documented exception to ``dispatch``'s
-        otherwise-unconditional "zero awaits between lock release and
-        notify/send initiation" claim: ``_refuse_outbound_scan`` awaits
-        ``_emit_refused`` (a real Postgres write) before its notify, and unlike
-        the ``budget_denied``/``turn_error`` legs — whose audit write happens
-        INSIDE the lock — this one runs after release. Harmless in practice
-        (an audit write completes long before a later turn finishes an LLM
-        turn, and #594 R1's debt bound self-corrects a transcript-order swap
-        within one watchdog window anyway), but do not read that contract as
-        unconditional.
+        The scan-FAILURE legs are the one REMAINING documented exception to
+        ``dispatch``'s otherwise-unconditional "zero awaits between lock
+        release and notify/send initiation" claim (arc-001, PR #594 Task S1,
+        closed the OTHER, larger exception — the two ingest-resolved outcomes
+        that used to skip the lock entirely; see ``_await_turn_ordering_barrier``):
+        ``_refuse_outbound_scan`` awaits ``_emit_refused`` (a real Postgres
+        write) before its notify, and unlike the ``budget_denied``/
+        ``turn_error`` legs — whose audit write happens INSIDE the lock —
+        this one runs after release. Harmless in practice: an audit write
+        completes long before a later turn finishes an LLM turn, so the
+        ordering exposure here is negligible in magnitude even though it is
+        real in kind — do not read this as an unconditional contract.
+
+        Do NOT reach for the TUI's stale-turn debt bound
+        (``plugins/alfred_tui/src/alfred_tui/textual/app.py``,
+        ``_incur_stale_turn_debt``) as a reason this doesn't matter — that
+        was arc-001's actual root cause. The debt counter is
+        order-INSENSITIVE by construction: it is a FIFO of fungible handles,
+        so whichever signal arrives first discharges a debt and whichever
+        arrives second ends the turn, regardless of which turn either signal
+        was really for (see the state-machine proof in the root-cause
+        report, root-cause-arc-001-turn-order-race.md §3.1). That self-
+        corrects STATE — the pending-turn flag and debt count converge to
+        the same values either way — but it is INDIFFERENT to order, not a
+        correction OF it: it neither detects nor repairs a transcript line
+        printing in the wrong sequence. "The debt bound self-corrects a
+        transcript-order swap anyway" was exactly the false reasoning that
+        let arc-001 through review; ordering correctness lives ENTIRELY in
+        this module (the per-key lock + the ordering barrier), never in the
+        client's debt bookkeeping.
 
         The audit row needs turn context (``notification`` +
         ``canonical_user_id`` both present); the refusal-reply send
