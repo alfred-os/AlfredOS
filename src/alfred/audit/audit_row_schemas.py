@@ -805,6 +805,14 @@ DAEMON_BOOT_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
 # collision instead raises QuarantineProviderSeparationCollisionError, which routes
 # through the audited refusal path (DAEMON_BOOT_FAILED_FIELDS,
 # failure_reason="quarantine_provider_separation_violated").
+#
+# NOTE on the "privileged_provider" field name: it is populated from
+# settings.primary_provider, a CONFIGURED setting that build_router never reads
+# (issue #590) — the row records "the two configured settings collided", not "a
+# privileged call actually reached the quarantine provider". Comment-only caveat;
+# NOT a field rename — this schema is a shipped audit-row contract, and renaming
+# the key would re-key forensic history for rows already written. Revisit the name
+# alongside #590, once the value it describes actually changes.
 DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS: Final[frozenset[str]] = frozenset(
     {"boot_id", "privileged_provider", "quarantine_provider", "occurred_at"}
 )

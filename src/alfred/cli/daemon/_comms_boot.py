@@ -650,6 +650,13 @@ async def enforce_quarantine_provider_separation(
     this PR's own feature. Hoisted here and called unconditionally so whether comms is
     enabled cannot decide whether a security gate applies.
 
+    Compares the two CONFIGURED provider settings only —
+    ``settings.primary_provider`` is not the provider a privileged call actually
+    dials: ``alfred.cli._bootstrap.build_router`` hardcodes DeepSeek as primary
+    with an Anthropic fallback and never reads this field (issue #590). A clean
+    pass through this gate means "the two settings differ", not "no privileged
+    path can reach the quarantine provider".
+
     Raises:
         QuarantineProviderSeparationCollisionError: separation required and the ids
             collide. A distinct, catchable type so ``_commands.py`` routes it through
@@ -674,11 +681,16 @@ async def enforce_quarantine_provider_separation(
     # simply is not required — said NOTHING about which provider the quarantined child
     # would dial: only a COLLISION produced any signal at all, so the operator whose
     # config is fine had no boot-log evidence that their ALFRED_QUARANTINE_PROVIDER was
-    # even read. Placed here (rather than inside either arm) so it fires on every comms
-    # boot regardless of which arm runs, and before any I/O — a later refusal still
+    # even read. Placed here (rather than inside either arm) so it fires on EVERY boot —
+    # comms-enabled or not, since 7213f2f6 hoisted this gate out of the comms-gated boot
+    # graph — regardless of which arm runs, and before any I/O — a later refusal still
     # leaves this breadcrumb behind. Non-secret closed-set routing config, safe to log
     # (hard rule #5); ``alfred status`` renders the same two values for the operator who
     # is not reading logs.
+    #
+    # NOTE: ``privileged_provider`` below is ``settings.primary_provider`` — config
+    # only, not what a privileged call actually dials (see the function docstring;
+    # issue #590).
     log.info(
         "comms.comms_boot.quarantine_provider_resolved",
         quarantine_provider=settings.quarantine_provider,

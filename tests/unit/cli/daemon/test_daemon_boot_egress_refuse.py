@@ -43,17 +43,33 @@ from .test_daemon_comms_spawn import _patch_comms_seams
 
 _ENABLED_ADAPTER = "alfred_comms_test"
 
-# The three tests below drive a FULL, successful `alfred daemon start`, which on
-# Windows crosses a CHAIN of POSIX-only gates: `write_pidfile`'s bare
-# `os.O_NOFOLLOW` (`_commands.py:1268`) raises first, and were that ported, the
-# control plane's 0600 AF_UNIX socket (`:1356` -> `DaemonControlServer.start()` ->
-# `bind_owner_only_unix_socket`) would raise next — `socket.AF_UNIX` is not exposed
-# by CPython on Windows. Verified empirically, not inferred from line numbers: with
-# only `os.O_NOFOLLOW` deleted on a POSIX host these fail at the pidfile; the
-# t3_nonce siblings behave identically. The other seven tests in this file refuse
-# the boot inside `_build_comms_boot_graph`, well before any POSIX syscall, so they
-# keep running on Windows and this file stays MIXED (per-test skipif, NOT the
-# tests/_posix_only_tests.py whole-file registry).
+# The three `@_posix_boot_only` tests below drive a FULL, successful `alfred daemon
+# start`, which on Windows crosses a CHAIN of POSIX-only gates: `write_pidfile`'s
+# bare `os.O_NOFOLLOW` raises first, and were that ported, the control plane's 0600
+# AF_UNIX socket (`DaemonControlServer.start()` -> `bind_owner_only_unix_socket`)
+# would raise next — `socket.AF_UNIX` is not exposed by CPython on Windows.
+# Verified empirically, not inferred: with only `os.O_NOFOLLOW` deleted on a POSIX
+# host EXACTLY these three fail, at the pidfile; the t3_nonce siblings behave
+# identically.
+#
+# Both gates are named by SYMBOL, here and in the skip reason below — never as
+# `_commands.py:<line>`. That citation rotted TWICE inside this one PR (the
+# provider-separation-gate hoist, then the settings-error fix, each shifted the
+# file), and a stale line number is exactly what let a guard sit on the no-adapter
+# collision test long after its refusal had moved hundreds of lines ahead of the
+# first POSIX call — see `test_boot_refuses_on_collision_even_with_no_comms_adapter_enabled`
+# below, which is deliberately UNguarded despite once looking like a sibling of the
+# three above.
+#
+# EVERY OTHER test in this file is deliberately UNGUARDED and must stay that way.
+# They either refuse the boot before any POSIX-only operation — at `Settings`
+# construction, at the unconditional `enforce_quarantine_provider_separation` call,
+# or inside `_build_comms_boot_graph`, all of which run BEFORE `write_pidfile` — or
+# never drive a boot at all. Their whole regression signal is that they RUN on the
+# blocking Windows leg, so a guard there silently deletes it. No count is stated on
+# purpose: a number here is one more thing to rot as tests are added. This file
+# stays MIXED (per-test skipif, NOT the tests/_posix_only_tests.py whole-file
+# registry).
 #
 # The Windows equivalents were investigated, not assumed (#586/#587 review), and
 # they DO exist — this guard is about what is BUILT, not about what is possible.
@@ -82,9 +98,10 @@ _posix_boot_only = pytest.mark.skipif(
     sys.platform == "win32",
     reason=(
         "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
-        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
-        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
-        "happens to fire first, so this reason cannot rot if any one of them is ported."
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
     ),
 )
 
@@ -659,7 +676,6 @@ def test_boot_refuses_audited_when_deepseek_model_is_blank(
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
 
 
-@_posix_boot_only
 def test_boot_refuses_on_collision_even_with_no_comms_adapter_enabled(
     monkeypatch: pytest.MonkeyPatch,
     boot_success_env: FakeAuditWriter,
@@ -680,6 +696,17 @@ def test_boot_refuses_on_collision_even_with_no_comms_adapter_enabled(
     No `quarantine_registry` / `patch_quarantine_child_spawn` fixtures: with no
     adapter there is no quarantined extractor to build and no child to spawn — the
     refusal has to fire before any of that, which is the point.
+
+    Deliberately NOT `@_posix_boot_only`, unlike the three full-boot tests above: this
+    refusal fires inside `enforce_quarantine_provider_separation`, which `_start_async`
+    calls unconditionally, long before `write_pidfile`'s `os.O_NOFOLLOW` — the boot
+    path's first POSIX-only gate — and with no enabled adapter the comms branch never
+    runs at all. Verified by deleting `os.O_NOFOLLOW` on a POSIX host: only the three
+    exit-0 full-boot tests above fail; this one still passes. Its sibling
+    `test_boot_refuses_when_separation_required_and_providers_collide` (above) drives
+    the identical refusal through the same call and is already green on the blocking
+    Windows CI leg — a guard here would just delete the Windows signal for a gate whose
+    entire point is that it runs unconditionally, before anything else.
     """
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.delenv("ALFRED_COMMS_ENABLED_ADAPTERS", raising=False)

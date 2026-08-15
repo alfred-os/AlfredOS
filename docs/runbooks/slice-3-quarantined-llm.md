@@ -79,8 +79,27 @@ See [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md) for
 the full rationale (no PRD section states a "providers must differ"
 invariant — do not cite "spec §5.4 / PRD §6.4").
 
-**Which knob actually controls runtime behaviour today: `ALFRED_QUARANTINE_PROVIDER`,
-and only that one.** It is a plain, ungated `.env` setting — set it, restart, done. The
+**What that opt-in check actually compares — and what it does not.** It
+compares `Settings.quarantine_provider` against `Settings.primary_provider`:
+two `.env` settings. `Settings.primary_provider`
+(`ALFRED_PRIMARY_PROVIDER`) is NOT the privileged provider the system
+dials — `build_router` (`src/alfred/cli/_bootstrap.py`) hardcodes DeepSeek
+as primary and wires Anthropic in as a live fallback whenever
+`ALFRED_ANTHROPIC_API_KEY` is set, and never reads the field. So the
+privileged half of this pair has no working knob at all;
+`ALFRED_QUARANTINE_PROVIDER` is the only one of the two that changes what
+a provider call actually goes to. Read a passing check as "the two
+configured provider settings differ", not as "no privileged path can ever
+reach the quarantine provider": on the shipped defaults
+(`primary_provider=deepseek`, `quarantine_provider=anthropic`) the check
+PASSES while the privileged router's Anthropic fallback is exactly the
+provider the quarantine child uses.
+[#590](https://github.com/alfred-os/AlfredOS/issues/590) tracks narrowing
+the check to `build_router`'s actually-resolved pair.
+
+**Which knob actually controls runtime behaviour today: `ALFRED_QUARANTINE_PROVIDER`
+(the privileged side has none — see the paragraph above).** It is a plain, ungated
+`.env` setting — set it, restart, done. The
 reviewer-gated `alfred config quarantined-provider <provider>` flow described immediately
 below is **aspirational**: that `state.git` proposal flow does not exist yet, and even
 once it does it targets `routing.yaml [quarantine].provider`, which no loader reads

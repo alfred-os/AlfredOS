@@ -225,6 +225,14 @@ def status() -> None:
     typer.echo(t("status.quarantine_provider", provider=settings.quarantine_provider))
     typer.echo(t("status.quarantine_provider_separation", yes_or_no=separation_yes_no))
     typer.echo(t("status.anthropic_configured", yes_or_no=yes_no))
+    # #590 pre-work: every line above states `primary_provider`/the separation
+    # posture as though it governs which provider a privileged call actually
+    # dials. It doesn't — build_router (src/alfred/cli/_bootstrap.py) hardcodes
+    # DeepSeek as primary with an Anthropic fallback and never reads this field
+    # (ADR-0064). Unconditional, not "warn only if it looks wrong": a conditional
+    # check would need its own hardcoded copy of build_router's provider choice,
+    # which would silently go stale the moment #590 lands and wires the field up.
+    typer.echo(t("status.provider_wiring_note"))
     # #370 item 3: surface WHERE the broker resolved its file backend, grouped
     # with the credential line above, so a secrets problem doesn't send the
     # operator to the ADR. The path is a filesystem location, never a secret

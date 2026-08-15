@@ -268,10 +268,12 @@ class Settings(BaseSettings):
     require_quarantine_provider_separation: bool = Field(
         default=False,
         description=(
-            "When True, refuse to boot if the quarantine and privileged providers "
+            "When True, refuse to boot if quarantine_provider and primary_provider "
             "are the same id (see alfred.bootstrap.quarantine.assert_provider_separation). "
             "Default False — same-provider is permitted, with an operator-facing warning "
-            "(see #586, ADR-0064)."
+            "(see #586, ADR-0064). Compares the two CONFIGURED settings, not which "
+            "provider a privileged call actually dials: primary_provider is config-only "
+            "and build_router never reads it (issue #590)."
         ),
     )
 

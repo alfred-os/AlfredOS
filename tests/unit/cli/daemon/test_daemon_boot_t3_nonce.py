@@ -63,9 +63,10 @@ def quarantine_registry() -> Iterator[HookRegistry]:
     sys.platform == "win32",
     reason=(
         "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
-        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
-        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
-        "happens to fire first, so this reason cannot rot if any one of them is ported."
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
     ),
 )
 def test_boot_registers_authorized_t3_nonce(
@@ -103,9 +104,10 @@ def test_boot_registers_authorized_t3_nonce(
     sys.platform == "win32",
     reason=(
         "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
-        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
-        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
-        "happens to fire first, so this reason cannot rot if any one of them is ported."
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
     ),
 )
 def test_boot_threads_same_nonce_into_comms_graph(
@@ -177,9 +179,10 @@ def test_boot_threads_same_nonce_into_comms_graph(
     sys.platform == "win32",
     reason=(
         "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
-        "the pidfile's os.O_NOFOLLOW (_commands.py:1268) first, then the AF_UNIX control "
-        "socket + os.getuid peer auth (:1356). Naming the chain, not whichever gate "
-        "happens to fire first, so this reason cannot rot if any one of them is ported."
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
     ),
 )
 def test_boot_does_not_double_call_factory(

@@ -29,7 +29,11 @@ def test_alfred_status_exits_zero(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    assert "deepseek" in result.stdout.lower()
+    # A bare "deepseek" substring check would keep passing even if the real
+    # assertion target (the primary-provider line) were deleted entirely —
+    # "deepseek" also appears in the quarantine-provider line's help text and
+    # elsewhere in the output. Anchor on the specific rendered line instead.
+    assert "primary provider: deepseek" in result.stdout.lower()
 
 
 def test_alfred_status_reports_the_quarantine_provider(monkeypatch: MonkeyPatch) -> None:
@@ -75,6 +79,31 @@ def test_alfred_status_reports_separation_not_enforced_by_default(
     flat = " ".join(result.stdout.split()).lower()
     assert "quarantine provider: anthropic" in flat, flat
     assert "quarantine provider separation enforced: no" in flat, flat
+
+
+def test_alfred_status_notes_the_provider_lines_are_config_not_routing(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """CodeRabbit round 4 (#589): every doc/comment near ``primary_provider`` stated
+
+    or implied it selects the privileged provider a call actually dials. It doesn't —
+    ``build_router`` (``src/alfred/cli/_bootstrap.py``) hardcodes DeepSeek as primary
+    with an Anthropic fallback and never reads the field (#590). Docs and `.env.example`
+    now carry that caveat; this is the one place doing so was previously impossible —
+    ``alfred status`` is the field's only real consumer, and it rendered `primary
+    provider: X` as unqualified fact. Unconditional (not "only if it looks wrong"): a
+    conditional check would need its own copy of ``build_router``'s hardcoded choice,
+    which would go stale the moment #590 lands.
+    """
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.stdout.split()).lower()
+    assert "build_router" in flat, flat
+    assert "590" in flat, flat
 
 
 def test_alfred_status_refuses_credential_shaped_primary_provider_without_echoing_it(

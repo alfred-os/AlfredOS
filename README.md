@@ -56,8 +56,13 @@ alfred chat                 # start a TUI conversation
 >   with the default DeepSeek-privileged setup this is an **Anthropic** key — get one from
 >   <https://console.anthropic.com>. You can set `ALFRED_QUARANTINE_PROVIDER=deepseek` to use
 >   DeepSeek for both roles instead; set `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` to
->   make the stricter separation posture mandatory (refuses to boot on a collision) rather than
->   advisory (see [ADR-0064](docs/adr/0064-quarantine-provider-separation-is-opt-in.md)). With the
+>   make a collision refuse boot rather than only warn — but read that as a check on the two
+>   *configured* provider settings, not as a runtime guarantee: `build_router`
+>   (`src/alfred/cli/_bootstrap.py`) never reads `ALFRED_PRIMARY_PROVIDER` and always wires
+>   Anthropic in as the privileged fallback when `ALFRED_ANTHROPIC_API_KEY` is set, so the check
+>   can pass while a privileged turn still lands on the quarantine provider (see
+>   [ADR-0064](docs/adr/0064-quarantine-provider-separation-is-opt-in.md);
+>   [#590](https://github.com/alfred-os/AlfredOS/issues/590) tracks closing that gap). With the
 >   key unset the core exits 2 (`quarantine_provider_key_unset`) and crash-loops under
 >   `restart: unless-stopped`. This is deliberate — a keyless first run does not start.
 >   `bin/alfred-setup.sh` reports the missing key and exits 1; it cannot seed one for you.

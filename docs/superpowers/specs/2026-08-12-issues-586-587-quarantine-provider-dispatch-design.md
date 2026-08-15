@@ -172,16 +172,32 @@ call sites and reviewing them together is cheaper than sequencing):
 
 - Add `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION` (bool, default
   `false`) as a real setting.
-- At the top of `_build_comms_boot_graph` in
-  `src/alfred/cli/daemon/_comms_boot.py` — BEFORE any I/O, so a refusal can
-  never leak a partially-constructed secret broker or content store — when
-  this setting is `true`, call the existing
+- In `enforce_quarantine_provider_separation` in
+  `src/alfred/cli/daemon/_comms_boot.py`, which `_start_async`
+  (`src/alfred/cli/daemon/_commands.py`) calls UNCONDITIONALLY on every boot —
+  OUTSIDE the `if settings.comms_enabled_adapters:` branch, and before
+  `write_pidfile` / `Supervisor.start()` / the AF_UNIX control socket, so a
+  refusal has no daemon-up side effects and no I/O has happened yet (it can
+  never leak a partially-constructed secret broker or content store). When
+  this setting is `true` the gate calls the existing
   `assert_provider_separation(privileged_provider_id=..., quarantined_provider_id=...)`
-  — refuses boot on a collision, exactly as already implemented and tested.
-  (As implemented. An earlier draft of this spec placed the call in
-  `daemon_runtime.py`, next to the Piece A provider-id resolution; the boot
+  — refuses boot on a collision, exactly as already implemented and tested —
+  and re-raises it as `QuarantineProviderSeparationCollisionError` so
+  `_start_async`'s except-cascade routes it through the audited `_refuse_boot`
+  path rather than letting a bare `AlfredError` escape uncaught (the #368
+  anti-pattern).
+  (As implemented, after two moves. An earlier draft of this spec placed the
+  call in `daemon_runtime.py`, next to the Piece A provider-id resolution; it
+  first moved into `_build_comms_boot_graph`, on the reasoning that the boot
   graph is where the audited refusal cascade and the boot-scoped audit writer
-  actually live, so the check moved there and the resolvers stayed pure.)
+  live. CodeRabbit then showed `_start_async` only calls that builder under
+  `if settings.comms_enabled_adapters:` — so a daemon with the flag on,
+  colliding providers and no enabled adapter booted CLEAN: the operator opted
+  into a security posture, got a green boot, and the control never ran.
+  Commit 7213f2f6 hoisted the check into the sibling
+  `enforce_quarantine_provider_separation` and called it unconditionally.
+  Whether comms is enabled can no longer decide whether a security gate
+  applies; the resolvers stayed pure throughout.)
 - When `false` (default) and the ids DO collide: boot proceeds (today's de
   facto behaviour, now intentional rather than accidental), but this must
   not be silent — emit an operator-facing warning (structured log line, or
@@ -199,18 +215,39 @@ call sites and reviewing them together is cheaper than sequencing):
 .env: ALFRED_QUARANTINE_PROVIDER=deepseek
       ALFRED_QUARANTINE_PROVIDER_API_KEY=<key>
       ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false   (default)
-  -> _comms_boot.py `_build_comms_boot_graph` (top of the function, pre-I/O):
-       - IF require_separation: assert_provider_separation(privileged_id, quarantined_id)
-                                  -> refuse boot (AlfredError) on collision
-         ELSE IF ids collide: emit operator-facing warning, continue
-  -> daemon_runtime.py boot resolution:
-       - resolve quarantine provider id (closed-set validated) + key (existing presence check)
-       - spawn quarantine child; provider id + model threaded via spawn env
-  -> quarantine_child/__main__.py: reads provider id from env
-       -> brokered_egress.py: branch on provider id
-            -> AnthropicProvider.from_settings(api_key, model, http_client=<brokered>, ...)
-            -> DeepSeekProvider.from_settings(api_key, base_url, model, http_client=<brokered>, ...)
-       -> extraction proceeds identically regardless of which provider was constructed
+  -> _commands.py `_start_async`, on EVERY boot — comms-enabled or not, and
+     BEFORE write_pidfile / Supervisor.start() / the AF_UNIX control socket:
+       -> _comms_boot.py `enforce_quarantine_provider_separation` (pre-I/O):
+            - ALWAYS: log the resolved posture (quarantine + privileged
+              provider ids, require_separation) — the happy path leaves a
+              breadcrumb too, not only a collision
+            - IF require_separation: assert_provider_separation(privileged_id, quarantined_id)
+                -> collision -> QuarantineProviderSeparationCollisionError
+                     -> _start_async's except-cascade -> _refuse_boot
+                        (exit 2, daemon.boot.failed
+                         reason=quarantine_provider_separation_violated)
+              ELSE IF ids collide: operator-facing warning + audit row
+                     daemon.boot.quarantine_provider_separation_not_enforced,
+                     boot continues
+  -> _commands.py `if settings.comms_enabled_adapters:`  ── the fork ──
+       │
+       ├─ NO adapter enabled: the whole comms graph is skipped. The gate above
+       │    already ran — that is precisely what hoisting it out bought
+       │    (7213f2f6); before the hoist this arm ran no separation check at all.
+       │
+       └─ AT LEAST ONE adapter: _comms_boot.py `_build_comms_boot_graph`
+            -> daemon_runtime.py boot resolution:
+                 - resolve quarantine provider id (closed-set validated) + key
+                   (existing presence check)
+                 - spawn quarantine child; provider id + model threaded via spawn env
+            -> quarantine_child/__main__.py: reads provider id from env
+                 -> brokered_egress.py: branch on provider id
+                      -> AnthropicProvider.from_settings(api_key, model, http_client=<brokered>, ...)
+                      -> DeepSeekProvider.from_settings(api_key, base_url, model, http_client=<brokered>, ...)
+                 -> extraction proceeds identically regardless of which provider
+                    was constructed
+  -> both arms rejoin: write_pidfile -> Supervisor.start() -> DaemonControlServer
+     (AF_UNIX, 0600, SO_PEERCRED uid check) -> daemon.boot.completed
 ```
 
 ## 6. Error handling
@@ -241,12 +278,16 @@ call sites and reviewing them together is cheaper than sequencing):
 - Unit: `DeepSeekProvider` and `AnthropicProvider` both constructible via
   the new dispatch branch for a given provider id; unsupported id refused
   at parse time (extend the existing validator test file); the new
-  `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION` setting's three states
-  (enabled+collision → refuse, enabled+distinct → boot, disabled+collision
-  → warn-and-boot) each get a dedicated test at the `daemon_runtime.py` call
-  site — this is new coverage `assert_provider_separation()`'s own tests
-  don't provide, since those only test the function in isolation, never a
-  real call site.
+  `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION` setting's states each get a
+  dedicated test against a real `alfred daemon start` in
+  `tests/unit/cli/daemon/test_daemon_boot_egress_refuse.py`, exercising
+  `enforce_quarantine_provider_separation` at its real `_start_async` call
+  site: enabled+collision → audited refusal (exit 2), enabled+distinct →
+  boots, disabled+collision → warn-and-boot. The 7213f2f6 hoist added a
+  fourth: enabled+collision with NO comms adapter enabled → still refuses,
+  pinning that the gate is not conditioned on comms being enabled. This is
+  new coverage `assert_provider_separation()`'s own tests do not provide,
+  since those only test the function in isolation, never a real call site.
 - Integration: a real DeepSeek-configured quarantine child completes a real
   extraction end-to-end (mirroring whatever the existing Anthropic-path
   integration test already proves — same shape, different provider),

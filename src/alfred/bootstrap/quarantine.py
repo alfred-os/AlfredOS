@@ -5,10 +5,17 @@ and the quarantined provider "MUST differ" by default (spec §5.4, PRD
 §6.4). The prior code had no startup check enforcing that invariant —
 an operator who set both ``[quarantine] provider`` and the privileged
 provider to the same id would boot a system where the dual-LLM split
-is structurally a single-LLM split. This module is the structural
-backstop: every code path that wires the quarantined-LLM client at
-bootstrap MUST consult :func:`assert_provider_separation` before
-returning a ready router.
+is structurally a single-LLM split. This module supplies that check,
+:func:`assert_provider_separation` — but it is NOT a universal backstop
+consulted by every bootstrap path. In this codebase only the daemon boot
+path calls it (``alfred.cli.daemon._comms_boot.enforce_quarantine_
+provider_separation``, run unconditionally on every ``alfred daemon
+start`` / ``docker compose up``), and even there it REFUSES only when the
+operator opts in with ``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=
+true`` (ADR-0064) — the default is warn-only. ``alfred.cli._bootstrap.
+build_router``, the function every OTHER top-level command (``chat``,
+``login``, ``status``, ...) goes through to get a ready router, never
+calls this module at all (issue #590 tracks closing that gap).
 
 This helper is deliberately tiny and import-light — bootstrap modules
 should be cheap to import in the test / mypy / ruff context, and
@@ -32,10 +39,12 @@ def provider_ids_collide(a: str, b: str) -> bool:
 
     The single definition of "same provider" for the whole codebase (#586). Extracted
     so the two call sites that need it — :func:`assert_provider_separation` below (the
-    ``require_quarantine_provider_separation=True`` refuse path) and the daemon boot
-    graph's ``require_quarantine_provider_separation=False`` *warn* path in
-    ``alfred.cli.daemon._comms_boot`` — cannot silently disagree about what a collision
-    IS. Before this helper the warn path re-implemented the normalisation inline; two
+    ``require_quarantine_provider_separation=True`` refuse path) and the
+    ``require_quarantine_provider_separation=False`` *warn* path in
+    ``alfred.cli.daemon._comms_boot.enforce_quarantine_provider_separation`` (the gate
+    the daemon runs on EVERY boot, not the comms-gated boot graph) — cannot silently
+    disagree about what a collision IS. Before this helper the warn path re-implemented
+    the normalisation inline; two
     copies of a security predicate drift, and the drift is silent in the direction that
     matters (a collision the warn path fails to notice is a dual-LLM split quietly
     collapsed with no operator-facing signal at all).
@@ -53,7 +62,7 @@ def provider_ids_collide(a: str, b: str) -> bool:
     As of the round-2 fix wave neither id can actually BE blank on the daemon boot path:
     both ``Settings.quarantine_provider`` and ``Settings.primary_provider`` are
     ``Literal`` fields, so a blank (or any other out-of-set) value refuses at Settings
-    construction rather than reaching the boot graph and getting relabelled as a
+    construction rather than reaching the separation gate and getting relabelled as a
     collision. The blank arms here are retained as defence-in-depth for callers that do
     not come through ``Settings`` — this helper is deliberately import-light and
     config-agnostic.
@@ -77,9 +86,11 @@ def assert_provider_separation(
     Closed-set: provider ids are normalised via ``.strip().lower()``
     before the comparison — delegated to :func:`provider_ids_collide`
     above, the ONE definition of "same provider", shared with the
-    daemon boot graph's not-required warn path — so an accidental
-    case / whitespace mismatch in routing.yaml does not silently pass
-    the check. Empty / blank ids on either side fail too, checked
+    not-required warn path in the daemon's unconditional per-boot
+    separation gate
+    (``alfred.cli.daemon._comms_boot.enforce_quarantine_provider_separation``)
+    — so an accidental case / whitespace mismatch in routing.yaml does
+    not silently pass the check. Empty / blank ids on either side fail too, checked
     HERE and before the collision test: the operator must declare BOTH
     providers explicitly, and "both undeclared" must not be reported
     as the (different, actionable-in-a-different-way) same-provider

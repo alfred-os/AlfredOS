@@ -995,6 +995,11 @@ async def _start_async() -> None:
         # not touch the audited failure_reason token or the audit schema. The values
         # are non-secret routing config (closed-set provider ids, never a key), so
         # CLAUDE.md hard rule #5 is not in play.
+        #
+        # NOTE: ``privileged_provider`` below is ``settings.primary_provider`` —
+        # a CONFIGURED setting, not what a privileged call actually dials (build_router
+        # hardcodes DeepSeek with an Anthropic fallback and never reads this field;
+        # issue #590).
         log.error(
             "daemon.boot.quarantine_provider_separation_violated",
             privileged_provider=settings.primary_provider,
