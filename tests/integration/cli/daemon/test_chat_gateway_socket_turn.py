@@ -1001,9 +1001,7 @@ async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
                 normalized_log_text = " ".join(log_text.split())
                 you_marker = " ".join(t("tui.label_you").split())
                 thinking_marker = " ".join(t("tui.thinking").split())
-                failed_marker = " ".join(
-                    t("tui.turn_failed.budget_exhausted").split()
-                )
+                failed_marker = " ".join(t("tui.turn_failed.budget_exhausted").split())
                 assert you_marker in normalized_log_text, log_text
                 assert thinking_marker in normalized_log_text, log_text
                 assert failed_marker in normalized_log_text, log_text
