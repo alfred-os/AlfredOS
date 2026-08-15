@@ -110,9 +110,22 @@ def test_setup_script_seeds_the_pepper_into_dotenv_too() -> None:
     MissingAuditHashPepperError on the operator's first message.
     """
     block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
-    assert "ALFRED_AUDIT_HASH_PEPPER" in block, (
-        "ALFRED_AUDIT_HASH_PEPPER missing from the pepper bootstrap step — "
-        ".env would never receive the pepper docker-compose forwards to alfred-core"
+    # Not a bare substring check: "ALFRED_AUDIT_HASH_PEPPER" also appears in
+    # comments, the `pepper_env_key="ALFRED_AUDIT_HASH_PEPPER"` assignment, and
+    # failure-message text, all of which survive even if BOTH real
+    # `_pepper_write_env` call sites were deleted. A same-shape suggested fix
+    # (checking `pepper_env_key=...` or the bare string "_pepper_write_env")
+    # would ALSO pass vacuously, because the function's own definition line
+    # (`_pepper_write_env() {`) still contains that literal string regardless
+    # of whether it is ever called. Anchor on the actual CALL syntax instead —
+    # the function name followed by a quoted `$variable` argument, which only
+    # a real invocation (not the definition, not a comment, not the env-key
+    # assignment) can produce.
+    assert re.search(r'_pepper_write_env\s+"\$\w+"', block), (
+        "no `_pepper_write_env` INVOCATION found in the pepper bootstrap step "
+        "(only its definition and/or the pepper_env_key variable would remain "
+        "after deleting the real call sites) — .env would never receive the "
+        "pepper docker-compose forwards to alfred-core"
     )
 
 
