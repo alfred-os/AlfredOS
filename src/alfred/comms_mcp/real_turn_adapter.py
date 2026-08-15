@@ -44,7 +44,6 @@ from alfred.comms_mcp.protocol import (
 from alfred.errors import AlfredError
 from alfred.i18n import set_language, t
 from alfred.orchestrator.core import _ALFRED_PERSONA_ID as _PERSONA
-from alfred.plugins.comms_wire import CommsProtocolError
 from alfred.security.dlp import OutboundCanaryTripped
 from alfred.security.quarantine import (
     DowngradeDeniedError,
@@ -102,16 +101,6 @@ _RefusalStage = Literal[
     "turn_error",
     "send_failed",
 ]
-
-# Wire-send faults that are LOGGED-not-fatal on the best-effort notify path.
-# NEVER `Exception` — a real bug surfaces loud; NEVER `BaseException` —
-# `CancelledError` must propagate.
-_NOTIFY_WIRE_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
-    BrokenPipeError,
-    ConnectionResetError,
-    CommsProtocolError,
-    OSError,
-)
 
 # A wedged-but-connected client must not hold the turn leg.
 _NOTIFY_TIMEOUT_SECONDS: Final[float] = 2.0
@@ -456,11 +445,16 @@ class RealTurnOrchestratorAdapter:
         adapter_id: str,
         stage: _RefusalStage,
     ) -> None:
-        """Best-effort client-visible turn-failure signal (#593). NEVER raises.
+        """Best-effort client-visible turn-failure signal (#593).
+
+        NEVER raises — except ``CancelledError``, which propagates BY DESIGN
+        (it derives from ``BaseException``, so the bare ``except Exception``
+        below cannot catch it, and a caller-level cancellation must genuinely
+        cancel an in-flight notify rather than be logged like a wire fault).
 
         The AUTHORITATIVE record is the audit row ``_emit_refused`` already wrote
         BEFORE this call; this frame is a UX affordance whose failure backstop is
-        the client's own turn watchdog. A wire fault here is LOUD-but-contained:
+        the client's own turn watchdog. A fault here is LOUD-but-contained:
 
         * On the ``_HaltNoReply`` legs, raising would convert a DETERMINISTIC halt
           into a re-raise -> the forwarded path's replay -> duplicate paid
@@ -470,7 +464,16 @@ class RealTurnOrchestratorAdapter:
           real turn fault with a transport fault — losing the fault the replay
           path is supposed to act on.
 
-        ``CancelledError`` is outside the caught tuple and propagates.
+        #594 R1 (err-001): the containment is over ``Exception``, not a fixed
+        wire-fault tuple, because the docstring above is a contract other code
+        relies on IN PROSE and a narrow tuple made it a lie — anything outside
+        it (a ``ValidationError`` from constructing the notification, a bug in a
+        sender implementation) escaped and did exactly the damage the two
+        bullets describe. This is NOT a swallow-and-continue in a business
+        path: the authoritative audit row is already written, the fail-loud
+        posture is preserved by the ``_log.warning`` (``error_class`` only,
+        never ``str(exc)``), and the alternative is strictly worse. Containment
+        IS the fail-loud choice at this seam.
         """
         if adapter_id not in TURN_STATE_CLIENT_KINDS:
             _log.debug(
@@ -506,7 +509,10 @@ class RealTurnOrchestratorAdapter:
                 refusal_stage=stage,
                 timeout_s=_NOTIFY_TIMEOUT_SECONDS,
             )
-        except _NOTIFY_WIRE_EXCEPTIONS as exc:
+        except Exception as exc:
+            # Bare `Exception` (not a wire-fault tuple) — see the docstring:
+            # this seam's whole job is to be a dead end for faults, and
+            # `CancelledError` (BaseException) still propagates.
             _log.warning(
                 "comms.inbound.real_turn.turn_failed_notify_failed",
                 adapter_id=adapter_id,
@@ -662,9 +668,13 @@ class RealTurnOrchestratorAdapter:
                 # perf-001 (PR #594): `exc` is carried out via `_TurnFailed.reraise`
                 # and re-raised AFTER the lock releases + the notify below runs —
                 # the audit-write-then-notify-then-raise ORDER is unchanged, only
-                # the lock boundary moved. `_notify_turn_failed` NEVER raises, so
-                # this still cannot replace/mask `exc` — the forwarded replay path
-                # still sees the original turn fault verbatim.
+                # the lock boundary moved. `_notify_turn_failed` contains every
+                # `Exception` (#594 R1 widened it from a narrow wire-fault tuple,
+                # which had made this very claim false for anything outside that
+                # tuple), so it cannot replace/mask `exc` — the forwarded replay
+                # path still sees the original turn fault verbatim. A
+                # `CancelledError` DOES propagate from the notify, by design:
+                # a cancelled turn has no replay to protect.
                 outcome = _TurnFailed(stage="turn_error", reraise=exc)
             finally:
                 await self._pool.release(key, wm)

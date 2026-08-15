@@ -371,9 +371,10 @@ class _RaisingSendOutboundSender:
 
 class _WireFaultOnNotifySender:
     """``send_outbound`` succeeds (records); ``send_turn_state`` raises a given
-    wire fault every time. Parameterises the class-of-fault so both the
-    "logged, halt still returns" and "does not replace the turn-error reraise"
-    tests can drive a real member of ``_NOTIFY_WIRE_EXCEPTIONS``."""
+    fault every time. Parameterises the class-of-fault so the "logged, halt
+    still returns", "does not replace the turn-error reraise" and (#594 R1)
+    "an UNEXPECTED, non-wire exception is contained just the same" tests can
+    each drive their own exception class through one double."""
 
     def __init__(self, fault: Exception) -> None:
         self.sent: list[object] = []
@@ -390,11 +391,11 @@ class _WireFaultOnNotifySender:
 class _CancelledOnNotifySender:
     """``send_outbound`` records; ``send_turn_state`` raises ``CancelledError``.
 
-    Distinct from ``_WireFaultOnNotifySender``: ``CancelledError`` is
-    deliberately NOT a member of ``_NOTIFY_WIRE_EXCEPTIONS`` (never
-    ``BaseException`` in that tuple), so it must fall through both ``except``
-    clauses in ``_notify_turn_failed`` and propagate, rather than being
-    logged-and-swallowed the way a real wire fault is.
+    Distinct from ``_WireFaultOnNotifySender``: ``CancelledError`` derives from
+    ``BaseException``, so ``_notify_turn_failed``'s containment (a bare
+    ``except Exception`` since #594 R1) structurally cannot catch it — it must
+    fall through both ``except`` clauses and propagate, rather than being
+    logged-and-swallowed the way every ``Exception`` is.
     """
 
     def __init__(self) -> None:
@@ -518,13 +519,50 @@ async def test_notify_wire_failure_does_not_replace_the_turn_error_reraise() -> 
         await adapter.dispatch(_prepared())
 
 
+async def test_unexpected_notify_exception_does_not_replace_the_turn_error() -> None:
+    """#594 R1 (err-001 Half B): an exception the notify path never anticipated
+    must be contained exactly like a wire fault, not substituted for the turn's
+    OWN exception.
+
+    ``_notify_turn_failed`` documents "NEVER raises", and ``dispatch``'s
+    ``turn_error`` leg relies on that IN PROSE when it notifies and then
+    re-raises ``outcome.reraise``. Before this fix the containment was a fixed
+    four-member wire-fault tuple, so anything outside it — a ``ValidationError``
+    from building the notification, a bug in a sender implementation, the
+    ``ValueError`` stood in for here — escaped and REPLACED the real turn
+    fault. That hands the forwarded path's bounded-replay machinery a transport
+    exception instead of the fault it is supposed to act on; on a
+    ``_HaltNoReply`` leg it would convert an already-audited deterministic halt
+    into a re-raise, burning the poison ceiling on duplicate PAID completions.
+    """
+    sender = _WireFaultOnNotifySender(ValueError("a sender bug nobody anticipated"))
+    adapter = _adapter(
+        orchestrator=_Orchestrator(exc=RuntimeError("provider down")),
+        sender=sender,
+        pool=_Pool(),
+    )
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(RuntimeError, match="provider down"),
+    ):
+        await adapter.dispatch(_prepared())
+    assert any(
+        entry.get("event") == "comms.inbound.real_turn.turn_failed_notify_failed"
+        and entry.get("log_level") == "warning"
+        and entry.get("error_class") == "ValueError"
+        for entry in captured
+    ), captured
+
+
 async def test_notify_turn_failed_lets_cancelled_error_propagate() -> None:
     """``CancelledError`` must propagate out of ``_notify_turn_failed`` uncaught
-    (#594 Fix-4). ``_NOTIFY_WIRE_EXCEPTIONS`` is deliberately narrow — never
-    ``BaseException`` — precisely so a caller-level task cancellation (e.g. the
-    daemon shutting down mid-turn) that lands while ``send_turn_state`` is
-    in-flight actually cancels the notify, rather than being silently caught
-    and logged like a real member of the wire-fault tuple.
+    (#594 Fix-4). The containment there is deliberately over ``Exception`` and
+    never ``BaseException`` — precisely so a caller-level task cancellation
+    (e.g. the daemon shutting down mid-turn) that lands while ``send_turn_state``
+    is in-flight actually cancels the notify, rather than being silently caught
+    and logged like an ordinary fault. This test is what keeps #594 R1's
+    widening (from a narrow wire-fault tuple to bare ``except Exception``) from
+    quietly becoming ``except BaseException``.
 
     Called directly (mirroring
     ``test_notify_turn_failed_skips_non_notifiable_stage_directly`` below)
