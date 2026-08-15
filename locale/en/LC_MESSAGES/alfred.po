@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 14:05+0100\n"
+"POT-Creation-Date: 2026-08-15 14:25+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3661,10 +3661,11 @@ msgid "tui.label_you"
 msgstr "you"
 
 # #593 (Task 14/15) — revived from the obsolete Slice-1/2 orchestrator
-# entries above (tui.thinking, tui.alfred_error unchanged; tui.turn_timeout's
+# entries above (tui.thinking unchanged at revival time; tui.turn_timeout's
 # msgstr is CORRECTED here — the old "; cancelled" clause is false under the
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
-# reply can still render).
+# reply can still render; tui.alfred_error's msgstr was later re-punctuated
+# by #594 R7 to match the tui.* convention -- see that msgid below).
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:491
 #: plugins/alfred_tui/tests/test_textual_app.py:298
 msgid "tui.thinking"
@@ -3673,7 +3674,7 @@ msgstr "thinking..."
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:507
 #: plugins/alfred_tui/tests/test_textual_app.py:846
 msgid "tui.alfred_error"
-msgstr "alfred error: {error}"
+msgstr "Alfred error: {error}."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:579
 msgid "tui.label_alfred"

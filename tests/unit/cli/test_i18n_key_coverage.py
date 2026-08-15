@@ -401,12 +401,14 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {},
         ("event",),
     ),
-    # tui.* -- #593 Task 15. plugins/ is out of scope for
-    # test_placeholder_substitution_closure.py (src/alfred only), so these
-    # placeholder-bearing TUI keys (tui.turn_timeout, tui.alfred_error) need
-    # their own closure guard here; the three bodyless turn_failed.* keys and
-    # the revived tui.thinking are pinned alongside them for the same
-    # fuzzy-match protection the rest of this table provides.
+    # tui.* -- #593 Task 15. test_placeholder_substitution_closure.py's AST
+    # walk covers the top-level plugins/ tree too (widened by #594 Fix-9), so
+    # these placeholder-bearing TUI keys (tui.turn_timeout, tui.alfred_error)
+    # already have a placeholder-closure guard; the fingerprint rows here
+    # check a different concern -- exact substring content, not placeholder
+    # closure -- so they're pinned alongside the three bodyless turn_failed.*
+    # keys and the revived tui.thinking for the same fuzzy-match protection
+    # the rest of this table provides.
     "tui.thinking": ({}, ("thinking",)),
     "tui.turn_timeout": ({"seconds": 90}, ("no response", "90")),
     "tui.alfred_error": ({"error": "ConnectionResetError"}, ("alfred", "error")),

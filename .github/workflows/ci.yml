@@ -160,8 +160,8 @@ jobs:
           uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report=term-missing --cov-fail-under=75
           uv run coverage report --include='src/alfred/security/*' --fail-under=100
       - name: TUI plugin unit tests
-        # #591/#592/#593 companion. `plugins/alfred_tui/tests` (10 files, 82 tests,
-        # ~4.8s) appeared in NO workflow and NO Makefile target, and `testpaths =
+        # #591/#592/#593 companion. `plugins/alfred_tui/tests` (11 files, 91 tests,
+        # ~10.5s) appeared in NO workflow and NO Makefile target, and `testpaths =
         # ["tests"]` cannot reach it — `testpaths` applies only when pytest is given
         # no path args, and every CI lane passes explicit paths. So the plugin that
         # owns `alfred chat`'s entire client half had zero merge gating.
