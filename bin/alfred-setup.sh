@@ -475,27 +475,41 @@ pepper_blank_re="${pepper_line_re}[[:space:]]*(\"\"|'')[[:space:]]*\$"
 pepper_bare_re="^[[:space:]]*${pepper_key_re}[[:space:]]*="
 # A TOML table / array-of-tables header, used ONLY by the refusal gate below.
 #
-# The whole line must be `[key]` or `[[key]]` (any indentation, optional
-# trailing comment) and must contain NO comma. A first version of this pattern
-# was just `^[[:space:]]*\[` — "a line starting with [" — which is NOT the same
-# predicate at all, and mis-classified perfectly legal TOML: an array element on
-# its own line (`  [1, 2],` inside a multi-line `matrix = [ ... ]`) read as a
-# table header, so a pepper appearing after it was REFUSED with remediation
-# ("move the line above line N") that would have moved the secret INSIDE the
-# array. Requiring the whole line to close its own bracket, and rejecting the
-# comma that only an array element can carry, separates the two.
+# Derived from TOML's actual key grammar rather than guessed at, because both
+# earlier guesses were wrong in opposite directions and the second was wrong
+# SILENTLY:
 #
-# ACCEPTED LEXICAL LIMITS — name them here rather than pretend the guard is a
-# parser (a lexical rule cannot decide a parse-level fact):
-#   * a single-element array on its own line with no trailing comma (`[1]`) is
-#     indistinguishable from the table header `[1]`;
-#   * a `[bracketed]`-shaped line inside a multi-line """string""" body reads as
-#     a header.
-# Both are false POSITIVES, so both fail in the loud direction — a refusal the
-# operator can see and act on, never a silent mis-write. The insert path below
-# deliberately does not use this pattern at all, so neither limit can corrupt a
-# file.
-toml_table_re='^[[:space:]]*\[\[?[^],]*\]\]?[[:space:]]*(#.*)?$'
+#   * `^[[:space:]]*\[` — "a line starting with [" — is not the same predicate
+#     at all. An array element on its own line (`  [1, 2],` inside a multi-line
+#     `matrix = [ ... ]`) read as a table header, so a pepper after it was
+#     REFUSED, on a legal file, with remediation ("move the line above line N")
+#     that would have moved the secret INSIDE the array.
+#   * `\[\[?[^],]*\]\]?...` — "…and contains no comma" — fixed that but broke
+#     the gate for real headers whose QUOTED key contains a comma or a bracket:
+#     `["a,b"]`, `[["a,b"]]`, `["x]y"]` are all legal TOML, and a pepper scoped
+#     inside one was silently NOT refused — exit 0, success banner, pepper
+#     invisible to the broker. That is the exact two-HMAC-plane failure this
+#     gate exists to prevent, i.e. a false NEGATIVE, the dangerous direction.
+#
+# A header is `[` or `[[`, then a dotted path of TOML keys — bare
+# (`[A-Za-z0-9_-]+`), basic-quoted (`"..."`, backslash escapes honoured so a
+# `\"` inside the name does not end it early), or literal-quoted (`'...'`,
+# which TOML defines as having no escapes at all) — then `]`/`]]`, then only
+# whitespace or a comment. An array element such as `[1, 2],` cannot match:
+# after the first key the grammar allows only `.`, `]` or whitespace, never a
+# comma, and never a trailing `,` after the bracket.
+#
+# ACCEPTED LEXICAL LIMIT — named here rather than pretending the guard is a
+# parser (a lexical rule cannot decide a parse-level fact): a single-element
+# array of one bare token on its own line with no trailing comma (`[1]`, or a
+# `[grafana]`-shaped line inside a multi-line """string""" body) is genuinely
+# indistinguishable from a table header without parsing. That residual is a
+# false POSITIVE — a visible refusal the operator can act on, never a silent
+# mis-write — and the insert path deliberately does not use this pattern at
+# all, so it cannot corrupt a file. Verified against all of the shapes above on
+# bash 3.2.57 and 5.3, with `grep -E` and `[[ =~ ]]` agreeing on every one.
+_toml_key_re="([A-Za-z0-9_-]+|\"([^\"\\\\]|\\\\.)*\"|'[^']*')"
+toml_table_re="^[[:space:]]*\\[\\[?[[:space:]]*${_toml_key_re}([[:space:]]*\\.[[:space:]]*${_toml_key_re})*[[:space:]]*\\]\\]?[[:space:]]*(#.*)?\$"
 
 # The leading run of comment/blank lines at the TOP of a TOML file. Anything
 # before the first line that is neither is, by construction, still at root
@@ -630,7 +644,7 @@ _pepper_from_file() {
 # REAL value (spec §8.10: rotating the pepper invalidates cross-row
 # correlation).
 _pepper_write_file() {
-  local tmp_file line replaced=0 inserted=0
+  local tmp_file line replaced=0 inserted=0 write_rc=0
   if grep -qE "$pepper_line_re" "$target_file" 2>/dev/null; then
     # #594 sec-002 (fix-2, regression fix): the key is present. Only overwrite
     # when the value is SPECIFICALLY a provably-blank string (`= ""` or `= ''`)
@@ -662,6 +676,9 @@ _pepper_write_file() {
     # mirrored-from-.env path, so it must never be fed through sed/awk
     # substitution syntax.
     tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
+    # See _pepper_write_rc_note below for why every write flips $write_rc and
+    # the group ends on an explicit test of it.
+    write_rc=0
     if ! {
       while IFS= read -r line || [[ -n "$line" ]]; do
         # LOAD-BEARING: $pepper_blank_re is UNQUOTED here. Quoting the RHS of
@@ -671,12 +688,13 @@ _pepper_write_file() {
         # banner. Verified against bash 3.2.57 and 5.3; pinned by
         # test_bootstrap_fills_a_blank_entry_in_place_without_duplicating.
         if [[ "$replaced" -eq 0 && "$line" =~ $pepper_blank_re ]]; then
-          printf '"%s" = "%s"\n' "$pepper_key" "$1"
+          printf '"%s" = "%s"\n' "$pepper_key" "$1" || write_rc=1
           replaced=1
         else
-          printf '%s\n' "$line"
+          printf '%s\n' "$line" || write_rc=1
         fi
       done < "$target_file"
+      [[ "$write_rc" -eq 0 ]]
     } > "$tmp_file"; then
       rm -f "$tmp_file"
       return 1
@@ -721,21 +739,43 @@ _pepper_write_file() {
   # not hex-constrained on the mirrored-from-.env path and must never be fed
   # through sed/awk substitution syntax.
   tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
+  # _pepper_write_rc_note — WHY every write below flips $write_rc and the group
+  # ends on `[[ "$write_rc" -eq 0 ]]` rather than on whatever ran last:
+  #
+  # These rebuild groups TRUNCATE and re-emit the whole file, so a write that
+  # fails part-way through (ENOSPC, EDQUOT, EIO) does not merely fail to add the
+  # pepper — it silently DROPS the lines it could not write, and the `mv` below
+  # then promotes that truncated file over the operator's real secrets. Every
+  # other secret in the file disappears, exit 0, success banner. That is
+  # strictly worse than the append-only bug this rebuild replaced.
+  #
+  # A brace group exits with the status of its LAST command, and neither
+  # candidate for "last" is trustworthy here:
+  #   * a trailing `if` whose condition is false and which has no `else` exits
+  #     0, discarding any earlier failure outright;
+  #   * a `while` loop exits with the status of the last command of its LAST
+  #     iteration, so a mid-file failure is overwritten by any later success.
+  # Empirically reproduced in all three rebuild loops in this file (injected
+  # per-write failure on a middle line: rc 0, banner printed, that line gone).
+  # Accumulating into $write_rc and ending the group on an explicit test of it
+  # is the only shape that survives both, so all three loops use it.
+  write_rc=0
   if ! {
     while IFS= read -r line || [[ -n "$line" ]]; do
       # $toml_preamble_re unquoted, for the same reason as $pepper_blank_re
-      # above. The brace group is not a subshell, so `inserted` survives the
-      # loop and the post-loop fallback below sees it.
+      # above. The brace group is not a subshell, so `inserted` and `write_rc`
+      # survive the loop and the statements below see them.
       if [[ "$inserted" -eq 0 ]] && ! [[ "$line" =~ $toml_preamble_re ]]; then
-        printf '"%s" = "%s"\n' "$pepper_key" "$1"
+        printf '"%s" = "%s"\n' "$pepper_key" "$1" || write_rc=1
         inserted=1
       fi
-      printf '%s\n' "$line"
+      printf '%s\n' "$line" || write_rc=1
     done < "$target_file"
     # Whole file was preamble (or empty): still root scope, so EOF is correct.
     if [[ "$inserted" -eq 0 ]]; then
-      printf '"%s" = "%s"\n' "$pepper_key" "$1"
+      printf '"%s" = "%s"\n' "$pepper_key" "$1" || write_rc=1
     fi
+    [[ "$write_rc" -eq 0 ]]
   } > "$tmp_file"; then
     rm -f "$tmp_file"
     return 1
@@ -778,22 +818,27 @@ _pepper_write_env() {
     # Rebuild .env line-by-line instead: the value only ever reaches
     # `printf '%s'`, which performs no replacement/backreference expansion on
     # its arguments.
-    local tmp_env line replaced=0
+    local tmp_env line replaced=0 write_rc=0
     tmp_env="$(umask 077 && mktemp .env.XXXXXX)" || return 1
+    # See _pepper_write_rc_note in _pepper_write_file above. Identical hazard
+    # with a different blast radius: a mid-file write failure here silently
+    # deletes the operator's OTHER .env variables (provider keys, Discord token,
+    # Compose settings), not just the pepper.
     if ! {
       while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$replaced" -eq 0 && "$line" =~ ^${pepper_env_key}= ]]; then
-          printf '%s=%s\n' "$pepper_env_key" "$1"
+          printf '%s=%s\n' "$pepper_env_key" "$1" || write_rc=1
           replaced=1
         else
-          printf '%s\n' "$line"
+          printf '%s\n' "$line" || write_rc=1
         fi
       done < .env
+      [[ "$write_rc" -eq 0 ]]
     } > "$tmp_env"; then
       rm -f "$tmp_env"
       return 1
     fi
-    mv "$tmp_env" .env
+    mv "$tmp_env" .env || return 1
   else
     # Trailing-newline guard (#469 Blocker 2 CodeRabbit finding): without it a
     # .env whose last byte is not \n glues the new key onto the previous line.

@@ -98,11 +98,21 @@ def _run_bootstrap_in_tmpdir(
     *,
     stub_openssl: bool = False,
     openssl_path: str | None = None,
+    fail_writes_containing: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the bootstrap block in ``tmpdir`` with a stubbed env.
 
     ``stub_openssl=True`` shadows ``openssl`` in PATH with a stub that
     always exits 127 — exercises the openssl-missing branch.
+
+    ``fail_writes_containing=MARKER`` shadows the ``printf`` builtin with a
+    wrapper that returns 1 (writing nothing) for any call whose arguments carry
+    ``MARKER``, and delegates to ``builtin printf`` otherwise. That injects a
+    deterministic, portable per-write failure at a chosen point in a rebuild
+    loop — modelling ENOSPC/EDQUOT/EIO, which are otherwise not reproducible in
+    a test. It is the only way to exercise a failure PART-WAY through a rebuild
+    (as opposed to a ``mktemp`` failure before the loop starts, which aborts on
+    a different code path entirely).
 
     #591: the reconcile block reads/writes a relative ``.env`` via
     ``read_env_var`` / ``_pepper_write_env`` — never an absolute path.
@@ -136,7 +146,22 @@ def _run_bootstrap_in_tmpdir(
         + slice_shell_function(_SETUP_SH, "trim_ws() {")
         + _openssl_missing_message_func()
     )
-    script = prelude + bootstrap
+    # Injected AFTER the prelude's own helpers so it shadows `printf` only for
+    # the bootstrap block under test. `builtin printf` avoids infinite
+    # recursion; the harness's own `step` shim uses `echo`, so banners are
+    # unaffected.
+    write_fault_shim = ""
+    if fail_writes_containing is not None:
+        write_fault_shim = (
+            "printf() {\n"
+            "  local __a\n"
+            '  for __a in "$@"; do\n'
+            f'    case "$__a" in *{fail_writes_containing}*) return 1;; esac\n'
+            "  done\n"
+            '  builtin printf "$@"\n'
+            "}\n"
+        )
+    script = prelude + write_fault_shim + bootstrap
     env = os.environ.copy()
     env["HOME"] = str(tmpdir)
     if stub_openssl:
@@ -1236,6 +1261,146 @@ def test_bootstrap_propagates_a_secrets_file_write_failure(
     assert "Mirrored" not in result.stdout, (
         f"a success banner was printed despite the write failing: {result.stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #594 R2 re-review: a rebuild that fails PART-WAY must abort, not promote a
+# truncated file; and the refusal gate must not go silent on legal TOML.
+# ---------------------------------------------------------------------------
+
+_WRITE_FAULT = "__FAIL_WRITE__"
+
+
+@pytest.mark.parametrize(
+    ("secrets_toml", "dotenv"),
+    [
+        pytest.param(
+            "# AlfredOS secrets file. DO NOT commit.\n"
+            'deepseek_api_key = "sk-abc"\n'
+            f'canary = "{_WRITE_FAULT}"\n'
+            'grafana_admin = "hunter2"\n',
+            f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n",
+            id="root-scope-insert-rebuild",
+        ),
+        pytest.param(
+            # A line AFTER the canary is load-bearing: it makes the failing
+            # write a MIDDLE iteration. With the canary last, the loop's own
+            # exit status already carries the failure and the bug is invisible.
+            f'"audit.hash_pepper" = ""\ndeepseek_api_key = "sk-abc"\n'
+            f'canary = "{_WRITE_FAULT}"\ntail_key = "keep-me"\n',
+            f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n",
+            id="blank-overwrite-rebuild",
+        ),
+        pytest.param(
+            f'"audit.hash_pepper" = "{_PEPPER_ONE}"\n',
+            f"ALFRED_AUDIT_HASH_PEPPER=\nOTHER_KEY={_WRITE_FAULT}\nLAST_KEY=keep-me\n",
+            id="dotenv-rebuild",
+        ),
+    ],
+)
+def test_bootstrap_aborts_when_a_write_fails_partway_through_a_rebuild(
+    bash_available: str,
+    tmp_path: Path,
+    secrets_toml: str,
+    dotenv: str,
+) -> None:
+    """A mid-rebuild write failure aborts with BOTH files byte-identical.
+
+    All three rebuild loops in this block TRUNCATE and re-emit a whole file, so
+    a write that fails part-way does not merely fail to add the pepper — it
+    silently DROPS the lines it could not write, and the atomic ``mv`` then
+    promotes that truncated file over the operator's real secrets. Every other
+    secret vanishes, exit 0, success banner. That is strictly worse than the
+    append-only bug the rebuild replaced.
+
+    A brace group exits with the status of its LAST command, and neither
+    candidate for "last" is trustworthy: a trailing ``if`` with a false
+    condition and no ``else`` exits 0 outright, and a ``while`` loop exits with
+    the status of its LAST iteration, so a mid-file failure is overwritten by
+    any later success. Reproduced in all three loops before the fix — the file
+    came back modified with the failing line silently deleted and rc 0. Each
+    loop now accumulates into ``$write_rc`` and ends on an explicit test of it.
+
+    The failure is injected by shadowing ``printf`` (see
+    ``fail_writes_containing``), which is what makes a PART-WAY failure
+    reproducible at all; a ``mktemp`` failure aborts before the loop even
+    starts and exercises a different path.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(secrets_toml)
+    (tmp_path / ".env").write_text(dotenv)
+    before_toml = target.read_bytes()
+    before_env = (tmp_path / ".env").read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path, fail_writes_containing=_WRITE_FAULT)
+
+    assert result.returncode != 0, (
+        "a mid-rebuild write failure reported success:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert target.read_bytes() == before_toml, (
+        "secrets.toml was replaced by a TRUNCATED rebuild — the lines the "
+        f"failing write dropped are gone:\n{target.read_text()}"
+    )
+    assert (tmp_path / ".env").read_bytes() == before_env, (
+        f".env was replaced by a truncated rebuild:\n{(tmp_path / '.env').read_text()}"
+    )
+    assert "Mirrored" not in result.stdout and "Seeded" not in result.stdout, (
+        f"a success banner was printed despite the write failing: {result.stdout!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param('["a,b"]', id="comma-in-quoted-key"),
+        pytest.param('[["a,b"]]', id="comma-in-quoted-array-of-tables"),
+        pytest.param('["x]y"]', id="bracket-in-quoted-key"),
+        pytest.param("['a,b']", id="comma-in-literal-quoted-key"),
+    ],
+)
+def test_bootstrap_refuses_a_pepper_inside_a_quoted_table_header(
+    bash_available: str,
+    tmp_path: Path,
+    header: str,
+) -> None:
+    """A pepper scoped inside a table whose QUOTED key contains a comma or bracket refuses.
+
+    These are all legal TOML table headers. An intermediate version of the
+    refusal gate excluded any bracketed line containing a comma — which fixed a
+    false refusal on array-continuation lines but silently broke the gate for
+    real headers like these: exit 0, success banner, and ``tomllib`` confirming
+    the pepper never reaches top level. That is a false NEGATIVE, the dangerous
+    direction, and exactly the two-HMAC-plane failure the gate exists to
+    prevent.
+
+    The pattern is now derived from TOML's own key grammar (bare / basic-quoted
+    with escapes honoured / literal-quoted, dotted), so a quoted key may contain
+    anything while an array element still cannot match.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(
+        f"# AlfredOS secrets file. DO NOT commit.\n{header}\n"
+        f'"audit.hash_pepper" = "{_PEPPER_ONE}"\n'
+    )
+    before = target.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        f"a pepper scoped inside the legal table header {header} was not refused:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "line 3" in result.stderr and "line 2" in result.stderr, (
+        f"refusal does not name both line numbers: {result.stderr!r}"
+    )
+    assert _PEPPER_ONE not in result.stderr, f"the refusal echoed the secret: {result.stderr!r}"
+    assert target.read_bytes() == before
+    assert _read_dotenv_pepper(tmp_path) == ""
 
 
 # ---------------------------------------------------------------------------
