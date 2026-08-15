@@ -505,7 +505,13 @@ def test_child_base_url_guard_agrees_with_settings_validator_on_rejection(
     wraps every exception into ``SettingsError``, so a bare ``ValidationError`` can
     never actually escape ``Settings()`` — the tuple form would keep passing even if
     that wrapping broke, and both boot paths depend on it.
+
+    Round-6 review fleet (CodeRabbit): asserting only the exception TYPE would still
+    pass if ``Settings()`` started raising ``SettingsError`` for an unrelated field —
+    the field-path check below is what actually proves THIS corpus is the cause.
     """
+    from pydantic import ValidationError
+
     from alfred.config.settings import Settings, SettingsError
 
     assert child_main._base_url_rejection_reason(url) is not None
@@ -513,8 +519,16 @@ def test_child_base_url_guard_agrees_with_settings_validator_on_rejection(
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
     monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", url)
-    with pytest.raises(SettingsError):
+    with pytest.raises(SettingsError) as exc_info:
         Settings()  # type: ignore[call-arg]
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError), exc_info.value
+    # Field-path only — pydantic's ``input`` echo would re-print the credential-
+    # adjacent fixture value this corpus is built from.
+    assert any(
+        "deepseek_base_url" in str(error["loc"])
+        for error in cause.errors(include_input=False, include_url=False)
+    ), cause.errors(include_input=False, include_url=False)
 
 
 @pytest.mark.parametrize("url", _BENIGN_BASE_URLS)

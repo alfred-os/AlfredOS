@@ -578,9 +578,11 @@ def test_child_env_default_omits_golive_provider_config(
 ) -> None:
     """A no-arg (dormant/control_fd=False) ``_child_env`` sets NONE of the golive keys.
 
-    The three keys are on the scrubbed allowlist (Task 2), so ``delenv`` them first
-    to isolate the FUNCTION's behaviour from an ambient host value — the assertion is
-    "``_child_env`` does not ADD them", not "the host had none".
+    All four keys (``ALFRED_QUARANTINE_MODEL``, ``ALFRED_QUARANTINE_MAX_TOKENS``,
+    ``SSL_CERT_FILE``, ``ALFRED_QUARANTINE_PROVIDER``) are on the scrubbed allowlist
+    (Task 2), so ``delenv`` them first to isolate the FUNCTION's behaviour from an
+    ambient host value — the assertion is "``_child_env`` does not ADD them", not
+    "the host had none".
     """
     for key in _GOLIVE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)

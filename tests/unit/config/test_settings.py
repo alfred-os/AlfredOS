@@ -422,7 +422,7 @@ class TestQuarantineProviderSettings:
     """#586/#587: quarantine provider selection and enforcement settings."""
 
     @pytest.fixture(autouse=True)
-    def _base_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _base_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Hermetic env for every test in this class — required vars set, ambient noise cleared.
 
         Every provider-adjacent ``ALFRED_*`` var is ``delenv``'d, not just the two fields the
@@ -430,11 +430,17 @@ class TestQuarantineProviderSettings:
         so pydantic reads a ``.env`` from CWD in addition to the shell, and a coincidentally-
         matching ambient value from either source could let a ``pytest.raises(SettingsError)``
         test in this class pass for the WRONG reason, or let a default-asserting test read
-        through to ambient state instead of proving the CODE default. Matches the autouse-
-        fixture idiom every sibling ``tests/unit/config/test_settings_*.py`` file already uses
-        (e.g. ``test_settings_egress_proxy_url.py``, ``test_settings_db_pools.py``) — this class
+        through to ambient state instead of proving the CODE default. ``delenv`` alone only
+        covers the shell half of that claim — it cannot neutralize a REAL ``.env`` FILE in
+        CWD, which ``DotEnvSettingsSource`` reads directly, independent of ``os.environ``
+        (round-6 review fleet / CodeRabbit). ``monkeypatch.chdir(tmp_path)`` closes that gap:
+        an empty ``tmp_path`` has no ``.env`` to read, so ``env_file=".env"`` resolves to a
+        path that doesn't exist. Matches the autouse-fixture idiom every sibling
+        ``tests/unit/config/test_settings_*.py`` file already uses (e.g.
+        ``test_settings_egress_proxy_url.py``, ``test_settings_db_pools.py``) — this class
         predates that convention.
         """
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
         monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
         for var in (
