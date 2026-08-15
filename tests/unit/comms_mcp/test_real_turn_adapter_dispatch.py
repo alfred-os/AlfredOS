@@ -37,20 +37,15 @@ from alfred.security.dlp import OutboundCanaryTripped, OutboundDlp
 from alfred.security.tiers import T2, tag
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.gates import make_quarantined_extract_chain_gate
-
-
-class _FakeAuditHashBroker:
-    """Minimal broker satisfying ``audit_hash._BrokerLike`` for unit tests.
-
-    FOLD-R12: the ``budget_denied`` / ``turn_error`` / ``send_failed`` legs all
-    reach ``_emit_refused``, which hashes via ``audit_hash`` and raises
-    ``MissingAuditHashPepperError`` fail-closed until ``set_broker`` runs (the
-    daemon wires the real broker at ``inbound.py:707``). Mirrors the fixture in
-    ``test_real_turn_adapter_ingest.py``.
-    """
-
-    def get(self, name: str) -> str:
-        return "p" * 40
+from tests.unit.comms_mcp._real_turn_adapter_doubles import (
+    _adapter,
+    _FakeAuditHashBroker,
+    _Orchestrator,
+    _Pool,
+    _prepared,
+    _RecordingAudit,
+    _RecordingSender,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -58,81 +53,6 @@ def _wire_audit_hash_pepper() -> object:
     audit_hash.set_broker_for_test(_FakeAuditHashBroker())
     yield
     audit_hash.reset_for_test()
-
-
-class _RecordingSender:
-    def __init__(self) -> None:
-        self.sent: list[object] = []
-        self.turn_states_sent: list[object] = []
-
-    async def send_outbound(self, request):
-        self.sent.append(request)
-        return {}
-
-    async def send_turn_state(self, notification):
-        self.turn_states_sent.append(notification)
-
-
-class _RecordingAudit:
-    def __init__(self) -> None:
-        self.rows: list[dict[str, object]] = []
-
-    async def append_schema(self, **kwargs: object) -> None:
-        self.rows.append(dict(kwargs))
-
-
-class _Pool:
-    def __init__(self) -> None:
-        self.acquired: list[object] = []
-        self.released: list[object] = []
-
-    async def acquire(self, key):
-        self.acquired.append(key)
-        return SimpleNamespace(key=key)
-
-    async def release(self, key, wm) -> None:
-        self.released.append(key)
-
-
-class _Orchestrator:
-    def __init__(self, *, answer: str | None = None, exc: Exception | None = None) -> None:
-        self._answer = answer
-        self._exc = exc
-        self.calls: list[dict[str, object]] = []
-
-    async def handle_user_message(self, *, user, content, working_memory, egress_context=None):
-        self.calls.append({"user": user, "content": content, "egress": egress_context})
-        if self._exc is not None:
-            raise self._exc
-        assert self._answer is not None
-        return self._answer
-
-
-def _prepared() -> _PreparedTurn:
-    return _PreparedTurn(
-        content=tag(T2, "hi alfred", source="comms.inbound"),
-        user=_InboundUser(slug="u-1", display_name="Ada", language="en-US"),
-        egress=SimpleNamespace(adapter_id="tui", inbound_id="ib-1", session_id="u-1"),  # type: ignore[arg-type]
-        adapter_id="tui",
-        target_platform_id="plat-9",
-    )
-
-
-def _adapter(*, orchestrator, audit=None, sender=None, pool=None, outbound_dlp=None):
-    a = RealTurnOrchestratorAdapter(
-        orchestrator=orchestrator,
-        working_memory_pool=pool or _Pool(),
-        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
-        audit_writer=audit or _RecordingAudit(),
-        # FOLD-R9: a real broker-backed OutboundDlp — ``OutboundMessageRequest.body``
-        # is a ``ScannedOutboundBody`` NewType a bare stand-in can't mint. The
-        # ``outbound_dlp`` override exists for the #594 R1 Fix C2 scan-leg tests,
-        # which need a scanner that genuinely trips or genuinely faults.
-        outbound_dlp=outbound_dlp or identity_outbound_dlp(),
-        extractor_bridge=SimpleNamespace(),
-    )
-    a.bind_outbound_sender(sender or _RecordingSender())
-    return a
 
 
 async def test_dispatch_prepared_runs_turn_and_sends_scanned_answer() -> None:

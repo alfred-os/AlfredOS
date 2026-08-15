@@ -343,7 +343,7 @@ async def test_cib_009_turn_failed_stage_coarsening_hides_which_control_fired() 
 
     from alfred.comms_mcp.real_turn_adapter import _HaltNoReply
     from alfred.security.dlp import OutboundCanaryTripped
-    from tests.unit.comms_mcp.test_real_turn_adapter_dispatch import (
+    from tests.unit.comms_mcp._real_turn_adapter_doubles import (
         _adapter,
         _FakeAuditHashBroker,
         _Orchestrator,
