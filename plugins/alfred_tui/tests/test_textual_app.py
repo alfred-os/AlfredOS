@@ -483,7 +483,17 @@ async def test_set_turn_failed_renders_localized_copy_and_clears_pending(
         assert app._turn_pending is False
         assert input_widget.disabled is False
         rendered = _plain_text(_log(app))
-    assert _turn_failure_message(stage) in rendered
+    # RichLog soft-wraps a single write at the widget's viewport width
+    # (~78 cols in the default 80x24 test terminal), inserting a raw "\n" at
+    # a space boundary; `_plain_text` then joins every wrapped Strip with
+    # "\n" too, so a single logical message can come back fragmented across
+    # lines. The #594 S3 budget_exhausted copy (160 chars, naming the exact
+    # `alfred user set` remediation per the root-cause report) is the first
+    # entry here long enough to wrap. Collapse whitespace on both sides
+    # before comparing so this asserts CONTENT, not viewport width — a
+    # wrap-inserted "\n" always lands at a former space, so collapsing runs
+    # of whitespace to one space losslessly reconstructs the original text.
+    assert " ".join(_turn_failure_message(stage).split()) in " ".join(rendered.split())
 
 
 def test_turn_failure_message_is_exhaustive_over_the_wire_literal() -> None:

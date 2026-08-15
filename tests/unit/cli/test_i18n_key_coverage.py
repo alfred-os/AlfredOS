@@ -413,7 +413,7 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     "tui.turn_timeout": ({"seconds": 90}, ("no response", "90")),
     "tui.alfred_error": ({"error": "ConnectionResetError"}, ("alfred", "error")),
     "tui.turn_failed.refused": ({}, ("could not process",)),
-    "tui.turn_failed.budget_exhausted": ({}, ("budget",)),
+    "tui.turn_failed.budget_exhausted": ({}, ("--daily-budget-usd",)),
     "tui.turn_failed.internal_error": ({}, ("went wrong",)),
     # #594 Fix-10 -- live elapsed-time counter (non-logged, separate widget)
     # + rate-limited dropped-keystroke acknowledgement (logged, once per turn).

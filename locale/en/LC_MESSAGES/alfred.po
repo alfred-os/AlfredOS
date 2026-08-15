@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 21:06+0100\n"
+"POT-Creation-Date: 2026-08-15 22:14+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -369,28 +369,30 @@ msgstr "secrets file: {path}"
 msgid "status.secrets_file_absent"
 msgstr "secrets file: {path} (not found — using environment variables)"
 
-#: src/alfred/cli/main.py:225
+#: src/alfred/cli/main.py:232
 msgid "status.daily_budget"
-msgstr "daily budget USD: {amount}"
+msgstr ""
+"daily budget USD (seed for new users; live cap is per-user — see `alfred "
+"user list`): {amount}"
 
-#: src/alfred/cli/main.py:226
+#: src/alfred/cli/main.py:233
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:232
+#: src/alfred/cli/main.py:239
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:235
+#: src/alfred/cli/main.py:242
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:237
+#: src/alfred/cli/main.py:244
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
-#: src/alfred/cli/main.py:384 src/alfred/i18n/_slice_4_reserve.py:158
+#: src/alfred/cli/main.py:391 src/alfred/i18n/_slice_4_reserve.py:158
 msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
 "alfred chat needs the gateway. Start it with: alfred gateway start. If "
@@ -3613,8 +3615,9 @@ msgstr "Alfred could not process that turn. Try rephrasing, or ask something els
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:90
 msgid "tui.turn_failed.budget_exhausted"
 msgstr ""
-"Daily budget reached. Raise ALFRED_DAILY_BUDGET_USD in .env, or wait to "
-"reset."
+"Daily budget reached; it resets at UTC midnight. To raise it now, run "
+"`alfred user set <slug> --daily-budget-usd <amount>` (`alfred user list` "
+"shows your slug)."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:92
 msgid "tui.turn_failed.internal_error"
@@ -3640,7 +3643,7 @@ msgstr "Speak to Alfred..."
 #: plugins/alfred_tui/tests/test_textual_app.py:380
 #: plugins/alfred_tui/tests/test_textual_app.py:406
 #: plugins/alfred_tui/tests/test_textual_app.py:462
-#: plugins/alfred_tui/tests/test_textual_app.py:674
+#: plugins/alfred_tui/tests/test_textual_app.py:684
 msgid "tui.turn_timeout"
 msgstr ""
 "No response within {seconds}s. Try again, or check the daemon logs if it "
@@ -3648,10 +3651,10 @@ msgstr ""
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:490
 #: plugins/alfred_tui/tests/test_textual_app.py:354
-#: plugins/alfred_tui/tests/test_textual_app.py:941
-#: plugins/alfred_tui/tests/test_textual_app.py:948
-#: plugins/alfred_tui/tests/test_textual_app.py:967
-#: plugins/alfred_tui/tests/test_textual_app.py:980
+#: plugins/alfred_tui/tests/test_textual_app.py:951
+#: plugins/alfred_tui/tests/test_textual_app.py:958
+#: plugins/alfred_tui/tests/test_textual_app.py:977
+#: plugins/alfred_tui/tests/test_textual_app.py:990
 msgid "tui.turn_still_pending"
 msgstr "Still working on your last message..."
 
@@ -3672,7 +3675,7 @@ msgid "tui.thinking"
 msgstr "thinking..."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:523
-#: plugins/alfred_tui/tests/test_textual_app.py:846
+#: plugins/alfred_tui/tests/test_textual_app.py:856
 msgid "tui.alfred_error"
 msgstr "Alfred error: {error}."
 
@@ -3686,7 +3689,7 @@ msgstr "alfred"
 # real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
 # reconciles the `#:` source-location comments.
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:673
-#: plugins/alfred_tui/tests/test_textual_app.py:897
+#: plugins/alfred_tui/tests/test_textual_app.py:907
 msgid "tui.thinking_elapsed"
 msgstr "Alfred is thinking... ({seconds}s)"
 
