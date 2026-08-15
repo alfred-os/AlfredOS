@@ -995,6 +995,249 @@ def test_bootstrap_does_not_clobber_an_indented_dotenv_pepper(
     )
 
 
+def test_bootstrap_rewrites_the_column0_dotenv_line_not_an_indented_one(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """With BOTH an indented and a column-0 entry, the writer edits the column-0 one.
+
+    The sibling test above proves the append branch; this one is the only case
+    that reaches the REWRITE branch's narrowed anchor and can tell it apart from
+    the old one. ``read_env_var`` sees only the column-0 line (here deliberately
+    left empty, the normal ``cp .env.example .env`` shape), so the file-only
+    mirror branch runs and ``_pepper_write_env`` must fill THAT line.
+
+    Against the old ``^[[:space:]]*KEY=`` anchor the loop replaced the FIRST
+    matching line — the indented one — which both destroyed the operator's value
+    AND left the column-0 line empty, so Compose (last occurrence wins) would
+    have booted alfred-core with an EMPTY pepper while the script reported
+    success.
+    """
+    (tmp_path / ".env").write_text(
+        f"  ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\nALFRED_AUDIT_HASH_PEPPER=\n"
+    )
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "secrets.toml").write_text(f'"audit.hash_pepper" = "{_PEPPER_TWO}"\n')
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    env_lines = (tmp_path / ".env").read_text().splitlines()
+    assert f"  ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}" in env_lines, (
+        f"the indented line was rewritten instead of the column-0 one:\n{env_lines}"
+    )
+    assert f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_TWO}" in env_lines, (
+        f"the column-0 line was not filled with the mirrored value:\n{env_lines}"
+    )
+
+
+def test_bootstrap_fresh_seed_writes_nothing_to_stderr(
+    bash_available: str,
+    openssl_available: str,
+    tmp_path: Path,
+) -> None:
+    """A clean first run is SILENT on stderr.
+
+    Pins the duplicate-count capture in ``_pepper_refuse_unusable_shapes``.
+    ``grep -c`` prints ``"0"`` AND exits 1 when nothing matches, so the natural
+    ``count="$(grep -c ... || echo 0)"`` yields the two-line string ``"0\\n0"``
+    and the ``-gt`` comparison below it then dies with a bash arithmetic syntax
+    error — on the most common path there is, a fresh file with no pepper yet.
+    The refusal still (correctly) does not fire, so exit status alone cannot
+    catch this; only stderr can.
+    """
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.stderr == "", f"a clean fresh-seed run emitted stderr output: {result.stderr!r}"
+
+
+# ---------------------------------------------------------------------------
+# #594 R2 review round: the insert must prove root scope POSITIVELY.
+#
+# The first version of the root-scope insert scanned for a table header and
+# inserted above it — a LEXICAL guess about a PARSE-level fact, wrong in both
+# directions on files tomllib reads perfectly well. The insert now anchors on
+# the file's leading comment/blank preamble instead, which needs no guess at
+# all: nothing before the first substantive line can have opened a table, an
+# array, or a multi-line string.
+# ---------------------------------------------------------------------------
+
+_ARRAY_FIXTURE = "# AlfredOS secrets file. DO NOT commit.\nmatrix = [\n  [1, 2],\n  [3, 4],\n]\n"
+_MULTILINE_STRING_FIXTURE = (
+    '# AlfredOS secrets file. DO NOT commit.\nnotes = """\n[not a table]\n"""\n'
+)
+
+
+def test_bootstrap_does_not_refuse_a_legal_array_followed_by_the_pepper(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """An array element line is not a table header, so this must NOT refuse.
+
+    ``  [1, 2],`` inside a legal multi-line ``matrix = [ ... ]`` matched the
+    first "is this a table header" pattern (``^[[:space:]]*\\[``). A pepper
+    appearing after it was therefore refused — on a file ``tomllib`` parses
+    perfectly, with the pepper already correctly at top level — and the refusal
+    told the operator to move the line above the array element, which would have
+    moved the secret INSIDE the array.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(f'{_ARRAY_FIXTURE}"audit.hash_pepper" = "{_PEPPER_ONE}"\n')
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        "a legal TOML array was mistaken for a table header and the pepper was "
+        f"falsely refused:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_ONE
+    assert _read_dotenv_pepper(tmp_path) == _PEPPER_ONE
+
+
+@pytest.mark.parametrize(
+    ("fixture", "survivor_key"),
+    [
+        pytest.param(_ARRAY_FIXTURE, "matrix", id="multi-line-array"),
+        pytest.param(_MULTILINE_STRING_FIXTURE, "notes", id="multi-line-string"),
+    ],
+)
+def test_bootstrap_inserts_at_root_scope_without_corrupting_multiline_constructs(
+    bash_available: str,
+    tmp_path: Path,
+    fixture: str,
+    survivor_key: str,
+) -> None:
+    """The insert lands at root scope and never inside a multi-line construct.
+
+    Two distinct corruptions the header-scanning insert caused, both on files
+    ``tomllib`` reads fine, both with exit 0 and a success banner:
+
+    * **array** — inserting between ``matrix = [`` and ``  [1, 2],`` produced
+      ``TOMLDecodeError: Unclosed array`` for the ENTIRE file, taking every
+      other secret down with it. This was strictly WORSE than the blind EOF
+      append it replaced, which would have worked here.
+    * **multi-line string** — a ``[not a table]``-shaped line inside a
+      ``\"\"\"...\"\"\"`` body drew the insert into the string, where the pepper
+      became inert text the broker can never see. That is byte-for-byte the
+      table-scoping bug the insert exists to close, reproduced in a new spot.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(fixture)
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # Parses at all, AND the pepper is genuinely top-level, AND the construct
+    # the insert had to step over survived intact.
+    with target.open("rb") as fh:
+        data = tomllib.load(fh)
+    assert data.get("audit.hash_pepper") == _PEPPER_ONE, (
+        "the pepper is not at top level — the insert landed inside the "
+        f"multi-line construct. secrets.toml:\n{target.read_text()}"
+    )
+    assert survivor_key in data, (
+        f"the {survivor_key!r} construct was destroyed by the insert:\n{target.read_text()}"
+    )
+
+
+def test_bootstrap_append_does_not_glue_onto_a_file_without_a_trailing_newline(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """A target file whose last byte is not a newline does not get a glued line.
+
+    The sibling ``_pepper_write_env`` has carried a trailing-newline guard since
+    #469 Blocker 2; the secrets-file writer never did. Without it the new key is
+    appended onto the end of the previous line as one unparseable line, and
+    ``tomllib`` rejects the whole file while the script reports success. The
+    rebuild re-emits every line through ``printf '%s\\n'``, so the guard is
+    structural rather than a second thing that has to be remembered.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    # No trailing newline, and no comment preamble to hide behind.
+    target.write_text('deepseek_api_key = "sk-abc"')
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    with target.open("rb") as fh:
+        data = tomllib.load(fh)
+    assert data.get("audit.hash_pepper") == _PEPPER_ONE
+    assert data.get("deepseek_api_key") == "sk-abc", (
+        f"the pre-existing last line was mangled by the write:\n{target.read_text()}"
+    )
+
+
+def test_bootstrap_propagates_a_secrets_file_write_failure(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """A failed secrets-file write is reported, never masked by a success banner.
+
+    The invariant this whole block documents (``_pepper_bootstrap``'s ``||
+    return 1`` comment): because the bootstrap is invoked as
+    ``_pepper_bootstrap || _pepper_status=$?``, ``set -e`` is disabled inside
+    it, so any write helper that swallows its own failure falls through to the
+    trailing ``echo`` — which is always exit 0 — and the function reports
+    success having written nothing.
+
+    Driven by making the secrets DIRECTORY read-only, so the writer's ``mktemp``
+    cannot create its temp file — a genuinely reachable operator state (a
+    ``~/.config/alfred`` left root-owned by an earlier ``sudo`` run).
+
+    Scope of what this actually discriminates, measured rather than assumed:
+    it catches the CALLER swallowing the helper's status (verified — replacing
+    the ``if ! _pepper_write_file ...; then ... return 1; fi`` with ``|| true``
+    fails this test). It does NOT discriminate between the helper's individual
+    internal guards: the ``mktemp`` guard, the redirection failure, and the
+    ``mv`` guard are defence-in-depth and any one of them alone produces the
+    same correct outcome, so dropping any single one still passes. Recorded here
+    so a future reader does not over-trust this as a per-line pin.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("running as root — filesystem permissions do not apply")
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text("# AlfredOS secrets file. DO NOT commit.\n")
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+    secrets_dir.chmod(0o500)
+    try:
+        result = _run_bootstrap_in_tmpdir(tmp_path)
+    finally:
+        # Restore before tmp_path cleanup, or teardown cannot remove the dir.
+        secrets_dir.chmod(0o700)
+
+    assert result.returncode != 0, (
+        "a failed secrets-file write reported success:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "audit.hash_pepper" in result.stderr, (
+        f"the write failure was not explained on stderr: {result.stderr!r}"
+    )
+    assert "Mirrored" not in result.stdout, (
+        f"a success banner was printed despite the write failing: {result.stdout!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Final-review fix 1: the "Bootstrapping operator identity" step's non-TTY
 # ALFRED_OPERATOR_NAME resolution must trim whitespace BEFORE applying the

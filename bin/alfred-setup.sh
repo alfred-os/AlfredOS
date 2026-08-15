@@ -473,11 +473,38 @@ pepper_blank_re="${pepper_line_re}[[:space:]]*(\"\"|'')[[:space:]]*\$"
 # The bare (unquoted) dotted spelling — the TOML nested-table trap. Deliberately
 # NOT part of pepper_line_re: it is a shape this script must refuse, not accept.
 pepper_bare_re="^[[:space:]]*${pepper_key_re}[[:space:]]*="
-# A TOML table/array-of-tables header. Shared by the refusal gate and the
-# root-scope insert in _pepper_write_file for the same reason the pepper
-# patterns are shared: two hand-written copies of "what opens a table" would be
-# free to drift the same way the pepper patterns did.
-toml_table_re='^[[:space:]]*\['
+# A TOML table / array-of-tables header, used ONLY by the refusal gate below.
+#
+# The whole line must be `[key]` or `[[key]]` (any indentation, optional
+# trailing comment) and must contain NO comma. A first version of this pattern
+# was just `^[[:space:]]*\[` — "a line starting with [" — which is NOT the same
+# predicate at all, and mis-classified perfectly legal TOML: an array element on
+# its own line (`  [1, 2],` inside a multi-line `matrix = [ ... ]`) read as a
+# table header, so a pepper appearing after it was REFUSED with remediation
+# ("move the line above line N") that would have moved the secret INSIDE the
+# array. Requiring the whole line to close its own bracket, and rejecting the
+# comma that only an array element can carry, separates the two.
+#
+# ACCEPTED LEXICAL LIMITS — name them here rather than pretend the guard is a
+# parser (a lexical rule cannot decide a parse-level fact):
+#   * a single-element array on its own line with no trailing comma (`[1]`) is
+#     indistinguishable from the table header `[1]`;
+#   * a `[bracketed]`-shaped line inside a multi-line """string""" body reads as
+#     a header.
+# Both are false POSITIVES, so both fail in the loud direction — a refusal the
+# operator can see and act on, never a silent mis-write. The insert path below
+# deliberately does not use this pattern at all, so neither limit can corrupt a
+# file.
+toml_table_re='^[[:space:]]*\[\[?[^],]*\]\]?[[:space:]]*(#.*)?$'
+
+# The leading run of comment/blank lines at the TOP of a TOML file. Anything
+# before the first line that is neither is, by construction, still at root
+# scope: no table header, no array, and no multi-line string can have been
+# opened yet. That makes "insert immediately after the preamble" a POSITIVE,
+# parse-independent proof of root scope — which is why the insert in
+# _pepper_write_file anchors on this instead of trying to lexically detect
+# where a table begins.
+toml_preamble_re='^[[:space:]]*(#.*)?$'
 target_file="${ALFRED_SECRETS_FILE:-$secrets_file}"
 lock_dir="${target_file}.lock"
 # #591: the .env carrier for the dotted container key docker-compose forwards
@@ -660,32 +687,55 @@ _pepper_write_file() {
   # Quote the dotted key so tomllib reads it as a flat string key
   # (cross-cutting BLOCKER closure).
   #
-  # #594 R2: insert at ROOT-table scope, not blindly at EOF. A bare `>>` append
-  # is only correct when the file has no [table] header: TOML scopes every key
-  # after a header INTO that table, so an EOF-appended
-  # `"audit.hash_pepper" = "..."` under a trailing [grafana] parses as
-  # grafana."audit.hash_pepper", the broker (top-level strings only) drops it,
-  # and this script still prints its normal "Seeded ..." banner and exits 0 —
-  # no hand-editing mistake required, only a [table] anywhere in the file.
-  # Verified against tomllib.
-  if ! grep -qE "$toml_table_re" "$target_file" 2>/dev/null; then
-    printf '"%s" = "%s"\n' "$pepper_key" "$1" >> "$target_file"
-    return 0
-  fi
-  # Same temp-file + printf + atomic-mv idiom as the blank-overwrite rewrite
-  # above and _pepper_write_env below, for the same reason: the value is not
-  # hex-constrained on the mirrored-from-.env path and must never be fed
+  # #594 R2: write at ROOT scope, proven positively. The original code appended
+  # blindly at EOF with `>>`, which is only correct when the file has no [table]
+  # header at all: TOML scopes every key after a header INTO that table, so an
+  # EOF-appended `"audit.hash_pepper" = "..."` under a trailing [grafana] parses
+  # as grafana."audit.hash_pepper", the broker (top-level strings only) drops it,
+  # and the script still prints "Seeded ..." and exits 0.
+  #
+  # The obvious repair — scan for a table header and insert above it — is a
+  # LEXICAL guess about a PARSE-level fact, and it was wrong in both directions:
+  # inserting above a `  [1, 2],` array element split a legal `matrix = [ ... ]`
+  # into `Unclosed array` (killing every OTHER secret in the file, exit 0,
+  # success banner), and inserting above a `[bracketed]`-shaped line inside a
+  # multi-line """string""" buried the pepper in the string body as inert text —
+  # reproducing, in a new spot, the very bug this insert exists to close.
+  #
+  # Anchor on the PREAMBLE instead: everything before the first line that is
+  # neither blank nor a comment is provably still root scope — no table, array,
+  # or multi-line string can have been opened yet — so inserting there needs no
+  # guess about TOML structure whatsoever. A file that is entirely comments (the
+  # freshly-created `# AlfredOS secrets file. DO NOT commit.` case, by far the
+  # most common) has no such line, so the key lands at EOF: byte-identical to
+  # the append this replaces, verified by cmp.
+  #
+  # One path, not two. The previous version kept a `>>` fast path alongside the
+  # rebuild, and the two branches immediately diverged — the fast path masked
+  # its own write failure behind an unconditional `return 0` and had no
+  # trailing-newline guard, so a target file whose last byte was not \n glued
+  # the new key onto the previous line. Both defects are structurally impossible
+  # here: `mv` failure is propagated, and every line is re-emitted through
+  # `printf '%s\n'`. Same temp-file + atomic-mv idiom as the blank-overwrite
+  # rewrite above and _pepper_write_env below, for the same reason: the value is
+  # not hex-constrained on the mirrored-from-.env path and must never be fed
   # through sed/awk substitution syntax.
   tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
   if ! {
     while IFS= read -r line || [[ -n "$line" ]]; do
-      # $toml_table_re unquoted, for the same reason as $pepper_blank_re above.
-      if [[ "$inserted" -eq 0 && "$line" =~ $toml_table_re ]]; then
+      # $toml_preamble_re unquoted, for the same reason as $pepper_blank_re
+      # above. The brace group is not a subshell, so `inserted` survives the
+      # loop and the post-loop fallback below sees it.
+      if [[ "$inserted" -eq 0 ]] && ! [[ "$line" =~ $toml_preamble_re ]]; then
         printf '"%s" = "%s"\n' "$pepper_key" "$1"
         inserted=1
       fi
       printf '%s\n' "$line"
     done < "$target_file"
+    # Whole file was preamble (or empty): still root scope, so EOF is correct.
+    if [[ "$inserted" -eq 0 ]]; then
+      printf '"%s" = "%s"\n' "$pepper_key" "$1"
+    fi
   } > "$tmp_file"; then
     rm -f "$tmp_file"
     return 1
