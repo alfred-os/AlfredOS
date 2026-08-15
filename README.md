@@ -42,14 +42,13 @@ alfred chat                 # start a TUI conversation
 > Set `ALFRED_OPERATOR_NAME` in `.env` before `bin/alfred-setup.sh` for a custom display name.
 
 > `alfred chat` shows a pending indicator while a turn is in flight, and will tell you directly
-> if a turn fails or times out rather than leaving you waiting indefinitely — the one case that
-> still looks like total silence is below. **If your first `alfred chat` message never gets a
-> reply**, the TUI's identity and the
-> seeded one have diverged. The TUI authenticates as `ALFRED_OPERATOR_NAME` (default
-> `operator`) — the same value migration `0004` seeded as the `tui` platform identity.
-> Migration `0004` runs **once**, so *changing* `ALFRED_OPERATOR_NAME` after your first
-> `docker compose up -d` breaks the match. Either restore the old value in `.env`, or
-> rebind:
+> if a turn fails or times out rather than leaving you waiting indefinitely. The one case where
+> that message won't tell you *why* is below. **If your first `alfred chat` message never gets
+> a reply**, the TUI's identity and the seeded one have diverged. The TUI authenticates as
+> `ALFRED_OPERATOR_NAME` (default `operator`) — the same value migration `0004` seeded as the
+> `tui` platform identity. Migration `0004` runs **once**, so *changing* `ALFRED_OPERATOR_NAME`
+> after your first `docker compose up -d` breaks the match. Either restore the old value in
+> `.env`, or rebind:
 >
 > ```sh
 > docker compose run --rm alfred-core user unbind <your-operator-slug> --platform tui
