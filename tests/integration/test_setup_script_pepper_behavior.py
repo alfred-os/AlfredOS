@@ -967,6 +967,17 @@ def test_bootstrap_refuses_a_pepper_scoped_inside_a_table(
             'ab"cd',
             id="double-quote-in-literal",
         ),
+        # Mirror image of "double-quote-in-literal" above: a single quote
+        # embedded in a DOUBLE-quoted TOML basic string (rather than a double
+        # quote embedded in a single-quoted TOML literal). `_pepper_refuse_
+        # unsafe_value`'s `case` pattern (`*[\\\"\'\$\#]*`) refuses `'` in
+        # the same class as `"`, `\`, `$`, and `#`, but until now no param
+        # here exercised the bare `'` arm.
+        pytest.param(
+            '"audit.hash_pepper" = "ab\'cd"',
+            "ab'cd",
+            id="single-quote-in-basic-string",
+        ),
         pytest.param(
             "'audit.hash_pepper' = 'ab$cd'",
             "ab$cd",

@@ -865,8 +865,19 @@ _pepper_write_env() {
 #      captures RAW text, so the DIFFERS gate below compares equal and never
 #      fires — the same precondition-blindness Fix-1 round 3 closed for the
 #      reader, one layer down in the escape layer.
-#   " ' read_env_var deletes both outright (`tr -d`), so the value the script
-#      mirrors is not the value Compose forwards.
+#   " '  by the time a value reaches this function, read_env_var has already
+#      deleted both outright (`tr -d`) on the .env leg, and
+#      _pepper_from_file's own capture group has already consumed the TOML
+#      delimiter pair on the file leg -- this check almost never fires on
+#      either quote character today. A MATCHED outer delimiter pair
+#      (`KEY="hex"`, `KEY='hex'`) is a legitimate Compose/TOML quoting
+#      convention -- Compose strips exactly that pair too (verified against
+#      real `docker compose config`) -- and must NOT be refused; only an
+#      UNMATCHED or embedded quote is unsafe. That distinction is made
+#      upstream of this function, on the RAW pre-strip value, by
+#      `_pepper_bootstrap`'s `_pepper_env_raw_value` + the
+#      `raw_env_pepper_peeled` peel-then-check (#594 Task S2 review rounds
+#      1-2) -- see that block's own comment for the peel mechanics.
 #   $ #  Compose's dotenv interpolates `$` and strips a `#` inline comment.
 #   space/control/empty  unquoted .env values do not survive them.
 # ACCEPTED FALSE POSITIVE, named rather than hidden: a TOML *literal* string
@@ -877,6 +888,11 @@ _pepper_write_env() {
 # Reports the offending CHARACTER, never the value (the value is the secret).
 _pepper_refuse_unsafe_value() {
   local what="$1" value="$2"
+  # KNOWN LIMITATION: `[[:graph:]]` is a POSIX bracket class and therefore
+  # locale-dependent. Under `LC_ALL=C` a valid UTF-8 pepper containing a
+  # non-ASCII byte sequence is wrongly refused as "non-printable"; the same
+  # value passes under a UTF-8 locale. Not fixed here -- this is a
+  # comment-only pass, and the fix would be a logic change to this function.
   if ! [[ "$value" =~ ^[[:graph:]]+$ ]]; then
     printf 'ERROR: %s\n' \
       "the audit.hash_pepper value in ${what} contains whitespace or a non-printable character. Compose's dotenv parser and this script's TOML writer cannot both carry it unchanged, so alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set it to a value made only of printable non-space characters (the bootstrap generates 64 lowercase hex chars), keeping the SAME value in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
@@ -1261,6 +1277,16 @@ if [[ -t 0 ]]; then
     # EXIT CODE, never on the message text (the message is translated — i18n rule):
     # 0 = bound, 2 = an identity-level refusal the operator should read verbatim,
     # anything else = a real failure worth aborting on.
+    #
+    # Sibling contrast: the TUI bind above `fail`s on the same exit 2 instead
+    # of `warn`ing. That is not an inconsistency -- the two arms sit at
+    # different points in the run. The TUI bind fires seconds after `user
+    # add` creates $slug on THIS run, so an exit 2 there can only mean the
+    # display name collides with a DIFFERENT, pre-existing user (a genuine
+    # #592-class failure worth aborting on). This Discord bind is
+    # deliberately re-run-safe: it runs on EVERY invocation of this optional,
+    # TTY-only prompt, so its exit 2 legitimately includes the benign
+    # "already bound from a prior run" case alongside the same collision.
     bind_rc=0
     bind_out="$(docker compose run --rm alfred-core user bind "$slug" \
       --platform discord \
