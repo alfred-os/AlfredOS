@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-14 19:40+0100\n"
+"POT-Creation-Date: 2026-08-15 01:39+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1642,25 +1642,25 @@ msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:222
-#: src/alfred/comms_mcp/real_turn_adapter.py:513
+#: src/alfred/comms_mcp/daemon_runtime.py:221
+#: src/alfred/comms_mcp/real_turn_adapter.py:587
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:248
+#: src/alfred/comms_mcp/daemon_runtime.py:247
 msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:255
-#: src/alfred/comms_mcp/real_turn_adapter.py:463
+#: src/alfred/comms_mcp/daemon_runtime.py:254
+#: src/alfred/comms_mcp/real_turn_adapter.py:520
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:298
+#: src/alfred/comms_mcp/real_turn_adapter.py:355
 msgid "comms.inbound.real_turn.extraction_refused"
 msgstr "Sorry, I couldn't process that message. Please try rephrasing."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:306
+#: src/alfred/comms_mcp/real_turn_adapter.py:363
 msgid "comms.inbound.real_turn.unexpected_extract_kind"
 msgstr "Unexpected extraction result kind reached the real-turn adapter."
 
@@ -3628,17 +3628,17 @@ msgstr "Something went wrong on Alfred's side; the turn did not complete."
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:169
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:173
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:223
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:233
 #: plugins/alfred_tui/tests/test_textual_app.py:373
 #: plugins/alfred_tui/tests/test_textual_app.py:399
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:251
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:261
 #: plugins/alfred_tui/tests/test_textual_app.py:297
 msgid "tui.label_you"
 msgstr "you"
@@ -3648,17 +3648,17 @@ msgstr "you"
 # msgstr is CORRECTED here — the old "; cancelled" clause is false under the
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
 # reply can still render).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:254
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:264
 #: plugins/alfred_tui/tests/test_textual_app.py:298
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:269
-#: plugins/alfred_tui/tests/test_textual_app.py:472
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:279
+#: plugins/alfred_tui/tests/test_textual_app.py:584
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:290
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:345
 msgid "tui.label_alfred"
 msgstr "alfred"
 
