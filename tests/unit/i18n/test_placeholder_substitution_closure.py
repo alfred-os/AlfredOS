@@ -110,9 +110,10 @@ def _is_skipped_path(rel: str) -> bool:
 
     Skips a ``tests`` component (test code, not operator output — see
     ``_SKIP_DIR_NAMES``), any hidden directory (``.venv``, ``.tox``, ``.git``,
-    ...), and any ``*.egg-info`` packaging directory. ``__pycache__`` is
-    caught incidentally by the hidden-directory check (and its ``*.pyc``
-    contents can't match the ``*.py`` glob anyway).
+    ...), and any ``*.egg-info`` packaging directory. ``__pycache__`` needs
+    none of these checks to stay out of the walk: its ``*.pyc`` contents
+    can't match the ``root.rglob("*.py")`` glob in the first place, so this
+    function never even sees a ``__pycache__`` path to skip.
     """
     parts = Path(rel).parts
     return any(p in _SKIP_DIR_NAMES or p.startswith(".") or p.endswith(".egg-info") for p in parts)

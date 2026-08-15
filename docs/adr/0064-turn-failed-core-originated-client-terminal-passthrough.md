@@ -186,9 +186,10 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
   already reads the full-fidelity `_RefusalStage` verbatim out of the
   `comms.inbound.real_turn.refused` structured-log line (the surface
   `docs/runbooks/slice-3-operator-migration.md` names as sanctioned while
-  `alfred audit log` is stubbed) — a 0600 file, and the audit DB credentials,
-  that a same-UID process already has read access to — so no privilege is
-  gained; that party is in any case also shown turn latency directly by
+  `alfred audit log` is stubbed) — a 0600 file a same-UID process already has
+  read access to, same as the audit DB itself once `alfred audit log` ships —
+  so no privilege is gained; that party is in any case also shown turn
+  latency directly by
   `tui.thinking_elapsed`, the 90s watchdog line, and the
   `alfred_comms_inbound_dispatch_seconds` histogram; (2) the collapse has
   one reachable member today —
