@@ -466,9 +466,14 @@ def test_child_base_url_guard_agrees_with_settings_validator_on_rejection(
     code on purpose (importing ``alfred.config.settings`` into the child would drag
     the whole ``pydantic_settings`` model onto its egress-free boot path, against the
     ADR-0030 reachable-surface bound) — this test is the anti-drift device that buys
-    back what not sharing the code costs: one corpus, two independent oracles."""
-    from pydantic import ValidationError
+    back what not sharing the code costs: one corpus, two independent oracles.
 
+    ``SettingsError`` only, not ``(ValidationError, SettingsError)`` (CodeRabbit,
+    matching err-001's fix elsewhere in this PR): ``Settings.__init__`` unconditionally
+    wraps every exception into ``SettingsError``, so a bare ``ValidationError`` can
+    never actually escape ``Settings()`` — the tuple form would keep passing even if
+    that wrapping broke, and both boot paths depend on it.
+    """
     from alfred.config.settings import Settings, SettingsError
 
     assert child_main._base_url_rejection_reason(url) is not None
@@ -476,7 +481,7 @@ def test_child_base_url_guard_agrees_with_settings_validator_on_rejection(
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
     monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", url)
-    with pytest.raises((ValidationError, SettingsError)):
+    with pytest.raises(SettingsError):
         Settings()  # type: ignore[call-arg]
 
 
