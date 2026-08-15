@@ -247,8 +247,12 @@ ADR-0012). If you already keep secrets there — or your `~/.config` is a git re
 
 - **macOS:** Docker Desktop maps the host file's uid/gid to the
   container uid/gid directly; `chmod 600` on the host applies inside
-  the container too. The setup script runs `export UID GID` because
-  macOS bash 3.2 does not export `UID` by default.
+  the container too. The setup script still runs `export UID GID`
+  (macOS bash 3.2 does not export `UID` by default), but per the
+  comment next to that line in `bin/alfred-setup.sh`, this is now a
+  harmless no-op — nothing in the compose file or the container reads
+  `$UID`/`$GID` anymore (see the Linux bullet below for what used to
+  consume it and when that was removed).
 - **Linux:** the container does not remap to the host operator's uid/gid —
   `alfred-core` always runs as the fixed non-root `alfred` user baked into the
   image (`docker/alfred-core.Dockerfile`), regardless of the host operator's

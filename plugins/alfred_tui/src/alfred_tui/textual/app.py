@@ -480,6 +480,11 @@ class AlfredTuiApp(App[None]):
         (mirroring the Slice-1 affordance), THEN the turn is marked pending
         and the "thinking..." line written — in that order, so the echo
         always precedes the pending indicator in the transcript.
+
+        A local send failure (except-branch below) restores the typed text
+        into the input widget before re-raising: "nothing typed is lost"
+        applies to this path too, not only to the concurrent-submission
+        guard above.
         """
         text = event.value.strip()
         if not text:
@@ -521,6 +526,7 @@ class AlfredTuiApp(App[None]):
             # #593 is about.
             self._end_turn()
             log.write(f"[bold red]{t('tui.alfred_error', error=type(exc).__name__)}[/]")
+            event.input.value = text
             raise
 
     def _resolve_pending_turn(self) -> None:

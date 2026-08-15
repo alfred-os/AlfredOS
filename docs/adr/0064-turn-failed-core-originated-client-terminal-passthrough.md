@@ -176,14 +176,22 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
   (1) `TURN_STATE_CLIENT_KINDS` contains only `"tui"`, whose transport is a
   0600 AF_UNIX socket under a 0700 runtime dir with `SO_PEERCRED` same-uid
   enforcement (ADR-0031, `src/alfred/plugins/_local_socket.py`) — the only
-  party who can submit a turn AND observe the frame is the operator, who
+  party who can submit a turn AND observe the frame is a process running as
+  the operator's UID. (`SO_PEERCRED` establishes UID equality, not human
+  identity: this reaches any process sharing that UID, not only the human
+  operator. Same-UID processes are inside this ADR's trust boundary and out
+  of scope for the current threat model — but the "no privilege gained"
+  conclusion below holds regardless of which one is observing, since a
+  same-UID process already has the full-fidelity signal too.) That party
   already reads the full-fidelity `_RefusalStage` verbatim out of the
   `comms.inbound.real_turn.refused` structured-log line (the surface
   `docs/runbooks/slice-3-operator-migration.md` names as sanctioned while
-  `alfred audit log` is stubbed), so no privilege is gained — and who is in
-  any case shown turn latency directly by `tui.thinking_elapsed`, the
-  90s watchdog line, and the `alfred_comms_inbound_dispatch_seconds`
-  histogram; (2) the collapse has one reachable member today —
+  `alfred audit log` is stubbed) — a 0600 file, and the audit DB credentials,
+  that a same-UID process already has read access to — so no privilege is
+  gained; that party is in any case also shown turn latency directly by
+  `tui.thinking_elapsed`, the 90s watchdog line, and the
+  `alfred_comms_inbound_dispatch_seconds` histogram; (2) the collapse has
+  one reachable member today —
   `dlp_canary_tripped` is inert until `web.fetch` (#583) ships a tool whose
   output can carry a canary token (`real_turn_adapter.py`, the
   `OutboundCanaryTripped` leg's own comment); (3) the marginal bit ("did my

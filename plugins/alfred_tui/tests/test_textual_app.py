@@ -857,6 +857,12 @@ async def test_flush_failure_paints_error_class_and_reraises() -> None:
         assert "transport internals" not in rendered, (
             "str(exc) must never reach the operator-facing transcript"
         )
+        # "Nothing typed is lost" applies to THIS path too, not only the
+        # concurrent-submission guard: the submitted text must be restored
+        # into the input widget, not left cleared, after a local send failure.
+        assert input_widget.value == "hello alfred", (
+            "a local send failure must restore the typed text, not lose it"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -898,8 +904,11 @@ async def test_elapsed_counter_shows_after_a_tick_and_is_never_logged() -> None:
         assert app._turn_pending is True  # sanity: turn genuinely pending
 
         # Outlive at least one 1s tick of the elapsed-counter's repeating
-        # timer by a comfortable real-time margin.
-        await pilot.pause(1.1)
+        # timer by a comfortable real-time margin (widened to 1.5s -- #594
+        # Fix batch: 100ms of margin on a real-time wait is flake-prone
+        # under CI load; the assertions below are lower-bound only, so a
+        # longer wait cannot make them wrong).
+        await pilot.pause(1.5)
 
         status = app.query_one("#turn_status", Static)
         assert status.display is True
@@ -920,7 +929,9 @@ async def test_elapsed_counter_hidden_again_after_turn_ends() -> None:
     app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
     async with app.run_test() as pilot:
         await _submit(app, "hello alfred")
-        await pilot.pause(1.1)
+        # Widened to 1.5s -- see the comment in
+        # test_elapsed_counter_shows_after_a_tick_and_is_never_logged above.
+        await pilot.pause(1.5)
         status = app.query_one("#turn_status", Static)
         assert status.display is True  # sanity: it was showing while pending
 
