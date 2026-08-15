@@ -410,14 +410,33 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # keys and the revived tui.thinking for the same fuzzy-match protection
     # the rest of this table provides.
     "tui.thinking": ({}, ("thinking",)),
-    "tui.turn_timeout": ({"seconds": 90}, ("no response", "try again")),
+    # #594 final-review I2: "try again" was dropped from this tuple -- it also
+    # appears verbatim in the sibling msgid tui.turn_failed.internal_error's
+    # msgstr ("Something went wrong on Alfred's side. Try again, or check the
+    # daemon logs."). The two msgids are deliberately worded to be mutually
+    # distinct (see the "#593 (Task 14/15)" catalog comment above
+    # tui.turn_failed.refused) so a pybabel fuzzy-match swap between them
+    # cannot pass silently -- an ANY-based fingerprint (see the assertion in
+    # test_cli_i18n_key_resolves_with_fingerprint) that still carried "try
+    # again" would match EITHER msgstr and so could no longer catch that
+    # exact swap. "no response" alone is unique to this msgid across the
+    # whole catalog (verified against locale/en/LC_MESSAGES/alfred.po).
+    "tui.turn_timeout": ({"seconds": 90}, ("no response",)),
     "tui.alfred_error": ({"error": "ConnectionResetError"}, ("alfred", "error")),
     "tui.turn_failed.refused": ({}, ("could not process",)),
     "tui.turn_failed.budget_exhausted": ({}, ("--daily-budget-usd",)),
     "tui.turn_failed.internal_error": ({}, ("went wrong",)),
     # #594 Fix-10 -- live elapsed-time counter (non-logged, separate widget)
     # + rate-limited dropped-keystroke acknowledgement (logged, once per turn).
-    "tui.thinking_elapsed": ({"seconds": 12}, ("thinking", "alfred")),
+    # #594 final-review I2: a two-element tuple here was two weak arms, not
+    # one strong one -- the ANY-based assertion in
+    # test_cli_i18n_key_resolves_with_fingerprint passes if EITHER matches,
+    # so bare "thinking" alone would match the sibling tui.thinking msgstr
+    # ("thinking...") and bare "alfred" alone would match roughly half the
+    # tui.* family (tui.alfred_error, tui.label_alfred, ...). One
+    # distinctive multi-word phrase closes both gaps at once; verified
+    # unique to this msgid across the whole catalog.
+    "tui.thinking_elapsed": ({"seconds": 12}, ("alfred is thinking",)),
     "tui.turn_still_pending": ({}, ("still working",)),
 }
 

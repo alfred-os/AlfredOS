@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 23:10+0100\n"
+"POT-Creation-Date: 2026-08-15 23:44+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -372,8 +372,8 @@ msgstr "secrets file: {path} (not found — using environment variables)"
 #: src/alfred/cli/main.py:232
 msgid "status.daily_budget"
 msgstr ""
-"daily budget USD (seed for new users; live cap is per-user — see `alfred "
-"user list`): {amount}"
+"daily budget USD (seeded the operator row at first migration; live cap is"
+" per-user — see `alfred user list`): {amount}"
 
 #: src/alfred/cli/main.py:233
 msgid "status.per_call_max"
@@ -1645,7 +1645,7 @@ msgstr ""
 "it. Refusing to boot."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:221
-#: src/alfred/comms_mcp/real_turn_adapter.py:708
+#: src/alfred/comms_mcp/real_turn_adapter.py:715
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
