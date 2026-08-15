@@ -262,7 +262,7 @@ make the audit log less actionable.
 - [ADR-0031](../adr/0031-comms-socket-transport-for-the-foreground-tui.md) —
   the socket transport `link.*`/`turn.*` client-terminal control frames ride;
   see its `turn.*` amendment for the `#593` wire-direction contract (this
-  file's "Client turn-failure notification" section above).
+  file's "Client turn-failure notification" section below).
 
 ## Open questions / forward-compat notes
 
