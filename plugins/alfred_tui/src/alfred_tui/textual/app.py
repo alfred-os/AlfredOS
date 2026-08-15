@@ -175,8 +175,15 @@ class AlfredTuiApp(App[None]):
         self._turn_elapsed_timer: Timer | None = None
         # How many watchdog-abandoned turns the client still owes exactly one
         # late completion signal (a reply or a `turn.failed`) for. See
-        # `_resolve_pending_turn`.
+        # `_resolve_pending_turn`. AUTHORITATIVE: the list below is only
+        # bookkeeping for the expiry timers.
         self._stale_turns_awaiting_signal: int = 0
+        # One live one-shot expiry `Timer` per outstanding debt above (#594
+        # R1). Plain instance state for the same reason as `_turn_watchdog`:
+        # a `Timer` handle is not a render input. The handles are FUNGIBLE —
+        # nothing correlates a debt with a turn — so this is a plain FIFO,
+        # not a map; see `_discharge_stale_turn_debt`.
+        self._stale_debt_expiries: list[Timer] = []
         # Whether the operator has already been told (via ONE dim log line)
         # that their last keystroke was dropped because a turn is still
         # pending. Reset to `False` at the start of each new turn (see
@@ -275,6 +282,114 @@ class AlfredTuiApp(App[None]):
         self._turn_pending = False
         self.query_one("#turn_status", Static).display = False
 
+    def _incur_stale_turn_debt(self) -> None:
+        """Record one watchdog-abandoned turn's owed late signal — WITH an expiry.
+
+        The debt (``_stale_turns_awaiting_signal``) encodes "the core still
+        owes this client exactly one late completion signal for a turn the
+        watchdog gave up on". That is a GUARANTEE the server side only ever
+        offered as BEST EFFORT: ``process_inbound_message`` has ten
+        independently-traced paths that commit the frame and put NOTHING on
+        the wire — the dominant one being the unbound-identity path this PR's
+        own README documents as the expected first-run failure (#592), where
+        ``resolve()`` returns ``None``, a binding-request audit row is
+        written, and the function returns.
+
+        Before #594 R1 the debt had NO expiry, so one never-arriving signal
+        desynchronized the client PERMANENTLY: the NEXT turn's own correct
+        reply was consumed as the missing late signal, so it rendered but did
+        not release the input; that turn then timed out, re-incurring the
+        debt, and printed a red timeout line UNDER an answer that had already
+        succeeded — forever, once per turn, until a TUI restart.
+
+        Bounding each debt to ONE watchdog window turns that permanent,
+        non-converging drift into a single-turn, self-correcting error: once
+        the window elapses the client is merely back to the pre-#594
+        behaviour (one late signal ends the current turn early), which is
+        bounded to one turn instead of being permanent. One window is the
+        right length in BOTH directions: the core serializes a session's
+        turns behind a per-``(persona, slug)`` mutex and starts sending each
+        turn's signal only after releasing it (see ``_resolve_pending_turn``),
+        so a late signal that IS still coming arrives before the next turn's
+        own signal — and the next turn cannot outlive one more watchdog
+        window without arming its own debt. Longer would widen the
+        mis-attribution surface; shorter would risk discarding a genuine late
+        signal.
+        """
+        self._stale_turns_awaiting_signal += 1
+        self._stale_debt_expiries.append(
+            self.set_timer(
+                self._turn_timeout_seconds,
+                self._expire_stale_turn_debt,
+                name="alfred-stale-debt-expiry",
+            )
+        )
+
+    def _discharge_stale_turn_debt(self) -> None:
+        """A genuine late signal arrived: settle one debt and cancel its expiry.
+
+        Stopping the expiry ``Timer`` is what stops an ALREADY-SETTLED debt
+        from being decremented a SECOND time when its window later elapses:
+        without it, a debt discharged by a real late signal would also be
+        written off a moment later, taking the count below the number of
+        turns genuinely still owed a signal and re-introducing the drift in
+        the opposite direction.
+
+        Popping index 0 — rather than "the timer belonging to this particular
+        debt" — is correct because debts are FUNGIBLE. Nothing correlates a
+        debt with a turn (``TurnFailedNotification`` deliberately carries no
+        ``inbound_id`` and a reply carries none either — see
+        ``_resolve_pending_turn``), every expiry timer is armed with the
+        identical ``_turn_timeout_seconds`` duration, and they are appended in
+        creation order. Only the COUNT is semantically meaningful, so the list
+        is a FIFO of interchangeable handles and index 0 is simply the one
+        closest to firing.
+        """
+        self._stale_turns_awaiting_signal -= 1
+        if self._stale_debt_expiries:
+            self._stale_debt_expiries.pop(0).stop()
+
+    def _expire_stale_turn_debt(self) -> None:
+        """One debt's window elapsed with no late signal: write it off.
+
+        Idempotence guard, LOAD-BEARING for exactly the same reason as
+        ``_on_turn_timeout``'s: ``Timer.stop()`` cannot un-queue a callback
+        the message pump has ALREADY scheduled onto the current tick, so the
+        expiry for a debt that ``_discharge_stale_turn_debt`` settled in that
+        same tick can still reach here. Decrementing unconditionally would
+        drive the count negative — or, with a second debt outstanding,
+        silently write off a turn that IS still owed a signal — so the
+        ``> 0`` test is not defensive padding.
+
+        The handle pop and the count decrement are guarded SEPARATELY: the
+        fired one-shot's handle must leave the list whether or not its debt is
+        still outstanding, or a spent entry would accumulate and later be
+        ``stop()``-ed in place of a live one. See
+        ``_discharge_stale_turn_debt`` for why popping index 0 rather than
+        the handle that actually fired is correct — the handles are fungible.
+        """
+        if self._stale_debt_expiries:
+            self._stale_debt_expiries.pop(0)
+        if self._stale_turns_awaiting_signal > 0:
+            self._stale_turns_awaiting_signal -= 1
+
+    def on_unmount(self) -> None:
+        """Stop every still-armed stale-debt expiry timer at teardown.
+
+        A debt incurred shortly before the app closes leaves a one-shot
+        ``Timer`` armed for a full ``_turn_timeout_seconds`` (90s in
+        production) that nothing else would ever stop — the dangling-``Timer``
+        leak this repo has a documented history of, and which
+        ``plugins/alfred_tui/tests`` runs under ``-W error::ResourceWarning``
+        specifically to catch. The CURRENT turn's watchdog / elapsed-tick
+        timers are deliberately NOT touched here: those belong to
+        ``_end_turn``, and the debt timers belong to turns that were
+        ABANDONED, which is why nothing else owns them.
+        """
+        for expiry in self._stale_debt_expiries:
+            expiry.stop()
+        self._stale_debt_expiries.clear()
+
     def _on_turn_timeout(self) -> None:
         """No reply inside the budget: tell the operator and release the input.
 
@@ -295,8 +410,12 @@ class AlfredTuiApp(App[None]):
         # may still be processing it and can still send a reply or
         # `turn.failed` for it later. Record that one late completion signal
         # is now owed so `_resolve_pending_turn` recognizes it as stale
-        # (rather than the CURRENT turn's own signal) whenever it arrives.
-        self._stale_turns_awaiting_signal += 1
+        # (rather than the CURRENT turn's own signal) whenever it arrives —
+        # bounded to ONE watchdog window, because that signal may equally
+        # never come at all (#594 R1; see `_incur_stale_turn_debt`). MUST stay
+        # AFTER the `_turn_pending` guard above: a stale queued callback for
+        # an already-ended turn owes nothing and must arm no expiry timer.
+        self._incur_stale_turn_debt()
         self._end_turn()
         self.query_one("#conversation_log", RichLog).write(
             f"[bold red]{t('tui.turn_timeout', seconds=int(self._turn_timeout_seconds))}[/]"
@@ -400,9 +519,15 @@ class AlfredTuiApp(App[None]):
         test that would fail if that ordering ever regressed:
         ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
         in ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``.
+
+        That ordering contract says WHEN a late signal arrives relative to the
+        next turn's — it does NOT promise one ever arrives at all, and the
+        core has ten traced paths that send nothing (#594 R1). So each debt
+        also EXPIRES after one watchdog window; see ``_incur_stale_turn_debt``
+        for why an unbounded debt desynchronized the client permanently.
         """
         if self._stale_turns_awaiting_signal > 0:
-            self._stale_turns_awaiting_signal -= 1
+            self._discharge_stale_turn_debt()
             return
         self._end_turn()
 

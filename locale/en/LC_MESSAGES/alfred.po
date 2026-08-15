@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 08:46+0100\n"
+"POT-Creation-Date: 2026-08-15 11:32+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3632,27 +3632,28 @@ msgstr ""
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:205
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:212
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:302
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:421
 #: plugins/alfred_tui/tests/test_textual_app.py:380
 #: plugins/alfred_tui/tests/test_textual_app.py:406
-#: plugins/alfred_tui/tests/test_textual_app.py:458
+#: plugins/alfred_tui/tests/test_textual_app.py:462
+#: plugins/alfred_tui/tests/test_textual_app.py:674
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:332
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:451
 #: plugins/alfred_tui/tests/test_textual_app.py:354
-#: plugins/alfred_tui/tests/test_textual_app.py:737
-#: plugins/alfred_tui/tests/test_textual_app.py:744
-#: plugins/alfred_tui/tests/test_textual_app.py:763
-#: plugins/alfred_tui/tests/test_textual_app.py:776
+#: plugins/alfred_tui/tests/test_textual_app.py:940
+#: plugins/alfred_tui/tests/test_textual_app.py:947
+#: plugins/alfred_tui/tests/test_textual_app.py:966
+#: plugins/alfred_tui/tests/test_textual_app.py:979
 msgid "tui.turn_still_pending"
 msgstr "Still working on your last message..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:341
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:460
 #: plugins/alfred_tui/tests/test_textual_app.py:297
 msgid "tui.label_you"
 msgstr "you"
@@ -3662,17 +3663,17 @@ msgstr "you"
 # msgstr is CORRECTED here — the old "; cancelled" clause is false under the
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
 # reply can still render).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:349
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:468
 #: plugins/alfred_tui/tests/test_textual_app.py:298
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:365
-#: plugins/alfred_tui/tests/test_textual_app.py:642
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:484
+#: plugins/alfred_tui/tests/test_textual_app.py:845
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:431
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:556
 msgid "tui.label_alfred"
 msgstr "alfred"
 
@@ -3681,8 +3682,8 @@ msgstr "alfred"
 # procedure Task 15 used for tui.turn_timeout/tui.turn_failed.* above: a
 # real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
 # reconciles the `#:` source-location comments.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:502
-#: plugins/alfred_tui/tests/test_textual_app.py:693
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:627
+#: plugins/alfred_tui/tests/test_textual_app.py:896
 msgid "tui.thinking_elapsed"
 msgstr "Alfred is thinking... ({seconds}s)"
 

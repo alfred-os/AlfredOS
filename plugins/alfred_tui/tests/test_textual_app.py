@@ -451,6 +451,10 @@ async def test_watchdog_callback_after_turn_already_ended_is_a_safe_no_op() -> N
         assert app._stale_turns_awaiting_signal == 0, (
             "a stale call caught by the guard must never reach the debt-counter increment"
         )
+        assert app._stale_debt_expiries == [], (
+            "and must therefore arm no debt-expiry timer either (#594 R1) — the "
+            "increment and its expiry timer are one indivisible step"
+        )
         rendered_after = _plain_text(_log(app))
     assert rendered_after == rendered_before, (
         "a stale watchdog callback for an already-ended turn must add nothing to the transcript"
@@ -535,6 +539,7 @@ async def test_stale_outbound_reply_does_not_clobber_the_next_turn() -> None:
         app._on_turn_timeout()
         assert app._turn_pending is False  # sanity: turn 1 really was abandoned
         assert app._stale_turns_awaiting_signal == 1
+        assert len(app._stale_debt_expiries) == 1  # ...with its expiry armed (#594 R1)
 
         await _submit(app, "second message")
         await pilot.pause()
@@ -553,6 +558,10 @@ async def test_stale_outbound_reply_does_not_clobber_the_next_turn() -> None:
             "turn 2's watchdog must not be stopped by turn 1's late reply"
         )
         assert app._stale_turns_awaiting_signal == 0
+        assert app._stale_debt_expiries == [], (
+            "the settled debt's expiry timer must be stopped and dropped, not "
+            "left armed to write the SAME debt off a second time (#594 R1)"
+        )
         input_widget = _user_input(app)
         assert input_widget.disabled is True, "input must stay disabled — turn 2 is still pending"
 
@@ -605,12 +614,206 @@ async def test_stale_turn_failed_does_not_clobber_the_next_turn() -> None:
         assert app._turn_watchdog is turn_2_watchdog, (
             "turn 2's watchdog must not be stopped by turn 1's late turn.failed"
         )
+        assert app._stale_turns_awaiting_signal == 0
+        assert app._stale_debt_expiries == []  # settled debt -> expiry stopped (#594 R1)
         input_widget = _user_input(app)
         assert input_widget.disabled is True, "input must stay disabled — turn 2 is still pending"
 
         rendered = _plain_text(_log(app))
     assert _turn_failure_message("internal_error") in rendered, (
         "a late turn.failed for an abandoned turn is still informative and must render"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #594 R1: the stale-turn debt is BOUNDED IN TIME.
+#
+# The debt counter above encodes "the core still owes this client exactly one
+# late completion signal for each watchdog-abandoned turn". The core only ever
+# offered that as BEST EFFORT — the dominant real-world miss is the
+# unbound-identity path (#592), which writes a binding-request audit row and
+# puts NOTHING on the wire. With no expiry, ONE missed signal desynchronized
+# the client permanently: the next turn's own correct reply got consumed as the
+# missing late signal, so it rendered but never released the input, and that
+# turn then timed out and printed a red timeout line UNDER an answer that had
+# already succeeded — once per turn, forever, until a TUI restart.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_debt_expires_after_one_timeout_window() -> None:
+    """A late signal that NEVER comes must not eat the next turn's own reply.
+
+    The regression this whole section exists for. Turn 1 is abandoned by its
+    watchdog and no signal for it is ever sent (the unbound-identity /
+    burst-drop / transient-audit-fault class); one further watchdog window
+    later the debt must have been written off, so turn 2's genuine reply ends
+    turn 2 instead of being consumed as turn 1's missing signal.
+
+    Deliberately driven by REAL timers end to end (``_FAST_TIMEOUT_SECONDS``
+    plus the file's usual 20x pause margin) rather than by calling the
+    callbacks directly: the whole point of the fix is that an expiry timer is
+    genuinely ARMED, which a direct-call test could not distinguish from a
+    no-op. The single pause deliberately spans BOTH windows (the watchdog at
+    1x, then the debt's expiry at 2x) — the intermediate "debt is exactly 1"
+    state lives in a 1x-to-2x gap far too narrow to sample reliably against
+    ``pilot.pause``'s own tens-of-milliseconds idle-detection overhead, so
+    the timeout line in the transcript stands in as proof that the watchdog
+    genuinely fired. Fails on pre-#594-R1 code at the first assertion below
+    (the debt would still be 1) and again at the last (turn 2 never ends).
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_FAST_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+
+        # Turn 1's real watchdog expires (nothing is ever sent for it), then
+        # its debt's own expiry window elapses too.
+        await pilot.pause(_FAST_TIMEOUT_SECONDS * 20)
+        assert app._turn_pending is False  # sanity: turn 1 really was abandoned
+        assert t("tui.turn_timeout", seconds=int(_FAST_TIMEOUT_SECONDS)) in _plain_text(
+            _log(app)
+        ), "sanity: the real watchdog genuinely fired and incurred the debt"
+        assert app._stale_turns_awaiting_signal == 0, (
+            "a debt whose late signal never arrives must be written off after "
+            "one watchdog window, not held forever"
+        )
+        assert app._stale_debt_expiries == []
+
+        # Turn 2 now behaves like any first turn: its OWN reply ends it.
+        # Submitted and answered back-to-back (no real-time pause in between)
+        # so turn 2's own short watchdog cannot fire mid-test.
+        await _submit(app, "second message")
+        app.write_outbound("real reply for the second turn")
+        await pilot.pause()
+
+        assert app._turn_pending is False, (
+            "turn 2's own reply must END turn 2 — before this fix it was "
+            "swallowed as turn 1's never-arriving late signal, leaving the "
+            "input dead until turn 2's watchdog painted a false timeout line"
+        )
+        assert _user_input(app).disabled is False
+        rendered = _plain_text(_log(app))
+    assert "real reply for the second turn" in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_discharged_debt_cannot_decrement_twice() -> None:
+    """A debt settled by a real late signal must not ALSO be written off.
+
+    Two halves, because there are two ways the double-decrement could land:
+    the expiry ``Timer`` firing later on its own (closed by ``.stop()`` in
+    ``_discharge_stale_turn_debt``), and the un-un-queueable same-tick
+    callback that ``Timer.stop()`` structurally cannot prevent (closed by
+    ``_expire_stale_turn_debt``'s ``> 0`` guard — the same race
+    ``test_watchdog_callback_after_turn_already_ended_is_a_safe_no_op``
+    pins for the watchdog). A double decrement would drive the count negative
+    and re-introduce the drift in the opposite direction.
+
+    Turn 1's abandonment is driven directly through ``_on_turn_timeout`` (the
+    exact callback a real watchdog invokes) so the late reply lands INSIDE
+    the debt's window with no real-time race — with equal-length windows,
+    sleeping to the watchdog but not past the expiry is a ~50ms target that
+    ``pilot.pause``'s own overhead cannot hit reliably.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_FAST_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        app._on_turn_timeout()  # turn 1 abandoned -> debt 1, expiry armed
+        assert app._stale_turns_awaiting_signal == 1  # sanity
+        assert len(app._stale_debt_expiries) == 1
+
+        # Turn 1's late reply DOES arrive — the debt is genuinely settled.
+        app.write_outbound("late reply for the abandoned first turn")
+        assert app._stale_turns_awaiting_signal == 0
+        assert app._stale_debt_expiries == []
+
+        # Half 1: the stopped expiry must never fire at all.
+        await pilot.pause(_FAST_TIMEOUT_SECONDS * 20)
+        assert app._stale_turns_awaiting_signal == 0, (
+            "a settled debt's expiry timer must have been stopped, not left "
+            "armed to decrement the count a second time"
+        )
+
+        # Half 2: the same-tick callback the pump had already scheduled before
+        # `.stop()` could un-queue it, invoked directly (the file's standard
+        # deterministic stand-in for that race).
+        app._expire_stale_turn_debt()
+        assert app._stale_turns_awaiting_signal == 0, (
+            "an expiry for an already-settled debt must be a no-op, never a decrement below zero"
+        )
+
+        # And the ledger being genuinely settled, turn 2's own reply ends it.
+        await _submit(app, "second message")
+        app.write_outbound("real reply for the second turn")
+        await pilot.pause()
+        assert app._turn_pending is False
+        assert _user_input(app).disabled is False
+
+
+@pytest.mark.asyncio
+async def test_two_abandoned_turns_expire_independently() -> None:
+    """Two outstanding debts settle one-for-one: one by signal, one by expiry.
+
+    Driven through the callbacks directly (``_MODERATE_TIMEOUT_SECONDS``, the
+    same idiom the stale-signal tests above use) rather than through real
+    timers: two debts can only be outstanding SIMULTANEOUSLY if the second
+    abandonment happens inside the first debt's window, which equal-length
+    real windows cannot produce deterministically.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        app._on_turn_timeout()  # turn 1 abandoned -> debt 1
+
+        await _submit(app, "second message")
+        await pilot.pause()
+        app._on_turn_timeout()  # turn 2 abandoned -> debt 2
+
+        assert app._stale_turns_awaiting_signal == 2
+        assert len(app._stale_debt_expiries) == 2
+
+        # One late signal arrives — it settles exactly ONE debt (they are
+        # fungible; nothing correlates a signal with a particular turn).
+        app.write_outbound("late reply for one of the abandoned turns")
+        await pilot.pause()
+        assert app._stale_turns_awaiting_signal == 1
+        assert len(app._stale_debt_expiries) == 1
+
+        # The OTHER debt's window then elapses with nothing ever arriving.
+        # A real expiry's one-shot `Timer` has already fired by the time its
+        # callback runs; this direct stand-in leaves the real handle armed, so
+        # stop it here to keep teardown free of a dangling 5s timer.
+        remaining_expiry = app._stale_debt_expiries[0]
+        app._expire_stale_turn_debt()
+        remaining_expiry.stop()
+
+        assert app._stale_turns_awaiting_signal == 0
+        assert app._stale_debt_expiries == [], "no orphan expiry handles may survive"
+
+
+@pytest.mark.asyncio
+async def test_unmount_stops_every_live_stale_debt_timer() -> None:
+    """Teardown disarms outstanding debt timers rather than leaking them.
+
+    A debt incurred shortly before the app closes owns a one-shot ``Timer``
+    armed for a full ``_turn_timeout_seconds`` that nothing else would ever
+    stop — the dangling-``Timer`` leak this repo has a documented history of,
+    and which this file's ``-W error::ResourceWarning`` runs exist to catch.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        app._on_turn_timeout()
+        assert len(app._stale_debt_expiries) == 1  # sanity: genuinely armed at teardown
+
+    assert app._stale_debt_expiries == [], (
+        "on_unmount must stop and drop every still-armed debt-expiry timer"
     )
 
 
