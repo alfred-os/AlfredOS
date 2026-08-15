@@ -1053,8 +1053,20 @@ if [[ "$has_operator" == "0" ]]; then
   # otherwise have nothing to resolve against. Bind it here so both paths end in the
   # same state. The platform_id is the DISPLAY NAME, matching migration 0004 and
   # alfred.config.operator_env.operator_display_name() — NOT the slug.
-  docker compose run --rm alfred-core user bind "$slug" --platform tui --id "$name"
-  echo "Bound the TUI platform identity '$name' to operator '$slug'."
+  # Classify on the EXIT CODE, never on the message text (the message is
+  # translated — i18n rule): 0 = bound, 2 = an identity-level refusal the
+  # operator should read verbatim, anything else = a real failure worth
+  # aborting on. Mirrors the Discord-bind classification below.
+  bind_rc=0
+  bind_out="$(docker compose run --rm alfred-core user bind "$slug" \
+    --platform tui \
+    --id "$name" 2>&1)" || bind_rc=$?
+  case "$bind_rc" in
+    0) echo "Bound the TUI platform identity '$name' to operator '$slug'." ;;
+    2) warn "TUI identity bind refused (already bound, or that display name belongs to another user). The CLI said:"
+       printf '%s\n' "$bind_out" >&2 ;;
+    *) fail "user bind failed (exit $bind_rc): $bind_out" ;;
+  esac
 else
   echo "Operator user already exists; skipping create."
   slug="$(printf '%s' "$user_list_json" | jq -r '[.[] | select(.authorization=="operator")][0].slug')"
