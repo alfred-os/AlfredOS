@@ -18,9 +18,19 @@ nothing about WHY the boot was refused.
 placeholder-leak guard, but it is a HAND-MAINTAINED fingerprint list scoped to the
 CLI ``config`` / ``web`` surfaces — the daemon-boot keys were never in it, which is
 why both leaks shipped. This test is the CLOSURE guard: it walks every ``t()`` call
-in ``src/alfred`` with a literal key, resolves the msgstr from the shipped catalog,
-and asserts the template's ``{placeholder}`` set is covered by the call's keyword
-arguments. Nothing has to be added by hand when a new key lands.
+with a literal key under ``src/alfred`` AND the top-level ``plugins/`` tree — the
+actual plugin packages (``alfred_tui``, ``alfred_discord``, et al.; production code
+only, ``tests/`` directories excluded) — resolves the msgstr from the shipped
+catalog, and asserts the template's ``{placeholder}`` set is covered by the call's
+keyword arguments. Nothing has to be added by hand when a new key lands.
+
+**Two directories are both named "plugins".** ``src/alfred/plugins/`` (walked as
+part of the ``src/alfred`` root) and the top-level ``plugins/`` directory (the
+actual plugin packages, walked as its own root) are unrelated. ``_ANCHOR_MODULES``
+entries are keyed by ``(root_label, path_relative_to_that_root)`` — see ``_ROOTS``
+— rather than a bare path string, so the two cannot collide: an anchor under
+``src/alfred/plugins/`` and an anchor under the top-level ``plugins/`` tree can
+share the same relative-path text without meaning the same file.
 
 **Why the anchor modules are exempt.** The ``_*_reserve.py`` / ``_*_i18n.py``
 modules call ``t(key)`` with no kwargs ON PURPOSE — they exist so ``pybabel
@@ -42,19 +52,34 @@ import pytest
 
 from alfred.i18n import t
 
-_SRC: Final[Path] = Path(__file__).resolve().parents[3] / "src" / "alfred"
+_REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
+_SRC: Final[Path] = _REPO_ROOT / "src" / "alfred"
+_PLUGINS: Final[Path] = _REPO_ROOT / "plugins"
+
+#: Roots this guard walks, each tagged with a label used to key
+#: ``_ANCHOR_MODULES`` (see below) and to look a root back up by label in
+#: ``test_every_exempt_anchor_module_exists``.
+_ROOTS: Final[tuple[tuple[str, Path], ...]] = (
+    ("src", _SRC),
+    ("plugins", _PLUGINS),
+)
 
 #: Modules whose ``t()`` calls are pybabel-visibility ANCHORS, not operator output.
-#: Every entry discards the returned string. See the module docstring.
-_ANCHOR_MODULES: Final[frozenset[str]] = frozenset(
+#: Every entry discards the returned string. See the module docstring. Keyed by
+#: ``(root_label, path_relative_to_that_root)`` so the existing
+#: ``("src", "plugins/_launcher_i18n.py")`` / ``("src", "plugins/_sandbox_i18n.py")``
+#: entries — which live under ``src/alfred/plugins/`` — cannot collide with a
+#: future anchor under the unrelated, top-level ``plugins/`` tree (label
+#: ``"plugins"``).
+_ANCHOR_MODULES: Final[frozenset[tuple[str, str]]] = frozenset(
     {
-        "i18n/_339_pr4b_broker_reserve.py",
-        "i18n/_deferred_key_anchors.py",
-        "i18n/_slice_4_reserve.py",
-        "i18n/_spec_b_reserve.py",
-        "i18n/_spec_c_reserve.py",
-        "plugins/_launcher_i18n.py",
-        "plugins/_sandbox_i18n.py",
+        ("src", "i18n/_339_pr4b_broker_reserve.py"),
+        ("src", "i18n/_deferred_key_anchors.py"),
+        ("src", "i18n/_slice_4_reserve.py"),
+        ("src", "i18n/_spec_b_reserve.py"),
+        ("src", "i18n/_spec_c_reserve.py"),
+        ("src", "plugins/_launcher_i18n.py"),
+        ("src", "plugins/_sandbox_i18n.py"),
     }
 )
 
@@ -64,27 +89,43 @@ _ANCHOR_MODULES: Final[frozenset[str]] = frozenset(
 _FIELD: Final[re.Pattern[str]] = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)[^}]*\}")
 
 
+def _is_test_path(rel: str) -> bool:
+    """True if the root-relative posix path ``rel`` has a ``tests`` component.
+
+    ``src/alfred`` has no ``tests`` subdirectory today, so this is a no-op for that
+    root. It matters for the top-level ``plugins/`` tree: ``plugins/alfred_tui/
+    tests/`` holds test code, not operator output, and must not be walked.
+    """
+    return "tests" in Path(rel).parts
+
+
 def _t_calls() -> list[tuple[Path, int, str, set[str], bool]]:
-    """Yield ``(path, lineno, key, kwarg_names, has_double_star)`` per literal ``t()`` call."""
+    """Yield ``(path, lineno, key, kwarg_names, has_double_star)`` per literal ``t()`` call.
+
+    Walks both ``_ROOTS``: ``src/alfred`` and the top-level ``plugins/`` tree, where
+    the actual plugin packages live (``alfred_tui`` uses a ``src/`` sublayout;
+    ``alfred_discord``, ``alfred_web_fetch``, etc. are flat) — production code only.
+    """
     found: list[tuple[Path, int, str, set[str], bool]] = []
-    for path in sorted(_SRC.rglob("*.py")):
-        rel = path.relative_to(_SRC).as_posix()
-        if rel in _ANCHOR_MODULES:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
+    for label, root in _ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            rel = path.relative_to(root).as_posix()
+            if _is_test_path(rel) or (label, rel) in _ANCHOR_MODULES:
                 continue
-            if not isinstance(node.func, ast.Name) or node.func.id != "t":
-                continue
-            if not node.args or not isinstance(node.args[0], ast.Constant):
-                continue
-            key = node.args[0].value
-            if not isinstance(key, str):
-                continue
-            names = {kw.arg for kw in node.keywords if kw.arg is not None}
-            has_star = any(kw.arg is None for kw in node.keywords)
-            found.append((path, node.lineno, key, names, has_star))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not isinstance(node.func, ast.Name) or node.func.id != "t":
+                    continue
+                if not node.args or not isinstance(node.args[0], ast.Constant):
+                    continue
+                key = node.args[0].value
+                if not isinstance(key, str):
+                    continue
+                names = {kw.arg for kw in node.keywords if kw.arg is not None}
+                has_star = any(kw.arg is None for kw in node.keywords)
+                found.append((path, node.lineno, key, names, has_star))
     return found
 
 
@@ -93,21 +134,28 @@ def test_the_walker_finds_the_daemon_boot_call_sites() -> None:
 
     Both boot-probe refusals are the sites UAT caught, so pinning them by name proves
     the walker reaches ``src/alfred/cli/daemon/_commands.py`` and unpacks its kwargs.
+    ``tui.turn_timeout`` is pinned the same way for the ``plugins/`` root: it lives in
+    ``plugins/alfred_tui/src/alfred_tui/textual/app.py`` (PR #594), so its presence
+    proves the walker reaches the top-level ``plugins/`` tree too, not just
+    ``src/alfred``.
     """
     keys = {key for _, _, key, _, _ in _t_calls()}
     assert "daemon.boot.snapshot_ref_init_failed" in keys
     assert "daemon.boot.capability_gate_handshake_failed" in keys
+    assert "tui.turn_timeout" in keys
     assert len(keys) > 100, "walker collected implausibly few keys — check the glob"
 
 
 @pytest.mark.parametrize("anchor", sorted(_ANCHOR_MODULES))
-def test_every_exempt_anchor_module_exists(anchor: str) -> None:
+def test_every_exempt_anchor_module_exists(anchor: tuple[str, str]) -> None:
     """A renamed/deleted anchor must not silently widen the exemption to nothing.
 
     Without this, a stale entry would sit in ``_ANCHOR_MODULES`` forever and a future
     module reusing the old path would inherit an exemption nobody granted.
     """
-    assert (_SRC / anchor).is_file(), f"exempt anchor module no longer exists: {anchor}"
+    label, rel = anchor
+    root = dict(_ROOTS)[label]
+    assert (root / rel).is_file(), f"exempt anchor module no longer exists: {label}:{rel}"
 
 
 def test_no_t_call_omits_a_kwarg_its_template_requires() -> None:
@@ -130,8 +178,10 @@ def test_no_t_call_omits_a_kwarg_its_template_requires() -> None:
         required = set(_FIELD.findall(rendered))
         missing = required - names
         if missing:
+            # Repo-root-relative (not root-relative): unambiguous between
+            # ``src/alfred/plugins/`` and the unrelated top-level ``plugins/`` tree.
             offenders.append(
-                f"{path.relative_to(_SRC).as_posix()}:{lineno} t({key!r}) "
+                f"{path.relative_to(_REPO_ROOT).as_posix()}:{lineno} t({key!r}) "
                 f"missing kwargs {sorted(missing)}"
             )
     assert not offenders, (
