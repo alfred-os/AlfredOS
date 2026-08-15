@@ -111,6 +111,7 @@ from alfred.cli.daemon._failures import (
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
     QuarantineMaxTokensInvalidFailure,
+    QuarantineProviderConfigInvalidFailure,
     QuarantineProviderKeyUnsetFailure,
     QuarantineProviderSeparationViolatedFailure,
     RouterSecretMissingFailure,
@@ -135,6 +136,7 @@ from alfred.cli.daemon._gate_boot import (
 # bogus placeholder key = a silent dead-LLM (§20.3.1 must-not-regress).
 from alfred.comms_mcp.daemon_runtime import (
     QuarantineMaxTokensInvalidError,
+    QuarantineProviderConfigInvalidError,
     QuarantineProviderKeyUnsetError,
 )
 from alfred.config._environment_loader import (
@@ -1093,6 +1095,29 @@ async def _start_async() -> None:
                 audit,
                 QuarantineMaxTokensInvalidFailure(),
                 t("daemon.boot.quarantine_max_tokens_invalid"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except QuarantineProviderConfigInvalidError:
+            # Round-5 review fleet, Tier A: _build_comms_inbound_extractor resolves the
+            # quarantined child's provider-aware (model, base_url) SYNCHRONOUSLY
+            # (pre-spawn), via _resolve_quarantine_model / _resolve_quarantine_base_url.
+            # An out-of-closed-set provider_id, a blank deepseek_model, or a blank
+            # deepseek_base_url raises this BEFORE the bwrap child is spawned. REFUSE
+            # boot fail-closed (audited, exit 2) rather than thread an unusable
+            # model/endpoint into the child env, where every extraction would fail and
+            # the dispatch retry loop would LAUNDER that into a generic cannot_extract
+            # refusal (masking the misconfig — the HARD #7 silent-fail shape this whole
+            # arm exists to close: the resolver used to raise a bare ValueError here,
+            # caught by NO arm of this cascade, producing an uncaught exit-1 crash with
+            # ZERO daemon.boot.failed rows — the #368 anti-pattern). Distinct reason
+            # from quarantine_max_tokens_invalid (the budget, not the provider/model/
+            # endpoint) and quarantine_provider_key_unset (the key, not its config).
+            # Pre-spawn, so no live child leaks.
+            await _refuse_boot(
+                audit,
+                QuarantineProviderConfigInvalidFailure(),
+                t("daemon.boot.quarantine_provider_config_invalid"),
                 boot_id=boot_id,
                 environment_source=source,
             )

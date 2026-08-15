@@ -194,6 +194,9 @@ async def test_control_fd_with_no_egress_config_raises(_spawn_capture: dict[str,
         (None, 8192),  # model omitted
         ("claude-haiku-4-5", None),  # budget omitted
         (None, None),  # both omitted
+        ("", 8192),  # model blank (round-5 review fleet, 1E)
+        (" ", 8192),  # model whitespace-only
+        ("\t", 8192),  # model whitespace-only, tab
     ],
 )
 async def test_control_fd_without_provider_config_refuses(
@@ -209,6 +212,14 @@ async def test_control_fd_without_provider_config_refuses(
     (``_run_mcp_server``) — after the two-frame handshake has already reported the child
     healthy. Refusing pre-spawn keeps every ``control_fd=True`` misconfiguration one loud
     failure of the same shape, and costs no spawn.
+
+    The blank-model rows (round-5 review fleet, 1E) are the mirror of the deepseek
+    blank-``base_url`` rows in the test below: ``model is None`` alone missed a
+    whitespace-only argument, which is non-``None`` and so takes the OPPOSITE path through
+    ``_child_env`` — the var is actually SET, and the child boots with an unusable model id
+    whose every extraction the dispatch retry loop launders into a generic
+    ``cannot_extract``, the identical failure shape ``_build_provider``'s own blank-model
+    guard closes independently, one process over.
     """
     with pytest.raises(QuarantineChildSpawnError):
         await spawn_quarantine_child_io(

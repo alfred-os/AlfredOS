@@ -402,11 +402,12 @@ def test_boot_refuses_fail_closed_on_quarantine_child_spawn_failure(
 
     sup = FakeSupervisor.last_instance
     # The pump was NEVER registered — the refusal happens during the comms-graph
-    # build, BEFORE Supervisor() is even constructed (isolation-robust: with
-    # FakeSupervisor.last_instance reset per test, this test's own boot never
-    # sets it, so `sup is None` is the deterministic outcome, not an accident of
-    # execution order — see _reset_fake_supervisor_last_instance in conftest.py).
-    assert sup is None or sup.registered_tasks == []
+    # build, BEFORE Supervisor() is even constructed. conftest.py's autouse
+    # _reset_fake_supervisor_last_instance resets the ClassVar at SETUP for every
+    # test in this package, so `sup is None` is deterministic here, not an
+    # accident of execution order — no `or sup.registered_tasks == []` fallback
+    # needed.
+    assert sup is None, sup
     # A loud daemon.boot.failed row with the EXACT fail-closed reason (not just
     # "some refusal") — catches a wrong-refusal-arm regression (CR #255).
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
@@ -448,11 +449,13 @@ def test_boot_refuses_fail_closed_on_quarantine_provider_key_unset(
 
     # The pump was NEVER registered — the refusal happens during the comms-graph
     # build (the pre-spawn key resolve), BEFORE supervisor.start / the spawn loop.
-    # In isolation ``last_instance`` is therefore None; in a full-file run a prior
-    # test's supervisor may linger on the ClassVar, so assert the isolation-robust
-    # intent (no pump task registered) either way.
+    # conftest.py's autouse _reset_fake_supervisor_last_instance resets the
+    # ClassVar at SETUP for every test in this package, so `sup is None` is
+    # deterministic here regardless of file/collection ordering — the "prior
+    # test's supervisor may linger" caveat this comment used to carry no longer
+    # applies.
     sup = FakeSupervisor.last_instance
-    assert sup is None or sup.registered_tasks == []
+    assert sup is None, sup
     # The refuse is PRE-spawn, so no bwrap child was ever spawned (the §20.2 host
     # primary defense fires before the single spawn await — no fd-3 clobber window).
     assert patch_quarantine_child_spawn == []
@@ -497,12 +500,12 @@ def test_boot_refuses_fail_closed_on_quarantine_max_tokens_invalid(
     assert result.exit_code == 2
 
     # The pump was NEVER registered — the refusal happens during the comms-graph build
-    # (the pre-spawn budget resolve), BEFORE the supervisor is even constructed. In
-    # isolation ``last_instance`` is therefore None; in a full-file run a prior test's
-    # supervisor may linger on the ClassVar, so assert the isolation-robust intent (no
-    # pump task registered) either way.
+    # (the pre-spawn budget resolve), BEFORE the supervisor is even constructed.
+    # conftest.py's autouse _reset_fake_supervisor_last_instance resets the ClassVar
+    # at SETUP for every test in this package, so `sup is None` is deterministic
+    # here regardless of file/collection ordering.
     sup = FakeSupervisor.last_instance
-    assert sup is None or sup.registered_tasks == []
+    assert sup is None, sup
     # The refuse is PRE-spawn, so no bwrap child was ever spawned (§20.2 host primary
     # defense fires before the single spawn await — no fd-3 clobber window).
     assert patch_quarantine_child_spawn == []
@@ -515,6 +518,71 @@ def test_boot_refuses_fail_closed_on_quarantine_max_tokens_invalid(
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
     # The operator-facing message names the offending budget knob.
     assert "max_tokens_per_extraction" in result.output
+
+
+def test_boot_refuses_fail_closed_on_quarantine_provider_config_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """An unresolvable quarantine provider config on a comms boot refuses (exit 2),
+    no pump, no spawn (round-5 review fleet, Tier A).
+
+    ``_build_comms_boot_graph`` resolves the quarantined child's provider-aware
+    ``(model, base_url)`` SYNCHRONOUSLY (pre-spawn), via ``_resolve_quarantine_model`` /
+    ``_resolve_quarantine_base_url``. Both raise ``QuarantineProviderConfigInvalidError``
+    on an out-of-closed-set ``provider_id`` or a blank ``deepseek_model`` /
+    ``deepseek_base_url`` — but every real path into those two conditions is already
+    closed at ``Settings`` construction (``Settings.quarantine_provider`` is
+    ``Literal``-validated; ``Settings._reject_blank_deepseek_model`` /
+    ``_validate_deepseek_base_url`` refuse a blank value). So this arm is UNREACHABLE
+    from a real ``.env``-driven boot today, and can only be proven by monkeypatching
+    the resolver directly — matching this codebase's own "unreachable today is not a
+    safety argument" lesson: without a green boot-level test here, a future regression
+    in either upstream ``Settings`` guarantee would reopen an uncaught crash (exit 1,
+    ZERO ``daemon.boot.failed`` rows — the #368 anti-pattern) with nothing to catch it.
+    ``_comms_boot.py`` imports the resolver LAZILY, inside the function, so patching
+    the module attribute on ``daemon_runtime`` takes effect.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    def _raise_config_invalid(provider_id: str, settings: Any) -> str:
+        del provider_id, settings
+        from alfred.comms_mcp.daemon_runtime import QuarantineProviderConfigInvalidError
+
+        raise QuarantineProviderConfigInvalidError(
+            "_resolve_quarantine_model: provider_id='deepseek' but deepseek_model is "
+            "blank — test-injected fault (round-5 review fleet, Tier A)"
+        )
+
+    monkeypatch.setattr(
+        "alfred.comms_mcp.daemon_runtime._resolve_quarantine_model", _raise_config_invalid
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    # The fail-closed refusal contract: exit 2, never a degraded boot.
+    assert result.exit_code == 2
+
+    # The pump was NEVER registered — the refusal happens during the comms-graph build
+    # (the pre-spawn model/base_url resolve), BEFORE the supervisor is even constructed.
+    sup = FakeSupervisor.last_instance
+    assert sup is None, sup
+    # The refuse is PRE-spawn, so no bwrap child was ever spawned.
+    assert patch_quarantine_child_spawn == []
+    # A loud daemon.boot.failed row with the EXACT reason — DISTINCT from the
+    # max-tokens, provider-key-unset and spawn-failed tokens (catches a wrong-arm
+    # regression, and proves the arm this test exists for actually routes through
+    # _refuse_boot rather than escaping uncaught).
+    rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+    assert rows
+    reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
+    assert "quarantine_provider_config_invalid" in reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
 
 
 def test_boot_refuses_audited_on_comms_graph_broker_config_error(
@@ -630,8 +698,9 @@ def test_boot_refuses_on_multiple_enabled_adapters(
     sup = FakeSupervisor.last_instance
     # No pump registered + no runner constructed — the refusal happened before
     # Supervisor() is even constructed (fail-closed, never a parked cross-routed
-    # graph). Isolation-robust: see _reset_fake_supervisor_last_instance.
-    assert sup is None or sup.registered_tasks == []
+    # graph). Deterministic per _reset_fake_supervisor_last_instance's autouse
+    # setup-time reset.
+    assert sup is None, sup
     assert _FakeRunner.instances == []
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
@@ -740,10 +809,11 @@ def test_boot_refuses_on_unregistered_adapter_kind(
     assert reasons == {"comms_adapter_unknown_kind"}
 
 
-# These two child-reaping tests run LAST in the file: the supervisor-stop case
-# boots fully (registers a pump), and the refusal tests above read the shared
-# ``FakeSupervisor.last_instance`` (not reset by the autouse instance-clear), so
-# they must not run before those refusal tests or they'd pollute that state.
+# No ordering constraint on these two child-reaping tests: conftest.py's autouse
+# _reset_fake_supervisor_last_instance resets FakeSupervisor.last_instance at SETUP
+# for every test in this package, so the supervisor-stop case booting fully
+# (registering a pump) here cannot leak state into any refusal test elsewhere in
+# the file, whichever order pytest collects them in.
 def test_boot_reaps_child_when_supervisor_stop_raises(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

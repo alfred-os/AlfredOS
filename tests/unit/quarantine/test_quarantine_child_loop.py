@@ -283,9 +283,13 @@ def test_build_provider_returns_factory_from_key(monkeypatch: pytest.MonkeyPatch
     assert isinstance(factory, _ProviderFactory)
     rendered = repr(factory)
     assert "sk-secret" not in rendered
-    assert "deepseek" in rendered  # provider_id
-    assert "deepseek-chat" in rendered  # model
-    assert "8192" in rendered  # max_tokens
+    # Field-qualified, not bare substrings: this fixture sets a deepseek model
+    # ("deepseek-chat") and a deepseek base_url ("api.deepseek.com"), so a bare
+    # "deepseek" in rendered would still pass even with provider_id deleted from
+    # __repr__ entirely — it appears three times over regardless.
+    assert "provider_id='deepseek'" in rendered
+    assert "model='deepseek-chat'" in rendered
+    assert "max_tokens=8192" in rendered
     assert "https://api.deepseek.com" in rendered  # base_url (path dropped — see docstring)
     assert "/v1" not in rendered, rendered  # ...and the path really is gone
 

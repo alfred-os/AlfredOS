@@ -557,6 +557,24 @@ def _build_provider(key: str) -> _ProviderFactory:
             "only on the live (control_fd=True) spawn, so an unset value means the spawn "
             "call omitted the golive provider config (§20.2)"
         ) from exc
+    if not model.strip():
+        # §20.2 SECONDARY refuse-boot (HARD #7), the same shape as every guard in this
+        # function — and the sibling of the ALFRED_QUARANTINE_BASE_URL blank guard below,
+        # closing the identical hole on the OTHER required config value (round-5 review
+        # fleet, 1E): the KeyError check above proves the var is SET, never that it is
+        # USABLE. A blank model id is present, passes that check, and constructs a
+        # provider that fails every extraction with an unusable-model API error — laundered
+        # by the dispatch retry loop into a generic ``cannot_extract`` exactly like an
+        # unset base_url would be. The value is host-set routing config (non-secret /
+        # non-T3), safe to echo, but an unset/blank value has nothing worth echoing.
+        raise QuarantineChildBootError(
+            "ALFRED_QUARANTINE_MODEL must not be blank — refusing to boot a child whose "
+            "every extraction would fail on an unusable model id (§20.2)"
+        )
+    # Strip-and-STORE, matching ALFRED_QUARANTINE_BASE_URL's handling below and
+    # Settings._reject_blank_deepseek_model: passing the raw value on would thread
+    # invisible leading/trailing bytes into the SDK client.
+    model = model.strip()
     # A non-integer budget is the same class of spawn-wiring fault: refuse typed rather than
     # let `int()` raise a bare ValueError out of a security gate.
     try:

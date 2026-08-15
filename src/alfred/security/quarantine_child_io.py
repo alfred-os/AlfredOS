@@ -1166,7 +1166,15 @@ async def spawn_quarantine_child_io(
         # same pre-fork refusal. (The child's ``_build_provider`` and the host's
         # ``_resolve_quarantine_base_url`` both already treat blank as missing; this was the
         # one layer in the chain that did not.)
-        missing_core = model is None or max_tokens is None
+        #
+        # ``model`` gets the SAME blank check as ``base_url`` above, not just ``is None``
+        # (round-5 review fleet, 1E): the mirror gap this comment used to leave open — a
+        # whitespace-only ``model=""`` argument is not ``None``, so it survived the old
+        # ``model is None`` check, reached ``_child_env`` (which forwards any non-``None``
+        # value verbatim), and produced the identical laundered-into-``cannot_extract``
+        # failure the base_url guard exists to prevent. The child's own ``_build_provider``
+        # closed this same hole independently; this is the pre-fork layer.
+        missing_core = model is None or not model.strip() or max_tokens is None
         missing_deepseek_base_url = provider == "deepseek" and (
             base_url is None or not base_url.strip()
         )

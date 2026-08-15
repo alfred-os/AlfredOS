@@ -194,6 +194,38 @@ def test_child_build_provider_refuses_unparseable_budget(
     assert isinstance(exc_info.value.__cause__, ValueError)
 
 
+@pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
+def test_child_build_provider_refuses_blank_model(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """A BLANK (not just unset) ``ALFRED_QUARANTINE_MODEL`` refuses typed at boot
+    (round-5 review fleet, 1E).
+
+    The mirror gap this test closes: ``test_child_build_provider_refuses_unset_spawn_env``
+    above proves an UNSET var refuses (``KeyError`` -> typed), but the ``os.environ[...]``
+    indexing that guard uses proves only PRESENCE, not USABILITY — a whitespace-only value
+    is present, so it sailed through, reached ``_ProviderFactory.from_key``, and built a
+    provider that fails every extraction on an unusable model id, laundered by the
+    dispatch retry loop into a generic ``cannot_extract``. The sibling
+    ``ALFRED_QUARANTINE_BASE_URL`` guard below already closed this exact shape for its own
+    field; this closes it for the other required one.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", blank)
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    with pytest.raises(QuarantineChildBootError, match="ALFRED_QUARANTINE_MODEL") as exc_info:
+        child_main._build_provider("sk-quarantine-key")
+    assert not isinstance(exc_info.value, ValueError)
+
+
+def test_child_build_provider_strips_model_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model id with incidental leading/trailing whitespace is stored stripped —
+    the same strip-and-STORE treatment as ``base_url`` (round-5 review fleet, 1E)."""
+    monkeypatch.setenv("ALFRED_QUARANTINE_MODEL", "  claude-haiku-4-5  ")
+    monkeypatch.setenv("ALFRED_QUARANTINE_MAX_TOKENS", "8192")
+    factory = child_main._build_provider("sk-quarantine-key")
+    assert factory.model == "claude-haiku-4-5"
+
+
 # --------------------------------------------------------------------------- #
 # CHILD boundary — _build_provider reads the provider id + base_url (#587).
 # --------------------------------------------------------------------------- #

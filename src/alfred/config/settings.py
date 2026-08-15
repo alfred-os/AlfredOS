@@ -806,12 +806,18 @@ class Settings(BaseSettings):
 
         This validator is the PRIMARY guard, added after ``_resolve_quarantine_model``'s
         own resolver-level ``ValueError`` was found unreachable-from-safety: that
-        ``ValueError`` is caught by NO arm of the daemon boot cascade, so it escaped as
-        an uncaught crash (exit 1, ZERO ``daemon.boot.failed`` rows — the #368
+        ``ValueError`` was caught by NO arm of the daemon boot cascade, so on its own it
+        escaped as an uncaught crash (exit 1, ZERO ``daemon.boot.failed`` rows — the #368
         anti-pattern), and it protected only the quarantine path, leaving ``build_router``
         exposed. Refusing at Settings CONSTRUCTION routes both paths through the EXISTING
         audited ``settings_invalid`` boot refusal (exit 2 + a real ``daemon.boot.failed``
-        row). Raw English, no ``t()``: Settings loads before the translator, exactly as
+        row) — this is still the guard that actually fires on a real ``.env``-driven
+        boot, since it runs before ``_resolve_quarantine_model`` is ever reached. Round-5
+        review fleet, Tier A: that resolver's own ``ValueError`` is now a typed
+        ``QuarantineProviderConfigInvalidError``, routed through its own audited
+        ``quarantine_provider_config_invalid`` refusal — SECONDARY, defence-in-depth for
+        non-``Settings`` callers, not the primary guard this docstring describes. Raw
+        English, no ``t()``: Settings loads before the translator, exactly as
         ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
         """
         # Strip-and-STORE, not strip-only-to-test (CodeRabbit): returning the raw
@@ -826,6 +832,33 @@ class Settings(BaseSettings):
                 "deepseek_model must not be blank — set ALFRED_DEEPSEEK_MODEL to a real "
                 "DeepSeek model id (default deepseek-chat) or leave it unset to take "
                 "that default"
+            )
+        return v
+
+    @field_validator("anthropic_model")
+    @classmethod
+    def _reject_blank_anthropic_model(cls, v: str) -> str:
+        """Reject a blank/whitespace ``ALFRED_ANTHROPIC_MODEL``.
+
+        Round-5 review fleet (1F): the structural twin ``_reject_blank_deepseek_model``
+        above exists precisely because a blank ``str``-with-a-real-default field of this
+        shape has no downstream ``is None`` refusal to catch it — the value simply
+        becomes an unusable model id that fails per call. ``anthropic_model`` is
+        consumed the same way, by ``build_router`` (``src/alfred/cli/_bootstrap.py``)
+        for the privileged Anthropic FALLBACK provider — a narrower blast radius than
+        ``deepseek_model`` (the quarantine child's own Anthropic path uses a hardcoded
+        constant, ``_QUARANTINE_MODEL``, never this field — see
+        ``comms_mcp.daemon_runtime._resolve_quarantine_model``), but the same failure
+        shape: an untyped per-call API error instead of a boot-time refusal naming the
+        field. The guard was placed on the field this PR happened to touch
+        (``deepseek_model``) rather than on the class; this closes the other half.
+        """
+        v = v.strip()
+        if not v:
+            raise ValueError(
+                "anthropic_model must not be blank — set ALFRED_ANTHROPIC_MODEL to a "
+                "real Anthropic model id (default claude-sonnet-4-6) or leave it unset "
+                "to take that default"
             )
         return v
 

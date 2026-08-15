@@ -41,6 +41,7 @@ from alfred.comms_mcp.daemon_runtime import (
     CommsAdapterCrashedHookInvoker,
     CommsInboundOrchestratorAdapter,
     OutboundSenderLike,
+    QuarantineProviderConfigInvalidError,
     _build_comms_inbound_extractor,
     _resolve_quarantine_base_url,
     _resolve_quarantine_model,
@@ -699,9 +700,15 @@ def test_resolve_quarantine_model_returns_deepseek_setting_for_deepseek() -> Non
 
 def test_resolve_quarantine_model_refuses_unknown_provider_id() -> None:
     """prov-r2-001: an out-of-closed-set provider_id raises loud, never resolves
-    silently to the anthropic model (CLAUDE.md hard rule #7)."""
+    silently to the anthropic model (CLAUDE.md hard rule #7).
+
+    QuarantineProviderConfigInvalidError, not a bare ValueError (round-5 review
+    fleet, Tier A) — the raised type now routes through the audited
+    quarantine_provider_config_invalid boot refusal instead of escaping the daemon
+    boot cascade uncaught (the #368 anti-pattern).
+    """
     settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
-    with pytest.raises(ValueError, match="unsupported provider_id"):
+    with pytest.raises(QuarantineProviderConfigInvalidError, match="unsupported provider_id"):
         _resolve_quarantine_model("openai", settings)
 
 
@@ -725,7 +732,7 @@ def test_resolve_quarantine_model_refuses_blank_deepseek_model(blank: str) -> No
     than dead code shadowed by it.
     """
     settings = Settings.model_construct(deepseek_model=blank)
-    with pytest.raises(ValueError, match="blank"):
+    with pytest.raises(QuarantineProviderConfigInvalidError, match="blank"):
         _resolve_quarantine_model("deepseek", settings)
 
 
@@ -755,9 +762,13 @@ def test_resolve_quarantine_base_url_returns_deepseek_setting_for_deepseek() -> 
 
 def test_resolve_quarantine_base_url_refuses_unknown_provider_id() -> None:
     """prov-r2-001: an out-of-closed-set provider_id raises loud, never resolves
-    silently to ``None`` (CLAUDE.md hard rule #7)."""
+    silently to ``None`` (CLAUDE.md hard rule #7).
+
+    QuarantineProviderConfigInvalidError, not a bare ValueError (round-5 review
+    fleet, Tier A) — same rationale as the sibling model-resolver test above.
+    """
     settings = Settings(deepseek_api_key=SecretStr("sk-test"), environment="test")
-    with pytest.raises(ValueError, match="unsupported provider_id"):
+    with pytest.raises(QuarantineProviderConfigInvalidError, match="unsupported provider_id"):
         _resolve_quarantine_base_url("openai", settings)
 
 
@@ -779,7 +790,7 @@ def test_resolve_quarantine_base_url_refuses_blank_deepseek_base_url(blank: str)
     than dead code shadowed by it.
     """
     settings = Settings.model_construct(deepseek_base_url=blank)
-    with pytest.raises(ValueError, match="blank"):
+    with pytest.raises(QuarantineProviderConfigInvalidError, match="blank"):
         _resolve_quarantine_base_url("deepseek", settings)
 
 

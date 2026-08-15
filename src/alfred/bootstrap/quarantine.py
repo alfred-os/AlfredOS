@@ -34,6 +34,31 @@ from alfred.errors import AlfredError
 from alfred.i18n import t
 
 
+class ProviderIdBlankError(AlfredError):
+    """A blank privileged or quarantined provider id reached the separation check.
+
+    Round-5 review fleet (1G): distinct from :class:`ProviderSeparationViolatedError`
+    below — this is a MISSING-CONFIG fault ("the operator did not declare a provider"),
+    not a collision. Splitting them lets a caller (``_comms_boot.py``'s unconditional
+    per-boot gate) catch the collision specifically without also catching this one — the
+    12-line comment that used to sit at that catch site, explaining why relabelling
+    every ``AlfredError`` from this module as a collision was "only honest because a
+    collision is the sole thing that can still reach that line," is no longer needed:
+    the type now says what the comment asserted.
+    """
+
+
+class ProviderSeparationViolatedError(AlfredError):
+    """The privileged and quarantined provider ids collide — separation required.
+
+    Round-5 review fleet (1G): behaviour-preserving for every existing
+    ``except AlfredError`` caller (both are still ``AlfredError`` subclasses); this only
+    makes the SHAPE of what :func:`assert_provider_separation` raises independently
+    checkable, rather than resting on a caller's own bare relabel of "the only
+    ``AlfredError`` this function can still raise here."
+    """
+
+
 def provider_ids_collide(a: str, b: str) -> bool:
     """Return ``True`` when two provider ids name the SAME provider.
 
@@ -96,9 +121,11 @@ def assert_provider_separation(
     as the (different, actionable-in-a-different-way) same-provider
     error.
 
-    Raises :class:`AlfredError` with a t() catalogue message; callers
-    propagate this to the operator-facing CLI surface and the bootstrap
-    refuses to continue. We deliberately do NOT log the offending
+    Raises :class:`ProviderIdBlankError` (blank arm) or
+    :class:`ProviderSeparationViolatedError` (collision arm) — both
+    :class:`AlfredError` subclasses (round-5 review fleet, 1G) — with a t() catalogue
+    message; callers propagate this to the operator-facing CLI surface and the
+    bootstrap refuses to continue. We deliberately do NOT log the offending
     provider id beyond the t() interpolation — the same string lands
     in the audit-log family once the routing.yaml loader is wired
     (slice 4+), at which point this helper grows an audit-emit arm.
@@ -106,9 +133,9 @@ def assert_provider_separation(
     privileged_normalised = privileged_provider_id.strip().lower()
     quarantined_normalised = quarantined_provider_id.strip().lower()
     if not privileged_normalised or not quarantined_normalised:
-        raise AlfredError(t("bootstrap.providers_blank_error"))
+        raise ProviderIdBlankError(t("bootstrap.providers_blank_error"))
     if provider_ids_collide(privileged_provider_id, quarantined_provider_id):
-        raise AlfredError(
+        raise ProviderSeparationViolatedError(
             t(
                 "bootstrap.providers_same_error",
                 provider=privileged_normalised,

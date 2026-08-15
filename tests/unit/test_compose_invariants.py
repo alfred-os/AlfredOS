@@ -422,6 +422,30 @@ def test_require_quarantine_provider_separation_defaults_to_false(
     )
 
 
+def test_primary_and_fallback_provider_are_not_forwarded_to_core(compose: dict[str, Any]) -> None:
+    """Pins TODAY's behaviour, not a desired end state (round-5 review fleet).
+
+    Unlike ``ALFRED_QUARANTINE_PROVIDER``/``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION``
+    above, ``ALFRED_PRIMARY_PROVIDER`` and ``ALFRED_FALLBACK_PROVIDER`` are deliberately
+    left unforwarded (see the ``NOT FORWARDED UNDER DOCKER COMPOSE`` disclosure in both
+    fields' ``.env.example`` blocks) — forwarding ``ALFRED_PRIMARY_PROVIDER`` today would
+    give it the power to flip ``bin/alfred-setup.sh``'s separation-collision check and the
+    real boot-time separation check from pass to refuse for existing deployments, without
+    changing which provider ``build_router`` actually dials (#590 owns that half).
+
+    This is a MECHANICAL COUPLING GATE, not a preference: ``bin/alfred-setup.sh``'s
+    ``compose_primary_provider="deepseek"`` constant (the #586 separation-collision check)
+    is correct ONLY because this test is green. #590 will legitimately flip this test one
+    day — whoever does MUST, in the same commit, convert that bash constant to the same
+    ``${VAR+x}`` shell-precedence resolution the script already uses for
+    ``ALFRED_QUARANTINE_PROVIDER``, or the setup gate will silently certify the wrong pair.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_PRIMARY_PROVIDER" not in env
+    assert "ALFRED_FALLBACK_PROVIDER" not in env
+
+
 def test_quarantine_provider_settings_never_reach_the_gateway(compose: dict[str, Any]) -> None:
     """Neither #586/#587 setting reaches alfred-gateway — it holds no provider config.
 

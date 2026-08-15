@@ -360,7 +360,9 @@ def test_boot_refuses_when_separation_required_and_providers_collide(
     assert "PRD §6.4" not in flat, flat
     assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in flat, flat
     assert "ALFRED_QUARANTINE_PROVIDER=" in flat, flat
-    assert "0064" in flat, flat
+    # Bare "0064" would also match a port number, byte count, or any other stray
+    # four-digit run — pin the ADR it's meant to cite instead.
+    assert "docs/adr/0064-quarantine-provider-separation-is-opt-in.md" in flat, flat
 
 
 def test_boot_refuses_blank_primary_provider_as_settings_invalid_not_collision(
@@ -400,6 +402,10 @@ def test_boot_refuses_blank_primary_provider_as_settings_invalid_not_collision(
     # accurate reason token is not undone by a message that still says "collision".
     flat = " ".join(result.output.split())
     assert "primary_provider" in flat, flat
+    # Pins the MECHANISM, not just this one value: catches a regression back to
+    # rendering pydantic's raw envelope even where nothing credential-shaped was fed
+    # in, matching the same assertion on the credential-shaped sibling test below.
+    assert "input_value" not in flat, flat
 
 
 def test_boot_refuses_credential_shaped_primary_provider_without_logging_it(
@@ -441,6 +447,10 @@ def test_boot_refuses_credential_shaped_primary_provider_without_logging_it(
     # test_boot_refuses_blank_primary_provider_as_settings_invalid_not_collision above.
     flat = " ".join(result.output.split())
     assert credential not in flat, flat
+    # credential not in flat only catches THIS credential; input_value not in flat
+    # catches the MECHANISM (pydantic's raw envelope reaching the sink at all) —
+    # what actually regresses.
+    assert "input_value" not in flat, flat
     assert "primary_provider" in flat, flat
     assert not any(credential in repr(entry) for entry in logs), logs
 
@@ -475,6 +485,7 @@ def test_boot_refuses_unsupported_primary_provider_naming_the_accepted_values(
     assert "settings_invalid" in reasons, reasons
     flat = " ".join(result.output.split())
     assert "primary_provider" in flat, flat
+    assert "input_value" not in flat, flat
     assert "anthropic" in flat, flat
     assert "deepseek" in flat, flat
 

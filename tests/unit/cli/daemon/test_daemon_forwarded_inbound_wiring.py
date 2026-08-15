@@ -384,11 +384,10 @@ def test_boot_refuses_when_forwarded_registry_promoter_misconfigured(
 
     sup = FakeSupervisor.last_instance
     # Fail-closed: no pump registered — the refusal fired in the graph build,
-    # before Supervisor() is even constructed. Isolation-robust: with
-    # FakeSupervisor.last_instance reset per test (conftest.py's
-    # _reset_fake_supervisor_last_instance), `sup is None` is this test's own
-    # deterministic outcome, not an accident of execution order.
-    assert sup is None or sup.registered_tasks == []
+    # before Supervisor() is even constructed. Deterministic per conftest.py's
+    # autouse _reset_fake_supervisor_last_instance, which resets the ClassVar at
+    # SETUP for every test in this package.
+    assert sup is None, sup
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
     assert "comms_promoter_misconfigured" in reasons

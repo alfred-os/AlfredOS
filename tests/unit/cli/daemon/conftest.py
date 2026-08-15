@@ -121,11 +121,11 @@ def _reset_fake_supervisor_last_instance() -> Iterator[None]:
 
     Autouse and RESET-AT-SETUP (not just at teardown) so every test — including
     ones that never construct a real ``FakeSupervisor`` at all — starts from a
-    known ``None`` baseline, matching a fresh pytest process. Sibling tests that
-    tolerate a genuinely absent supervisor already spell that out as
-    ``assert sup is None or sup.registered_tasks == []``; this fixture is what
-    makes ``sup is None`` the actual, deterministic outcome for a pre-Supervisor
-    refusal, instead of an accident of ordering.
+    known ``None`` baseline, matching a fresh pytest process. This is what makes
+    a plain ``assert sup is None`` the actual, deterministic outcome for every
+    pre-Supervisor refusal test in this package, instead of an accident of
+    ordering that would otherwise need an ``or sup.registered_tasks == []``
+    fallback.
     """
     FakeSupervisor.last_instance = None
     yield

@@ -270,6 +270,41 @@ def test_factory_from_key_builds_deepseek_factory() -> None:
     assert "realkey" not in repr(f)
 
 
+def test_factory_from_key_refuses_unknown_provider_id() -> None:
+    """from_key's OWN closed-set refusal (round-5 review fleet, 1D) — independent of
+    __main__._build_provider's identical check, which runs earlier in the real boot
+    path but does not structurally couple to this one. Without this, from_key was
+    documented as the child's "SECONDARY refuse-boot guard" while actually validating
+    only ONE of the three inputs a caller could get wrong."""
+    with pytest.raises(QuarantineChildBootError, match="provider_id"):
+        _ProviderFactory.from_key("realkey", provider_id="openai", model="gpt-4", max_tokens=8192)
+
+
+def test_factory_from_key_refuses_blank_deepseek_base_url() -> None:
+    """from_key's OWN blank-base_url refusal for the deepseek path (round-5 review
+    fleet, 1D) — the third independent layer for this guarantee alongside
+    __main__._build_provider and build_child_client's own completed guard."""
+    with pytest.raises(QuarantineChildBootError, match="base_url"):
+        _ProviderFactory.from_key(
+            "realkey",
+            provider_id="deepseek",
+            model="deepseek-chat",
+            max_tokens=8192,
+            base_url="   ",
+        )
+
+
+def test_factory_from_key_allows_anthropic_without_base_url() -> None:
+    """Oracle guard for the blank-base_url refusal above: the anthropic path never
+    needs a base_url, so from_key's new check must not over-reach into rejecting a
+    perfectly valid anthropic factory."""
+    f = _ProviderFactory.from_key(
+        "realkey", provider_id="anthropic", model="claude-haiku-4-5", max_tokens=8192
+    )
+    assert f.provider_id == "anthropic"
+    assert f.base_url is None
+
+
 @_posix_only
 def test_build_child_client_dispatches_to_deepseek() -> None:
     """provider_id='deepseek' constructs a DeepSeekProvider, not AnthropicProvider."""
@@ -297,9 +332,19 @@ def test_build_child_client_dispatches_to_deepseek() -> None:
 
 
 @_posix_only
-def test_build_child_client_deepseek_requires_base_url() -> None:
-    """A DeepSeek dispatch with no base_url refuses loudly (HARD #7), never silently
-    falls back to some default the operator didn't choose."""
+@pytest.mark.parametrize("blank_base_url", [None, "", "   ", "\t"])
+def test_build_child_client_deepseek_requires_base_url(blank_base_url: str | None) -> None:
+    """A DeepSeek dispatch with a missing OR blank base_url refuses loudly (HARD #7),
+    never silently falls back to some default the operator didn't choose, or
+    constructs a client that fails only per-call.
+
+    Blank, not just None (round-5 review fleet, 1B): the guard used to check
+    ``base_url is None`` only, so a whitespace-only value passed through here even
+    though it is functionally identical to unset. This is now the THIRD independent
+    layer for this guarantee — behind __main__._build_provider and
+    _ProviderFactory.from_key — kept a bare ValueError specifically because it is a
+    programming-error backstop, not a boot function.
+    """
     a, b = socket.socketpair()
     fd = a.detach()
     try:
@@ -311,7 +356,7 @@ def test_build_child_client_deepseek_requires_base_url() -> None:
                 api_key="k",
                 timeout=be._CHILD_SDK_READ_TIMEOUT,
                 budget_seconds=5.0,
-                base_url=None,
+                base_url=blank_base_url,
             )
     finally:
         os.close(fd)
@@ -399,10 +444,16 @@ def test_provider_source_construction_refuses_unknown_provider_id() -> None:
     is a distinct dispatch site from build_child_client's — this is the test that
     actually exercises it, since none of the tests above construct a source with an
     out-of-set provider_id. Required for the 100%-branch trust-boundary coverage
-    gate this task's Step 6 already demands."""
+    gate this task's Step 6 already demands.
+
+    QuarantineChildBootError, not a bare ValueError (round-5 review fleet, 1C): this
+    constructor runs after the fd-4 control socket is already built, before `ready` —
+    a bare exception there crashed the child with a traceback rather than a typed
+    boot refusal.
+    """
     end, peer = _af_unix_socketpair()
     try:
-        with pytest.raises(ValueError, match="provider_id"):
+        with pytest.raises(QuarantineChildBootError, match="provider_id"):
             BrokeredProviderSource(_factory(provider_id="openai"), end)
     finally:
         end.close()

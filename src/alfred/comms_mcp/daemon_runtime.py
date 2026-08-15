@@ -396,6 +396,24 @@ def _resolve_quarantine_model_config() -> tuple[str, int]:
     return _QUARANTINE_MODEL, max_tokens
 
 
+class QuarantineProviderConfigInvalidError(AlfredError):
+    """The quarantine child's provider/model/base_url cannot be resolved — refuse boot.
+
+    Round-5 review fleet, Tier A: :func:`_resolve_quarantine_model` and
+    :func:`_resolve_quarantine_base_url` below used to raise a bare ``ValueError`` for
+    all four of their default-deny arms (blank model, blank base_url, and each
+    function's out-of-closed-set ``provider_id`` arm). A bare ``ValueError`` is caught
+    by NO arm of the daemon boot cascade (``_build_comms_boot_graph`` re-raises
+    unchanged; none of ``_commands.py``'s typed arms was ``ValueError``; ``start_daemon``
+    catches only ``_BootRefusedError``), so on its own it produced an uncaught crash —
+    exit 1 with ZERO ``daemon.boot.failed`` rows, the #368 anti-pattern this whole PR
+    exists to close everywhere else. Rooted at :class:`AlfredError`, matching this
+    module's sibling :class:`QuarantineProviderKeyUnsetError` /
+    :class:`QuarantineMaxTokensInvalidError`, so the CLI boot path's ``except`` arm maps
+    it into an audited ``daemon.boot.failed`` refusal (exit 2) instead.
+    """
+
+
 def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
     """The quarantine child's model id, provider-aware (#587 — prov-001 fix).
 
@@ -414,33 +432,46 @@ def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
     reuses — and, like it, is DEFENCE-IN-DEPTH, not the primary guard.
     ``Settings._reject_blank_deepseek_model`` refuses ``ALFRED_DEEPSEEK_MODEL=""`` at
     config-load time, which is what routes the misconfiguration onto the audited
-    ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row).
-
-    That ordering matters and was learned the hard way: this ``ValueError`` is caught
-    by NO arm of the daemon boot cascade (``_build_comms_boot_graph`` re-raises
-    unchanged; none of ``_commands.py``'s typed arms is ``ValueError``; ``start_daemon``
-    catches only ``_BootRefusedError``), so on its own it produced an uncaught crash —
-    exit 1 with ZERO audit rows, the #368 anti-pattern. It is kept because this function
-    is a public-ish resolution seam reachable from ``Settings.model_construct`` doubles
-    and future non-``Settings`` callers: without it a blank would be threaded into the
-    child's ``ALFRED_QUARANTINE_MODEL``, and every extraction would name an unusable
-    model and launder into a generic ``cannot_extract`` via the dispatch retry loop.
+    ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row) on a
+    well-behaved ``Settings`` instance — unreachable there today, same as this
+    function's sibling ``provider_id`` guard, per this codebase's "unreachable today is
+    not a safety argument" lesson. Kept because this function is a public-ish
+    resolution seam reachable from ``Settings.model_construct`` doubles and future
+    non-``Settings`` callers: without it a blank would be threaded into the child's
+    ``ALFRED_QUARANTINE_MODEL``, and every extraction would name an unusable model and
+    launder into a generic ``cannot_extract`` via the dispatch retry loop. Both this
+    guard and the ``provider_id`` guard below now raise
+    :class:`QuarantineProviderConfigInvalidError`, routed through the audited
+    ``quarantine_provider_config_invalid`` boot refusal (round-5 review fleet, Tier A)
+    rather than escaping as an uncaught ``ValueError``.
     """
     if provider_id == "deepseek":
         model = settings.deepseek_model
         if not model.strip():
-            raise ValueError(
+            # Non-secret routing config (a model id, never a credential) — but blank
+            # by construction at this point, so there is nothing worth naming beyond
+            # the field itself; provider_id is closed-set, safe to log alongside it.
+            _log.error(
+                "comms.daemon_runtime.quarantine_provider_config_invalid",
+                field="deepseek_model",
+                provider_id=provider_id,
+            )
+            raise QuarantineProviderConfigInvalidError(
                 "_resolve_quarantine_model: provider_id='deepseek' but "
-                f"deepseek_model is blank ({model!r}) — refusing to spawn a "
-                "quarantine child whose every extraction would name an unusable "
-                "model and launder into cannot_extract (HARD #7). Set "
-                "ALFRED_DEEPSEEK_MODEL to a real DeepSeek model id "
-                "(default deepseek-chat)"
+                "deepseek_model is blank — refusing to spawn a quarantine child "
+                "whose every extraction would name an unusable model and launder "
+                "into cannot_extract (HARD #7). Set ALFRED_DEEPSEEK_MODEL to a "
+                "real DeepSeek model id (default deepseek-chat)"
             )
         return model
     if provider_id == "anthropic":
         return _QUARANTINE_MODEL
-    raise ValueError(
+    _log.error(
+        "comms.daemon_runtime.quarantine_provider_config_invalid",
+        field="quarantine_provider",
+        provider_id=provider_id,
+    )
+    raise QuarantineProviderConfigInvalidError(
         f"_resolve_quarantine_model: unsupported provider_id {provider_id!r} — "
         "refusing to silently resolve the anthropic model for an out-of-closed-set "
         "value (HARD #7, prov-r2-001)"
@@ -461,23 +492,45 @@ def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | 
     ``ALFRED_DEEPSEEK_BASE_URL=""`` passes it, reaches ``AsyncOpenAI(base_url="")``, and
     surfaces only as an untyped per-extraction failure that the dispatch retry loop
     LAUNDERS into a generic ``cannot_extract`` — a boot-time misconfiguration wearing a
-    runtime-extraction-failure costume. Refusing here keeps it pre-spawn and loud.
+    runtime-extraction-failure costume. Refusing here keeps it pre-spawn and loud. Like
+    its sibling guard in :func:`_resolve_quarantine_model` above, unreachable from a
+    well-behaved ``Settings`` instance today (``Settings._validate_deepseek_base_url``
+    refuses a blank value at config-load time) — retained as defence-in-depth for the
+    same non-``Settings``-caller reasons. Raises
+    :class:`QuarantineProviderConfigInvalidError` (round-5 review fleet, Tier A), routed
+    through the audited ``quarantine_provider_config_invalid`` boot refusal rather than
+    escaping as an uncaught ``ValueError``.
     """
     if provider_id == "deepseek":
         base_url = settings.deepseek_base_url
         if not base_url.strip():
-            raise ValueError(
+            # The field name only, deliberately NOT the value (unlike the model guard
+            # above): base_url may legitimately front a self-hosted relay with inline
+            # credentials on a non-``Settings`` caller, and this module's own
+            # ``_validate_deepseek_base_url`` precedent treats that as a real exposure
+            # vector, not a hypothetical one.
+            _log.error(
+                "comms.daemon_runtime.quarantine_provider_config_invalid",
+                field="deepseek_base_url",
+                provider_id=provider_id,
+            )
+            raise QuarantineProviderConfigInvalidError(
                 "_resolve_quarantine_base_url: provider_id='deepseek' but "
-                f"deepseek_base_url is blank ({base_url!r}) — refusing to spawn a "
-                "quarantine child whose every extraction would fail an unusable "
-                "endpoint and launder into cannot_extract (HARD #7). Set "
+                "deepseek_base_url is blank — refusing to spawn a quarantine "
+                "child whose every extraction would fail an unusable endpoint "
+                "and launder into cannot_extract (HARD #7). Set "
                 "ALFRED_DEEPSEEK_BASE_URL to the DeepSeek API base "
                 "(default https://api.deepseek.com/v1)"
             )
         return base_url
     if provider_id == "anthropic":
         return None
-    raise ValueError(
+    _log.error(
+        "comms.daemon_runtime.quarantine_provider_config_invalid",
+        field="quarantine_provider",
+        provider_id=provider_id,
+    )
+    raise QuarantineProviderConfigInvalidError(
         f"_resolve_quarantine_base_url: unsupported provider_id {provider_id!r} — "
         "refusing to silently resolve None for an out-of-closed-set value "
         "(HARD #7, prov-r2-001)"

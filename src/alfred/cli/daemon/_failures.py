@@ -230,6 +230,34 @@ class QuarantineMaxTokensInvalidFailure(_BootFailureBase):
     failure_reason: Literal["quarantine_max_tokens_invalid"] = "quarantine_max_tokens_invalid"
 
 
+class QuarantineProviderConfigInvalidFailure(_BootFailureBase):
+    """The quarantine child's provider config cannot be resolved at boot (round-5
+    review fleet, Tier A).
+
+    With a comms adapter enabled, the comms boot graph resolves the quarantined
+    child's model/base_url PROVIDER-AWARE, synchronously, pre-spawn
+    (:func:`alfred.comms_mcp.daemon_runtime._resolve_quarantine_model` /
+    :func:`_resolve_quarantine_base_url`). An out-of-closed-set ``provider_id``, a
+    blank ``deepseek_model``, or a blank ``deepseek_base_url`` raises
+    :class:`alfred.comms_mcp.daemon_runtime.QuarantineProviderConfigInvalidError`.
+
+    Fail-closed (CLAUDE.md hard rule #7): any of those three would make every
+    extraction fail on an unusable model/endpoint, laundered by the dispatch retry
+    loop into a generic ``cannot_extract`` refusal that masks the real
+    misconfiguration. REFUSE boot (audited, exit 2) instead. Distinct from
+    ``quarantine_max_tokens_invalid`` (the budget, not the provider/model/endpoint) and
+    ``quarantine_provider_key_unset`` (the key, not its config) — three different
+    resolution failures at the same pre-spawn boundary, three different forensic
+    tokens. The audit row carries only the ``failure_reason`` (``_refuse_boot``'s fixed
+    subject shape) — never the resolved field's value, matching the resolver's own
+    DLP-safe structlog line.
+    """
+
+    failure_reason: Literal["quarantine_provider_config_invalid"] = (
+        "quarantine_provider_config_invalid"
+    )
+
+
 class QuarantineProviderSeparationViolatedFailure(_BootFailureBase):
     """#586: require_quarantine_provider_separation=True and the privileged/quarantine
     provider ids collide at boot. Distinct failure_reason lets forensics tell an
@@ -467,6 +495,7 @@ DaemonBootFailure = Annotated[
     | QuarantineChildSpawnFailedFailure
     | QuarantineProviderKeyUnsetFailure
     | QuarantineMaxTokensInvalidFailure
+    | QuarantineProviderConfigInvalidFailure
     | QuarantineProviderSeparationViolatedFailure
     | CommsAdapterSpawnFailedFailure
     | CommsAdapterBindFailedFailure
@@ -486,6 +515,7 @@ ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + #340 golive ``quarantine_provider_key_unset`` +
 #340 golive Task 15 ``quarantine_max_tokens_invalid`` +
+round-5 review fleet ``quarantine_provider_config_invalid`` (Tier A) +
 #586 ``quarantine_provider_separation_violated`` +
 PR-S4-11b ``comms_adapter_spawn_failed`` +
 ADR-0031 ``comms_adapter_bind_failed`` +

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 10:00+0100\n"
+"POT-Creation-Date: 2026-08-15 12:25+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -22,7 +22,7 @@ msgstr ""
 "land via `alfred plugin grant`. MUST NOT appear on production stacks: "
 "production wires RealGate against Postgres, not the in-process stub."
 
-#: src/alfred/bootstrap/quarantine.py:109
+#: src/alfred/bootstrap/quarantine.py:136
 msgid "bootstrap.providers_blank_error"
 msgstr ""
 "Both ALFRED_QUARANTINE_PROVIDER and ALFRED_PRIMARY_PROVIDER must be "
@@ -30,7 +30,7 @@ msgstr ""
 "config/routing.yaml will not fix this — its [quarantine] provider is "
 "documentation only and is not read at runtime."
 
-#: src/alfred/bootstrap/quarantine.py:113
+#: src/alfred/bootstrap/quarantine.py:140
 msgid "bootstrap.providers_same_error"
 msgstr ""
 "ALFRED_QUARANTINE_PROVIDER must differ from ALFRED_PRIMARY_PROVIDER in "
@@ -1067,7 +1067,7 @@ msgstr "Core lifecycle: ready (epoch {epoch})."
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:441
+#: src/alfred/cli/daemon/_commands.py:443
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "'{value}' is not a recognised environment. Refusing to boot. Alfred reads"
@@ -1077,7 +1077,7 @@ msgstr ""
 "then re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:444
+#: src/alfred/cli/daemon/_commands.py:446
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -1088,7 +1088,7 @@ msgstr ""
 "then your .env file — and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:615
+#: src/alfred/cli/daemon/_commands.py:617
 msgid "daemon.boot.environment_source_unreadable"
 msgstr ""
 "The environment source could not be read (permission or ownership problem"
@@ -1097,7 +1097,7 @@ msgstr ""
 "permissions/ownership so the daemon process can read it, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:706
+#: src/alfred/cli/daemon/_commands.py:708
 #: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -1105,7 +1105,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:717
+#: src/alfred/cli/daemon/_commands.py:719
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1114,7 +1114,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:741
+#: src/alfred/cli/daemon/_commands.py:743
 #: src/alfred/i18n/_slice_4_reserve.py:122
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1127,7 +1127,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:763
+#: src/alfred/cli/daemon/_commands.py:765
 #: src/alfred/i18n/_slice_4_reserve.py:123
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1139,7 +1139,7 @@ msgstr ""
 " and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:806
+#: src/alfred/cli/daemon/_commands.py:808
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1149,7 +1149,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:832
+#: src/alfred/cli/daemon/_commands.py:834
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "A mandatory first-party capability grant is not live after boot (the DLP-"
@@ -1160,7 +1160,7 @@ msgstr ""
 "failed — then re-run `alfred daemon start` (or `docker compose up -d` on "
 "the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:860
+#: src/alfred/cli/daemon/_commands.py:862
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1171,7 +1171,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:932
+#: src/alfred/cli/daemon/_commands.py:934
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1180,7 +1180,7 @@ msgstr ""
 "daemon start` (or `docker compose up -d` on the compose stack). Multi-"
 "adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:1011
+#: src/alfred/cli/daemon/_commands.py:1013
 msgid "daemon.boot.quarantine_provider_separation_violated"
 msgstr ""
 "Cannot start: quarantine/privileged provider separation is REQUIRED "
@@ -1201,7 +1201,7 @@ msgstr ""
 "-quarantine-provider-separation-is-opt-in.md. Then re-run `alfred daemon "
 "start` (or `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1062
+#: src/alfred/cli/daemon/_commands.py:1064
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1212,7 +1212,7 @@ msgstr ""
 "run `alfred daemon start` (or `docker compose up -d` on the compose "
 "stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1078
+#: src/alfred/cli/daemon/_commands.py:1080
 msgid "daemon.boot.quarantine_provider_key_unset"
 msgstr ""
 "Cannot start: the quarantined LLM's provider key "
@@ -1224,7 +1224,7 @@ msgstr ""
 "key: alfred-core mounts no secrets.toml, so `.env` plus the compose env "
 "forwarding is the ONLY way in."
 
-#: src/alfred/cli/daemon/_commands.py:1095
+#: src/alfred/cli/daemon/_commands.py:1097
 msgid "daemon.boot.quarantine_max_tokens_invalid"
 msgstr ""
 "Cannot start: the quarantined LLM's per-extraction token budget "
@@ -1240,8 +1240,20 @@ msgstr ""
 " value in BOTH, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1112
-#: src/alfred/cli/daemon/_comms_boot.py:1201
+#: src/alfred/cli/daemon/_commands.py:1120
+msgid "daemon.boot.quarantine_provider_config_invalid"
+msgstr ""
+"Cannot start: the quarantined LLM's provider configuration could not be "
+"resolved. This means one of: ALFRED_QUARANTINE_PROVIDER is not "
+"'anthropic' or 'deepseek'; or the quarantine provider is 'deepseek' and "
+"ALFRED_DEEPSEEK_MODEL or ALFRED_DEEPSEEK_BASE_URL is blank. Refusing to "
+"boot rather than spawn a quarantined child whose every extraction would "
+"fail on an unusable model or endpoint. Check `.env` against "
+"`.env.example`, then re-run `alfred daemon start` (or `docker compose up "
+"-d` on the compose stack). See docs/runbooks/slice-3-quarantined-llm.md."
+
+#: src/alfred/cli/daemon/_commands.py:1137
+#: src/alfred/cli/daemon/_comms_boot.py:1211
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -1250,7 +1262,7 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:1135
+#: src/alfred/cli/daemon/_commands.py:1160
 msgid "daemon.boot.egress_plane_unavailable"
 msgstr ""
 "Cannot start: the egress proxy setting (ALFRED_EGRESS_PROXY_URL) is "
@@ -1263,7 +1275,7 @@ msgstr ""
 "default http://alfred-gateway:8889), and re-run `alfred daemon start` (or"
 " `docker compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1155
+#: src/alfred/cli/daemon/_commands.py:1180
 msgid "daemon.boot.router_secret_missing"
 msgstr ""
 "Cannot start: the primary provider secret (`deepseek_api_key`) could not "
@@ -1271,7 +1283,7 @@ msgstr ""
 "variable for that key and re-run `alfred daemon start` (or `docker "
 "compose up -d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1174
+#: src/alfred/cli/daemon/_commands.py:1199
 msgid "daemon.boot.operator_not_seeded"
 msgstr ""
 "Cannot start: comms requires exactly one seeded operator user. Run "
@@ -1281,38 +1293,38 @@ msgstr ""
 "operator, then re-run `alfred daemon start` (or `docker compose up -d` on"
 " the compose stack)."
 
-#: src/alfred/cli/daemon/_commands.py:1327
+#: src/alfred/cli/daemon/_commands.py:1352
 #: src/alfred/i18n/_slice_4_reserve.py:125
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1525
+#: src/alfred/cli/daemon/_commands.py:1550
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1528
-#: src/alfred/cli/daemon/_commands.py:1533
+#: src/alfred/cli/daemon/_commands.py:1553
+#: src/alfred/cli/daemon/_commands.py:1558
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1535
+#: src/alfred/cli/daemon/_commands.py:1560
 #: src/alfred/i18n/_slice_4_reserve.py:132
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1550
+#: src/alfred/cli/daemon/_commands.py:1575
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1553
+#: src/alfred/cli/daemon/_commands.py:1578
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1561
+#: src/alfred/cli/daemon/_commands.py:1586
 #: src/alfred/i18n/_slice_4_reserve.py:133
 msgid "daemon.status.template"
 msgstr ""
@@ -1321,32 +1333,32 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:1615
-#: src/alfred/cli/daemon/_commands.py:1622
-#: src/alfred/cli/daemon/_commands.py:1633
+#: src/alfred/cli/daemon/_commands.py:1640
+#: src/alfred/cli/daemon/_commands.py:1647
+#: src/alfred/cli/daemon/_commands.py:1658
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:1637
+#: src/alfred/cli/daemon/_commands.py:1662
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:1639
+#: src/alfred/cli/daemon/_commands.py:1664
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:1644
+#: src/alfred/cli/daemon/_commands.py:1669
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:1653
+#: src/alfred/cli/daemon/_commands.py:1678
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
 "incident(s)){latest_crash}"
 
-#: src/alfred/cli/daemon/_comms_boot.py:420
-#: src/alfred/cli/daemon/_comms_boot.py:1150
+#: src/alfred/cli/daemon/_comms_boot.py:427
+#: src/alfred/cli/daemon/_comms_boot.py:1160
 msgid "daemon.boot.comms_adapter_unknown_kind"
 msgstr ""
 "Comms adapter '{adapter_id}' declares unknown adapter_kind "
@@ -1355,8 +1367,8 @@ msgstr ""
 "`plugins/{adapter_id}/manifest.toml` for a typo, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:433
-#: src/alfred/cli/daemon/_comms_boot.py:1163
+#: src/alfred/cli/daemon/_comms_boot.py:440
+#: src/alfred/cli/daemon/_comms_boot.py:1173
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -1364,11 +1376,11 @@ msgstr ""
 "and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack), or unset it from ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:913
+#: src/alfred/cli/daemon/_comms_boot.py:923
 msgid "daemon.comms.tools_wired"
 msgstr "Comms tool registry wired: {count} tool(s) ({tool_names})."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1401
+#: src/alfred/cli/daemon/_comms_boot.py:1411
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
@@ -1376,11 +1388,11 @@ msgstr ""
 "/ crash row, then re-run `alfred daemon start` (or `docker compose up -d`"
 " on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1415
+#: src/alfred/cli/daemon/_comms_boot.py:1425
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1511
+#: src/alfred/cli/daemon/_comms_boot.py:1521
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -1389,7 +1401,7 @@ msgstr ""
 "`comms-*.sock`, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1588
+#: src/alfred/cli/daemon/_comms_boot.py:1598
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -1398,7 +1410,7 @@ msgstr ""
 "day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1648
+#: src/alfred/cli/daemon/_comms_boot.py:1658
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -3453,17 +3465,17 @@ msgstr "Quarantine child egress broker is not configured."
 msgid "security.quarantine_child.child_module_not_allowed"
 msgstr "Refusing to spawn the quarantine child with a non-allowlisted module."
 
-#: src/alfred/security/quarantine_child_io.py:1174
+#: src/alfred/security/quarantine_child_io.py:1182
 msgid "security.quarantine_child.provider_config_missing"
 msgstr ""
 "Refusing to spawn the live quarantine child without its provider model "
 "and token budget."
 
-#: src/alfred/security/quarantine_child_io.py:1259
+#: src/alfred/security/quarantine_child_io.py:1267
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:1310
+#: src/alfred/security/quarantine_child_io.py:1318
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "

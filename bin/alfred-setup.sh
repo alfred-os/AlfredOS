@@ -257,23 +257,98 @@ fi
 # exported and `ALFRED_QUARANTINE_PROVIDER=deepseek` in `.env` got the wrong answer from
 # setup. `+x` tests SET-NESS only, so the two cases stay apart.
 #
-# The `anthropic`/`deepseek` literals below are a FOURTH hand-maintained copy of this
-# closed set (the three Python copies — Settings.quarantine_provider's Literal, the CLI
-# validator, and the proposal-payload validator — are pinned against each other by
-# tests/unit/config/test_settings.py::
-#   TestSettings::test_quarantine_provider_literal_matches_allowed_quarantined_providers).
+# The `anthropic`/`deepseek` literals below are a hand-maintained copy of this closed
+# set (the six Python copies — Settings.quarantine_provider / primary_provider /
+# fallback_provider's Literals, the CLI validator, the proposal-payload validator, and
+# the quarantine child's own `__main__._SUPPORTED_PROVIDER_IDS` — are pinned against
+# each other by tests/unit/config/test_settings.py::
+#   TestQuarantineProviderSettings::test_provider_closed_set_copies_stay_in_lockstep).
 # Bash cannot import that frozenset, and deriving it would cost far more than a 2-value
 # list is worth, so this comment is the link: WIDENING THE CLOSED SET FOR A NEW PROVIDER
 # MUST UPDATE THIS BRANCH TOO — that Python test will not fail for you if you forget.
 if [[ -n "${ALFRED_QUARANTINE_PROVIDER+x}" ]]; then
   quarantine_provider="${ALFRED_QUARANTINE_PROVIDER:-anthropic}"
+  quarantine_provider_source="your shell environment (which docker compose prefers over .env)"
 else
   quarantine_provider="$(read_env_var ALFRED_QUARANTINE_PROVIDER)"
+  quarantine_provider_source=".env"
 fi
 if [[ -n "$quarantine_provider" ]] &&
    [[ "$quarantine_provider" != "anthropic" && "$quarantine_provider" != "deepseek" ]]; then
-  add_config_problem "ALFRED_QUARANTINE_PROVIDER is '${quarantine_provider}', which is not a supported value. It must be exactly 'anthropic' or 'deepseek' (lowercase, no quotes) — or left unset to use the 'anthropic' default. Any other value refuses boot on the settings_invalid path. See .env.example and docs/runbooks/slice-3-quarantined-llm.md."
+  # The offending value is deliberately NOT reprinted (CodeRabbit): ALFRED_QUARANTINE_
+  # PROVIDER_API_KEY sits directly beside this variable in .env, and a credential pasted
+  # onto the wrong line must not be copied into setup output, shell scrollback, or a CI
+  # log. Naming the SOURCE instead recovers the diagnostic value the echo was carrying —
+  # the operator's real confusion in a shell-vs-.env precedence case is which file they're
+  # editing, not what they typed (they can already see that). ${quarantine_provider_source}
+  # is a script-authored literal, structurally incapable of carrying operator input — the
+  # bash analogue of alfred.cli._settings_errors' field-path-only rendering.
+  add_config_problem "ALFRED_QUARANTINE_PROVIDER (read from ${quarantine_provider_source}) is set to an unsupported value. It must be exactly 'anthropic' or 'deepseek' (lowercase, no quotes) — or left unset to use the 'anthropic' default. Any other value refuses boot on the settings_invalid path. See .env.example and docs/runbooks/slice-3-quarantined-llm.md."
 fi
+
+# #586: ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION is an opt-in REFUSE-BOOT posture,
+# newly forwarded to alfred-core by this same PR, and this gate was blind to it. An
+# operator following the README's advice to enable the strict posture, while running one
+# provider for both roles, passed setup CLEANLY and then met exit 2
+# (quarantine_provider_separation_violated) on the first `docker compose up -d` — a
+# crash-loop under `restart: unless-stopped`, exactly the fix-one-thing/re-run/discover-
+# the-next-problem friction this gate exists to eliminate.
+#
+# HARD FAILURE, not a warning: setup-time severity mirrors the boot-time consequence.
+# require=true + collision REFUSES (exit 2, audited daemon.boot.failed row); the
+# require=false default only WARNS and boots (_comms_boot.py's not-enforced arm) — which
+# is why this is gated on resolved truthiness, not on same-provider alone.
+#
+# WHICH PRIMARY PROVIDER — deliberately NOT `read_env_var ALFRED_PRIMARY_PROVIDER`.
+# docker-compose.yaml does not list ALFRED_PRIMARY_PROVIDER in alfred-core's
+# `environment:` block, declares no `env_file:`, and bind-mounts no `.env` (the service
+# mounts only alfred_state_git + alfred_run) — so under the deployment THIS SCRIPT SETS
+# UP, Settings.primary_provider ALWAYS resolves to its "deepseek" default whatever the
+# shell or .env say (see .env.example's ALFRED_PRIMARY_PROVIDER block; #590 tracks wiring
+# the field up). Reading .env here would be wrong in BOTH directions: it would PASS
+# PRIMARY=anthropic + QUARANTINE=deepseek (which crash-loops — the container compares
+# deepseek vs deepseek) and FAIL PRIMARY=anthropic + QUARANTINE=anthropic (which boots
+# fine). The gate must model the value the STACK will use, not the value the operator
+# happened to write down for a host-side `alfred` invocation.
+# COUPLING: if docker-compose.yaml ever forwards ALFRED_PRIMARY_PROVIDER, this constant
+# MUST become the same ${VAR+x} resolution used above, or this gate silently certifies
+# the wrong pair —
+# tests/unit/test_compose_invariants.py::test_primary_and_fallback_provider_are_not_forwarded_to_core
+# is the mechanical pin that would need to flip alongside it.
+compose_primary_provider="deepseek"
+
+if [[ -n "${ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION+x}" ]]; then
+  require_separation="${ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION:-false}"
+else
+  require_separation="$(read_env_var ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION)"
+fi
+
+# Normalise as provider_ids_collide() does (.strip().lower()) — belt-and-braces: a
+# mis-cased ALFRED_QUARANTINE_PROVIDER already fails the closed-set branch above, so an
+# operator whose value is BOTH mis-cased and colliding learns both problems in one setup
+# run instead of fix-case / re-run / discover-collision. tr, not bash 4+ ${var,,}: this
+# script targets bash 3.2 (macOS system bash).
+require_separation_norm="$(printf '%s' "$require_separation" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+quarantine_provider_norm="$(printf '%s' "$quarantine_provider" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+quarantine_provider_effective="${quarantine_provider_norm:-anthropic}"
+
+# Pydantic's bool parsing is a CLOSED SET, case-insensitive, with NO whitespace
+# tolerance: true/1/yes/y/on/t and false/0/no/off/f/n — anything else, including a
+# whitespace-padded value or the empty string post-normalisation, raises a
+# settings_invalid refuse-boot. Whitespace is stripped above rather than reported here:
+# compose's own .env parser owns that edge, and a false "not a boolean" problem blocking
+# an otherwise-working stack costs more than the miss.
+case "$require_separation_norm" in
+  true | 1 | yes | y | on | t)
+    if [[ "$quarantine_provider_effective" == "$compose_primary_provider" ]]; then
+      add_config_problem "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION is enabled, but the quarantine and privileged providers are both '${compose_primary_provider}'. 'docker compose up -d' WILL REFUSE TO BOOT (exit 2, quarantine_provider_separation_violated) and crash-loop under 'restart: unless-stopped'. Set ALFRED_QUARANTINE_PROVIDER to the other provider (and a matching key in ALFRED_QUARANTINE_PROVIDER_API_KEY), or set ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false for the default warn-only posture. NOTE: the privileged side is fixed at '${compose_primary_provider}' under docker compose — ALFRED_PRIMARY_PROVIDER is NOT forwarded and cannot change this. See docs/adr/0064-quarantine-provider-separation-is-opt-in.md and issue #590."
+    fi
+    ;;
+  "" | false | 0 | no | off | f | n) ;;
+  *)
+    add_config_problem "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION is '${require_separation}', which is not a boolean. It must be one of true/1/yes/y/on/t or false/0/no/off/f/n (any case) — or left unset for the 'false' default. Any other value refuses boot on the settings_invalid path."
+    ;;
+esac
 
 # #340 PR2b-golive: the quarantined (dual-LLM) child now makes REAL provider calls, so
 # ALFRED_QUARANTINE_PROVIDER_API_KEY became a hard boot requirement — the core resolves

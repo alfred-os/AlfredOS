@@ -313,15 +313,23 @@ def build_child_client(
     The read component of ``timeout`` becomes the backend's per-syscall idle cap AND is
     injected into the httpx client. ``budget_seconds`` — what remains of the per-extraction
     wall-clock budget — becomes the absolute deadline every socket operation is clamped
-    against, which is the ceiling that actually holds (rev.2 / prov-001)."""
+    against, which is the ceiling that actually holds (rev.2 / prov-001).
+
+    THIRD independent layer for the deepseek-requires-base_url guarantee (round-5 review
+    fleet), behind ``__main__._build_provider`` and :meth:`_ProviderFactory.from_key` —
+    a bare ``ValueError`` is correct here specifically because both of those already
+    refuse a blank value before this function is ever reached in the real boot path; this
+    is a programming-error backstop, not a boot function, so a ``QuarantineChildBootError``
+    would be a category error (this call has no boot-audit context to attach one to)."""
     backend = PassedFdBackend(fd, read_timeout=timeout.read, budget_seconds=budget_seconds)
     transport = _PassedFdTransport(backend)
     http_client = httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=timeout)
     if provider_id == "deepseek":
-        if base_url is None:
+        if base_url is None or not base_url.strip():
             raise ValueError(
-                "build_child_client: provider_id='deepseek' requires base_url — refusing "
-                "to silently fall back to some default the operator did not choose (HARD #7)"
+                "build_child_client: provider_id='deepseek' requires a non-blank base_url "
+                "— refusing to silently fall back to some default the operator did not "
+                "choose, or to construct a client that fails only per-call (HARD #7)"
             )
         provider: AnthropicProvider | DeepSeekProvider = DeepSeekProvider.from_settings(
             api_key=api_key,
@@ -422,17 +430,33 @@ def _redact_base_url(base_url: str | None) -> str | None:
         return "<unparseable-base-url>"
 
 
+# A SEVENTH hand-maintained copy of the {"anthropic", "deepseek"} closed set (round-5
+# review fleet): the other six — Settings.quarantine_provider / primary_provider /
+# fallback_provider's Literals, the CLI validator, the proposal-payload validator, and
+# __main__._SUPPORTED_PROVIDER_IDS — are pinned against each other by
+# tests/unit/config/test_settings.py::
+#   TestQuarantineProviderSettings::test_provider_closed_set_copies_stay_in_lockstep,
+# which this module's copy is ALSO enumerated in. Declared locally rather than imported
+# from __main__ (which would be circular — __main__ imports FROM this module) or from
+# Settings (this module is deliberately import-light and Settings-agnostic, matching
+# __main__._SUPPORTED_PROVIDER_IDS's own stated rationale for staying local).
+_SUPPORTED_PROVIDER_IDS = frozenset({"anthropic", "deepseek"})
+
+
 @dataclass(frozen=True, slots=True)
 class _ProviderFactory:
     """Frozen, key-free-repr builder for the child's per-attempt provider client (§8, #587).
 
     ``build(fd)`` assembles the #339-seam provider over ONE brokered TCP fd via
-    ``build_child_client``. ``from_key`` is the child's SECONDARY refuse-boot guard (§20.2): an
-    empty provider key means the child cannot build a real provider, so it refuses to boot with a
-    loud :class:`QuarantineChildBootError` rather than silently degrading to a dead LLM (HARD #7).
-    The HOST pre-spawn key check (Task 6/7 of the original #340 plan) is the PRIMARY guard; this
-    is defence-in-depth.
-    """
+    ``build_child_client``. ``from_key`` is the child's SECONDARY refuse-boot guard (§20.2) —
+    independently validating everything the HOST's pre-spawn checks (Task 6/7 of the original
+    #340 plan; ``__main__._build_provider``'s closed-set and blank-base_url guards) already
+    validate: an empty key, an out-of-closed-set ``provider_id``, or a blank ``base_url`` on the
+    deepseek path all refuse to boot with a loud :class:`QuarantineChildBootError` rather than
+    silently degrading to a dead LLM or a client that fails only per-call (HARD #7). Originally
+    key-only (round-5 review fleet widened it to match — this classmethod's job description was
+    narrower than what a caller could actually pass it, and the two omitted checks were each
+    independently reachable via :func:`build_child_client`'s own asymmetric guards)."""
 
     # ``provider_id`` stays ``str``, NOT ``Literal["anthropic", "deepseek"]``, deliberately
     # (review question, answered empirically). Narrowing it type-checks only if the ONE
@@ -463,6 +487,17 @@ class _ProviderFactory:
         if not key:
             raise QuarantineChildBootError(
                 "quarantine provider key is empty — refusing to boot a dead-LLM child (§20.2)"
+            )
+        if provider_id not in _SUPPORTED_PROVIDER_IDS:
+            raise QuarantineChildBootError(
+                f"quarantine provider_id {provider_id!r} is not one of "
+                f"{sorted(_SUPPORTED_PROVIDER_IDS)} — refusing to boot rather than construct "
+                "an unrecognised provider client (HARD #7, sec-002)"
+            )
+        if provider_id == "deepseek" and not (base_url or "").strip():
+            raise QuarantineChildBootError(
+                "quarantine provider_id='deepseek' requires a non-blank base_url — refusing "
+                "to boot rather than construct a client that fails only per-call (HARD #7)"
             )
         return cls(
             provider_id=provider_id,
@@ -558,7 +593,15 @@ class BrokeredProviderSource:
         elif factory.provider_id == "deepseek":
             self._caps = DeepSeekProvider._capabilities_for_model(factory.model)
         else:
-            raise ValueError(
+            # A bare ValueError here (round-5 review fleet, 1C) meant an out-of-set
+            # provider_id reaching THIS constructor — after the fd-4 control socket is
+            # already built, before `ready` — crashed the child with a traceback rather
+            # than a typed boot refusal. __main__._build_provider's own docstring already
+            # names this exact construction site as the thing it exists to prevent;
+            # QuarantineChildBootError is this module's own boot-refusal type (used
+            # identically by _ProviderFactory.from_key above) rather than a bare exception
+            # class with no boot-refusal contract.
+            raise QuarantineChildBootError(
                 f"BrokeredProviderSource: unsupported provider_id {factory.provider_id!r} — "
                 "refusing to silently resolve either capability set (HARD #7, sec-002)"
             )

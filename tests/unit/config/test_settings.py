@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 import structlog.testing
+from pydantic import ValidationError
 from pydantic_settings import DotEnvSettingsSource, EnvSettingsSource, SecretsSettingsSource
 
 from alfred.config._environment_loader import EnvironmentLoadResult, EnvironmentSource
@@ -399,24 +400,61 @@ class TestWithoutSourceIdentity:
         assert keys == ["EnvSettingsSource", "DotEnvSettingsSource", "SecretsSettingsSource"]
 
 
+def _validator_messages(exc: SettingsError) -> str:
+    """The validators' OWN messages on a caught ``SettingsError``, input echo excluded.
+
+    ``SettingsError`` is built as ``SettingsError(str(exc)) from exc`` (settings.py), and
+    pydantic's ``ValidationError.__str__()`` embeds ``input_value=<raw>`` for every error —
+    so asserting against ``str(settings_error)`` asserts against a string that CONTAINS
+    whatever credential-shaped value the test itself just fed in. Not a live leak today
+    (both real ``except SettingsError`` catch sites use the safe field-path-only renderers
+    in ``alfred.cli._settings_errors``, never ``str(exc)``) — but a test using the raw form
+    doesn't prove the DLP property its docstring claims, either. Same ``errors(include_input
+    =False, include_url=False)`` contract as ``alfred.cli._settings_errors.settings_error_
+    field`` and as ``test_deepseek_base_url_rejects_embedded_credentials`` below.
+    """
+    cause = exc.__cause__
+    assert isinstance(cause, ValidationError), exc
+    return " ".join(error["msg"] for error in cause.errors(include_input=False, include_url=False))
+
+
 class TestQuarantineProviderSettings:
     """#586/#587: quarantine provider selection and enforcement settings."""
 
-    @staticmethod
-    def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
-        """Set up minimal env for Settings construction."""
+    @pytest.fixture(autouse=True)
+    def _base_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hermetic env for every test in this class — required vars set, ambient noise cleared.
+
+        Every provider-adjacent ``ALFRED_*`` var is ``delenv``'d, not just the two fields the
+        default-asserting tests below read: ``Settings.model_config`` sets ``env_file=".env"``,
+        so pydantic reads a ``.env`` from CWD in addition to the shell, and a coincidentally-
+        matching ambient value from either source could let a ``pytest.raises(SettingsError)``
+        test in this class pass for the WRONG reason, or let a default-asserting test read
+        through to ambient state instead of proving the CODE default. Matches the autouse-
+        fixture idiom every sibling ``tests/unit/config/test_settings_*.py`` file already uses
+        (e.g. ``test_settings_egress_proxy_url.py``, ``test_settings_db_pools.py``) — this class
+        predates that convention.
+        """
         monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
         monkeypatch.setenv("ALFRED_ENVIRONMENT", "development")
+        for var in (
+            "ALFRED_QUARANTINE_PROVIDER",
+            "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION",
+            "ALFRED_PRIMARY_PROVIDER",
+            "ALFRED_FALLBACK_PROVIDER",
+            "ALFRED_DEEPSEEK_BASE_URL",
+            "ALFRED_DEEPSEEK_MODEL",
+            "ALFRED_ANTHROPIC_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
 
     def test_quarantine_provider_defaults_to_anthropic(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._base_env(monkeypatch)
         settings = Settings()
         assert settings.quarantine_provider == "anthropic"
 
     def test_quarantine_provider_accepts_deepseek(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
         settings = Settings()
         assert settings.quarantine_provider == "deepseek"
@@ -424,7 +462,6 @@ class TestQuarantineProviderSettings:
     def test_quarantine_provider_rejects_unknown_value(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "openai")
         with pytest.raises(SettingsError):
             Settings()
@@ -432,14 +469,12 @@ class TestQuarantineProviderSettings:
     def test_require_quarantine_provider_separation_defaults_to_false(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._base_env(monkeypatch)
         settings = Settings()
         assert settings.require_quarantine_provider_separation is False
 
     def test_require_quarantine_provider_separation_accepts_true(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION", "true")
         settings = Settings()
         assert settings.require_quarantine_provider_separation is True
@@ -447,8 +482,8 @@ class TestQuarantineProviderSettings:
     def test_provider_closed_set_copies_stay_in_lockstep(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """SIX hand-maintained copies of the ``{"anthropic", "deepseek"}`` closed set
-        must stay equal (prov-002). ONE test, not six pairwise ones, and it enumerates
+        """SEVEN hand-maintained copies of the ``{"anthropic", "deepseek"}`` closed set
+        must stay equal (prov-002). ONE test, not seven pairwise ones, and it enumerates
         every copy by name so no comment can undercount them again:
 
         1. ``Settings.quarantine_provider``'s ``Literal``   — src/alfred/config/settings.py
@@ -460,12 +495,17 @@ class TestQuarantineProviderSettings:
         6. ``alfred.security.quarantine_child.__main__._SUPPORTED_PROVIDER_IDS``
            (the child's own re-validation of the env it is handed, in another PROCESS —
            host-side widening alone would make the child refuse a value the host accepts)
+        7. ``alfred.security.quarantine_child.brokered_egress._SUPPORTED_PROVIDER_IDS``
+           (round-5 review fleet: ``_ProviderFactory.from_key``'s own independent
+           closed-set guard — see the widened dispatch-site list below)
 
-        None of the six can import any other: the ``Literal``s need a static literal for
+        None of the seven can import any other: the ``Literal``s need a static literal for
         ``mypy --strict``; the CLI copy is deliberately not introspected from the provider
-        registry (module-init may not have run at parse time); the child copy is
-        deliberately declared locally so the check stays on its egress-free, import-light
-        boot path. Duplication is the accepted cost — this test is the price paid for it.
+        registry (module-init may not have run at parse time); the two child-process copies
+        are deliberately declared locally so each stays on its egress-free, import-light
+        boot path (and so ``brokered_egress`` need not import ``__main__``, which would be
+        circular — ``__main__`` imports FROM ``brokered_egress``). Duplication is the
+        accepted cost — this test is the price paid for it.
 
         Superseded three narrower tests that each pinned a subset
         (``..._matches_allowed_quarantined_providers`` — the original three-way pin —,
@@ -475,27 +515,43 @@ class TestQuarantineProviderSettings:
         was wrong the moment the next copy landed.
 
         **Widening this set is NOT a one-line change (prov-001).** Adding a third provider
-        means implementing it, IN THE SAME COMMIT, at all four quarantine-dispatch sites:
+        means implementing it, IN THE SAME COMMIT, at every default-deny dispatch site
+        across TWO separate processes:
 
-        * ``comms_mcp.daemon_runtime._resolve_quarantine_model``
-        * ``comms_mcp.daemon_runtime._resolve_quarantine_base_url``
-        * ``quarantine_child.brokered_egress.build_child_client``
-        * ``quarantine_child.brokered_egress.BrokeredProviderSource.__init__`` (capabilities)
+        HOST daemon process (``comms_mcp/daemon_runtime.py``) — an out-of-set/blank value
+        routes through the audited ``quarantine_provider_config_invalid`` boot refusal
+        (round-5: previously a bare ``ValueError`` no arm of the daemon boot cascade
+        caught — the #368 anti-pattern; see ``QuarantineProviderConfigInvalidError``):
 
-        Each of those four is a default-DENY dispatch whose ``else`` arm raises a bare
-        ``ValueError``, and no arm of the daemon boot cascade catches ``ValueError`` — so
-        a Literal widened ahead of its implementation produces an uncaught crash (exit 1,
-        ZERO ``daemon.boot.failed`` rows), which is the exact #368 anti-pattern this PR
-        eliminated for blank provider strings. Not a bug today — a landmine for the commit
-        that adds provider three.
+        * ``_resolve_quarantine_model``
+        * ``_resolve_quarantine_base_url``
+
+        QUARANTINE CHILD subprocess (``security/quarantine_child/``) — a SEPARATE process
+        with its own typed boot-refusal (``QuarantineChildBootError``, RuntimeError-rooted,
+        never part of the host's ``AlfredError``/daemon-boot-cascade regime at all), now
+        THREE independent layers deep (round-5):
+
+        * ``__main__._build_provider`` — primary guard, before the fd-4 control socket exists
+        * ``brokered_egress._ProviderFactory.from_key`` — independent secondary guard
+        * ``brokered_egress.BrokeredProviderSource.__init__`` — independent tertiary guard
+          for the capability-dispatch site specifically
+        * ``brokered_egress.build_child_client`` — innermost backstop, deliberately still a
+          bare ``ValueError``: by the time this runs the three guards above have already
+          refused, so this is a programming-error backstop, not a boot function
+
+        A missed site reopens the #368 shape LOCALLY to whichever process it's missing
+        from: an uncaught host-side resolver crashes the daemon boot with zero audit rows;
+        an uncaught child-side guard crashes the sandboxed subprocess with a bare traceback
+        instead of a typed refusal frame. Not a bug today — a landmine for the commit that
+        adds provider three.
         """
         from typing import get_args
 
         from alfred.cli import _validators
         from alfred.security.quarantine_child import __main__ as quarantine_child_main
+        from alfred.security.quarantine_child import brokered_egress as quarantine_brokered_egress
         from alfred.state import proposal_payloads
 
-        self._base_env(monkeypatch)
         copies = {
             "Settings.quarantine_provider (config/settings.py)": frozenset(
                 get_args(Settings.model_fields["quarantine_provider"].annotation)
@@ -515,11 +571,14 @@ class TestQuarantineProviderSettings:
             "quarantine_child.__main__._SUPPORTED_PROVIDER_IDS": frozenset(
                 quarantine_child_main._SUPPORTED_PROVIDER_IDS
             ),
+            "quarantine_child.brokered_egress._SUPPORTED_PROVIDER_IDS": frozenset(
+                quarantine_brokered_egress._SUPPORTED_PROVIDER_IDS
+            ),
         }
         # A dict, not a chained ``==``: on failure this names WHICH copy drifted rather
-        # than printing six anonymous frozensets.
+        # than printing seven anonymous frozensets.
         assert len(set(copies.values())) == 1, copies
-        # Oracle guard: six equal EMPTY containers would also satisfy the above. Pin the
+        # Oracle guard: seven equal EMPTY containers would also satisfy the above. Pin the
         # live content so a refactor cannot make this test vacuous.
         assert next(iter(copies.values())) == frozenset({"anthropic", "deepseek"}), copies
 
@@ -535,7 +594,6 @@ class TestQuarantineProviderSettings:
         the quarantine retry loop launders it into a generic ``cannot_extract``. Refusing
         here puts the failure on the audited ``settings_invalid`` boot path instead.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", blank)
         with pytest.raises(SettingsError):
             Settings()
@@ -544,7 +602,6 @@ class TestQuarantineProviderSettings:
         """Oracle guard for the blank-rejection above: a normal override still passes,
         so the test pair cannot both stay green under a validator that rejects
         everything."""
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://proxy.internal/v1")
         assert Settings().deepseek_base_url == "https://proxy.internal/v1"
 
@@ -571,9 +628,7 @@ class TestQuarantineProviderSettings:
         ``_ProviderFactory`` repr fixed the DISPLAY of that value, not the data flow —
         refusing at the boundary does, on the audited ``settings_invalid`` boot path.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", credentialed)
-        from pydantic import ValidationError
 
         with pytest.raises(SettingsError) as exc_info:
             Settings()
@@ -587,12 +642,7 @@ class TestQuarantineProviderSettings:
         # surface interpolates ``str(exc)`` at all (#589 closed the interactive-CLI
         # sink that used to). What is in scope here is that the message THIS validator
         # adds does not ALSO carry the credential.
-        validation_error = exc_info.value.__cause__
-        assert isinstance(validation_error, ValidationError), exc_info.value
-        messages = " ".join(
-            error["msg"]
-            for error in validation_error.errors(include_input=False, include_url=False)
-        )
+        messages = _validator_messages(exc_info.value)
         assert "hunter2" not in messages, messages
         assert "apikey" not in messages, messages
         # Actionable, not merely loud: names the field and where the credential belongs.
@@ -618,7 +668,6 @@ class TestQuarantineProviderSettings:
         working deployments, and the rejection tests above/below would stay green under
         it. Each row here must still construct.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", benign)
         assert Settings().deepseek_base_url == benign
 
@@ -644,11 +693,17 @@ class TestQuarantineProviderSettings:
         zero function — reject it regardless of whether THIS particular value looks
         credential-shaped, since the mechanism that would leak it doesn't care.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", query_or_fragment)
         with pytest.raises(SettingsError) as exc_info:
             Settings()
-        assert "deepseek_base_url" in str(exc_info.value)
+        messages = _validator_messages(exc_info.value)
+        assert "deepseek_base_url" in messages, messages
+        # The property this test's docstring has always implied and never actually
+        # pinned: the query/fragment value fed in above must not survive into the
+        # refusal message. Only the credential-shaped parametrize row exercises this
+        # meaningfully; asserted unconditionally since a real query string is never a
+        # legitimate substring of the validator's own fixed wording either way.
+        assert "sk-abcd1234" not in messages, messages
 
     def test_deepseek_base_url_rejects_an_unparseable_url(
         self, monkeypatch: pytest.MonkeyPatch
@@ -659,11 +714,10 @@ class TestQuarantineProviderSettings:
         credential-free. Letting ``urlsplit``'s own ``ValueError`` escape would still
         refuse, but the operator would read "Invalid IPv6 URL" with no field name.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://[::1/v1")
         with pytest.raises(SettingsError) as exc_info:
             Settings()
-        assert "deepseek_base_url" in str(exc_info.value)
+        assert "deepseek_base_url" in _validator_messages(exc_info.value)
 
     def test_deepseek_base_url_rejects_a_malformed_port(
         self, monkeypatch: pytest.MonkeyPatch
@@ -676,11 +730,10 @@ class TestQuarantineProviderSettings:
         deep in the httpx/openai SDK, as a confusing runtime error instead of a
         boot-time refusal naming the field (CodeRabbit r4).
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://relay.internal:notaport/v1")
         with pytest.raises(SettingsError) as exc_info:
             Settings()
-        assert "deepseek_base_url" in str(exc_info.value)
+        assert "deepseek_base_url" in _validator_messages(exc_info.value)
 
     @pytest.mark.parametrize(
         "unusable",
@@ -700,11 +753,10 @@ class TestQuarantineProviderSettings:
         it would otherwise reach the SAME laundered-into-``cannot_extract`` failure
         mode the blank-value guard exists to prevent (CodeRabbit r4).
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", unusable)
         with pytest.raises(SettingsError) as exc_info:
             Settings()
-        assert "deepseek_base_url" in str(exc_info.value)
+        assert "deepseek_base_url" in _validator_messages(exc_info.value)
 
     def test_deepseek_base_url_strips_surrounding_whitespace(
         self, monkeypatch: pytest.MonkeyPatch
@@ -716,7 +768,6 @@ class TestQuarantineProviderSettings:
         stored value is exactly what gets threaded into HTTP clients and the child's
         spawn environment, not a string with invisible leading/trailing bytes.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "  https://relay.internal/v1  ")
         assert Settings().deepseek_base_url == "https://relay.internal/v1"
 
@@ -733,7 +784,6 @@ class TestQuarantineProviderSettings:
         runtime-failure-costume this validator exists to stop, so the whitespace case
         has to be pinned, not just the empty one.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", "  deepseek-chat  ")
         assert Settings().deepseek_model == "deepseek-chat"
 
@@ -759,7 +809,6 @@ class TestQuarantineProviderSettings:
         (``test_boot_refuses_audited_when_deepseek_model_is_blank`` pins the end-to-end
         boot behaviour).
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", blank)
         with pytest.raises(SettingsError):
             Settings()
@@ -768,9 +817,34 @@ class TestQuarantineProviderSettings:
         """Oracle guard for the blank-rejection above: a normal override still passes,
         so the test pair cannot both stay green under a validator that rejects
         everything."""
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_DEEPSEEK_MODEL", "deepseek-reasoner")
         assert Settings().deepseek_model == "deepseek-reasoner"
+
+    def test_anthropic_model_strips_surrounding_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The structural twin gets the same strip-and-STORE treatment (round-5 review
+        fleet, 1F) as ``deepseek_model`` above."""
+        monkeypatch.setenv("ALFRED_ANTHROPIC_MODEL", "  claude-sonnet-4-6  ")
+        assert Settings().anthropic_model == "claude-sonnet-4-6"
+
+    @pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
+    def test_anthropic_model_rejects_blank(
+        self, monkeypatch: pytest.MonkeyPatch, blank: str
+    ) -> None:
+        """A blank ``ALFRED_ANTHROPIC_MODEL`` refuses at Settings construction
+        (round-5 review fleet, 1F) — the structural twin of ``deepseek_model``
+        above, closing the same class of gap on the field ``build_router`` hands
+        to the privileged Anthropic FALLBACK provider. The guard used to exist on
+        only one of the two structurally identical fields."""
+        monkeypatch.setenv("ALFRED_ANTHROPIC_MODEL", blank)
+        with pytest.raises(SettingsError):
+            Settings()
+
+    def test_anthropic_model_accepts_a_real_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Oracle guard for the blank-rejection above: a normal override still passes."""
+        monkeypatch.setenv("ALFRED_ANTHROPIC_MODEL", "claude-opus-4")
+        assert Settings().anthropic_model == "claude-opus-4"
 
     @pytest.mark.parametrize("blank", ["", " ", "\t", "\n"])
     def test_primary_provider_rejects_blank(
@@ -787,14 +861,12 @@ class TestQuarantineProviderSettings:
         (``settings_invalid``, field named) and makes that blank arm unreachable from
         the call site.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", blank)
         with pytest.raises(SettingsError):
             Settings()
 
     def test_primary_provider_accepts_a_real_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Oracle guard for the blank-rejection above: a normal override still passes."""
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", "anthropic")
         assert Settings().primary_provider == "anthropic"
 
@@ -826,7 +898,6 @@ class TestQuarantineProviderSettings:
         ``"Anthropic"`` is therefore also a rejection case, not just structurally invalid
         values.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_PRIMARY_PROVIDER", value)
         with pytest.raises(SettingsError):
             Settings()
@@ -839,7 +910,6 @@ class TestQuarantineProviderSettings:
         mirrors ``primary_provider``'s own blank-rejection test above. No dedicated
         validator needed: the ``Literal`` type itself rejects blank (it is not a
         member of ``{"anthropic", "deepseek"}``)."""
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_FALLBACK_PROVIDER", blank)
         with pytest.raises(SettingsError):
             Settings()
@@ -848,7 +918,6 @@ class TestQuarantineProviderSettings:
         """Oracle guard for the blank-rejection above: a normal, NON-default override
         still passes (so the test pair cannot both stay green under a validator that
         rejects everything)."""
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_FALLBACK_PROVIDER", "deepseek")
         assert Settings().fallback_provider == "deepseek"
 
@@ -875,7 +944,6 @@ class TestQuarantineProviderSettings:
         provider field in this codebase — ``"Anthropic"`` is therefore also a
         rejection case, not just structurally invalid values.
         """
-        self._base_env(monkeypatch)
         monkeypatch.setenv("ALFRED_FALLBACK_PROVIDER", value)
         with pytest.raises(SettingsError):
             Settings()

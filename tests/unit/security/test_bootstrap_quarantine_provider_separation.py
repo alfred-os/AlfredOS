@@ -25,8 +25,22 @@ from __future__ import annotations
 
 import pytest
 
-from alfred.bootstrap.quarantine import assert_provider_separation, provider_ids_collide
-from alfred.errors import AlfredError
+from alfred.bootstrap.quarantine import (
+    ProviderIdBlankError,
+    ProviderSeparationViolatedError,
+    assert_provider_separation,
+    provider_ids_collide,
+)
+
+
+def test_the_two_typed_errors_are_alfred_errors() -> None:
+    """Behaviour-preserving is the whole point of splitting these (round-5 review
+    fleet, 1G): every existing ``except AlfredError`` caller must still catch
+    either one."""
+    from alfred.errors import AlfredError
+
+    assert issubclass(ProviderIdBlankError, AlfredError)
+    assert issubclass(ProviderSeparationViolatedError, AlfredError)
 
 
 def test_assert_provider_separation_accepts_distinct_ids() -> None:
@@ -42,13 +56,17 @@ def test_assert_provider_separation_accepts_distinct_ids() -> None:
 
 
 def test_assert_provider_separation_refuses_identical_ids() -> None:
-    """Same provider on both sides → AlfredError.
+    """Same provider on both sides → ProviderSeparationViolatedError.
 
     Structural defence: the dual-LLM split collapses when both sides
     are the same provider. The startup check refuses to boot rather
-    than silently degrading the trust-tier guarantee.
+    than silently degrading the trust-tier guarantee. Narrowed from the base
+    ``AlfredError`` to the specific collision type (round-5 review fleet, 1G) — the
+    same narrowing this PR already applied elsewhere (err-001) so a regression that
+    misrouted this to the wrong ``AlfredError`` subclass would be caught here, not
+    just "some AlfredError was raised."
     """
-    with pytest.raises(AlfredError):
+    with pytest.raises(ProviderSeparationViolatedError):
         assert_provider_separation(
             privileged_provider_id="deepseek",
             quarantined_provider_id="deepseek",
@@ -62,7 +80,7 @@ def test_assert_provider_separation_refuses_case_variant_ids() -> None:
     the other would otherwise pass a string-equality check and boot a
     structurally-collapsed system. The normalised check closes that gap.
     """
-    with pytest.raises(AlfredError):
+    with pytest.raises(ProviderSeparationViolatedError):
         assert_provider_separation(
             privileged_provider_id="DeepSeek",
             quarantined_provider_id="deepseek",
@@ -75,7 +93,7 @@ def test_assert_provider_separation_refuses_whitespace_variant_ids() -> None:
     YAML can leak trailing whitespace from a hand-edited file; the
     normalised check strips before comparing.
     """
-    with pytest.raises(AlfredError):
+    with pytest.raises(ProviderSeparationViolatedError):
         assert_provider_separation(
             privileged_provider_id="deepseek ",
             quarantined_provider_id="deepseek",
@@ -87,9 +105,12 @@ def test_assert_provider_separation_refuses_blank_privileged() -> None:
 
     The operator must explicitly declare both providers; defaulting to
     empty would let a misconfigured ``routing.yaml`` boot a system
-    where the privileged tier has no provider at all.
+    where the privileged tier has no provider at all. Narrowed to
+    ``ProviderIdBlankError`` (round-5 review fleet, 1G) — distinct from the
+    collision type above, since this is a missing-config fault, not a collision;
+    a regression that mislabelled it as one would fail here.
     """
-    with pytest.raises(AlfredError):
+    with pytest.raises(ProviderIdBlankError):
         assert_provider_separation(
             privileged_provider_id="",
             quarantined_provider_id="anthropic",
@@ -103,7 +124,7 @@ def test_assert_provider_separation_refuses_blank_quarantined() -> None:
     is not a default-to-the-other fallback. The startup check is
     fail-closed.
     """
-    with pytest.raises(AlfredError):
+    with pytest.raises(ProviderIdBlankError):
         assert_provider_separation(
             privileged_provider_id="deepseek",
             quarantined_provider_id="   ",

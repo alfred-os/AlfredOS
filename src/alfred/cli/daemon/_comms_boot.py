@@ -46,7 +46,12 @@ from alfred.bootstrap.lifecycle_epoch import current_boot_epoch
 # exception to "unmodified" is provider_ids_collide(), extracted from inside
 # assert_provider_separation() so the not-required WARN path below shares the SAME
 # collision predicate instead of re-implementing the normalisation inline.
-from alfred.bootstrap.quarantine import assert_provider_separation, provider_ids_collide
+from alfred.bootstrap.quarantine import (
+    ProviderIdBlankError,
+    ProviderSeparationViolatedError,
+    assert_provider_separation,
+    provider_ids_collide,
+)
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
     _emit_or_quarantine,
@@ -288,9 +293,11 @@ class QuarantineProviderSeparationCollisionError(AlfredError):
     """#586: require_quarantine_provider_separation=True and the privileged/quarantine
     provider ids collide. A distinct, catchable type so _commands.py's typed
     except-cascade can route this through the audited _refuse_boot path —
-    assert_provider_separation() itself raises only the base AlfredError (unmodified,
-    design spec §9), which would otherwise escape uncaught past every arm (arch-002 /
-    sec-001 / test-001 — the #368 anti-pattern)."""
+    assert_provider_separation() itself raises alfred.bootstrap.quarantine.
+    ProviderIdBlankError or ProviderSeparationViolatedError (both AlfredError
+    subclasses, round-5 review fleet 1G; assert_provider_separation()'s own BEHAVIOUR
+    is unmodified, design spec §9), which would otherwise escape uncaught past every
+    arm (arch-002 / sec-001 / test-001 — the #368 anti-pattern)."""
 
 
 class _ForwardedInboundRegistryMisconfiguredError(Exception):
@@ -661,8 +668,9 @@ async def enforce_quarantine_provider_separation(
         QuarantineProviderSeparationCollisionError: separation required and the ids
             collide. A distinct, catchable type so ``_commands.py`` routes it through
             the audited ``_refuse_boot`` path instead of letting
-            ``assert_provider_separation``'s bare ``AlfredError`` escape uncaught (the
-            #368 anti-pattern).
+            ``assert_provider_separation``'s typed ``ProviderIdBlankError`` /
+            ``ProviderSeparationViolatedError`` (round-5 review fleet, 1G) escape
+            uncaught (the #368 anti-pattern).
     """
     # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
     # refusal here can never leak a partially-constructed secret_broker/content_store —
@@ -703,19 +711,21 @@ async def enforce_quarantine_provider_separation(
                 privileged_provider_id=settings.primary_provider,
                 quarantined_provider_id=settings.quarantine_provider,
             )
-        except AlfredError as exc:
-            # This blanket relabel is only HONEST because a collision is the sole
-            # AlfredError assert_provider_separation can still raise here. It also has a
-            # blank-id arm, checked BEFORE its collision test with its own distinct
-            # message — and that arm used to reach this line, reporting a merely-blank
-            # primary_provider to the operator and to the audit row as a
-            # "separation violated" collision (CodeRabbit, round 2). Both ids are now
-            # blank-proof upstream: quarantine_provider and primary_provider are both
-            # Literal fields, so a blank (or unsupported) value refuses at Settings
-            # construction, onto the accurately-labelled settings_invalid boot refusal.
-            # If either of those two guarantees is ever relaxed, this relabel goes back to
-            # lying — restore an explicit blank check here first
-            # (test_boot_refuses_blank_primary_provider_as_settings_invalid pins it).
+        except (ProviderIdBlankError, ProviderSeparationViolatedError) as exc:
+            # Precisely typed (round-5 review fleet, 1G), not a blanket ``except
+            # AlfredError`` — the two types this catches are the ONLY things
+            # assert_provider_separation can raise, so this is no longer a relabel
+            # resting on a comment's honesty, but an exhaustive type list the checker
+            # itself can verify. ProviderIdBlankError is UNREACHABLE from this call site
+            # today (quarantine_provider and primary_provider are both Literal fields, so
+            # a blank/unsupported value refuses at Settings construction first, onto the
+            # accurately-labelled settings_invalid boot refusal) — retained in the catch
+            # rather than split out, matching this codebase's own "unreachable today is
+            # not a safety argument" lesson: if that Literal guarantee is ever relaxed,
+            # a blank id gets an AUDITED refusal here (mislabelled as a collision, no
+            # worse than before this change) rather than an uncaught crash
+            # (``test_boot_refuses_blank_primary_provider_as_settings_invalid_not_
+            # collision`` pins the guarantee this rests on).
             raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
     elif provider_ids_collide(settings.primary_provider, settings.quarantine_provider):
         log.warning(

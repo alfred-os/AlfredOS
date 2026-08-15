@@ -103,7 +103,13 @@ def test_alfred_status_notes_the_provider_lines_are_config_not_routing(
     assert result.exit_code == 0, result.output
     flat = " ".join(result.stdout.split()).lower()
     assert "build_router" in flat, flat
-    assert "590" in flat, flat
+    # Bare "590" would also match a port number or byte count — pin the note's own
+    # wording instead. The middle assertion is the load-bearing one: the note's
+    # entire purpose is to caveat the PRIMARY line without caveating the QUARANTINE
+    # line, and nothing else pins that asymmetry.
+    assert "compare configured settings only" in flat, flat
+    assert "does control dispatch" in flat, flat
+    assert "issue #590" in flat, flat
 
 
 def test_alfred_status_refuses_credential_shaped_primary_provider_without_echoing_it(

@@ -156,6 +156,11 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # #340 golive Task 15 (§17 / §20.2 fail-loud): a <=0 quarantine max_tokens budget
     # refuses boot pre-spawn rather than laundering into a cannot_extract typed refusal.
     "daemon.boot.quarantine_max_tokens_invalid",
+    # Round-5 review fleet, Tier A: an out-of-closed-set quarantine provider_id, or a
+    # blank deepseek_model/deepseek_base_url, refuses boot pre-spawn rather than
+    # laundering into a cannot_extract typed refusal (the #368 anti-pattern this arm
+    # closes — the resolver used to raise a bare, boot-cascade-uncaught ValueError).
+    "daemon.boot.quarantine_provider_config_invalid",
     # #586 (ADR-0064): with ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true, a
     # privileged/quarantine provider collision refuses boot. Its own catalogue key
     # rather than reusing assert_provider_separation()'s message: this row is the
