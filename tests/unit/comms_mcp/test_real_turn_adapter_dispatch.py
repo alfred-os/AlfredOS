@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from types import SimpleNamespace
 from typing import get_args
 
@@ -507,12 +508,26 @@ async def test_notify_timeout_is_bounded_and_does_not_hang_the_halt(monkeypatch)
     monkeypatch.setattr(real_turn_adapter_mod, "_NOTIFY_TIMEOUT_SECONDS", 0.01)
     sender = _HangingNotifySender()
     adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
+    started = time.monotonic()
     with structlog.testing.capture_logs() as captured:
         await adapter.dispatch(_HaltNoReply(stage="downgrade_denied", adapter_id="tui"))
+    elapsed = time.monotonic() - started
     assert any(
         entry.get("event") == "comms.inbound.real_turn.turn_failed_notify_timeout"
         for entry in captured
     ), captured
+    # The log event alone doesn't prove which bound fired: the sender hangs
+    # for 10s regardless, so a monkeypatch that silently failed to take
+    # (e.g. a stale module reference) would STILL produce the same log line
+    # after the production 2.0s default. Bound comfortably under the
+    # production _NOTIFY_TIMEOUT_SECONDS (2.0s) but well above the patched
+    # 0.01s to stay non-flaky, proving the PATCHED short timeout is what
+    # actually fired.
+    assert elapsed < 1.0, (
+        f"took {elapsed:.3f}s — expected well under the production "
+        f"_NOTIFY_TIMEOUT_SECONDS default (2.0s), i.e. the patched 0.01s "
+        f"bound must be what actually fired"
+    )
 
 
 class _EventGatedHangingNotifySender:
@@ -680,6 +695,12 @@ async def test_dispatch_notifies_same_key_turns_in_submission_order_even_when_co
     # turn 2's dispatch call WHILE turn 1 is still in flight.
     task_2 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 2")))
     await asyncio.sleep(0)  # let turn 2's dispatch run up to the lock and block on it
+    # Not just "task_2 hasn't finished yet" (which could be true for an
+    # unrelated reason) — assert the actual per-(persona, slug) Lock object
+    # is held, proving turn 2's block is genuinely lock contention, matching
+    # the same ``.locked()`` proof style used by the sibling
+    # release-before-notify tests above.
+    assert adapter._turn_locks[("alfred", "u-1")].locked() is True
     assert not task_2.done(), "turn 2 must genuinely block on the lock, not race ahead"
     assert sender.events == [], "neither turn may have signaled the sender yet"
 

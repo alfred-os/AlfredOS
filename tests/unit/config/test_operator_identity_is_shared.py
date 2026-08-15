@@ -29,8 +29,8 @@ _v0004 = importlib.import_module("alfred.memory.migrations.versions.0004_users_a
 
 @pytest.mark.parametrize(
     "env_value",
-    [None, "operator", "Bruce Wayne", ""],
-    ids=["unset", "operator", "Bruce Wayne", "empty"],
+    [None, "operator", "Bruce Wayne", "", "  Bruce  ", "   "],
+    ids=["unset", "operator", "Bruce Wayne", "empty", "padded", "whitespace-only"],
 )
 def test_migration_and_tui_readers_agree(
     env_value: str | None, monkeypatch: pytest.MonkeyPatch

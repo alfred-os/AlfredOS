@@ -15,6 +15,7 @@ PR-S4-8/9 comms hash-helpers, PR-S4-1 daemon-boot probe) request it.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from alfred.security.secrets import SUPPORTED_SECRETS
@@ -125,11 +126,22 @@ def test_setup_script_refuses_on_pepper_drift() -> None:
     must return non-zero and tell the operator to reconcile by hand instead.
     """
     block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
-    assert "return 1" in block, "no non-zero return in the pepper bootstrap step"
     assert "DIFFERS" in block, (
         "no drift-refusal error message in the pepper bootstrap step — "
         "a differing .env/secrets.toml pepper pair must be surfaced to the "
         "operator, not picked silently"
+    )
+    # Anchored, not two independent membership checks: the step now contains
+    # SEVERAL other `return 1`s (#594 R2's _pepper_refuse_unusable_shapes adds
+    # three more), so `"return 1" in block` alone would stay green even if the
+    # DIFFERS branch itself lost its return and silently fell through. This
+    # requires the actual `return 1` to appear within a few lines of the
+    # DIFFERS error message — i.e. inside the same branch, not merely
+    # somewhere in the ~90-line step.
+    assert re.search(r'"[^"]*DIFFERS[^"]*"[^\n]*\n(?:[^\n]*\n){0,3}?\s*return 1\b', block), (
+        "the DIFFERS error message is not immediately followed by 'return 1' "
+        "— the drift-refusal branch may have lost its non-zero return, which "
+        "would let the script proceed as if the peppers agreed"
     )
 
 

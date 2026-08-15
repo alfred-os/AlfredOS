@@ -163,6 +163,14 @@ def _run_bootstrap_in_tmpdir(
         )
     script = prelude + write_fault_shim + bootstrap
     env = os.environ.copy()
+    # Hermetic: the bootstrap block under test never actually reads these two
+    # via bare env-var expansion (both go through `read_env_var`, which greps
+    # the `.env` FILE at cwd, not the process environment), so this is
+    # defence-in-depth rather than a live bug fix — but it keeps the harness
+    # from ever silently depending on whatever the invoking developer's own
+    # shell happens to export.
+    env.pop("ALFRED_AUDIT_HASH_PEPPER", None)
+    env.pop("ALFRED_OPERATOR_NAME", None)
     env["HOME"] = str(tmpdir)
     if stub_openssl:
         # Symlink ONLY the whitelisted bash builtins+tools into a
@@ -1494,6 +1502,13 @@ def test_operator_name_resolution_trims_like_operator_display_name(
         + _resolve_operator_name_line()
         + '\nprintf "%s" "$name"\n'
     )
+    # Hermetic for the same reason as `_run_bootstrap_in_tmpdir` above: the
+    # resolution line reads `.env` via `read_env_var`, never the process
+    # environment directly, so this is defensive rather than load-bearing —
+    # but it stops this subprocess from implicitly inheriting the invoking
+    # developer's own ALFRED_OPERATOR_NAME, if any.
+    env = os.environ.copy()
+    env.pop("ALFRED_OPERATOR_NAME", None)
     result = subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
@@ -1501,6 +1516,7 @@ def test_operator_name_resolution_trims_like_operator_display_name(
         encoding="utf-8",
         errors="surrogateescape",
         check=False,
+        env=env,
         cwd=str(tmp_path),
         timeout=10,
     )

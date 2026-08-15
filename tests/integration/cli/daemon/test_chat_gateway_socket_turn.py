@@ -984,10 +984,20 @@ async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
 
                 log_text = _richlog_text(app.query_one("#conversation_log", RichLog))
                 # The pending indicator DID engage, in the right order, before
-                # being released — the "pending" half of #593's proof.
-                you_index = log_text.index(t("tui.label_you"))
-                thinking_index = log_text.index(t("tui.thinking"))
-                failed_index = log_text.index(t("tui.turn_failed.budget_exhausted"))
+                # being released — the "pending" half of #593's proof. Check
+                # each localized marker's presence explicitly (log_text in the
+                # message) BEFORE calling .index() on it — a missing marker
+                # should fail with the actual transcript content, not a bare
+                # ValueError("substring not found") that hides it.
+                you_marker = t("tui.label_you")
+                thinking_marker = t("tui.thinking")
+                failed_marker = t("tui.turn_failed.budget_exhausted")
+                assert you_marker in log_text, log_text
+                assert thinking_marker in log_text, log_text
+                assert failed_marker in log_text, log_text
+                you_index = log_text.index(you_marker)
+                thinking_index = log_text.index(thinking_marker)
+                failed_index = log_text.index(failed_marker)
                 assert you_index < thinking_index < failed_index, log_text
                 # Non-vacuity: the turn never reached a real completion — the
                 # router's canned reply must be ABSENT (the pre-check halted
