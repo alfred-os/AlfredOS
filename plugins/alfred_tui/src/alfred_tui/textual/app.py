@@ -344,10 +344,19 @@ class AlfredTuiApp(App[None]):
         creation order. Only the COUNT is semantically meaningful, so the list
         is a FIFO of interchangeable handles and index 0 is simply the one
         closest to firing.
+
+        Deliberately NOT guarded on a non-empty list. ``len(_stale_debt_expiries)
+        == _stale_turns_awaiting_signal`` is an invariant — every one of the
+        three methods that touches either moves both, and the only asymmetric
+        arm (``_expire_stale_turn_debt``'s two independent guards) can only ever
+        move the two CLOSER together — and this method is reached solely from
+        ``_resolve_pending_turn``'s own ``count > 0`` test. An ``IndexError``
+        here would therefore mean that invariant has broken, which is a bug
+        worth failing LOUD on rather than absorbing into a silent no-op branch
+        that no test could ever reach.
         """
         self._stale_turns_awaiting_signal -= 1
-        if self._stale_debt_expiries:
-            self._stale_debt_expiries.pop(0).stop()
+        self._stale_debt_expiries.pop(0).stop()
 
     def _expire_stale_turn_debt(self) -> None:
         """One debt's window elapsed with no late signal: write it off.
@@ -367,24 +376,38 @@ class AlfredTuiApp(App[None]):
         ``stop()``-ed in place of a live one. See
         ``_discharge_stale_turn_debt`` for why popping index 0 rather than
         the handle that actually fired is correct — the handles are fungible.
+
+        The popped handle is ``stop()``-ed, not just dropped, because index 0
+        is NOT always the timer that fired. In the same-tick race above, a
+        discharge can pop-and-stop the (already spent) head before this queued
+        callback runs, so the handle this pop reaches is the NEXT debt's — still
+        armed. Dropping it unstopped would leave a live timer that no longer
+        appears in the app's own bookkeeping. ``Timer.stop()`` is safe on a
+        spent one-shot too: it cancels ``_run_timer``, which catches
+        ``CancelledError``, and cancelling an already-finished task is a no-op.
         """
         if self._stale_debt_expiries:
-            self._stale_debt_expiries.pop(0)
+            self._stale_debt_expiries.pop(0).stop()
         if self._stale_turns_awaiting_signal > 0:
             self._stale_turns_awaiting_signal -= 1
 
     def on_unmount(self) -> None:
-        """Stop every still-armed stale-debt expiry timer at teardown.
+        """Clear the app's own debt bookkeeping deterministically at teardown.
 
-        A debt incurred shortly before the app closes leaves a one-shot
-        ``Timer`` armed for a full ``_turn_timeout_seconds`` (90s in
-        production) that nothing else would ever stop — the dangling-``Timer``
-        leak this repo has a documented history of, and which
-        ``plugins/alfred_tui/tests`` runs under ``-W error::ResourceWarning``
-        specifically to catch. The CURRENT turn's watchdog / elapsed-tick
-        timers are deliberately NOT touched here: those belong to
-        ``_end_turn``, and the debt timers belong to turns that were
-        ABANDONED, which is why nothing else owns them.
+        NOT a leak-prevention mechanism — Textual already handles that.
+        ``App._shutdown`` awaits ``_close_messages()``, which calls
+        ``Timer._stop_all()`` over every timer created through
+        ``self.set_timer`` and clears its own registry, BEFORE it dispatches
+        ``events.Unmount`` (verified in ``textual/app.py`` +
+        ``textual/message_pump.py``, textual 8.2.8). So by the time this hook
+        runs, every debt timer is already stopped whether or not this method
+        exists.
+
+        What it DOES buy: the ``stop()`` calls are harmless defence-in-depth
+        against that framework ordering ever changing, and clearing the list
+        leaves the app's own state consistent with reality rather than holding
+        references to spent handles. The CURRENT turn's watchdog / elapsed-tick
+        timers are deliberately untouched: those belong to ``_end_turn``.
         """
         for expiry in self._stale_debt_expiries:
             expiry.stop()

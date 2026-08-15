@@ -585,7 +585,9 @@ class RealTurnOrchestratorAdapter:
         is unchanged; only the LOCK boundary moved. See ``_TurnFailed``.
 
         DO NOT add an ``await`` between the ``async with lock:`` block below
-        releasing and the notify/``_send`` call that follows it, and do not let
+        releasing and the notify/``_send`` call that follows it (``_send``'s
+        own scan-FAILURE legs are the one documented exception — see its
+        docstring), and do not let
         two same-``(persona, slug)``-key turns process concurrently — a
         downstream client (the TUI's stale-turn debt counter) depends on
         notify/send order matching submission order for one session with NO
@@ -769,6 +771,16 @@ class RealTurnOrchestratorAdapter:
         load-bearing for the TUI's stale-turn debt counter; see the contract
         note on ``_TurnFailed`` and
         ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``.
+        The scan-FAILURE legs are the one documented exception to ``dispatch``'s
+        otherwise-unconditional "zero awaits between lock release and
+        notify/send initiation" claim: ``_refuse_outbound_scan`` awaits
+        ``_emit_refused`` (a real Postgres write) before its notify, and unlike
+        the ``budget_denied``/``turn_error`` legs — whose audit write happens
+        INSIDE the lock — this one runs after release. Harmless in practice
+        (an audit write completes long before a later turn finishes an LLM
+        turn, and #594 R1's debt bound self-corrects a transcript-order swap
+        within one watchdog window anyway), but do not read that contract as
+        unconditional.
 
         The audit row needs turn context (``notification`` +
         ``canonical_user_id`` both present); the refusal-reply send

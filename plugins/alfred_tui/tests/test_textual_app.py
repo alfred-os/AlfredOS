@@ -784,25 +784,26 @@ async def test_two_abandoned_turns_expire_independently() -> None:
         assert len(app._stale_debt_expiries) == 1
 
         # The OTHER debt's window then elapses with nothing ever arriving.
-        # A real expiry's one-shot `Timer` has already fired by the time its
-        # callback runs; this direct stand-in leaves the real handle armed, so
-        # stop it here to keep teardown free of a dangling 5s timer.
-        remaining_expiry = app._stale_debt_expiries[0]
+        # No manual cleanup needed: `_expire_stale_turn_debt` stops the handle
+        # it pops, precisely because index 0 is not guaranteed to be the timer
+        # that fired.
         app._expire_stale_turn_debt()
-        remaining_expiry.stop()
 
         assert app._stale_turns_awaiting_signal == 0
         assert app._stale_debt_expiries == [], "no orphan expiry handles may survive"
 
 
 @pytest.mark.asyncio
-async def test_unmount_stops_every_live_stale_debt_timer() -> None:
-    """Teardown disarms outstanding debt timers rather than leaking them.
+async def test_unmount_clears_the_stale_debt_bookkeeping() -> None:
+    """Teardown leaves the app's own debt bookkeeping empty and consistent.
 
-    A debt incurred shortly before the app closes owns a one-shot ``Timer``
-    armed for a full ``_turn_timeout_seconds`` that nothing else would ever
-    stop — the dangling-``Timer`` leak this repo has a documented history of,
-    and which this file's ``-W error::ResourceWarning`` runs exist to catch.
+    Deliberately NOT a claim about leak prevention: Textual's own
+    ``App._shutdown`` stops every ``set_timer`` timer (via
+    ``_close_messages`` -> ``Timer._stop_all``) BEFORE it dispatches
+    ``events.Unmount``, so the handles are already spent by the time
+    ``on_unmount`` runs. What this pins is that the hook exists and empties
+    the list, so the app never ends up holding references to spent timers
+    while reporting outstanding debt.
     """
     session = _RecordingSession()
     app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
@@ -810,10 +811,10 @@ async def test_unmount_stops_every_live_stale_debt_timer() -> None:
         await _submit(app, "first message")
         await pilot.pause()
         app._on_turn_timeout()
-        assert len(app._stale_debt_expiries) == 1  # sanity: genuinely armed at teardown
+        assert len(app._stale_debt_expiries) == 1  # sanity: a debt is outstanding at teardown
 
     assert app._stale_debt_expiries == [], (
-        "on_unmount must stop and drop every still-armed debt-expiry timer"
+        "on_unmount must stop and drop every debt-expiry handle it still holds"
     )
 
 

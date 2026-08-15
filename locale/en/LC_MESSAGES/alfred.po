@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 11:41+0100\n"
+"POT-Creation-Date: 2026-08-15 12:14+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1643,7 +1643,7 @@ msgstr ""
 "it. Refusing to boot."
 
 #: src/alfred/comms_mcp/daemon_runtime.py:221
-#: src/alfred/comms_mcp/real_turn_adapter.py:617
+#: src/alfred/comms_mcp/real_turn_adapter.py:619
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
@@ -3636,7 +3636,7 @@ msgstr "Quit"
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:421
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:444
 #: plugins/alfred_tui/tests/test_textual_app.py:380
 #: plugins/alfred_tui/tests/test_textual_app.py:406
 #: plugins/alfred_tui/tests/test_textual_app.py:462
@@ -3644,16 +3644,16 @@ msgstr "Speak to Alfred..."
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:451
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:474
 #: plugins/alfred_tui/tests/test_textual_app.py:354
-#: plugins/alfred_tui/tests/test_textual_app.py:940
-#: plugins/alfred_tui/tests/test_textual_app.py:947
-#: plugins/alfred_tui/tests/test_textual_app.py:966
-#: plugins/alfred_tui/tests/test_textual_app.py:979
+#: plugins/alfred_tui/tests/test_textual_app.py:941
+#: plugins/alfred_tui/tests/test_textual_app.py:948
+#: plugins/alfred_tui/tests/test_textual_app.py:967
+#: plugins/alfred_tui/tests/test_textual_app.py:980
 msgid "tui.turn_still_pending"
 msgstr "Still working on your last message..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:460
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:483
 #: plugins/alfred_tui/tests/test_textual_app.py:297
 msgid "tui.label_you"
 msgstr "you"
@@ -3663,17 +3663,17 @@ msgstr "you"
 # msgstr is CORRECTED here — the old "; cancelled" clause is false under the
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
 # reply can still render).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:468
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:491
 #: plugins/alfred_tui/tests/test_textual_app.py:298
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:484
-#: plugins/alfred_tui/tests/test_textual_app.py:845
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:507
+#: plugins/alfred_tui/tests/test_textual_app.py:846
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:556
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:579
 msgid "tui.label_alfred"
 msgstr "alfred"
 
@@ -3682,8 +3682,8 @@ msgstr "alfred"
 # procedure Task 15 used for tui.turn_timeout/tui.turn_failed.* above: a
 # real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
 # reconciles the `#:` source-location comments.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:627
-#: plugins/alfred_tui/tests/test_textual_app.py:896
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:650
+#: plugins/alfred_tui/tests/test_textual_app.py:897
 msgid "tui.thinking_elapsed"
 msgstr "Alfred is thinking... ({seconds}s)"
 
