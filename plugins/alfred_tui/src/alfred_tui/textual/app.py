@@ -156,6 +156,17 @@ class AlfredTuiApp(App[None]):
         # render input, and tearing one down on every reactive-diff cycle
         # would be spurious churn.
         self._turn_watchdog: Timer | None = None
+        # Monotonic identity for each turn-pending "episode": bumped once per
+        # accepted submission (`on_input_submitted`) and once per watchdog
+        # abandonment (`_on_turn_timeout`). Diagnostic/identity counter only —
+        # see `_stale_turns_awaiting_signal` for why a bare generation
+        # COMPARISON cannot gate `write_outbound`/`set_turn_failed` (#594
+        # review finding).
+        self._turn_generation: int = 0
+        # How many watchdog-abandoned turns the client still owes exactly one
+        # late completion signal (a reply or a `turn.failed`) for. See
+        # `_resolve_pending_turn`.
+        self._stale_turns_awaiting_signal: int = 0
 
     def compose(self) -> ComposeResult:
         # The reconnect banner is mounted hidden (``display=False``); it is shown
@@ -218,6 +229,13 @@ class AlfredTuiApp(App[None]):
         self._turn_watchdog = None
         if not self._turn_pending:
             return
+        # This turn is being ABANDONED client-side, not resolved — the core
+        # may still be processing it and can still send a reply or
+        # `turn.failed` for it later. Record that one late completion signal
+        # is now owed so `_resolve_pending_turn` recognizes it as stale
+        # (rather than the CURRENT turn's own signal) whenever it arrives.
+        self._turn_generation += 1
+        self._stale_turns_awaiting_signal += 1
         self._end_turn()
         self.query_one("#conversation_log", RichLog).write(
             f"[bold red]{t('tui.turn_timeout', seconds=int(self._turn_timeout_seconds))}[/]"
@@ -250,6 +268,7 @@ class AlfredTuiApp(App[None]):
         # legitimate markup. (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold cyan]{t('tui.label_you')}[/]: {escape(text)}")
         event.input.value = ""
+        self._turn_generation += 1  # new turn-pending episode (#594 review finding)
         self._turn_pending = True  # -> watcher: disable + .busy
         log.write(f"[dim]{t('tui.thinking')}[/]")
         self._arm_turn_watchdog()
@@ -269,6 +288,38 @@ class AlfredTuiApp(App[None]):
             log.write(f"[bold red]{t('tui.alfred_error', error=type(exc).__name__)}[/]")
             raise
 
+    def _resolve_pending_turn(self) -> None:
+        """Gate ``_end_turn()`` against a late signal for an ALREADY-abandoned turn.
+
+        ``write_outbound``/``set_turn_failed`` are invoked from wire callbacks
+        with no per-turn correlation available at all — ``TurnFailedNotification``
+        deliberately carries no ``inbound_id`` (the TUI is structurally
+        1:1/single-turn, ``protocol.py``), and a reply carries none either. So
+        this cannot check "does this signal match generation N": after a
+        watchdog timeout abandons turn 1 and the operator resubmits as turn 2,
+        turn 2's OWN submission bumps ``_turn_generation`` right back to a value
+        a same-tick "matches the current generation" comparison would accept —
+        a bare generation match is genuinely indistinguishable between "turn 2's
+        own signal" and "turn 1's late signal arriving while turn 2 is pending".
+
+        What IS available, with no wire tag at all, is a COUNT. The core
+        serializes one session's turns behind a per-(persona, slug) mutex
+        (``RealTurnOrchestratorAdapter.dispatch``, FOLD-R1) and only starts
+        sending a turn's notify/reply AFTER releasing that mutex, with no
+        ``await`` in between — so a later turn cannot even begin server-side
+        processing, let alone have ITS OWN signal reach the wire, until every
+        earlier turn's signal for that session has already been sent. That
+        guarantees the ``_stale_turns_awaiting_signal`` late signals — one per
+        watchdog-abandoned turn — arrive, in order, before the CURRENTLY
+        pending turn's own signal. Consume that backlog first, without
+        touching ``_turn_pending``/the watchdog; only once it is empty does a
+        completion signal end the turn that is actually still pending.
+        """
+        if self._stale_turns_awaiting_signal > 0:
+            self._stale_turns_awaiting_signal -= 1
+            return
+        self._end_turn()
+
     def write_outbound(self, body: str) -> None:
         """Paint a host-delivered outbound message into the conversation log.
 
@@ -276,11 +327,15 @@ class AlfredTuiApp(App[None]):
         render hook). Synchronous: a RichLog write is non-blocking and the
         outbound handler awaits nothing on the render itself.
 
-        Also ENDS the in-flight turn (#593): the reply arriving IS turn
-        completion. A host-pushed outbound with no pending turn is a harmless
-        no-op (a reactive set to its current value does not fire the watcher).
+        Also ENDS the in-flight turn (#593), UNLESS this reply is a late
+        arrival for a turn the watchdog already abandoned (#594 review
+        finding) — see ``_resolve_pending_turn``. Either way the body still
+        renders: a late reply is still informative to the operator, just not
+        a signal that the CURRENT turn is done. A host-pushed outbound with no
+        pending turn and no stale backlog is a harmless no-op (a reactive set
+        to its current value does not fire the watcher).
         """
-        self._end_turn()
+        self._resolve_pending_turn()
         log = self.query_one("#conversation_log", RichLog)
         # ``body`` is host-delivered persona output that can carry T3-derived
         # content; escape it so console markup in the body renders literally
@@ -298,8 +353,13 @@ class AlfredTuiApp(App[None]):
         connection state, and must remain visible above the next turn (a
         banner would be overwritten/cleared by the NEXT link-state change,
         silently erasing the record that this turn failed).
+
+        Releases the in-flight turn UNLESS this failure is a late arrival for
+        a turn the watchdog already abandoned (#594 review finding) — see
+        ``_resolve_pending_turn``. The failure copy still renders either way;
+        only whether it touches ``_turn_pending``/the watchdog is gated.
         """
-        self._end_turn()
+        self._resolve_pending_turn()
         self.query_one("#conversation_log", RichLog).write(
             f"[bold red]{_turn_failure_message(stage)}[/]"
         )

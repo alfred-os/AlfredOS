@@ -439,6 +439,124 @@ def test_turn_failure_message_is_exhaustive_over_the_wire_literal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_outbound_reply_does_not_clobber_the_next_turn() -> None:
+    """A late reply for an already-timed-out turn must not touch the NEW turn.
+
+    Concrete race (comms-engineer finding on PR #594): turn 1 outruns the
+    watchdog and is abandoned client-side (pending cleared, watchdog stopped);
+    the operator resubmits as turn 2 (pending set again, a NEW watchdog
+    armed); THEN turn 1's late reply finally arrives from the core (it kept
+    running server-side even though the client gave up on it). Before this
+    fix, ``write_outbound`` called ``_end_turn()`` unconditionally — stopping
+    turn 2's watchdog and clearing ``_turn_pending`` even though turn 2 is
+    genuinely still in flight, which is the exact "operator can't tell what
+    state their turn is in" problem #593 exists to fix, recurring one layer
+    up. Turn 1's late message must still render (informative), but must not
+    end turn 2's turn.
+
+    Uses ``_MODERATE_TIMEOUT_SECONDS`` for the app (not ``_FAST_TIMEOUT_SECONDS``)
+    so turn 2's OWN watchdog cannot spuriously fire for real during this
+    test's several ``pilot.pause()`` calls — each costs "tens of
+    milliseconds" of real wall-clock idle-detection overhead (see the module
+    comment above ``_MODERATE_TIMEOUT_SECONDS``), which would rival a 0.05s
+    watchdog and make the test racy. Turn 1's abandonment is instead driven
+    directly through ``_on_turn_timeout`` — the exact callback a real watchdog
+    invokes on expiry, just invoked deterministically rather than by sleeping
+    through the real timer (mirroring how ``_submit`` above drives
+    ``on_input_submitted`` directly for the same determinism reason).
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: turn 1 really is pending
+
+        # Simulate turn 1's watchdog expiring (same code path a real firing
+        # takes) without waiting out the real timeout window.
+        app._on_turn_timeout()
+        assert app._turn_pending is False  # sanity: turn 1 really was abandoned
+        assert app._stale_turns_awaiting_signal == 1
+
+        await _submit(app, "second message")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: turn 2 is genuinely pending
+        turn_2_watchdog = app._turn_watchdog
+        assert turn_2_watchdog is not None
+
+        # Turn 1's late reply finally arrives.
+        app.write_outbound("stale reply for the abandoned first turn")
+        await pilot.pause()
+
+        assert app._turn_pending is True, (
+            "turn 2's pending indicator must survive turn 1's late reply"
+        )
+        assert app._turn_watchdog is turn_2_watchdog, (
+            "turn 2's watchdog must not be stopped by turn 1's late reply"
+        )
+        assert app._stale_turns_awaiting_signal == 0
+        input_widget = _user_input(app)
+        assert input_widget.disabled is True, "input must stay disabled — turn 2 is still pending"
+
+        # Turn 2's OWN reply then arrives normally — the debt is settled, so
+        # this one DOES end the turn, exactly like the no-staleness case.
+        app.write_outbound("real reply for the still-pending second turn")
+        await pilot.pause()
+        assert app._turn_pending is False
+        assert input_widget.disabled is False
+
+        rendered = _plain_text(_log(app))
+    assert "stale reply for the abandoned first turn" in rendered, (
+        "a late reply for an abandoned turn is still informative and must render"
+    )
+    assert "real reply for the still-pending second turn" in rendered
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_failed_does_not_clobber_the_next_turn() -> None:
+    """Same race as above, but the late signal is a ``turn.failed`` rather than a reply.
+
+    See ``test_stale_outbound_reply_does_not_clobber_the_next_turn`` for why
+    ``_MODERATE_TIMEOUT_SECONDS`` + a direct ``_on_turn_timeout()`` call (not
+    a real sleep through ``_FAST_TIMEOUT_SECONDS``) is used to drive turn 1's
+    abandonment deterministically.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: turn 1 really is pending
+
+        app._on_turn_timeout()
+        assert app._turn_pending is False  # sanity: turn 1 really was abandoned
+
+        await _submit(app, "second message")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: turn 2 is genuinely pending
+        turn_2_watchdog = app._turn_watchdog
+        assert turn_2_watchdog is not None
+
+        # Turn 1's late `turn.failed` finally arrives.
+        app.set_turn_failed("internal_error")
+        await pilot.pause()
+
+        assert app._turn_pending is True, (
+            "turn 2's pending indicator must survive turn 1's late turn.failed"
+        )
+        assert app._turn_watchdog is turn_2_watchdog, (
+            "turn 2's watchdog must not be stopped by turn 1's late turn.failed"
+        )
+        input_widget = _user_input(app)
+        assert input_widget.disabled is True, "input must stay disabled — turn 2 is still pending"
+
+        rendered = _plain_text(_log(app))
+    assert _turn_failure_message("internal_error") in rendered, (
+        "a late turn.failed for an abandoned turn is still informative and must render"
+    )
+
+
+@pytest.mark.asyncio
 async def test_flush_failure_paints_error_class_and_reraises() -> None:
     """A dead local wire ends the turn immediately, renders the exception CLASS
     NAME (never ``str(exc)``), and re-raises rather than swallowing the fault.
