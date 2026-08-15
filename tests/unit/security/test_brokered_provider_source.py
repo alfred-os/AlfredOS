@@ -310,6 +310,7 @@ def test_build_child_client_dispatches_to_deepseek() -> None:
     """provider_id='deepseek' constructs a DeepSeekProvider, not AnthropicProvider."""
     a, b = socket.socketpair()
     fd = a.detach()
+    provider = None
     try:
         provider, _backend = be.build_child_client(
             fd,
@@ -322,10 +323,13 @@ def test_build_child_client_dispatches_to_deepseek() -> None:
         )
         assert isinstance(provider, DeepSeekProvider)
     finally:
-        # test-r2-006: reclaim both the detached raw fd AND both socketpair ends —
-        # match this file's own established fd-ownership discipline (see e.g.
-        # test_factory_build_resolves_read_timeout / test_build_anchors_the_attempt_deadline
-        # _from_the_budget).
+        # test-r2-006 + round-6 review fleet (CodeRabbit): reclaim the constructed
+        # provider's own client FIRST, then the detached raw fd AND both socketpair
+        # ends — match this file's own established fd-ownership teardown order (see
+        # e.g. test_factory_build_resolves_read_timeout /
+        # test_build_anchors_the_attempt_deadline_from_the_budget).
+        if provider is not None:
+            anyio.run(provider.aclose)
         os.close(fd)
         a.close()
         b.close()

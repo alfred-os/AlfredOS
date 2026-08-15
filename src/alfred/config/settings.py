@@ -852,6 +852,9 @@ class Settings(BaseSettings):
         shape: an untyped per-call API error instead of a boot-time refusal naming the
         field. The guard was placed on the field this PR happened to touch
         (``deepseek_model``) rather than on the class; this closes the other half.
+
+        Raw English, no ``t()``: Settings loads before the translator, exactly as
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
         """
         v = v.strip()
         if not v:

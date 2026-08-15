@@ -147,7 +147,7 @@ def _check_domain(value: str) -> str:
     return value
 
 
-# Closed set: providers the quarantined-LLM config knob may name. ONE of six copies
+# Closed set: providers the quarantined-LLM config knob may name. ONE of seven copies
 # of this set across the codebase; ``test_provider_closed_set_copies_stay_in_lockstep``
 # (``tests/unit/config/test_settings.py``) is the single drift gate that pins them all,
 # and enumerates them by name. Widening for a new provider means widening every copy —

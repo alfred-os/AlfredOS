@@ -320,17 +320,31 @@ def build_child_client(
     a bare ``ValueError`` is correct here specifically because both of those already
     refuse a blank value before this function is ever reached in the real boot path; this
     is a programming-error backstop, not a boot function, so a ``QuarantineChildBootError``
-    would be a category error (this call has no boot-audit context to attach one to)."""
+    would be a category error (this call has no boot-audit context to attach one to).
+
+    Validation runs BEFORE any resource is allocated (round-6 review fleet / CodeRabbit):
+    an invalid ``provider_id``/``base_url`` now raises before ``PassedFdBackend``,
+    ``_PassedFdTransport``, or the ``httpx.AsyncClient`` are constructed, so the caller's
+    ``fd`` is never wrapped into a backend it would then have to unwind."""
+    if provider_id not in {"anthropic", "deepseek"}:
+        raise ValueError(
+            f"build_child_client: unsupported provider_id {provider_id!r} — refusing to "
+            "silently construct either provider for an out-of-closed-set value (HARD #7, sec-002)"
+        )
+    if provider_id == "deepseek" and (base_url is None or not base_url.strip()):
+        raise ValueError(
+            "build_child_client: provider_id='deepseek' requires a non-blank base_url "
+            "— refusing to silently fall back to some default the operator did not "
+            "choose, or to construct a client that fails only per-call (HARD #7)"
+        )
     backend = PassedFdBackend(fd, read_timeout=timeout.read, budget_seconds=budget_seconds)
     transport = _PassedFdTransport(backend)
     http_client = httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=timeout)
     if provider_id == "deepseek":
-        if base_url is None or not base_url.strip():
-            raise ValueError(
-                "build_child_client: provider_id='deepseek' requires a non-blank base_url "
-                "— refusing to silently fall back to some default the operator did not "
-                "choose, or to construct a client that fails only per-call (HARD #7)"
-            )
+        # Re-narrows for mypy --strict: the blank-check above already proved this at
+        # runtime, but it's a separate `if` from this one, so the type checker can't
+        # carry the narrowing across the intervening resource-allocation lines.
+        assert base_url is not None
         provider: AnthropicProvider | DeepSeekProvider = DeepSeekProvider.from_settings(
             api_key=api_key,
             base_url=base_url,
@@ -339,14 +353,9 @@ def build_child_client(
             max_retries=0,
             timeout=timeout,
         )
-    elif provider_id == "anthropic":
+    else:
         provider = AnthropicProvider.from_settings(
             api_key=api_key, model=model, http_client=http_client, max_retries=0, timeout=timeout
-        )
-    else:
-        raise ValueError(
-            f"build_child_client: unsupported provider_id {provider_id!r} — refusing to "
-            "silently construct either provider for an out-of-closed-set value (HARD #7, sec-002)"
         )
     return provider, backend
 
