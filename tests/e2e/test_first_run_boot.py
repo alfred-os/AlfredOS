@@ -206,10 +206,13 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
             )
 
             # (3) A late step ran: the hash_pepper bootstrap wrote the redirected secrets file.
-            secrets_text = secrets_file.read_text()
-            assert secrets_file.is_file() and "audit.hash_pepper" in secrets_text, (
+            assert secrets_file.is_file(), (
                 "setup.sh did not bootstrap audit.hash_pepper into ALFRED_SECRETS_FILE — the "
                 "provisioning did not reach the late secret-seed step."
+            )
+            secrets_text = secrets_file.read_text()
+            assert "audit.hash_pepper" in secrets_text, (
+                "secrets file exists but audit.hash_pepper was not written into it."
             )
 
             # (4) #591: the SAME pepper value must ALSO reach .env — the carrier docker-compose

@@ -578,15 +578,9 @@ async def test_flush_failure_paints_error_class_and_reraises() -> None:
         rendered = _plain_text(_log(app))
         assert app._turn_pending is False, "a local send failure must end the turn immediately"
         assert input_widget.disabled is False
-        # `t("tui.alfred_error", ...)` (computed the same way here — not
-        # hardcoded) rather than asserting the literal substring "RuntimeError":
-        # the `tui.alfred_error` catalog key is currently OBSOLETE (Task 15
-        # regenerates it), so `t()` falls back to the bare key and does NOT
-        # interpolate `error=...` at all yet. Computing the expectation via
-        # `t()` keeps this assertion correct both now (bare key, no exception
-        # name visible) and after Task 15 restores the msgid (class name
-        # visible) — either way it must be the CLASS NAME going in, never
-        # `str(exc)`.
+        # Computed via `t("tui.alfred_error", ...)` (same call the app makes),
+        # not asserted as a hardcoded literal — the class name must reach the
+        # transcript, never `str(exc)`.
         assert t("tui.alfred_error", error="RuntimeError") in rendered
         assert "transport internals" not in rendered, (
             "str(exc) must never reach the operator-facing transcript"
