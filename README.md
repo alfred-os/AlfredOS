@@ -249,11 +249,13 @@ ADR-0012). If you already keep secrets there — or your `~/.config` is a git re
   container uid/gid directly; `chmod 600` on the host applies inside
   the container too. The setup script runs `export UID GID` because
   macOS bash 3.2 does not export `UID` by default.
-- **Linux:** the container no longer remaps to the host operator's uid/gid — the
-  `user: "${UID:-1000}:${GID:-1000}"` compose override was deleted in commit
-  `76f044e3`. `alfred-core` now always runs as the fixed non-root `alfred` user
-  baked into the image (`docker/alfred-core.Dockerfile`), regardless of the
-  host operator's uid/gid.
+- **Linux:** the container does not remap to the host operator's uid/gid —
+  `alfred-core` always runs as the fixed non-root `alfred` user baked into the
+  image (`docker/alfred-core.Dockerfile`), regardless of the host operator's
+  uid/gid. (A `user: "${UID:-1000}:${GID:-1000}"` override did exist in this
+  file, but only on the separate `alfred-discord` service, added in commit
+  `944d37e2` and removed with that service in commit `76f044e3` — `alfred-core`
+  itself has never carried this override.)
 - **WSL2:** same as Linux, with the caveat that running `docker compose`
   from PowerShell (vs `wsl`) sees a different uid namespace. Run the
   setup script from inside WSL to keep the perms consistent.
