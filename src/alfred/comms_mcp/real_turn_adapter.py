@@ -391,6 +391,10 @@ class RealTurnOrchestratorAdapter:
             )
             return
         if not isinstance(ingested, _PreparedTurn):  # defensive — the ingest union is closed
+            # Round-6 review fleet: log before raising, matching this class's own
+            # sibling guard (_require_sender, sender_unbound above) — the same gap
+            # err-002 found and fixed on daemon_runtime.py's identically-keyed guard.
+            _log.error("comms.daemon_runtime.dispatch_bad_ingested")
             raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
 
         set_language(ingested.user.language)

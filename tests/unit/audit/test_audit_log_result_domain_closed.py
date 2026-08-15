@@ -354,7 +354,13 @@ def test_dynamic_result_sites_are_documented() -> None:
             # ("success" / "refused"), both in-domain (unchanged by the move).
             "src/alfred/cli/daemon/_boot_audit.py:176",
             "src/alfred/comms_mcp/adapter_credential_resolver.py:288",
-            "src/alfred/comms_mcp/adapter_status_observer.py:255",
+            # Round-6 review fleet (err-001) shifted it (255 -> 272): observe()'s
+            # AdapterUpNotification branch gained a try/except around
+            # self._expected_epoch() (17 new lines) so a RuntimeError from an unminted
+            # boot epoch routes through the SAME audited status_rejected refusal as
+            # every other bad frame instead of escaping uncaught — the site itself
+            # (still `result=result`, forwarding _accept's own parameter) is unchanged.
+            "src/alfred/comms_mcp/adapter_status_observer.py:272",
             "src/alfred/comms_mcp/forwarded_inbound_receiver.py:366",
             # G7-2c-1 (#333) — _audit_refused result param; reachable values:
             # "in_doubt" | "io_plane_unavailable" | "denied" (all in-domain,

@@ -306,6 +306,42 @@ async def test_forged_epoch_up_is_refused_and_audited() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unavailable_epoch_is_refused_and_audited_not_raised() -> None:
+    """Round-6 review fleet (err-001): ``observe``'s own docstring promises it NEVER
+    raises on a bad frame except a genuine audit-write failure — but ``_expected_epoch``
+    (unreachable from a real boot; the epoch is minted before this observer is ever
+    constructed) can raise a bare ``RuntimeError``. Prove ``observe`` now honours its
+    own contract: the RuntimeError is caught and turned into the SAME loud, audited
+    refusal every other bad frame gets, not an uncaught crash with zero audit row."""
+    audit = _FakeAudit()
+
+    def _unset_epoch() -> str:
+        raise RuntimeError("boot epoch unset when building the status observer")
+
+    obs = AdapterStatusObserver(
+        audit=audit,
+        expected_epoch=_unset_epoch,
+        now=lambda: _FIXED_NOW,
+        reconciler=CrashIncidentReconciler(),
+    )
+
+    # Must not raise.
+    await obs.observe("gateway.adapter.up", {"adapter_id": "discord", "epoch": _EPOCH})
+
+    assert len(audit.rows) == 1
+    row = audit.rows[0]
+    assert row["event"] == "gateway.adapter.status_rejected"
+    assert row["result"] == "refused"
+    subject = row["subject"]
+    assert isinstance(subject, dict)
+    assert subject["rejection_reason"] == "epoch_unavailable"
+    assert subject["adapter_id"] == "discord"
+    assert row["trace_id"] == "discord"
+    # No false-liveness record.
+    assert obs.latest("discord") is None
+
+
+@pytest.mark.asyncio
 async def test_unknown_method_is_refused_and_audited() -> None:
     audit = _FakeAudit()
     obs = _make_observer(audit)
