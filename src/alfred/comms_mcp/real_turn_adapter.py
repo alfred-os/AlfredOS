@@ -481,6 +481,18 @@ class RealTurnOrchestratorAdapter:
             return
         client_stage = _client_turn_failure_stage(stage)
         if client_stage is None:
+            # Symmetric with the `TURN_STATE_CLIENT_KINDS` skip above: no
+            # production call site passes `send_failed` here today (`_send`'s
+            # except block deliberately never calls this helper — see its
+            # docstring), but the parameter type stays the full `_RefusalStage`
+            # so a future call site is a type-check pass, not a silent drop.
+            # Log it so "why did nothing happen here" stays traceable if that
+            # ever changes.
+            _log.debug(
+                "comms.inbound.real_turn.turn_state_not_notifiable",
+                adapter_id=adapter_id,
+                refusal_stage=stage,
+            )
             return
         try:
             await asyncio.wait_for(
