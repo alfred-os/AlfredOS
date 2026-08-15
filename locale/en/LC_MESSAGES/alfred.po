@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 01:54+0100\n"
+"POT-Creation-Date: 2026-08-15 02:05+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3608,15 +3608,19 @@ msgstr "Alfred is unavailable. Retrying..."
 # another (no shared prefix, no shared empty-placeholder shape).
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:88
 msgid "tui.turn_failed.refused"
-msgstr "Alfred could not process that turn."
+msgstr "Alfred could not process that turn. Try rephrasing, or ask something else."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:90
 msgid "tui.turn_failed.budget_exhausted"
-msgstr "Daily budget reached; the turn was not run."
+msgstr ""
+"Daily budget reached. Raise ALFRED_DAILY_BUDGET_USD in .env, or wait to "
+"reset."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:92
 msgid "tui.turn_failed.internal_error"
-msgstr "Something went wrong on Alfred's side; the turn did not complete."
+msgstr ""
+"Something went wrong on Alfred's side. Try again, or check the daemon "
+"logs."
 
 # PR-S4-10 review F1 (#206): the TUI render layer moved to
 # plugins/alfred_tui; the CI extract scanned src/alfred ONLY, so these LIVE
