@@ -218,6 +218,25 @@ def _read_secrets_toml_pepper(tmpdir: Path) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _count_pepper_lines(tmpdir: Path) -> int:
+    """Count raw lines in ``secrets.toml`` that assign the pepper key, any shape.
+
+    Deliberately a LOOSER pattern than the script's own ``$pepper_line_re``
+    (quoted or bare, any indentation): the point is to catch a duplicate the
+    script appended because its own narrower pattern failed to see the entry
+    already there — so an oracle built from the script's pattern would share the
+    exact blind spot it is supposed to detect (#594 R2).
+    """
+    target = tmpdir / ".config" / "alfred" / "secrets.toml"
+    if not target.is_file():
+        return 0
+    return sum(
+        1
+        for line in target.read_text().splitlines()
+        if re.match(r"""^\s*["']?audit\.hash_pepper["']?\s*=""", line)
+    )
+
+
 # Two distinct, valid 64-hex-char pepper values for the reconcile-matrix tests
 # below. Neither needs to come from openssl — the mirror/drift branches never
 # call it, and hardcoding keeps those tests independent of an openssl_available
@@ -615,6 +634,275 @@ def test_bootstrap_refuses_on_pepper_drift(
     # Neither side is silently rewritten when the bootstrap refuses.
     assert _read_dotenv_pepper(tmp_path) == _PEPPER_ONE
     assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_TWO
+
+
+# ---------------------------------------------------------------------------
+# #594 R2: the pepper-key parsing root-cause fix.
+#
+# The reader (_pepper_from_file), the writer (_pepper_write_file's presence /
+# blank / rewrite checks) and the actual consumer
+# (SecretBroker._load_toml_file, which does a real tomllib.load and keeps only
+# top-level string values) each carried their OWN notion of "what counts as the
+# audit.hash_pepper key", and the three accept-sets were never identical. Three
+# prior fix rounds each patched one instance of that divergence and left the
+# divergence itself intact.
+#
+# Every case below is a shape where two of those three parsers disagreed. Each
+# was verified to FAIL against pre-fix HEAD before the fix landed. None of them
+# had ANY test before this batch — which is precisely how three rounds of fixes
+# kept missing them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "blank_shape",
+    [
+        pytest.param('"audit.hash_pepper" = ""', id="double-quoted-blank"),
+        pytest.param("\"audit.hash_pepper\" = ''", id="single-quoted-blank"),
+    ],
+)
+def test_bootstrap_fills_a_blank_entry_in_place_without_duplicating(
+    bash_available: str,
+    tmp_path: Path,
+    blank_shape: str,
+) -> None:
+    """A blank pepper entry is filled IN PLACE — never duplicated, never skipped.
+
+    This whole path had no test at all before #594 R2, which is how the
+    load-bearing "the ``=~`` right-hand side must be UNQUOTED" detail in
+    ``_pepper_write_file``'s rewrite loop could have regressed silently:
+    quoting ``$pepper_blank_re`` there makes bash match it as a literal string
+    rather than an ERE, so the branch never fires and the blank entry is left
+    blank while the bootstrap prints its normal success banner.
+
+    The ``''`` variant additionally FAILS against pre-fix HEAD: the old blank
+    detector recognised only the double-quoted ``= ""`` shape, so a
+    single-quoted blank entry was classified as "a real value is already here"
+    and left permanently unfilled — the cosmetic follow-up parked in the #594
+    fix-1 round-3 review, closed for free by deriving the blank pattern from
+    the shared key definition with a ``("" | '')`` value alternation.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "secrets.toml").write_text(f"{blank_shape}\n")
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_ONE, (
+        "blank pepper entry was not filled in place from the .env value"
+    )
+    assert _count_pepper_lines(tmp_path) == 1, (
+        "blank entry was duplicated rather than overwritten in place:\n"
+        f"{(secrets_dir / 'secrets.toml').read_text()}"
+    )
+
+
+def test_bootstrap_fills_an_indented_blank_entry_without_corrupting_the_file(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """An INDENTED blank entry is recognised — not duplicated into an unparseable file.
+
+    Leading whitespace does NOT make a TOML top-level key nested (verified
+    against ``tomllib``), so ``  "audit.hash_pepper" = ""`` is a perfectly legal
+    flat entry and the reader always saw it. The writer's presence-grep had no
+    ``[[:space:]]*`` prefix, so it did NOT — and appended a SECOND pepper line.
+    ``tomllib`` then rejects the resulting file outright with "Cannot overwrite
+    a value", which takes ``deepseek_api_key``, ``anthropic_api_key`` and
+    ``discord_bot_token`` down with the pepper: a cosmetic indentation in a file
+    the docs explicitly instruct operators to hand-edit brings the entire secret
+    plane down.
+
+    Pre-fix this raised ``TOMLDecodeError`` out of ``_read_secrets_toml_pepper``
+    while the script itself exited 0 with a success banner.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(
+        '# AlfredOS secrets file. DO NOT commit.\ndeepseek_api_key = "sk-abc"\n'
+        '  "audit.hash_pepper" = ""\n'
+    )
+    (tmp_path / ".env").write_text(f"ALFRED_AUDIT_HASH_PEPPER={_PEPPER_ONE}\n")
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert _count_pepper_lines(tmp_path) == 1, (
+        f"indented entry was duplicated rather than filled:\n{target.read_text()}"
+    )
+    # Parses at all (the "Cannot overwrite a value" blast radius) AND the other
+    # secrets in the file survived.
+    with target.open("rb") as fh:
+        data = tomllib.load(fh)
+    assert data.get("audit.hash_pepper") == _PEPPER_ONE
+    assert data.get("deepseek_api_key") == "sk-abc", (
+        "an unrelated secret was collateral damage of the pepper write"
+    )
+
+
+def test_bootstrap_ignores_an_underscore_typo_key_and_still_writes_the_real_one(
+    bash_available: str,
+    openssl_available: str,
+    tmp_path: Path,
+) -> None:
+    """``audit_hash_pepper`` (underscore) must NOT be mistaken for the real key.
+
+    The dots in ``audit.hash_pepper`` are ERE metacharacters. With an unescaped
+    ``${pepper_key}`` in the writer's presence-grep, ``audit_hash_pepper`` —
+    the single most plausible operator typo, since it mirrors the
+    ``ALFRED_AUDIT_HASH_PEPPER`` spelling in ``.env.example`` — matched as if it
+    WERE the key, while the reader (which DID escape the dot) read nothing.
+
+    Pre-fix that permanently bricked the host CLI, silently: the writer's
+    presence check matched the typo line and returned early having written
+    NOTHING, ``_pepper_write_env`` then wrote the fresh value to ``.env``, and
+    the banner claimed "Seeded audit.hash_pepper into <file> and .env" — a lie,
+    repeated on every future run forever, with ``secrets.toml`` never receiving
+    a pepper at all.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text('# AlfredOS secrets file. DO NOT commit.\naudit_hash_pepper = "decoy"\n')
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    file_value = _read_secrets_toml_pepper(tmp_path)
+    assert file_value is not None and re.fullmatch(r"[0-9a-f]{64}", file_value), (
+        "the real quoted audit.hash_pepper key was never written — the underscore "
+        f"typo line was mistaken for it. secrets.toml:\n{target.read_text()}"
+    )
+    assert file_value == _read_dotenv_pepper(tmp_path), (
+        "the banner claimed both planes were seeded but they hold different values"
+    )
+    # The operator's own (unrelated, misspelled) line is left exactly as it was.
+    assert 'audit_hash_pepper = "decoy"' in target.read_text()
+
+
+def test_bootstrap_refuses_a_bare_unquoted_dotted_key(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """An unquoted ``audit.hash_pepper = "..."`` is refused, not mirrored.
+
+    In TOML that is the NESTED table ``{audit: {hash_pepper: ...}}``, and
+    ``SecretBroker._load_toml_file`` keeps only top-level string values — so the
+    broker drops it entirely. The reader's old optional-quote ``"?`` accepted it
+    anyway and pre-fix happily mirrored it into ``.env`` with exit 0, putting
+    alfred-core on a value host-side ``alfred`` commands can never see.
+
+    The refusal reports the offending LINE NUMBER, never the line contents: that
+    line holds the secret.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(
+        f'# AlfredOS secrets file. DO NOT commit.\naudit.hash_pepper = "{_PEPPER_ONE}"\n'
+    )
+    before = target.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        f"a bare dotted key must refuse, not exit 0:\nstdout: {result.stdout}"
+    )
+    assert "line 2" in result.stderr, (
+        f"refusal does not name the offending line number: {result.stderr!r}"
+    )
+    assert str(target) in result.stderr, f"refusal does not name the file: {result.stderr!r}"
+    assert _PEPPER_ONE not in result.stderr, (
+        "the refusal echoed the secret value itself — it must report the line "
+        f"NUMBER only: {result.stderr!r}"
+    )
+    # Neither plane is touched when the bootstrap refuses.
+    assert target.read_bytes() == before, "secrets.toml was modified despite the refusal"
+    assert _read_dotenv_pepper(tmp_path) == "", ".env was written despite the refusal"
+
+
+def test_bootstrap_refuses_a_duplicate_canonical_key(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """Two canonical pepper lines are refused, naming the count.
+
+    ``tomllib`` rejects a duplicate key with "Cannot overwrite a value" for the
+    WHOLE file, so this state makes every other secret unreadable too, not just
+    the pepper. Pre-fix the reader simply took the first match and mirrored it
+    into ``.env`` with exit 0, leaving the operator with a secrets file the
+    broker could not load at all and no indication why.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(
+        f'"audit.hash_pepper" = "{_PEPPER_ONE}"\n"audit.hash_pepper" = "{_PEPPER_TWO}"\n'
+    )
+    before = target.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        f"a duplicate pepper key must refuse, not exit 0:\nstdout: {result.stdout}"
+    )
+    assert "2 times" in result.stderr, (
+        f"refusal does not name the duplicate count: {result.stderr!r}"
+    )
+    assert _PEPPER_ONE not in result.stderr and _PEPPER_TWO not in result.stderr, (
+        f"the refusal echoed a secret value: {result.stderr!r}"
+    )
+    assert target.read_bytes() == before
+    assert _read_dotenv_pepper(tmp_path) == ""
+
+
+def test_bootstrap_refuses_a_pepper_scoped_inside_a_table(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """A correctly-spelled pepper line INSIDE a ``[table]`` is refused.
+
+    TOML scopes every key after a table header into that table, so the broker's
+    top-level lookup never sees it however correctly the line itself is spelled.
+    Pre-fix the reader matched the line regardless of scope and mirrored it into
+    ``.env`` with exit 0 — the two-HMAC-planes outcome again.
+
+    Both line numbers are reported so the operator knows exactly where to move
+    the line TO, not just that something is wrong.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(
+        "# AlfredOS secrets file. DO NOT commit.\n"
+        "[grafana]\n"
+        f'"audit.hash_pepper" = "{_PEPPER_ONE}"\n'
+    )
+    before = target.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        f"a table-scoped pepper must refuse, not exit 0:\nstdout: {result.stdout}"
+    )
+    assert "line 3" in result.stderr, (
+        f"refusal does not name the pepper's line number: {result.stderr!r}"
+    )
+    assert "line 2" in result.stderr, (
+        f"refusal does not name the opening [table]'s line number: {result.stderr!r}"
+    )
+    assert _PEPPER_ONE not in result.stderr, f"the refusal echoed the secret: {result.stderr!r}"
+    assert target.read_bytes() == before
+    assert _read_dotenv_pepper(tmp_path) == ""
 
 
 # ---------------------------------------------------------------------------

@@ -432,6 +432,52 @@ step "Bootstrapping audit.hash_pepper secret"
 # closure — unquoted would have left SecretBroker.get(...) raising
 # UnknownSecretError).
 pepper_key="audit.hash_pepper"
+# #594 R2 (root-cause fix). ERE-escaped form of $pepper_key. The literal dots
+# in "audit.hash_pepper" are regex metacharacters ("any character") unless
+# escaped: with an unescaped ${pepper_key}, `audit_hash_pepper` — the single
+# most plausible operator typo, since it mirrors the ALFRED_AUDIT_HASH_PEPPER
+# spelling in .env.example — matched as if it WERE the key, so
+# _pepper_write_file's presence check skipped the write while _pepper_from_file
+# (which DID escape the dot) read nothing, and the bootstrap reported
+# "Mirrored ..." on every future run having written nothing at all. Derived
+# from $pepper_key by substitution rather than spelled out a second time, so
+# the literal and its regex form can never drift apart.
+pepper_key_re="${pepper_key//./\\.}"
+
+# THE canonical pepper line. Every presence/blank/rewrite/extract pattern below
+# derives from this ONE definition. Three independently-authored spellings of
+# "the pepper key" (reader sed, writer grep, writer `[[ =~ ]]`) with three
+# different accept-sets — none of them matching the accept-set of the actual
+# consumer, SecretBroker._load_toml_file, which does a real tomllib.load and
+# keeps only top-level string values — is the root cause of #594's entire
+# pepper-parsing fix series. Each earlier round patched one instance of the
+# divergence and left the divergence itself intact.
+#
+# Requires the key to be QUOTED: `audit.hash_pepper = ...` without quotes is,
+# in real TOML, the NESTED table {audit: {hash_pepper: ...}}, which the broker
+# drops entirely — so treating it as "the pepper is here" reports success over
+# a value the broker can never read (refused outright by
+# _pepper_refuse_unusable_shapes below). Accepts either TOML key-quoting style
+# (basic "..." and literal '...' both parse to the same flat key) and any
+# indentation: leading whitespace does NOT make a top-level key nested
+# (verified against tomllib), so an indented entry that a presence check misses
+# gets a DUPLICATE appended, and tomllib then rejects the WHOLE file with
+# "Cannot overwrite a value" — taking deepseek_api_key, discord_bot_token and
+# every other secret down with the pepper.
+pepper_line_re="^[[:space:]]*(\"${pepper_key_re}\"|'${pepper_key_re}')[[:space:]]*="
+# ... the same line with a provably-empty value. Both quote styles: a '' blank
+# is as unambiguously blank as a "" one, and accepting it also closes the
+# cosmetic "single-quoted blank entries never auto-fill" follow-up parked in
+# the #594 fix-1 round-3 review.
+pepper_blank_re="${pepper_line_re}[[:space:]]*(\"\"|'')[[:space:]]*\$"
+# The bare (unquoted) dotted spelling — the TOML nested-table trap. Deliberately
+# NOT part of pepper_line_re: it is a shape this script must refuse, not accept.
+pepper_bare_re="^[[:space:]]*${pepper_key_re}[[:space:]]*="
+# A TOML table/array-of-tables header. Shared by the refusal gate and the
+# root-scope insert in _pepper_write_file for the same reason the pepper
+# patterns are shared: two hand-written copies of "what opens a table" would be
+# free to drift the same way the pepper patterns did.
+toml_table_re='^[[:space:]]*\['
 target_file="${ALFRED_SECRETS_FILE:-$secrets_file}"
 lock_dir="${target_file}.lock"
 # #591: the .env carrier for the dotted container key docker-compose forwards
@@ -450,11 +496,74 @@ _pepper_ensure_target() {
   chmod 600 "$target_file"
 }
 
+# #594 R2: refuse — never guess — on any secrets.toml shape whose meaning to
+# tomllib (and therefore to SecretBroker._load_toml_file, the only consumer)
+# differs from what this script's pattern-matching would assume. This script is
+# not a TOML parser; it handles exactly the one canonical shape it writes.
+# Every historical bug in this block (#594 sec-002, sec-002-drift, and both
+# CodeRabbit majors on #594) is the same failure: guessing about a shape the
+# script cannot decide, then reporting success over it. Refusing keeps the
+# invariant that the operator LEARNS about it, rather than ending up with
+# alfred-core and the host CLI on two different HMAC planes (spec §8.10).
+#
+# Reports LINE NUMBERS, never line contents: the offending line holds the
+# secret, and nothing in this block ever echoes a pepper value.
+#
+# Runs inside the lock, before anything is read for reconcile or written, so it
+# gates BOTH the read and the write side.
+_pepper_refuse_unusable_shapes() {
+  local bare_line dup_count first_pepper first_table
+
+  # 1. Bare dotted key: `audit.hash_pepper = "..."`. In TOML that is the nested
+  #    table {audit: {hash_pepper: ...}}; _load_toml_file keeps only top-level
+  #    string values, so the broker drops it. Mirroring it into .env would put
+  #    alfred-core on a value host-side `alfred` commands cannot see.
+  #    `|| true` guards the pipeline the same way _pepper_from_file's does: with
+  #    `pipefail` a no-match grep (rc 1) would otherwise fail the assignment,
+  #    which `set -e` kills outright in any call context that is not an
+  #    `if`-condition. Not relying on the current call site's shape for that.
+  bare_line="$(grep -nE "$pepper_bare_re" "$target_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+  if [[ -n "$bare_line" ]]; then
+    printf 'ERROR: %s\n' \
+      "${target_file} line ${bare_line} sets audit.hash_pepper as an UNQUOTED dotted key. In TOML that is the nested table [audit] hash_pepper, not the flat key AlfredOS reads — the secret broker drops it entirely, so alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Quote the key instead: \"audit.hash_pepper\" = \"<your value>\" (keep the value exactly as it is — changing it invalidates every *_hash audit row already written). Then re-run." >&2
+    return 1
+  fi
+
+  # 2. More than one canonical pepper line. tomllib rejects a duplicate key
+  #    with "Cannot overwrite a value" for the WHOLE file, which takes every
+  #    other secret (deepseek_api_key, discord_bot_token, ...) down with the
+  #    pepper.
+  #    `grep -c` prints "0" AND exits 1 when nothing matches, so the tempting
+  #    `$(grep -c ... || echo 0)` yields the two-line string "0\n0" and the
+  #    `-gt` below then dies with a bash arithmetic syntax error on stderr —
+  #    on the MOST COMMON path (a fresh file with no pepper yet). Capture the
+  #    count and default on the assignment's own status instead.
+  dup_count="$(grep -cE "$pepper_line_re" "$target_file" 2>/dev/null)" || dup_count=0
+  if [[ "$dup_count" -gt 1 ]]; then
+    printf 'ERROR: %s\n' \
+      "${target_file} defines audit.hash_pepper ${dup_count} times. TOML rejects a duplicate key ('Cannot overwrite a value'), which makes the ENTIRE secrets file unreadable — every other secret in it fails too, not just the pepper. Delete the duplicate lines until exactly one remains, then re-run. If they hold different values, keep the one alfred-core is already using (ALFRED_AUDIT_HASH_PEPPER in .env) — changing it invalidates every *_hash audit row written under the other." >&2
+    return 1
+  fi
+
+  # 3. A canonical pepper line scoped INSIDE a [table]. TOML puts every key
+  #    after a table header into that table, so the broker's top-level lookup
+  #    never sees it, however correctly the line itself is spelled.
+  first_pepper="$(grep -nE "$pepper_line_re" "$target_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+  first_table="$(grep -nE "$toml_table_re" "$target_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+  if [[ -n "$first_pepper" && -n "$first_table" && "$first_pepper" -gt "$first_table" ]]; then
+    printf 'ERROR: %s\n' \
+      "${target_file} line ${first_pepper} sets audit.hash_pepper inside the [table] opened at line ${first_table}. TOML scopes it into that table, so the secret broker (which reads only top-level keys) never sees it. Move the line ABOVE line ${first_table}, keeping its value unchanged, then re-run." >&2
+    return 1
+  fi
+
+  return 0
+}
+
 # #591: print the existing pepper VALUE (not just presence) out of the broker
-# secrets file. Accepts both the quoted dotted key this script writes
-# (``"audit.hash_pepper" = "..."``) and the unquoted spelling an operator's
-# hand-edited file might use, AND both TOML string forms tomllib accepts for
-# a flat string value: double-quoted basic strings (``"..."``) and
+# secrets file. Accepts either TOML KEY-quoting style
+# (``"audit.hash_pepper" = ...`` / ``'audit.hash_pepper' = ...``, both of which
+# tomllib reads as the same flat key) and both TOML string forms tomllib
+# accepts for a flat string VALUE: double-quoted basic strings (``"..."``) and
 # single-quoted literal strings (``'...'``). #594 sec-002-drift: a
 # single-quoted hand-set value used to read back as empty here (the regex
 # only recognized the double-quoted form), which made _pepper_bootstrap
@@ -467,11 +576,26 @@ _pepper_ensure_target() {
 # complexity. ``|| true`` binds to the whole pipeline so a SIGPIPE from
 # `head -1` truncating the stream can never trip `pipefail` (same idiom as
 # `read_env_var` above).
+#
+# #594 R2: the key half of both patterns is now $pepper_line_re — the SAME
+# definition _pepper_write_file and _pepper_refuse_unusable_shapes use — rather
+# than a fourth hand-written spelling. That also NARROWS the reader: it used to
+# accept the bare `audit.hash_pepper = "..."` spelling via an optional-quote
+# `"?`, which tomllib reads as a nested table the broker never sees, so the
+# reader reported a value alfred-core could not possibly be using. That shape
+# is now refused up-front instead of silently mis-read.
+#
+# LOAD-BEARING: the capture group is \2, not \1. $pepper_line_re contains a
+# capture group of its own (the "..."|'...' key-quote alternation — POSIX ERE
+# has no non-capturing group), so the VALUE is the second group. If
+# $pepper_line_re ever gains or loses a group, this numbering must move with
+# it; a silently-wrong number here reads back an empty pepper, which is exactly
+# the shape of the sec-002-drift bug (two HMAC planes, exit 0, no refusal).
 _pepper_from_file() {
   [[ -f "$target_file" ]] || return 0
   sed -n -E \
-    -e 's/^[[:space:]]*"?audit\.hash_pepper"?[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' \
-    -e "s/^[[:space:]]*\"?audit\.hash_pepper\"?[[:space:]]*=[[:space:]]*'([^']*)'.*/\1/p" \
+    -e "s/${pepper_line_re}[[:space:]]*\"([^\"]*)\".*/\\2/p" \
+    -e "s/${pepper_line_re}[[:space:]]*'([^']*)'.*/\\2/p" \
     "$target_file" | head -1 || true
 }
 
@@ -479,10 +603,11 @@ _pepper_from_file() {
 # REAL value (spec §8.10: rotating the pepper invalidates cross-row
 # correlation).
 _pepper_write_file() {
-  if grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
+  local tmp_file line replaced=0
+  if grep -qE "$pepper_line_re" "$target_file" 2>/dev/null; then
     # #594 sec-002 (fix-2, regression fix): the key is present. Only overwrite
-    # when the value is SPECIFICALLY a blank double-quoted string (`= ""`) —
-    # never merely because a general-purpose value-extraction regex failed to
+    # when the value is SPECIFICALLY a provably-blank string (`= ""` or `= ''`)
+    # — never merely because a general-purpose value-extraction regex failed to
     # match. A first version of this fix called _pepper_from_file (whose
     # regex only recognizes DOUBLE-quoted TOML strings) and treated "didn't
     # match" as "must be blank" — but TOML also allows SINGLE-quoted literal
@@ -496,7 +621,11 @@ _pepper_write_file() {
     # double-quoted, malformed, ...) is treated as "a value is already here"
     # and left completely untouched — the same behavior this function had
     # before #594 sec-002 for every one of those shapes.
-    if ! grep -qE "^\"?${pepper_key}\"?[[:space:]]*=[[:space:]]*\"\"[[:space:]]*\$" "$target_file" 2>/dev/null; then
+    #
+    # #594 R2: both this blank check and the presence check above are now
+    # derived from the shared $pepper_line_re / $pepper_blank_re definitions
+    # instead of carrying their own hand-written spelling of the key.
+    if ! grep -qE "$pepper_blank_re" "$target_file" 2>/dev/null; then
       return 0
     fi
     # Blank double-quoted entry (e.g. an operator hand-set
@@ -505,11 +634,16 @@ _pepper_write_file() {
     # same reason: the incoming value is not hex-constrained on the
     # mirrored-from-.env path, so it must never be fed through sed/awk
     # substitution syntax.
-    local tmp_file line replaced=0
     tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
     if ! {
       while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$replaced" -eq 0 && "$line" =~ ^\"?${pepper_key}\"?[[:space:]]*=[[:space:]]*\"\"[[:space:]]*$ ]]; then
+        # LOAD-BEARING: $pepper_blank_re is UNQUOTED here. Quoting the RHS of
+        # `=~` makes bash match it as a LITERAL STRING rather than as an ERE,
+        # so this branch would silently never fire and a blank entry would
+        # never be filled in — while the caller still printed its success
+        # banner. Verified against bash 3.2.57 and 5.3; pinned by
+        # test_bootstrap_fills_a_blank_entry_in_place_without_duplicating.
+        if [[ "$replaced" -eq 0 && "$line" =~ $pepper_blank_re ]]; then
           printf '"%s" = "%s"\n' "$pepper_key" "$1"
           replaced=1
         else
@@ -580,6 +714,12 @@ _pepper_bootstrap() {
   if ! _pepper_ensure_target; then
     printf 'ERROR: failed to prepare %s for the audit.hash_pepper bootstrap (chmod 600 failed?)\n' \
       "$target_file" >&2
+    return 1
+  fi
+  # #594 R2: gate every shape this script cannot handle correctly BEFORE either
+  # plane is read for reconcile or written. The helper prints its own specific,
+  # remediation-bearing error, so there is nothing to add here.
+  if ! _pepper_refuse_unusable_shapes; then
     return 1
   fi
   local env_pepper file_pepper
