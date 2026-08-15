@@ -268,7 +268,7 @@ fi
 # MUST UPDATE THIS BRANCH TOO — that Python test will not fail for you if you forget.
 if [[ -n "${ALFRED_QUARANTINE_PROVIDER+x}" ]]; then
   quarantine_provider="${ALFRED_QUARANTINE_PROVIDER:-anthropic}"
-  quarantine_provider_source="your shell environment (which docker compose prefers over .env)"
+  quarantine_provider_source="your shell environment — docker compose prefers this over .env"
 else
   quarantine_provider="$(read_env_var ALFRED_QUARANTINE_PROVIDER)"
   quarantine_provider_source=".env"
@@ -323,21 +323,29 @@ else
   require_separation="$(read_env_var ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION)"
 fi
 
-# Normalise as provider_ids_collide() does (.strip().lower()) — belt-and-braces: a
-# mis-cased ALFRED_QUARANTINE_PROVIDER already fails the closed-set branch above, so an
-# operator whose value is BOTH mis-cased and colliding learns both problems in one setup
-# run instead of fix-case / re-run / discover-collision. tr, not bash 4+ ${var,,}: this
-# script targets bash 3.2 (macOS system bash).
-require_separation_norm="$(printf '%s' "$require_separation" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+# quarantine_provider_norm: normalise as provider_ids_collide() does (.strip().lower())
+# — belt-and-braces: a mis-cased ALFRED_QUARANTINE_PROVIDER already fails the closed-set
+# branch above (that check runs against the RAW, un-normalised value, so a whitespace- or
+# case- mangled value is already flagged there), so an operator whose value is BOTH
+# mis-cased and colliding learns both problems in one setup run instead of
+# fix-case / re-run / discover-collision. Stripping here is redundant-but-harmless with
+# that earlier gate, never the ONLY check. tr, not bash 4+ ${var,,}: this script targets
+# bash 3.2 (macOS system bash).
+#
+# require_separation_norm: case-fold ONLY — do NOT strip whitespace (round-6 review
+# fleet / CodeRabbit). Unlike quarantine_provider, require_separation has no earlier
+# raw-value gate, so stripping whitespace here would be the ONLY check, and it would
+# silently PASS a value pydantic's bool parser REJECTS: that parser is a CLOSED SET,
+# case-insensitive, with NO whitespace tolerance (true/1/yes/y/on/t,
+# false/0/no/off/f/n — anything else, including a whitespace-padded value, raises
+# settings_invalid). A stripped " true" would match the true-branch below and read as
+# "no problem" while the real daemon refuses to boot — the exact silent-miss this gate
+# exists to prevent. Case-folding alone is safe: pydantic's bool parser IS
+# case-insensitive, so folding case never turns a real rejection into a false accept.
+require_separation_norm="$(printf '%s' "$require_separation" | tr '[:upper:]' '[:lower:]')"
 quarantine_provider_norm="$(printf '%s' "$quarantine_provider" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 quarantine_provider_effective="${quarantine_provider_norm:-anthropic}"
 
-# Pydantic's bool parsing is a CLOSED SET, case-insensitive, with NO whitespace
-# tolerance: true/1/yes/y/on/t and false/0/no/off/f/n — anything else, including a
-# whitespace-padded value or the empty string post-normalisation, raises a
-# settings_invalid refuse-boot. Whitespace is stripped above rather than reported here:
-# compose's own .env parser owns that edge, and a false "not a boolean" problem blocking
-# an otherwise-working stack costs more than the miss.
 case "$require_separation_norm" in
   true | 1 | yes | y | on | t)
     if [[ "$quarantine_provider_effective" == "$compose_primary_provider" ]]; then
@@ -346,7 +354,12 @@ case "$require_separation_norm" in
     ;;
   "" | false | 0 | no | off | f | n) ;;
   *)
-    add_config_problem "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION is '${require_separation}', which is not a boolean. It must be one of true/1/yes/y/on/t or false/0/no/off/f/n (any case) — or left unset for the 'false' default. Any other value refuses boot on the settings_invalid path."
+    # The offending value is deliberately NOT reprinted (same rationale as the
+    # ALFRED_QUARANTINE_PROVIDER diagnostic above): this field sits in the same .env
+    # neighbourhood as ALFRED_QUARANTINE_PROVIDER_API_KEY, and an operator who fat-
+    # fingered a credential onto the wrong line must not have it echoed into setup
+    # output, shell scrollback, or a CI log.
+    add_config_problem "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION is set to an unsupported boolean value. It must be one of true/1/yes/y/on/t or false/0/no/off/f/n (any case) — or left unset for the 'false' default. Any other value (including a whitespace-padded one) refuses boot on the settings_invalid path."
     ;;
 esac
 

@@ -211,6 +211,11 @@ class CommsInboundOrchestratorAdapter:
         """
         sender = self._require_sender()
         if not isinstance(ingested, Mapping):
+            # Round-6 review fleet (err-002): log before raising, matching the
+            # fail-loud-with-context standard of the sibling guards below
+            # (_require_ingested_key, _require_sender) — this arm was the one
+            # left silent.
+            _log.error("comms.daemon_runtime.dispatch_bad_ingested")
             raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
         # MANDATORY DLP chokepoint: mint the ScannedOutboundBody from the raw ack
         # content text. This is the ONLY way to obtain the body type the request
@@ -466,14 +471,17 @@ def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
         return model
     if provider_id == "anthropic":
         return _QUARANTINE_MODEL
+    # provider_id deliberately NOT logged/echoed: it is ALFRED_QUARANTINE_PROVIDER,
+    # the exact field bin/alfred-setup.sh's own diagnostic stopped echoing this same
+    # round because ALFRED_QUARANTINE_PROVIDER_API_KEY sits on the adjacent .env line
+    # — the field name alone is the safe, sufficient triage key (round-6 review fleet).
     _log.error(
         "comms.daemon_runtime.quarantine_provider_config_invalid",
         field="quarantine_provider",
-        provider_id=provider_id,
     )
     raise QuarantineProviderConfigInvalidError(
-        f"_resolve_quarantine_model: unsupported provider_id {provider_id!r} — "
-        "refusing to silently resolve the anthropic model for an out-of-closed-set "
+        "_resolve_quarantine_model: unsupported provider_id — refusing to silently "
+        "resolve the anthropic model for an out-of-closed-set ALFRED_QUARANTINE_PROVIDER "
         "value (HARD #7, prov-r2-001)"
     )
 
@@ -525,14 +533,15 @@ def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | 
         return base_url
     if provider_id == "anthropic":
         return None
+    # provider_id deliberately NOT logged/echoed — see the identical rationale on the
+    # sibling out-of-closed-set guard in _resolve_quarantine_model above.
     _log.error(
         "comms.daemon_runtime.quarantine_provider_config_invalid",
         field="quarantine_provider",
-        provider_id=provider_id,
     )
     raise QuarantineProviderConfigInvalidError(
-        f"_resolve_quarantine_base_url: unsupported provider_id {provider_id!r} — "
-        "refusing to silently resolve None for an out-of-closed-set value "
+        "_resolve_quarantine_base_url: unsupported provider_id — refusing to silently "
+        "resolve None for an out-of-closed-set ALFRED_QUARANTINE_PROVIDER value "
         "(HARD #7, prov-r2-001)"
     )
 
@@ -726,5 +735,6 @@ __all__ = [
     "CommsInboundOrchestratorAdapter",
     "OutboundSenderLike",
     "QuarantineMaxTokensInvalidError",
+    "QuarantineProviderConfigInvalidError",
     "QuarantineProviderKeyUnsetError",
 ]

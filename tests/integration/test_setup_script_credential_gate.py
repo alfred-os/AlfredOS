@@ -448,6 +448,27 @@ def test_required_separation_accepts_pydantics_full_falsy_set(tmp_path: Path, fa
     assert code == 0, err
 
 
+def test_whitespace_padded_separation_flag_is_reported_not_silently_stripped(
+    tmp_path: Path,
+) -> None:
+    """Round-6 review fleet (CodeRabbit): pydantic's bool parser has NO whitespace
+    tolerance, so a padded value (unlike ALFRED_QUARANTINE_PROVIDER, which has its own
+    earlier raw-value gate) must be REPORTED here, not silently normalised into a
+    matching truthy/falsy spelling. Before the fix this gate stripped whitespace before
+    comparing, so ' true' passed as clean while the real daemon would refuse boot on
+    settings_invalid — the exact silent-miss this test pins shut."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION= true\n",
+    )
+    assert code == 1
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in err
+    assert "unsupported boolean value" in err
+
+
 def test_unparseable_separation_flag_is_reported(tmp_path: Path) -> None:
     """A value outside pydantic's closed bool set refuses boot on settings_invalid —
     the gate must catch it too, not just the collision it might also be hiding."""
@@ -459,7 +480,10 @@ def test_unparseable_separation_flag_is_reported(tmp_path: Path) -> None:
     )
     assert code == 1
     assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in err
-    assert "not a boolean" in err
+    assert "unsupported boolean value" in err
+    # Round-6 review fleet: the offending value is deliberately NOT echoed (same
+    # credential-adjacency rationale as the ALFRED_QUARANTINE_PROVIDER diagnostic).
+    assert "maybe" not in err
 
 
 def test_shell_set_separation_beats_a_dotenv_value(tmp_path: Path) -> None:
