@@ -402,6 +402,57 @@ async def test_watchdog_does_not_fire_after_a_reply_arrives() -> None:
 
 
 @pytest.mark.asyncio
+async def test_watchdog_callback_after_turn_already_ended_is_a_safe_no_op() -> None:
+    """The same-tick race ``_on_turn_timeout``'s idempotence guard exists for:
+    ``Timer.stop()`` cannot un-queue a callback the message pump already
+    scheduled onto the CURRENT tick, so a reply that lands in the same tick
+    as the watchdog's expiry can still reach ``_on_turn_timeout`` AFTER
+    ``_end_turn()`` already ran via the reply path (``write_outbound`` /
+    ``set_turn_failed``). Simulated directly here — real same-tick Textual
+    scheduling would be flaky to construct reliably: end the turn normally
+    via ``write_outbound``, THEN call ``_on_turn_timeout()`` directly,
+    standing in for the stale queued callback the real ``Timer.stop()``
+    couldn't have prevented.
+
+    Distinct from ``test_watchdog_does_not_fire_after_a_reply_arrives``
+    above (which proves the watchdog ``Timer`` is genuinely STOPPED and so
+    never fires at all) and from ``test_stale_outbound_reply_does_not_clobber_the_next_turn``
+    below (which drives ``_on_turn_timeout`` to ABANDON a still-pending turn,
+    the opposite direction of this race) — this is the callback firing
+    AFTER the turn already ended through the normal path, which neither of
+    those covers.
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "hello alfred")
+        await pilot.pause()
+        assert app._turn_pending is True  # sanity: turn genuinely pending
+
+        app.write_outbound("a normal reply that ends the turn")
+        await pilot.pause()
+        assert app._turn_pending is False  # sanity: the reply really did end it
+        rendered_before = _plain_text(_log(app))
+
+        # The stale queued callback: fires AFTER the turn already ended,
+        # standing in for a callback the message pump had already scheduled
+        # onto this tick before `Timer.stop()` could un-queue it.
+        app._on_turn_timeout()
+        await pilot.pause()
+
+        assert app._turn_pending is False, "the guard must not toggle pending back on"
+        assert app._stale_turns_awaiting_signal == 0, (
+            "a stale call caught by the guard must never reach the debt-counter increment"
+        )
+        rendered_after = _plain_text(_log(app))
+    assert rendered_after == rendered_before, (
+        "a stale watchdog callback for an already-ended turn must add nothing to the transcript"
+    )
+    timeout_line = t("tui.turn_timeout", seconds=int(_MODERATE_TIMEOUT_SECONDS))
+    assert timeout_line not in rendered_after
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stage", get_args(TurnFailureStage))
 async def test_set_turn_failed_renders_localized_copy_and_clears_pending(
     stage: TurnFailureStage,

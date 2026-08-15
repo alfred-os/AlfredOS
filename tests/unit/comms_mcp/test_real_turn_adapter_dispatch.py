@@ -387,6 +387,27 @@ class _WireFaultOnNotifySender:
         raise self._fault
 
 
+class _CancelledOnNotifySender:
+    """``send_outbound`` records; ``send_turn_state`` raises ``CancelledError``.
+
+    Distinct from ``_WireFaultOnNotifySender``: ``CancelledError`` is
+    deliberately NOT a member of ``_NOTIFY_WIRE_EXCEPTIONS`` (never
+    ``BaseException`` in that tuple), so it must fall through both ``except``
+    clauses in ``_notify_turn_failed`` and propagate, rather than being
+    logged-and-swallowed the way a real wire fault is.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    async def send_outbound(self, request: object) -> dict[str, object]:
+        self.sent.append(request)
+        return {}
+
+    async def send_turn_state(self, notification: object) -> None:
+        raise asyncio.CancelledError
+
+
 class _HangingNotifySender:
     """``send_turn_state`` never completes — proves the notify bound fires."""
 
@@ -495,6 +516,27 @@ async def test_notify_wire_failure_does_not_replace_the_turn_error_reraise() -> 
     )
     with pytest.raises(RuntimeError, match="provider down"):
         await adapter.dispatch(_prepared())
+
+
+async def test_notify_turn_failed_lets_cancelled_error_propagate() -> None:
+    """``CancelledError`` must propagate out of ``_notify_turn_failed`` uncaught
+    (#594 Fix-4). ``_NOTIFY_WIRE_EXCEPTIONS`` is deliberately narrow — never
+    ``BaseException`` — precisely so a caller-level task cancellation (e.g. the
+    daemon shutting down mid-turn) that lands while ``send_turn_state`` is
+    in-flight actually cancels the notify, rather than being silently caught
+    and logged like a real member of the wire-fault tuple.
+
+    Called directly (mirroring
+    ``test_notify_turn_failed_skips_non_notifiable_stage_directly`` below)
+    with a NOTIFIABLE stage (``budget_denied`` -> client stage
+    ``budget_exhausted``) so execution actually reaches the
+    ``await asyncio.wait_for(sender.send_turn_state(...))`` call rather than
+    short-circuiting on the ``client_stage is None`` guard.
+    """
+    sender = _CancelledOnNotifySender()
+    adapter = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender)
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._notify_turn_failed(sender, adapter_id="tui", stage="budget_denied")
 
 
 async def test_notify_timeout_is_bounded_and_does_not_hang_the_halt(monkeypatch) -> None:

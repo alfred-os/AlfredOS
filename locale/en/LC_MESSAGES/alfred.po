@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 01:39+0100\n"
+"POT-Creation-Date: 2026-08-15 01:54+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3635,6 +3635,7 @@ msgstr "Speak to Alfred..."
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:233
 #: plugins/alfred_tui/tests/test_textual_app.py:373
 #: plugins/alfred_tui/tests/test_textual_app.py:399
+#: plugins/alfred_tui/tests/test_textual_app.py:451
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s"
 
@@ -3654,7 +3655,7 @@ msgid "tui.thinking"
 msgstr "thinking..."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:279
-#: plugins/alfred_tui/tests/test_textual_app.py:584
+#: plugins/alfred_tui/tests/test_textual_app.py:635
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
