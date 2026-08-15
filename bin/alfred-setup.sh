@@ -585,6 +585,11 @@ _pepper_bootstrap() {
   local env_pepper file_pepper
   env_pepper="$(read_env_var "$pepper_env_key")"
   file_pepper="$(_pepper_from_file)"
+  # The pepper is hex-only; surrounding whitespace in a hand-edited .env is
+  # never part of the value. Trim before comparing so a padded-but-identical
+  # pair does not trip the drift refusal below.
+  env_pepper="$(trim_ws "$env_pepper")"
+  file_pepper="$(trim_ws "$file_pepper")"
 
   if [[ -n "$env_pepper" && -n "$file_pepper" ]]; then
     if [[ "$env_pepper" == "$file_pepper" ]]; then
@@ -735,6 +740,7 @@ if [[ "$has_operator" == "0" ]]; then
     default_name="$(read_env_var ALFRED_OPERATOR_NAME)"
     default_name="$(trim_ws "$default_name")"; default_name="${default_name:-operator}"
     read -r -p "Operator display name [${default_name}]: " name
+    name="$(trim_ws "$name")"
     name="${name:-$default_name}"
   fi
   budget="$(read_env_var ALFRED_DAILY_BUDGET_USD)"

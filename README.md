@@ -50,7 +50,7 @@ alfred chat                 # start a TUI conversation
 >
 > ```sh
 > docker compose run --rm alfred-core user unbind <your-operator-slug> --platform tui
-> docker compose run --rm alfred-core user bind   <your-operator-slug> --platform tui --id "$ALFRED_OPERATOR_NAME"
+> docker compose run --rm alfred-core user bind   <your-operator-slug> --platform tui --id <your-operator-display-name>
 > ```
 
 > **Two provider keys are required before the first `docker compose up -d`.**

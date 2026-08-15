@@ -125,13 +125,15 @@ def _run_bootstrap_in_tmpdir(
         env_file.write_text("ALFRED_AUDIT_HASH_PEPPER=\n")
     # Prelude defines the variables the bootstrap block expects from
     # the surrounding script (secrets_file from "Priming secrets bind-
-    # mount"; step helper as a no-op shim) plus read_env_var, which the
-    # reconcile block now calls but which is defined elsewhere in the real
+    # mount"; step helper as a no-op shim) plus read_env_var and trim_ws,
+    # which the reconcile block now calls (trim_ws since #594's
+    # whitespace-drift fix) but which are defined elsewhere in the real
     # script (outside this slice), same reason _openssl_missing_message_func
     # is prepended below.
     prelude = (
         f'secrets_file="{target_file}"\nstep() {{ echo "==> $*"; }}\n'
         + slice_shell_function(_SETUP_SH, "read_env_var() {")
+        + slice_shell_function(_SETUP_SH, "trim_ws() {")
         + _openssl_missing_message_func()
     )
     script = prelude + bootstrap

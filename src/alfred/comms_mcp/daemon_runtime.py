@@ -138,7 +138,6 @@ class OutboundSenderLike(Protocol):
         scan (there is no text — the frame carries a closed ``Literal`` only), and
         NO adapter addressing (the runner behind this seam IS the address).
         """
-        ...
 
 
 class CommsInboundOrchestratorAdapter:

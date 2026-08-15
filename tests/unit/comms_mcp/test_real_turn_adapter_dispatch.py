@@ -723,5 +723,13 @@ def test_client_turn_failure_stage_is_total_over_refusal_stage() -> None:
     ``assert_never`` — the exhaustiveness guarantee ``_client_turn_failure_stage``
     exists to provide (a future refusal stage added without a client decision
     must be a type-check failure here, never a silent drop)."""
-    for stage in get_args(_RefusalStage):
-        _client_turn_failure_stage(stage)  # must not raise
+    assert {
+        stage: _client_turn_failure_stage(stage) for stage in get_args(_RefusalStage)
+    } == {
+        "downgrade_denied": "refused",
+        "dlp_canary_tripped": "refused",
+        "budget_denied": "budget_exhausted",
+        "downgrade_malformed": "internal_error",
+        "turn_error": "internal_error",
+        "send_failed": None,
+    }
