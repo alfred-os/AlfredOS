@@ -842,8 +842,14 @@ _pepper_write_env() {
   else
     # Trailing-newline guard (#469 Blocker 2 CodeRabbit finding): without it a
     # .env whose last byte is not \n glues the new key onto the previous line.
-    if [[ -s .env ]] && [[ -n "$(tail -c1 .env)" ]]; then printf '\n' >> .env; fi
-    ( umask 077 && printf '%s=%s\n' "$pepper_env_key" "$1" >> .env )
+    # Both writes below are guarded individually (not just the second one's
+    # subshell exit status) -- see _pepper_write_rc_note above: a silently-
+    # failed newline write here would let the pepper append glue onto the
+    # operator's last existing .env line while the function still reports 0.
+    if [[ -s .env ]] && [[ -n "$(tail -c1 .env)" ]]; then
+      printf '\n' >> .env || return 1
+    fi
+    ( umask 077 && printf '%s=%s\n' "$pepper_env_key" "$1" >> .env ) || return 1
   fi
 }
 
