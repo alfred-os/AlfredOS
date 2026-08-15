@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 12:14+0100\n"
+"POT-Creation-Date: 2026-08-15 14:05+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3642,7 +3642,9 @@ msgstr "Speak to Alfred..."
 #: plugins/alfred_tui/tests/test_textual_app.py:462
 #: plugins/alfred_tui/tests/test_textual_app.py:674
 msgid "tui.turn_timeout"
-msgstr "no response within {seconds}s"
+msgstr ""
+"No response within {seconds}s. Try again, or check the daemon logs if it "
+"recurs."
 
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:474
 #: plugins/alfred_tui/tests/test_textual_app.py:354
