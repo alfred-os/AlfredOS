@@ -119,3 +119,24 @@ def _adapter(*, orchestrator, audit=None, sender=None, pool=None, outbound_dlp=N
     )
     a.bind_outbound_sender(sender or _RecordingSender())
     return a
+
+
+def _unbound_adapter(*, orchestrator):
+    """Sibling to ``_adapter()`` for the pre-``bind_outbound_sender`` shape.
+
+    Deliberately skips the ``bind_outbound_sender`` call ``_adapter()`` always
+    makes — for the FOLD-R5 sender-unbound tests
+    (``test_dispatch_before_bind_raises_runtime_error``,
+    ``test_halt_no_reply_with_no_bound_sender_halts_loudly_without_raising``,
+    ``test_refusal_reply_with_no_bound_sender_still_raises``), which need
+    ``self._sender is None`` at dispatch time. Extracted (arc-001, PR #594
+    Task S1) once a third call site inlined the same 7-line construction.
+    """
+    return RealTurnOrchestratorAdapter(
+        orchestrator=orchestrator,
+        working_memory_pool=_Pool(),
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
+        audit_writer=_RecordingAudit(),
+        outbound_dlp=identity_outbound_dlp(),
+        extractor_bridge=SimpleNamespace(),
+    )

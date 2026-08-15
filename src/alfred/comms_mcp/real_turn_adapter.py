@@ -645,11 +645,13 @@ class RealTurnOrchestratorAdapter:
         and ``_RefusalReply`` it is ``_await_turn_ordering_barrier`` (below)
         returning (``_send``'s own scan-FAILURE legs are the one documented
         exception — see its docstring). Two same-``(persona, slug)``-key
-        turns can no longer signal the client out of submission order, full
-        stop — arc-001 (PR #594 Task S1) closed the gap where this held only
+        turns can no longer signal the client out of submission order —
+        arc-001 (PR #594 Task S1) closed the gap where this held only
         for a ``_PreparedTurn``-vs-``_PreparedTurn`` pairing: the two
         ingest-resolved outcomes now take the SAME ordering barrier instead
-        of running turn work under the lock, so EVERY pairing is covered. A
+        of running turn work under the lock, so EVERY pairing is covered
+        (modulo the arrival-at-lock-vs-submission-order caveat on
+        ``_TurnFailed`` above, which applies here too). A
         downstream client (the TUI's stale-turn debt counter) depends on
         this: it has NO wire-level correlation available to check it itself.
         See the longer note on ``_TurnFailed`` above and
@@ -663,17 +665,23 @@ class RealTurnOrchestratorAdapter:
             # must not be left staring at a dead prompt. Signal the STATE (no text
             # on the wire) so the client can release its pending turn.
             #
-            # arc-001 (PR #594 Task S1): read the sender BEFORE the barrier, but
-            # do not raise on it yet — a wiring precondition (unbound sender) must
-            # not turn this DETERMINISTIC halt into a re-raise that the forwarded
-            # path's bounded replay would amplify into up to 5 duplicate
-            # quarantined extracts re-writing the identical audit row (the
-            # CodeRabbit finding folded into this fix, root-cause report §2).
-            # The barrier itself runs UNCONDITIONALLY — even with no sender bound
-            # there is still an ordering contract to honour for whichever other
-            # same-key turn eventually does have one.
-            sender = self._sender
+            # arc-001 (PR #594 Task S1): the barrier runs UNCONDITIONALLY,
+            # BEFORE the sender is even read — even with no sender bound there
+            # is still an ordering contract to honour for whichever other
+            # same-key turn eventually does have one. The sender itself is
+            # read AFTER the barrier returns (not before): a synchronous
+            # attribute read introduces no ``await`` and so doesn't touch the
+            # no-await-between-release-and-notify invariant, and reading it
+            # late is strictly FRESHER — a sender bound while this coroutine
+            # was parked on the barrier must be seen, not missed via a stale
+            # snapshot taken before the wait. Do not raise on ``None`` here —
+            # a wiring precondition (unbound sender) must not turn this
+            # DETERMINISTIC halt into a re-raise that the forwarded path's
+            # bounded replay would amplify into up to 5 duplicate quarantined
+            # extracts re-writing the identical audit row (the CodeRabbit
+            # finding folded into this fix, root-cause report §2).
             await self._await_turn_ordering_barrier(ingested.canonical_user_id)
+            sender = self._sender
             if sender is None:
                 _log.error("comms.daemon_runtime.sender_unbound")
                 return

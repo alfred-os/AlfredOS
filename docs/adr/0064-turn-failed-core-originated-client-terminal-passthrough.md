@@ -242,18 +242,55 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
   fix eventually would have been the wire change this ADR explicitly
   rejects.
 
-  **Tripwire (in addition to the one above).** The ordering barrier is a
-  per-key acquire-then-release of the SAME mutex a `_PreparedTurn` holds for
-  the duration of a turn. Today that is inert wire-time cost — an
-  uncontended `asyncio.Lock` acquire/release is effectively free — because
-  `TURN_STATE_CLIENT_KINDS == frozenset({"tui"})` and the TUI is a
-  daemon-spawned stdio adapter on the direct, non-`commit_at_dispatch_edge`
-  path, so no forwarded frame is ever held open on the barrier. The moment
-  `TURN_STATE_CLIENT_KINDS` gains a non-local kind, a refusal for that
-  adapter would be genuinely DELAYED until an in-flight same-key
-  `_PreparedTurn` releases the lock. Re-derive this alongside the existing
-  tripwire above, which the same widening commit already has to revisit for
-  the timing-side-channel acceptance.
+  **Accepted cost, live TODAY — not a future-only tripwire.** The ordering
+  barrier is UNCONDITIONAL by design (report §5.2 step 3: "acquire the
+  barrier unconditionally... default-deny closes the class") — it is never
+  gated on `TURN_STATE_CLIENT_KINDS`, which governs only whether
+  `_notify_turn_failed` puts a frame on the wire, not whether the barrier
+  itself runs. So `TURN_STATE_CLIENT_KINDS == frozenset({"tui"})` says
+  nothing about whether the barrier is exercised, and an earlier draft of
+  this note wrongly reasoned from it that the barrier was inert until that
+  set widened.
+
+  It is already exercised, today, on the forwarded/gateway path.
+  `GatewayForwardedInboundReceiver` calls `process_inbound_message` with
+  `commit_at_dispatch_edge=True`
+  (`src/alfred/comms_mcp/forwarded_inbound_receiver.py:247`) against the
+  SAME `RealTurnOrchestratorAdapter` instance the TUI's direct path shares —
+  both are constructed and wired together in the one boot function
+  (`src/alfred/cli/daemon/_comms_boot.py`: `inbound_orchestrator` is built,
+  then threaded into `_build_forwarded_inbound_registry` and from there into
+  `GatewayForwardedInboundReceiver`). So a forwarded adapter's
+  `_RefusalReply` — driven by the ROUTINE `cannot_extract` /
+  `provider_unavailable` `TypedRefusal` reasons, not a rare
+  misconfiguration — already takes the same `dispatch()` call and already
+  sits on the barrier if an earlier same-key turn is in flight. Unlike the
+  TUI, the forwarded path has no client-side turn-pending lockout gating one
+  in-flight turn per session behind a 90s watchdog, so same-user overlap
+  there is ordinary traffic, not a rare failure mode.
+
+  Accepted because the barrier's cost when contended IS the behaviour the
+  fix exists to produce — a later same-key signal correctly waiting behind
+  an earlier one's completion, bounded by however long that earlier turn
+  takes, exactly like `_PreparedTurn`-vs-`_PreparedTurn` contention already
+  was — not a latent defect; and because when uncontended (the common case)
+  an `asyncio.Lock` acquire/release is negligible.
+
+  **Tripwire, re-keyed on what can actually regress** (in addition to the
+  one above, which is still about `TurnFailedNotification`'s missing
+  `adapter_id`). The invariant this ADR and `_TurnFailed`'s docstring depend
+  on is that the barrier's acquire-then-release is UNCONDITIONAL over every
+  ingest-resolved outcome. A future change that re-gates it — e.g. skipping
+  it for an adapter kind outside `TURN_STATE_CLIENT_KINDS` on the mistaken
+  belief that only client-notifiable kinds need ordering — would silently
+  reopen arc-001 for every excluded kind, forwarded/gateway included.
+  `test_ordering_barrier_is_unconditional_for_a_non_client_adapter_kind`
+  (`tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py`) pins this: it
+  proves the barrier still blocks a `adapter_id="discord"` halt behind an
+  earlier same-key turn's held lock, a kind outside
+  `TURN_STATE_CLIENT_KINDS` that the sibling
+  `test_notify_skipped_for_non_client_adapter_kind` only ever drives
+  uncontended (so it cannot see the barrier at all).
 
 ## Alternatives considered
 

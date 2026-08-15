@@ -36,8 +36,6 @@ from alfred.comms_mcp.real_turn_adapter import (
 from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
 from alfred.security.dlp import OutboundCanaryTripped, OutboundDlp
 from alfred.security.tiers import T2, tag
-from tests.helpers.dlp import identity_outbound_dlp
-from tests.helpers.gates import make_quarantined_extract_chain_gate
 from tests.unit.comms_mcp._real_turn_adapter_doubles import (
     _adapter,
     _FakeAuditHashBroker,
@@ -46,6 +44,7 @@ from tests.unit.comms_mcp._real_turn_adapter_doubles import (
     _prepared,
     _RecordingAudit,
     _RecordingSender,
+    _unbound_adapter,
 )
 
 
@@ -262,14 +261,7 @@ async def test_turn_lock_for_reuses_existing_lock_for_same_key() -> None:
 
 async def test_dispatch_before_bind_raises_runtime_error() -> None:
     """FOLD-R5: covers ``_require_sender``'s ``sender is None`` branch."""
-    adapter = RealTurnOrchestratorAdapter(
-        orchestrator=_Orchestrator(answer="unused"),
-        working_memory_pool=_Pool(),
-        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
-        audit_writer=_RecordingAudit(),
-        outbound_dlp=identity_outbound_dlp(),
-        extractor_bridge=SimpleNamespace(),
-    )
+    adapter = _unbound_adapter(orchestrator=_Orchestrator(answer="unused"))
     with pytest.raises(RuntimeError):
         await adapter.dispatch(_prepared())
 
@@ -302,14 +294,7 @@ async def test_halt_no_reply_with_no_bound_sender_halts_loudly_without_raising()
     the sibling test below: ``_RefusalReply`` keeps the raising
     ``_require_sender()`` deliberately, because it has a reply to deliver.
     """
-    adapter = RealTurnOrchestratorAdapter(
-        orchestrator=_Orchestrator(answer="unused"),
-        working_memory_pool=_Pool(),
-        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
-        audit_writer=_RecordingAudit(),
-        outbound_dlp=identity_outbound_dlp(),
-        extractor_bridge=SimpleNamespace(),
-    )
+    adapter = _unbound_adapter(orchestrator=_Orchestrator(answer="unused"))
     with structlog.testing.capture_logs() as captured:
         await adapter.dispatch(  # must NOT raise
             _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
@@ -327,14 +312,7 @@ async def test_refusal_reply_with_no_bound_sender_still_raises() -> None:
     fail-loud (raise) is the correct posture there, unlike the halt leg's
     must-not-amplify-a-replay posture.
     """
-    adapter = RealTurnOrchestratorAdapter(
-        orchestrator=_Orchestrator(answer="unused"),
-        working_memory_pool=_Pool(),
-        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
-        audit_writer=_RecordingAudit(),
-        outbound_dlp=identity_outbound_dlp(),
-        extractor_bridge=SimpleNamespace(),
-    )
+    adapter = _unbound_adapter(orchestrator=_Orchestrator(answer="unused"))
     with pytest.raises(RuntimeError):
         await adapter.dispatch(
             _RefusalReply(
@@ -712,6 +690,18 @@ class _ParkThenSucceedOrchestrator:
     ``_notify_turn_failed``), so the event-KIND assertion (``send`` vs
     ``notify``) actually distinguishes "turn 1 signalled" from "turn 2
     signalled" rather than both legs producing the same kind of sender call.
+
+    UNLIKE ``_OrderProvingOrchestrator``, this double parks UNCONDITIONALLY —
+    it does not branch on ``content.content == "turn 1"``, so every call
+    parks. That is fine for the current tests (only ever ONE ``_PreparedTurn``
+    is dispatched through it per test; the same-key "turn 2" in each test
+    below is always an ingest-resolved outcome that never reaches the
+    orchestrator at all) but would DEADLOCK if reused for a scenario driving
+    two ``_PreparedTurn`` dispatches through the SAME instance, since the
+    second call would also park on ``release_turn_1`` with nothing left to
+    set it. Give it turn-distinguishing behaviour (like
+    ``_OrderProvingOrchestrator``'s ``content.content`` branch) before reusing
+    it that way.
     """
 
     def __init__(self) -> None:
@@ -883,6 +873,53 @@ async def test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn() -> No
         "halt-notify, even though turn 2's dispatch was already in flight "
         "and waiting on the ordering barrier"
     )
+
+
+async def test_ordering_barrier_is_unconditional_for_a_non_client_adapter_kind() -> None:
+    """Discord-kind variant of the test above — pins that the barrier is
+    UNCONDITIONAL, not gated on ``TURN_STATE_CLIENT_KINDS`` (report §5.2
+    step 3: "acquire the barrier unconditionally... default-deny closes the
+    class").
+
+    ``adapter_id="discord"`` is OUTSIDE ``TURN_STATE_CLIENT_KINDS``, so
+    ``_notify_turn_failed`` itself skips the wire send for turn 2 either
+    way — but ``test_notify_skipped_for_non_client_adapter_kind`` only
+    drives that skip UNCONTENDED, so it cannot see whether the BARRIER ran
+    at all. This test proves it does: turn 2 genuinely blocks behind turn
+    1's in-flight, lock-holding turn before it ever reaches the (skipped)
+    notify. Without this, a future refactor that re-gated the barrier
+    itself onto ``TURN_STATE_CLIENT_KINDS`` — e.g. "only client-notifiable
+    kinds need ordering" — would leave every existing test green (they all
+    use ``adapter_id="tui"``) while silently reopening arc-001 for every
+    excluded kind. That matters concretely: the forwarded/gateway path
+    already dispatches through this same barrier today for ordinary
+    ``_RefusalReply`` outcomes (ADR-0064's Negative/accepted section), not
+    as a future concern.
+    """
+    sender = _OrderRecordingSender()
+    orchestrator = _ParkThenSucceedOrchestrator()
+    pool = _Pool()
+    adapter = _adapter(orchestrator=orchestrator, sender=sender, pool=pool)
+
+    task_1 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 1")))
+    await asyncio.wait_for(orchestrator.turn_1_started.wait(), timeout=1.0)
+
+    task_2 = asyncio.create_task(
+        adapter.dispatch(
+            _HaltNoReply(stage="downgrade_denied", adapter_id="discord", canonical_user_id="u-1")
+        )
+    )
+    await asyncio.sleep(0)  # let turn 2 run up to the barrier and block on it
+    assert adapter._turn_locks[("alfred", "u-1")].locked() is True
+    assert not task_2.done(), "the barrier must block turn 2 even for a non-client adapter kind"
+
+    orchestrator.release_turn_1.set()
+    await asyncio.gather(task_1, task_2)
+
+    # "discord" is outside TURN_STATE_CLIENT_KINDS, so turn 2's own notify is
+    # a debug-log-and-skip no-op (test_notify_skipped_for_non_client_adapter_kind)
+    # — only turn 1's send ever reaches the sender.
+    assert [kind for kind, _ in sender.events] == ["send"]
 
 
 async def test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn() -> None:

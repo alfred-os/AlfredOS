@@ -309,8 +309,9 @@ class AlfredTuiApp(App[None]):
         bounded to one turn instead of being permanent. One window is the
         right length in BOTH directions: the core serializes a session's
         turns behind a per-``(persona, slug)`` mutex, and — since arc-001's
-        ordering barrier (``RealTurnOrchestratorAdapter.
-        _await_turn_ordering_barrier``, PR #594 Task S1) — starts sending
+        ordering barrier
+        (``RealTurnOrchestratorAdapter._await_turn_ordering_barrier``,
+        PR #594 Task S1) — starts sending
         EVERY turn's signal (not just a turn that ran real work) only after
         releasing that mutex (see ``_resolve_pending_turn``), so a late
         signal that IS still coming arrives before the next turn's own
