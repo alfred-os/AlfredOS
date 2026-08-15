@@ -603,7 +603,7 @@ _pepper_from_file() {
 # REAL value (spec §8.10: rotating the pepper invalidates cross-row
 # correlation).
 _pepper_write_file() {
-  local tmp_file line replaced=0
+  local tmp_file line replaced=0 inserted=0
   if grep -qE "$pepper_line_re" "$target_file" 2>/dev/null; then
     # #594 sec-002 (fix-2, regression fix): the key is present. Only overwrite
     # when the value is SPECIFICALLY a provably-blank string (`= ""` or `= ''`)
@@ -659,7 +659,38 @@ _pepper_write_file() {
   fi
   # Quote the dotted key so tomllib reads it as a flat string key
   # (cross-cutting BLOCKER closure).
-  printf '"%s" = "%s"\n' "$pepper_key" "$1" >> "$target_file"
+  #
+  # #594 R2: insert at ROOT-table scope, not blindly at EOF. A bare `>>` append
+  # is only correct when the file has no [table] header: TOML scopes every key
+  # after a header INTO that table, so an EOF-appended
+  # `"audit.hash_pepper" = "..."` under a trailing [grafana] parses as
+  # grafana."audit.hash_pepper", the broker (top-level strings only) drops it,
+  # and this script still prints its normal "Seeded ..." banner and exits 0 —
+  # no hand-editing mistake required, only a [table] anywhere in the file.
+  # Verified against tomllib.
+  if ! grep -qE "$toml_table_re" "$target_file" 2>/dev/null; then
+    printf '"%s" = "%s"\n' "$pepper_key" "$1" >> "$target_file"
+    return 0
+  fi
+  # Same temp-file + printf + atomic-mv idiom as the blank-overwrite rewrite
+  # above and _pepper_write_env below, for the same reason: the value is not
+  # hex-constrained on the mirrored-from-.env path and must never be fed
+  # through sed/awk substitution syntax.
+  tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
+  if ! {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      # $toml_table_re unquoted, for the same reason as $pepper_blank_re above.
+      if [[ "$inserted" -eq 0 && "$line" =~ $toml_table_re ]]; then
+        printf '"%s" = "%s"\n' "$pepper_key" "$1"
+        inserted=1
+      fi
+      printf '%s\n' "$line"
+    done < "$target_file"
+  } > "$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  mv "$tmp_file" "$target_file" || return 1
 }
 
 # #591: mirror the pepper into .env so docker-compose can forward it to

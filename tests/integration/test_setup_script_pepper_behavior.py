@@ -905,6 +905,52 @@ def test_bootstrap_refuses_a_pepper_scoped_inside_a_table(
     assert _read_dotenv_pepper(tmp_path) == ""
 
 
+def test_bootstrap_appends_above_a_trailing_table_not_inside_it(
+    bash_available: str,
+    openssl_available: str,
+    tmp_path: Path,
+) -> None:
+    """A fresh pepper is inserted at ROOT scope, above the first ``[table]``.
+
+    The old blind ``>> "$target_file"`` EOF append was only correct for a file
+    with no table header at all. With a trailing ``[grafana]`` — which needs no
+    hand-editing mistake whatsoever, only a table anywhere in the file — the
+    appended line parsed as ``grafana."audit.hash_pepper"``, the broker (top-level
+    strings only) dropped it, and the script still printed "Seeded
+    audit.hash_pepper into ... and .env." and exited 0. Of the three
+    silent-corruption shapes this fix closes, this is the one most likely to be
+    hit in practice.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(
+        "# AlfredOS secrets file. DO NOT commit.\n"
+        'deepseek_api_key = "sk-abc"\n'
+        "\n"
+        "[grafana]\n"
+        'admin_password = "hunter2"\n'
+    )
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"bootstrap failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    file_value = _read_secrets_toml_pepper(tmp_path)
+    assert file_value is not None and re.fullmatch(r"[0-9a-f]{64}", file_value), (
+        "the pepper is not at TOP LEVEL — it landed inside the [grafana] table, "
+        f"where the broker can never see it. secrets.toml:\n{target.read_text()}"
+    )
+    assert file_value == _read_dotenv_pepper(tmp_path)
+    # The table it was inserted above is still intact and still holds its own key.
+    with target.open("rb") as fh:
+        data = tomllib.load(fh)
+    assert data.get("grafana", {}).get("admin_password") == "hunter2", (
+        f"the [grafana] table was damaged by the insert:\n{target.read_text()}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Final-review fix 1: the "Bootstrapping operator identity" step's non-TTY
 # ALFRED_OPERATOR_NAME resolution must trim whitespace BEFORE applying the
