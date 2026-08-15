@@ -1110,6 +1110,96 @@ def test_bootstrap_refuses_a_dotenv_pepper_containing_a_quote_character(
     )
 
 
+@pytest.mark.parametrize(
+    ("dotenv_line", "quote_style"),
+    [
+        pytest.param(f'ALFRED_AUDIT_HASH_PEPPER="{_PEPPER_ONE}"', "double", id="double-quoted"),
+        pytest.param(f"ALFRED_AUDIT_HASH_PEPPER='{_PEPPER_ONE}'", "single", id="single-quoted"),
+    ],
+)
+def test_bootstrap_accepts_a_dotenv_pepper_delimited_by_a_matched_quote_pair(
+    bash_available: str,
+    tmp_path: Path,
+    dotenv_line: str,
+    quote_style: str,
+) -> None:
+    """#594 Task S2 review round 2 finding: a MATCHED surrounding quote pair
+    is a delimiter, not an embedded character, and must NOT refuse.
+
+    Round 2's first fix over-corrected: it refused on the presence of ANY
+    quote in the raw ``.env`` line, which also caught ``KEY="hex"`` and
+    ``KEY='hex'`` — shapes that are genuinely single-plane, because
+    Compose's dotenv parser strips a single matched outer pair exactly like
+    ``read_env_var``'s ``tr -d`` does for that SAME pair (verified against
+    real ``docker compose config``: ``ALFRED_AUDIT_HASH_PEPPER="deadbeef"``
+    and ``SQ='beefcafe'`` both forward the unquoted value). Refusing them
+    was a false alarm whose own message wrongly claimed "Compose's dotenv
+    parser does NOT strip them" and told the operator a pepper rotation was
+    needed when nothing was wrong.
+
+    The fix peels at most one matched pair before checking for a quote
+    that's still there — this test is the passing-direction proof the
+    round-2 review noted was missing (its absence is exactly what let the
+    over-refusal ship undetected). See
+    ``test_bootstrap_refuses_a_dotenv_pepper_containing_a_quote_character``
+    for the still-refused embedded-quote (no delimiter pair) case, which
+    this fix must not regress.
+    """
+    (tmp_path / ".env").write_text(f"{dotenv_line}\n")
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f"a {quote_style}-quoted delimiter pair must be accepted, not refused:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert _read_secrets_toml_pepper(tmp_path) == _PEPPER_ONE, (
+        f"secrets.toml pepper was not mirrored correctly from a {quote_style}-quoted .env value"
+    )
+    assert _read_dotenv_pepper(tmp_path) == _PEPPER_ONE, (
+        f".env pepper reads back wrong after a {quote_style}-quoted-delimiter bootstrap"
+    )
+    assert "Mirrored the .env audit.hash_pepper" in result.stdout, (
+        f"no mirror banner in stdout: {result.stdout!r}"
+    )
+
+
+def test_bootstrap_seeds_a_fresh_pepper_when_the_dotenv_value_is_an_empty_quoted_string(
+    bash_available: str,
+    openssl_available: str,
+    tmp_path: Path,
+) -> None:
+    """#594 Task S2 review round 2 finding: ``ALFRED_AUDIT_HASH_PEPPER=""``
+    must seed a fresh pepper (empty = unset), not refuse.
+
+    ``""`` is a matched double-quote pair around zero characters — peeling
+    it leaves the empty string, which the round-1 fix's raw quote-presence
+    check could not distinguish from a genuinely unsafe value. This is the
+    round-2 review's third named regression case (alongside ``"hex"`` /
+    ``'hex'`` above): blocking it would have blocked first-run bootstrap
+    for anyone whose ``.env.example`` seeds the key as an empty quoted
+    string.
+    """
+    (tmp_path / ".env").write_text('ALFRED_AUDIT_HASH_PEPPER=""\n')
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode == 0, (
+        f'an empty quoted .env value ("") must seed a fresh pepper, not refuse:\n'
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    env_value = _read_dotenv_pepper(tmp_path)
+    file_value = _read_secrets_toml_pepper(tmp_path)
+    assert env_value is not None and re.fullmatch(r"[0-9a-f]{64}", env_value), (
+        ".env pepper missing or not 64-hex-char after seeding from an empty "
+        f"quoted value: {env_value!r}"
+    )
+    assert file_value == env_value, (
+        f".env pepper {env_value!r} != secrets.toml pepper {file_value!r} after seeding "
+        'from ALFRED_AUDIT_HASH_PEPPER=""'
+    )
+
+
 def test_bootstrap_appends_above_a_trailing_table_not_inside_it(
     bash_available: str,
     openssl_available: str,
