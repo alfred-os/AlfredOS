@@ -92,12 +92,17 @@ _ADDRESSING_MODE: Literal["dm"] = "dm"
 # `downgrade_denied` (gate policy deny). FOLD-R11: `send_failed` for the outbound leg.
 # #410 PR3 (I4 fix wave): `dlp_canary_tripped` for an `OutboundCanaryTripped` raised
 # out of `dispatch_tool` — deterministic like `budget_denied`, so it halts rather
-# than re-raising into the generic `turn_error` replay leg.
+# than re-raising into the generic `turn_error` replay leg. #594 R1 (Fix C2):
+# `dlp_scan_failed` for a NON-canary fault out of the outbound scan (e.g. a
+# broker/vault blip in DLP stage 1) — DISTINCT from `send_failed` because the scan
+# runs strictly BEFORE any wire write, so the wire is still healthy and a client
+# notify is both deliverable and honest.
 _RefusalStage = Literal[
     "downgrade_denied",
     "downgrade_malformed",
     "budget_denied",
     "dlp_canary_tripped",
+    "dlp_scan_failed",
     "turn_error",
     "send_failed",
 ]
@@ -120,7 +125,10 @@ def _client_turn_failure_stage(stage: _RefusalStage) -> TurnFailureStage | None:
             return "refused"
         case "budget_denied":
             return "budget_exhausted"
-        case "downgrade_malformed" | "turn_error":
+        case "downgrade_malformed" | "turn_error" | "dlp_scan_failed":
+            # A scan-infrastructure fault (vault/broker blip) is genuinely an
+            # internal error, not a refusal — and it is not attacker-triggerable
+            # by content, so separating it from `refused` opens no oracle.
             return "internal_error"
         case "send_failed":
             # NOT notifiable — the client-side watchdog is the backstop.
@@ -486,9 +494,11 @@ class RealTurnOrchestratorAdapter:
         if client_stage is None:
             # Symmetric with the `TURN_STATE_CLIENT_KINDS` skip above: no
             # production call site passes `send_failed` here today (`_send`'s
-            # except block deliberately never calls this helper — see its
-            # docstring), but the parameter type stays the full `_RefusalStage`
-            # so a future call site is a type-check pass, not a silent drop.
+            # SEND-leg except block deliberately never notifies — see its
+            # docstring; its SCAN leg does, but only ever with
+            # `dlp_canary_tripped`/`dlp_scan_failed`), but the parameter type
+            # stays the full `_RefusalStage` so a future call site is a
+            # type-check pass, not a silent drop.
             # Log it so "why did nothing happen here" stays traceable if that
             # ever changes.
             _log.debug(
@@ -544,9 +554,11 @@ class RealTurnOrchestratorAdapter:
         On the FORWARDED path this runs inside ``process_inbound_message``'s
         ``dispatch`` try/except (inbound.py:885): a re-raised turn error takes the
         audited ``dispatch_failed`` + bounded-replay path. BudgetError, an
-        ``OutboundCanaryTripped`` DLP-canary trip (#410 PR3 — surfaces out of
-        ``dispatch_tool``'s totality wrapper on either tool leg), and the
-        downgrade-deny (handled in ``ingest``) are DETERMINISTIC — the adapter
+        ``OutboundCanaryTripped`` DLP-canary trip (#410 PR3 — out of
+        ``dispatch_tool``'s totality wrapper on either tool leg; since #594 R1
+        Fix C2 also out of the FINAL answer's own outbound scan, classified
+        identically in ``_send``), and the downgrade-deny (handled in
+        ``ingest``) are DETERMINISTIC — the adapter
         audits them loudly and HALTS (no reply, no re-raise) so the frame commits
         rather than burning the replay ceiling on a completion that will re-fail
         identically (same content, same canary token, every retry). Genuinely
@@ -693,9 +705,10 @@ class RealTurnOrchestratorAdapter:
             return
 
         # Send OUTSIDE the mutex (the buffer work is done) but with its own
-        # audited envelope (FOLD-R11): a scan/send failure gets a loud adapter row
-        # then re-raises (forwarded -> dispatch_failed + replay; direct ->
-        # propagate).
+        # audited envelope (FOLD-R11): a scan/send failure gets a loud adapter
+        # row, then re-raises (forwarded -> dispatch_failed + replay; direct ->
+        # propagate) — EXCEPT a canary trip in the scan, which is deterministic
+        # and halts there instead (#594 R1 Fix C2; see `_send`).
         await self._send(
             sender,
             ingested.adapter_id,
@@ -726,13 +739,43 @@ class RealTurnOrchestratorAdapter:
     ) -> None:
         """DLP-scan the body (rule #4) + send it as a DM (FOLD-6), audited (FOLD-R11).
 
-        On a scan/send failure with turn context (``notification`` +
-        ``canonical_user_id`` both present) the adapter writes a loud
-        ``send_failed`` row then re-raises; the refusal-reply send (no turn
-        context — ``ingest``'s ``_RefusalReply`` leg) just re-raises (the inbound
-        path audits it on the forwarded edge). A DLP CANARY trip is signalled in
-        the scan RESULT, not an exception (unchanged from the echo path) — it does
-        not raise here.
+        TWO legs with DELIBERATELY DIFFERENT postures (#594 R1 Fix C2 split the
+        single ``try`` that used to cover both), because they differ in the one
+        thing that matters — whether the wire is still healthy:
+
+        * **SCAN leg** (``scan_for_outbound``) runs strictly BEFORE any wire
+          write, so the wire IS healthy and a client notify is both deliverable
+          and honest. An ``OutboundCanaryTripped`` here is audited
+          ``dlp_canary_tripped`` and HALTS (no re-raise), matching the
+          ``dispatch_tool`` arm in ``dispatch`` (#410 PR3's I4 fix wave); any
+          other scan fault is audited ``dlp_scan_failed`` and re-raises for the
+          forwarded path's replay. Both notify the client.
+        * **SEND leg** (``sender.send_outbound``) keeps the original
+          ``send_failed`` + NO-notify + re-raise posture — see its own comment.
+
+        Before the split, an ``OutboundCanaryTripped`` on the persona's FINAL
+        answer fell into the blanket handler and was audited under a TRANSPORT
+        stage, then re-raised — so the single most security-relevant outbound
+        event (a canary in the answer, i.e. a successful indirect prompt
+        injection) landed in the forensic log misattributed AND burned the
+        forwarded-replay ceiling re-tripping the identical canary on identical
+        content. That is precisely what the I4 wave exists to prevent elsewhere.
+        Inert today (``canary=None`` is the core default, ``dlp.py``); fixed now
+        while it is cheap to review, same argument I4 itself made.
+
+        Ordering invariant: ``scan_for_outbound`` is SYNCHRONOUS, so this split
+        introduces no new ``await`` ahead of the send — the first suspension
+        point on the happy path is still ``send_outbound`` itself. That is
+        load-bearing for the TUI's stale-turn debt counter; see the contract
+        note on ``_TurnFailed`` and
+        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``.
+
+        The audit row needs turn context (``notification`` +
+        ``canonical_user_id`` both present); the refusal-reply send
+        (``ingest``'s ``_RefusalReply`` leg) has none, so it is audited by the
+        inbound path on the forwarded edge instead — and on the scan leg the
+        DLP's own ``dlp.outbound_canary_tripped`` / ``dlp.outbound_redacted``
+        rows are the authoritative record either way.
 
         FOLD-R18: this DLP-scan -> ``OutboundMessageRequest`` -> send sequence
         duplicates ``CommsInboundOrchestratorAdapter.dispatch``
@@ -744,6 +787,35 @@ class RealTurnOrchestratorAdapter:
         """
         try:
             scanned = self._outbound_dlp.scan_for_outbound(body)
+        except OutboundCanaryTripped as exc:
+            # DETERMINISTIC: the same answer trips the same token on every
+            # replay, so HALT (audited, notified, no re-raise) exactly like the
+            # `dispatch_tool` arm — re-raising would burn the poison ceiling
+            # reproducing an identical trip for zero benefit.
+            await self._refuse_outbound_scan(
+                sender,
+                adapter_id,
+                stage="dlp_canary_tripped",
+                exc=exc,
+                notification=notification,
+                canonical_user_id=canonical_user_id,
+            )
+            return
+        except Exception as exc:
+            # Non-canary scan fault (a broker/vault blip in DLP stage 1) —
+            # plausibly transient, so re-raise for the forwarded path's replay,
+            # but tell the client first: nothing has touched the wire yet.
+            await self._refuse_outbound_scan(
+                sender,
+                adapter_id,
+                stage="dlp_scan_failed",
+                exc=exc,
+                notification=notification,
+                canonical_user_id=canonical_user_id,
+            )
+            raise
+
+        try:
             request = OutboundMessageRequest(
                 adapter_id=adapter_id,
                 idempotency_key=uuid4(),
@@ -764,5 +836,32 @@ class RealTurnOrchestratorAdapter:
             # forwarded path a successful retry could deliver the real answer
             # AFTER we told the operator the turn failed — a false negative worse
             # than silence. The client-side turn watchdog is the correct backstop
-            # for a dead-wire failure.
+            # for a dead-wire failure — and since #594 R1 that backstop is
+            # bounded in time, so the client self-heals in one watchdog window
+            # instead of depending on this notify to stay consistent.
             raise
+
+    async def _refuse_outbound_scan(
+        self,
+        sender: OutboundSenderLike,
+        adapter_id: str,
+        *,
+        stage: _RefusalStage,
+        exc: Exception,
+        notification: _NotificationView | None,
+        canonical_user_id: str | None,
+    ) -> None:
+        """Audit (when there is turn context) + client-notify a PRE-WIRE scan fault.
+
+        Split out of ``_send`` so both scan-leg arms share one
+        audit-then-notify ordering — the authoritative record is written first,
+        the best-effort UX frame second, exactly as every other refusal leg in
+        ``dispatch`` does it. Never raises on its own behalf: ``_emit_refused``
+        writes the row and ``_notify_turn_failed`` contains every ``Exception``,
+        so the CALLER decides halt-vs-re-raise for the original fault.
+        """
+        if notification is not None and canonical_user_id is not None:
+            await self._emit_refused(
+                notification, canonical_user_id=canonical_user_id, stage=stage, exc=exc
+            )
+        await self._notify_turn_failed(sender, adapter_id=adapter_id, stage=stage)

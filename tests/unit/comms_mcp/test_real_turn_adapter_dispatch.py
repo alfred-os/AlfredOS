@@ -32,7 +32,8 @@ from alfred.comms_mcp.real_turn_adapter import (
     _RefusalReply,
     _RefusalStage,
 )
-from alfred.security.dlp import OutboundCanaryTripped
+from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
+from alfred.security.dlp import OutboundCanaryTripped, OutboundDlp
 from alfred.security.tiers import T2, tag
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.gates import make_quarantined_extract_chain_gate
@@ -117,15 +118,17 @@ def _prepared() -> _PreparedTurn:
     )
 
 
-def _adapter(*, orchestrator, audit=None, sender=None, pool=None):
+def _adapter(*, orchestrator, audit=None, sender=None, pool=None, outbound_dlp=None):
     a = RealTurnOrchestratorAdapter(
         orchestrator=orchestrator,
         working_memory_pool=pool or _Pool(),
         gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
         audit_writer=audit or _RecordingAudit(),
         # FOLD-R9: a real broker-backed OutboundDlp — ``OutboundMessageRequest.body``
-        # is a ``ScannedOutboundBody`` NewType a bare stand-in can't mint.
-        outbound_dlp=identity_outbound_dlp(),
+        # is a ``ScannedOutboundBody`` NewType a bare stand-in can't mint. The
+        # ``outbound_dlp`` override exists for the #594 R1 Fix C2 scan-leg tests,
+        # which need a scanner that genuinely trips or genuinely faults.
+        outbound_dlp=outbound_dlp or identity_outbound_dlp(),
         extractor_bridge=SimpleNamespace(),
     )
     a.bind_outbound_sender(sender or _RecordingSender())
@@ -808,6 +811,169 @@ def test_client_turn_failure_stage_is_total_over_refusal_stage() -> None:
         "dlp_canary_tripped": "refused",
         "budget_denied": "budget_exhausted",
         "downgrade_malformed": "internal_error",
+        "dlp_scan_failed": "internal_error",
         "turn_error": "internal_error",
         "send_failed": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# #594 R1 Fix C2: `_send`'s DLP-scan leg is classified separately from the wire.
+#
+# `scan_for_outbound` runs strictly BEFORE any wire write, so the wire is still
+# healthy there — a client notify is deliverable and honest, unlike on the
+# send leg. And an `OutboundCanaryTripped` in the FINAL answer is the same
+# DETERMINISTIC event the `dispatch_tool` arm already halts on (#410 PR3's I4
+# fix wave); before this split it fell into the blanket handler, was audited
+# under the TRANSPORT `send_failed` stage, and re-raised — burning the
+# forwarded-replay ceiling re-tripping the identical canary on identical
+# content. Inert today (`canary=None` is the core default).
+# ---------------------------------------------------------------------------
+
+
+class _RaisingScanDlp:
+    """``scan_for_outbound`` raises a NON-canary infrastructure fault.
+
+    Stands in for a broker/vault blip inside DLP stage 1 — the one clean case
+    the root-cause investigation found where the wire is healthy and, before
+    Fix C2, nothing was ever sent to the client.
+    """
+
+    def __init__(self, fault: Exception) -> None:
+        self._fault = fault
+
+    def scan_for_outbound(self, raw_body: str) -> object:
+        raise self._fault
+
+
+def _canary_tripping_dlp(token: str) -> OutboundDlp:
+    """A REAL ``OutboundDlp`` whose stage-3 matcher trips on ``token``.
+
+    Deliberately the real class with a real :class:`CanaryMatcher` rather than
+    a double that just raises: the point of the test is the classification of
+    the exception ``OutboundDlp`` itself raises out of ``_scan_stages``, so a
+    hand-raised stand-in could pass while the production wiring diverged.
+    """
+
+    class _IdentityBroker:
+        def redact(self, text: str) -> str:
+            return text
+
+    def _sink(*, event: str, subject: object) -> None:
+        return None
+
+    return OutboundDlp(
+        broker=_IdentityBroker(),
+        audit=_sink,  # type: ignore[arg-type]
+        canary=CanaryMatcher(tokens=[CanaryToken(value=token)]),
+    )
+
+
+async def test_canary_trip_on_the_final_answer_audits_dlp_canary_tripped_and_halts() -> None:
+    """A canary in the persona's ANSWER is a security event, not a transport fault.
+
+    It must land in the forensic log under ``dlp_canary_tripped`` (matching the
+    ``dispatch_tool`` arm), notify the client with the COARSE ``refused`` stage,
+    send no body, and — critically — NOT re-raise, so the forwarded path commits
+    the frame instead of replaying an identical trip up to the poison ceiling.
+    """
+    audit = _RecordingAudit()
+    sender = _RecordingSender()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(answer="here is your answer: canary-token-1"),
+        audit=audit,
+        sender=sender,
+        outbound_dlp=_canary_tripping_dlp("canary-token-1"),
+    )
+
+    await adapter.dispatch(_prepared())  # must NOT raise — deterministic halt
+
+    assert sender.sent == []  # the canary'd body never egressed
+    stages = [
+        r["subject"]["refusal_stage"]
+        for r in audit.rows
+        if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ]
+    assert stages == ["dlp_canary_tripped"], (
+        "a canary trip in the final answer must NOT be audited as a transport "
+        "`send_failed` — that misattributes a successful indirect prompt "
+        "injection and takes the replay path"
+    )
+    assert len(sender.turn_states_sent) == 1
+    notification = sender.turn_states_sent[0]
+    assert notification.stage == "refused"
+    assert "canary" not in notification.model_dump_json().lower()  # anti-oracle
+
+
+async def test_dlp_scan_failure_notifies_the_client_but_a_wire_send_failure_does_not() -> None:
+    """The two legs of ``_send`` differ in exactly one thing: is the wire alive?
+
+    Both halves in one test so the CONTRAST is what is pinned, not two
+    independent facts that could drift apart. The scan leg (wire healthy,
+    nothing written yet) audits ``dlp_scan_failed``, notifies, and re-raises for
+    the forwarded replay; the send leg (wire just failed) keeps its deliberate
+    ``send_failed`` + NO-notify posture.
+    """
+    scan_audit = _RecordingAudit()
+    scan_sender = _RecordingSender()
+    scan_adapter = _adapter(
+        orchestrator=_Orchestrator(answer="hi"),
+        audit=scan_audit,
+        sender=scan_sender,
+        outbound_dlp=_RaisingScanDlp(RuntimeError("vault unreachable")),
+    )
+    with pytest.raises(RuntimeError, match="vault unreachable"):
+        await scan_adapter.dispatch(_prepared())
+    assert scan_sender.sent == []
+    assert [
+        r["subject"]["refusal_stage"]
+        for r in scan_audit.rows
+        if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ] == ["dlp_scan_failed"]
+    assert scan_sender.turn_states_sent == [TurnFailedNotification(stage="internal_error")], (
+        "the scan runs before any wire write, so the client CAN and MUST be told"
+    )
+
+    send_audit = _RecordingAudit()
+    send_sender = _RaisingSendOutboundSender()
+    send_adapter = _adapter(
+        orchestrator=_Orchestrator(answer="hi"), audit=send_audit, sender=send_sender
+    )
+    with pytest.raises(ConnectionError):
+        await send_adapter.dispatch(_prepared())
+    assert [
+        r["subject"]["refusal_stage"]
+        for r in send_audit.rows
+        if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ] == ["send_failed"]
+    assert send_sender.turn_states_sent == [], (
+        "the send leg's no-notify design is unchanged (C1): the same wire just "
+        "failed, and a later successful replay could deliver the real answer "
+        "after a false turn-failed signal"
+    )
+
+
+async def test_dlp_scan_failure_on_the_refusal_reply_leg_notifies_without_an_audit_row() -> None:
+    """``ingest``'s ``_RefusalReply`` leg carries no turn context to attribute to.
+
+    Same no-turn-context arm as ``test_dispatch_refusal_send_failure_reraises_
+    without_audit`` covers for the send leg: no adapter-owned refusal row (the
+    inbound path audits it on the forwarded edge), but the client notify still
+    fires — it only needs the ``adapter_id``, which this leg does have.
+    """
+    audit = _RecordingAudit()
+    sender = _RecordingSender()
+    adapter = _adapter(
+        orchestrator=_Orchestrator(answer="unused"),
+        audit=audit,
+        sender=sender,
+        outbound_dlp=_RaisingScanDlp(RuntimeError("vault unreachable")),
+    )
+    with pytest.raises(RuntimeError, match="vault unreachable"):
+        await adapter.dispatch(
+            _RefusalReply(reply="benign", adapter_id="tui", target_platform_id="plat-9")
+        )
+    assert [
+        r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
+    ] == []
+    assert sender.turn_states_sent == [TurnFailedNotification(stage="internal_error")]

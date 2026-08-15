@@ -472,17 +472,33 @@ EXCEPT `send_failed`, the adapter sends a best-effort, id-less `turn.failed`
 notification (`TurnFailedNotification`, `src/alfred/comms_mcp/protocol.py`)
 carrying a closed `TurnFailureStage` — `refused` / `budget_exhausted` /
 `internal_error` — so the client can release its pending turn. That covers all
-five `_RefusalStage` values that map to a client-notifiable stage:
+six `_RefusalStage` values that map to a client-notifiable stage:
 `downgrade_denied` and `downgrade_malformed` (both surfaced from `ingest` as a
-`_HaltNoReply` outcome), and `budget_denied`, `dlp_canary_tripped`, and
+`_HaltNoReply` outcome); `budget_denied`, `dlp_canary_tripped`, and
 `turn_error` (all three surfaced from inside `dispatch`'s pool-bracketed turn
 as a `_TurnFailed` outcome, notified only AFTER the per-`(persona, slug)` lock
-releases). `send_failed` is the deliberate exception: the outbound send that
-just failed used THIS SAME WIRE, so a notify down the same seam is
-near-certain to fail too, and — because that leg re-raises for the forwarded
-path's replay — a later successful retry could deliver the real answer AFTER
-the client was told the turn failed, a false negative worse than silence. The
-client-side turn watchdog is the backstop for a dead-wire failure instead.
+releases); and `dlp_scan_failed` (a non-canary fault out of `_send`'s outbound
+DLP scan — see the scan/send split below). `send_failed` is the deliberate
+exception: the outbound send that just failed used THIS SAME WIRE, so a notify
+down the same seam is near-certain to fail too, and — because that leg
+re-raises for the forwarded path's replay — a later successful retry could
+deliver the real answer AFTER the client was told the turn failed, a false
+negative worse than silence. The client-side turn watchdog is the backstop for
+a dead-wire failure instead, and since #594 that backstop is bounded in time
+(the TUI's stale-turn debt expires after one watchdog window), so the client
+self-heals rather than depending on a notify it may never get.
+
+`_send` classifies its two legs separately (#594), because they differ in
+whether the wire is still healthy. The **scan** leg (`scan_for_outbound`) runs
+strictly before any wire write, so a notify is deliverable and honest: an
+`OutboundCanaryTripped` there is audited `dlp_canary_tripped` and HALTS (no
+re-raise), matching how the same exception out of `dispatch_tool` is already
+handled, and any other scan fault is audited `dlp_scan_failed` and re-raises.
+The **send** leg keeps `send_failed` + no notify + re-raise, unchanged. Before
+the split, a canary trip in the persona's *final answer* — the single most
+security-relevant outbound event there is — was audited under the transport
+`send_failed` stage and re-raised, burning the forwarded-replay ceiling
+re-tripping the identical canary on identical content.
 
 The frame is CORE-originated but gateway-RELAYED — opaque pass-through, never
 consumed by the gateway — the same shape as the `link.*` frames the gateway

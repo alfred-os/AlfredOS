@@ -73,9 +73,10 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
 3. **A closed, coarse, client-facing vocabulary — `TurnFailureStage =
    Literal["refused", "budget_exhausted", "internal_error"]` — deliberately
    NOT the private audit `_RefusalStage` Literal it is mapped from.** The
-   audit taxonomy is forensic and has already widened twice
+   audit taxonomy is forensic and has already widened three times
    (`downgrade_denied`, `downgrade_malformed`, `budget_denied`,
-   `dlp_canary_tripped`, `turn_error`, `send_failed`); aliasing the wire to
+   `dlp_canary_tripped`, `dlp_scan_failed`, `turn_error`, `send_failed`);
+   aliasing the wire to
    it would let a future audit-only stage silently become an unmapped (and
    therefore unrendered) wire value. `_client_turn_failure_stage` in
    `real_turn_adapter.py` is an exhaustive `match`/`assert_never` over the
