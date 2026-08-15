@@ -89,14 +89,33 @@ _ANCHOR_MODULES: Final[frozenset[tuple[str, str]]] = frozenset(
 _FIELD: Final[re.Pattern[str]] = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)[^}]*\}")
 
 
-def _is_test_path(rel: str) -> bool:
-    """True if the root-relative posix path ``rel`` has a ``tests`` component.
+#: Directory names to skip during the walk, in addition to hidden directories
+#: (dotfiles/dotdirs, e.g. ``.venv``, ``.tox``) and ``*.egg-info`` packaging
+#: output. ``plugins/alfred_tui`` is an independently ``uv``-managed
+#: sub-project (its own ``pyproject.toml`` + ``uv.lock``), not part of this
+#: repo's single-root venv model — ``plugins/alfred_tui/.venv`` is real once
+#: `uv sync`/`uv run` has been scoped there, and it can hold hundreds of
+#: vendored ``.py`` files this walk has no business parsing (perf waste today,
+#: latent false-match risk the moment a dependency defines its own ``t()``).
+#: ``.venv`` is ``.gitignore``d so a fresh CI checkout never sees it, but any
+#: developer/session that has already run `uv sync` under ``plugins/alfred_tui``
+#: will.
+_SKIP_DIR_NAMES: Final[frozenset[str]] = frozenset(
+    {"tests", ".venv", "venv", "build", "dist", ".tox"}
+)
 
-    ``src/alfred`` has no ``tests`` subdirectory today, so this is a no-op for that
-    root. It matters for the top-level ``plugins/`` tree: ``plugins/alfred_tui/
-    tests/`` holds test code, not operator output, and must not be walked.
+
+def _is_skipped_path(rel: str) -> bool:
+    """True if the root-relative posix path ``rel`` should not be walked.
+
+    Skips a ``tests`` component (test code, not operator output — see
+    ``_SKIP_DIR_NAMES``), any hidden directory (``.venv``, ``.tox``, ``.git``,
+    ...), and any ``*.egg-info`` packaging directory. ``__pycache__`` is
+    caught incidentally by the hidden-directory check (and its ``*.pyc``
+    contents can't match the ``*.py`` glob anyway).
     """
-    return "tests" in Path(rel).parts
+    parts = Path(rel).parts
+    return any(p in _SKIP_DIR_NAMES or p.startswith(".") or p.endswith(".egg-info") for p in parts)
 
 
 def _t_calls() -> list[tuple[Path, int, str, set[str], bool]]:
@@ -110,7 +129,7 @@ def _t_calls() -> list[tuple[Path, int, str, set[str], bool]]:
     for label, root in _ROOTS:
         for path in sorted(root.rglob("*.py")):
             rel = path.relative_to(root).as_posix()
-            if _is_test_path(rel) or (label, rel) in _ANCHOR_MODULES:
+            if _is_skipped_path(rel) or (label, rel) in _ANCHOR_MODULES:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):

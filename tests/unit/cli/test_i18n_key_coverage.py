@@ -410,14 +410,14 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # keys and the revived tui.thinking for the same fuzzy-match protection
     # the rest of this table provides.
     "tui.thinking": ({}, ("thinking",)),
-    "tui.turn_timeout": ({"seconds": 90}, ("no response", "90")),
+    "tui.turn_timeout": ({"seconds": 90}, ("no response", "try again")),
     "tui.alfred_error": ({"error": "ConnectionResetError"}, ("alfred", "error")),
     "tui.turn_failed.refused": ({}, ("could not process",)),
     "tui.turn_failed.budget_exhausted": ({}, ("--daily-budget-usd",)),
     "tui.turn_failed.internal_error": ({}, ("went wrong",)),
     # #594 Fix-10 -- live elapsed-time counter (non-logged, separate widget)
     # + rate-limited dropped-keystroke acknowledgement (logged, once per turn).
-    "tui.thinking_elapsed": ({"seconds": 12}, ("thinking", "12")),
+    "tui.thinking_elapsed": ({"seconds": 12}, ("thinking", "alfred")),
     "tui.turn_still_pending": ({}, ("still working",)),
 }
 

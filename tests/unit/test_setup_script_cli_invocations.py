@@ -53,6 +53,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 import typer.main
 from typer.core import TyperArgument, TyperCommand, TyperGroup, TyperOption
 
@@ -99,11 +100,34 @@ _DOCKER_RUN_CAPTURE_RE = re.compile(
     r"(?:^\s*|\$\()docker\s+compose\s+run\s+(?:-\S+\s+)*alfred-core\s+(.*)"
 )
 
-# Trims trailing shell noise (redirects, `||`/`&&`, a `;` separator, or the
+# Trims trailing shell noise (redirects, `||`/`&&`/`|`, a `;` separator, or the
 # closing `)"` of a `var="$(...)"` capture) off an extracted argv string, so
 # `2>/dev/null`, `|| true`, `2>&1`, and the wrapping quote/paren never get
 # handed to shlex as if they were CLI tokens.
-_SHELL_TERMINATOR_RE = re.compile(r'\s+\d*>&?\d*\S*|\s+\|\|?|\s+&&|\s*;|\)"')
+#
+# Every alternative REQUIRES a literal operator character — none can fire on
+# whitespace alone, or a valid multi-token argv like `user bind x --platform
+# discord` would be cut at its first space and the rest would silently escape
+# validation.
+#
+# `<` is deliberately NOT treated as a redirection operator. README documents
+# its placeholders in angle brackets (`<your-operator-slug>`, `<snowflake>`),
+# so ` <` is a placeholder here, not an input redirect. Adding `<` truncates
+# `user bind <your-operator-slug> --platform discord --id <snowflake>` down to
+# `user bind` — which resolves to the `user` GROUP with nothing left to check,
+# so the invocation passes with ZERO flags validated. Neither source file uses
+# an input redirect or a trailing `&`; if one is ever added, add a matching
+# alternative AND a case to test_truncate_at_shell_terminator_discriminates.
+_SHELL_TERMINATOR_RE = re.compile(
+    r"""
+      \s+\d*>{1,2}&?\d*\S*   # redirect: `>f` `>>f` `2>f` `2>&1` -- the `>` is REQUIRED
+    | \s+\|\|?               # pipe `|` / logical-or `||`
+    | \s+&&                  # logical-and `&&`
+    | \s*;                   # command separator
+    | \)"                    # closing `)"` of a `var="$(...)"` capture
+    """,
+    re.VERBOSE,
+)
 
 
 def _truncate_at_shell_terminator(argv_text: str) -> str:
@@ -560,3 +584,51 @@ def test_validator_rejects_a_bind_invocation_missing_a_required_option() -> None
         "Validator failed to reject `user bind x --platform discord` — it is missing "
         "the required `--id` option and should have been flagged."
     )
+
+
+# ---------------------------------------------------------------------------
+# Direct self-test of `_truncate_at_shell_terminator` (#594 Task S5,
+# root-cause-cli-invocation-validator-regex.md sec 5.2). The tests above only
+# exercise the regex INDIRECTLY, via a downstream CLI-resolution failure --
+# a mutant that breaks the regex shows up as "README.md invokes `alfred` with
+# flags/args the real CLI rejects", which points at README, not at the regex
+# that actually broke. This pins both directions at the regex itself.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("argv_text", "expected"),
+    [
+        # --- MUST pass through unchanged: valid multi-token argv ---
+        ("user bind x --platform discord", "user bind x --platform discord"),
+        # Angle-bracket README placeholders are NOT input redirects.
+        (
+            "user bind <slug> --platform discord --id <snowflake>",
+            "user bind <slug> --platform discord --id <snowflake>",
+        ),
+        ("gateway adapters --wait-ready discord", "gateway adapters --wait-ready discord"),
+        ("migrate", "migrate"),
+        # --- MUST truncate: real shell terminators ---
+        ("user list >/dev/null", "user list"),
+        ("user list >> out.log", "user list"),
+        ("user list 2>/dev/null", "user list"),
+        ("user list 2>&1", "user list"),
+        ("user list 1>&2", "user list"),
+        ("user list | jq .", "user list"),
+        ("user list || true", "user list"),
+        ("user list && echo ok", "user list"),
+        ("user list; echo done", "user list"),
+        ('user list --json)"', "user list --json"),  # kills the M4 survivor
+        ('user list --json 2>/dev/null || true)"', "user list --json"),
+    ],
+)
+def test_truncate_at_shell_terminator_discriminates(argv_text: str, expected: str) -> None:
+    """The terminator regex must cut at REAL shell operators and nowhere else.
+
+    A regex that fires on bare whitespace would cut a valid argv at its first
+    space; the remainder would never reach the CLI check, and the invocation
+    would pass with most of its flags unvalidated — a silently vacuous
+    drift-net. Both directions are pinned here so a mutation in either
+    direction fails loudly at the regex, not three layers downstream.
+    """
+    assert _truncate_at_shell_terminator(argv_text) == expected

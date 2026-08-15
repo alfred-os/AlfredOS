@@ -806,8 +806,15 @@ async def test_dispatch_notifies_same_key_turns_in_submission_order_even_when_co
     # unrelated reason) — assert the actual per-(persona, slug) Lock object
     # is held, proving turn 2's block is genuinely lock contention, matching
     # the same ``.locked()`` proof style used by the sibling
-    # release-before-notify tests above.
-    assert adapter._turn_locks[("alfred", "u-1")].locked() is True
+    # release-before-notify tests above. ``.locked()`` + ``not task_2.done()``
+    # together prove "lock is held" and "task 2 hasn't finished" but neither
+    # entails "task 2 is blocked because it registered as a waiter on THIS
+    # lock object" — reach one level further into asyncio.Lock's own waiter
+    # queue for that (matching the existing idiom of reaching into the
+    # private ``_turn_locks`` dict above).
+    lock = adapter._turn_locks[("alfred", "u-1")]
+    assert lock.locked() is True
+    assert len(lock._waiters) == 1, "turn 2 must have registered as a lock waiter"
     assert not task_2.done(), "turn 2 must genuinely block on the lock, not race ahead"
     assert sender.events == [], "neither turn may have signaled the sender yet"
 

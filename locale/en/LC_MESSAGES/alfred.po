@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 22:14+0100\n"
+"POT-Creation-Date: 2026-08-15 22:32+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2514,7 +2514,7 @@ msgstr ""
 "Authorization tier (read-only | standard | trusted | operator; default "
 "standard)."
 
-#: src/alfred/identity/cli.py:250 src/alfred/identity/cli.py:694
+#: src/alfred/identity/cli.py:250
 msgid "cli.user.flag.daily-budget-usd.short"
 msgstr "Per-user daily budget cap in USD (default 0.50)."
 
@@ -2727,6 +2727,12 @@ msgid "cli.user.help.set.short"
 msgstr ""
 "Tune an existing user's daily budget, authorization, language, or rate-"
 "limit overrides."
+
+#: src/alfred/identity/cli.py:694
+msgid "cli.user.flag.daily-budget-usd.set.short"
+msgstr ""
+"Per-user daily budget cap in USD (omit to leave the current value "
+"unchanged)."
 
 #: src/alfred/identity/cli.py:762
 msgid "cli.user.set.success"
