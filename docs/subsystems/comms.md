@@ -259,6 +259,10 @@ make the audit log less actionable.
 - [ADR-0013](../adr/0013-defer-t1-t3-and-dual-llm.md) — T3 deferred to
   Slice 3; the Discord allowlist is what bounds Slice-2 trust-tier
   exposure to T2 only.
+- [ADR-0031](../adr/0031-comms-socket-transport-for-the-foreground-tui.md) —
+  the socket transport `link.*`/`turn.*` client-terminal control frames ride;
+  see its `turn.*` amendment for the `#593` wire-direction contract (this
+  file's "Client turn-failure notification" section above).
 
 ## Open questions / forward-compat notes
 
@@ -457,6 +461,34 @@ adapter can serve a turn; each failure mode is audited and refuses boot fail-clo
   copy-pasteable remedy (`alfred user add --name <name> --authorization
   operator`, or `alfred user list` + `alfred user set --authorization
   trusted <slug>` to demote extras).
+
+### Client turn-failure notification (`turn.failed`, #593)
+
+A TUI turn that produced no reply used to leave the operator staring at a dead
+prompt forever — no wire signal, no way to release the pending-turn indicator.
+`#593` closes that gap: on every refusal/error leg of
+`RealTurnOrchestratorAdapter.dispatch` (`src/alfred/comms_mcp/real_turn_adapter.py`)
+EXCEPT `send_failed`, the adapter sends a best-effort, id-less `turn.failed`
+notification (`TurnFailedNotification`, `src/alfred/comms_mcp/protocol.py`)
+carrying a closed `TurnFailureStage` — `refused` / `budget_exhausted` /
+`internal_error` — so the client can release its pending turn. That covers all
+five `_RefusalStage` values that map to a client-notifiable stage:
+`downgrade_denied` and `downgrade_malformed` (both surfaced from `ingest` as a
+`_HaltNoReply` outcome), and `budget_denied`, `dlp_canary_tripped`, and
+`turn_error` (all three surfaced from inside `dispatch`'s pool-bracketed turn
+as a `_TurnFailed` outcome, notified only AFTER the per-`(persona, slug)` lock
+releases). `send_failed` is the deliberate exception: the outbound send that
+just failed used THIS SAME WIRE, so a notify down the same seam is
+near-certain to fail too, and — because that leg re-raises for the forwarded
+path's replay — a later successful retry could deliver the real answer AFTER
+the client was told the turn failed, a false negative worse than silence. The
+client-side turn watchdog is the backstop for a dead-wire failure instead.
+
+The frame is CORE-originated but gateway-RELAYED — opaque pass-through, never
+consumed by the gateway — the same shape as the `link.*` frames the gateway
+sends itself. See
+[ADR-0031's `turn.*` amendment](../adr/0031-comms-socket-transport-for-the-foreground-tui.md#amendment--the-turn-client-state-frame-family-593)
+for the wire-direction contract and the gateway-side relay mechanics.
 
 ### Spec B G6-3: the gateway adapter credential path (core-injects-at-spawn)
 
