@@ -853,6 +853,44 @@ _pepper_write_env() {
   fi
 }
 
+# Refuse any pepper value whose bytes do not mean themselves on BOTH carriers.
+# NOT a hex check: the pepper is opaque HMAC key material (SecretBroker.get
+# returns it as a str; every consumer just .encode("utf-8")s it), so its
+# ALPHABET is irrelevant to correctness — only that the same bytes reach both
+# planes. Derived from the two grammars, not guessed:
+#   \  TOML basic-string escape introducer. `= "ab\ncd"` DECODES to ab<LF>cd,
+#      so the broker and .env hold different keys; `= "ab\qcd"` is not valid
+#      TOML at all and makes the WHOLE secrets file unreadable (every other
+#      secret with it). Neither is detectable afterwards: _pepper_from_file
+#      captures RAW text, so the DIFFERS gate below compares equal and never
+#      fires — the same precondition-blindness Fix-1 round 3 closed for the
+#      reader, one layer down in the escape layer.
+#   " ' read_env_var deletes both outright (`tr -d`), so the value the script
+#      mirrors is not the value Compose forwards.
+#   $ #  Compose's dotenv interpolates `$` and strips a `#` inline comment.
+#   space/control/empty  unquoted .env values do not survive them.
+# ACCEPTED FALSE POSITIVE, named rather than hidden: a TOML *literal* string
+# ('...') has no escape layer at all, so a single-quoted value containing a
+# backslash is legal and safe — and is refused here anyway. That is a LOUD,
+# actionable refusal on an exotic hand-edited value, never a silent mis-write,
+# which is the direction this block's other gates already choose.
+# Reports the offending CHARACTER, never the value (the value is the secret).
+_pepper_refuse_unsafe_value() {
+  local what="$1" value="$2"
+  if ! [[ "$value" =~ ^[[:graph:]]+$ ]]; then
+    printf 'ERROR: %s\n' \
+      "the audit.hash_pepper value in ${what} contains whitespace or a non-printable character. Compose's dotenv parser and this script's TOML writer cannot both carry it unchanged, so alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set it to a value made only of printable non-space characters (the bootstrap generates 64 lowercase hex chars), keeping the SAME value in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+    return 1
+  fi
+  case "$value" in
+    *[\\\"\'\$\#]*)
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in ${what} contains one of \\ \" ' \$ # — characters that do NOT survive the round trip unchanged (a backslash is a TOML escape introducer, quotes are stripped by this script's .env reader, and Compose's dotenv treats \$ as interpolation and # as a comment). alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper to a value without those characters, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+  esac
+  return 0
+}
+
 _pepper_bootstrap() {
   # #594: guard the same way the write helpers below already are — a failed
   # chmod 600 (permission denied, read-only filesystem, file owned by
@@ -869,7 +907,7 @@ _pepper_bootstrap() {
   if ! _pepper_refuse_unusable_shapes; then
     return 1
   fi
-  local env_pepper file_pepper
+  local env_pepper file_pepper pepper_value
   env_pepper="$(read_env_var "$pepper_env_key")"
   file_pepper="$(_pepper_from_file)"
   # The pepper is hex-only; surrounding whitespace in a hand-edited .env is
@@ -877,6 +915,13 @@ _pepper_bootstrap() {
   # pair does not trip the drift refusal below.
   env_pepper="$(trim_ws "$env_pepper")"
   file_pepper="$(trim_ws "$file_pepper")"
+
+  if [[ -n "$env_pepper" ]] && ! _pepper_refuse_unsafe_value ".env (${pepper_env_key})" "$env_pepper"; then
+    return 1
+  fi
+  if [[ -n "$file_pepper" ]] && ! _pepper_refuse_unsafe_value "$target_file" "$file_pepper"; then
+    return 1
+  fi
 
   if [[ -n "$env_pepper" && -n "$file_pepper" ]]; then
     if [[ "$env_pepper" == "$file_pepper" ]]; then
@@ -1056,15 +1101,25 @@ if [[ "$has_operator" == "0" ]]; then
   # Classify on the EXIT CODE, never on the message text (the message is
   # translated — i18n rule): 0 = bound, 2 = an identity-level refusal the
   # operator should read verbatim, anything else = a real failure worth
-  # aborting on. Mirrors the Discord-bind classification below.
+  # aborting on.
   bind_rc=0
   bind_out="$(docker compose run --rm alfred-core user bind "$slug" \
     --platform tui \
     --id "$name" 2>&1)" || bind_rc=$?
   case "$bind_rc" in
     0) echo "Bound the TUI platform identity '$name' to operator '$slug'." ;;
-    2) warn "TUI identity bind refused (already bound, or that display name belongs to another user). The CLI said:"
-       printf '%s\n' "$bind_out" >&2 ;;
+    # Exit 2 on THIS path can only be PlatformIdInUseError: `user add` above
+    # created $slug seven lines up, so UserAlreadyBoundError (which needs an
+    # existing live tui binding on the SAME user) is unreachable here. It
+    # therefore always means the display name belongs to SOMEONE ELSE — which
+    # leaves the operator with no tui identity while `alfred chat` resolves
+    # that name to the other user, running as the wrong identity with their
+    # authorization tier. That is the #592 failure this step exists to
+    # prevent, so refuse rather than continue. The Discord sibling below
+    # keeps `warn` deliberately: it runs on EVERY run, so its exit 2 really
+    # does include the benign "already bound" re-run case.
+    2) printf '%s\n' "$bind_out" >&2
+       fail "TUI identity bind refused: the display name '$name' is already bound to another user (see the CLI message above). Operator '$slug' has NO tui identity, so 'alfred chat' would resolve '$name' to that other user instead. Fix it with 'alfred user unbind <that-slug> --platform tui' then 'alfred user bind $slug --platform tui --id \"$name\"', or pick a different ALFRED_OPERATOR_NAME and re-run. NOTE: re-running setup alone will NOT retry this bind — the operator user now exists, so setup skips this whole step." ;;
     *) fail "user bind failed (exit $bind_rc): $bind_out" ;;
   esac
 else

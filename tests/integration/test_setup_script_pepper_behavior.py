@@ -479,7 +479,6 @@ def test_bootstrap_file_only_mirrors_into_dotenv_without_regenerating(
     "pepper_value",
     [
         pytest.param("prefix-ab&cd-suffix", id="ampersand"),
-        pytest.param(r"prefix-ab\cd-suffix", id="backslash"),
         pytest.param("prefix-ab|cd-suffix", id="pipe-sed-delimiter"),
         pytest.param(_PEPPER_ONE, id="clean-hex-baseline"),
     ],
@@ -495,9 +494,8 @@ def test_bootstrap_file_only_mirrors_sed_metacharacter_pepper_byte_for_byte(
     ``_pepper_from_file``'s extraction is a bare regex capture, not a TOML
     parser or a hex validator — an operator's hand-edited secrets.toml (a
     scenario the README explicitly supports) can carry a pepper containing
-    ``&`` (sed's "insert the matched text" token), a backslash (a sed
-    backreference introducer), or ``|`` (the sed delimiter this script used
-    to substitute with). Before the fix, ``_pepper_write_env``'s
+    ``&`` (sed's "insert the matched text" token) or ``|`` (the sed delimiter
+    this script used to substitute with). Before the fix, ``_pepper_write_env``'s
     ``sed -i "s|...|...|"`` interpolated that value straight into the
     replacement string: `&` silently expanded to the matched text (sed still
     exited 0), corrupting .env while the bootstrap printed its normal success
@@ -510,6 +508,16 @@ def test_bootstrap_file_only_mirrors_sed_metacharacter_pepper_byte_for_byte(
     since the seeded file simulates arbitrary hand-edited content rather than
     a TOML-escaped string — exactly what the production sed-regex extraction
     in ``_pepper_from_file`` also never validates.
+
+    A THIRD metacharacter param used to live here — a backslash
+    (``prefix-ab\\cd-suffix``) — and has MOVED to
+    ``test_bootstrap_refuses_a_pepper_value_that_is_not_identity_safe`` below
+    (id ``backslash-in-basic-string``), per #594 §1.6: a backslash is a TOML
+    basic-string escape introducer, so ``\\c`` there is not merely "unusual",
+    it makes the seeded ``secrets.toml`` line something ``tomllib`` cannot
+    parse at all — this test was pinning byte-for-byte mirroring OUT OF a
+    file the broker refuses to load, a weak pin the new refusal replaces
+    with a strong one (refuse before either plane is touched).
     """
     secrets_dir = tmp_path / ".config" / "alfred"
     secrets_dir.mkdir(parents=True)
@@ -813,7 +821,7 @@ def test_bootstrap_ignores_an_underscore_typo_key_and_still_writes_the_real_one(
     file_value = _read_secrets_toml_pepper(tmp_path)
     assert file_value is not None and re.fullmatch(r"[0-9a-f]{64}", file_value), (
         "the real quoted audit.hash_pepper key was never written — the underscore "
-        f"typo line was mistaken for it. secrets.toml:\n{target.read_text()}"
+        "typo line was mistaken for it (secrets.toml contents not printed here — sec-003)."
     )
     assert file_value == _read_dotenv_pepper(tmp_path), (
         "the banner claimed both planes were seeded but they hold different values"
@@ -938,6 +946,111 @@ def test_bootstrap_refuses_a_pepper_scoped_inside_a_table(
     assert _read_dotenv_pepper(tmp_path) == ""
 
 
+@pytest.mark.parametrize(
+    ("toml_line", "leaked_fragment"),
+    [
+        # Moved from test_bootstrap_file_only_mirrors_sed_metacharacter_pepper_byte_for_byte
+        # (id "backslash" there) — see that test's docstring. `\c` is not a
+        # valid TOML escape, so the OLD test was pinning byte-for-byte
+        # mirroring out of a file tomllib cannot even parse.
+        pytest.param(
+            '"audit.hash_pepper" = "prefix-ab\\cd-suffix"',
+            "prefix-ab\\cd-suffix",
+            id="backslash-in-basic-string",
+        ),
+        # Legal TOML (single-quoted literal string), reaches the reader —
+        # unlike the backslash case above, this file parses fine; the value
+        # itself is refused because a double quote is stripped outright by
+        # this script's own `.env` reader (`tr -d '"'`).
+        pytest.param(
+            "'audit.hash_pepper' = 'ab\"cd'",
+            'ab"cd',
+            id="double-quote-in-literal",
+        ),
+        pytest.param(
+            "'audit.hash_pepper' = 'ab$cd'",
+            "ab$cd",
+            id="dollar-interpolation",
+        ),
+        pytest.param(
+            "'audit.hash_pepper' = 'ab#cd'",
+            "ab#cd",
+            id="hash-comment",
+        ),
+        pytest.param(
+            "'audit.hash_pepper' = 'ab cd'",
+            "ab cd",
+            id="internal-space",
+        ),
+    ],
+)
+def test_bootstrap_refuses_a_pepper_value_that_is_not_identity_safe(
+    bash_available: str,
+    tmp_path: Path,
+    toml_line: str,
+    leaked_fragment: str,
+) -> None:
+    """#594 §1.6: refuse a pepper VALUE that cannot round-trip identically
+    through both carriers (TOML basic-string escaping and Compose's dotenv
+    parser), rather than silently mirroring bytes that mean something
+    different on each side.
+
+    This is NOT a hex/alphabet check — the pepper is opaque HMAC key
+    material, so a passphrase or base64 pepper is fine. It refuses only
+    ``\\ " ' $ #``, whitespace, and control characters, because those
+    specific bytes do not survive the round trip:
+
+    * a backslash is a TOML basic-string escape introducer — ``"ab\\cd"``
+      either DECODES to a different byte string than what ``.env`` would
+      hold, or (as in the ``backslash-in-basic-string`` case here) is not
+      valid TOML at all, which takes every OTHER secret in the file down
+      with it (``TOMLDecodeError`` on the whole file, not just this key);
+    * a double quote is deleted outright by this script's own ``.env``
+      reader (``read_env_var``'s ``tr -d '"'``);
+    * ``$`` and ``#`` are, respectively, interpolated and comment-stripped
+      by Compose's dotenv parser;
+    * unquoted whitespace does not survive an ``.env`` value at all.
+
+    Each of the five params below reaches a DIFFERENT branch of the new
+    ``_pepper_refuse_unsafe_value`` gate (verified: the backslash param hits
+    the case-arm via ``\\``, the quote/dollar/hash params hit it via their
+    own character, and the internal-space param hits the separate
+    ``[[:graph:]]`` whitespace check first). All five are FILE-only (secrets
+    .toml is hand-set, ``.env`` starts blank), so this exercises the
+    file-read leg of the one chokepoint in ``_pepper_bootstrap`` — the
+    env-read leg shares the same call and is not re-parametrized here.
+
+    Refuses BEFORE either plane is touched: secrets.toml stays byte-
+    identical (checked via raw bytes, not ``_read_secrets_toml_pepper``'s
+    ``tomllib.load`` — the backslash param is not even valid TOML), ``.env``
+    stays at its blank baseline, no success banner prints, and — per the
+    house rule the other refusal tests already assert (e.g.
+    ``test_bootstrap_refuses_a_bare_unquoted_dotted_key``) — the pepper
+    value itself never appears in stdout or stderr; the gate reports only
+    the offending CHARACTER.
+    """
+    secrets_dir = tmp_path / ".config" / "alfred"
+    secrets_dir.mkdir(parents=True)
+    target = secrets_dir / "secrets.toml"
+    target.write_text(f"{toml_line}\n")
+    before = target.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        f"a non-identity-safe pepper value must refuse, not exit 0:\nstdout: {result.stdout}"
+    )
+    assert target.read_bytes() == before, "secrets.toml was modified despite the refusal"
+    assert _read_dotenv_pepper(tmp_path) == "", ".env was written despite the refusal"
+    assert "Seeded" not in result.stdout and "Mirrored" not in result.stdout, (
+        f"a success banner leaked despite the refusal: {result.stdout!r}"
+    )
+    assert leaked_fragment not in result.stdout and leaked_fragment not in result.stderr, (
+        "the refusal echoed the pepper value itself — it must report only the "
+        f"offending CHARACTER: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
 def test_bootstrap_appends_above_a_trailing_table_not_inside_it(
     bash_available: str,
     openssl_available: str,
@@ -973,14 +1086,15 @@ def test_bootstrap_appends_above_a_trailing_table_not_inside_it(
     file_value = _read_secrets_toml_pepper(tmp_path)
     assert file_value is not None and re.fullmatch(r"[0-9a-f]{64}", file_value), (
         "the pepper is not at TOP LEVEL — it landed inside the [grafana] table, "
-        f"where the broker can never see it. secrets.toml:\n{target.read_text()}"
+        "where the broker can never see it (secrets.toml contents not printed here — sec-003)."
     )
     assert file_value == _read_dotenv_pepper(tmp_path)
     # The table it was inserted above is still intact and still holds its own key.
     with target.open("rb") as fh:
         data = tomllib.load(fh)
     assert data.get("grafana", {}).get("admin_password") == "hunter2", (
-        f"the [grafana] table was damaged by the insert:\n{target.read_text()}"
+        "the [grafana] table was damaged by the insert "
+        "(secrets.toml contents not printed here — sec-003)."
     )
 
 
