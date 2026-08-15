@@ -58,8 +58,9 @@ from typer.core import TyperArgument, TyperCommand, TyperGroup, TyperOption
 
 from alfred.cli.main import app
 
-_SETUP_SH = Path("bin/alfred-setup.sh")
-_README = Path("README.md")
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_SETUP_SH = _REPO_ROOT / "bin" / "alfred-setup.sh"
+_README = _REPO_ROOT / "README.md"
 
 
 @dataclass(frozen=True)
