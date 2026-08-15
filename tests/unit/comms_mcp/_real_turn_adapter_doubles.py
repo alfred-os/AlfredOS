@@ -1,14 +1,20 @@
 """Shared test doubles for ``RealTurnOrchestratorAdapter.dispatch`` tests.
 
 These doubles were originally private to ``test_real_turn_adapter_dispatch.py``
-and are re-used by the adversarial corpus's executable counterpart
-(``tests/adversarial/comms_identity_boundary/test_cib_corpus_executable.py``,
-cib-2026-009) so that entry drives the SAME real ``dispatch()`` boundary
-rather than reimplementing an independent double set that could silently
-drift from the unit tests' own wiring. Extracted here — matching the
-``_inbound_spies.py`` convention in this same directory — so neither test
-module reaches into the other's ``test_*.py`` file, and the cross-file
-dependency is documented rather than implicit.
+and are re-used by two other cross-file consumers so each drives the SAME real
+``dispatch()`` boundary rather than reimplementing an independent double set
+that could silently drift from the unit tests' own wiring:
+
+* the adversarial corpus's executable counterpart
+  (``tests/adversarial/comms_identity_boundary/test_cib_corpus_executable.py``,
+  cib-2026-009);
+* the display-name-injection adversarial test
+  (``tests/adversarial/prompt_injection/test_pi_2026_014_inbound_display_name_injection.py``,
+  pi-2026-014), which imports ``_RecordingSender`` from here.
+
+Extracted here — matching the ``_inbound_spies.py`` convention in this same
+directory — so no test module reaches into another's ``test_*.py`` file, and
+each cross-file dependency is documented rather than implicit.
 
 ``_RecordingAudit`` is not one of the names the corpus test imports directly,
 but it is ``_adapter()``'s default ``audit_writer`` (``audit or

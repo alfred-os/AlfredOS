@@ -692,7 +692,14 @@ class RealTurnOrchestratorAdapter:
         if isinstance(ingested, _RefusalReply):
             # This leg genuinely cannot proceed without a sender — there is a
             # reply to DELIVER, unlike the halt leg above, so fail-loud (raise)
-            # via `_require_sender()` is the correct posture here.
+            # via `_require_sender()` is the correct posture here. Deliberately
+            # the mirror image of the halt leg's read: `_require_sender()` runs
+            # EARLY, BEFORE the barrier, because this branch always needs a
+            # sender to do its job — if none is bound, raise immediately rather
+            # than parking on the barrier first only to fail after. The halt
+            # leg above reads late (after the barrier) precisely because it can
+            # legitimately complete with NO sender at all (one may bind mid-wait
+            # or never bind), so there is no reason to fail-fast there.
             sender = self._require_sender()
             await self._await_turn_ordering_barrier(ingested.canonical_user_id)
             await self._send(
