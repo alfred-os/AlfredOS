@@ -585,6 +585,115 @@ async def test_dispatch_releases_lock_before_notify_wire_wait_on_turn_error() ->
             await task
 
 
+class _OrderProvingOrchestrator:
+    """Turn 1's ``handle_user_message`` call parks mid-processing (holding the
+    per-key turn lock) until explicitly released; turn 2's call proceeds
+    immediately once it gets to run. Distinguishes the two turns by
+    ``content.content`` — ``_PreparedTurn.content`` is a ``TaggedContent[T2]``,
+    not a bare string.
+    """
+
+    def __init__(self) -> None:
+        self.turn_1_started = asyncio.Event()
+        self.release_turn_1 = asyncio.Event()
+
+    async def handle_user_message(self, *, user, content, working_memory, egress_context=None):
+        if content.content == "turn 1":
+            self.turn_1_started.set()
+            await self.release_turn_1.wait()
+            raise BudgetError("turn 1 over budget")
+        return "turn 2 answer"
+
+
+class _OrderRecordingSender:
+    """Records BOTH ``send_outbound`` and ``send_turn_state`` calls into ONE
+    ordered log, so cross-call-type ordering (an earlier turn's ``turn.failed``
+    notify vs a later turn's reply send) can be asserted directly rather than
+    inferred from two separate lists.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, object]] = []
+
+    async def send_outbound(self, request: object) -> dict[str, object]:
+        self.events.append(("send", request))
+        return {}
+
+    async def send_turn_state(self, notification: object) -> None:
+        self.events.append(("notify", notification))
+
+
+def _prepared_with_content(text: str) -> _PreparedTurn:
+    """Same shape as ``_prepared()`` but with distinguishable content, for a
+    test that needs to tell two SAME-key turns apart via a shared
+    orchestrator double."""
+    return _PreparedTurn(
+        content=tag(T2, text, source="comms.inbound"),
+        user=_InboundUser(slug="u-1", display_name="Ada", language="en-US"),
+        egress=SimpleNamespace(adapter_id="tui", inbound_id="ib-1", session_id="u-1"),  # type: ignore[arg-type]
+        adapter_id="tui",
+        target_platform_id="plat-9",
+    )
+
+
+async def test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent() -> None:
+    """Cross-module proof for a client-side assumption (#594 follow-up finding).
+
+    ``AlfredTuiApp._resolve_pending_turn`` (``plugins/alfred_tui/src/alfred_tui/
+    textual/app.py``) treats a stale/late completion signal for a
+    watchdog-abandoned turn as arriving strictly BEFORE a later, genuinely
+    still-pending turn's own signal — with NO wire-level correlation of any
+    kind available to actually distinguish them. That assumption rests
+    entirely on THIS module: the per-``(persona, slug)`` turn lock (FOLD-R1)
+    serializes two same-key turns' PROCESSING, and — since PR #594's
+    lock-boundary move — the notify/send call for each turn only starts AFTER
+    that turn's own ``async with lock:`` block has exited, with no ``await``
+    in between. See the matching contract comment on ``dispatch`` /
+    ``_TurnFailed`` / ``_TurnSucceeded`` above: do not add an ``await``
+    between lock release and notify/send initiation, and do not loosen the
+    per-key lock to allow same-key concurrency, without revisiting this test
+    and the TUI's debt-counter design.
+
+    This test dispatches turn 1 (fails -> ``send_turn_state``) and turn 2
+    (succeeds -> ``send_outbound``) for the SAME key, with turn 1 deliberately
+    parked mid-processing (via an event-gated orchestrator double) so it is
+    still holding the lock when turn 2's ``dispatch()`` call is issued and
+    genuinely blocks on lock acquisition — proving turn 2 cannot jump the
+    queue, not merely that it happens not to in an untimed race. Both a
+    ``send_turn_state`` and a ``send_outbound`` call are used (rather than two
+    of the same kind) so the assertion covers ordering ACROSS the two sender
+    methods, matching the real notify-then-reply shape a stale-turn-then-
+    live-turn sequence produces in production.
+    """
+    sender = _OrderRecordingSender()
+    orchestrator = _OrderProvingOrchestrator()
+    pool = _Pool()
+    adapter = _adapter(orchestrator=orchestrator, sender=sender, pool=pool)
+
+    task_1 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 1")))
+    await asyncio.wait_for(orchestrator.turn_1_started.wait(), timeout=1.0)
+
+    # Turn 1 is now parked mid-processing, holding the per-key lock. Issue
+    # turn 2's dispatch call WHILE turn 1 is still in flight.
+    task_2 = asyncio.create_task(adapter.dispatch(_prepared_with_content("turn 2")))
+    await asyncio.sleep(0)  # let turn 2's dispatch run up to the lock and block on it
+    assert not task_2.done(), "turn 2 must genuinely block on the lock, not race ahead"
+    assert sender.events == [], "neither turn may have signaled the sender yet"
+
+    orchestrator.release_turn_1.set()
+    await asyncio.gather(task_1, task_2)
+
+    assert [kind for kind, _ in sender.events] == ["notify", "send"], (
+        "turn 1's completion signal must reach the sender strictly before "
+        "turn 2's, even though turn 2's dispatch was already in flight and "
+        "waiting on the lock"
+    )
+    notify = sender.events[0][1]
+    assert notify.stage == "budget_exhausted"
+    sent = sender.events[1][1]
+    assert sent.body[0] == "turn 2 answer"  # DLP-scanned body, index 0 is the text
+
+
 async def test_notify_skipped_for_non_client_adapter_kind() -> None:
     """``adapter_id="discord"`` is not in ``TURN_STATE_CLIENT_KINDS`` — the
     debug-log-and-skip arm fires and NOTHING is sent to it."""

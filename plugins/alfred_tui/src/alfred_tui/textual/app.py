@@ -156,13 +156,6 @@ class AlfredTuiApp(App[None]):
         # render input, and tearing one down on every reactive-diff cycle
         # would be spurious churn.
         self._turn_watchdog: Timer | None = None
-        # Monotonic identity for each turn-pending "episode": bumped once per
-        # accepted submission (`on_input_submitted`) and once per watchdog
-        # abandonment (`_on_turn_timeout`). Diagnostic/identity counter only —
-        # see `_stale_turns_awaiting_signal` for why a bare generation
-        # COMPARISON cannot gate `write_outbound`/`set_turn_failed` (#594
-        # review finding).
-        self._turn_generation: int = 0
         # How many watchdog-abandoned turns the client still owes exactly one
         # late completion signal (a reply or a `turn.failed`) for. See
         # `_resolve_pending_turn`.
@@ -234,7 +227,6 @@ class AlfredTuiApp(App[None]):
         # `turn.failed` for it later. Record that one late completion signal
         # is now owed so `_resolve_pending_turn` recognizes it as stale
         # (rather than the CURRENT turn's own signal) whenever it arrives.
-        self._turn_generation += 1
         self._stale_turns_awaiting_signal += 1
         self._end_turn()
         self.query_one("#conversation_log", RichLog).write(
@@ -268,7 +260,6 @@ class AlfredTuiApp(App[None]):
         # legitimate markup. (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold cyan]{t('tui.label_you')}[/]: {escape(text)}")
         event.input.value = ""
-        self._turn_generation += 1  # new turn-pending episode (#594 review finding)
         self._turn_pending = True  # -> watcher: disable + .busy
         log.write(f"[dim]{t('tui.thinking')}[/]")
         self._arm_turn_watchdog()
@@ -295,12 +286,12 @@ class AlfredTuiApp(App[None]):
         with no per-turn correlation available at all — ``TurnFailedNotification``
         deliberately carries no ``inbound_id`` (the TUI is structurally
         1:1/single-turn, ``protocol.py``), and a reply carries none either. So
-        this cannot check "does this signal match generation N": after a
-        watchdog timeout abandons turn 1 and the operator resubmits as turn 2,
-        turn 2's OWN submission bumps ``_turn_generation`` right back to a value
-        a same-tick "matches the current generation" comparison would accept —
-        a bare generation match is genuinely indistinguishable between "turn 2's
-        own signal" and "turn 1's late signal arriving while turn 2 is pending".
+        this cannot check "does this signal match generation N": a generation
+        counter bumped on both submission and abandonment returns to the SAME
+        value on resubmission that a same-tick "matches the current
+        generation" comparison would accept, which makes "turn 2's own
+        signal" and "turn 1's late signal arriving while turn 2 is pending"
+        genuinely indistinguishable by that check alone.
 
         What IS available, with no wire tag at all, is a COUNT. The core
         serializes one session's turns behind a per-(persona, slug) mutex
@@ -314,6 +305,15 @@ class AlfredTuiApp(App[None]):
         pending turn's own signal. Consume that backlog first, without
         touching ``_turn_pending``/the watchdog; only once it is empty does a
         completion signal end the turn that is actually still pending.
+
+        This is a CROSS-MODULE contract, not something enforceable from this
+        file alone: see the ``DOWNSTREAM CONTRACT`` note on
+        ``real_turn_adapter._TurnFailed`` and the matching note on
+        ``RealTurnOrchestratorAdapter.dispatch``
+        (``src/alfred/comms_mcp/real_turn_adapter.py``), and the regression
+        test that would fail if that ordering ever regressed:
+        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
+        in ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``.
         """
         if self._stale_turns_awaiting_signal > 0:
             self._stale_turns_awaiting_signal -= 1

@@ -252,6 +252,33 @@ class _TurnFailed:
     exception-to-reraise OUT of the lock so ``dispatch`` can notify (and, on
     the ``turn_error`` leg, re-raise) AFTER the mutex has released, while
     preserving each leg's original notify-then-{return,raise} ORDER.
+
+    DOWNSTREAM CONTRACT (#594 follow-up finding): the TUI plugin's stale-turn
+    debt counter (``AlfredTuiApp._resolve_pending_turn``,
+    ``plugins/alfred_tui/src/alfred_tui/textual/app.py``) has no wire-level
+    way to tell "this reply/turn.failed is for the turn I'm currently
+    waiting on" apart from "this is a late signal for a turn my watchdog
+    already gave up on" — the client's ONLY correctness lever is that this
+    module sends one session's turn-completion signals to the sender in
+    SUBMISSION order, even when two dispatches for the same ``(persona,
+    slug)`` key are in flight "concurrently" from the caller's perspective.
+    That guarantee rests on TWO invariants living here, both load-bearing for
+    a module the TUI never imports or type-checks against:
+
+    1. the per-key ``asyncio.Lock`` (FOLD-R1) serializes same-key turns'
+       PROCESSING — a later turn cannot even START running the orchestrator
+       until every earlier same-key turn has released the lock;
+    2. no ``await`` sits between a turn's ``async with lock:`` block exiting
+       and that turn's notify/send call being INITIATED (see the
+       ``perf-001`` note on ``dispatch`` below) — so a later turn's own
+       signal cannot reach the sender before an earlier turn's.
+
+    Do not introduce an ``await`` between lock release and notify/send
+    initiation, and do not loosen the per-``(persona, slug)`` lock to allow
+    same-key concurrency, without first re-reading
+    ``AlfredTuiApp._resolve_pending_turn`` and
+    ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py::test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
+    — the latter fails loudly if this ordering ever regresses.
     """
 
     stage: _RefusalStage
@@ -526,6 +553,16 @@ class RealTurnOrchestratorAdapter:
         mirroring the successful-turn ``_send`` call's existing outside-the-mutex
         placement. Each leg's audit-write-then-notify-then-{return,raise} ORDER
         is unchanged; only the LOCK boundary moved. See ``_TurnFailed``.
+
+        DO NOT add an ``await`` between the ``async with lock:`` block below
+        releasing and the notify/``_send`` call that follows it, and do not let
+        two same-``(persona, slug)``-key turns process concurrently — a
+        downstream client (the TUI's stale-turn debt counter) depends on
+        notify/send order matching submission order for one session with NO
+        wire-level correlation available to check it itself. See the longer
+        note on ``_TurnFailed`` above and
+        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``
+        in ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``.
         """
         sender = self._require_sender()
         if isinstance(ingested, _HaltNoReply):
