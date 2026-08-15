@@ -75,7 +75,7 @@ def env_example_text() -> str:
 
 
 def _forwarded_env_names() -> frozenset[str]:
-    """The ``ALFRED_<NAME>`` env names every registered secret resolves under.
+    """The ``ALFRED_<NAME>`` env names every core-forwarded secret resolves under.
 
     Mirrors ``SecretBroker.get()``'s own ``f"{_ENV_PREFIX}{name.upper()}"``
     (src/alfred/security/secrets.py) verbatim — no dot->underscore
@@ -83,8 +83,20 @@ def _forwarded_env_names() -> frozenset[str]:
     ``ALFRED_AUDIT.HASH_PEPPER``, not an underscored variant. Derived from
     ``SUPPORTED_SECRETS`` so a newly-registered secret is covered here
     automatically, without anyone remembering to update this test.
+
+    ``_CORE_UNFORWARDED`` is filtered out HERE, before the uppercase/prefix
+    transform — not by subtracting it from the transformed output. The two
+    sets live in different string spaces: ``SUPPORTED_SECRETS`` /
+    ``_CORE_UNFORWARDED`` hold dotted secret identifiers
+    (``"audit.hash_pepper"``), while the return value holds
+    ``ALFRED_``-prefixed uppercased env-var names
+    (``"ALFRED_AUDIT.HASH_PEPPER"``). Subtracting an identifier-space set
+    from an env-var-name-space set can never remove anything — the transform
+    changes every string's shape, so no element of one set can ever equal an
+    element of the other.
     """
-    return frozenset(f"ALFRED_{s.upper()}" for s in SUPPORTED_SECRETS)
+    forwarded_secrets = SUPPORTED_SECRETS - _CORE_UNFORWARDED
+    return frozenset(f"ALFRED_{s.upper()}" for s in forwarded_secrets)
 
 
 def test_every_supported_secret_is_forwarded_to_core(compose: dict[str, Any]) -> None:
@@ -98,7 +110,7 @@ def test_every_supported_secret_is_forwarded_to_core(compose: dict[str, Any]) ->
     the ones known about today.
     """
     core_env = compose["services"]["alfred-core"]["environment"]
-    required = _forwarded_env_names() - _CORE_UNFORWARDED
+    required = _forwarded_env_names()
     missing = required - set(core_env)
     assert not missing, (
         f"alfred-core's `environment:` block is missing {sorted(missing)} — "
@@ -126,7 +138,7 @@ def test_every_forwarded_secret_is_operator_settable(
     but with no `.env` variable an operator could actually populate.
     """
     core_env = compose["services"]["alfred-core"]["environment"]
-    required = _forwarded_env_names() - _CORE_UNFORWARDED
+    required = _forwarded_env_names()
 
     for key in sorted(required):
         raw_value = core_env[key]
