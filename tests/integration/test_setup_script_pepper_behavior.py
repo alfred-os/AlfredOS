@@ -1011,14 +1011,18 @@ def test_bootstrap_refuses_a_pepper_value_that_is_not_identity_safe(
       by Compose's dotenv parser;
     * unquoted whitespace does not survive an ``.env`` value at all.
 
-    Each of the five params below reaches a DIFFERENT branch of the new
-    ``_pepper_refuse_unsafe_value`` gate (verified: the backslash param hits
-    the case-arm via ``\\``, the quote/dollar/hash params hit it via their
-    own character, and the internal-space param hits the separate
-    ``[[:graph:]]`` whitespace check first). All five are FILE-only (secrets
-    .toml is hand-set, ``.env`` starts blank), so this exercises the
-    file-read leg of the one chokepoint in ``_pepper_bootstrap`` — the
-    env-read leg shares the same call and is not re-parametrized here.
+    Four of the five params below reach the new ``_pepper_refuse_unsafe_
+    value`` gate's ``case`` branch, each via its own character (backslash,
+    double-quote, dollar, hash); the fifth (``internal-space``) reaches the
+    separate, earlier ``[[:graph:]]`` whitespace check instead. All five are
+    FILE-only (secrets.toml is hand-set, ``.env`` starts blank), so this
+    exercises the file-read leg of the one chokepoint in
+    ``_pepper_bootstrap``. The env-read leg shares the same
+    ``_pepper_refuse_unsafe_value`` call for ``\\ $ #``/whitespace — but NOT
+    for a quote character, which ``read_env_var``'s ``tr -d`` strips before
+    that call ever sees it; see
+    ``test_bootstrap_refuses_a_dotenv_pepper_containing_a_quote_character``
+    below for that leg's own, narrower gate.
 
     Refuses BEFORE either plane is touched: secrets.toml stays byte-
     identical (checked via raw bytes, not ``_read_secrets_toml_pepper``'s
@@ -1048,6 +1052,61 @@ def test_bootstrap_refuses_a_pepper_value_that_is_not_identity_safe(
     assert leaked_fragment not in result.stdout and leaked_fragment not in result.stderr, (
         "the refusal echoed the pepper value itself — it must report only the "
         f"offending CHARACTER: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_bootstrap_refuses_a_dotenv_pepper_containing_a_quote_character(
+    bash_available: str,
+    tmp_path: Path,
+) -> None:
+    """#594 Task S2 review round 1 finding: a raw ``"``/``'`` in the ``.env``
+    pepper VALUE must refuse, even though ``env_pepper`` — the value every
+    OTHER check in ``_pepper_bootstrap`` sees — never contains it.
+
+    ``read_env_var`` ends in ``tr -d '"' | tr -d "'"``, shared by 4 other
+    call sites in this file (``ALFRED_OPERATOR_NAME``, the Discord token,
+    the DeepSeek/quarantine API keys), so it cannot be changed for this one
+    caller. That means a raw ``.env`` line
+    ``ALFRED_AUDIT_HASH_PEPPER=ab"cd`` reads, post-``read_env_var``, as
+    ``env_pepper=abcd`` — which passes ``_pepper_refuse_unsafe_value``
+    cleanly (no forbidden character survives the strip) and would have been
+    mirrored into secrets.toml as ``abcd``, while Compose's dotenv parser
+    does NOT do this stripping and forwards alfred-core the UNTOUCHED
+    ``ab"cd``. Two different HMAC planes, exit 0, no refusal — precisely
+    the failure class ``_pepper_refuse_unsafe_value`` exists to close, just
+    one layer further upstream than that gate alone can see through
+    ``read_env_var``.
+
+    Confirmed to fail against the S2 first-pass fix (the
+    ``_pepper_refuse_unsafe_value`` gate on the already-``tr -d``-stripped
+    ``env_pepper`` alone, with no raw pre-strip check): that build exits 0
+    and prints a "Mirrored ... into secrets.toml" banner for this exact
+    ``.env`` line.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text('ALFRED_AUDIT_HASH_PEPPER=ab"cd\n')
+    before = env_file.read_bytes()
+
+    result = _run_bootstrap_in_tmpdir(tmp_path)
+
+    assert result.returncode != 0, (
+        "a quote character silently stripped by read_env_var must still refuse, "
+        f"not exit 0:\nstdout: {result.stdout}"
+    )
+    assert env_file.read_bytes() == before, ".env was modified despite the refusal"
+    assert _read_secrets_toml_pepper(tmp_path) is None, (
+        "secrets.toml was written despite the refusal"
+    )
+    assert "Seeded" not in result.stdout and "Mirrored" not in result.stdout, (
+        f"a success banner leaked despite the refusal: {result.stdout!r}"
+    )
+    assert 'ab"cd' not in result.stdout and 'ab"cd' not in result.stderr, (
+        "the refusal echoed the raw pepper value itself — it must report only "
+        f"the offending CHARACTER: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "abcd" not in result.stdout and "abcd" not in result.stderr, (
+        "the refusal echoed the read_env_var-STRIPPED value — that value must "
+        f"never be treated as safe: stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
 

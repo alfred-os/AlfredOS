@@ -891,6 +891,29 @@ _pepper_refuse_unsafe_value() {
   return 0
 }
 
+# #594 Task S2 review round 1: `read_env_var`'s `tr -d '"' | tr -d "'"` (needed
+# so a quoted ALFRED_OPERATOR_NAME="Bruce"-shaped value reads as the bare name
+# at every OTHER call site) makes a `"`/`'` inside the pepper value invisible
+# to `_pepper_refuse_unsafe_value` above: by the time `env_pepper` reaches
+# that call, the quote is already gone. `.env` line `ALFRED_AUDIT_HASH_PEPPER=
+# ab"cd` would read as `env_pepper=abcd` — passes the gate, gets mirrored into
+# `target_file` as `abcd` — while Compose's dotenv parser does NOT do this
+# stripping and forwards the UNTOUCHED `ab"cd` to alfred-core. Two different
+# HMAC planes, exit 0, no refusal: the exact failure `_pepper_refuse_unsafe_
+# value` exists to prevent, one layer further upstream than `read_env_var`
+# lets it see.
+#
+# This is deliberately NOT a second copy of `_pepper_refuse_unsafe_value` (or
+# a change to `read_env_var`'s shared stripping, which four other call sites
+# rely on): every OTHER refused character (`\ $ #` and whitespace) survives
+# `read_env_var` unchanged, so it is already caught via `env_pepper`; only the
+# two quote characters need a raw, pre-strip look. This is a narrow,
+# pepper-specific companion read, at the same one chokepoint, not a new one.
+_pepper_env_raw_value() {
+  [[ -f .env ]] || return 0
+  grep -E "^${pepper_env_key}=" .env | head -1 | cut -d= -f2- || true
+}
+
 _pepper_bootstrap() {
   # #594: guard the same way the write helpers below already are — a failed
   # chmod 600 (permission denied, read-only filesystem, file owned by
@@ -907,7 +930,7 @@ _pepper_bootstrap() {
   if ! _pepper_refuse_unusable_shapes; then
     return 1
   fi
-  local env_pepper file_pepper pepper_value
+  local env_pepper file_pepper pepper_value raw_env_pepper
   env_pepper="$(read_env_var "$pepper_env_key")"
   file_pepper="$(_pepper_from_file)"
   # The pepper is hex-only; surrounding whitespace in a hand-edited .env is
@@ -915,6 +938,18 @@ _pepper_bootstrap() {
   # pair does not trip the drift refusal below.
   env_pepper="$(trim_ws "$env_pepper")"
   file_pepper="$(trim_ws "$file_pepper")"
+
+  # Raw (pre-`tr -d`) look at the SAME .env line, quote-check ONLY — see
+  # _pepper_env_raw_value's comment above. Runs before the env_pepper gate
+  # below so a quote character is refused even though env_pepper itself
+  # never sees it.
+  raw_env_pepper="$(trim_ws "$(_pepper_env_raw_value)")"
+  case "$raw_env_pepper" in
+    *[\"\']*)
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in .env (${pepper_env_key}) contains a \" or ' character. This script's .env reader silently deletes both before the value is ever compared or mirrored, but Compose's dotenv parser does NOT strip them — so alfred-core would receive a different value (with the quote) than what this script would write into ${target_file} (without it). alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in .env to a value without a \" or ' character, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+  esac
 
   if [[ -n "$env_pepper" ]] && ! _pepper_refuse_unsafe_value ".env (${pepper_env_key})" "$env_pepper"; then
     return 1
