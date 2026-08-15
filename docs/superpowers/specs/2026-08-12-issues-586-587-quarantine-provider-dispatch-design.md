@@ -178,8 +178,11 @@ call sites and reviewing them together is cheaper than sequencing):
   (`src/alfred/cli/daemon/_commands.py`) calls UNCONDITIONALLY on every boot —
   OUTSIDE the `if settings.comms_enabled_adapters:` branch, and before
   `write_pidfile` / `Supervisor.start()` / the AF_UNIX control socket, so a
-  refusal has no daemon-up side effects and no I/O has happened yet (it can
-  never leak a partially-constructed secret broker or content store). When
+  refusal has no daemon-up side effects and occurs before provider/comms I/O
+  (it can never leak a partially-constructed secret broker or content
+  store) — it DOES log the resolved posture (see the data-flow section
+  below), so "pre-I/O" scopes to provider/comms I/O, not logging/audit I/O.
+  When
   this setting is `true` the gate calls the existing
   `assert_provider_separation(privileged_provider_id=..., quarantined_provider_id=...)`
   — refuses boot on a collision, exactly as already implemented and tested —
@@ -218,7 +221,8 @@ call sites and reviewing them together is cheaper than sequencing):
       ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false   (default)
   -> _commands.py `_start_async`, on EVERY boot — comms-enabled or not, and
      BEFORE write_pidfile / Supervisor.start() / the AF_UNIX control socket:
-       -> _comms_boot.py `enforce_quarantine_provider_separation` (pre-I/O):
+       -> _comms_boot.py `enforce_quarantine_provider_separation`
+          (before provider/comms I/O and daemon-up side effects):
             - ALWAYS: log the resolved posture (quarantine + privileged
               provider ids, require_separation) — the happy path leaves a
               breadcrumb too, not only a collision
