@@ -989,15 +989,27 @@ async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
                 # message) BEFORE calling .index() on it — a missing marker
                 # should fail with the actual transcript content, not a bare
                 # ValueError("substring not found") that hides it.
-                you_marker = t("tui.label_you")
-                thinking_marker = t("tui.thinking")
-                failed_marker = t("tui.turn_failed.budget_exhausted")
-                assert you_marker in log_text, log_text
-                assert thinking_marker in log_text, log_text
-                assert failed_marker in log_text, log_text
-                you_index = log_text.index(you_marker)
-                thinking_index = log_text.index(thinking_marker)
-                failed_index = log_text.index(failed_marker)
+                #
+                # Whitespace-collapsed on BOTH sides (matching the #594 S3
+                # fix in plugins/alfred_tui/tests/test_textual_app.py): the
+                # budget_exhausted copy is 160 chars, longer than RichLog's
+                # ~78-col wrap width in this run_test() terminal, so a
+                # word-wrap can land a literal "\n" where the msgstr has a
+                # plain space. Collapsing runs of whitespace to one space is
+                # order-preserving, so the three markers' relative .index()
+                # positions below still correctly prove transcript order.
+                normalized_log_text = " ".join(log_text.split())
+                you_marker = " ".join(t("tui.label_you").split())
+                thinking_marker = " ".join(t("tui.thinking").split())
+                failed_marker = " ".join(
+                    t("tui.turn_failed.budget_exhausted").split()
+                )
+                assert you_marker in normalized_log_text, log_text
+                assert thinking_marker in normalized_log_text, log_text
+                assert failed_marker in normalized_log_text, log_text
+                you_index = normalized_log_text.index(you_marker)
+                thinking_index = normalized_log_text.index(thinking_marker)
+                failed_index = normalized_log_text.index(failed_marker)
                 assert you_index < thinking_index < failed_index, log_text
                 # Non-vacuity: the turn never reached a real completion — the
                 # router's canned reply must be ABSENT (the pre-check halted
