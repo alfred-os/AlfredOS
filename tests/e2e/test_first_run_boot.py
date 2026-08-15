@@ -211,8 +211,10 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
                 "provisioning did not reach the late secret-seed step."
             )
             secrets_text = secrets_file.read_text()
-            assert "audit.hash_pepper" in secrets_text, (
-                "secrets file exists but audit.hash_pepper was not written into it."
+            has_pepper_key = "audit.hash_pepper" in secrets_text
+            assert has_pepper_key, (
+                f"{secrets_file} exists but audit.hash_pepper was not written into it "
+                "(contents not printed here — sec-003)."
             )
 
             # (4) #591: the SAME pepper value must ALSO reach .env — the carrier docker-compose
@@ -222,6 +224,10 @@ def test_setup_sh_completes(tmp_path: Path) -> None:
             # Values are compared as a bool (not `assert x == y`) so a failure never dumps the
             # raw hex pepper into pytest's assertion-rewrite output — scrub_env_secrets above
             # only reaches captured subprocess text, not a Python-level assert diff (sec-003).
+            # The has_pepper_key assert above (step 3) uses the same bool-indirection idiom for
+            # the identical reason: a custom assertion message does NOT suppress pytest's
+            # rewritten-expression introspection, so referencing secrets_text directly inside an
+            # assert would still print the full file contents on failure.
             secrets_pepper = re.search(
                 r'^"?audit\.hash_pepper"?\s*=\s*"([0-9a-f]{64})"', secrets_text, re.MULTILINE
             )

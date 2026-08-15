@@ -101,14 +101,22 @@ gateway-PASS-THROUGH (opaque relay, not consumed).**
 5. **Best-effort wire, authoritative audit — the same posture ADR-0033
    Decision 5 establishes for `daemon.lifecycle.*`.** The refusal's audit
    row (`_emit_refused`) is written and durable BEFORE the notify is
-   attempted; `_notify_turn_failed` never raises (`TimeoutError` and the
-   narrow wire-fault tuple `BrokenPipeError` / `ConnectionResetError` /
-   `CommsProtocolError` / `OSError` are caught and logged, never
-   `Exception`/`BaseException` bare — `CancelledError` still propagates), so
-   a dead or wedged client wire can never turn a deterministic halt into a
-   replay-poisoning re-raise. If the frame never arrives, the client's own
-   90-second turn watchdog (Task 14) is the backstop — the operator recovers
-   either way, just via a different signal.
+   attempted; `_notify_turn_failed` never raises. `TimeoutError` is caught
+   and logged on its own leg, and every OTHER `Exception` is contained by a
+   deliberately bare `except Exception` (#594 R1 Fix B): a narrow
+   wire-fault tuple made the never-raises contract a lie, letting anything
+   outside it — a `ValidationError` from constructing the notification, a
+   bug in a sender implementation — escape and do exactly the damage this
+   decision exists to prevent. `CancelledError` derives from
+   `BaseException`, so it is NOT caught and still propagates BY DESIGN: a
+   caller-level cancellation must genuinely cancel an in-flight notify
+   rather than be logged like a wire fault. Containment is not silence —
+   each leg logs a `_log.warning` carrying `error_class` only, never
+   `str(exc)`. A dead or wedged client wire can therefore never turn a
+   deterministic halt into a replay-poisoning re-raise. If the frame never
+   arrives, the client's own 90-second turn watchdog (Task 14) is the
+   backstop — the operator recovers either way, just via a different
+   signal.
 
 6. **Client-side routing mirrors the `link.*` wire-contract-violation
    discipline exactly.** `alfred_tui.cohost._serve_wire` recognizes
