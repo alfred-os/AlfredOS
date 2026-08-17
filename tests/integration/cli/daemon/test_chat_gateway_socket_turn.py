@@ -471,6 +471,7 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
     listener: CommsSocketListener | None = None
     # Gateway halves + cohost — reaped in the finally regardless of how far we got.
     gateway_client_listener: GatewayClientListener | None = None
+    accept_task: asyncio.Task[Any] | None = None
     relay_task: asyncio.Task[None] | None = None
     gateway_shutdown = asyncio.Event()
     cohost_transport: Any = None
@@ -714,7 +715,11 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
         # proof's discipline) regardless of how far boot got.
         gateway_shutdown.set()
         supervisor.shutdown_event.set()
-        optional_tasks: tuple[asyncio.Task[None] | None, ...] = (relay_task, cohost_wire_task)
+        optional_tasks: tuple[asyncio.Task[Any] | None, ...] = (
+            accept_task,
+            relay_task,
+            cohost_wire_task,
+        )
         for maybe_task in optional_tasks:
             if maybe_task is not None:
                 maybe_task.cancel()
@@ -819,6 +824,7 @@ async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
     listener: CommsSocketListener | None = None
     # Gateway halves + cohost — reaped in the finally regardless of how far we got.
     gateway_client_listener: GatewayClientListener | None = None
+    accept_task: asyncio.Task[Any] | None = None
     relay_task: asyncio.Task[None] | None = None
     gateway_shutdown = asyncio.Event()
     cohost_transport: Any = None
@@ -1023,7 +1029,11 @@ async def test_core_turn_failure_reaches_chat_and_releases_the_pending_turn(
         # proof's discipline) regardless of how far boot got.
         gateway_shutdown.set()
         supervisor.shutdown_event.set()
-        optional_tasks: tuple[asyncio.Task[None] | None, ...] = (relay_task, cohost_wire_task)
+        optional_tasks: tuple[asyncio.Task[Any] | None, ...] = (
+            accept_task,
+            relay_task,
+            cohost_wire_task,
+        )
         for maybe_task in optional_tasks:
             if maybe_task is not None:
                 maybe_task.cancel()
