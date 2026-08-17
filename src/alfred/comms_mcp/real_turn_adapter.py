@@ -930,13 +930,14 @@ class RealTurnOrchestratorAdapter:
         (``plugins/alfred_tui/src/alfred_tui/textual/app.py``,
         ``_incur_stale_turn_debt``) as a reason this doesn't matter — that
         was arc-001's actual root cause. The debt counter is
-        order-INSENSITIVE by construction: it is a FIFO of fungible handles,
-        so whichever signal arrives first discharges a debt and whichever
-        arrives second ends the turn, regardless of which turn either signal
-        was really for (see the state-machine proof in the root-cause
-        report, root-cause-arc-001-turn-order-race.md §3.1). That self-
-        corrects STATE — the pending-turn flag and debt count converge to
-        the same values either way — but it is INDIFFERENT to order, not a
+        order-INSENSITIVE by construction: it is a FIFO of debts that are
+        fungible FOR DISCHARGE, so whichever signal arrives first discharges
+        a debt and whichever arrives second ends the turn, regardless of
+        which turn either signal was really for (see the state-machine proof
+        in the root-cause report, root-cause-arc-001-turn-order-race.md
+        §3.1). That self-corrects STATE — the pending-turn flag and debt
+        count converge to the same values either way — but it is
+        INDIFFERENT to order, not a
         correction OF it: it neither detects nor repairs a transcript line
         printing in the wrong sequence. "The debt bound self-corrects a
         transcript-order swap anyway" was exactly the false reasoning that

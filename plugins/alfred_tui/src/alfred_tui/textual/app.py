@@ -22,6 +22,8 @@ introduced by the move.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from functools import partial
 from typing import Final, Protocol, assert_never
 
 from rich.markup import escape
@@ -109,6 +111,30 @@ class _SessionLike(Protocol):
         raise NotImplementedError
 
 
+@dataclass(slots=True, eq=False)
+class _StaleTurnDebt:
+    """One watchdog-abandoned turn's owed late signal, plus its own expiry handle.
+
+    ``eq=False`` is LOAD-BEARING: entries are looked up by IDENTITY (an expiry
+    callback must recognize ITS OWN debt, and two debts carrying equal field
+    values are still two distinct obligations). A dataclass-generated
+    ``__eq__`` would let ``list.remove``/``in`` match the WRONG entry — the
+    very aliasing this type exists to remove.
+
+    ``expiry`` is ``init=False`` with no default rather than ``Timer | None``:
+    it is assigned in the statement that creates it (see
+    ``_incur_stale_turn_debt``), before the event loop can run the timer's
+    callback, so no reachable window leaves it unset. A ``| None`` type would
+    force an ``is not None`` branch at every use that no test could ever
+    reach — the same dead arm ``_discharge_stale_turn_debt`` already refuses
+    on its list. Unset would raise ``AttributeError``, which is the loud
+    failure that situation deserves.
+    """
+
+    expiry: Timer = field(init=False)
+    discharged: bool = False
+
+
 class AlfredTuiApp(App[None]):
     """Textual app: scrolling conversation log + bottom input box.
 
@@ -173,17 +199,15 @@ class AlfredTuiApp(App[None]):
         # that drives the live elapsed-time counter (#594 Fix-10) is plain
         # instance state, not a reactive.
         self._turn_elapsed_timer: Timer | None = None
-        # How many watchdog-abandoned turns the client still owes exactly one
-        # late completion signal (a reply or a `turn.failed`) for. See
-        # `_resolve_pending_turn`. AUTHORITATIVE: the list below is only
-        # bookkeeping for the expiry timers.
-        self._stale_turns_awaiting_signal: int = 0
-        # One live one-shot expiry `Timer` per outstanding debt above (#594
-        # R1). Plain instance state for the same reason as `_turn_watchdog`:
-        # a `Timer` handle is not a render input. The handles are FUNGIBLE —
-        # nothing correlates a debt with a turn — so this is a plain FIFO,
-        # not a map; see `_discharge_stale_turn_debt`.
-        self._stale_debt_expiries: list[Timer] = []
+        # Every watchdog-abandoned turn still owed exactly one late completion
+        # signal (a reply or a `turn.failed`), oldest first. THE single source
+        # of truth (#594 R2): `_stale_turns_awaiting_signal` is a projection of
+        # this list's length, not a second number kept in lockstep with it.
+        # Debts are FUNGIBLE FOR DISCHARGE (nothing correlates a signal with a
+        # turn, so a late signal settles the head) but BOUND FOR EXPIRY (each
+        # debt's expiry callback carries the debt it belongs to) — see
+        # `_discharge_stale_turn_debt` and `_expire_stale_turn_debt`.
+        self._stale_debts: list[_StaleTurnDebt] = []
         # Whether the operator has already been told (via ONE dim log line)
         # that their last keystroke was dropped because a turn is still
         # pending. Reset to `False` at the start of each new turn (see
@@ -282,6 +306,21 @@ class AlfredTuiApp(App[None]):
         self._turn_pending = False
         self.query_one("#turn_status", Static).display = False
 
+    @property
+    def _stale_turns_awaiting_signal(self) -> int:
+        """How many watchdog-abandoned turns still owe this client a late signal.
+
+        DERIVED from :attr:`_stale_debts`, never stored. Until #594 R2 this was
+        an independent ``int`` maintained in lockstep with a parallel
+        ``list[Timer]`` by three methods, under a stated ``len(list) == count``
+        invariant. That invariant was the bug, not the guard: an expiry
+        callback that ``Timer.stop()`` structurally cannot un-queue wrote off
+        the WRONG debt while keeping BOTH sides consistent, so no
+        ``IndexError`` and no assertion could ever catch it. One structure
+        cannot drift from itself.
+        """
+        return len(self._stale_debts)
+
     def _incur_stale_turn_debt(self) -> None:
         """Record one watchdog-abandoned turn's owed late signal — WITH an expiry.
 
@@ -331,81 +370,101 @@ class AlfredTuiApp(App[None]):
         nor could have repaired it, because it does not look at order at
         all. It had to be fixed server-side, in
         ``RealTurnOrchestratorAdapter.dispatch``.
+
+        Each debt gets its OWN expiry callback, bound to its own debt object
+        (#594 R2). ``set_timer`` does NOT invoke its callback from the timer
+        task: it registers ``partial(self.call_next, callback)``
+        (``textual/message_pump.py``), so a fired timer merely APPENDS an
+        ``events.Callback`` to the app's ``_next_callbacks`` list and then
+        completes. ``Timer.stop()`` cancels an already-finished task and has no
+        way to un-append that message, so the window between a timer firing and
+        the pump's next ``_flush_next_callbacks`` is fully exposed. A debt
+        discharged inside that window still gets exactly one expiry call.
+        Binding the callback to its own debt is what makes that call a no-op
+        rather than a write-off of whichever debt happens to be at the head.
         """
-        self._stale_turns_awaiting_signal += 1
-        self._stale_debt_expiries.append(
-            self.set_timer(
-                self._turn_timeout_seconds,
-                self._expire_stale_turn_debt,
-                name="alfred-stale-debt-expiry",
-            )
+        debt = _StaleTurnDebt()
+        # Assign the handle onto the debt the callback is already bound to:
+        # `partial` captured `debt` by reference, so the timer that fires and
+        # the debt that decides whether that firing means anything are the same
+        # object by construction. The timer task cannot run before this
+        # assignment completes — `set_timer` only schedules it, and nothing
+        # between here and the append yields to the event loop.
+        debt.expiry = self.set_timer(
+            self._turn_timeout_seconds,
+            partial(self._expire_stale_turn_debt, debt),
+            name="alfred-stale-debt-expiry",
         )
+        self._stale_debts.append(debt)
 
     def _discharge_stale_turn_debt(self) -> None:
-        """A genuine late signal arrived: settle one debt and cancel its expiry.
+        """A genuine late signal arrived: settle the OLDEST debt, cancel its expiry.
 
-        Stopping the expiry ``Timer`` is what stops an ALREADY-SETTLED debt
-        from being decremented a SECOND time when its window later elapses:
-        without it, a debt discharged by a real late signal would also be
-        written off a moment later, taking the count below the number of
-        turns genuinely still owed a signal and re-introducing the drift in
-        the opposite direction.
-
-        Popping index 0 — rather than "the timer belonging to this particular
-        debt" — is correct because debts are FUNGIBLE. Nothing correlates a
-        debt with a turn (``TurnFailedNotification`` deliberately carries no
+        Settling the HEAD — rather than "the debt this signal was for" — is
+        correct because debts are FUNGIBLE FOR DISCHARGE. Nothing correlates a
+        signal with a turn (``TurnFailedNotification`` deliberately carries no
         ``inbound_id`` and a reply carries none either — see
-        ``_resolve_pending_turn``), every expiry timer is armed with the
-        identical ``_turn_timeout_seconds`` duration, and they are appended in
-        creation order. Only the COUNT is semantically meaningful, so the list
-        is a FIFO of interchangeable handles and index 0 is simply the one
-        closest to firing.
+        ``_resolve_pending_turn``), every debt is armed with the identical
+        ``_turn_timeout_seconds`` window, and the core delivers late signals in
+        turn order. Only the COUNT is semantically meaningful for this
+        direction, so the list is a FIFO and the head is simply the one closest
+        to expiring.
 
-        Deliberately NOT guarded on a non-empty list. ``len(_stale_debt_expiries)
-        == _stale_turns_awaiting_signal`` is an invariant — every one of the
-        three methods that touches either moves both, and the only asymmetric
-        arm (``_expire_stale_turn_debt``'s two independent guards) can only ever
-        move the two CLOSER together — and this method is reached solely from
-        ``_resolve_pending_turn``'s own ``count > 0`` test. An ``IndexError``
-        here would therefore mean that invariant has broken, which is a bug
-        worth failing LOUD on rather than absorbing into a silent no-op branch
-        that no test could ever reach.
+        Debts are NOT fungible for EXPIRY — the distinction #594 R2 added, and
+        the one the previous single word "fungible" elided. ``discharged`` is
+        flipped here so this debt's OWN already-queued expiry callback, which
+        ``stop()`` below structurally cannot un-queue, recognizes itself as
+        spent and returns without touching a DIFFERENT debt that is still
+        genuinely outstanding. ``stop()`` still closes the larger window (a
+        debt settled well before its deadline never queues an expiry at all);
+        the flag closes the residue ``stop()`` cannot reach.
+
+        Deliberately NOT guarded on a non-empty list. This method is reached
+        solely from ``_resolve_pending_turn``'s own
+        ``_stale_turns_awaiting_signal > 0`` test which — the count now BEING
+        ``len(self._stale_debts)`` — is that emptiness test. An ``IndexError``
+        here would mean that identity has broken, which is worth failing LOUD
+        on rather than absorbing into a silent no-op branch no test could
+        reach.
         """
-        self._stale_turns_awaiting_signal -= 1
-        self._stale_debt_expiries.pop(0).stop()
+        debt = self._stale_debts.pop(0)
+        debt.discharged = True
+        debt.expiry.stop()
 
-    def _expire_stale_turn_debt(self) -> None:
-        """One debt's window elapsed with no late signal: write it off.
+    def _expire_stale_turn_debt(self, debt: _StaleTurnDebt) -> None:
+        """``debt``'s window elapsed with no late signal: write off THAT debt.
 
-        Idempotence guard, LOAD-BEARING for exactly the same reason as
-        ``_on_turn_timeout``'s: ``Timer.stop()`` cannot un-queue a callback
-        the message pump has ALREADY scheduled onto the current tick, so the
-        expiry for a debt that ``_discharge_stale_turn_debt`` settled in that
-        same tick can still reach here. Decrementing unconditionally would
-        drive the count negative — or, with a second debt outstanding,
-        silently write off a turn that IS still owed a signal — so the
-        ``> 0`` test is not defensive padding.
+        Bound to its own debt (#594 R2) because ``Timer.stop()`` cannot
+        un-queue a callback the pump has already scheduled: ``set_timer``
+        registers ``partial(self.call_next, callback)`` as the timer's
+        callback, so a fired timer appends an ``events.Callback`` to
+        ``_next_callbacks`` and finishes; a later ``stop()`` cancels an
+        already-completed task and leaves the queued message untouched
+        (textual 8.2.8 — ``timer.py`` + ``message_pump.py``; pinned by
+        ``test_textual_timer_stop_cannot_unqueue_an_already_fired_callback``).
 
-        The handle pop and the count decrement are guarded SEPARATELY: the
-        fired one-shot's handle must leave the list whether or not its debt is
-        still outstanding, or a spent entry would accumulate and later be
-        ``stop()``-ed in place of a live one. See
-        ``_discharge_stale_turn_debt`` for why popping index 0 rather than
-        the handle that actually fired is correct — the handles are fungible.
+        So this can still be called for a debt ``_discharge_stale_turn_debt``
+        already settled, and the ``discharged`` guard is what makes that a pure
+        no-op. It replaces a bare ``> 0`` count test that only stopped the
+        count going NEGATIVE with ONE debt outstanding. With TWO outstanding
+        the count was still positive after a discharge, so the phantom callback
+        passed the guard, popped index 0 — by then the OTHER, still-outstanding
+        debt's handle — ``stop()``-ed its live expiry timer, and decremented the
+        count to zero. That silently wrote off a turn genuinely still owed a
+        signal AND destroyed the very expiry that would have self-corrected it,
+        re-opening the permanent off-by-one drift #594 R1 exists to bound. Both
+        sides stayed consistent throughout, so the old
+        ``len(list) == count`` invariant held and nothing failed loud.
 
-        The popped handle is ``stop()``-ed, not just dropped, because index 0
-        is NOT always the timer that fired. In the same-tick race above, a
-        discharge can pop-and-stop the (already spent) head before this queued
-        callback runs, so the handle this pop reaches is the NEXT debt's — still
-        armed. Dropping it unstopped would leave a live timer that no longer
-        appears in the app's own bookkeeping. ``Timer.stop()`` is safe on a
-        spent one-shot too: it cancels ``_run_timer``, which catches
-        ``CancelledError``, and cancelling an already-finished task is a no-op.
+        ``remove`` is by IDENTITY (``_StaleTurnDebt`` sets ``eq=False``) and
+        cannot raise: ``discharged`` transitions ``False`` -> ``True`` exactly
+        once, and every site that flips it removes the debt from the list in
+        the same breath (here, ``_discharge_stale_turn_debt``, ``on_unmount``).
         """
-        if self._stale_debt_expiries:
-            self._stale_debt_expiries.pop(0).stop()
-        if self._stale_turns_awaiting_signal > 0:
-            self._stale_turns_awaiting_signal -= 1
+        if debt.discharged:
+            return
+        debt.discharged = True
+        self._stale_debts.remove(debt)
 
     def on_unmount(self) -> None:
         """Clear the app's own debt bookkeeping deterministically at teardown.
@@ -424,10 +483,15 @@ class AlfredTuiApp(App[None]):
         leaves the app's own state consistent with reality rather than holding
         references to spent handles. The CURRENT turn's watchdog / elapsed-tick
         timers are deliberately untouched: those belong to ``_end_turn``.
+
+        Marking each debt ``discharged`` here — not just stopping it — is what
+        keeps a callback the pump queued before teardown from reaching
+        ``list.remove`` on an already-cleared list (#594 R2).
         """
-        for expiry in self._stale_debt_expiries:
-            expiry.stop()
-        self._stale_debt_expiries.clear()
+        for debt in self._stale_debts:
+            debt.discharged = True
+            debt.expiry.stop()
+        self._stale_debts.clear()
 
     def _on_turn_timeout(self) -> None:
         """No reply inside the budget: tell the operator and release the input.

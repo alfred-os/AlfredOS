@@ -9,10 +9,13 @@ calling an in-process orchestrator.
 
 from __future__ import annotations
 
+import asyncio
+from functools import partial
 from typing import get_args
 
 import pytest
 from alfred_tui.textual.app import AlfredTuiApp, _turn_failure_message
+from textual.app import App, ComposeResult
 from textual.widgets import Input, RichLog, Static
 
 from alfred.comms_mcp.protocol import (
@@ -451,9 +454,9 @@ async def test_watchdog_callback_after_turn_already_ended_is_a_safe_no_op() -> N
         assert app._stale_turns_awaiting_signal == 0, (
             "a stale call caught by the guard must never reach the debt-counter increment"
         )
-        assert app._stale_debt_expiries == [], (
-            "and must therefore arm no debt-expiry timer either (#594 R1) — the "
-            "increment and its expiry timer are one indivisible step"
+        assert app._stale_debts == [], (
+            "and must therefore arm no debt-expiry timer either (#594 R1) — a "
+            "debt and its expiry timer are created in one indivisible step"
         )
         rendered_after = _plain_text(_log(app))
     assert rendered_after == rendered_before, (
@@ -549,7 +552,7 @@ async def test_stale_outbound_reply_does_not_clobber_the_next_turn() -> None:
         app._on_turn_timeout()
         assert app._turn_pending is False  # sanity: turn 1 really was abandoned
         assert app._stale_turns_awaiting_signal == 1
-        assert len(app._stale_debt_expiries) == 1  # ...with its expiry armed (#594 R1)
+        assert len(app._stale_debts) == 1  # ...with its expiry armed (#594 R1)
 
         await _submit(app, "second message")
         await pilot.pause()
@@ -568,7 +571,7 @@ async def test_stale_outbound_reply_does_not_clobber_the_next_turn() -> None:
             "turn 2's watchdog must not be stopped by turn 1's late reply"
         )
         assert app._stale_turns_awaiting_signal == 0
-        assert app._stale_debt_expiries == [], (
+        assert app._stale_debts == [], (
             "the settled debt's expiry timer must be stopped and dropped, not "
             "left armed to write the SAME debt off a second time (#594 R1)"
         )
@@ -625,7 +628,7 @@ async def test_stale_turn_failed_does_not_clobber_the_next_turn() -> None:
             "turn 2's watchdog must not be stopped by turn 1's late turn.failed"
         )
         assert app._stale_turns_awaiting_signal == 0
-        assert app._stale_debt_expiries == []  # settled debt -> expiry stopped (#594 R1)
+        assert app._stale_debts == []  # settled debt -> expiry stopped (#594 R1)
         input_widget = _user_input(app)
         assert input_widget.disabled is True, "input must stay disabled — turn 2 is still pending"
 
@@ -688,7 +691,7 @@ async def test_stale_turn_debt_expires_after_one_timeout_window() -> None:
             "a debt whose late signal never arrives must be written off after "
             "one watchdog window, not held forever"
         )
-        assert app._stale_debt_expiries == []
+        assert app._stale_debts == []
 
         # Turn 2 now behaves like any first turn: its OWN reply ends it.
         # Submitted and answered back-to-back (no real-time pause in between)
@@ -715,7 +718,7 @@ async def test_a_discharged_debt_cannot_decrement_twice() -> None:
     the expiry ``Timer`` firing later on its own (closed by ``.stop()`` in
     ``_discharge_stale_turn_debt``), and the un-un-queueable same-tick
     callback that ``Timer.stop()`` structurally cannot prevent (closed by
-    ``_expire_stale_turn_debt``'s ``> 0`` guard — the same race
+    ``_expire_stale_turn_debt``'s ``discharged`` guard — the same race
     ``test_watchdog_callback_after_turn_already_ended_is_a_safe_no_op``
     pins for the watchdog). A double decrement would drive the count negative
     and re-introduce the drift in the opposite direction.
@@ -732,12 +735,13 @@ async def test_a_discharged_debt_cannot_decrement_twice() -> None:
         await _submit(app, "first message")
         app._on_turn_timeout()  # turn 1 abandoned -> debt 1, expiry armed
         assert app._stale_turns_awaiting_signal == 1  # sanity
-        assert len(app._stale_debt_expiries) == 1
+        assert len(app._stale_debts) == 1
+        debt = app._stale_debts[0]  # captured before discharge for half 2 below
 
         # Turn 1's late reply DOES arrive — the debt is genuinely settled.
         app.write_outbound("late reply for the abandoned first turn")
         assert app._stale_turns_awaiting_signal == 0
-        assert app._stale_debt_expiries == []
+        assert app._stale_debts == []
 
         # Half 1: the stopped expiry must never fire at all.
         await pilot.pause(_FAST_TIMEOUT_SECONDS * 20)
@@ -748,8 +752,9 @@ async def test_a_discharged_debt_cannot_decrement_twice() -> None:
 
         # Half 2: the same-tick callback the pump had already scheduled before
         # `.stop()` could un-queue it, invoked directly (the file's standard
-        # deterministic stand-in for that race).
-        app._expire_stale_turn_debt()
+        # deterministic stand-in for that race) with the SAME debt object the
+        # discharge above already settled.
+        app._expire_stale_turn_debt(debt)
         assert app._stale_turns_awaiting_signal == 0, (
             "an expiry for an already-settled debt must be a no-op, never a decrement below zero"
         )
@@ -784,23 +789,23 @@ async def test_two_abandoned_turns_expire_independently() -> None:
         app._on_turn_timeout()  # turn 2 abandoned -> debt 2
 
         assert app._stale_turns_awaiting_signal == 2
-        assert len(app._stale_debt_expiries) == 2
+        assert len(app._stale_debts) == 2
 
         # One late signal arrives — it settles exactly ONE debt (they are
-        # fungible; nothing correlates a signal with a particular turn).
+        # fungible FOR DISCHARGE; nothing correlates a signal with a
+        # particular turn).
         app.write_outbound("late reply for one of the abandoned turns")
         await pilot.pause()
         assert app._stale_turns_awaiting_signal == 1
-        assert len(app._stale_debt_expiries) == 1
+        assert len(app._stale_debts) == 1
 
         # The OTHER debt's window then elapses with nothing ever arriving.
-        # No manual cleanup needed: `_expire_stale_turn_debt` stops the handle
-        # it pops, precisely because index 0 is not guaranteed to be the timer
-        # that fired.
-        app._expire_stale_turn_debt()
+        # Bound to its own debt object (#594 R2) — it only ever touches its
+        # own handle, never a different, still-outstanding debt's.
+        app._expire_stale_turn_debt(app._stale_debts[0])
 
         assert app._stale_turns_awaiting_signal == 0
-        assert app._stale_debt_expiries == [], "no orphan expiry handles may survive"
+        assert app._stale_debts == [], "no orphan expiry handles may survive"
 
 
 @pytest.mark.asyncio
@@ -821,11 +826,142 @@ async def test_unmount_clears_the_stale_debt_bookkeeping() -> None:
         await _submit(app, "first message")
         await pilot.pause()
         app._on_turn_timeout()
-        assert len(app._stale_debt_expiries) == 1  # sanity: a debt is outstanding at teardown
+        assert len(app._stale_debts) == 1  # sanity: a debt is outstanding at teardown
 
-    assert app._stale_debt_expiries == [], (
+    assert app._stale_debts == [], (
         "on_unmount must stop and drop every debt-expiry handle it still holds"
     )
+
+
+@pytest.mark.asyncio
+async def test_textual_timer_stop_cannot_unqueue_an_already_fired_callback() -> None:
+    """CONTRACT TEST against Textual, not against this app.
+
+    The per-debt binding in ``_expire_stale_turn_debt`` exists ONLY because
+    ``MessagePump.set_timer`` does not invoke its callback from the timer task:
+    it registers ``partial(self.call_next, callback)``, so a fired timer merely
+    APPENDS an ``events.Callback`` to the app's ``_next_callbacks`` and
+    completes. ``Timer.stop()`` cancels the (already finished) task and cannot
+    un-append that message.
+
+    Pinned at the framework boundary deliberately: no app-level test can
+    distinguish "we handled the phantom callback correctly" from "the phantom
+    callback never happened", so without this the app-level regression below
+    could pass against a Textual that no longer has the quirk, and the reason
+    for the whole design would silently evaporate. ``pyproject.toml`` floors
+    the dependency at ``textual>=0.50`` — about eight majors below the lock —
+    so this is not a hypothetical drift.
+
+    The ``asyncio.sleep`` runs INSIDE ``on_mount``: while a pump-dispatched
+    handler is still executing, ``_flush_next_callbacks`` cannot run, so the
+    timer is guaranteed to fire and enqueue with no chance of being flushed
+    before ``stop()``.
+    """
+    fired: list[str] = []
+
+    class _Probe(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Static("probe")
+
+        async def on_mount(self) -> None:
+            timer = self.set_timer(0.01, lambda: fired.append("expiry"))
+            await asyncio.sleep(0.15)  # far past the 0.01s deadline
+            timer.stop()
+
+    async with _Probe().run_test() as pilot:
+        await pilot.pause(0.2)
+
+    assert fired == ["expiry"], (
+        "Timer.stop() must NOT be able to un-queue a callback the pump had "
+        "already scheduled — this is the premise the per-debt expiry binding "
+        "exists to survive. If this ever fails, the binding can be simplified "
+        "(and `_on_turn_timeout`'s idempotence guard revisited); it is not a "
+        "test to relax."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_phantom_expiry_for_a_discharged_debt_spares_the_other_debt() -> None:
+    """A discharged debt's un-un-queueable expiry must not write off a DIFFERENT debt.
+
+    The exact #594 R2 race, with two debts outstanding:
+
+    1. debts A and B outstanding (``[A, B]``, count 2);
+    2. A's window elapses -> its timer appends ONE ``_expire_stale_turn_debt``
+       callback to the pump's ``_next_callbacks`` and completes;
+    3. BEFORE that flush, a genuine late signal discharges the head debt (A):
+       count 2 -> 1, and ``A.expiry.stop()`` runs — too late to un-queue step 2
+       (pinned by
+       ``test_textual_timer_stop_cannot_unqueue_an_already_fired_callback``);
+    4. the pump flushes the phantom A-callback.
+
+    Before the per-debt binding, step 4 popped index 0 — which is now B —
+    ``stop()``-ed B's still-live expiry timer, and decremented the count to 0
+    through a ``> 0`` guard that the second outstanding debt kept satisfied.
+    B's obligation was silently written off AND its self-correcting expiry
+    destroyed, so B's real late signal then released the CURRENT turn's input
+    early and every later turn inherited the same one-signal offset — the
+    permanent drift #594 R1 exists to bound, reintroduced with nothing left to
+    bound it. Both structures stayed mutually consistent throughout, so the old
+    ``len(list) == count`` invariant held and nothing failed loud.
+
+    Step 2 is reproduced through ``app.call_next`` — literally what
+    ``set_timer`` registers as the timer's callback
+    (``partial(self.call_next, callback)``, ``textual/message_pump.py``) —
+    rather than by racing two real windows, which cannot produce two
+    simultaneously-outstanding debts at all: the windows are equal length and
+    the debt's always starts first (same constraint as
+    ``test_two_abandoned_turns_expire_independently``).
+    """
+    session = _RecordingSession()
+    app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
+    async with app.run_test() as pilot:
+        await _submit(app, "first message")
+        await pilot.pause()
+        app._on_turn_timeout()  # turn 1 abandoned -> debt A
+        await _submit(app, "second message")
+        await pilot.pause()
+        app._on_turn_timeout()  # turn 2 abandoned -> debt B
+
+        debt_a, debt_b = app._stale_debts
+        assert app._stale_turns_awaiting_signal == 2  # sanity
+
+        # Step 2: A's expiry callback is on the pump queue, un-un-queueable.
+        app.call_next(partial(app._expire_stale_turn_debt, debt_a))
+
+        # Step 3: a genuine late signal settles the HEAD debt (A) first.
+        app.write_outbound("late reply for the first abandoned turn")
+        assert app._stale_debts == [debt_b]
+
+        # Step 4: the phantom fires.
+        await pilot.pause()
+
+        assert app._stale_debts == [debt_b], (
+            "a phantom expiry for an ALREADY-DISCHARGED debt must not write off "
+            "a different, still-outstanding debt"
+        )
+        assert app._stale_turns_awaiting_signal == 1
+        assert debt_b.discharged is False, (
+            "debt B was never settled and never expired — nothing may mark it so"
+        )
+
+        # The CONSEQUENCE, not just the counter: debt B's own late signal must
+        # still be absorbed as a DISCHARGE, leaving turn 3 pending.
+        await _submit(app, "third message")
+        await pilot.pause()
+        app.write_outbound("late reply for the second abandoned turn")
+        await pilot.pause()
+        assert app._turn_pending is True, (
+            "turn 3 must still be pending: that signal belonged to debt B, so "
+            "a phantom that cancelled B's obligation would release turn 3's "
+            "input early and desynchronize every turn after it"
+        )
+        assert _user_input(app).disabled is True
+
+        app.write_outbound("real reply for the third turn")
+        await pilot.pause()
+        assert app._turn_pending is False
+        assert _user_input(app).disabled is False
 
 
 @pytest.mark.asyncio
