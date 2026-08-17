@@ -115,11 +115,16 @@ class _SessionLike(Protocol):
 class _StaleTurnDebt:
     """One watchdog-abandoned turn's owed late signal, plus its own expiry handle.
 
-    ``eq=False`` is LOAD-BEARING: entries are looked up by IDENTITY (an expiry
-    callback must recognize ITS OWN debt, and two debts carrying equal field
-    values are still two distinct obligations). A dataclass-generated
-    ``__eq__`` would let ``list.remove``/``in`` match the WRONG entry — the
-    very aliasing this type exists to remove.
+    ``eq=False`` makes the identity lookup UNCONDITIONAL. Today a generated
+    ``__eq__`` would happen to behave the same, because ``expiry`` is a
+    per-debt ``Timer`` and ``Timer`` compares by identity (``Timer.__eq__ is
+    object.__eq__``), so no two distinct debts' ``(expiry, discharged)``
+    tuples can ever compare equal — but that is an accident of the CURRENT
+    field set, not something this type should depend on. Removal semantics
+    here must not ride on it: add any value-typed field (or ``compare=False``
+    on ``expiry``) and a generated ``__eq__`` would let ``list.remove``/``in``
+    match the WRONG entry, reintroducing the very aliasing this type exists
+    to remove.
 
     ``expiry`` is ``init=False`` with no default rather than ``Timer | None``:
     it is assigned in the statement that creates it (see
@@ -504,7 +509,11 @@ class AlfredTuiApp(App[None]):
         padding: without it, a same-tick reply-then-timeout ordering would
         re-paint a timeout line — and re-arm nothing, since
         ``self._turn_pending`` is already ``False`` — for a turn that in fact
-        completed, which is a lie to the operator.
+        completed, which is a lie to the operator. The same ``Timer.stop()``
+        premise is what ``_expire_stale_turn_debt`` guards against too, and
+        is pinned directly against the framework (not just asserted in prose)
+        by ``test_textual_timer_stop_cannot_unqueue_an_already_fired_callback``
+        in ``test_textual_app.py``.
         """
         self._turn_watchdog = None
         if not self._turn_pending:

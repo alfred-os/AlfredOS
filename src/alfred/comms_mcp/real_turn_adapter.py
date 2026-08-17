@@ -937,13 +937,12 @@ class RealTurnOrchestratorAdapter:
         in the root-cause report, root-cause-arc-001-turn-order-race.md
         §3.1). That self-corrects STATE — the pending-turn flag and debt
         count converge to the same values either way — but it is
-        INDIFFERENT to order, not a
-        correction OF it: it neither detects nor repairs a transcript line
-        printing in the wrong sequence. "The debt bound self-corrects a
-        transcript-order swap anyway" was exactly the false reasoning that
-        let arc-001 through review; ordering correctness lives ENTIRELY in
-        this module (the per-key lock + the ordering barrier), never in the
-        client's debt bookkeeping.
+        INDIFFERENT to order, not a correction OF it: it neither detects nor
+        repairs a transcript line printing in the wrong sequence. "The debt
+        bound self-corrects a transcript-order swap anyway" was exactly the
+        false reasoning that let arc-001 through review; ordering correctness
+        lives ENTIRELY in this module (the per-key lock + the ordering
+        barrier), never in the client's debt bookkeeping.
 
         The audit row needs turn context (``notification`` +
         ``canonical_user_id`` both present); the refusal-reply send

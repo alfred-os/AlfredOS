@@ -714,14 +714,17 @@ async def test_stale_turn_debt_expires_after_one_timeout_window() -> None:
 async def test_a_discharged_debt_cannot_decrement_twice() -> None:
     """A debt settled by a real late signal must not ALSO be written off.
 
-    Two halves, because there are two ways the double-decrement could land:
+    Two halves, because there are two ways the double-write-off could land:
     the expiry ``Timer`` firing later on its own (closed by ``.stop()`` in
     ``_discharge_stale_turn_debt``), and the un-un-queueable same-tick
     callback that ``Timer.stop()`` structurally cannot prevent (closed by
     ``_expire_stale_turn_debt``'s ``discharged`` guard — the same race
     ``test_watchdog_callback_after_turn_already_ended_is_a_safe_no_op``
-    pins for the watchdog). A double decrement would drive the count negative
-    and re-introduce the drift in the opposite direction.
+    pins for the watchdog). With the count now ``len(self._stale_debts)``,
+    a missing guard would not merely miscount: the debt below is already
+    removed from ``_stale_debts`` by the discharge, so a second
+    ``.remove(debt)`` would raise ``ValueError`` — a loud crash, not the old
+    silent negative-count drift.
 
     Turn 1's abandonment is driven directly through ``_on_turn_timeout`` (the
     exact callback a real watchdog invokes) so the late reply lands INSIDE
@@ -756,7 +759,9 @@ async def test_a_discharged_debt_cannot_decrement_twice() -> None:
         # discharge above already settled.
         app._expire_stale_turn_debt(debt)
         assert app._stale_turns_awaiting_signal == 0, (
-            "an expiry for an already-settled debt must be a no-op, never a decrement below zero"
+            "an expiry for an already-settled debt must be a no-op — without the "
+            "`discharged` guard this would raise ValueError, not silently miscount: "
+            "`debt` was already removed from `_stale_debts` by the discharge above"
         )
 
         # And the ledger being genuinely settled, turn 2's own reply ends it.
@@ -819,6 +824,18 @@ async def test_unmount_clears_the_stale_debt_bookkeeping() -> None:
     ``on_unmount`` runs. What this pins is that the hook exists and empties
     the list, so the app never ends up holding references to spent timers
     while reporting outstanding debt.
+
+    Also pins the ``discharged`` marking itself, not just the emptied list:
+    ``events.Unmount`` is dispatched through the SAME queued-callback path
+    (``_next_callbacks``) a phantom expiry uses, so a callback already queued
+    before teardown can still run against ``on_unmount``'s already-cleared
+    list. Marking ``discharged`` (not just calling ``.stop()``, which cannot
+    un-queue that callback either) is what makes a straggler a no-op instead
+    of a ``list.remove`` on an emptied list. Capturing ``debt`` before the
+    context manager exits and asserting on it afterward is what distinguishes
+    that guard actually firing from the list merely ending up empty by
+    construction (``.clear()`` alone would satisfy the assertion below without
+    it).
     """
     session = _RecordingSession()
     app = AlfredTuiApp(session=session, turn_timeout_seconds=_MODERATE_TIMEOUT_SECONDS)
@@ -827,9 +844,15 @@ async def test_unmount_clears_the_stale_debt_bookkeeping() -> None:
         await pilot.pause()
         app._on_turn_timeout()
         assert len(app._stale_debts) == 1  # sanity: a debt is outstanding at teardown
+        debt = app._stale_debts[0]  # captured before teardown for the discharged assertion below
 
     assert app._stale_debts == [], (
         "on_unmount must stop and drop every debt-expiry handle it still holds"
+    )
+    assert debt.discharged is True, (
+        "on_unmount must mark the debt discharged, not just stop and drop its "
+        "handle — otherwise a callback the pump had already queued before "
+        "teardown would still reach list.remove on the now-cleared list"
     )
 
 
