@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-15 23:44+0100\n"
+"POT-Creation-Date: 2026-08-17 18:15+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -3596,15 +3596,15 @@ msgstr ""
 "request_plugin_restart refused: {reason!r} is not a known restart reason."
 " Pass a valid PluginRestartReason."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:60
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:62
 msgid "tui.banner.reconnecting"
 msgstr "Reconnecting to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:61
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:63
 msgid "tui.banner.restored"
 msgstr "Reconnected to Alfred."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:62
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:64
 msgid "tui.banner.unavailable"
 msgstr "Alfred is unavailable. Retrying..."
 
@@ -3612,18 +3612,18 @@ msgstr "Alfred is unavailable. Retrying..."
 # _turn_failure_message's exhaustive TurnFailureStage match. Worded to be
 # mutually distinct so pybabel's fuzzy matcher can't collapse them onto one
 # another (no shared prefix, no shared empty-placeholder shape).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:88
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:90
 msgid "tui.turn_failed.refused"
 msgstr "Alfred could not process that turn. Try rephrasing, or ask something else."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:90
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:92
 msgid "tui.turn_failed.budget_exhausted"
 msgstr ""
 "Daily budget reached; it resets at UTC midnight. To raise it now, run "
 "`alfred user set <slug> --daily-budget-usd <amount>` (`alfred user list` "
 "shows your slug)."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:92
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:94
 msgid "tui.turn_failed.internal_error"
 msgstr ""
 "Something went wrong on Alfred's side. Try again, or check the daemon "
@@ -3634,26 +3634,26 @@ msgstr ""
 # keys were marked obsolete and dropped at compile time, leaving operators
 # with raw "tui.label_you:" keys. The extract now scans `src/alfred plugins`
 # and these are restored as active msgids with their English msgstr.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:158
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:159
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:189
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:190
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:212
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:241
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:460
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:533
 msgid "tui.turn_timeout"
 msgstr ""
 "No response within {seconds}s. Try again, or check the daemon logs if it "
 "recurs."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:495
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:568
 msgid "tui.turn_still_pending"
 msgstr "Still working on your last message..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:504
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:577
 msgid "tui.label_you"
 msgstr "you"
 
@@ -3663,15 +3663,15 @@ msgstr "you"
 # comms-MCP wire model: the host turn runs on, input re-enables, and a late
 # reply can still render; tui.alfred_error's msgstr was later re-punctuated
 # by #594 R7 to match the tui.* convention -- see that msgid below).
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:512
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:585
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:528
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:601
 msgid "tui.alfred_error"
 msgstr "Alfred error: {error}."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:608
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:681
 msgid "tui.label_alfred"
 msgstr "alfred"
 
@@ -3680,7 +3680,7 @@ msgstr "alfred"
 # procedure Task 15 used for tui.turn_timeout/tui.turn_failed.* above: a
 # real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
 # reconciles the `#:` source-location comments.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:679
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:752
 msgid "tui.thinking_elapsed"
 msgstr "Alfred is thinking... ({seconds}s)"
 
