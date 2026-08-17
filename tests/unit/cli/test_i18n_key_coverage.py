@@ -409,7 +409,23 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # closure -- so they're pinned alongside the three bodyless turn_failed.*
     # keys and the revived tui.thinking for the same fuzzy-match protection
     # the rest of this table provides.
-    "tui.thinking": ({}, ("thinking",)),
+    # CodeRabbit (PR #594 follow-up review): bare "thinking" also matches the
+    # sibling tui.thinking_elapsed msgstr ("Alfred is thinking... ({seconds}s)").
+    # Full uniqueness isn't achievable here by substring alone: this msgid's
+    # ENTIRE msgstr, "thinking...", is itself a literal substring of that
+    # sibling's msgstr, so no substring of "thinking..." can ever discriminate
+    # between the two. The concrete fuzzy-swap-onto-tui.thinking_elapsed
+    # scenario is independently caught anyway by check (2) above (no `{`/`}`
+    # survives): tui.thinking_elapsed's RAW msgstr contains a literal
+    # "{seconds}" placeholder, and this key's own test entry calls t() with NO
+    # kwargs, so that swap would leave "{seconds}" unsubstituted and fail
+    # check (2) regardless of what this fingerprint says. Tightened to the
+    # full literal string (including the ellipsis) so it at least also rules
+    # out a hypothetical FUTURE catalog entry that merely contains the bare
+    # word "thinking" without this exact trailing punctuation -- verified
+    # today no other active or obsolete catalog entry contains "thinking" at
+    # all.
+    "tui.thinking": ({}, ("thinking...",)),
     # #594 final-review I2: "try again" was dropped from this tuple -- it also
     # appears verbatim in the sibling msgid tui.turn_failed.internal_error's
     # msgstr ("Something went wrong on Alfred's side. Try again, or check the
@@ -422,10 +438,24 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # exact swap. "no response" alone is unique to this msgid across the
     # whole catalog (verified against locale/en/LC_MESSAGES/alfred.po).
     "tui.turn_timeout": ({"seconds": 90}, ("no response",)),
-    "tui.alfred_error": ({"error": "ConnectionResetError"}, ("alfred", "error")),
+    # CodeRabbit (PR #594 follow-up review): the two-arm ("alfred", "error")
+    # tuple was two weak arms -- bare "alfred" alone matches roughly half the
+    # tui.* family (tui.label_alfred's msgstr is the bare word "alfred", plus
+    # every message that happens to mention Alfred by name), and bare "error"
+    # matches essentially any error-shaped message. "alfred error" (with the
+    # rendered colon-prefixed phrasing) is verified unique across the whole
+    # active + obsolete catalog.
+    "tui.alfred_error": ({"error": "ConnectionResetError"}, ("alfred error",)),
     "tui.turn_failed.refused": ({}, ("could not process",)),
     "tui.turn_failed.budget_exhausted": ({}, ("--daily-budget-usd",)),
-    "tui.turn_failed.internal_error": ({}, ("went wrong",)),
+    # "went wrong" alone also matches the retired (obsolete, "#~") msgid
+    # discord.alfred_error's old msgstr ("Something went wrong on my end...")
+    # -- pybabel's fuzzy-matcher draws candidates from obsolete entries too,
+    # so a regeneration could in principle fuzzy-match this key onto that
+    # retired, materially different (shorter, no remediation advice) text and
+    # still pass this fingerprint. "alfred's side" is verified unique against
+    # both the active and obsolete catalog.
+    "tui.turn_failed.internal_error": ({}, ("alfred's side",)),
     # #594 Fix-10 -- live elapsed-time counter (non-logged, separate widget)
     # + rate-limited dropped-keystroke acknowledgement (logged, once per turn).
     # #594 final-review I2: a two-element tuple here was two weak arms, not
