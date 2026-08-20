@@ -58,6 +58,7 @@ from alfred.cli.daemon._failures import (
 # seam is here, not ``_commands``.)
 from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
+    TURN_FAILED,
 )
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.i18n import t
@@ -88,7 +89,7 @@ if TYPE_CHECKING:
         GatewayForwardedInboundReceiver,
         _ForwardedCollaborators,
     )
-    from alfred.comms_mcp.protocol import OutboundMessageRequest
+    from alfred.comms_mcp.protocol import OutboundMessageRequest, TurnFailedNotification
     from alfred.comms_mcp.real_turn_adapter import RealTurnOrchestratorAdapter
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
@@ -124,13 +125,15 @@ class _CommsAdapterWireSpec:
 
 
 class _RunnerOutboundSender:
-    """The narrow host -> plugin outbound seam the dispatch ack flows through.
+    """The narrow host -> plugin outbound seam the dispatch ack + turn-state flow through.
 
-    Satisfies :class:`alfred.comms_mcp.daemon_runtime.OutboundSenderLike` by
-    mapping ``send_outbound`` onto a ``outbound.message`` JSON-RPC request on the
-    runner. Kept a tiny adapter here (not in ``daemon_runtime``) so that module
-    never imports the runner — the one-directional import graph (daemon_runtime
-    is imported BY the runner's consumers, never the reverse) stays intact.
+    Satisfies :class:`alfred.comms_mcp.daemon_runtime.OutboundSenderLike` by mapping
+    ``send_outbound`` onto an ``outbound.message`` JSON-RPC *request* (id-correlated,
+    awaits a response) and ``send_turn_state`` (#593) onto a ``turn.failed`` JSON-RPC
+    *notification* on the runner — no id, no awaited response. Kept a tiny adapter
+    here (not in ``daemon_runtime``) so that module never imports the runner — the
+    one-directional import graph (daemon_runtime is imported BY the runner's
+    consumers, never the reverse) stays intact.
     """
 
     def __init__(self, *, runner: CommsPluginRunner) -> None:
@@ -145,6 +148,15 @@ class _RunnerOutboundSender:
         return await self._runner.send_request(
             "outbound.message",
             request.model_dump(mode="json"),
+        )
+
+    async def send_turn_state(self, notification: TurnFailedNotification) -> None:
+        # id-LESS notification (no correlated response) — the client-terminal
+        # `turn.*` frames are pure state signals the peer never acks at the
+        # JSON-RPC layer.
+        await self._runner.send_notification(
+            TURN_FAILED,
+            notification.model_dump(mode="json"),
         )
 
 

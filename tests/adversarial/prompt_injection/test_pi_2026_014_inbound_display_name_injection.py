@@ -67,6 +67,7 @@ from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.dlp import identity_outbound_dlp
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 from tests.helpers.routers import FixedAnswerRouter
+from tests.unit.comms_mcp._real_turn_adapter_doubles import _RecordingSender
 
 _PAYLOAD_PATH = Path(__file__).parent / "pi-2026-014-inbound-display-name-injection.yaml"
 
@@ -92,11 +93,18 @@ def test_payload_schema_valid() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Lightweight doubles — mirrors tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py
-# (the adapter-level doubles) + tests/unit/orchestrator/test_core.py's `_build`
-# in-memory-buffer pattern (the REAL-Orchestrator-without-Postgres shape), so
-# this module drives the genuine Orchestrator.handle_user_message ->
-# render_persona_prompt call chain rather than a fake orchestrator double.
+# Lightweight doubles — `_RecordingSender` is imported from the shared
+# `tests/unit/comms_mcp/_real_turn_adapter_doubles.py` module rather than
+# redefined here (#594 Task S5); the rest mirror
+# tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py's adapter-level
+# doubles + tests/unit/orchestrator/test_core.py's `_build` in-memory-buffer
+# pattern (the REAL-Orchestrator-without-Postgres shape), so this module
+# drives the genuine Orchestrator.handle_user_message -> render_persona_prompt
+# call chain rather than a fake orchestrator double. These remaining local
+# doubles (`_StubOperator`, `_FakeWorkingMemory`, `_FakePool`,
+# `_RecordingAuditWriter`) are genuinely different in shape from anything in
+# the shared module, because this file drives the real `Orchestrator` rather
+# than just the adapter.
 # ---------------------------------------------------------------------------
 
 
@@ -156,15 +164,6 @@ class _RecordingAuditWriter:
 
     async def append_schema(self, **kwargs: Any) -> None:
         del kwargs
-
-
-class _RecordingSender:
-    def __init__(self) -> None:
-        self.sent: list[Any] = []
-
-    async def send_outbound(self, request: Any) -> dict[str, object]:
-        self.sent.append(request)
-        return {}
 
 
 def _build_real_orchestrator(router: FixedAnswerRouter) -> Orchestrator:

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-13 22:11+0100\n"
+"POT-Creation-Date: 2026-08-17 18:15+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -369,28 +369,30 @@ msgstr "secrets file: {path}"
 msgid "status.secrets_file_absent"
 msgstr "secrets file: {path} (not found — using environment variables)"
 
-#: src/alfred/cli/main.py:225
+#: src/alfred/cli/main.py:232
 msgid "status.daily_budget"
-msgstr "daily budget USD: {amount}"
+msgstr ""
+"daily budget USD (seeded the operator row at first migration; live cap is"
+" per-user — see `alfred user list`): {amount}"
 
-#: src/alfred/cli/main.py:226
+#: src/alfred/cli/main.py:233
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:232
+#: src/alfred/cli/main.py:239
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:235
+#: src/alfred/cli/main.py:242
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:237
+#: src/alfred/cli/main.py:244
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
-#: src/alfred/cli/main.py:384 src/alfred/i18n/_slice_4_reserve.py:158
+#: src/alfred/cli/main.py:391 src/alfred/i18n/_slice_4_reserve.py:158
 msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
 "alfred chat needs the gateway. Start it with: alfred gateway start. If "
@@ -1173,7 +1175,7 @@ msgstr ""
 "-d` on the compose stack)."
 
 #: src/alfred/cli/daemon/_commands.py:1125
-#: src/alfred/cli/daemon/_comms_boot.py:1060
+#: src/alfred/cli/daemon/_comms_boot.py:1072
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -1277,8 +1279,8 @@ msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
 "incident(s)){latest_crash}"
 
-#: src/alfred/cli/daemon/_comms_boot.py:402
-#: src/alfred/cli/daemon/_comms_boot.py:1009
+#: src/alfred/cli/daemon/_comms_boot.py:414
+#: src/alfred/cli/daemon/_comms_boot.py:1021
 msgid "daemon.boot.comms_adapter_unknown_kind"
 msgstr ""
 "Comms adapter '{adapter_id}' declares unknown adapter_kind "
@@ -1287,8 +1289,8 @@ msgstr ""
 "`plugins/{adapter_id}/manifest.toml` for a typo, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:415
-#: src/alfred/cli/daemon/_comms_boot.py:1022
+#: src/alfred/cli/daemon/_comms_boot.py:427
+#: src/alfred/cli/daemon/_comms_boot.py:1034
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -1296,11 +1298,11 @@ msgstr ""
 "and re-run `alfred daemon start` (or `docker compose up -d` on the "
 "compose stack), or unset it from ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_comms_boot.py:772
+#: src/alfred/cli/daemon/_comms_boot.py:784
 msgid "daemon.comms.tools_wired"
 msgstr "Comms tool registry wired: {count} tool(s) ({tool_names})."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1260
+#: src/alfred/cli/daemon/_comms_boot.py:1272
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
@@ -1308,11 +1310,11 @@ msgstr ""
 "/ crash row, then re-run `alfred daemon start` (or `docker compose up -d`"
 " on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1274
+#: src/alfred/cli/daemon/_comms_boot.py:1286
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1370
+#: src/alfred/cli/daemon/_comms_boot.py:1382
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -1321,7 +1323,7 @@ msgstr ""
 "`comms-*.sock`, then re-run `alfred daemon start` (or `docker compose up "
 "-d` on the compose stack)."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1447
+#: src/alfred/cli/daemon/_comms_boot.py:1459
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -1330,7 +1332,7 @@ msgstr ""
 "day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
-#: src/alfred/cli/daemon/_comms_boot.py:1507
+#: src/alfred/cli/daemon/_comms_boot.py:1519
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -1642,25 +1644,25 @@ msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:213
-#: src/alfred/comms_mcp/real_turn_adapter.py:394
+#: src/alfred/comms_mcp/daemon_runtime.py:221
+#: src/alfred/comms_mcp/real_turn_adapter.py:715
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:239
+#: src/alfred/comms_mcp/daemon_runtime.py:247
 msgid "comms.daemon_runtime.dispatch_missing_ingested_key"
 msgstr "Comms dispatch ingest result is missing a required key; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:246
-#: src/alfred/comms_mcp/real_turn_adapter.py:357
+#: src/alfred/comms_mcp/daemon_runtime.py:254
+#: src/alfred/comms_mcp/real_turn_adapter.py:603
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:251
+#: src/alfred/comms_mcp/real_turn_adapter.py:398
 msgid "comms.inbound.real_turn.extraction_refused"
 msgstr "Sorry, I couldn't process that message. Please try rephrasing."
 
-#: src/alfred/comms_mcp/real_turn_adapter.py:259
+#: src/alfred/comms_mcp/real_turn_adapter.py:407
 msgid "comms.inbound.real_turn.unexpected_extract_kind"
 msgstr "Unexpected extraction result kind reached the real-turn adapter."
 
@@ -2512,7 +2514,7 @@ msgstr ""
 "Authorization tier (read-only | standard | trusted | operator; default "
 "standard)."
 
-#: src/alfred/identity/cli.py:250 src/alfred/identity/cli.py:694
+#: src/alfred/identity/cli.py:250
 msgid "cli.user.flag.daily-budget-usd.short"
 msgstr "Per-user daily budget cap in USD (default 0.50)."
 
@@ -2725,6 +2727,12 @@ msgid "cli.user.help.set.short"
 msgstr ""
 "Tune an existing user's daily budget, authorization, language, or rate-"
 "limit overrides."
+
+#: src/alfred/identity/cli.py:694
+msgid "cli.user.flag.daily-budget-usd.set.short"
+msgstr ""
+"Per-user daily budget cap in USD (omit to leave the current value "
+"unchanged)."
 
 #: src/alfred/identity/cli.py:762
 msgid "cli.user.set.success"
@@ -3588,41 +3596,93 @@ msgstr ""
 "request_plugin_restart refused: {reason!r} is not a known restart reason."
 " Pass a valid PluginRestartReason."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:59
-#: plugins/alfred_tui/tests/test_textual_app.py:148
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:62
 msgid "tui.banner.reconnecting"
 msgstr "Reconnecting to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:60
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:63
 msgid "tui.banner.restored"
 msgstr "Reconnected to Alfred."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:61
-#: plugins/alfred_tui/tests/test_textual_app.py:173
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:64
 msgid "tui.banner.unavailable"
 msgstr "Alfred is unavailable. Retrying..."
+
+# #593 (Task 14/15) — brand-new turn-failure catalog keys for
+# _turn_failure_message's exhaustive TurnFailureStage match. Worded to be
+# mutually distinct so pybabel's fuzzy matcher can't collapse them onto one
+# another (no shared prefix, no shared empty-placeholder shape).
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:90
+msgid "tui.turn_failed.refused"
+msgstr "Alfred could not process that turn. Try rephrasing, or ask something else."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:92
+msgid "tui.turn_failed.budget_exhausted"
+msgstr ""
+"Daily budget reached; it resets at UTC midnight. To raise it now, run "
+"`alfred user set <slug> --daily-budget-usd <amount>` (`alfred user list` "
+"shows your slug)."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:94
+msgid "tui.turn_failed.internal_error"
+msgstr ""
+"Something went wrong on Alfred's side. Try again, or check the daemon "
+"logs."
 
 # PR-S4-10 review F1 (#206): the TUI render layer moved to
 # plugins/alfred_tui; the CI extract scanned src/alfred ONLY, so these LIVE
 # keys were marked obsolete and dropped at compile time, leaving operators
 # with raw "tui.label_you:" keys. The extract now scans `src/alfred plugins`
 # and these are restored as active msgids with their English msgstr.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:106
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:107
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:189
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:190
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:123
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:241
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:150
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:533
+msgid "tui.turn_timeout"
+msgstr ""
+"No response within {seconds}s. Try again, or check the daemon logs if it "
+"recurs."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:568
+msgid "tui.turn_still_pending"
+msgstr "Still working on your last message..."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:577
 msgid "tui.label_you"
 msgstr "you"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:168
+# #593 (Task 14/15) — revived from the obsolete Slice-1/2 orchestrator
+# entries above (tui.thinking unchanged at revival time; tui.turn_timeout's
+# msgstr is CORRECTED here — the old "; cancelled" clause is false under the
+# comms-MCP wire model: the host turn runs on, input re-enables, and a late
+# reply can still render; tui.alfred_error's msgstr was later re-punctuated
+# by #594 R7 to match the tui.* convention -- see that msgid below).
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:585
+msgid "tui.thinking"
+msgstr "thinking..."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:601
+msgid "tui.alfred_error"
+msgstr "Alfred error: {error}."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:681
 msgid "tui.label_alfred"
 msgstr "alfred"
+
+# #594 Fix-10 -- live, non-logged elapsed-time counter + rate-limited
+# dropped-keystroke acknowledgement. Added by hand following the same
+# procedure Task 15 used for tui.turn_timeout/tui.turn_failed.* above: a
+# real English msgstr (not a pybabel fuzzy-copy), then `make i18n-fix`
+# reconciles the `#:` source-location comments.
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:752
+msgid "tui.thinking_elapsed"
+msgstr "Alfred is thinking... ({seconds}s)"
 
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""
@@ -3960,23 +4020,17 @@ msgstr "alfred"
 # PR-S4-10 review F1 (#206): tui.binding.quit / tui.input_placeholder /
 # tui.label_you / tui.label_alfred were restored to ACTIVE msgids above
 # (the render layer still uses them live from plugins/alfred_tui); their
-# obsolete duplicates are removed here. The five entries below stay obsolete
-# — they belonged to the in-process orchestrator turn-lifecycle the move
-# dropped and have NO live caller.
+# obsolete duplicates are removed here.
+# #593 (Task 15) revives tui.thinking / tui.turn_timeout / tui.alfred_error
+# as ACTIVE msgids — Task 14's pending indicator, watchdog, and turn-failure
+# rendering call all three live. tui.binding.cancel_turn and
+# tui.turn_cancelled stay obsolete: Task 14 deliberately does not revive
+# Esc-to-cancel (no live caller).
 #~ msgid "tui.binding.cancel_turn"
 #~ msgstr "Cancel turn"
 
-#~ msgid "tui.thinking"
-#~ msgstr "thinking..."
-
 #~ msgid "tui.turn_cancelled"
 #~ msgstr "turn cancelled"
-
-#~ msgid "tui.turn_timeout"
-#~ msgstr "no response within {seconds}s; cancelled"
-
-#~ msgid "tui.alfred_error"
-#~ msgstr "alfred error: {error}"
 
 # Slice-3 retrospective CR-142 round-3 sec-001 — TUI ingress runtime
 # allowlist guard. ``_ingest_tier`` is the source of truth for the

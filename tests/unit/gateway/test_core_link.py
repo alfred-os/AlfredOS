@@ -26,6 +26,7 @@ from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
+    TURN_FAILED,
     LinkReconnectingNotification,
     LinkRestoredNotification,
     LinkUnavailableNotification,
@@ -1644,6 +1645,27 @@ async def test_route_unit_no_method_response_is_relayed() -> None:
     await link._route_unit(_payload_unit(body))
 
     assert sink.received == [body]
+
+
+@pytest.mark.asyncio
+async def test_route_unit_turn_failed_is_relayed_not_consumed() -> None:
+    """#593: ``turn.failed`` matches none of ``_route_unit``'s four consumed methods
+    (``daemon.comms.ack``, ``daemon.lifecycle.ready``, ``daemon.lifecycle.going_down``,
+    ``core.adapter.spawn_grant``), so it MUST fall through to ``_payload_relay``
+    byte-for-byte. This is the proof that the gateway needs ZERO code changes for the
+    new core->client turn-failure frame — if this test ever needs a gateway-side
+    change to pass, the "no gateway change" design premise (Task 9/#593) was wrong.
+    """
+    link, recorder, sink = _link_with_relay()
+    body = json.dumps(
+        {"jsonrpc": "2.0", "method": TURN_FAILED, "params": {"stage": "refused"}}
+    ).encode()
+
+    await link._route_unit(_payload_unit(body))
+
+    assert sink.received == [body]  # byte-for-byte, untouched — RELAYED, not rewritten
+    assert recorder.controls == []  # never fed to the link-state machine as a control frame
+    assert link._dropped_payload_frames == 0  # never counted as a dropped/consumed payload
 
 
 @pytest.mark.asyncio

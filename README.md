@@ -41,6 +41,20 @@ alfred chat                 # start a TUI conversation
 > `alfred user add` step — running one after setup fails with `OperatorAlreadyExists` (exit 2).
 > Set `ALFRED_OPERATOR_NAME` in `.env` before `bin/alfred-setup.sh` for a custom display name.
 
+> `alfred chat` shows a pending indicator while a turn is in flight, and will tell you directly
+> if a turn fails or times out rather than leaving you waiting indefinitely. The one case where
+> that message won't tell you *why* is below. **If your first `alfred chat` message never gets
+> a reply**, the TUI's identity and the seeded one have diverged. The TUI authenticates as
+> `ALFRED_OPERATOR_NAME` (default `operator`) — the same value migration `0004` seeded as the
+> `tui` platform identity. Migration `0004` runs **once**, so *changing* `ALFRED_OPERATOR_NAME`
+> after your first `docker compose up -d` breaks the match. Either restore the old value in
+> `.env`, or rebind:
+>
+> ```sh
+> docker compose run --rm alfred-core user unbind <your-operator-slug> --platform tui
+> docker compose run --rm alfred-core user bind   <your-operator-slug> --platform tui --id <your-operator-display-name>
+> ```
+
 > **Two provider keys are required before the first `docker compose up -d`.**
 > `bin/alfred-setup.sh` validates both up front and refuses to proceed (exit 1), listing every
 > problem at once, if either is missing (or, for the DeepSeek key, still the `sk-...` placeholder):
@@ -58,7 +72,7 @@ alfred chat                 # start a TUI conversation
 >   This is deliberate — a keyless first run does not start. `bin/alfred-setup.sh` reports the
 >   missing key and exits 1; it cannot seed one for you.
 >
-> **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
+> **Precisely:** the *quarantine*-key refuse-boot is gated on comms being enabled
 > (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so
 > that key is not needed and the core boots fine. That is not the quickstart above:
 > `docker-compose.yaml` defaults `ALFRED_COMMS_ENABLED_ADAPTERS` to `["alfred_tui"]`, so the
@@ -70,8 +84,11 @@ alfred chat                 # start a TUI conversation
 (`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a
 one-shot command runner. One-off subcommands still work via
 `docker compose run --rm alfred-core <cmd>` (`migrate`, `user add`, `chat`, …) because
-`run` overrides the service `command`. **Run `bin/alfred-setup.sh` _before_
-`docker compose up -d`**: it seeds the `audit.hash_pepper` and provisions secrets the
+`run` overrides the service `command`. **Run `bin/alfred-setup.sh` *before*
+`docker compose up -d`**: it seeds the `audit.hash_pepper` (into **both** `.env` and
+`~/.config/alfred/secrets.toml` — `.env` is what reaches the container, the file is what
+host-side `alfred` commands read; the script keeps them identical and refuses if they
+drift) and provisions secrets the
 daemon requires to boot. Skip it and the daemon refuse-boots and, under
 `restart: unless-stopped`, crash-loops. The script seeds what it can and warns about
 what it cannot — `ALFRED_QUARANTINE_PROVIDER_API_KEY` has to come from you.
@@ -191,7 +208,7 @@ Operator workflow for a fresh deploy:
    ID. Then on the host:
 
    ```sh
-   alfred user bind --slug <your-operator-slug> --platform discord --platform-id <snowflake>
+   alfred user bind <your-operator-slug> --platform discord --id <snowflake>
    ```
 
    The setup script offers an interactive prompt for this in its final
@@ -230,12 +247,19 @@ ADR-0012). If you already keep secrets there — or your `~/.config` is a git re
 
 - **macOS:** Docker Desktop maps the host file's uid/gid to the
   container uid/gid directly; `chmod 600` on the host applies inside
-  the container too. The setup script runs `export UID GID` because
-  macOS bash 3.2 does not export `UID` by default.
-- **Linux:** `user: "${UID:-1000}:${GID:-1000}"` in
-  `docker-compose.yaml` resolves to the operator's real uid/gid; the
-  bind-mount's `chmod 600` is enforced by the kernel exactly as on the
-  host.
+  the container too. The setup script still runs `export UID GID`
+  (macOS bash 3.2 does not export `UID` by default), but per the
+  comment next to that line in `bin/alfred-setup.sh`, this is now a
+  harmless no-op — nothing in the compose file or the container reads
+  `$UID`/`$GID` anymore (see the Linux bullet below for what used to
+  consume it and when that was removed).
+- **Linux:** the container does not remap to the host operator's uid/gid —
+  `alfred-core` always runs as the fixed non-root `alfred` user baked into the
+  image (`docker/alfred-core.Dockerfile`), regardless of the host operator's
+  uid/gid. (A `user: "${UID:-1000}:${GID:-1000}"` override did exist in this
+  file, but only on the separate `alfred-discord` service, added in commit
+  `944d37e2` and removed with that service in commit `76f044e3` — `alfred-core`
+  itself has never carried this override.)
 - **WSL2:** same as Linux, with the caveat that running `docker compose`
   from PowerShell (vs `wsl`) sees a different uid namespace. Run the
   setup script from inside WSL to keep the perms consistent.
@@ -283,7 +307,7 @@ permanent.
 
 - **Compose (the default deployment): unaffected.** `docker-compose.yaml`
   substitutes `ALFRED_ENVIRONMENT` from your host shell or host `.env` into a
-  container _environment variable_ before the container starts, so inside the
+  container *environment variable* before the container starts, so inside the
   container it arrives as the fully-trusted env-var source. `development` and
   `test` work normally.
 - **Bare host, configured only through `.env`:** the shipped `production` default
@@ -346,7 +370,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
-For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain _why_ the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
+For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain *why* the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
 
 If you (or an AI agent) are contributing to this repository, also read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 

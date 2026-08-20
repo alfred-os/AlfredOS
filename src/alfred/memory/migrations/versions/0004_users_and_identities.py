@@ -55,6 +55,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 
+from alfred.config.operator_env import operator_display_name
 from alfred.identity.errors import OperatorSlugCollisionError
 from alfred.identity.slug import derive_slug
 
@@ -80,8 +81,14 @@ __all__ = [
 
 
 def _operator_name() -> str:
-    """Operator's human-readable name from env; defaults to ``"operator"``."""
-    return os.environ.get("ALFRED_OPERATOR_NAME", "operator")
+    """Operator's human-readable name from env; defaults to ``"operator"``.
+
+    #592: delegates to the shared helper the TUI client also calls, so the
+    ``platform_identities`` row this migration seeds and the ``platform_user_id``
+    the client sends are the same string BY CONSTRUCTION rather than by two
+    copies of one expression staying in sync by luck.
+    """
+    return operator_display_name()
 
 
 def _operator_language() -> str:

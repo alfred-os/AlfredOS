@@ -691,7 +691,7 @@ def set_(
     ] = None,
     daily_budget_usd: Annotated[
         float | None,
-        typer.Option("--daily-budget-usd", help=t("cli.user.flag.daily-budget-usd.short")),
+        typer.Option("--daily-budget-usd", help=t("cli.user.flag.daily-budget-usd.set.short")),
     ] = None,
     rate_limit_per_min: Annotated[
         str | None,

@@ -27,6 +27,12 @@ the payload's declared invariant actually holds at the trust boundary.
   SAME inbound_id N times: exactly ONE accept (downstream side effects run once)
   and N-1 audited replay DROPs (result="dropped", trust_tier_of_trigger="T3"),
   zero extra side effects.
+* cib-2026-009 (turn.failed stage-coarsening anti-oracle, #593/#594) -> two
+  DIFFERENT internal refusal legs (downgrade_denied, dlp_canary_tripped) driven
+  through the real ``RealTurnOrchestratorAdapter.dispatch()`` boundary produce
+  STRUCTURALLY IDENTICAL ``turn.failed`` wire frames (``stage="refused"`` on
+  both) -- an adversary diffing the two frames, or grepping either one's full
+  JSON serialization for the internal control names, learns nothing.
 
 Mirrors the csb-2026 / de-2026 executable-corpus pattern.
 """
@@ -309,3 +315,96 @@ async def test_cib_008_inbound_replay_is_processed_at_most_once() -> None:
         assert row["trust_tier_of_trigger"] == "T3"
         assert row["inbound_id_hash"] == audit_hash.hash_inbound_id(inbound_id)
         assert inbound_id not in str(row)  # raw wire id never on the row
+
+
+@pytest.mark.asyncio
+async def test_cib_009_turn_failed_stage_coarsening_hides_which_control_fired() -> None:
+    """cib-2026-009: #593 anti-oracle proof at the ADVERSARIAL-CORPUS layer.
+
+    ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py::
+    test_dispatch_canary_tripped_notifies_refused_not_the_control_name`` already
+    pins ONE leg (``dlp_canary_tripped``) against ONE forbidden substring
+    (``"canary"``). This corpus entry is the stronger, release-blocking version:
+    it drives BOTH refusal legs the ``TurnFailureStage`` docstring names as
+    colliding on purpose -- ``downgrade_denied`` (the ``ingest``-side gate-deny
+    halt, reached via a bare ``_HaltNoReply``) and ``dlp_canary_tripped`` (the
+    ``dispatch``-side halt reached when the orchestrator's turn raises
+    ``OutboundCanaryTripped``, #410 PR3 I4) -- through the REAL
+    ``RealTurnOrchestratorAdapter.dispatch()`` boundary, and asserts the two
+    resulting ``TurnFailedNotification`` wire frames are actually
+    INDISTINGUISHABLE: same coarse stage, structurally equal frames, and none
+    of four internal-control-name substrings present in either frame's full
+    JSON serialization. An adversary that could tell the two legs apart from
+    the wire alone would have exactly the boundary-probing oracle #593's
+    ``TurnFailureStage`` design exists to deny them.
+    """
+    payload = _load("cib-2026-009")
+    assert payload.expected_outcome == "refused"
+
+    from alfred.comms_mcp.real_turn_adapter import _HaltNoReply
+    from alfred.security.dlp import OutboundCanaryTripped
+    from tests.unit.comms_mcp._real_turn_adapter_doubles import (
+        _adapter,
+        _FakeAuditHashBroker,
+        _Orchestrator,
+        _Pool,
+        _prepared,
+        _RecordingSender,
+    )
+
+    # Leg B's `_emit_refused` (see below) hashes `canonical_user_id` via
+    # `audit_hash`, which raises `AuditHashBrokerNotWiredError` unless a
+    # broker is wired first (real_turn_adapter.py's FOLD-R12 invariant).
+    # Unlike cib-001..008, this test doesn't drive `process_inbound_message`
+    # (which wires the real broker as a production side effect) -- wire an
+    # explicit fake here so this test is self-sufficient and does not depend
+    # on state a preceding test in this file happened to leave behind.
+    audit_hash.set_broker_for_test(_FakeAuditHashBroker())
+    try:
+        # Leg A: downgrade_denied. `ingest` already decided this upstream of the
+        # turn -- `dispatch` short-circuits on the bare `_HaltNoReply` outcome
+        # without ever calling the orchestrator.
+        sender_a = _RecordingSender()
+        adapter_a = _adapter(orchestrator=_Orchestrator(answer="unused"), sender=sender_a)
+        await adapter_a.dispatch(
+            _HaltNoReply(stage="downgrade_denied", adapter_id="tui", canonical_user_id="u-1")
+        )
+
+        # Leg B: dlp_canary_tripped. This halt is decided INSIDE `dispatch`'s
+        # `async with lock:` turn-running block, when the orchestrator's own call
+        # raises `OutboundCanaryTripped` -- so it is driven via a real `_prepared()`
+        # turn rather than a pre-built `_HaltNoReply`.
+        sender_b = _RecordingSender()
+        pool_b = _Pool()
+        adapter_b = _adapter(
+            orchestrator=_Orchestrator(exc=OutboundCanaryTripped(token="canary-oracle-probe")),  # noqa: S106
+            sender=sender_b,
+            pool=pool_b,
+        )
+        await adapter_b.dispatch(_prepared())  # deterministic halt -- must NOT raise
+    finally:
+        audit_hash.reset_for_test()
+
+    assert len(sender_a.turn_states_sent) == 1
+    assert len(sender_b.turn_states_sent) == 1
+    frame_a = sender_a.turn_states_sent[0]
+    frame_b = sender_b.turn_states_sent[0]
+
+    # The anti-oracle proof itself: two DIFFERENT internal legs collapse to the
+    # SAME coarse stage, and the two frames are structurally equal -- not just
+    # "both happen to say refused", but literally indistinguishable on the wire.
+    assert frame_a.stage == "refused"
+    assert frame_b.stage == "refused"
+    assert frame_a == frame_b
+
+    # The stronger, corpus-grade check (vs the unit test's single "canary"
+    # substring): none of the internal control names leak through EITHER
+    # frame's full wire serialization.
+    forbidden_substrings = ("canary", "downgrade", "policy", "dlp")
+    for frame in (frame_a, frame_b):
+        serialized = frame.model_dump_json().lower()
+        for needle in forbidden_substrings:
+            assert needle not in serialized, (
+                f"anti-oracle violation: {needle!r} leaked into the turn.failed "
+                f"wire frame {serialized!r}"
+            )

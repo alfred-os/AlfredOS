@@ -123,6 +123,10 @@ class _FakeRunner:
         self.max_in_flight_notifications = max_in_flight_notifications
         self.handshake_called = False
         self.outbound_calls: list[dict[str, Any]] = []
+        # #593 Task 11: records every id-LESS ``send_notification`` call — the
+        # seam ``_RunnerOutboundSender.send_turn_state`` drives, distinct from
+        # ``outbound_calls`` (the ``id``-correlated ``send_request`` seam above).
+        self.notification_calls: list[dict[str, Any]] = []
         _FakeRunner.instances.append(self)
 
     async def start_and_handshake(self) -> None:
@@ -138,6 +142,9 @@ class _FakeRunner:
     async def send_request(self, method: str, params: Any) -> Any:
         self.outbound_calls.append({"method": method, "params": params})
         return {}
+
+    async def send_notification(self, method: str, params: Any) -> None:
+        self.notification_calls.append({"method": method, "params": params})
 
 
 @pytest.fixture(autouse=True)
@@ -325,6 +332,31 @@ def test_enabled_adapter_spawns_and_registers(
             },
         }
     ]
+
+
+def test_runner_outbound_sender_send_turn_state_writes_an_idless_notification() -> None:
+    """``send_turn_state`` writes an id-LESS ``turn.failed`` notification (#593 Task 11).
+
+    Distinct from ``send_outbound`` above (an ``id``-correlated JSON-RPC *request*
+    awaiting a response): this drives ``CommsPluginRunner.send_notification``
+    directly. A JSON-RPC notification carries no ``id`` at any layer — proven here
+    by asserting no ``id`` key appears anywhere in what was recorded, not merely
+    that the recorded call matches the expected shape.
+    """
+    import asyncio
+
+    from alfred.cli.daemon._comms_boot import _RunnerOutboundSender
+    from alfred.comms_mcp.protocol import TurnFailedNotification
+
+    runner = _FakeRunner(session=None, transport=None, adapter_id=_ENABLED_ADAPTER)
+    sender = _RunnerOutboundSender(runner=runner)  # type: ignore[arg-type]
+
+    asyncio.run(sender.send_turn_state(TurnFailedNotification(stage="refused")))
+
+    assert runner.notification_calls == [{"method": "turn.failed", "params": {"stage": "refused"}}]
+    recorded = runner.notification_calls[0]
+    assert "id" not in recorded
+    assert "id" not in recorded["params"]
 
 
 @pytest.mark.skipif(

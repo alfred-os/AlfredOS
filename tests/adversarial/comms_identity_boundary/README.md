@@ -27,6 +27,10 @@ attachment SHA-mismatch TOCTOU, and DLP-bypass on outbound retry.
   replay after a core restart, or a malicious adapter resend) is processed at
   most once — the accept-once commit short-circuits the duplicate into a
   content-free audited DROP, never re-running side effects (Spec A G0).
+- `turn.failed` stage-coarsening anti-oracle: an adversary diffing the wire
+  frames from two different internal refusal legs (a downgrade-gate policy
+  deny vs. a DLP canary trip) cannot tell which control fired — both
+  deliberately collapse to the same coarse `stage="refused"` (#593/#594).
 
 **Prefix.** `cib-`
 
@@ -69,6 +73,7 @@ foundations).
 | Pre-resolution DoS via spray of fresh platform_user_ids | PR-S4-8 host-side `_PreResolutionLimiter` (covered by unit suite) |
 | Prompt injection through Discord sub-payloads (9 surfaces) | PR-S4-9 |
 | Inbound frame replay (buffer replay / malicious resend) reprocessed | Spec A G0 (`cib-2026-008`) — accept-once short-circuit + audited drop |
+| `turn.failed` stage-coarsening anti-oracle: `downgrade_denied` vs. `dlp_canary_tripped` both collapse to `stage="refused"` on the wire | PR #594 / #593 (`cib-2026-009`) — `TurnFailureStage` docstring's "NO SECURITY-CONTROL ORACLE" rationale |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.

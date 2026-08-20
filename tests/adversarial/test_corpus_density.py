@@ -186,13 +186,16 @@ def test_comms_identity_boundary_corpus_has_payloads() -> None:
     extends the category with cib-2026-006 (outbound-queue resume DLP bypass)
     and cib-2026-007, lifting the floor to 7. The Spec-A G0 inbound-idempotency
     work adds cib-2026-008 (inbound replay processed at most once), lifting the
-    floor to 8. The xfail-strict placeholder self-destructed when the payloads
-    arrived, by design; the floor catches a silent deletion regression.
+    floor to 8. PR #594 (#593) adds cib-2026-009 (turn.failed stage-coarsening
+    anti-oracle — downgrade_denied and dlp_canary_tripped both collapse to the
+    same wire stage), lifting the floor to 9. The xfail-strict placeholder
+    self-destructed when the payloads arrived, by design; the floor catches a
+    silent deletion regression.
     """
     category_dir = Path(__file__).parent / "comms_identity_boundary"
     count = _count_yaml_payloads(category_dir)
-    assert count >= 8, (
-        f"expected ≥8 *.yaml payloads under {category_dir} (cib-2026-001..008), "
+    assert count >= 9, (
+        f"expected ≥9 *.yaml payloads under {category_dir} (cib-2026-001..009), "
         f"found {count} — a payload was deleted or renamed"
     )
 

@@ -69,6 +69,20 @@ read_env_var() {
   grep -E "^${key}=" .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true
 }
 
+# `trim_ws VALUE` strips leading/trailing whitespace via sed. `read_env_var`
+# returns a `.env` value AS-IS — a whitespace-padded entry like
+# `ALFRED_OPERATOR_NAME="   Bruce  "` comes back padded. Python's
+# `alfred.config.operator_env.operator_display_name()` normalizes with
+# `.strip() or "operator"`, so it trims BEFORE deciding whether the value
+# counts as unset. Any shell-side caller that reads the same env var and
+# applies `${var:-operator}` directly (without this trim first) would
+# normalize differently for a padded value — matters wherever the result is
+# compared against, or fed into, something the Python side also computes
+# (see the operator-identity bootstrap below, #592).
+trim_ws() {
+  printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 # #469 Blocker 2 Task 5: make the opt-in coherent. docker-compose.yaml now defaults
 # ALFRED_GATEWAY_HOSTED_ADAPTERS to [] (Discord is opt-in), so setting a real Discord
 # token alone no longer enables Discord — an operator's single action (the token) must
@@ -418,8 +432,101 @@ step "Bootstrapping audit.hash_pepper secret"
 # closure — unquoted would have left SecretBroker.get(...) raising
 # UnknownSecretError).
 pepper_key="audit.hash_pepper"
+# #594 R2 (root-cause fix). ERE-escaped form of $pepper_key. The literal dots
+# in "audit.hash_pepper" are regex metacharacters ("any character") unless
+# escaped: with an unescaped ${pepper_key}, `audit_hash_pepper` — the single
+# most plausible operator typo, since it mirrors the ALFRED_AUDIT_HASH_PEPPER
+# spelling in .env.example — matched as if it WERE the key, so
+# _pepper_write_file's presence check skipped the write while _pepper_from_file
+# (which DID escape the dot) read nothing, and the bootstrap reported
+# "Mirrored ..." on every future run having written nothing at all. Derived
+# from $pepper_key by substitution rather than spelled out a second time, so
+# the literal and its regex form can never drift apart.
+pepper_key_re="${pepper_key//./\\.}"
+
+# THE canonical pepper line. Every presence/blank/rewrite/extract pattern below
+# derives from this ONE definition. Three independently-authored spellings of
+# "the pepper key" (reader sed, writer grep, writer `[[ =~ ]]`) with three
+# different accept-sets — none of them matching the accept-set of the actual
+# consumer, SecretBroker._load_toml_file, which does a real tomllib.load and
+# keeps only top-level string values — is the root cause of #594's entire
+# pepper-parsing fix series. Each earlier round patched one instance of the
+# divergence and left the divergence itself intact.
+#
+# Requires the key to be QUOTED: `audit.hash_pepper = ...` without quotes is,
+# in real TOML, the NESTED table {audit: {hash_pepper: ...}}, which the broker
+# drops entirely — so treating it as "the pepper is here" reports success over
+# a value the broker can never read (refused outright by
+# _pepper_refuse_unusable_shapes below). Accepts either TOML key-quoting style
+# (basic "..." and literal '...' both parse to the same flat key) and any
+# indentation: leading whitespace does NOT make a top-level key nested
+# (verified against tomllib), so an indented entry that a presence check misses
+# gets a DUPLICATE appended, and tomllib then rejects the WHOLE file with
+# "Cannot overwrite a value" — taking deepseek_api_key, discord_bot_token and
+# every other secret down with the pepper.
+pepper_line_re="^[[:space:]]*(\"${pepper_key_re}\"|'${pepper_key_re}')[[:space:]]*="
+# ... the same line with a provably-empty value. Both quote styles: a '' blank
+# is as unambiguously blank as a "" one, and accepting it also closes the
+# cosmetic "single-quoted blank entries never auto-fill" follow-up parked in
+# the #594 fix-1 round-3 review.
+pepper_blank_re="${pepper_line_re}[[:space:]]*(\"\"|'')[[:space:]]*\$"
+# The bare (unquoted) dotted spelling — the TOML nested-table trap. Deliberately
+# NOT part of pepper_line_re: it is a shape this script must refuse, not accept.
+pepper_bare_re="^[[:space:]]*${pepper_key_re}[[:space:]]*="
+# A TOML table / array-of-tables header, used ONLY by the refusal gate below.
+#
+# Derived from TOML's actual key grammar rather than guessed at, because both
+# earlier guesses were wrong in opposite directions and the second was wrong
+# SILENTLY:
+#
+#   * `^[[:space:]]*\[` — "a line starting with [" — is not the same predicate
+#     at all. An array element on its own line (`  [1, 2],` inside a multi-line
+#     `matrix = [ ... ]`) read as a table header, so a pepper after it was
+#     REFUSED, on a legal file, with remediation ("move the line above line N")
+#     that would have moved the secret INSIDE the array.
+#   * `\[\[?[^],]*\]\]?...` — "…and contains no comma" — fixed that but broke
+#     the gate for real headers whose QUOTED key contains a comma or a bracket:
+#     `["a,b"]`, `[["a,b"]]`, `["x]y"]` are all legal TOML, and a pepper scoped
+#     inside one was silently NOT refused — exit 0, success banner, pepper
+#     invisible to the broker. That is the exact two-HMAC-plane failure this
+#     gate exists to prevent, i.e. a false NEGATIVE, the dangerous direction.
+#
+# A header is `[` or `[[`, then a dotted path of TOML keys — bare
+# (`[A-Za-z0-9_-]+`), basic-quoted (`"..."`, backslash escapes honoured so a
+# `\"` inside the name does not end it early), or literal-quoted (`'...'`,
+# which TOML defines as having no escapes at all) — then `]`/`]]`, then only
+# whitespace or a comment. An array element such as `[1, 2],` cannot match:
+# after the first key the grammar allows only `.`, `]` or whitespace, never a
+# comma, and never a trailing `,` after the bracket.
+#
+# ACCEPTED LEXICAL LIMIT — named here rather than pretending the guard is a
+# parser (a lexical rule cannot decide a parse-level fact): a single-element
+# array of one bare token on its own line with no trailing comma (`[1]`, or a
+# `[grafana]`-shaped line inside a multi-line """string""" body) is genuinely
+# indistinguishable from a table header without parsing. That residual is a
+# false POSITIVE — a visible refusal the operator can act on, never a silent
+# mis-write — and the insert path deliberately does not use this pattern at
+# all, so it cannot corrupt a file. Verified against all of the shapes above on
+# bash 3.2.57 and 5.3, with `grep -E` and `[[ =~ ]]` agreeing on every one.
+_toml_key_re="([A-Za-z0-9_-]+|\"([^\"\\\\]|\\\\.)*\"|'[^']*')"
+toml_table_re="^[[:space:]]*\\[\\[?[[:space:]]*${_toml_key_re}([[:space:]]*\\.[[:space:]]*${_toml_key_re})*[[:space:]]*\\]\\]?[[:space:]]*(#.*)?\$"
+
+# The leading run of comment/blank lines at the TOP of a TOML file. Anything
+# before the first line that is neither is, by construction, still at root
+# scope: no table header, no array, and no multi-line string can have been
+# opened yet. That makes "insert immediately after the preamble" a POSITIVE,
+# parse-independent proof of root scope — which is why the insert in
+# _pepper_write_file anchors on this instead of trying to lexically detect
+# where a table begins.
+toml_preamble_re='^[[:space:]]*(#.*)?$'
 target_file="${ALFRED_SECRETS_FILE:-$secrets_file}"
 lock_dir="${target_file}.lock"
+# #591: the .env carrier for the dotted container key docker-compose forwards
+# as ALFRED_AUDIT.HASH_PEPPER. Nothing reads this name directly — see the
+# docker-compose.yaml comment next to ALFRED_AUDIT_HASH_PEPPER for the
+# alfred-core side of this contract (dotted container key vs underscored
+# .env variable are NOT interchangeable; Compose cannot interpolate a dot).
+pepper_env_key="ALFRED_AUDIT_HASH_PEPPER"
 
 # PR #215 sec-1 closure: chmod 600 the target_file directly (the outer
 # $secrets_file chmod only covered the default path).
@@ -430,21 +537,583 @@ _pepper_ensure_target() {
   chmod 600 "$target_file"
 }
 
-_pepper_bootstrap() {
-  _pepper_ensure_target
-  if grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
-    echo "audit.hash_pepper already configured in ${target_file}; leaving alone."
+# #594 R2: refuse — never guess — on any secrets.toml shape whose meaning to
+# tomllib (and therefore to SecretBroker._load_toml_file, the only consumer)
+# differs from what this script's pattern-matching would assume. This script is
+# not a TOML parser; it handles exactly the one canonical shape it writes.
+# Every historical bug in this block (#594 sec-002, sec-002-drift, and both
+# CodeRabbit majors on #594) is the same failure: guessing about a shape the
+# script cannot decide, then reporting success over it. Refusing keeps the
+# invariant that the operator LEARNS about it, rather than ending up with
+# alfred-core and the host CLI on two different HMAC planes (spec §8.10).
+#
+# Reports LINE NUMBERS, never line contents: the offending line holds the
+# secret, and nothing in this block ever echoes a pepper value.
+#
+# Runs inside the lock, before anything is read for reconcile or written, so it
+# gates BOTH the read and the write side.
+_pepper_refuse_unusable_shapes() {
+  local bare_line dup_count first_pepper first_table
+
+  # 1. Bare dotted key: `audit.hash_pepper = "..."`. In TOML that is the nested
+  #    table {audit: {hash_pepper: ...}}; _load_toml_file keeps only top-level
+  #    string values, so the broker drops it. Mirroring it into .env would put
+  #    alfred-core on a value host-side `alfred` commands cannot see.
+  #    `|| true` guards the pipeline the same way _pepper_from_file's does: with
+  #    `pipefail` a no-match grep (rc 1) would otherwise fail the assignment,
+  #    which `set -e` kills outright in any call context that is not an
+  #    `if`-condition. Not relying on the current call site's shape for that.
+  bare_line="$(grep -nE "$pepper_bare_re" "$target_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+  if [[ -n "$bare_line" ]]; then
+    printf 'ERROR: %s\n' \
+      "${target_file} line ${bare_line} sets audit.hash_pepper as an UNQUOTED dotted key. In TOML that is the nested table [audit] hash_pepper, not the flat key AlfredOS reads — the secret broker drops it entirely, so alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Quote the key instead: \"audit.hash_pepper\" = \"<your value>\" (keep the value exactly as it is — changing it invalidates every *_hash audit row already written). Then re-run." >&2
+    return 1
+  fi
+
+  # 2. More than one canonical pepper line. tomllib rejects a duplicate key
+  #    with "Cannot overwrite a value" for the WHOLE file, which takes every
+  #    other secret (deepseek_api_key, discord_bot_token, ...) down with the
+  #    pepper.
+  #    `grep -c` prints "0" AND exits 1 when nothing matches, so the tempting
+  #    `$(grep -c ... || echo 0)` yields the two-line string "0\n0" and the
+  #    `-gt` below then dies with a bash arithmetic syntax error on stderr —
+  #    on the MOST COMMON path (a fresh file with no pepper yet). Capture the
+  #    count and default on the assignment's own status instead.
+  dup_count="$(grep -cE "$pepper_line_re" "$target_file" 2>/dev/null)" || dup_count=0
+  if [[ "$dup_count" -gt 1 ]]; then
+    printf 'ERROR: %s\n' \
+      "${target_file} defines audit.hash_pepper ${dup_count} times. TOML rejects a duplicate key ('Cannot overwrite a value'), which makes the ENTIRE secrets file unreadable — every other secret in it fails too, not just the pepper. Delete the duplicate lines until exactly one remains, then re-run. If they hold different values, keep the one alfred-core is already using (ALFRED_AUDIT_HASH_PEPPER in .env) — changing it invalidates every *_hash audit row written under the other." >&2
+    return 1
+  fi
+
+  # 3. A canonical pepper line scoped INSIDE a [table]. TOML puts every key
+  #    after a table header into that table, so the broker's top-level lookup
+  #    never sees it, however correctly the line itself is spelled.
+  first_pepper="$(grep -nE "$pepper_line_re" "$target_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+  first_table="$(grep -nE "$toml_table_re" "$target_file" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+  if [[ -n "$first_pepper" && -n "$first_table" && "$first_pepper" -gt "$first_table" ]]; then
+    printf 'ERROR: %s\n' \
+      "${target_file} line ${first_pepper} sets audit.hash_pepper inside the [table] opened at line ${first_table}. TOML scopes it into that table, so the secret broker (which reads only top-level keys) never sees it. Move the line ABOVE line ${first_table}, keeping its value unchanged, then re-run." >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# #591: print the existing pepper VALUE (not just presence) out of the broker
+# secrets file. Accepts either TOML KEY-quoting style
+# (``"audit.hash_pepper" = ...`` / ``'audit.hash_pepper' = ...``, both of which
+# tomllib reads as the same flat key) and both TOML string forms tomllib
+# accepts for a flat string VALUE: double-quoted basic strings (``"..."``) and
+# single-quoted literal strings (``'...'``). #594 sec-002-drift: a
+# single-quoted hand-set value used to read back as empty here (the regex
+# only recognized the double-quoted form), which made _pepper_bootstrap
+# think secrets.toml had no pepper at all and silently mirror a FRESH,
+# unintended value into .env on every run instead of the operator's real
+# one — the env/file "DIFFERS" drift-refusal never fired either, since its
+# own precondition (`-n "$file_pepper"`) shared the identical blind spot.
+# Deliberately does NOT handle multi-line/triple-quoted TOML strings —
+# implausible for a one-line hex secret, not worth the added regex
+# complexity. ``|| true`` binds to the whole pipeline so a SIGPIPE from
+# `head -1` truncating the stream can never trip `pipefail` (same idiom as
+# `read_env_var` above).
+#
+# #594 R2: the key half of both patterns is now $pepper_line_re — the SAME
+# definition _pepper_write_file and _pepper_refuse_unusable_shapes use — rather
+# than a fourth hand-written spelling. That also NARROWS the reader: it used to
+# accept the bare `audit.hash_pepper = "..."` spelling via an optional-quote
+# `"?`, which tomllib reads as a nested table the broker never sees, so the
+# reader reported a value alfred-core could not possibly be using. That shape
+# is now refused up-front instead of silently mis-read.
+#
+# LOAD-BEARING: the capture group is \2, not \1. $pepper_line_re contains a
+# capture group of its own (the "..."|'...' key-quote alternation — POSIX ERE
+# has no non-capturing group), so the VALUE is the second group. If
+# $pepper_line_re ever gains or loses a group, this numbering must move with
+# it; a silently-wrong number here reads back an empty pepper, which is exactly
+# the shape of the sec-002-drift bug (two HMAC planes, exit 0, no refusal).
+_pepper_from_file() {
+  [[ -f "$target_file" ]] || return 0
+  sed -n -E \
+    -e "s/${pepper_line_re}[[:space:]]*\"([^\"]*)\".*/\\2/p" \
+    -e "s/${pepper_line_re}[[:space:]]*'([^']*)'.*/\\2/p" \
+    "$target_file" | head -1 || true
+}
+
+# Append-if-absent (or overwrite-if-blank) ONLY — never rewrite an existing
+# REAL value (spec §8.10: rotating the pepper invalidates cross-row
+# correlation).
+_pepper_write_file() {
+  local tmp_file line replaced=0 inserted=0 write_rc=0
+  if grep -qE "$pepper_line_re" "$target_file" 2>/dev/null; then
+    # #594 sec-002 (fix-2, regression fix): the key is present. Only overwrite
+    # when the value is SPECIFICALLY a provably-blank string (`= ""` or `= ''`)
+    # — never merely because a general-purpose value-extraction regex failed to
+    # match. A first version of this fix called _pepper_from_file (whose
+    # regex only recognizes DOUBLE-quoted TOML strings) and treated "didn't
+    # match" as "must be blank" — but TOML also allows SINGLE-quoted literal
+    # strings (`'...'`), which tomllib parses fine. A hand-set
+    # `"audit.hash_pepper" = 'a-real-hex-value'` would fail to match that
+    # extraction regex too, and got silently OVERWRITTEN with a fresh
+    # openssl-generated value while reporting success — destroying a real
+    # pepper, which is strictly worse than the original bug (failing to fill
+    # in a blank one). Positively detect the blank case with a dedicated
+    # pattern instead; every other shape (single-quoted, non-blank
+    # double-quoted, malformed, ...) is treated as "a value is already here"
+    # and left completely untouched — the same behavior this function had
+    # before #594 sec-002 for every one of those shapes.
+    #
+    # #594 R2: both this blank check and the presence check above are now
+    # derived from the shared $pepper_line_re / $pepper_blank_re definitions
+    # instead of carrying their own hand-written spelling of the key.
+    if ! grep -qE "$pepper_blank_re" "$target_file" 2>/dev/null; then
+      return 0
+    fi
+    # Blank double-quoted entry (e.g. an operator hand-set
+    # `"audit.hash_pepper" = ""`) — overwrite it in place. Rebuilt
+    # line-by-line via printf, same as _pepper_write_env above and for the
+    # same reason: the incoming value is not hex-constrained on the
+    # mirrored-from-.env path, so it must never be fed through sed/awk
+    # substitution syntax.
+    tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
+    # See _pepper_write_rc_note below for why every write flips $write_rc and
+    # the group ends on an explicit test of it.
+    write_rc=0
+    if ! {
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        # LOAD-BEARING: $pepper_blank_re is UNQUOTED here. Quoting the RHS of
+        # `=~` makes bash match it as a LITERAL STRING rather than as an ERE,
+        # so this branch would silently never fire and a blank entry would
+        # never be filled in — while the caller still printed its success
+        # banner. Verified against bash 3.2.57 and 5.3; pinned by
+        # test_bootstrap_fills_a_blank_entry_in_place_without_duplicating.
+        if [[ "$replaced" -eq 0 && "$line" =~ $pepper_blank_re ]]; then
+          printf '"%s" = "%s"\n' "$pepper_key" "$1" || write_rc=1
+          replaced=1
+        else
+          printf '%s\n' "$line" || write_rc=1
+        fi
+      done < "$target_file"
+      [[ "$write_rc" -eq 0 ]]
+    } > "$tmp_file"; then
+      rm -f "$tmp_file"
+      return 1
+    fi
+    mv "$tmp_file" "$target_file" || return 1
     return 0
   fi
+  # Quote the dotted key so tomllib reads it as a flat string key
+  # (cross-cutting BLOCKER closure).
+  #
+  # #594 R2: write at ROOT scope, proven positively. The original code appended
+  # blindly at EOF with `>>`, which is only correct when the file has no [table]
+  # header at all: TOML scopes every key after a header INTO that table, so an
+  # EOF-appended `"audit.hash_pepper" = "..."` under a trailing [grafana] parses
+  # as grafana."audit.hash_pepper", the broker (top-level strings only) drops it,
+  # and the script still prints "Seeded ..." and exits 0.
+  #
+  # The obvious repair — scan for a table header and insert above it — is a
+  # LEXICAL guess about a PARSE-level fact, and it was wrong in both directions:
+  # inserting above a `  [1, 2],` array element split a legal `matrix = [ ... ]`
+  # into `Unclosed array` (killing every OTHER secret in the file, exit 0,
+  # success banner), and inserting above a `[bracketed]`-shaped line inside a
+  # multi-line """string""" buried the pepper in the string body as inert text —
+  # reproducing, in a new spot, the very bug this insert exists to close.
+  #
+  # Anchor on the PREAMBLE instead: everything before the first line that is
+  # neither blank nor a comment is provably still root scope — no table, array,
+  # or multi-line string can have been opened yet — so inserting there needs no
+  # guess about TOML structure whatsoever. A file that is entirely comments (the
+  # freshly-created `# AlfredOS secrets file. DO NOT commit.` case, by far the
+  # most common) has no such line, so the key lands at EOF: byte-identical to
+  # the append this replaces, verified by cmp.
+  #
+  # One path, not two. The previous version kept a `>>` fast path alongside the
+  # rebuild, and the two branches immediately diverged — the fast path masked
+  # its own write failure behind an unconditional `return 0` and had no
+  # trailing-newline guard, so a target file whose last byte was not \n glued
+  # the new key onto the previous line. Both defects are structurally impossible
+  # here: `mv` failure is propagated, and every line is re-emitted through
+  # `printf '%s\n'`. Same temp-file + atomic-mv idiom as the blank-overwrite
+  # rewrite above and _pepper_write_env below, for the same reason: the value is
+  # not hex-constrained on the mirrored-from-.env path and must never be fed
+  # through sed/awk substitution syntax.
+  tmp_file="$(umask 077 && mktemp "${target_file}.XXXXXX")" || return 1
+  # _pepper_write_rc_note — WHY every write below flips $write_rc and the group
+  # ends on `[[ "$write_rc" -eq 0 ]]` rather than on whatever ran last:
+  #
+  # These rebuild groups TRUNCATE and re-emit the whole file, so a write that
+  # fails part-way through (ENOSPC, EDQUOT, EIO) does not merely fail to add the
+  # pepper — it silently DROPS the lines it could not write, and the `mv` below
+  # then promotes that truncated file over the operator's real secrets. Every
+  # other secret in the file disappears, exit 0, success banner. That is
+  # strictly worse than the append-only bug this rebuild replaced.
+  #
+  # A brace group exits with the status of its LAST command, and neither
+  # candidate for "last" is trustworthy here:
+  #   * a trailing `if` whose condition is false and which has no `else` exits
+  #     0, discarding any earlier failure outright;
+  #   * a `while` loop exits with the status of the last command of its LAST
+  #     iteration, so a mid-file failure is overwritten by any later success.
+  # Empirically reproduced in all three rebuild loops in this file (injected
+  # per-write failure on a middle line: rc 0, banner printed, that line gone).
+  # Accumulating into $write_rc and ending the group on an explicit test of it
+  # is the only shape that survives both, so all three loops use it.
+  write_rc=0
+  if ! {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      # $toml_preamble_re unquoted, for the same reason as $pepper_blank_re
+      # above. The brace group is not a subshell, so `inserted` and `write_rc`
+      # survive the loop and the statements below see them.
+      if [[ "$inserted" -eq 0 ]] && ! [[ "$line" =~ $toml_preamble_re ]]; then
+        printf '"%s" = "%s"\n' "$pepper_key" "$1" || write_rc=1
+        inserted=1
+      fi
+      printf '%s\n' "$line" || write_rc=1
+    done < "$target_file"
+    # Whole file was preamble (or empty): still root scope, so EOF is correct.
+    if [[ "$inserted" -eq 0 ]]; then
+      printf '"%s" = "%s"\n' "$pepper_key" "$1" || write_rc=1
+    fi
+    [[ "$write_rc" -eq 0 ]]
+  } > "$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  mv "$tmp_file" "$target_file" || return 1
+}
+
+# #591: mirror the pepper into .env so docker-compose can forward it to
+# alfred-core as ALFRED_AUDIT_HASH_PEPPER. Mirrors the Grafana admin-password
+# seed's shape exactly: present-but-empty is the normal `cp .env.example .env`
+# state, so the update branch is the NORMAL path and append is only the
+# fallback for a pre-#591 .env that predates this key. `umask 077` covers
+# the temp file this update writes; .env itself is already 0600 from the
+# unconditional chmod near the top of this script. NEVER echoed.
+#
+# #594 R2: the anchors below are `^${pepper_env_key}=` — byte-identical to
+# `read_env_var`'s (`^${key}=`), with NO `[[:space:]]*` allowance. They used to
+# allow leading whitespace while the reader did not, which is the same
+# reader/writer divergence as the TOML-side root cause, in miniature: with
+# `  ALFRED_AUDIT_HASH_PEPPER=<operator value>` in .env, `read_env_var` returned
+# nothing (so `env_pepper` read empty and the DIFFERS drift-refusal could not
+# fire), while this writer's grep MATCHED and overwrote the operator's value in
+# place with the secrets.toml one. Narrowed the WRITER to the reader rather
+# than the reverse: `read_env_var` is shared by five other call sites in this
+# script and widening it would ripple. An indented .env entry is now
+# consistently invisible to both, and the append branch adds a proper column-0
+# line — which Compose's dotenv (last occurrence wins) then uses.
+# $pepper_env_key is [A-Z_] only, so it carries no ERE metacharacters and needs
+# no escaping analogous to $pepper_key_re.
+_pepper_write_env() {
+  if grep -qE "^${pepper_env_key}=" .env 2>/dev/null; then
+    # #594 sec-001: the mirrored-from-secrets.toml value is NOT hex-constrained
+    # (only the freshly-generated-via-openssl branch below is guaranteed
+    # [0-9a-f]{64} — this branch carries forward whatever an operator hand-set
+    # in secrets.toml). A sed `s///` replacement string treats `&` as "insert
+    # the matched text" and `\N` as a backreference, so interpolating an
+    # arbitrary value there can silently corrupt .env while sed still exits 0
+    # (empirically reproduced: a pepper of "ab&cd" against
+    # "ALFRED_AUDIT_HASH_PEPPER=" wrote back "abALFRED_AUDIT_HASH_PEPPER=cd").
+    # Rebuild .env line-by-line instead: the value only ever reaches
+    # `printf '%s'`, which performs no replacement/backreference expansion on
+    # its arguments.
+    local tmp_env line replaced=0 write_rc=0
+    tmp_env="$(umask 077 && mktemp .env.XXXXXX)" || return 1
+    # See _pepper_write_rc_note in _pepper_write_file above. Identical hazard
+    # with a different blast radius: a mid-file write failure here silently
+    # deletes the operator's OTHER .env variables (provider keys, Discord token,
+    # Compose settings), not just the pepper.
+    if ! {
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$replaced" -eq 0 && "$line" =~ ^${pepper_env_key}= ]]; then
+          printf '%s=%s\n' "$pepper_env_key" "$1" || write_rc=1
+          replaced=1
+        else
+          printf '%s\n' "$line" || write_rc=1
+        fi
+      done < .env
+      [[ "$write_rc" -eq 0 ]]
+    } > "$tmp_env"; then
+      rm -f "$tmp_env"
+      return 1
+    fi
+    mv "$tmp_env" .env || return 1
+  else
+    # Trailing-newline guard (#469 Blocker 2 CodeRabbit finding): without it a
+    # .env whose last byte is not \n glues the new key onto the previous line.
+    # Both writes below are guarded individually (not just the second one's
+    # subshell exit status) -- see _pepper_write_rc_note above: a silently-
+    # failed newline write here would let the pepper append glue onto the
+    # operator's last existing .env line while the function still reports 0.
+    if [[ -s .env ]] && [[ -n "$(tail -c1 .env)" ]]; then
+      printf '\n' >> .env || return 1
+    fi
+    ( umask 077 && printf '%s=%s\n' "$pepper_env_key" "$1" >> .env ) || return 1
+  fi
+}
+
+# Refuse any pepper value whose bytes do not mean themselves on BOTH carriers.
+# NOT a hex check: the pepper is opaque HMAC key material (SecretBroker.get
+# returns it as a str; every consumer just .encode("utf-8")s it), so its
+# ALPHABET is irrelevant to correctness — only that the same bytes reach both
+# planes. Derived from the two grammars, not guessed:
+#   \  TOML basic-string escape introducer. `= "ab\ncd"` DECODES to ab<LF>cd,
+#      so the broker and .env hold different keys; `= "ab\qcd"` is not valid
+#      TOML at all and makes the WHOLE secrets file unreadable (every other
+#      secret with it). Neither is detectable afterwards: _pepper_from_file
+#      captures RAW text, so the DIFFERS gate below compares equal and never
+#      fires — the same precondition-blindness Fix-1 round 3 closed for the
+#      reader, one layer down in the escape layer.
+#   " '  by the time a value reaches this function, read_env_var has already
+#      deleted both outright (`tr -d`) on the .env leg, and
+#      _pepper_from_file's own capture group has already consumed the TOML
+#      delimiter pair on the file leg -- this check almost never fires on
+#      either quote character today. A MATCHED outer delimiter pair
+#      (`KEY="hex"`, `KEY='hex'`) is a legitimate Compose/TOML quoting
+#      convention -- Compose strips exactly that pair too (verified against
+#      real `docker compose config`) -- and must NOT be refused; only an
+#      UNMATCHED or embedded quote is unsafe. That distinction is made
+#      upstream of this function, on the RAW pre-strip value, by
+#      `_pepper_bootstrap`'s `_pepper_env_raw_value` + the
+#      `raw_env_pepper_peeled` peel-then-check (#594 Task S2 review rounds
+#      1-2) -- see that block's own comment for the peel mechanics.
+#   $ #  Compose's dotenv interpolates `$` and strips a `#` inline comment.
+#   space/control/empty  unquoted .env values do not survive them.
+# ACCEPTED FALSE POSITIVE, named rather than hidden: a TOML *literal* string
+# ('...') has no escape layer at all, so a single-quoted value containing a
+# backslash is legal and safe — and is refused here anyway. That is a LOUD,
+# actionable refusal on an exotic hand-edited value, never a silent mis-write,
+# which is the direction this block's other gates already choose.
+# Reports the offending CHARACTER, never the value (the value is the secret).
+_pepper_refuse_unsafe_value() {
+  local what="$1" value="$2"
+  # KNOWN LIMITATION: `[[:graph:]]` is a POSIX bracket class and therefore
+  # locale-dependent. Under `LC_ALL=C` a valid UTF-8 pepper containing a
+  # non-ASCII byte sequence is wrongly refused as "non-printable"; the same
+  # value passes under a UTF-8 locale. Not fixed here -- this is a
+  # comment-only pass, and the fix would be a logic change to this function.
+  if ! [[ "$value" =~ ^[[:graph:]]+$ ]]; then
+    printf 'ERROR: %s\n' \
+      "the audit.hash_pepper value in ${what} contains whitespace or a non-printable character. Compose's dotenv parser and this script's TOML writer cannot both carry it unchanged, so alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set it to a value made only of printable non-space characters (the bootstrap generates 64 lowercase hex chars), keeping the SAME value in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+    return 1
+  fi
+  case "$value" in
+    *[\\\"\'\$\#]*)
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in ${what} contains one of \\ \" ' \$ # — characters that do NOT survive the round trip unchanged (a backslash is a TOML escape introducer, quotes are stripped by this script's .env reader, and Compose's dotenv treats \$ as interpolation and # as a comment). alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper to a value without those characters, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+  esac
+  return 0
+}
+
+# #594 Task S2 review round 1: `read_env_var`'s `tr -d '"' | tr -d "'"` (needed
+# so a quoted ALFRED_OPERATOR_NAME="Bruce"-shaped value reads as the bare name
+# at every OTHER call site) makes a `"`/`'` inside the pepper value invisible
+# to `_pepper_refuse_unsafe_value` above: by the time `env_pepper` reaches
+# that call, an EMBEDDED quote is already gone. `.env` line
+# `ALFRED_AUDIT_HASH_PEPPER=ab"cd` (no delimiter pair, `"` mid-value) would
+# read as `env_pepper=abcd` — passes the gate, gets mirrored into
+# `target_file` as `abcd` — while Compose's dotenv parser does NOT strip an
+# embedded quote and forwards the UNTOUCHED `ab"cd` to alfred-core. Two
+# different HMAC planes, exit 0, no refusal: the exact failure
+# `_pepper_refuse_unsafe_value` exists to prevent, one layer further
+# upstream than `read_env_var` lets it see.
+#
+# review round 2 correction: Compose DOES strip a single MATCHED outer
+# quote PAIR (KEY="v" and KEY='v' both forward v, verified against real
+# `docker compose config`), exactly like `read_env_var`'s `tr -d` does for
+# that same pair — so `"hex"`, `'hex'` and `""` are genuinely single-plane
+# and must NOT refuse. Only a quote that is not acting as the delimiter
+# (none present, or one still there after peeling a single outer pair) is
+# the real divergence. The call site below peels at most one such pair
+# before checking, mirroring Compose's own rule.
+#
+# This is deliberately NOT a second copy of `_pepper_refuse_unsafe_value` (or
+# a change to `read_env_var`'s shared stripping, which four other call sites
+# rely on): every OTHER refused character (`\ $ #` and whitespace) survives
+# `read_env_var` unchanged, so it is already caught via `env_pepper`; only the
+# two quote characters need a raw, pre-strip look. This is a narrow,
+# pepper-specific companion read, at the same one chokepoint, not a new one.
+#
+# Deliberately duplicates read_env_var's `grep -E "^${key}=" .env | head -1 |
+# cut -d= -f2-` matcher rather than sharing it (review round 2, Minor,
+# DEFERRED — this file's history is that consolidation attempts in this exact
+# area have introduced worse bugs than the one being fixed). If
+# read_env_var's matcher ever changes, mirror the change here too.
+_pepper_env_raw_value() {
+  [[ -f .env ]] || return 0
+  grep -E "^${pepper_env_key}=" .env | head -1 | cut -d= -f2- || true
+}
+
+_pepper_bootstrap() {
+  # #594: guard the same way the write helpers below already are — a failed
+  # chmod 600 (permission denied, read-only filesystem, file owned by
+  # someone else) must not let the bootstrap proceed as if the target were
+  # properly secured.
+  if ! _pepper_ensure_target; then
+    printf 'ERROR: failed to prepare %s for the audit.hash_pepper bootstrap (chmod 600 failed?)\n' \
+      "$target_file" >&2
+    return 1
+  fi
+  # #594 R2: gate every shape this script cannot handle correctly BEFORE either
+  # plane is read for reconcile or written. The helper prints its own specific,
+  # remediation-bearing error, so there is nothing to add here.
+  if ! _pepper_refuse_unusable_shapes; then
+    return 1
+  fi
+  local env_pepper file_pepper pepper_value raw_env_pepper raw_env_pepper_peeled raw_file_pepper
+  env_pepper="$(read_env_var "$pepper_env_key")"
+  file_pepper="$(_pepper_from_file)"
+  # #594 Task S2 review round 3: keep the UNTRIMMED file-side capture too.
+  # _pepper_from_file's sed already consumes the TOML quote delimiters (its
+  # own capture group), so — unlike the .env leg — there is no "delimiter
+  # vs embedded" ambiguity to resolve on this side; the only risk is the
+  # `trim_ws` two lines down silently discarding leading/trailing
+  # whitespace BEFORE the graph-check below ever sees it. See the raw_file_
+  # pepper check after the .env-leg raw checks.
+  raw_file_pepper="$file_pepper"
+  # The pepper is hex-only; surrounding whitespace in a hand-edited .env is
+  # never part of the value. Trim before comparing so a padded-but-identical
+  # pair does not trip the drift refusal below.
+  env_pepper="$(trim_ws "$env_pepper")"
+  file_pepper="$(trim_ws "$file_pepper")"
+
+  # Raw (pre-`tr -d`) look at the SAME .env line, quote-check ONLY — see
+  # _pepper_env_raw_value's comment above. Runs before the env_pepper gate
+  # below so an EMBEDDED quote is refused even though env_pepper itself
+  # never sees it.
+  raw_env_pepper="$(trim_ws "$(_pepper_env_raw_value)")"
+  # Peel AT MOST ONE matched surrounding quote pair first — Compose's own
+  # rule (KEY="v" / KEY='v' -> v), so a value that is ONLY delimited, not
+  # embedding a second quote, must pass through untouched. The `case`
+  # patterns below require the SAME quote character at both the first and
+  # last position with at least one more character in between-or-none
+  # (`\"*\"` cannot match a bare single `"`: `*` can match zero characters,
+  # but the pattern still needs two literal `"` positions, so a 1-character
+  # string never satisfies it) — exactly "matched pair, length >= 2".
+  # `KEY=""` peels to an empty string, which the DIFFERS/blank logic below
+  # already treats as "no env pepper", so it correctly seeds fresh rather
+  # than refusing. A MISMATCHED pair (`"abc'`) matches neither pattern and
+  # falls through with its stray quote intact, which the check after this
+  # correctly still refuses (Compose does not strip a mismatched pair).
+  raw_env_pepper_peeled="$raw_env_pepper"
+  case "$raw_env_pepper" in
+    \"*\")
+      raw_env_pepper_peeled="${raw_env_pepper#\"}"
+      raw_env_pepper_peeled="${raw_env_pepper_peeled%\"}" ;;
+    \'*\')
+      raw_env_pepper_peeled="${raw_env_pepper#\'}"
+      raw_env_pepper_peeled="${raw_env_pepper_peeled%\'}" ;;
+  esac
+  # #594 Task S2 review round 3: whitespace immediately INSIDE the
+  # delimiter pair (`KEY="hex "`, `KEY=" hex"`) survives the peel above —
+  # there's no quote left there for the *[\"\']* check to catch — AND is
+  # invisible to `_pepper_refuse_unsafe_value`'s graph check below, because
+  # that check runs on `env_pepper`, which gets its OWN independent
+  # `trim_ws` earlier in this function. Compose forwards that whitespace
+  # unchanged (it strips only the delimiter quotes, never interior
+  # content), so a leading/trailing-inside-the-quotes space is a real,
+  # silent divergence: this script would mirror the TRIMMED value while
+  # alfred-core receives the padded one. Interior (non-edge) whitespace is
+  # NOT re-checked here — it already fails the standard graph check below,
+  # since trim_ws never touches the middle of a string.
+  case "$raw_env_pepper_peeled" in
+    *[\"\']*)
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in .env (${pepper_env_key}) contains a \" or ' character that is not acting as the value's own outer delimiter. This script's .env reader silently deletes every quote character before the value is ever compared or mirrored, but Compose's dotenv parser only strips a single MATCHED surrounding pair and leaves an embedded quote in place — so alfred-core would receive a different value than what this script would write into ${target_file}. alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in .env to a value without an embedded \" or ' character, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+    [[:space:]]*|*[[:space:]])
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in .env (${pepper_env_key}) has leading or trailing whitespace inside its quote delimiters. Compose's dotenv parser preserves that whitespace — it only strips the surrounding quote characters, never interior content — but this script trims it away before comparing or mirroring, so alfred-core would receive a padded value while host-side tooling would end up with the trimmed one. alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in .env without leading/trailing whitespace inside the quotes, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+  esac
+
+  # #594 Task S2 review round 3 (same bug, file leg): the mirror-image gap.
+  # `file_pepper`'s trim above (needed for the DIFFERS-comparison forgiving
+  # of incidental padding) runs BEFORE `_pepper_refuse_unsafe_value` below
+  # ever sees it, so leading/trailing whitespace inside a TOML string —
+  # which `tomllib` (the real consumer) decodes as part of the value,
+  # verbatim, not trimmed — would be silently laundered out of what this
+  # script compares and mirrors into .env. Check the UNTRIMMED capture.
+  # Interior (non-edge) whitespace is, again, already caught by the
+  # standard graph check on the trimmed value below.
+  case "$raw_file_pepper" in
+    [[:space:]]*|*[[:space:]])
+      printf 'ERROR: %s\n' \
+        "the audit.hash_pepper value in ${target_file} has leading or trailing whitespace inside its TOML string. tomllib (the real consumer, via SecretBroker) decodes that whitespace as part of the value, but this script trims it away before comparing or mirroring — so host-side 'alfred' commands (reading ${target_file} through the broker) would receive a padded value while .env would end up with the trimmed one. alfred-core and host-side 'alfred' commands would end up on two different HMAC planes. Re-set the pepper in ${target_file} without leading/trailing whitespace inside the quotes, identically in .env and ${target_file} — changing it invalidates every *_hash audit row already written. Then re-run." >&2
+      return 1 ;;
+  esac
+
+  if [[ -n "$env_pepper" ]] && ! _pepper_refuse_unsafe_value ".env (${pepper_env_key})" "$env_pepper"; then
+    return 1
+  fi
+  if [[ -n "$file_pepper" ]] && ! _pepper_refuse_unsafe_value "$target_file" "$file_pepper"; then
+    return 1
+  fi
+
+  if [[ -n "$env_pepper" && -n "$file_pepper" ]]; then
+    if [[ "$env_pepper" == "$file_pepper" ]]; then
+      echo "audit.hash_pepper already configured in .env and ${target_file}; leaving alone."
+      return 0
+    fi
+    # Refuse rather than pick. audit.hash_pepper is not in _PREFER_FILE, so the
+    # .env value is what alfred-core actually uses; a host-side 'alfred' command
+    # would use the OTHER one. Two peppers = two incompatible HMAC planes:
+    # operator-session tokens minted under one are unverifiable under the
+    # other, and platform_user_id_hash rows stop correlating (spec §8.10).
+    # Auto-picking would silently invalidate one side; only the operator knows
+    # which value is the real one.
+    printf 'ERROR: %s\n' \
+      "audit.hash_pepper DIFFERS between .env (${pepper_env_key}) and ${target_file}. alfred-core uses the .env value (env wins over file for this secret); host-side 'alfred' commands use the file. Reconcile them by hand — copy the value you want to KEEP into the other file — then re-run. Choosing for you would silently invalidate every *_hash audit row written under the other value." >&2
+    return 1
+  fi
+
+  if [[ -n "$env_pepper" ]]; then
+    # `_pepper_bootstrap` is invoked as `_pepper_bootstrap || _pepper_status=$?`
+    # at the call site below, which — a classic bash gotcha — disables `set -e`
+    # propagation for EVERY command inside this function's body (bash must run
+    # the whole function to know its exit status before deciding whether to
+    # take the `||` branch). A write failure here (unwritable target_file,
+    # disk full, ...) would otherwise fall through silently to the trailing
+    # `echo`, which is itself always exit-0 — so the function would report
+    # success having written nothing. `|| return 1` makes the failure explicit
+    # and propagates it as `_pepper_bootstrap`'s own non-zero return.
+    if ! _pepper_write_file "$env_pepper"; then
+      printf 'ERROR: failed to write audit.hash_pepper into %s\n' "$target_file" >&2
+      return 1
+    fi
+    echo "Mirrored the .env audit.hash_pepper into ${target_file} (host-side tooling reads the file)."
+    return 0
+  fi
+  if [[ -n "$file_pepper" ]]; then
+    # The pre-#591 upgrade path: an existing host seed is carried into .env, NOT
+    # regenerated, so existing audit rows stay correlatable.
+    if ! _pepper_write_env "$file_pepper"; then
+      printf 'ERROR: failed to write ALFRED_AUDIT_HASH_PEPPER into .env\n' >&2
+      return 1
+    fi
+    echo "Mirrored the ${target_file} audit.hash_pepper into .env (docker-compose forwards it to alfred-core)."
+    return 0
+  fi
+
   if ! command -v openssl >/dev/null 2>&1; then
     openssl_missing_message "bootstrap audit.hash_pepper"
     return 1
   fi
   pepper_value="$(openssl rand -hex 32)"
-  # Quote the dotted key so tomllib reads it as a flat string key
-  # (cross-cutting BLOCKER closure).
-  printf '"%s" = "%s"\n' "$pepper_key" "$pepper_value" >> "$target_file"
-  echo "Seeded audit.hash_pepper into ${target_file}."
+  if ! _pepper_write_file "$pepper_value"; then
+    printf 'ERROR: failed to write audit.hash_pepper into %s\n' "$target_file" >&2
+    return 1
+  fi
+  if ! _pepper_write_env "$pepper_value"; then
+    # target_file already has the pepper at this point (the write above
+    # succeeded) but .env does not — the two are now OUT OF SYNC. Never echo
+    # the pepper value itself into an error message.
+    printf 'ERROR: failed to write ALFRED_AUDIT_HASH_PEPPER into .env; %s already has a pepper written to it, so the two are now OUT OF SYNC — reconcile by hand and re-run.\n' "$target_file" >&2
+    return 1
+  fi
+  echo "Seeded audit.hash_pepper into ${target_file} and .env."
 }
 
 # mkdir-lock: POSIX atomic. Acquire, run, release.
@@ -469,10 +1138,17 @@ else
     echo "ERROR: audit.hash_pepper bootstrap lock ${lock_dir} held >30s — refusing to race." >&2
     exit 1
   fi
-  # Lock released; the other invocation already bootstrapped (or
-  # already-configured case). Just verify the key is present.
-  if ! grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
-    _pepper_bootstrap
+  # Lock released. #594 sec-003: always re-invoke the idempotent
+  # _pepper_bootstrap rather than inferring "already done" from a single
+  # plane. The winner writes target_file THEN .env; if it crashed between the
+  # two writes, target_file alone showing the key present would wrongly look
+  # "done" and leave .env unpopulated with nothing to self-heal it until some
+  # later, unrelated run. _pepper_bootstrap is a cheap no-op when both planes
+  # already agree, so re-running it here costs nothing in the common case and
+  # closes the crash-window gap in the rare one.
+  _pepper_bootstrap || _pepper_status=$?
+  if [[ -n "${_pepper_status:-}" ]] && [[ "$_pepper_status" -ne 0 ]]; then
+    exit "$_pepper_status"
   fi
 fi
 
@@ -481,12 +1157,12 @@ fi
 # behind the DeepSeek placeholder check's `exit 1`, so on a stock first run (a verbatim
 # `cp .env.example .env`) it was never reached at all.
 
-# Export UID and GID so the compose `user: "${UID:-1000}:${GID:-1000}"`
-# substitution picks up the operator's real uid/gid. macOS bash 3.2
-# does NOT export UID by default, and GID is rarely exported on any
-# shell. Without the explicit `export`, compose falls back to
-# 1000:1000 which collides with the host operator on non-1000-uid
-# systems and breaks the `chmod 600` enforcement on the bind-mount.
+# NOTE: compose's `user: "${UID:-1000}:${GID:-1000}"` substitution — which this
+# export used to feed — was deleted in commit `76f044e3`. `alfred-core` now
+# always runs as the fixed non-root `alfred` user baked into
+# `docker/alfred-core.Dockerfile` (`useradd --system` + `USER alfred`), not the
+# host operator's uid/gid. Nothing in this repo reads `$UID`/`$GID` anymore;
+# left as a harmless no-op rather than risking an unrelated behavior change here.
 export UID
 GID="$(id -g)"
 export GID
@@ -503,13 +1179,30 @@ fi
 has_operator="$(printf '%s' "$user_list_json" | jq -r '[.[] | select(.authorization=="operator")] | length')"
 if [[ "$has_operator" == "0" ]]; then
   # Non-TTY guard: under CI / piped stdin we cannot prompt — fall back to
-  # ALFRED_OPERATOR_NAME from .env (or the literal "Operator" if unset).
+  # ALFRED_OPERATOR_NAME from .env (or the literal "operator" if unset).
   if [[ ! -t 0 ]]; then
-    name="${ALFRED_OPERATOR_NAME:-Operator}"
+    # #592: read `.env` (what compose and migration 0004 see), not the shell, and
+    # default to the SAME lowercase `operator` every other layer defaults to —
+    # .env.example:36, docker-compose.yaml:182, migration 0004. A capital-O here
+    # would seed a display_name the TUI client never sends.
+    #
+    # `trim_ws` BEFORE the `${name:-operator}` default so a whitespace-padded
+    # `.env` value (e.g. `ALFRED_OPERATOR_NAME="   Bruce  "` or `"   "`)
+    # normalizes exactly like `operator_env.operator_display_name()`'s
+    # `.strip() or "operator"` — trim first, THEN decide unset. Without this,
+    # `${name:-operator}` only catches a literally-empty value, so a
+    # whitespace-only entry would sail through untrimmed into the `user bind
+    # ... --id "$name"` call below while the real TUI client sends the
+    # Python-normalized ("operator") value — the exact #592 mismatch this
+    # step exists to prevent.
+    name="$(read_env_var ALFRED_OPERATOR_NAME)"; name="$(trim_ws "$name")"; name="${name:-operator}"
     echo "Non-TTY context: using ALFRED_OPERATOR_NAME='$name'."
   else
-    read -r -p "Operator display name [Operator]: " name
-    name="${name:-Operator}"
+    default_name="$(read_env_var ALFRED_OPERATOR_NAME)"
+    default_name="$(trim_ws "$default_name")"; default_name="${default_name:-operator}"
+    read -r -p "Operator display name [${default_name}]: " name
+    name="$(trim_ws "$name")"
+    name="${name:-$default_name}"
   fi
   budget="$(read_env_var ALFRED_DAILY_BUDGET_USD)"
   budget="${budget:-1.0}"
@@ -529,6 +1222,35 @@ if [[ "$has_operator" == "0" ]]; then
   if [[ "$slug" != "$display_lower" ]]; then
     echo "  (Slug differs from display-lowercase; use '$slug' in future CLI commands.)"
   fi
+  # #592: `user add` creates no platform_identities row — only migration 0004 does.
+  # On this fallback path (migration 0004 did NOT install the operator) the TUI would
+  # otherwise have nothing to resolve against. Bind it here so both paths end in the
+  # same state. The platform_id is the DISPLAY NAME, matching migration 0004 and
+  # alfred.config.operator_env.operator_display_name() — NOT the slug.
+  # Classify on the EXIT CODE, never on the message text (the message is
+  # translated — i18n rule): 0 = bound, 2 = an identity-level refusal the
+  # operator should read verbatim, anything else = a real failure worth
+  # aborting on.
+  bind_rc=0
+  bind_out="$(docker compose run --rm alfred-core user bind "$slug" \
+    --platform tui \
+    --id "$name" 2>&1)" || bind_rc=$?
+  case "$bind_rc" in
+    0) echo "Bound the TUI platform identity '$name' to operator '$slug'." ;;
+    # Exit 2 on THIS path can only be PlatformIdInUseError: `user add` above
+    # created $slug seven lines up, so UserAlreadyBoundError (which needs an
+    # existing live tui binding on the SAME user) is unreachable here. It
+    # therefore always means the display name belongs to SOMEONE ELSE — which
+    # leaves the operator with no tui identity while `alfred chat` resolves
+    # that name to the other user, running as the wrong identity with their
+    # authorization tier. That is the #592 failure this step exists to
+    # prevent, so refuse rather than continue. The Discord sibling below
+    # keeps `warn` deliberately: it runs on EVERY run, so its exit 2 really
+    # does include the benign "already bound" re-run case.
+    2) printf '%s\n' "$bind_out" >&2
+       fail "TUI identity bind refused: the display name '$name' is already bound to another user (see the CLI message above). Operator '$slug' has NO tui identity, so 'alfred chat' would resolve '$name' to that other user instead. Fix it with 'alfred user unbind <that-slug> --platform tui' then 'alfred user bind $slug --platform tui --id \"$name\"', or pick a different ALFRED_OPERATOR_NAME and re-run. NOTE: re-running setup alone will NOT retry this bind — the operator user now exists, so setup skips this whole step." ;;
+    *) fail "user bind failed (exit $bind_rc): $bind_out" ;;
+  esac
 else
   echo "Operator user already exists; skipping create."
   slug="$(printf '%s' "$user_list_json" | jq -r '[.[] | select(.authorization=="operator")][0].slug')"
@@ -544,11 +1266,37 @@ if [[ -t 0 ]]; then
   read -r -p "Discord snowflake to bind now (blank to skip): " snowflake
   snowflake="$(printf '%s' "$snowflake" | tr -d '[:space:]')"
   if [[ -n "$snowflake" ]]; then
-    docker compose run --rm alfred-core user bind \
-      --slug "$slug" \
+    # `slug` is POSITIONAL and the id flag is `--id` (src/alfred/identity/cli.py:559).
+    # The old `--slug X --platform-id Y` form named two flags that do not exist, so
+    # Typer exited 2 with "No such option" and `set -e` killed the script here.
+    # Pinned by tests/unit/test_setup_script_cli_invocations.py (Task 5).
+    #
+    # Idempotency: `bind` is NOT idempotent — a re-run that re-enters the same
+    # snowflake raises UserAlreadyBoundError, and a snowflake owned by someone else
+    # raises PlatformIdInUseError. Both surface as the CLI's exit 2. Classify on the
+    # EXIT CODE, never on the message text (the message is translated — i18n rule):
+    # 0 = bound, 2 = an identity-level refusal the operator should read verbatim,
+    # anything else = a real failure worth aborting on.
+    #
+    # Sibling contrast: the TUI bind above `fail`s on the same exit 2 instead
+    # of `warn`ing. That is not an inconsistency -- the two arms sit at
+    # different points in the run. The TUI bind fires seconds after `user
+    # add` creates $slug on THIS run, so an exit 2 there can only mean the
+    # display name collides with a DIFFERENT, pre-existing user (a genuine
+    # #592-class failure worth aborting on). This Discord bind is
+    # deliberately re-run-safe: it runs on EVERY invocation of this optional,
+    # TTY-only prompt, so its exit 2 legitimately includes the benign
+    # "already bound from a prior run" case alongside the same collision.
+    bind_rc=0
+    bind_out="$(docker compose run --rm alfred-core user bind "$slug" \
       --platform discord \
-      --platform-id "$snowflake"
-    echo "Bound snowflake $snowflake to operator $slug."
+      --id "$snowflake" 2>&1)" || bind_rc=$?
+    case "$bind_rc" in
+      0) echo "Bound snowflake $snowflake to operator $slug." ;;
+      2) warn "Discord bind refused (already bound, or that snowflake belongs to another user). The CLI said:"
+         printf '%s\n' "$bind_out" >&2 ;;
+      *) fail "user bind failed (exit $bind_rc): $bind_out" ;;
+    esac
     # #309 preflight: gateway-hosted Discord needs the token core-side, or the gateway
     # ABORTS at first spawn (loud + audited, but it takes the relay down — #331). Refuse
     # to bring Discord up without it rather than ship a green stack with a dead bot.

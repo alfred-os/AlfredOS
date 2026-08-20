@@ -158,7 +158,11 @@ packages = ["src/alfred"]
 "locale" = "alfred/_locale"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# `plugins/alfred_tui/tests` is listed so a bare `uv run pytest` collects it. This is
+# DEV PARITY ONLY — it does not gate: `testpaths` applies only when pytest is given no
+# path args, and every CI lane passes explicit paths. The gate is the `TUI plugin unit
+# tests` step in ci.yml's `python` job.
+testpaths = ["tests", "plugins/alfred_tui/tests"]
 # PR-S3-4: ``plugins/`` lives at the repo root and the flat-layout adapters
 # (``plugins.alfred_web_fetch.*``, ``plugins.alfred_comms_test.*``,
 # ``plugins.alfred_discord.*``) are imported as top-level packages. They are NOT

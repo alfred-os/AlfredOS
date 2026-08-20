@@ -222,6 +222,13 @@ def status() -> None:
         typer.echo(t("status.secrets_file", path=str(secrets_path)))
     else:
         typer.echo(t("status.secrets_file_absent", path=str(secrets_path)))
+    # This is the ONE-TIME SEED value (migration 0004's ``ON CONFLICT DO
+    # NOTHING`` operator INSERT), not the live cap for any user who has been
+    # through ``alfred user set`` -- BudgetGuard reads the per-user
+    # ``users.daily_budget_usd`` DB column, never this setting or the env
+    # var behind it (#594). The catalog string says so; don't drop that
+    # qualifier when touching this line. ``per_call_max_usd`` on the next
+    # line is genuinely live -- see ``_bootstrap.py``'s guard construction.
     typer.echo(t("status.daily_budget", amount=f"{settings.daily_budget_usd:.2f}"))
     typer.echo(t("status.per_call_max", amount=f"{settings.per_call_max_usd:.2f}"))
 

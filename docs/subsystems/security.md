@@ -242,6 +242,21 @@ analog lives in the plugins subsystem — see
     this section depends on. See ADR-0048's matching Consequences → Negative
     pin.
 
+- **DLP exemption — `turn.failed` client-state notify frames carry nothing to
+  scan (#593):** `RealTurnOrchestratorAdapter._notify_turn_failed`
+  (`src/alfred/comms_mcp/real_turn_adapter.py`) sends a `TurnFailedNotification`
+  (`src/alfred/comms_mcp/protocol.py`) over the wire with NO `OutboundDlp` scan
+  in the path — deliberately, not an oversight. DLP exists to catch T3-derived
+  or secret-shaped content in operator-facing TEXT, and this frame carries none:
+  its only field, `stage`, is the closed `TurnFailureStage` Literal (`refused` /
+  `budget_exhausted` / `internal_error`), and `TurnFailedNotification` has no
+  `str` field of any kind — `extra="forbid"` + `frozen=True` reject any
+  smuggled field at construction. `tests/unit/comms_mcp/test_protocol_schemas.py::test_turn_failed_notification_has_no_str_fields`
+  walks every field on the model and asserts each is a closed `Literal`, so a
+  future field addition that reintroduces free text (a `str`, `str | None`, or
+  any non-`Literal` shape) fails that test rather than silently opening a
+  DLP-bypassing channel.
+
 ### Secret broker (`src/alfred/security/secrets.py`)
 
 See [glossary: SecretBroker](../glossary.md#secretbroker). `SecretBroker.substitute(text,

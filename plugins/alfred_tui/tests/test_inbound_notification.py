@@ -37,7 +37,9 @@ async def test_keystroke_batch_emits_inbound_notification() -> None:
     assert note.adapter_id == "tui"
     assert note.body[BODY_FIELD_BY_KIND["tui"]] == "hello alfred"
     assert note.addressing_signal == "dm"
-    # platform_user_id for TUI is the OS-level operator identity captured at start.
+    # platform_user_id for TUI is the shared operator_display_name() (#592) —
+    # see test_platform_user_id_is_the_operator_display_name below for the
+    # value-level assertion.
     assert note.platform_user_id
 
 
@@ -171,3 +173,74 @@ async def test_stop_flushes_pending_buffer_count() -> None:
     flushed = await session.stop(reason="operator")
     assert flushed == 1
     assert session.health_snapshot().queue_depth == 0
+
+
+@pytest.mark.asyncio
+async def test_platform_user_id_is_the_operator_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592: ``platform_user_id`` comes from the shared ``operator_display_name()``.
+
+    This is the value the host resolves ``platform_identities(platform='tui',
+    platform_id=...)`` by; migration 0004 seeds that row from the same helper.
+    """
+    monkeypatch.setenv("ALFRED_OPERATOR_NAME", "Bruce Wayne")
+
+    emitted: list[InboundMessageNotification] = []
+
+    async def _spy(note: InboundMessageNotification) -> None:
+        emitted.append(note)
+
+    session = TuiSession(notify=_spy)
+    await session.start(adapter_id="tui")
+    await session.consume_user_input("hello alfred")
+    await session.flush_keystroke_batch()
+
+    assert emitted[0].platform_user_id == "Bruce Wayne"
+
+
+@pytest.mark.asyncio
+async def test_platform_user_id_defaults_to_operator_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ALFRED_OPERATOR_NAME", raising=False)
+
+    emitted: list[InboundMessageNotification] = []
+
+    async def _spy(note: InboundMessageNotification) -> None:
+        emitted.append(note)
+
+    session = TuiSession(notify=_spy)
+    await session.start(adapter_id="tui")
+    await session.consume_user_input("hello alfred")
+    await session.flush_keystroke_batch()
+
+    assert emitted[0].platform_user_id == "operator"
+
+
+@pytest.mark.asyncio
+async def test_platform_user_id_ignores_the_USER_env_var(  # noqa: N802 -- USER is the env var name, load-bearing emphasis
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression pin (#592): ``$USER`` must NEVER leak into ``platform_user_id``.
+
+    Docker's ``USER`` *directive* sets the process uid; it does not inject a
+    ``USER`` env var — but a host-side shell running the TUI outside a
+    container often DOES have one set, and the pre-#592 code read it. If
+    ``operator_display_name()`` is ever swapped back out for
+    ``os.environ.get("USER")``, this test must fail.
+    """
+    monkeypatch.setenv("USER", "somebody-else")
+    monkeypatch.delenv("ALFRED_OPERATOR_NAME", raising=False)
+
+    emitted: list[InboundMessageNotification] = []
+
+    async def _spy(note: InboundMessageNotification) -> None:
+        emitted.append(note)
+
+    session = TuiSession(notify=_spy)
+    await session.start(adapter_id="tui")
+    await session.consume_user_input("hello alfred")
+    await session.flush_keystroke_batch()
+
+    assert emitted[0].platform_user_id == "operator"

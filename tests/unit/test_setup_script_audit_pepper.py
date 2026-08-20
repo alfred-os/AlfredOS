@@ -15,9 +15,11 @@ PR-S4-8/9 comms hash-helpers, PR-S4-1 daemon-boot probe) request it.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from alfred.security.secrets import SUPPORTED_SECRETS
+from tests._setup_script_helpers import slice_shell_step
 
 _SETUP_SH = Path("bin/alfred-setup.sh")
 
@@ -58,36 +60,102 @@ def test_setup_script_seeds_audit_hash_pepper() -> None:
 def test_setup_script_audit_pepper_is_idempotent() -> None:
     """Re-running the script with an existing pepper MUST NOT clobber it.
 
-    The bootstrap step guards with ``grep -q "^audit.hash_pepper..."`` and
-    exits the seed branch when the value already exists. Rotating the
-    pepper invalidates cross-row correlation per spec §8.10.
+    Rotating the pepper invalidates cross-row correlation per spec §8.10, so
+    ``_pepper_bootstrap``'s reconcile logic (#591) MUST no-op — not
+    regenerate, not rewrite either side — when ``.env`` and ``secrets.toml``
+    already agree. The governing check is the equality branch
+    ``if [[ "$env_pepper" == "$file_pepper" ]]``, which leads straight to the
+    ``"already configured"`` no-op message.
 
-    Anchored on the ``step`` MARKER, not on the first textual occurrence of
-    ``audit.hash_pepper``. The old anchor keyed on the first line mentioning the
-    string anywhere in the script, so any earlier PROSE mention — a comment in an
-    unrelated step — silently relocated the slice onto text that was never the
-    bootstrap, and the guard assertion then failed (or, worse, passed against the
-    wrong block). #340 PR2b-golive tripped exactly that when the .env credential
-    gate gained a comment contrasting itself with the pepper. The marker is
-    unambiguous and moves only when the step itself does.
+    Sliced with ``slice_shell_step`` (cuts at the next ``step "..."``
+    marker) rather than a fixed-line-count window: a magic ``lines_after=N``
+    is fragile against the block growing (as it did when #591 added three
+    new helper functions between the marker and this guard) and, worse, a
+    generic guard-pattern list (``"grep -q"``, ``"[[ -z"``, ...) can pass by
+    coincidence against an unrelated helper's grep sitting inside the window
+    rather than the real dispatch path this test exists to pin. Matching the
+    literal equality-check text instead means the test can only pass if the
+    real governing branch is actually present, and fails if it is ever
+    removed, renamed, or reworked into a different comparison shape.
+
+    Anchored on the ``step`` MARKER (via ``slice_shell_step``), not on the
+    first textual occurrence of ``audit.hash_pepper``: the old anchor keyed
+    on the first line mentioning the string anywhere in the script, so any
+    earlier PROSE mention — a comment in an unrelated step — silently
+    relocated the slice onto text that was never the bootstrap, and the
+    guard assertion then failed (or, worse, passed against the wrong block).
+    #340 PR2b-golive tripped exactly that when the .env credential gate
+    gained a comment contrasting itself with the pepper. The marker is
+    unambiguous and moves only when the step itself does; ``slice_shell_step``
+    also fails loudly (``ValueError``) if the marker is ever renamed or
+    removed, rather than silently slicing an empty block.
     """
-    content = _SETUP_SH.read_text()
-    marker = 'step "Bootstrapping audit.hash_pepper secret"'
-    assert marker in content, (
-        f"pepper bootstrap step marker not found ({marker!r}) — the step was renamed "
-        f"or removed; every assertion below would slice an empty block and pass vacuously"
+    pepper_block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
+    assert '"$env_pepper" == "$file_pepper"' in pepper_block, (
+        "No idempotency guard (env/file equality check) around audit.hash_pepper "
+        f"seed:\n{pepper_block}"
     )
-    pepper_block = _slice_around(content, marker, lines_before=2, lines_after=60)
-    assert any(
-        guard in pepper_block
-        for guard in (
-            "grep -q",
-            "[[ -z",
-            "[ -z ",
-            "if ! ",
-            "test -n",
-        )
-    ), f"No idempotency guard around audit.hash_pepper seed:\n{pepper_block}"
+    assert "already configured" in pepper_block, (
+        f"equality guard present but no-op message missing/renamed:\n{pepper_block}"
+    )
+
+
+def test_setup_script_seeds_the_pepper_into_dotenv_too() -> None:
+    """#591: the bootstrap writes ALFRED_AUDIT_HASH_PEPPER into .env, not just secrets.toml.
+
+    docker-compose.yaml forwards ALFRED_AUDIT_HASH_PEPPER from .env into
+    alfred-core as ALFRED_AUDIT.HASH_PEPPER (#591 part 1, already landed). If
+    the setup script never populates the .env side, the container boots with
+    an unset pepper and every *_hash audit write raises
+    MissingAuditHashPepperError on the operator's first message.
+    """
+    block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
+    # Not a bare substring check: "ALFRED_AUDIT_HASH_PEPPER" also appears in
+    # comments, the `pepper_env_key="ALFRED_AUDIT_HASH_PEPPER"` assignment, and
+    # failure-message text, all of which survive even if BOTH real
+    # `_pepper_write_env` call sites were deleted. A same-shape suggested fix
+    # (checking `pepper_env_key=...` or the bare string "_pepper_write_env")
+    # would ALSO pass vacuously, because the function's own definition line
+    # (`_pepper_write_env() {`) still contains that literal string regardless
+    # of whether it is ever called. Anchor on the actual CALL syntax instead —
+    # the function name followed by a quoted `$variable` argument, which only
+    # a real invocation (not the definition, not a comment, not the env-key
+    # assignment) can produce.
+    assert re.search(r'_pepper_write_env\s+"\$\w+"', block), (
+        "no `_pepper_write_env` INVOCATION found in the pepper bootstrap step "
+        "(only its definition and/or the pepper_env_key variable would remain "
+        "after deleting the real call sites) — .env would never receive the "
+        "pepper docker-compose forwards to alfred-core"
+    )
+
+
+def test_setup_script_refuses_on_pepper_drift() -> None:
+    """#591: a pepper that DIFFERS between .env and secrets.toml must refuse, not pick one.
+
+    audit.hash_pepper is not in _PREFER_FILE, so alfred-core always uses the
+    .env value while host-side ``alfred`` commands use the file. Silently
+    picking one over the other would invalidate every *_hash audit row
+    written under whichever value lost (spec §8.10) — the reconcile logic
+    must return non-zero and tell the operator to reconcile by hand instead.
+    """
+    block = slice_shell_step(_SETUP_SH, "Bootstrapping audit.hash_pepper secret")
+    assert "DIFFERS" in block, (
+        "no drift-refusal error message in the pepper bootstrap step — "
+        "a differing .env/secrets.toml pepper pair must be surfaced to the "
+        "operator, not picked silently"
+    )
+    # Anchored, not two independent membership checks: the step now contains
+    # SEVERAL other `return 1`s (#594 R2's _pepper_refuse_unusable_shapes adds
+    # three more), so `"return 1" in block` alone would stay green even if the
+    # DIFFERS branch itself lost its return and silently fell through. This
+    # requires the actual `return 1` to appear within a few lines of the
+    # DIFFERS error message — i.e. inside the same branch, not merely
+    # somewhere in the ~90-line step.
+    assert re.search(r'"[^"]*DIFFERS[^"]*"[^\n]*\n(?:[^\n]*\n){0,3}?\s*return 1\b', block), (
+        "the DIFFERS error message is not immediately followed by 'return 1' "
+        "— the drift-refusal branch may have lost its non-zero return, which "
+        "would let the script proceed as if the peppers agreed"
+    )
 
 
 def test_setup_script_pepper_file_mode_0600() -> None:

@@ -9,6 +9,7 @@ is a ``UUID`` not a string.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal, get_args, get_origin
 from uuid import uuid4
 
 import pytest
@@ -319,8 +320,149 @@ def test_content_ref_kind_literal() -> None:
             error_class="ConnectionResetError",
             detail="redacted",
         ),
+        protocol.TurnFailedNotification(stage="refused"),
+        protocol.TurnFailedNotification(stage="budget_exhausted"),
+        protocol.TurnFailedNotification(stage="internal_error"),
     ],
 )
 def test_model_json_roundtrip(model: BaseModel) -> None:
     restored = type(model).model_validate_json(model.model_dump_json())
     assert restored == model
+
+
+# ----- Turn-state control frames (#593, Task 9) -----------------------------
+
+
+def test_turn_failed_notification_rejects_extra_fields() -> None:
+    """Anti-smuggling guard: an unknown ``detail`` field is refused, not silently kept.
+
+    This is the executable form of the standing objection recorded on
+    :class:`protocol.TurnFailedNotification`'s docstring — the frame has NO
+    channel for a core-supplied / T3-derived string, and ``extra="forbid"`` is
+    what makes an attempt to smuggle one a loud failure instead of a silent pass.
+    """
+    protocol.TurnFailedNotification.model_validate({"stage": "refused"})
+    with pytest.raises(ValidationError):
+        protocol.TurnFailedNotification.model_validate({"stage": "refused", "detail": "boom"})
+
+
+def test_turn_failure_stage_is_a_closed_literal() -> None:
+    assert set(get_args(protocol.TurnFailureStage)) == {
+        "refused",
+        "budget_exhausted",
+        "internal_error",
+    }
+
+
+def test_turn_failed_notification_frozen() -> None:
+    """``frozen=True`` (inherited from ``_WireModel``) — the other half of the guard."""
+    notification = protocol.TurnFailedNotification(stage="refused")
+    with pytest.raises(ValidationError):
+        notification.stage = "internal_error"
+
+
+def _is_closed_literal(annotation: object) -> bool:
+    """True if ``annotation`` is a ``Literal[...]`` type (a closed enumeration).
+
+    Deliberately a POSITIVE allowlist, not an ``annotation is not str`` identity
+    check: a bare identity check against ``str`` is a bypass — a declared
+    ``str | None`` (or ``list[str]``, ``dict[str, str]``, ...) field sails
+    straight through it, because none of those annotations literally ``is``
+    ``str`` even though every one of them still carries free text onto the
+    wire. What :class:`protocol.TurnFailedNotification`'s docstring actually
+    promises is narrower than "not str" — it is "every field is a closed
+    enumeration" — so assert that directly.
+    """
+    return get_origin(annotation) is Literal
+
+
+def test_turn_failed_notification_has_no_str_fields() -> None:
+    """Every field on the frame is a closed ``Literal`` — the "no free text on the wire" rule.
+
+    Walks ``model_fields`` rather than special-casing ``stage`` by name, so the
+    guard still means something if the model ever grows a second field: a
+    future non-Literal addition (``str``, ``str | None``, ``list[str]``, ...)
+    trips this test instead of silently reintroducing a smuggling channel. See
+    ``test_turn_failed_notification_str_field_bypass_is_caught`` immediately
+    below for proof this check actually catches the ``str | None`` shape a
+    bare ``annotation is not str`` identity check would miss.
+    """
+    fields = protocol.TurnFailedNotification.model_fields
+    assert fields, "expected at least one field to make this a real check"
+    for name, field in fields.items():
+        assert _is_closed_literal(field.annotation), (
+            f"{name} is not a closed Literal (annotation={field.annotation!r})"
+        )
+
+
+def test_turn_failed_notification_str_field_bypass_is_caught() -> None:
+    """Regression: ``_is_closed_literal`` catches what a bare ``is not str`` check missed.
+
+    A prior version of this guard used ``field.annotation is not str``, which
+    passes right through a declared ``detail: str | None = None`` field — the
+    exact "just an optional note" shape a future task (Tasks 11-14 build
+    directly on this frame) might innocently add. This constructs a throwaway
+    sibling frame with that exact shape and asserts the tightened check flags
+    it, so the guard cannot quietly regress to vacuous again.
+    """
+
+    class _StrLeakProbe(protocol._WireModel):
+        stage: protocol.TurnFailureStage
+        detail: str | None = None
+
+    fields = _StrLeakProbe.model_fields
+    flagged = {name for name, field in fields.items() if not _is_closed_literal(field.annotation)}
+    assert flagged == {"detail"}
+
+
+def test_turn_state_client_kinds_subset_of_adapter_kind() -> None:
+    """Drift guard: every listed client kind must be a real, known adapter kind."""
+    assert protocol.adapter_kind >= protocol.TURN_STATE_CLIENT_KINDS
+
+
+def test_turn_state_client_kinds_is_exactly_tui() -> None:
+    """Tripwire: widening this set voids TWO documented acceptances.
+
+    Exact equality, NOT a subset check — the sibling
+    ``test_turn_state_client_kinds_subset_of_adapter_kind`` passes happily if a
+    remote kind is added, so it cannot serve as the tripwire.
+
+    Both acceptances below hold ONLY because the sole listed kind is the
+    operator-local TUI (0600 AF_UNIX socket, 0700 runtime dir, SO_PEERCRED
+    same-uid -- ADR-0031), i.e. the party that submits a turn and the party
+    that observes the resulting ``turn.failed`` frame are the same operator:
+
+    1. ADR-0064 Negative/accepted -- the ``TurnFailureStage`` collapse is
+       CONTENT-coarsening only. ``downgrade_denied`` (pre-privileged-turn) and
+       ``dlp_canary_tripped`` (post-privileged-turn) are separable by frame
+       ARRIVAL LATENCY. Accepted because no remote party can observe it.
+    2. ``RealTurnOrchestratorAdapter.dispatch``'s docstring -- the
+       ``turn_error`` leg's notify-then-raise ordering, which becomes a LIE on
+       any bounded-replay-eligible forwarded adapter.
+
+    If this test fails you are adding a client kind. Re-derive BOTH before
+    changing this assertion.
+    """
+    assert frozenset({"tui"}) == protocol.TURN_STATE_CLIENT_KINDS
+
+
+def test_turn_failed_method_is_not_gateway_consumed() -> None:
+    """``turn.failed`` must stay OUTSIDE the gateway's four consumed method names.
+
+    ``GatewayCoreLink._route_unit`` consumes exactly these four constants
+    (payload-blind for everything else); if ``TURN_FAILED`` ever collided with
+    one, the gateway would silently swallow the client's failure frame instead
+    of relaying it — the opposite of what #593 needs. ``CORE_ADAPTER_SPAWN_GRANT``
+    lives in ``adapter_credential_protocol``, not this module, but is still one
+    of the four names the router special-cases.
+    """
+    from alfred.comms_mcp.adapter_credential_protocol import CORE_ADAPTER_SPAWN_GRANT
+
+    gateway_consumed = {
+        protocol.DAEMON_COMMS_ACK,
+        protocol.DAEMON_LIFECYCLE_READY,
+        protocol.DAEMON_LIFECYCLE_GOING_DOWN,
+        CORE_ADAPTER_SPAWN_GRANT,
+    }
+    assert protocol.TURN_FAILED not in gateway_consumed
+    assert not protocol.TURN_FAILED.startswith(protocol.GATEWAY_ADAPTER_STATUS_PREFIX)

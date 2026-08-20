@@ -159,6 +159,23 @@ jobs:
         run: |
           uv run pytest tests/unit -q --cov=src/alfred --cov=scripts --cov-report=term-missing --cov-fail-under=75
           uv run coverage report --include='src/alfred/security/*' --fail-under=100
+      - name: TUI plugin unit tests
+        # #591/#592/#593 companion. `plugins/alfred_tui/tests` (11 files, 91 tests,
+        # ~10.5s) appeared in NO workflow and NO Makefile target, and `testpaths =
+        # ["tests"]` cannot reach it — `testpaths` applies only when pytest is given
+        # no path args, and every CI lane passes explicit paths. So the plugin that
+        # owns `alfred chat`'s entire client half had zero merge gating.
+        #
+        # Its OWN step, not extra argv on the unit-test step above: a plugin failure
+        # names itself in the step title, and `--cov-fail-under` measures `src/alfred`
+        # only, so folding this suite in would perturb the coverage gate's dataset for
+        # no benefit.
+        #
+        # Non-vacuous by construction, no `hashFiles()` guard: pytest exits 4 on a
+        # missing path and 5 on "collected 0 items", so a deleted directory or an
+        # emptied suite FAILS this step rather than skipping it green.
+        if: steps.check.outputs.has_py == 'true'
+        run: uv run pytest plugins/alfred_tui/tests -q
       - name: check_tag_t3 detector 100% line+branch coverage
         # #537: the gate that enforces CLAUDE.md security rule #3 was itself
         # under NO coverage gate and NO type-checker — measured 0%, because the

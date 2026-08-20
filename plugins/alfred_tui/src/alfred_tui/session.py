@@ -30,7 +30,6 @@ is injected by ``alfred_tui.render`` at runtime.
 
 from __future__ import annotations
 
-import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -40,6 +39,7 @@ from typing import Final
 import structlog
 
 from alfred.comms_mcp.protocol import BODY_FIELD_BY_KIND, InboundMessageNotification
+from alfred.config.operator_env import operator_display_name
 from alfred_tui._addressing import TUI_INBOUND_ADDRESSING_SIGNAL
 
 _log = structlog.get_logger(__name__)
@@ -57,10 +57,6 @@ _BODY_FIELD: Final[str] = BODY_FIELD_BY_KIND[_ADAPTER_KIND]
 # resolved bindings against ``_active_lang = "en-US"``; the comms-MCP rewrite
 # keeps that default. Per-session language switching is future work host-side.
 _DEFAULT_LANGUAGE: Final[str] = "en-US"
-
-# A non-empty fallback for ``platform_user_id`` (the host bounds it to
-# ``1 <= len <= 512``); a shell with an empty ``$USER`` must not crash the emit.
-_UNKNOWN_OPERATOR: Final[str] = "unknown-operator"
 
 type InboundNotify = Callable[[InboundMessageNotification], Awaitable[None]]
 type RenderOutbound = Callable[[str], None]
@@ -144,7 +140,14 @@ class TuiSession:
         note = InboundMessageNotification(
             adapter_id=_ADAPTER_KIND,
             inbound_id=self._pending_inbound_id,
-            platform_user_id=os.environ.get("USER") or _UNKNOWN_OPERATOR,
+            # #592: the value the host resolves the operator by. MUST equal
+            # ``platform_identities.platform_id`` for ``platform='tui'``, which
+            # migration 0004 seeds from this same helper — never ``$USER``, which
+            # Docker does not set inside the container and which nothing binds
+            # anywhere. Resolved per-flush rather than cached at ``start`` so a
+            # long-lived session picks up an env change without a restart, and so
+            # the two readers share one call site with no snapshot in between.
+            platform_user_id=operator_display_name(),
             body={_BODY_FIELD: body, "language": _DEFAULT_LANGUAGE},
             sub_payload_refs=(),
             received_at=datetime.now(UTC),

@@ -166,6 +166,10 @@ async def test_ingest_typed_refusal_returns_benign_reply() -> None:
     assert isinstance(outcome, _RefusalReply)
     assert outcome.reply  # a non-empty benign string
     assert outcome.target_platform_id == "plat-9"
+    # arc-001 (PR #594 Task S1): threaded through so `dispatch` can key its
+    # ordering barrier at the SAME (persona, slug) a `_PreparedTurn` for this
+    # user would lock on.
+    assert outcome.canonical_user_id == "u-1"
 
 
 @pytest.mark.asyncio
@@ -213,6 +217,7 @@ async def test_ingest_downgrade_deny_writes_loud_audit_and_halts() -> None:
         display_name="Ada",
     )
     assert isinstance(outcome, _HaltNoReply)  # no reply leaked on a security deny
+    assert outcome.canonical_user_id == "u-1"  # arc-001 (PR #594 Task S1): threaded for the barrier
     refusal_rows = [
         r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
     ]
@@ -301,6 +306,7 @@ async def test_ingest_downgrade_malformed_text_writes_loud_audit_and_halts() -> 
     )
     assert isinstance(outcome, _HaltNoReply)
     assert outcome.stage == "downgrade_malformed"
+    assert outcome.canonical_user_id == "u-1"  # arc-001 (PR #594 Task S1): threaded for the barrier
     refusal_rows = [
         r for r in audit.rows if r.get("schema_name") == "COMMS_INBOUND_TURN_REFUSED_FIELDS"
     ]

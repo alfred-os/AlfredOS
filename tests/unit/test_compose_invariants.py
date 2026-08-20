@@ -360,6 +360,47 @@ def test_quarantine_provider_key_never_reaches_the_gateway(compose: dict[str, An
     assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" not in env
 
 
+def test_alfred_core_has_audit_hash_pepper_env(compose: dict[str, Any]) -> None:
+    """#591: alfred-core forwards the audit HMAC pepper.
+
+    `SecretBroker.get()` resolves `audit.hash_pepper` from env var
+    `ALFRED_AUDIT.HASH_PEPPER` with no dot->underscore normalisation. Without this
+    forward no `.env` value reaches the container, and alfred-core mounts no
+    secrets.toml either, so the daemon's very first inbound turn raises
+    `MissingAuditHashPepperError` with no reachable remedy.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_AUDIT.HASH_PEPPER" in env
+
+
+def test_audit_hash_pepper_uses_dotted_key_and_underscore_variable(
+    compose: dict[str, Any],
+) -> None:
+    """The container KEY has a dot; the `.env` carrier VARIABLE has an underscore.
+
+    `ALFRED_AUDIT.HASH_PEPPER` is what `SecretBroker.get()` looks up (no
+    normalisation). `${ALFRED_AUDIT.HASH_PEPPER:-}` would be rejected by Compose
+    with "invalid interpolation format" — a dot is not a legal interpolation
+    identifier — so the RHS must interpolate the underscore variable instead.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert env["ALFRED_AUDIT.HASH_PEPPER"] == "${ALFRED_AUDIT_HASH_PEPPER:-}"
+
+
+def test_audit_hash_pepper_never_reaches_the_gateway(compose: dict[str, Any]) -> None:
+    """ADR-0036: the audit HMAC pepper is a core-only secret, like the Discord token.
+
+    The gateway hosts adapters and brokers egress; it must never hold a security
+    secret. Pinned alongside the existing no-secret-on-gateway invariant so a
+    future 'just add it everywhere' edit fails loudly.
+    """
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    env = gw.get("environment", {}) or {}
+    assert "ALFRED_AUDIT.HASH_PEPPER" not in env
+
+
 def test_alfred_gateway_defaults_to_no_hosted_adapter(compose: dict[str, Any]) -> None:
     """#469 Blocker 2: Discord is opt-in — the shipped default hosts NO adapter, but the
     ALFRED_GATEWAY_HOSTED_ADAPTERS override is still wired so an operator can enable it."""

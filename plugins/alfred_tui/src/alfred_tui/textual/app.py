@@ -22,16 +22,19 @@ introduced by the move.
 
 from __future__ import annotations
 
-from typing import Protocol
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Final, Protocol, assert_never
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.widgets import Input, RichLog, Static
 
-from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_UNAVAILABLE
+from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_UNAVAILABLE, TurnFailureStage
 from alfred.i18n import t
 
 # Map the gateway's id-less ``link.*`` STATE method (Spec A G5 / ADR-0031) to the
@@ -61,6 +64,37 @@ def _reserve_banner_catalog_keys() -> None:
     t("tui.banner.unavailable")
 
 
+# Historical value from the deleted in-process TUI (PR-S4-10 removed it along
+# with the rest of the old turn lifecycle). Must comfortably exceed a
+# multi-completion Act-loop turn (live since #410 PR3), not just one
+# completion — a tight timeout would fire mid-turn on legitimate multi-step
+# work and paint a false failure.
+TURN_TIMEOUT_SECONDS: Final[float] = 90.0
+
+
+def _turn_failure_message(stage: TurnFailureStage) -> str:
+    """Localized operator copy for a core turn-failure stage (#593).
+
+    Deliberately NOT the ``_LINK_STATE_BANNER_KEY`` dict + ``t(variable)`` +
+    ``_reserve_banner_catalog_keys`` anchor shape used above for the banner:
+    each arm here is a LITERAL ``t("...")`` call, so ``pybabel extract`` sees
+    all three msgids statically without needing a separate reservation
+    function.
+
+    Exhaustive via ``assert_never`` over the CLOSED wire ``TurnFailureStage``
+    Literal — a future stage added to the wire type without a decision here
+    is a type-check failure, not a silent unrendered turn state.
+    """
+    match stage:
+        case "refused":
+            return t("tui.turn_failed.refused")
+        case "budget_exhausted":
+            return t("tui.turn_failed.budget_exhausted")
+        case "internal_error":
+            return t("tui.turn_failed.internal_error")
+    assert_never(stage)  # pragma: no cover
+
+
 class _SessionLike(Protocol):
     """The structural seam the app needs from its session.
 
@@ -77,6 +111,35 @@ class _SessionLike(Protocol):
         raise NotImplementedError
 
 
+@dataclass(slots=True, eq=False)
+class _StaleTurnDebt:
+    """One watchdog-abandoned turn's owed late signal, plus its own expiry handle.
+
+    ``eq=False`` makes the identity lookup UNCONDITIONAL. Today a generated
+    ``__eq__`` would happen to behave the same, because ``expiry`` is a
+    per-debt ``Timer`` and ``Timer`` compares by identity (``Timer.__eq__ is
+    object.__eq__``), so no two distinct debts' ``(expiry, discharged)``
+    tuples can ever compare equal — but that is an accident of the CURRENT
+    field set, not something this type should depend on. Removal semantics
+    here must not ride on it: add any value-typed field (or ``compare=False``
+    on ``expiry``) and a generated ``__eq__`` would let ``list.remove``/``in``
+    match the WRONG entry, reintroducing the very aliasing this type exists
+    to remove.
+
+    ``expiry`` is ``init=False`` with no default rather than ``Timer | None``:
+    it is assigned in the statement that creates it (see
+    ``_incur_stale_turn_debt``), before the event loop can run the timer's
+    callback, so no reachable window leaves it unset. A ``| None`` type would
+    force an ``is not None`` branch at every use that no test could ever
+    reach — the same dead arm ``_discharge_stale_turn_debt`` already refuses
+    on its list. Unset would raise ``AttributeError``, which is the loud
+    failure that situation deserves.
+    """
+
+    expiry: Timer = field(init=False)
+    discharged: bool = False
+
+
 class AlfredTuiApp(App[None]):
     """Textual app: scrolling conversation log + bottom input box.
 
@@ -88,6 +151,7 @@ class AlfredTuiApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #link_banner { dock: top; width: 100%; padding: 0 1; background: $warning; color: $text; }
+    #turn_status { dock: top; width: 100%; padding: 0 1; color: $text-muted; }
     #conversation_log { height: 1fr; border: solid white; padding: 1; }
     #user_input { dock: bottom; }
     #user_input.busy { background: $boost; color: $text-muted; }
@@ -99,6 +163,25 @@ class AlfredTuiApp(App[None]):
     # off-loop ``call_from_thread`` (the cohost pump shares this loop).
     _link_banner_key: reactive[str | None] = reactive[str | None](None)
 
+    # The turn-in-flight indicator. `True` between the operator pressing Enter
+    # and whichever of {reply, turn.failed, watchdog} lands first. A Textual
+    # `reactive` so every mutation drives `watch__turn_pending` on the app's
+    # OWN loop — the wire pump shares that loop, so this is a DIRECT set,
+    # never `call_from_thread` (same M1 discipline as `_link_banner_key`).
+    _turn_pending: reactive[bool] = reactive[bool](default=False)
+
+    # Seconds elapsed since the current turn began, ticked by a repeating
+    # timer while `_turn_pending` is `True` (#594 Fix-10). `always_update`
+    # is deliberate: the reset-to-0 at the START of a new turn (see
+    # `on_input_submitted`) must repaint even when the PREVIOUS turn's own
+    # elapsed count happened to already be 0 (the very first turn of the
+    # app's lifetime) — without it, that one turn's counter would stay
+    # hidden until the first tick a full second later instead of showing
+    # "0s" immediately alongside the pending indicator. This drives a
+    # SEPARATE, non-logged widget (`#turn_status`) — deliberately NOT new
+    # `RichLog` lines; see `watch__turn_elapsed_seconds`.
+    _turn_elapsed_seconds: reactive[int] = reactive[int](default=0, always_update=True)
+
     BINDINGS = [  # noqa: RUF012  # Textual reads BINDINGS off the class; mutable is the documented contract.
         # Footer descriptions are operator-facing and go through t() per
         # CLAUDE.md i18n hard rule #1. Existing tui.* catalog keys (unchanged
@@ -107,9 +190,36 @@ class AlfredTuiApp(App[None]):
         Binding("ctrl+q", "quit", t("tui.binding.quit"), show=True),
     ]
 
-    def __init__(self, *, session: _SessionLike) -> None:
+    def __init__(
+        self, *, session: _SessionLike, turn_timeout_seconds: float = TURN_TIMEOUT_SECONDS
+    ) -> None:
         super().__init__()
         self._session = session
+        self._turn_timeout_seconds = turn_timeout_seconds
+        # Plain instance state, not a reactive — a `Timer` handle is not a
+        # render input, and tearing one down on every reactive-diff cycle
+        # would be spurious churn.
+        self._turn_watchdog: Timer | None = None
+        # Same reasoning as `_turn_watchdog` above: the REPEATING timer handle
+        # that drives the live elapsed-time counter (#594 Fix-10) is plain
+        # instance state, not a reactive.
+        self._turn_elapsed_timer: Timer | None = None
+        # Every watchdog-abandoned turn still owed exactly one late completion
+        # signal (a reply or a `turn.failed`), oldest first. THE single source
+        # of truth (#594 R2): `_stale_turns_awaiting_signal` is a projection of
+        # this list's length, not a second number kept in lockstep with it.
+        # Debts are FUNGIBLE FOR DISCHARGE (nothing correlates a signal with a
+        # turn, so a late signal settles the head) but BOUND FOR EXPIRY (each
+        # debt's expiry callback carries the debt it belongs to) — see
+        # `_discharge_stale_turn_debt` and `_expire_stale_turn_debt`.
+        self._stale_debts: list[_StaleTurnDebt] = []
+        # Whether the operator has already been told (via ONE dim log line)
+        # that their last keystroke was dropped because a turn is still
+        # pending. Reset to `False` at the start of each new turn (see
+        # `on_input_submitted`) so a NEW pending turn gets its own fresh
+        # one-time acknowledgement rather than being permanently exhausted
+        # after the first ever drop (#594 Fix-10).
+        self._drop_acked_for_current_turn: bool = False
 
     def compose(self) -> ComposeResult:
         # The reconnect banner is mounted hidden (``display=False``); it is shown
@@ -118,6 +228,14 @@ class AlfredTuiApp(App[None]):
         banner = Static(id="link_banner")
         banner.display = False
         yield banner
+        # The live elapsed-time counter (#594 Fix-10). Mounted hidden, same as
+        # the banner above; shown by ``watch__turn_elapsed_seconds`` while a
+        # turn is pending and re-hidden by ``_end_turn`` on completion. Docked
+        # top like the banner, but mounted AFTER it so the two stack rather
+        # than overlap (Textual docks in mount order along the same edge).
+        turn_status = Static(id="turn_status")
+        turn_status.display = False
+        yield turn_status
         yield Vertical(
             RichLog(id="conversation_log", highlight=True, markup=True, wrap=True),
             Input(placeholder=t("tui.input_placeholder"), id="user_input"),
@@ -132,15 +250,324 @@ class AlfredTuiApp(App[None]):
         """
         self.query_one("#user_input", Input).focus()
 
+    def _arm_turn_watchdog(self) -> None:
+        """One-shot watchdog for the in-flight turn. Replaces any prior timer.
+
+        Uses Textual's ``self.set_timer`` — NOT ``asyncio.wait_for`` — because
+        the turn is no longer locally awaitable: ``inbound.message`` is a
+        fire-and-forget wire notification, so there is no local coroutine to
+        wrap in a timeout. The watchdog is a separate, independently-scheduled
+        callback racing the reply/failure paths, not a wrapper around them.
+        """
+        self._stop_turn_watchdog()
+        self._turn_watchdog = self.set_timer(
+            self._turn_timeout_seconds, self._on_turn_timeout, name="alfred-turn-watchdog"
+        )
+
+    def _stop_turn_watchdog(self) -> None:
+        if self._turn_watchdog is not None:
+            self._turn_watchdog.stop()
+            self._turn_watchdog = None
+
+    def _arm_turn_elapsed_timer(self) -> None:
+        """Start the repeating 1s tick driving the live elapsed-time counter.
+
+        Unlike ``_arm_turn_watchdog``'s one-shot ``set_timer`` (fires once,
+        at the timeout budget), this needs to fire every second for as long
+        as the turn is pending, so it uses ``set_interval`` instead. Any
+        prior timer is stopped first so a resubmission never accumulates
+        stray running timers.
+        """
+        self._stop_turn_elapsed_timer()
+        self._turn_elapsed_timer = self.set_interval(
+            1.0, self._tick_turn_elapsed, name="alfred-turn-elapsed-tick"
+        )
+
+    def _stop_turn_elapsed_timer(self) -> None:
+        if self._turn_elapsed_timer is not None:
+            self._turn_elapsed_timer.stop()
+            self._turn_elapsed_timer = None
+
+    def _tick_turn_elapsed(self) -> None:
+        """One second has passed on the current turn: bump the live counter.
+
+        The increment alone is enough to repaint: mutating a ``reactive``
+        drives ``watch__turn_elapsed_seconds`` on this same tick.
+        """
+        self._turn_elapsed_seconds += 1
+
+    def _end_turn(self) -> None:
+        """Release the in-flight turn: stop the watchdog + elapsed timer, hide
+        the elapsed-counter widget, re-enable + refocus input.
+
+        Hooking the elapsed-counter hide here (rather than in
+        ``watch__turn_pending``/``watch__turn_elapsed_seconds``) covers all
+        three ways a turn can end — a normal reply, a core-reported
+        ``turn.failed``, and a watchdog timeout — since all three already
+        funnel through this one method.
+        """
+        self._stop_turn_watchdog()
+        self._stop_turn_elapsed_timer()
+        self._turn_pending = False
+        self.query_one("#turn_status", Static).display = False
+
+    @property
+    def _stale_turns_awaiting_signal(self) -> int:
+        """How many watchdog-abandoned turns still owe this client a late signal.
+
+        DERIVED from :attr:`_stale_debts`, never stored. Until #594 R2 this was
+        an independent ``int`` maintained in lockstep with a parallel
+        ``list[Timer]`` by three methods, under a stated ``len(list) == count``
+        invariant. That invariant was the bug, not the guard: an expiry
+        callback that ``Timer.stop()`` structurally cannot un-queue wrote off
+        the WRONG debt while keeping BOTH sides consistent, so no
+        ``IndexError`` and no assertion could ever catch it. One structure
+        cannot drift from itself.
+        """
+        return len(self._stale_debts)
+
+    def _incur_stale_turn_debt(self) -> None:
+        """Record one watchdog-abandoned turn's owed late signal — WITH an expiry.
+
+        The debt (``_stale_turns_awaiting_signal``) encodes "the core still
+        owes this client exactly one late completion signal for a turn the
+        watchdog gave up on". That is a GUARANTEE the server side only ever
+        offered as BEST EFFORT: ``process_inbound_message`` has ten
+        independently-traced paths that commit the frame and put NOTHING on
+        the wire — the dominant one being the unbound-identity path this PR's
+        own README documents as the expected first-run failure (#592), where
+        ``resolve()`` returns ``None``, a binding-request audit row is
+        written, and the function returns.
+
+        Before #594 R1 the debt had NO expiry, so one never-arriving signal
+        desynchronized the client PERMANENTLY: the NEXT turn's own correct
+        reply was consumed as the missing late signal, so it rendered but did
+        not release the input; that turn then timed out, re-incurring the
+        debt, and printed a red timeout line UNDER an answer that had already
+        succeeded — forever, once per turn, until a TUI restart.
+
+        Bounding each debt to ONE watchdog window turns that permanent,
+        non-converging drift into a single-turn, self-correcting error: once
+        the window elapses the client is merely back to the pre-#594
+        behaviour (one late signal ends the current turn early), which is
+        bounded to one turn instead of being permanent. One window is the
+        right length in BOTH directions: the core serializes a session's
+        turns behind a per-``(persona, slug)`` mutex, and — since arc-001's
+        ordering barrier
+        (``RealTurnOrchestratorAdapter._await_turn_ordering_barrier``,
+        PR #594 Task S1) — starts sending
+        EVERY turn's signal (not just a turn that ran real work) only after
+        releasing that mutex (see ``_resolve_pending_turn``), so a late
+        signal that IS still coming arrives before the next turn's own
+        signal — and the next turn cannot outlive one more watchdog window
+        without arming its own debt. Longer would widen the mis-attribution
+        surface; shorter would risk discarding a genuine late signal.
+
+        Worth stating explicitly, because it is easy to over-read this
+        counter as an ORDERING fix rather than a STATE one: it is
+        order-INSENSITIVE by construction (whichever signal arrives first
+        discharges a debt, whichever arrives second ends the turn — see
+        ``_resolve_pending_turn``), so it self-corrects state regardless of
+        arrival order. It does NOT correct which line prints first in the
+        transcript — that is purely a function of the core's send order.
+        arc-001 (PR #594 Task S1) was a real bug where two ingest-resolved
+        outcomes could signal out of order; this counter neither detected
+        nor could have repaired it, because it does not look at order at
+        all. It had to be fixed server-side, in
+        ``RealTurnOrchestratorAdapter.dispatch``.
+
+        Each debt gets its OWN expiry callback, bound to its own debt object
+        (#594 R2). ``set_timer`` does NOT invoke its callback from the timer
+        task: it registers ``partial(self.call_next, callback)``
+        (``textual/message_pump.py``), so a fired timer merely APPENDS an
+        ``events.Callback`` to the app's ``_next_callbacks`` list and then
+        completes. ``Timer.stop()`` cancels an already-finished task and has no
+        way to un-append that message, so the window between a timer firing and
+        the pump's next ``_flush_next_callbacks`` is fully exposed. A debt
+        discharged inside that window still gets exactly one expiry call.
+        Binding the callback to its own debt is what makes that call a no-op
+        rather than a write-off of whichever debt happens to be at the head.
+        """
+        debt = _StaleTurnDebt()
+        # Assign the handle onto the debt the callback is already bound to:
+        # `partial` captured `debt` by reference, so the timer that fires and
+        # the debt that decides whether that firing means anything are the same
+        # object by construction. The timer task cannot run before this
+        # assignment completes — `set_timer` only schedules it, and nothing
+        # between here and the append yields to the event loop.
+        debt.expiry = self.set_timer(
+            self._turn_timeout_seconds,
+            partial(self._expire_stale_turn_debt, debt),
+            name="alfred-stale-debt-expiry",
+        )
+        self._stale_debts.append(debt)
+
+    def _discharge_stale_turn_debt(self) -> None:
+        """A genuine late signal arrived: settle the OLDEST debt, cancel its expiry.
+
+        Settling the HEAD — rather than "the debt this signal was for" — is
+        correct because debts are FUNGIBLE FOR DISCHARGE. Nothing correlates a
+        signal with a turn (``TurnFailedNotification`` deliberately carries no
+        ``inbound_id`` and a reply carries none either — see
+        ``_resolve_pending_turn``), every debt is armed with the identical
+        ``_turn_timeout_seconds`` window, and the core delivers late signals in
+        turn order. Only the COUNT is semantically meaningful for this
+        direction, so the list is a FIFO and the head is simply the one closest
+        to expiring.
+
+        Debts are NOT fungible for EXPIRY — the distinction #594 R2 added, and
+        the one the previous single word "fungible" elided. ``discharged`` is
+        flipped here so this debt's OWN already-queued expiry callback, which
+        ``stop()`` below structurally cannot un-queue, recognizes itself as
+        spent and returns without touching a DIFFERENT debt that is still
+        genuinely outstanding. ``stop()`` still closes the larger window (a
+        debt settled well before its deadline never queues an expiry at all);
+        the flag closes the residue ``stop()`` cannot reach.
+
+        Deliberately NOT guarded on a non-empty list. This method is reached
+        solely from ``_resolve_pending_turn``'s own
+        ``_stale_turns_awaiting_signal > 0`` test which — the count now BEING
+        ``len(self._stale_debts)`` — is that emptiness test. An ``IndexError``
+        here would mean that identity has broken, which is worth failing LOUD
+        on rather than absorbing into a silent no-op branch no test could
+        reach.
+        """
+        debt = self._stale_debts.pop(0)
+        debt.discharged = True
+        debt.expiry.stop()
+
+    def _expire_stale_turn_debt(self, debt: _StaleTurnDebt) -> None:
+        """``debt``'s window elapsed with no late signal: write off THAT debt.
+
+        Bound to its own debt (#594 R2) because ``Timer.stop()`` cannot
+        un-queue a callback the pump has already scheduled: ``set_timer``
+        registers ``partial(self.call_next, callback)`` as the timer's
+        callback, so a fired timer appends an ``events.Callback`` to
+        ``_next_callbacks`` and finishes; a later ``stop()`` cancels an
+        already-completed task and leaves the queued message untouched
+        (textual 8.2.8 — ``timer.py`` + ``message_pump.py``; pinned by
+        ``test_textual_timer_stop_cannot_unqueue_an_already_fired_callback``).
+
+        So this can still be called for a debt ``_discharge_stale_turn_debt``
+        already settled, and the ``discharged`` guard is what makes that a pure
+        no-op. It replaces a bare ``> 0`` count test that only stopped the
+        count going NEGATIVE with ONE debt outstanding. With TWO outstanding
+        the count was still positive after a discharge, so the phantom callback
+        passed the guard, popped index 0 — by then the OTHER, still-outstanding
+        debt's handle — ``stop()``-ed its live expiry timer, and decremented the
+        count to zero. That silently wrote off a turn genuinely still owed a
+        signal AND destroyed the very expiry that would have self-corrected it,
+        re-opening the permanent off-by-one drift #594 R1 exists to bound. Both
+        sides stayed consistent throughout, so the old
+        ``len(list) == count`` invariant held and nothing failed loud.
+
+        ``remove`` is by IDENTITY (``_StaleTurnDebt`` sets ``eq=False``) and
+        cannot raise: ``discharged`` transitions ``False`` -> ``True`` exactly
+        once, and every site that flips it removes the debt from the list in
+        the same breath (here, ``_discharge_stale_turn_debt``, ``on_unmount``).
+        """
+        if debt.discharged:
+            return
+        debt.discharged = True
+        self._stale_debts.remove(debt)
+
+    def on_unmount(self) -> None:
+        """Clear the app's own debt bookkeeping deterministically at teardown.
+
+        NOT a leak-prevention mechanism — Textual already handles that.
+        ``App._shutdown`` awaits ``_close_messages()``, which calls
+        ``Timer._stop_all()`` over every timer created through
+        ``self.set_timer`` and clears its own registry, BEFORE it dispatches
+        ``events.Unmount`` (verified in ``textual/app.py`` +
+        ``textual/message_pump.py``, textual 8.2.8). So by the time this hook
+        runs, every debt timer is already stopped whether or not this method
+        exists.
+
+        What it DOES buy: the ``stop()`` calls are harmless defence-in-depth
+        against that framework ordering ever changing, and clearing the list
+        leaves the app's own state consistent with reality rather than holding
+        references to spent handles. The CURRENT turn's watchdog / elapsed-tick
+        timers are deliberately untouched: those belong to ``_end_turn``.
+
+        Marking each debt ``discharged`` here — not just stopping it — is what
+        keeps a callback the pump queued before teardown from reaching
+        ``list.remove`` on an already-cleared list (#594 R2).
+        """
+        for debt in self._stale_debts:
+            debt.discharged = True
+            debt.expiry.stop()
+        self._stale_debts.clear()
+
+    def _on_turn_timeout(self) -> None:
+        """No reply inside the budget: tell the operator and release the input.
+
+        Idempotence guard: ``Timer.stop()`` cannot un-queue a callback the
+        message pump has ALREADY scheduled onto this tick, so a reply that
+        lands in the SAME tick as the expiry can still reach here after
+        ``_end_turn()`` already ran (via ``write_outbound`` or
+        ``set_turn_failed``). This guard is LOAD-BEARING, not defensive
+        padding: without it, a same-tick reply-then-timeout ordering would
+        re-paint a timeout line — and re-arm nothing, since
+        ``self._turn_pending`` is already ``False`` — for a turn that in fact
+        completed, which is a lie to the operator. The same ``Timer.stop()``
+        premise is what ``_expire_stale_turn_debt`` guards against too, and
+        is pinned directly against the framework (not just asserted in prose)
+        by ``test_textual_timer_stop_cannot_unqueue_an_already_fired_callback``
+        in ``test_textual_app.py``.
+        """
+        self._turn_watchdog = None
+        if not self._turn_pending:
+            return
+        # This turn is being ABANDONED client-side, not resolved — the core
+        # may still be processing it and can still send a reply or
+        # `turn.failed` for it later. Record that one late completion signal
+        # is now owed so `_resolve_pending_turn` recognizes it as stale
+        # (rather than the CURRENT turn's own signal) whenever it arrives —
+        # bounded to ONE watchdog window, because that signal may equally
+        # never come at all (#594 R1; see `_incur_stale_turn_debt`). MUST stay
+        # AFTER the `_turn_pending` guard above: a stale queued callback for
+        # an already-ended turn owes nothing and must arm no expiry timer.
+        self._incur_stale_turn_debt()
+        self._end_turn()
+        self.query_one("#conversation_log", RichLog).write(
+            f"[bold red]{t('tui.turn_timeout', seconds=int(self._turn_timeout_seconds))}[/]"
+        )
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter: feed the typed line to the session as one keystroke-batch.
 
         Empty submissions are dropped (the session's flush is a no-op on an
-        empty buffer too — belt and braces). The line is echoed into the log so
-        the operator sees their own turn, mirroring the Slice-1 affordance.
+        empty buffer too — belt and braces). One turn at a time: while a turn
+        is already pending, a submission is dropped WITHOUT clearing/echoing
+        the typed text — ``watch__turn_pending`` already disables the Input,
+        but a queued event can still arrive after the disable takes effect, so
+        this is belt-and-braces, not the primary guard. Nothing typed is lost.
+
+        The FIRST drop while a turn is pending writes ONE dim reassurance
+        line into the transcript (rate-limited, #594 Fix-10) — an operator
+        mashing Enter while Alfred is still thinking gets told once, not
+        spammed once per keystroke. ``_drop_acked_for_current_turn`` gates
+        this and is reset per-turn below.
+
+        The line is echoed into the log so the operator sees their own turn
+        (mirroring the Slice-1 affordance), THEN the turn is marked pending
+        and the "thinking..." line written — in that order, so the echo
+        always precedes the pending indicator in the transcript.
+
+        A local send failure (except-branch below) restores the typed text
+        into the input widget before re-raising: "nothing typed is lost"
+        applies to this path too, not only to the concurrent-submission
+        guard above.
         """
         text = event.value.strip()
         if not text:
+            return
+        if self._turn_pending:
+            if not self._drop_acked_for_current_turn:
+                self.query_one("#conversation_log", RichLog).write(
+                    f"[dim]{t('tui.turn_still_pending')}[/]"
+                )
+                self._drop_acked_for_current_turn = True
             return
         log = self.query_one("#conversation_log", RichLog)
         # ``text`` is operator-typed and echoed into a ``markup=True`` RichLog;
@@ -149,8 +576,85 @@ class AlfredTuiApp(App[None]):
         # legitimate markup. (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold cyan]{t('tui.label_you')}[/]: {escape(text)}")
         event.input.value = ""
-        await self._session.consume_user_input(text)
-        await self._session.flush_keystroke_batch()
+        self._turn_pending = True  # -> watcher: disable + .busy
+        # Fresh per-turn state (#594 Fix-10): the elapsed counter must not
+        # carry over the PREVIOUS turn's count, and a new turn earns its own
+        # one-time dropped-keystroke acknowledgement.
+        self._turn_elapsed_seconds = 0
+        self._drop_acked_for_current_turn = False
+        log.write(f"[dim]{t('tui.thinking')}[/]")
+        self._arm_turn_watchdog()
+        self._arm_turn_elapsed_timer()
+        try:
+            await self._session.consume_user_input(text)
+            await self._session.flush_keystroke_batch()
+        except Exception as exc:
+            # The inbound never reached the wire. No reply can ever come, so
+            # release the turn NOW rather than making the operator wait out
+            # the full watchdog for a failure we already know about. The
+            # rendered line carries the exception CLASS NAME only, never
+            # `str(exc)` (which could leak transport internals into the
+            # transcript). Re-raised: this is a dead local wire, and
+            # swallowing it here would be the exact silent-failure shape
+            # #593 is about.
+            self._end_turn()
+            log.write(f"[bold red]{t('tui.alfred_error', error=type(exc).__name__)}[/]")
+            event.input.value = text
+            raise
+
+    def _resolve_pending_turn(self) -> None:
+        """Gate ``_end_turn()`` against a late signal for an ALREADY-abandoned turn.
+
+        ``write_outbound``/``set_turn_failed`` are invoked from wire callbacks
+        with no per-turn correlation available at all — ``TurnFailedNotification``
+        deliberately carries no ``inbound_id`` (the TUI is structurally
+        1:1/single-turn, ``protocol.py``), and a reply carries none either. So
+        this cannot check "does this signal match generation N": a generation
+        counter bumped on both submission and abandonment returns to the SAME
+        value on resubmission that a same-tick "matches the current
+        generation" comparison would accept, which makes "turn 2's own
+        signal" and "turn 1's late signal arriving while turn 2 is pending"
+        genuinely indistinguishable by that check alone.
+
+        What IS available, with no wire tag at all, is a COUNT. The core
+        serializes one session's turns behind a per-(persona, slug) mutex
+        (``RealTurnOrchestratorAdapter.dispatch``, FOLD-R1) for the
+        ``_PreparedTurn`` outcome, and — since arc-001's ordering barrier
+        (``_await_turn_ordering_barrier``, PR #594 Task S1) — takes an
+        acquire-then-release pass over that SAME mutex for the two
+        ingest-resolved outcomes (``_HaltNoReply`` / ``_RefusalReply``) that
+        carry no turn work of their own. Either way, a turn's notify/reply is
+        only initiated AFTER that turn's hold on the mutex has released,
+        with no ``await`` in between — so a later same-key turn's own signal
+        cannot reach the wire until every earlier same-key turn's signal has
+        already been sent. That guarantees the ``_stale_turns_awaiting_signal``
+        late signals — one per watchdog-abandoned turn — arrive, in order,
+        before the CURRENTLY pending turn's own signal. Consume that backlog
+        first, without touching ``_turn_pending``/the watchdog; only once it
+        is empty does a completion signal end the turn that is actually
+        still pending.
+
+        This is a CROSS-MODULE contract, not something enforceable from this
+        file alone: see the ``DOWNSTREAM CONTRACT`` note on
+        ``real_turn_adapter._TurnFailed`` and the matching note on
+        ``RealTurnOrchestratorAdapter.dispatch``
+        (``src/alfred/comms_mcp/real_turn_adapter.py``), and the regression
+        tests that would fail if that ordering ever regressed:
+        ``test_dispatch_notifies_same_key_turns_in_submission_order_even_when_concurrent``,
+        ``test_dispatch_halt_no_reply_waits_for_an_earlier_same_key_turn``, and
+        ``test_dispatch_refusal_reply_waits_for_an_earlier_same_key_turn``, all
+        in ``tests/unit/comms_mcp/test_real_turn_adapter_dispatch.py``.
+
+        That ordering contract says WHEN a late signal arrives relative to the
+        next turn's — it does NOT promise one ever arrives at all, and the
+        core has ten traced paths that send nothing (#594 R1). So each debt
+        also EXPIRES after one watchdog window; see ``_incur_stale_turn_debt``
+        for why an unbounded debt desynchronized the client permanently.
+        """
+        if self._stale_turns_awaiting_signal > 0:
+            self._discharge_stale_turn_debt()
+            return
+        self._end_turn()
 
     def write_outbound(self, body: str) -> None:
         """Paint a host-delivered outbound message into the conversation log.
@@ -158,7 +662,16 @@ class AlfredTuiApp(App[None]):
         Called from the ``outbound.message`` wire handler (via the session's
         render hook). Synchronous: a RichLog write is non-blocking and the
         outbound handler awaits nothing on the render itself.
+
+        Also ENDS the in-flight turn (#593), UNLESS this reply is a late
+        arrival for a turn the watchdog already abandoned (#594 review
+        finding) — see ``_resolve_pending_turn``. Either way the body still
+        renders: a late reply is still informative to the operator, just not
+        a signal that the CURRENT turn is done. A host-pushed outbound with no
+        pending turn and no stale backlog is a harmless no-op (a reactive set
+        to its current value does not fire the watcher).
         """
+        self._resolve_pending_turn()
         log = self.query_one("#conversation_log", RichLog)
         # ``body`` is host-delivered persona output that can carry T3-derived
         # content; escape it so console markup in the body renders literally
@@ -166,6 +679,26 @@ class AlfredTuiApp(App[None]):
         # app-controlled label prefix keeps its legitimate markup.
         # (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold green]{t('tui.label_alfred')}[/]: {escape(body)}")
+
+    def set_turn_failed(self, stage: TurnFailureStage) -> None:
+        """Render the core's turn-failure state and release the in-flight turn.
+
+        Implements the ``_AppLike.set_turn_failed`` Protocol member declared
+        in ``cohost.py`` (Task 13). Rendered into the CONVERSATION LOG, not
+        the ``#link_banner``: a failed turn is a transcript event, not a
+        connection state, and must remain visible above the next turn (a
+        banner would be overwritten/cleared by the NEXT link-state change,
+        silently erasing the record that this turn failed).
+
+        Releases the in-flight turn UNLESS this failure is a late arrival for
+        a turn the watchdog already abandoned (#594 review finding) — see
+        ``_resolve_pending_turn``. The failure copy still renders either way;
+        only whether it touches ``_turn_pending``/the watchdog is gated.
+        """
+        self._resolve_pending_turn()
+        self.query_one("#conversation_log", RichLog).write(
+            f"[bold red]{_turn_failure_message(stage)}[/]"
+        )
 
     def set_link_state(self, method: str) -> None:
         """Update the reconnect banner from a gateway ``link.*`` state method.
@@ -197,3 +730,38 @@ class AlfredTuiApp(App[None]):
             return
         banner.update(t(banner_key))
         banner.display = True
+
+    def watch__turn_elapsed_seconds(self, elapsed: int) -> None:
+        """Paint the live elapsed-time counter while a turn is in flight.
+
+        Deliberately a SEPARATE ``#turn_status`` ``Static`` widget, not a new
+        ``RichLog`` line: the operator explicitly did not want this
+        informational tick logged into the transcript (#594 Fix-10) — see
+        ``test_elapsed_counter_shows_after_a_tick_and_is_never_logged``.
+
+        Guarded on ``_turn_pending``: a reactive-diff firing outside a
+        pending turn (e.g. Textual's own ``init=True`` watcher call at mount
+        time, which fires once with the default value ``0`` while
+        ``_turn_pending`` is still ``False``) must not paint or reveal the
+        widget. Hiding it again on completion is ``_end_turn``'s job, not
+        this watcher's — this method only ever shows/updates, never hides.
+        """
+        if not self._turn_pending:
+            return
+        status = self.query_one("#turn_status", Static)
+        status.update(t("tui.thinking_elapsed", seconds=elapsed))
+        status.display = True
+
+    def watch__turn_pending(self, pending: bool) -> None:  # noqa: FBT001 - Textual's watch_<name>(value) calling convention is positional; not this app's API to redesign.
+        """Disable + dim the input while a turn is in flight; restore on completion.
+
+        ``#user_input.busy`` (the CSS rule declared above, orphaned since the
+        in-process TUI was deleted) is what makes the disabled state VISIBLE.
+        Textual blurs a widget when it is disabled, so the completion edge
+        must re-``focus()`` or the operator's next keystrokes go nowhere.
+        """
+        user_input = self.query_one("#user_input", Input)
+        user_input.set_class(pending, "busy")
+        user_input.disabled = pending
+        if not pending:
+            user_input.focus()
