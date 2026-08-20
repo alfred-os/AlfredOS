@@ -3,11 +3,14 @@
 The routing.yaml loader lands in Slice 4 — until then this YAML file is
 the declarative source of truth for two trust-tier-sensitive contracts:
 
-* ``[quarantine] provider`` MUST differ from the privileged provider id
-  by default (spec §5.4, PRD §6.4). The bootstrap-time check in
-  :mod:`alfred.bootstrap.quarantine` enforces this at startup once the
-  loader is wired; until then the YAML's documented default is the
-  contract.
+* ``[quarantine] provider`` documents the shipped default — the
+  quarantined provider *should* differ from the privileged provider id
+  by default (defence-in-depth, ADR-0064). Enforcement is opt-in: the
+  bootstrap-time check in :mod:`alfred.bootstrap.quarantine` only
+  refuses to start on a same-provider collision when
+  ``Settings.require_quarantine_provider_separation`` is ``True``
+  (default ``False``). No PRD section states a "providers must differ"
+  invariant; do not cite "spec §5.4 / PRD §6.4".
 * ``[quarantine] max_tokens_per_extraction`` is the per-extraction
   budget knob (AI-2 fix). Reading it from this file at boot is a
   Slice-4 task, but the field MUST exist now so operators can configure
@@ -43,7 +46,9 @@ def _load_routing_yaml() -> dict[str, Any]:
 
 def test_routing_yaml_quarantine_provider_default_is_anthropic() -> None:
     """The shipped default pins ``anthropic`` so a fresh deploy with
-    deepseek-as-privileged stays on the dual-LLM split (spec §5.4).
+    deepseek-as-privileged keeps the two roles on different providers by
+    default (defence-in-depth, ADR-0064) — advisory, not enforced, unless
+    ``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true``.
     """
     parsed = _load_routing_yaml()
     quarantine = parsed["quarantine"]
@@ -73,6 +78,23 @@ def test_routing_yaml_max_tokens_per_extraction_is_positive_int() -> None:
     cap = quarantine["max_tokens_per_extraction"]
     assert isinstance(cap, int)
     assert cap > 0
+
+
+def test_settings_quarantine_provider_default_mirrors_routing_yaml() -> None:
+    """CodeRabbit PR-review r1: the PROVIDER default needs the same drift-guard the
+    MODEL already has (below), or documentation + this file's own test can both stay
+    green while ``Settings.quarantine_provider``'s default (the actual runtime source
+    of truth, per this file's own module docstring) silently diverges from
+    ``routing.yaml``'s ``[quarantine].provider`` (the shipped-default record and
+    alfred-config-proposal target).
+
+    Mirrors ``test_daemon_runtime_model_config_constants_mirror_routing_yaml`` below —
+    same drift-guard shape, for the field that test doesn't cover.
+    """
+    from alfred.config.settings import Settings
+
+    quarantine = _load_routing_yaml()["quarantine"]
+    assert Settings.model_fields["quarantine_provider"].default == quarantine["provider"]
 
 
 def test_daemon_runtime_model_config_constants_mirror_routing_yaml() -> None:

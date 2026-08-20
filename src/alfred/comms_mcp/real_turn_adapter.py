@@ -391,6 +391,10 @@ class RealTurnOrchestratorAdapter:
             )
             return
         if not isinstance(ingested, _PreparedTurn):  # defensive — the ingest union is closed
+            # Round-6 review fleet: log before raising, matching this class's own
+            # sibling guard (_require_sender, sender_unbound above) — the same gap
+            # err-002 found and fixed on daemon_runtime.py's identically-keyed guard.
+            _log.error("comms.daemon_runtime.dispatch_bad_ingested")
             raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
 
         set_language(ingested.user.language)
@@ -520,3 +524,11 @@ class RealTurnOrchestratorAdapter:
                     notification, canonical_user_id=canonical_user_id, stage="send_failed", exc=exc
                 )
             raise
+
+
+# mypy --strict (--no-implicit-reexport): ``_PERSONA`` is imported (aliased) from
+# ``alfred.orchestrator.core`` above, not defined here, so a consuming test that
+# does ``from alfred.comms_mcp.real_turn_adapter import _PERSONA`` needs an
+# explicit re-export declaration (mirrors this package's own
+# ``comms_mcp/__init__.py`` ``__all__`` convention).
+__all__ = ["_PERSONA"]

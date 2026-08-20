@@ -37,7 +37,7 @@ AlfredOS/
 │   │   └── capability_gate/        # RealGate, GatePolicy, GrantRow, StorageBackend
 │   ├── plugins/                    # MCP plugin transport, session, manifest, content store
 │   ├── supervisor/                 # plugin supervisor, circuit breaker (Slice 3+)
-│   ├── providers/                  # LLM provider adapters (Anthropic, OpenAI, internal-CLI)
+│   ├── providers/                  # LLM provider adapters (Anthropic, DeepSeek)
 │   ├── caching/                    # prompt cache, semantic cache, embedding cache
 │   ├── reviewer/                   # reviewer-gate client
 │   ├── audit/                      # audit log + git repo writer

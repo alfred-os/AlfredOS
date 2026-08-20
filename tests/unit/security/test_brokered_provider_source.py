@@ -33,7 +33,9 @@ import httpx
 import pytest
 
 from alfred.egress.control_fd_broker import ControlFdBrokerError, recv_passed_fd_nonblocking
+from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.base import ProviderCapability, ProviderUnavailableError
+from alfred.providers.deepseek import DeepSeekProvider
 from alfred.security.quarantine_child import brokered_egress as be
 from alfred.security.quarantine_child.brokered_egress import (
     BrokeredProviderSource,
@@ -82,9 +84,19 @@ def _af_unix_socketpair() -> tuple[socket.socket, socket.socket]:
     return socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 
 
-def _factory(timeout: httpx.Timeout | None = None) -> _ProviderFactory:
+def _factory(
+    timeout: httpx.Timeout | None = None,
+    *,
+    provider_id: str = "anthropic",
+    model: str | None = None,
+) -> _ProviderFactory:
     return _ProviderFactory(
-        api_key="super-secret", model="claude-haiku-4-5", max_tokens=8192, timeout=timeout
+        provider_id=provider_id,
+        api_key="super-secret",
+        model=model or ("claude-haiku-4-5" if provider_id == "anthropic" else "deepseek-chat"),
+        max_tokens=8192,
+        timeout=timeout,
+        base_url=None if provider_id == "anthropic" else "https://api.deepseek.com/v1",
     )
 
 
@@ -96,15 +108,143 @@ def test_factory_repr_hides_key() -> None:
     assert "super-secret" not in repr(_factory())
 
 
+def test_factory_repr_strips_credentials_from_base_url() -> None:
+    """A credential-bearing ``base_url`` must not survive into the repr (CodeRabbit r2).
+
+    ``base_url`` became a per-deployment value in #587, and a per-deployment URL can carry
+    inline basic-auth userinfo (``user:pass@``) or a token query param — both of which would
+    then appear in any traceback frame or log line capturing this repr. HARD #5's subject is
+    the SECRET, not the literal field name ``api_key``.
+
+    Asserts the credential is ABSENT *and* the diagnostic content is PRESENT: a repr that
+    dropped ``base_url`` entirely would pass a bare "not in" check while destroying the
+    misconfiguration-diagnosis the field is carried for.
+    """
+    factory = _ProviderFactory(
+        provider_id="deepseek",
+        api_key="super-secret",
+        model="deepseek-chat",
+        max_tokens=8192,
+        timeout=None,
+        base_url="https://relay-user:hunter2@relay.internal:8443/v1?token=abcd1234",
+    )
+
+    rendered = repr(factory)
+
+    assert "hunter2" not in rendered, rendered
+    assert "relay-user" not in rendered, rendered
+    assert "abcd1234" not in rendered, rendered
+    # Structural, not just value-wise: no query string survived at all. (Asserting on the
+    # substring "token" would be a false positive — ``max_tokens`` is in the same repr.)
+    assert "?" not in rendered, rendered
+    assert "@" not in rendered, rendered
+    # r3: the PATH is dropped too. ``_redact_base_url`` is default-deny — it rebuilds from
+    # the components judged safe (scheme + host + port) rather than stripping the ones known
+    # to be risky, and a path segment can carry a per-tenant token just as a query param can.
+    assert "/v1" not in rendered, rendered
+    # Still diagnosable: scheme, host and port survive — enough to answer "which endpoint".
+    assert "https://relay.internal:8443" in rendered, rendered
+
+
+def test_factory_repr_keeps_a_plain_base_url_intact() -> None:
+    """Oracle guard: the sanitiser is not a blanket redactor.
+
+    Without this, a ``_redact_base_url`` that returned a constant would satisfy every
+    assertion in the test above while making the field useless. The endpoint's HOST is
+    what survives (r3 drops the path), so that is what this pins.
+    """
+    rendered = repr(_factory(provider_id="deepseek"))
+    assert "https://api.deepseek.com" in rendered, rendered
+
+
+def test_factory_repr_renders_none_base_url_as_none() -> None:
+    """The anthropic path has no base_url; the repr must still say so distinguishably.
+
+    ``None`` must not collapse into an empty string or the opaque unparseable marker —
+    "no endpoint configured" and "endpoint hidden" are different facts to an operator.
+    """
+    assert "base_url=None" in repr(_factory(provider_id="anthropic"))
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "http://[::1/v1",  # malformed IPv6 literal — urlsplit raises ValueError
+        "https://host:notaport/v1",  # non-numeric port — .port raises ValueError
+    ],
+)
+def test_factory_repr_never_leaks_an_unparseable_base_url(hostile: str) -> None:
+    """An unparseable base_url yields the opaque marker, never the raw string.
+
+    Fail-closed: a value we cannot parse is exactly the value we cannot prove is
+    credential-free, so it must not be echoed verbatim as a "best effort". And the repr must
+    not RAISE — ``__repr__`` raising would break the very tracebacks it exists to make
+    readable (a repr that explodes is worse than one that redacts).
+    """
+    factory = _ProviderFactory(
+        provider_id="deepseek",
+        api_key="super-secret",
+        model="deepseek-chat",
+        max_tokens=8192,
+        timeout=None,
+        base_url=hostile,
+    )
+
+    rendered = repr(factory)
+
+    assert "unparseable-base-url" in rendered, rendered
+    assert hostile not in rendered, rendered
+
+
+@pytest.mark.parametrize(
+    "no_scheme_or_host",
+    [
+        "relay.internal/v1?token=abc",  # no "://" — urlsplit treats it all as a path
+        "not-a-url",  # same shape, no path separator either
+    ],
+)
+def test_factory_repr_marks_a_schemeless_hostless_base_url_unparseable(
+    no_scheme_or_host: str,
+) -> None:
+    """A THIRD outcome, distinct from a clean redaction or a raised ValueError.
+
+    CodeRabbit PR-review r1: ``urlsplit`` does not raise on a value with no "://" — it
+    parses "cleanly" with ``scheme=""``/``hostname=None``, and the pre-fix code collapsed
+    that to ``urlunsplit(("", "", "", "", ""))`` == ``""``. The repr then rendered
+    ``base_url=''``, which reads as "no endpoint configured" (the ``None`` case) rather
+    than "endpoint hidden" (this function's actual verdict on a value it cannot
+    affirmatively judge safe). No credential escapes in either version — path and query
+    are discarded regardless — this pins the DIAGNOSTIC fact, not a leak.
+    """
+    factory = _ProviderFactory(
+        provider_id="deepseek",
+        api_key="super-secret",
+        model="deepseek-chat",
+        max_tokens=8192,
+        timeout=None,
+        base_url=no_scheme_or_host,
+    )
+
+    rendered = repr(factory)
+
+    assert "unparseable-base-url" in rendered, rendered
+    assert "base_url=''" not in rendered, rendered
+    assert no_scheme_or_host not in rendered, rendered
+
+
 def test_factory_refuses_empty_key() -> None:
     """An empty provider key means the child cannot build a real provider — refuse boot (§20.2)."""
     with pytest.raises(QuarantineChildBootError):
-        _ProviderFactory.from_key("", model="claude-haiku-4-5", max_tokens=8192)
+        _ProviderFactory.from_key(
+            "", provider_id="anthropic", model="claude-haiku-4-5", max_tokens=8192
+        )
 
 
 def test_factory_from_key_builds_frozen_config() -> None:
     """A non-empty key yields a factory carrying the fixed child read-timeout ceiling."""
-    f = _ProviderFactory.from_key("realkey", model="claude-haiku-4-5", max_tokens=4096)
+    f = _ProviderFactory.from_key(
+        "realkey", provider_id="anthropic", model="claude-haiku-4-5", max_tokens=4096
+    )
     assert f.model == "claude-haiku-4-5"
     assert f.max_tokens == 4096
     assert f.timeout is be._CHILD_SDK_READ_TIMEOUT
@@ -113,6 +253,215 @@ def test_factory_from_key_builds_frozen_config() -> None:
 
 def test_quarantine_child_boot_error_is_runtime_error() -> None:
     assert issubclass(QuarantineChildBootError, RuntimeError)
+
+
+def test_factory_from_key_builds_deepseek_factory() -> None:
+    """A DeepSeek-configured factory carries its base_url and provider_id."""
+    f = _ProviderFactory.from_key(
+        "realkey",
+        provider_id="deepseek",
+        model="deepseek-chat",
+        max_tokens=4096,
+        base_url="https://api.deepseek.com/v1",
+    )
+    assert f.provider_id == "deepseek"
+    assert f.base_url == "https://api.deepseek.com/v1"
+    assert f.model == "deepseek-chat"
+    assert "realkey" not in repr(f)
+
+
+def test_factory_from_key_refuses_unknown_provider_id() -> None:
+    """from_key's OWN closed-set refusal (round-5 review fleet, 1D) — independent of
+    __main__._build_provider's identical check, which runs earlier in the real boot
+    path but does not structurally couple to this one. Without this, from_key was
+    documented as the child's "SECONDARY refuse-boot guard" while actually validating
+    only ONE of the three inputs a caller could get wrong."""
+    with pytest.raises(QuarantineChildBootError, match="provider_id"):
+        _ProviderFactory.from_key("realkey", provider_id="openai", model="gpt-4", max_tokens=8192)
+
+
+def test_factory_from_key_refuses_blank_deepseek_base_url() -> None:
+    """from_key's OWN blank-base_url refusal for the deepseek path (round-5 review
+    fleet, 1D) — the third independent layer for this guarantee alongside
+    __main__._build_provider and build_child_client's own completed guard."""
+    with pytest.raises(QuarantineChildBootError, match="base_url"):
+        _ProviderFactory.from_key(
+            "realkey",
+            provider_id="deepseek",
+            model="deepseek-chat",
+            max_tokens=8192,
+            base_url="   ",
+        )
+
+
+def test_factory_from_key_allows_anthropic_without_base_url() -> None:
+    """Oracle guard for the blank-base_url refusal above: the anthropic path never
+    needs a base_url, so from_key's new check must not over-reach into rejecting a
+    perfectly valid anthropic factory."""
+    f = _ProviderFactory.from_key(
+        "realkey", provider_id="anthropic", model="claude-haiku-4-5", max_tokens=8192
+    )
+    assert f.provider_id == "anthropic"
+    assert f.base_url is None
+
+
+@_posix_only
+def test_build_child_client_dispatches_to_deepseek() -> None:
+    """provider_id='deepseek' constructs a DeepSeekProvider, not AnthropicProvider."""
+    a, b = socket.socketpair()
+    fd = a.detach()
+    provider = None
+    try:
+        provider, _backend = be.build_child_client(
+            fd,
+            provider_id="deepseek",
+            model="deepseek-chat",
+            api_key="k",
+            timeout=be._CHILD_SDK_READ_TIMEOUT,
+            budget_seconds=5.0,
+            base_url="https://api.deepseek.com/v1",
+        )
+        assert isinstance(provider, DeepSeekProvider)
+    finally:
+        # test-r2-006 + round-6 review fleet (CodeRabbit): reclaim the constructed
+        # provider's own client FIRST, then the detached raw fd AND both socketpair
+        # ends — match this file's own established fd-ownership teardown order (see
+        # e.g. test_factory_build_resolves_read_timeout /
+        # test_build_anchors_the_attempt_deadline_from_the_budget).
+        if provider is not None:
+            anyio.run(provider.aclose)
+        os.close(fd)
+        a.close()
+        b.close()
+
+
+@_posix_only
+@pytest.mark.parametrize("blank_base_url", [None, "", "   ", "\t"])
+def test_build_child_client_deepseek_requires_base_url(blank_base_url: str | None) -> None:
+    """A DeepSeek dispatch with a missing OR blank base_url refuses loudly (HARD #7),
+    never silently falls back to some default the operator didn't choose, or
+    constructs a client that fails only per-call.
+
+    Blank, not just None (round-5 review fleet, 1B): the guard used to check
+    ``base_url is None`` only, so a whitespace-only value passed through here even
+    though it is functionally identical to unset. This is now the THIRD independent
+    layer for this guarantee — behind __main__._build_provider and
+    _ProviderFactory.from_key — kept a bare ValueError specifically because it is a
+    programming-error backstop, not a boot function.
+    """
+    a, b = socket.socketpair()
+    fd = a.detach()
+    try:
+        with pytest.raises(ValueError, match="base_url"):
+            be.build_child_client(
+                fd,
+                provider_id="deepseek",
+                model="deepseek-chat",
+                api_key="k",
+                timeout=be._CHILD_SDK_READ_TIMEOUT,
+                budget_seconds=5.0,
+                base_url=blank_base_url,
+            )
+    finally:
+        os.close(fd)
+        a.close()
+        b.close()
+
+
+def test_provider_source_capabilities_resolve_per_provider() -> None:
+    """BrokeredProviderSource.capabilities() reflects the CONFIGURED provider/model,
+    not a hardcoded Anthropic classvar — the #587 correctness gap the design doc named."""
+    anthropic_end, anthropic_peer = _af_unix_socketpair()
+    deepseek_end, deepseek_peer = _af_unix_socketpair()
+    try:
+        anthropic_source = BrokeredProviderSource(_factory(provider_id="anthropic"), anthropic_end)
+        deepseek_source = BrokeredProviderSource(_factory(provider_id="deepseek"), deepseek_end)
+        assert anthropic_source.capabilities() == AnthropicProvider.CAPABILITIES
+        assert deepseek_source.capabilities() == DeepSeekProvider._capabilities_for_model(
+            "deepseek-chat"
+        )
+        assert anthropic_source.capabilities() != deepseek_source.capabilities()
+    finally:
+        # test-r2-006: _af_unix_socketpair() returns BOTH ends — the peer end was
+        # discarded and leaked in the original draft; close all four sockets here.
+        anthropic_end.close()
+        anthropic_peer.close()
+        deepseek_end.close()
+        deepseek_peer.close()
+
+
+def test_provider_source_capabilities_resolve_per_model() -> None:
+    """DeepSeek's capabilities are MODEL-aware, not just provider-aware (test-005):
+    deepseek-chat and deepseek-reasoner have genuinely non-overlapping capability
+    sets. A regression that hardcodes the literal "deepseek-chat" into capability
+    resolution instead of reading `factory.model` would pass
+    `test_provider_source_capabilities_resolve_per_provider` unchanged — this test
+    is the one that actually pins model-awareness."""
+    chat_end, chat_peer = _af_unix_socketpair()
+    reasoner_end, reasoner_peer = _af_unix_socketpair()
+    try:
+        chat_source = BrokeredProviderSource(
+            _factory(provider_id="deepseek", model="deepseek-chat"), chat_end
+        )
+        reasoner_source = BrokeredProviderSource(
+            _factory(provider_id="deepseek", model="deepseek-reasoner"), reasoner_end
+        )
+        assert chat_source.capabilities() == DeepSeekProvider._capabilities_for_model(
+            "deepseek-chat"
+        )
+        assert reasoner_source.capabilities() == DeepSeekProvider._capabilities_for_model(
+            "deepseek-reasoner"
+        )
+        assert chat_source.capabilities() != reasoner_source.capabilities()
+    finally:
+        chat_end.close()
+        chat_peer.close()
+        reasoner_end.close()
+        reasoner_peer.close()
+
+
+@_posix_only
+def test_build_child_client_refuses_unknown_provider_id() -> None:
+    """An out-of-closed-set provider_id refuses loudly (HARD #7, sec-002) rather than
+    silently falling through to the Anthropic branch — a two-way if/else cannot
+    distinguish 'deepseek' from 'anything else', so this pins the 3-way dispatch."""
+    a, b = socket.socketpair()
+    fd = a.detach()
+    try:
+        with pytest.raises(ValueError, match="provider_id"):
+            be.build_child_client(
+                fd,
+                provider_id="openai",
+                model="gpt-4",
+                api_key="k",
+                timeout=be._CHILD_SDK_READ_TIMEOUT,
+                budget_seconds=5.0,
+            )
+    finally:
+        os.close(fd)
+        a.close()
+        b.close()
+
+
+def test_provider_source_construction_refuses_unknown_provider_id() -> None:
+    """test-r2-004: BrokeredProviderSource.__init__'s OWN closed-set refusal (sec-002)
+    is a distinct dispatch site from build_child_client's — this is the test that
+    actually exercises it, since none of the tests above construct a source with an
+    out-of-set provider_id. Required for the 100%-branch trust-boundary coverage
+    gate this task's Step 6 already demands.
+
+    QuarantineChildBootError, not a bare ValueError (round-5 review fleet, 1C): this
+    constructor runs after the fd-4 control socket is already built, before `ready` —
+    a bare exception there crashed the child with a traceback rather than a typed
+    boot refusal.
+    """
+    end, peer = _af_unix_socketpair()
+    try:
+        with pytest.raises(QuarantineChildBootError, match="provider_id"):
+            BrokeredProviderSource(_factory(provider_id="openai"), end)
+    finally:
+        end.close()
+        peer.close()
 
 
 @pytest.mark.skipif(
@@ -561,6 +910,38 @@ def test_bind_reclaims_fd_when_aclose_raises_after_dialing(
     anyio.run(_drive)
     with pytest.raises(OSError):
         os.close(victim)  # reclaimed despite calls > 0 — no leak
+    keeper.close()
+    a.close()
+    b.close()
+
+
+@_posix_only
+def test_bind_exercises_deepseek_aclose_and_releases_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real DeepSeekProvider.aclose() properly closes its httpx client and releases the fd.
+
+    All other bind() fd-ownership tests use an Anthropic factory (the default). This test
+    pins that DeepSeek's aclose() path (required for resource cleanup in the quarantine child's
+    brokered-egress source) actually works end-to-end: the provider is constructed over the
+    passed fd, bind() exercises the real provider, aclose() fires, and the fd is released
+    without leak or double-close.
+    """
+    keeper = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    victim = os.dup(keeper.fileno())  # a real, closeable fd the source must reclaim
+    monkeypatch.setattr(be, "recv_passed_fd", lambda _ce: (b"\x01", victim))
+    a, b = _af_unix_socketpair()
+    deepseek_factory = _factory(provider_id="deepseek")
+    source = BrokeredProviderSource(deepseek_factory, a)
+
+    async def _drive() -> None:
+        async with source.bind(budget_seconds=_AMPLE_BUDGET_S) as provider:
+            assert provider.name == "deepseek"
+            # Deliberately do NOT dial; the source will close the never-dialed fd in finally.
+
+    anyio.run(_drive)
+    with pytest.raises(OSError):
+        os.close(victim)  # already reclaimed by the source — EBADF proves no leak, single close
     keeper.close()
     a.close()
     b.close()

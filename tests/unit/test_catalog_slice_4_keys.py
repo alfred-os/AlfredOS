@@ -118,6 +118,12 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # ``loc``, never the value) when safely recoverable from a chained
     # ValidationError; falls back to the bare settings_invalid above otherwise.
     "daemon.boot.settings_invalid_field",
+    # #589 devex-001: the settings_invalid_field variant above named the field but
+    # never its accepted values, leaving an operator who mistyped a closed-set
+    # value (e.g. primary_provider) with no clue what WAS valid. Fires only for a
+    # rejected Literal, whose accepted-value set is schema-derived (never operator
+    # input) and therefore DLP-safe to list alongside the field name.
+    "daemon.boot.settings_invalid_field_choices",
     "daemon.boot.unsandboxed_in_production",
     "daemon.boot.launcher_not_policy_resolving",
     "daemon.boot.snapshot_ref_init_failed",
@@ -150,6 +156,17 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # #340 golive Task 15 (§17 / §20.2 fail-loud): a <=0 quarantine max_tokens budget
     # refuses boot pre-spawn rather than laundering into a cannot_extract typed refusal.
     "daemon.boot.quarantine_max_tokens_invalid",
+    # Round-5 review fleet, Tier A: an out-of-closed-set quarantine provider_id, or a
+    # blank deepseek_model/deepseek_base_url, refuses boot pre-spawn rather than
+    # laundering into a cannot_extract typed refusal (the #368 anti-pattern this arm
+    # closes — the resolver used to raise a bare, boot-cascade-uncaught ValueError).
+    "daemon.boot.quarantine_provider_config_invalid",
+    # #586 (ADR-0064): with ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true, a
+    # privileged/quarantine provider collision refuses boot. Its own catalogue key
+    # rather than reusing assert_provider_separation()'s message: this row is the
+    # daemon-boot refusal (audited, exit 2), a different surface from the helper's
+    # own operator-facing error, and the two must be free to diverge.
+    "daemon.boot.quarantine_provider_separation_violated",
     # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
     # in `alfred daemon start` output (not just an audit-log SQL query).
     "daemon.comms.adapter_spawned",

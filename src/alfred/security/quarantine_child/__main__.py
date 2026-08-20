@@ -47,6 +47,7 @@ import os
 import struct
 import sys
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 # Stdlib-only (import-closure-safe per ADR-0030): pins logging to stderr so the
 # child's stdout stays byte-pure for length-prefixed JSON-RPC frames. Called from
@@ -408,6 +409,82 @@ async def main() -> None:
     await _run_mcp_server(source, reader=reader, writer=writer)
 
 
+# #587: the closed set of provider ids the child can actually build (the same two
+# ``build_child_client`` / ``BrokeredProviderSource`` dispatch over). One of six copies
+# of this set across the codebase — pinned equal by
+# ``test_provider_closed_set_copies_stay_in_lockstep``
+# (``tests/unit/config/test_settings.py``). Declared here rather than imported from
+# ``brokered_egress`` so the check stays on the child's egress-free boot path with no
+# extra module load.
+_SUPPORTED_PROVIDER_IDS = frozenset({"anthropic", "deepseek"})
+
+
+def _base_url_rejection_reason(value: str) -> str | None:
+    """Return why ``ALFRED_QUARANTINE_BASE_URL`` is unusable, or ``None`` if it is fine.
+
+    The child-side twin of ``Settings._validate_deepseek_base_url`` (#587, CodeRabbit
+    r3/r4) — same checks, in the same order, for the same reason: an operator's
+    base_url may legitimately front a self-hosted relay, and the conventional
+    nginx/Envoy shape for that is inline basic auth
+    (``https://apikey:@relay.internal/v1``) — a literal credential. The host refuses
+    that at ``Settings`` construction, which is the PRIMARY guard; this is the §20.2
+    SECONDARY refuse-boot for the composed gap between the host's validation and this
+    module's UNVALIDATED ``os.environ`` read — a supervisor-side spawn-wiring bug or
+    manual env tampering, exactly like the provider-id and blank-base_url guards this
+    function's caller already applies.
+
+    It matters MORE here than host-side: this process's environment is readable via
+    ``/proc/<pid>/environ`` and dumpable in a crash report, and the child's whole
+    credential discipline is that the provider key arrives over fd 3 (spec §5.3),
+    NEVER through the environment. A credential smuggled in through a URL component
+    routes around that discipline entirely. Query strings and fragments are refused
+    on the same default-deny grounds: the openai SDK silently truncates the URL at
+    the query before dialling (verified against ``_validate_deepseek_base_url``'s own
+    finding), so they have zero function and pure exposure.
+
+    Returns a reason instead of raising so this stays a module-scope helper:
+    :class:`QuarantineChildBootError` lives in the egress-capable ``brokered_egress``,
+    whose import must stay lazy (the module-scope egress-import gate,
+    ``test_quarantined_child_has_no_module_scope_egress_import``). The caller, which
+    already holds that lazy import, does the raising.
+
+    No message echoes ``value`` — the offending value may BE the credential.
+    """
+    malformed = (
+        "ALFRED_QUARANTINE_BASE_URL is not a usable provider endpoint — set it to a "
+        "plain http(s)://host[:port][/path]. The value is not echoed here in case it "
+        "carries a credential (§20.2)"
+    )
+    try:
+        parts = urlsplit(value)
+        # ``.port`` is lazy and raises on a non-numeric / out-of-range port; urlsplit
+        # itself does not validate it, so touch it here or a malformed port sails
+        # through boot and fails per call, laundered into cannot_extract (HARD #7).
+        _ = parts.port
+    except ValueError:
+        return malformed
+    if parts.username is not None:
+        return (
+            "ALFRED_QUARANTINE_BASE_URL must not embed credentials — it carries a "
+            "'user@' / 'user:password@' userinfo component, and this child's spawn "
+            "environment is readable via /proc and can reach a crash dump. The "
+            "provider key arrives over fd 3 (spec §5.3), never the environment; put "
+            "the credential in ALFRED_QUARANTINE_PROVIDER_API_KEY host-side and set "
+            "the base URL to a bare scheme://host[:port][/path] (§20.2)"
+        )
+    if parts.query or parts.fragment:
+        return (
+            "ALFRED_QUARANTINE_BASE_URL must not carry a query string or fragment — "
+            "the openai SDK silently truncates the URL at the query, so it never "
+            "reaches the provider, yet it still sits in this child's spawn "
+            "environment: pure credential-exposure risk with no function. Use a bare "
+            "scheme://host[:port][/path] (§20.2)"
+        )
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return malformed
+    return None
+
+
 def _build_provider(key: str) -> _ProviderFactory:
     """Build the per-child provider FACTORY from the fd-3 key + spawn-env config.
 
@@ -433,6 +510,25 @@ def _build_provider(key: str) -> _ProviderFactory:
     failures on the §20.2 refuse-boot path, so both must present as ONE loud, typed,
     actionable shape that names the offending variable (HARD #7) — never a stdlib
     exception the operator has to decode, and never a silent model default.
+
+    ``ALFRED_QUARANTINE_PROVIDER`` (#587) is held to that SAME contract: it is validated
+    against :data:`_SUPPORTED_PROVIDER_IDS` here, before ``_ProviderFactory.from_key``.
+    Without that check an out-of-set id reaches ``BrokeredProviderSource.__init__``,
+    which refuses with a bare ``ValueError`` — a stdlib exception, raised after the
+    control socket is built, in a function whose contract is that no such thing escapes.
+
+    ``ALFRED_QUARANTINE_BASE_URL`` (#587) is held to that same contract for the ONE
+    provider that needs it: ``deepseek``. An unset/blank value there does not fail at
+    all here — the OpenAI-compatible client constructs happily — so the child would
+    report ``ready`` and fail only on its FIRST extraction, laundered by the dispatch
+    retry loop into a generic ``cannot_extract``. The guard below keeps that fault on
+    the boot path where it belongs. A PRESENT value gets a second check
+    (CodeRabbit, Major): :func:`_base_url_rejection_reason` rejects userinfo, a
+    query string or fragment, and any unparseable/unusable URL, mirroring
+    ``Settings._validate_deepseek_base_url`` — the host-side validator that would
+    normally have caught a credential-bearing value before it ever reached this
+    child's spawn environment, closing the same composed host/child gap the
+    provider-id guard above closes.
 
     The ``max_tokens > 0`` guard (Task 15, HARD #7) fires HERE — before the request loop
     that calls ``dispatch_extraction`` is ever entered — so a ``<= 0`` budget can never
@@ -461,6 +557,24 @@ def _build_provider(key: str) -> _ProviderFactory:
             "only on the live (control_fd=True) spawn, so an unset value means the spawn "
             "call omitted the golive provider config (§20.2)"
         ) from exc
+    if not model.strip():
+        # §20.2 SECONDARY refuse-boot (HARD #7), the same shape as every guard in this
+        # function — and the sibling of the ALFRED_QUARANTINE_BASE_URL blank guard below,
+        # closing the identical hole on the OTHER required config value (round-5 review
+        # fleet, 1E): the KeyError check above proves the var is SET, never that it is
+        # USABLE. A blank model id is present, passes that check, and constructs a
+        # provider that fails every extraction with an unusable-model API error — laundered
+        # by the dispatch retry loop into a generic ``cannot_extract`` exactly like an
+        # unset base_url would be. The value is host-set routing config (non-secret /
+        # non-T3), safe to echo, but an unset/blank value has nothing worth echoing.
+        raise QuarantineChildBootError(
+            "ALFRED_QUARANTINE_MODEL must not be blank — refusing to boot a child whose "
+            "every extraction would fail on an unusable model id (§20.2)"
+        )
+    # Strip-and-STORE, matching ALFRED_QUARANTINE_BASE_URL's handling below and
+    # Settings._reject_blank_deepseek_model: passing the raw value on would thread
+    # invisible leading/trailing bytes into the SDK client.
+    model = model.strip()
     # A non-integer budget is the same class of spawn-wiring fault: refuse typed rather than
     # let `int()` raise a bare ValueError out of a security gate.
     try:
@@ -479,7 +593,70 @@ def _build_provider(key: str) -> _ProviderFactory:
             f"ALFRED_QUARANTINE_MAX_TOKENS must be > 0, got {max_tokens} — refusing to "
             "boot a child whose every extraction would fail its >0 validator (§20.2)"
         )
-    return _ProviderFactory.from_key(key, model=model, max_tokens=max_tokens)
+    # #587: default "anthropic" when unset (matches Settings.quarantine_provider's
+    # default) — a dormant/unit spawn or a pre-#587 host omits this var entirely.
+    provider_id = os.environ.get("ALFRED_QUARANTINE_PROVIDER", "anthropic")
+    if provider_id not in _SUPPORTED_PROVIDER_IDS:
+        # §20.2 SECONDARY refuse-boot (HARD #7), same shape as the KeyError and
+        # max_tokens guards above. Unreachable from a well-behaved HOST today —
+        # Settings.quarantine_provider is Literal-validated before it ever reaches this
+        # env var — but the guard closes the composed gap between the host's validation
+        # and this UNVALIDATED env read: a supervisor-side spawn-wiring bug or manual env
+        # tampering would otherwise carry an out-of-set id all the way to
+        # BrokeredProviderSource.__init__, which refuses with a bare stdlib ``ValueError``
+        # — exactly the "stdlib exception the operator has to decode" this function's
+        # contract promises never happens. Refusing HERE also keeps the refusal on the
+        # boot path (before ``ready``) rather than after the control socket is built.
+        # The value is host-set routing config (non-secret / non-T3), safe to echo.
+        raise QuarantineChildBootError(
+            f"ALFRED_QUARANTINE_PROVIDER must be one of "
+            f"{sorted(_SUPPORTED_PROVIDER_IDS)}, got {provider_id!r} — refusing to boot a "
+            "child that cannot resolve a provider (§20.2)"
+        )
+    base_url = os.environ.get("ALFRED_QUARANTINE_BASE_URL")
+    if provider_id == "deepseek" and not (base_url or "").strip():
+        # §20.2 SECONDARY refuse-boot (HARD #7), the SAME contract as the three guards
+        # above. DeepSeek's OpenAI-compatible client needs an explicit endpoint; Anthropic's
+        # SDK supplies its own default, so this is deepseek-ONLY by design. Without the
+        # guard an unset/blank base_url reaches ``AsyncOpenAI(base_url=None|"")``, which
+        # CONSTRUCTS fine — the child then reports ``ready`` and fails only on the FIRST
+        # EXTRACTION, where the dispatch retry loop LAUNDERS the per-call failure into a
+        # generic ``cannot_extract`` typed refusal. That turns a boot-config fault into a
+        # runtime-extraction fault wearing a costume — precisely the shape the sibling
+        # guards exist to prevent. The host's own pre-spawn
+        # ``_resolve_quarantine_base_url`` refuses the same case, so this closes the
+        # composed gap between the host's validation and this UNVALIDATED env read
+        # (spawn-wiring bug or manual env tampering). The value is host-set routing
+        # config (non-secret / non-T3), but it is not echoed — an unset/blank value has
+        # nothing to name.
+        raise QuarantineChildBootError(
+            "ALFRED_QUARANTINE_BASE_URL must be set for provider_id='deepseek' "
+            "and must not be blank (§20.2) — refusing to boot a child that would "
+            "fail its first extraction instead of its boot check"
+        )
+    stripped_base_url = (base_url or "").strip()
+    if stripped_base_url:
+        # CodeRabbit (Major): the guard above proved the value is PRESENT, never that
+        # it is credential-free. Deliberately NOT provider-scoped, unlike the blank
+        # guard above: a well-behaved host sends no base_url at all on the anthropic
+        # path (``_resolve_quarantine_base_url`` returns ``None``, ``_child_env``
+        # omits the var), so the only way anthropic sees one is the same wiring-bug /
+        # tampering case this whole family of guards exists for — and the /proc +
+        # crash-dump exposure does not care which provider later reads the variable.
+        reason = _base_url_rejection_reason(stripped_base_url)
+        if reason is not None:
+            raise QuarantineChildBootError(reason)
+        # Strip-and-STORE, matching Settings._validate_deepseek_base_url: passing the
+        # raw value on would thread invisible leading/trailing bytes into the SDK
+        # client.
+        base_url = stripped_base_url
+    return _ProviderFactory.from_key(
+        key,
+        provider_id=provider_id,
+        model=model,
+        max_tokens=max_tokens,
+        base_url=base_url,
+    )
 
 
 async def _run_mcp_server(source: Any, *, reader: _FrameReader, writer: _FrameWriter) -> None:

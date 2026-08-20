@@ -401,6 +401,31 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {},
         ("event",),
     ),
+    # #589: alfred.cli._settings_errors' value-free settings-error renderers.
+    # Four near-identical "configuration is invalid" bodies now share the
+    # catalog (the fully-generic one, the field-named one, the field+choices
+    # one, plus the daemon-boot field+choices sibling) — exactly the fuzzy-swap
+    # cluster this test file's docstring warns about, so each fingerprint below
+    # is chosen to be MUTUALLY EXCLUSIVE: "missing or malformed" appears only in
+    # the fully-generic body, "was rejected" only in the field-named CLI body,
+    # "must be one of" only in the field+choices CLI body, and "accepted values"
+    # only in the daemon-boot field+choices body.
+    "error.config_invalid": (
+        {},
+        ("missing or malformed",),
+    ),
+    "error.config_invalid_field": (
+        {"field": "primary_provider"},
+        ("was rejected",),
+    ),
+    "error.config_invalid_field_choices": (
+        {"field": "primary_provider", "choices": "'anthropic' or 'deepseek'"},
+        ("must be one of",),
+    ),
+    "daemon.boot.settings_invalid_field_choices": (
+        {"field": "primary_provider", "choices": "'anthropic' or 'deepseek'"},
+        ("accepted values",),
+    ),
 }
 
 

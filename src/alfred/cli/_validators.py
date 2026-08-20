@@ -372,7 +372,9 @@ def validate_domain(value: str) -> str:
 # provider registry may not have run its module-init wiring, so a
 # runtime lookup risks false rejections. The trade-off is a maintenance
 # burden of one line per future provider, paid for in deterministic
-# parse-time rejection.
+# parse-time rejection. One of six copies of this set across the codebase — pinned
+# equal by ``test_provider_closed_set_copies_stay_in_lockstep``
+# (``tests/unit/config/test_settings.py``).
 _ALLOWED_QUARANTINED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "deepseek"})
 
 

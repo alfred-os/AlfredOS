@@ -186,7 +186,7 @@ async def test_auditor_is_threaded_into_transport(
     ``test_build_extractor_reaps_child_when_transport_construction_fails`` in
     ``tests/unit/comms_mcp/test_daemon_runtime.py``.
     """
-    from alfred.comms_mcp.daemon_runtime import _build_comms_inbound_extractor
+    from alfred.comms_mcp.daemon_runtime import _QUARANTINE_MODEL, _build_comms_inbound_extractor
     from alfred.egress.broker_audit import EgressBrokerAuditor
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine_transport import QuarantineStagingMap
@@ -234,6 +234,9 @@ async def test_auditor_is_threaded_into_transport(
             staging=QuarantineStagingMap(),
             environment="production",
             egress_config=_EgressCfg(),
+            quarantine_provider="anthropic",
+            quarantine_model=_QUARANTINE_MODEL,
+            quarantine_base_url=None,
         )
 
     auditor = seen["broker_auditor"]

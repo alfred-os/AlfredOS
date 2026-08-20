@@ -270,9 +270,11 @@ def test_boot_refuses_fail_closed_on_misconfigured_promoter(
     assert result.exit_code == 2, result.output
 
     sup = FakeSupervisor.last_instance
-    assert sup is not None
-    # The pump was NEVER registered — fail-closed, not parked-with-misconfig.
-    assert sup.registered_tasks == []
+    # The pump was NEVER registered — fail-closed, not parked-with-misconfig. The
+    # refusal fires before Supervisor() is even constructed; deterministic per
+    # conftest.py's autouse _reset_fake_supervisor_last_instance, which resets the
+    # ClassVar at SETUP for every test in this package.
+    assert sup is None, sup
     rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
     assert rows
     reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
@@ -326,9 +328,11 @@ async def test_graph_aclose_skips_close_for_non_content_store() -> None:
     assert not_a_store.close_calls == 0
 
 
-# These two run LAST: the supervisor-stop case boots fully (registers a pump) and
-# the misconfig test above reads the shared FakeSupervisor.last_instance, so a
-# full-boot test must not precede a last_instance reader (the #255 isolation quirk).
+# No ordering constraint: conftest.py's autouse _reset_fake_supervisor_last_instance
+# resets FakeSupervisor.last_instance at SETUP for every test in this package, so
+# a full-boot test here registering a pump cannot leak into the misconfig test
+# above reading the same ClassVar, whichever order pytest collects them in (the
+# #255 isolation quirk this comment used to guard against by hand).
 def test_boot_reaps_content_store_when_graph_assembly_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

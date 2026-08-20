@@ -45,7 +45,6 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 import typer
-from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import (
@@ -62,6 +61,7 @@ from alfred.bootstrap.nonce_factory import (
     T3NonceAlreadyRegisteredError,
     create_and_register_t3_nonce,
 )
+from alfred.cli._settings_errors import daemon_boot_settings_message
 from alfred.cli.daemon._audit_fallback import build_boot_audit_writer
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
@@ -73,6 +73,7 @@ from alfred.cli.daemon._boot_audit import (
     _refuse_boot,
 )
 from alfred.cli.daemon._comms_boot import (
+    QuarantineProviderSeparationCollisionError,
     _build_comms_boot_graph,
     _CommsBootGraph,
     _ForwardedInboundRegistryMisconfiguredError,
@@ -81,6 +82,7 @@ from alfred.cli.daemon._comms_boot import (
     _make_control_reject_auditor,
     _resolve_adapter_carrier_kind,
     _spawn_comms_adapter,
+    enforce_quarantine_provider_separation,
 )
 from alfred.cli.daemon._daemon_control_server import DaemonControlServer
 from alfred.cli.daemon._daemon_pidfile import (
@@ -109,7 +111,9 @@ from alfred.cli.daemon._failures import (
     QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
     QuarantineMaxTokensInvalidFailure,
+    QuarantineProviderConfigInvalidFailure,
     QuarantineProviderKeyUnsetFailure,
+    QuarantineProviderSeparationViolatedFailure,
     RouterSecretMissingFailure,
     SecretsConfigFailedFailure,
     SettingsInvalidFailure,
@@ -132,6 +136,7 @@ from alfred.cli.daemon._gate_boot import (
 # bogus placeholder key = a silent dead-LLM (§20.3.1 must-not-regress).
 from alfred.comms_mcp.daemon_runtime import (
     QuarantineMaxTokensInvalidError,
+    QuarantineProviderConfigInvalidError,
     QuarantineProviderKeyUnsetError,
 )
 from alfred.config._environment_loader import (
@@ -191,7 +196,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from alfred.audit.log import AuditWriter
-    from alfred.config.settings import Settings, SettingsError
+    from alfred.config.settings import Settings
 
     # sec-001 (#256 PR-3): annotation-only here (``socket_listeners:
     # list[CommsSocketListener]`` in _start_async). Kept under TYPE_CHECKING so the
@@ -373,7 +378,8 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult]:
       some OTHER required field (a secret, a DSN, a numeric bound) is invalid,
       NOT the environment. Raises ``_SettingsInvalidError`` carrying a
       CURATED message (never raw ``str(exc)`` — DLP: a ``database_url``
-      failure can echo a DSN password) built by ``_bootstrap_settings_message``.
+      failure can echo a DSN password) built by
+      :func:`alfred.cli._settings_errors.daemon_boot_settings_message`.
 
     sec-001: the caller has already built the AuditWriter, so every raise
     here is converted by the async caller into the audited-then-exit refusal.
@@ -393,7 +399,7 @@ def _load_settings_or_die() -> tuple[Settings, EnvironmentLoadResult]:
         settings = Settings(environment=result.value)  # type: ignore[no-untyped-call]  # reason: Settings.__init__ untyped pending task-17
     except SettingsError as exc:
         raise _SettingsInvalidError(
-            _bootstrap_settings_message(exc), source=result.source.value
+            daemon_boot_settings_message(exc), source=result.source.value
         ) from exc
     return settings, result
 
@@ -438,82 +444,6 @@ def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
             value=load_result.unrecognised_value or "",
         )
     return t("daemon.boot.environment_not_set")
-
-
-def _settings_error_field_name(exc: SettingsError) -> str | None:
-    """Extract the offending dotted FIELD PATH from a chained pydantic ``ValidationError``.
-
-    M2 (fleet review): ``ValidationError.errors()[].loc`` is the field path pydantic
-    itself attributes the failure to — safe to surface, unlike ``.msg``/``.input``,
-    either of which can carry the invalid VALUE (a custom validator's ``ValueError``
-    text can embed it, e.g. a ``database_url`` failure quoting the DSN). ``loc`` is
-    excluded from that risk: it names WHERE validation failed, never what value was
-    there. ``Settings.__init__`` chains the original exception via ``raise
-    SettingsError(str(exc)) from exc``, so ``exc.__cause__`` is the real
-    ``ValidationError`` on a genuine ``Settings()`` construction failure. Returns
-    ``None`` when no such chain exists (e.g. a test double raising ``SettingsError``
-    directly with no ``from``) or the cause is not a ``ValidationError`` — the caller
-    falls back to the fully generic message rather than guess — except for a model-level
-    (``loc=()``) error whose TYPE is a deliberately-authored ``PydanticCustomError`` slug,
-    which is returned as the DLP-safe category (#410 PR1).
-    """
-    cause = exc.__cause__
-    if not isinstance(cause, ValidationError):
-        return None
-    errors = cause.errors(include_url=False, include_context=False, include_input=False)
-    if not errors:
-        return None
-    loc = errors[0]["loc"]
-    if not loc:
-        # #410 PR1 (fleet finding H-3): a model-level validator reports
-        # loc=(). A DELIBERATELY-SLUGGED PydanticCustomError (e.g. the
-        # db-pool budget validator's "db_pool_connection_budget_exceeded")
-        # carries its category in the error TYPE — a value-free identifier
-        # authored as a string literal in settings.py, safe to surface under
-        # the same never-a-value contract as the field path below. Pydantic's
-        # own wrappers for bare `raise ValueError/AssertionError` arrive as
-        # the generic "value_error"/"assertion_error" types, which name
-        # nothing — those (and only those) still degrade to the generic
-        # message.
-        error_type = errors[0]["type"]
-        if error_type not in {"value_error", "assertion_error"}:
-            return error_type
-        return None
-    return ".".join(str(part) for part in loc)
-
-
-def _bootstrap_settings_message(exc: SettingsError) -> str:
-    """Pick the curated operator-facing message for a post-env ``Settings()`` failure.
-
-    Mirrors ``alfred.cli._bootstrap.load_settings_or_die``'s placeholder-vs-
-    generic branch, but the generic arm NEVER interpolates ``str(exc)``. This
-    message does NOT land in the audit row — ``_refuse_boot``'s fixed subject
-    shape only ever carries ``boot_id`` / ``attempted_at`` / ``failure_reason``
-    / ``environment_source``; the message itself reaches
-    ``typer.echo(..., err=True)`` (stderr), which for a daemon running as a
-    background service is commonly captured into durable container/system
-    logs (journald, ``docker logs``) rather than watched live by an operator —
-    unlike the interactive CLI bootstrap path this mirrors, which only ever
-    echoes to a first-run operator's own terminal. DLP: a ``database_url``/DSN
-    validation failure's ``str(exc)`` can echo a password, and CLAUDE.md hard
-    rule #1 (never log secrets) applies to that stderr/log sink just as much
-    as to a structlog line. ``daemon.boot.settings_invalid`` names the fix +
-    the ``alfred daemon start`` / ``docker compose up -d`` re-run — not
-    ``/etc/alfred`` (the environment was already resolved by the time this
-    runs; the fault is in some OTHER Settings field).
-
-    M2 (fleet review): when the FIELD NAME is safely recoverable
-    (:func:`_settings_error_field_name` — the pydantic ``loc``, never the value),
-    the curated ``daemon.boot.settings_invalid_field`` variant names it, saving the
-    operator a `grep` through the compose logs to find which field is wrong. Still
-    NEVER interpolates ``str(exc)`` or any value — only the field's dotted PATH.
-    """
-    if "placeholder_api_key" in str(exc):
-        return t("error.placeholder_api_key")
-    field = _settings_error_field_name(exc)
-    if field is not None:
-        return t("daemon.boot.settings_invalid_field", field=field)
-    return t("daemon.boot.settings_invalid")
 
 
 def _start_core_metrics_server(boot_id: str) -> None:
@@ -1030,6 +960,65 @@ async def _start_async() -> None:
     # broadcast through it after the (authoritative) audit row. Zero registrations in
     # the normal boot (the peer connects on-demand) → a clean DEBUG no-op.
     lifecycle_broadcaster = LifecycleBroadcaster()
+
+    # #586 (CodeRabbit): the opt-in provider-separation gate runs on EVERY boot,
+    # OUTSIDE the `if settings.comms_enabled_adapters` below. It used to live inside
+    # `_build_comms_boot_graph`, which that `if` gates — so a daemon with
+    # ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true, colliding providers and no
+    # enabled adapter booted CLEAN: the operator opted into a security posture, got a
+    # green boot, and the control never ran. Whether comms is enabled must not decide
+    # whether a security gate applies. Placed before write_pidfile/supervisor.start so
+    # a refusal still has no daemon-up side effects.
+    try:
+        await enforce_quarantine_provider_separation(
+            settings=settings, audit=audit, boot_id=boot_id
+        )
+    except QuarantineProviderSeparationCollisionError as exc:
+        # #586: require_quarantine_provider_separation=True and the privileged
+        # + quarantine providers collide. REACHABLE via a real boot (an operator
+        # opted into the stricter dual-LLM posture and misconfigured it). REFUSE
+        # boot fail-closed (audited, exit 2) rather than let the bare AlfredError
+        # assert_provider_separation() raises propagate uncaught (the #368
+        # anti-pattern — arch-002/sec-001/test-001).
+        #
+        # A t() catalogue message, NOT str(exc), for the same reason as every
+        # sibling arm: assert_provider_separation()'s own message predates this
+        # branch and names routing.yaml [quarantine] + "spec §5.4" — a remedy that
+        # does NOT work (routing.yaml is not read at runtime) and a citation the
+        # opt-in ADR-0064 supersedes. The catalogue message names the two env vars
+        # that actually change the outcome.
+        #
+        # Log the two colliding ids (review fix): the t() operator message names the
+        # env vars to CHANGE but deliberately not the values, and the closed
+        # DAEMON_BOOT_FAILED_FIELDS schema carries only the reason token — so without
+        # this line the actual collision is nowhere in the boot record, while its
+        # require=False WARN sibling in _comms_boot.py logs both. Same
+        # purely-diagnostic shape as the quarantine_grant_missing log above: it does
+        # not touch the audited failure_reason token or the audit schema. The values
+        # are non-secret routing config (closed-set provider ids, never a key), so
+        # CLAUDE.md hard rule #5 is not in play.
+        #
+        # NOTE: ``privileged_provider`` below is ``settings.primary_provider`` —
+        # a CONFIGURED setting, not what a privileged call actually dials (build_router
+        # hardcodes DeepSeek with an Anthropic fallback and never reads this field;
+        # issue #590).
+        log.error(
+            "daemon.boot.quarantine_provider_separation_violated",
+            privileged_provider=settings.primary_provider,
+            quarantine_provider=settings.quarantine_provider,
+        )
+        await _refuse_boot(
+            audit,
+            QuarantineProviderSeparationViolatedFailure(),
+            t("daemon.boot.quarantine_provider_separation_violated"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
+        # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
+        # line is unreachable defence-in-depth for the type checker's flow, matching
+        # the sibling _refuse_boot arms — and gives the now-bound ``exc`` a use, so
+        # the binding cannot be dropped as unused by a future cleanup.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
     if settings.comms_enabled_adapters:
         # PR-S4-11c-2b: the comms-graph build now SPAWNS the live bwrap quarantined
         # child (``spawn_quarantine_child_io`` inside ``_build_comms_inbound_extractor``).
@@ -1106,6 +1095,29 @@ async def _start_async() -> None:
                 audit,
                 QuarantineMaxTokensInvalidFailure(),
                 t("daemon.boot.quarantine_max_tokens_invalid"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except QuarantineProviderConfigInvalidError:
+            # Round-5 review fleet, Tier A: _build_comms_inbound_extractor resolves the
+            # quarantined child's provider-aware (model, base_url) SYNCHRONOUSLY
+            # (pre-spawn), via _resolve_quarantine_model / _resolve_quarantine_base_url.
+            # An out-of-closed-set provider_id, a blank deepseek_model, or a blank
+            # deepseek_base_url raises this BEFORE the bwrap child is spawned. REFUSE
+            # boot fail-closed (audited, exit 2) rather than thread an unusable
+            # model/endpoint into the child env, where every extraction would fail and
+            # the dispatch retry loop would LAUNDER that into a generic cannot_extract
+            # refusal (masking the misconfig — the HARD #7 silent-fail shape this whole
+            # arm exists to close: the resolver used to raise a bare ValueError here,
+            # caught by NO arm of this cascade, producing an uncaught exit-1 crash with
+            # ZERO daemon.boot.failed rows — the #368 anti-pattern). Distinct reason
+            # from quarantine_max_tokens_invalid (the budget, not the provider/model/
+            # endpoint) and quarantine_provider_key_unset (the key, not its config).
+            # Pre-spawn, so no live child leaks.
+            await _refuse_boot(
+                audit,
+                QuarantineProviderConfigInvalidFailure(),
+                t("daemon.boot.quarantine_provider_config_invalid"),
                 boot_id=boot_id,
                 environment_source=source,
             )
@@ -1671,3 +1683,20 @@ def _render_live_adapter_status() -> None:
                 latest_crash=latest,
             )
         )
+
+
+# mypy --strict (--no-implicit-reexport): the names below are IMPORTED into this
+# module from elsewhere (``_comms_boot.py`` / ``_boot_audit.py``), not defined
+# here, so several test files that do ``from alfred.cli.daemon._commands import
+# ...`` on them need an explicit re-export declaration (mirrors
+# ``_daemon_control_client.py``'s / ``_daemon_control_server.py``'s existing
+# ``__all__`` convention in this same package). Names DEFINED directly in this
+# module (``start_daemon`` / ``build_boot_session_scope`` / etc.) need no entry
+# here — only names re-exported from ANOTHER module trigger the check.
+__all__ = [
+    "LifecycleBroadcaster",
+    "_CommsBootGraph",
+    "_build_comms_boot_graph",
+    "_listen_socket_comms_adapter",
+    "_spawn_comms_adapter",
+]

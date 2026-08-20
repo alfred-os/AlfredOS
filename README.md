@@ -51,14 +51,38 @@ alfred chat                 # start a TUI conversation
 >   `.env.example`. This key is required regardless of which comms adapters are enabled. Get one
 >   from <https://platform.deepseek.com>.
 > - **`ALFRED_QUARANTINE_PROVIDER_API_KEY`** — the credential for the quarantined half of the
->   dual-LLM split, which now makes real provider calls. The quarantined provider **must differ**
->   from the privileged one (`config/routing.yaml`), so with the default DeepSeek-privileged setup
->   this is an **Anthropic** key — get one from <https://console.anthropic.com>. With it unset the
->   core exits 2 (`quarantine_provider_key_unset`) and crash-loops under `restart: unless-stopped`.
->   This is deliberate — a keyless first run does not start. `bin/alfred-setup.sh` reports the
->   missing key and exits 1; it cannot seed one for you.
+>   dual-LLM split, which now makes real provider calls. The quarantined provider **should differ**
+>   from the privileged one by default (`config/routing.yaml` / `ALFRED_QUARANTINE_PROVIDER`) — so
+>   with the default DeepSeek-privileged setup this is an **Anthropic** key — get one from
+>   <https://console.anthropic.com>. You can set `ALFRED_QUARANTINE_PROVIDER=deepseek` to use
+>   DeepSeek for both roles instead; set `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` to
+>   make a collision refuse boot rather than only warn — but read that as a check on the two
+>   *configured* provider settings, not as a runtime guarantee: `build_router`
+>   (`src/alfred/cli/_bootstrap.py`) never reads `ALFRED_PRIMARY_PROVIDER` and always wires
+>   Anthropic in as the privileged fallback when `ALFRED_ANTHROPIC_API_KEY` is set, so the check
+>   can pass while a privileged turn still lands on the quarantine provider (see
+>   [ADR-0064](docs/adr/0064-quarantine-provider-separation-is-opt-in.md);
+>   [#590](https://github.com/alfred-os/AlfredOS/issues/590) tracks closing that gap). With the
+>   key unset the core exits 2 (`quarantine_provider_key_unset`) and crash-loops under
+>   `restart: unless-stopped`. This is deliberate — a keyless first run does not start.
+>   `bin/alfred-setup.sh` reports the missing key and exits 1; it cannot seed one for you.
 >
-> **Precisely:** the _quarantine_-key refuse-boot is gated on comms being enabled
+> **The quarantine key must MATCH `ALFRED_QUARANTINE_PROVIDER`, and a mismatch is not caught
+> at boot.** It is a **separate credential**, never derived from or forwarded from
+> `ALFRED_DEEPSEEK_API_KEY` / `ALFRED_ANTHROPIC_API_KEY` — so with
+> `ALFRED_QUARANTINE_PROVIDER=deepseek` it must be its **own DeepSeek** key, not a copy of the
+> privileged one (copying it puts both halves of the dual-LLM split on one account; see
+> [ADR-0064](docs/adr/0064-quarantine-provider-separation-is-opt-in.md)). There is no
+> key-shape validation: boot checks only that the variable is non-empty, so a key belonging to
+> the *other* provider passes every startup check and shows up only at the **first extraction**,
+> as a generic `provider_unavailable` typed refusal. The provider's own error text is
+> deliberately not carried into that refusal — the quarantine child handles T3 (untrusted)
+> content and provider error strings can echo request fragments, so surfacing them across that
+> boundary would be a leak channel. That redaction is by design, not a bug. Practically: if
+> extractions start failing right after you switch `ALFRED_QUARANTINE_PROVIDER`, suspect this
+> key first — the refusal will not name it.
+>
+> **Precisely:** the *quarantine*-key refuse-boot is gated on comms being enabled
 > (`settings.comms_enabled_adapters`). With no adapters enabled there is no quarantine path, so
 > that key is not needed and the core boots fine. That is not the quickstart above:
 > `docker-compose.yaml` defaults `ALFRED_COMMS_ENABLED_ADAPTERS` to `["alfred_tui"]`, so the
@@ -70,7 +94,7 @@ alfred chat                 # start a TUI conversation
 (`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a
 one-shot command runner. One-off subcommands still work via
 `docker compose run --rm alfred-core <cmd>` (`migrate`, `user add`, `chat`, …) because
-`run` overrides the service `command`. **Run `bin/alfred-setup.sh` _before_
+`run` overrides the service `command`. **Run `bin/alfred-setup.sh` *before*
 `docker compose up -d`**: it seeds the `audit.hash_pepper` and provisions secrets the
 daemon requires to boot. Skip it and the daemon refuse-boots and, under
 `restart: unless-stopped`, crash-loops. The script seeds what it can and warns about
@@ -283,7 +307,7 @@ permanent.
 
 - **Compose (the default deployment): unaffected.** `docker-compose.yaml`
   substitutes `ALFRED_ENVIRONMENT` from your host shell or host `.env` into a
-  container _environment variable_ before the container starts, so inside the
+  container *environment variable* before the container starts, so inside the
   container it arrives as the fully-trusted env-var source. `development` and
   `test` work normally.
 - **Bare host, configured only through `.env`:** the shipped `production` default
@@ -346,7 +370,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
-For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain _why_ the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
+For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain *why* the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
 
 If you (or an AI agent) are contributing to this repository, also read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 

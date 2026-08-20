@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
+from urllib.parse import urlsplit
 
 import structlog
 from pydantic import (
@@ -206,8 +207,75 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-sonnet-4-6"
-    primary_provider: str = "deepseek"
-    fallback_provider: str = "anthropic"
+
+    # The privileged half of the dual-LLM split. Was a bare ``str`` until CodeRabbit
+    # flagged that several boot-time log/audit sites (``_comms_boot.py``,
+    # ``_commands.py``) treat this value as "non-secret closed-set routing config,
+    # safe to log" — a claim that was only true of the sibling ``quarantine_provider``
+    # Literal below, not of an unconstrained string. An operator who fat-fingered a
+    # credential into ALFRED_PRIMARY_PROVIDER would have had it echoed verbatim into
+    # every one of those lines. Closed to the SAME two ids as ``quarantine_provider``
+    # (the only provider adapters this codebase implements — see
+    # ``src/alfred/providers/``); a Literal also makes the old dedicated
+    # blank-rejection validator redundant (blank is simply not a member) and retires
+    # the wrong-reason-forensics bug that validator existed to fix (a blank id used to
+    # reach ``assert_provider_separation``'s own blank-id arm and get relabelled as a
+    # provider COLLISION). Note this narrows the ACCEPTED VALUES only —
+    # ``build_router`` still hardcodes DeepSeek as primary and never reads this field
+    # for real routing (ADR-0064); #590 tracks closing that gap.
+    primary_provider: Literal["anthropic", "deepseek"] = "deepseek"
+
+    # The runtime fallback provider's id. Closed to the SAME two-member set as
+    # ``primary_provider`` above (the only adapters ``src/alfred/providers/``
+    # implements), for the same reason and by the same mechanism — a Literal, not a
+    # hand-written validator. It was the last bare ``str`` with the identical
+    # "closed-set routing config, safe to echo" shape, and it IS echoed: ``alfred.cli.
+    # main``'s ``status.fallback_provider`` line prints ``settings.fallback_provider``
+    # on the SUCCESS path whenever it validates — so before this field closed, a
+    # credential-shaped value simply validated (there was nothing to reject it) and
+    # printed in full on every ``alfred status``. Safe to land only AFTER #589's
+    # shared settings-error rendering (``alfred.cli._settings_errors``) closed the
+    # OTHER echo path: narrowing this field earlier would have turned every rejected
+    # value into a fresh ``ValidationError``, routing it straight into
+    # ``load_settings_or_die``'s then-still-raw ``str(exc)`` echo — the exact leak
+    # ``primary_provider``'s own Literal reopened on the interactive CLI path before
+    # that fix landed. Display-only today: ``build_router`` hardcodes Anthropic as
+    # the fallback and never reads this field (ADR-0064); #590 tracks closing that
+    # gap for both provider-selection fields together.
+    fallback_provider: Literal["anthropic", "deepseek"] = "anthropic"
+
+    # #587: the quarantine child's provider — one of SIX hand-maintained copies of this
+    # closed set (a Literal cannot import a frozenset; mypy --strict needs a static
+    # literal). The other five: primary_provider's and fallback_provider's Literals
+    # above, alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS,
+    # alfred.state.proposal_payloads._ALLOWED_QUARANTINED_PROVIDERS, and
+    # alfred.security.quarantine_child.__main__._SUPPORTED_PROVIDER_IDS. ONE test pins
+    # all six equal — test_provider_closed_set_copies_stay_in_lockstep
+    # (tests/unit/config/test_settings.py) — and its docstring records why widening the
+    # set also requires implementing the new provider at all four quarantine-dispatch
+    # sites in the SAME commit (prov-001). This comment is the pointer; the test is the
+    # gate. Defaults to "anthropic" — byte-for-byte today's behaviour for every deployment
+    # that doesn't set this.
+    quarantine_provider: Literal["anthropic", "deepseek"] = "anthropic"
+
+    # #586: opt-in enforcement that the quarantine and privileged providers differ.
+    # NOTE: no PRD section actually states this invariant today (arch-001/rev-001) —
+    # do NOT cite "PRD §6.4" here (that section is "Self-Improvement with Reviewer
+    # Gate", unrelated). See ADR-0064 for the accurately-anchored record of this
+    # decision. Defaults to False: a home/self-hosted operator must never be
+    # forced into running two paid provider accounts. An enterprise deployment
+    # that wants the stricter posture sets this to True.
+    require_quarantine_provider_separation: bool = Field(
+        default=False,
+        description=(
+            "When True, refuse to boot if quarantine_provider and primary_provider "
+            "are the same id (see alfred.bootstrap.quarantine.assert_provider_separation). "
+            "Default False — same-provider is permitted, with an operator-facing warning "
+            "(see #586, ADR-0064). Compares the two CONFIGURED settings, not which "
+            "provider a privileged call actually dials: primary_provider is config-only "
+            "and build_router never reads it (issue #590)."
+        ),
+    )
 
     # Spec C / G7-3 (#333, ADR-0042): the core builds provider SDK clients with an
     # httpx proxy pointed at the gateway L7 CONNECT proxy (e.g. "http://alfred-gateway:8889").
@@ -525,16 +593,17 @@ class Settings(BaseSettings):
 
         Raised as :class:`PydanticCustomError` (a ``ValueError`` subclass),
         NOT a bare ``ValueError`` — deliberately. A model-level validator
-        reports ``loc=()``, and the daemon boundary
-        (``alfred.cli.daemon._commands._settings_error_field_name``) refuses
-        to interpolate ``str(exc)`` for DLP reasons, so a bare raise would be
+        reports ``loc=()``, and the value-free renderer
+        (``alfred.cli._settings_errors.settings_error_field``) refuses to
+        interpolate ``str(exc)`` for DLP reasons, so a bare raise would be
         swallowed into the fully generic ``daemon.boot.settings_invalid``
         message. The custom error TYPE slug
         (``db_pool_connection_budget_exceeded``) is the value-free category
         that boundary surfaces instead — the operator learns WHICH constraint
         refused the boot without any configured number reaching a log sink.
-        The full message (numbers included) still reaches the interactive
-        path via ``load_settings_or_die``'s ``str(exc)`` echo.
+        No surface renders the full message any more (#589): the interactive
+        path (``load_settings_or_die``) now uses the same value-free renderer
+        as the daemon-boot path, so the slug is what BOTH surfaces show.
         """
         total = self.db_turn_pool_max_connections + self.db_side_pool_max_connections
         if total > DB_TURN_PLUS_SIDE_POOL_CONNECTION_BUDGET:
@@ -608,6 +677,193 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return tuple(part.strip() for part in value.split(",") if part.strip())
         return value
+
+    @field_validator("deepseek_base_url")
+    @classmethod
+    def _validate_deepseek_base_url(cls, v: str) -> str:
+        """Reject a blank/whitespace OR credential-bearing ``ALFRED_DEEPSEEK_BASE_URL``.
+
+        **Credentials (CodeRabbit r3).** ``base_url`` is documented as non-secret routing
+        config, but the value an operator PUTS in it need not be: an egress-relay-fronted
+        deployment commonly fronts a self-hosted proxy with inline basic auth
+        (``https://apikey:@relay.internal/v1`` — the conventional nginx/Envoy shape), which
+        is precisely the flexibility this setting exists to give. #587 then threads the raw
+        value through ``_resolve_quarantine_base_url`` into the quarantine child's SPAWN
+        ENVIRONMENT as ``ALFRED_QUARANTINE_BASE_URL``, where it crosses a process boundary
+        and becomes readable via ``/proc/<pid>/environ`` and dumpable in a crash report.
+        Sanitising the ``_ProviderFactory`` repr (``_redact_base_url``) fixes the DISPLAY of
+        that value, not the DATA FLOW.
+
+        Refusing userinfo HERE closes it at the boundary instead — one check on the way in,
+        rather than a sanitiser at every place the value is later shown or transmitted (the
+        enumerate-vs-default-deny lesson). The message must not echo ``v`` — the offending
+        value is the credential.
+
+        **Query strings and fragments (CodeRabbit PR-review r1).** Also rejected, not just
+        userinfo — ``?api_key=...`` is at least as common a real-world API-credential shape
+        as inline userinfo, and unlike a path prefix it has NO legitimate function on this
+        field: empirically, ``AsyncOpenAI(base_url=...).base_url.join("chat/completions")``
+        SILENTLY DROPS everything from the query onward (verified: a base_url of
+        ``https://relay.internal/v1?region=eu`` joins to
+        ``https://relay.internal/chat/completions`` — losing BOTH the query AND the ``/v1``
+        path prefix it was attached to), so a query string never reaches DeepSeek's API
+        regardless of content. It still reaches the child's spawn environment and this
+        factory's repr, though (the same exposure vector as userinfo) — so it is pure risk
+        with zero function, not a "legitimate proxy setup" this validator needs to permit. A
+        bare PATH (no query, no fragment) is unaffected — ``https://relay.internal:8443/team-a/v1``
+        joins correctly and is exactly the "relay routing prefix" use case this setting exists
+        to support.
+
+        **Blanks.** The sibling ``_normalize_egress_proxy_url`` can map blank to ``None``
+        because its field is optional and a downstream seam fails closed on ``None``. This
+        field is a required ``str`` with a real default, and BOTH consumers treat "present"
+        as "usable": ``build_router`` hands it to the privileged ``DeepSeekProvider``,
+        and (#587) ``_resolve_quarantine_base_url`` hands it to the quarantine child.
+        ``build_child_client``'s ``base_url is None`` refusal therefore cannot fire for
+        a blank — ``AsyncOpenAI(base_url="")`` constructs fine and only fails per call,
+        where the quarantine dispatch retry loop LAUNDERS it into a generic
+        ``cannot_extract`` (CLAUDE.md hard rule #7 — a boot-time misconfiguration wearing
+        a runtime-failure costume).
+
+        Refusing at Settings construction routes it to the EXISTING audited
+        ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row) rather
+        than an uncaught crash (exit 1, no audit row — the #368 anti-pattern). Raw
+        English, no ``t()``: Settings loads before the translator, exactly as
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field NAME
+        (never the value, per the credentials note above).
+        """
+        v = v.strip()
+        if not v:
+            raise ValueError(
+                "deepseek_base_url must not be blank — set ALFRED_DEEPSEEK_BASE_URL to "
+                "the DeepSeek API base (default https://api.deepseek.com/v1) or leave it "
+                "unset to take that default"
+            )
+        malformed = (
+            "deepseek_base_url is not a valid DeepSeek API base — set "
+            "ALFRED_DEEPSEEK_BASE_URL to a plain http(s)://host[:port][/path] (default "
+            "https://api.deepseek.com/v1). The value is not echoed here in case it "
+            "carries a credential"
+        )
+        try:
+            parts = urlsplit(v)
+            # ``.port`` is a lazy property that raises on a non-numeric/out-of-range port
+            # (e.g. ``https://host:notaport/v1``) — ``urlsplit()`` itself does not
+            # validate this eagerly, so touch it here or a malformed port sails through
+            # Settings and only fails later, deep in the httpx/openai SDK, as a confusing
+            # runtime error instead of a boot-time refusal naming the field (CodeRabbit r4).
+            _ = parts.port
+        except ValueError as exc:
+            # ``urlsplit``/``.port`` raise on e.g. a malformed IPv6 literal or a
+            # non-numeric port. Fail CLOSED and typed: a URL we cannot parse is exactly
+            # the one we cannot prove is credential-free, and letting the raw ValueError
+            # escape would surface pydantic's own rendering of the parse error instead of
+            # a message naming the field an operator must fix.
+            raise ValueError(malformed) from exc
+        if parts.username is not None:
+            raise ValueError(
+                "deepseek_base_url must not embed credentials — ALFRED_DEEPSEEK_BASE_URL "
+                "carries a 'user@' / 'user:password@' userinfo component, and #587 threads "
+                "this value into the quarantine child's spawn environment "
+                "(ALFRED_QUARANTINE_BASE_URL), where it is readable via /proc and can reach "
+                "a crash dump. Put the credential in ALFRED_DEEPSEEK_API_KEY (privileged "
+                "path) / ALFRED_QUARANTINE_PROVIDER_API_KEY (quarantine child) and set the "
+                "base URL to a bare scheme://host[:port][/path]"
+            )
+        if parts.query or parts.fragment:
+            raise ValueError(
+                "deepseek_base_url must not carry a query string or fragment — "
+                "ALFRED_DEEPSEEK_BASE_URL is silently truncated at the query by the openai "
+                "SDK's URL-joining (never reaches DeepSeek's API), yet still crosses into "
+                "the quarantine child's spawn environment and this factory's repr — pure "
+                "credential-exposure risk with no function. Use a bare "
+                "scheme://host[:port][/path]; put any credential in ALFRED_DEEPSEEK_API_KEY "
+                "/ ALFRED_QUARANTINE_PROVIDER_API_KEY instead"
+            )
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            # CodeRabbit r4: neither an eager parse failure NOR a credential check catches
+            # a syntactically-valid-but-unusable URL like "not-a-url" (scheme="", parses
+            # clean, no userinfo) or "ftp://host/v1" (a scheme the SDK cannot dial) — both
+            # would otherwise reach the SAME laundered-into-cannot_extract failure mode
+            # the blank-value guard above exists to prevent.
+            raise ValueError(malformed)
+        return v
+
+    @field_validator("deepseek_model")
+    @classmethod
+    def _reject_blank_deepseek_model(cls, v: str) -> str:
+        """Reject a blank/whitespace ``ALFRED_DEEPSEEK_MODEL``.
+
+        The structural twin of ``_validate_deepseek_base_url``'s blank arm above, on the
+        OTHER ``deepseek_*`` field BOTH the privileged and the quarantined DeepSeek paths
+        reuse: ``build_router`` hands it to the privileged ``DeepSeekProvider``, and
+        (#587) ``_resolve_quarantine_model`` hands it to the quarantine child. Like its
+        sibling it is a required ``str`` with a real default, so no downstream ``is None``
+        refusal can ever fire for a blank — the value simply becomes an unusable model id
+        that every completion names, surfacing as an untyped per-call API failure the
+        quarantine dispatch retry loop LAUNDERS into a generic ``cannot_extract``
+        (CLAUDE.md hard rule #7).
+
+        This validator is the PRIMARY guard, added after ``_resolve_quarantine_model``'s
+        own resolver-level ``ValueError`` was found unreachable-from-safety: that
+        ``ValueError`` was caught by NO arm of the daemon boot cascade, so on its own it
+        escaped as an uncaught crash (exit 1, ZERO ``daemon.boot.failed`` rows — the #368
+        anti-pattern), and it protected only the quarantine path, leaving ``build_router``
+        exposed. Refusing at Settings CONSTRUCTION routes both paths through the EXISTING
+        audited ``settings_invalid`` boot refusal (exit 2 + a real ``daemon.boot.failed``
+        row) — this is still the guard that actually fires on a real ``.env``-driven
+        boot, since it runs before ``_resolve_quarantine_model`` is ever reached. Round-5
+        review fleet, Tier A: that resolver's own ``ValueError`` is now a typed
+        ``QuarantineProviderConfigInvalidError``, routed through its own audited
+        ``quarantine_provider_config_invalid`` refusal — SECONDARY, defence-in-depth for
+        non-``Settings`` callers, not the primary guard this docstring describes. Raw
+        English, no ``t()``: Settings loads before the translator, exactly as
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
+        """
+        # Strip-and-STORE, not strip-only-to-test (CodeRabbit): returning the raw
+        # value let `" deepseek-chat "` pass the blank check and reach BOTH provider
+        # paths as an invalid model id — a 4xx per extraction, laundered by the
+        # quarantine dispatch loop into a generic `cannot_extract`, which is the exact
+        # boot-misconfig-wearing-a-runtime-failure-costume this validator exists to
+        # prevent. Matches `_validate_deepseek_base_url`'s handling of the same shape.
+        v = v.strip()
+        if not v:
+            raise ValueError(
+                "deepseek_model must not be blank — set ALFRED_DEEPSEEK_MODEL to a real "
+                "DeepSeek model id (default deepseek-chat) or leave it unset to take "
+                "that default"
+            )
+        return v
+
+    @field_validator("anthropic_model")
+    @classmethod
+    def _reject_blank_anthropic_model(cls, v: str) -> str:
+        """Reject a blank/whitespace ``ALFRED_ANTHROPIC_MODEL``.
+
+        Round-5 review fleet (1F): the structural twin ``_reject_blank_deepseek_model``
+        above exists precisely because a blank ``str``-with-a-real-default field of this
+        shape has no downstream ``is None`` refusal to catch it — the value simply
+        becomes an unusable model id that fails per call. ``anthropic_model`` is
+        consumed the same way, by ``build_router`` (``src/alfred/cli/_bootstrap.py``)
+        for the privileged Anthropic FALLBACK provider — a narrower blast radius than
+        ``deepseek_model`` (the quarantine child's own Anthropic path uses a hardcoded
+        constant, ``_QUARANTINE_MODEL``, never this field — see
+        ``comms_mcp.daemon_runtime._resolve_quarantine_model``), but the same failure
+        shape: an untyped per-call API error instead of a boot-time refusal naming the
+        field. The guard was placed on the field this PR happened to touch
+        (``deepseek_model``) rather than on the class; this closes the other half.
+
+        Raw English, no ``t()``: Settings loads before the translator, exactly as
+        ``_reject_placeholder_key`` documents. Non-secret — safe to echo the field name.
+        """
+        v = v.strip()
+        if not v:
+            raise ValueError(
+                "anthropic_model must not be blank — set ALFRED_ANTHROPIC_MODEL to a "
+                "real Anthropic model id (default claude-sonnet-4-6) or leave it unset "
+                "to take that default"
+            )
+        return v
 
     @field_validator("deepseek_api_key")
     @classmethod

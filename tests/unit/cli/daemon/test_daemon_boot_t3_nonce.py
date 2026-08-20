@@ -61,7 +61,13 @@ def quarantine_registry() -> Iterator[HookRegistry]:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
+    ),
 )
 def test_boot_registers_authorized_t3_nonce(
     monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +102,13 @@ def test_boot_registers_authorized_t3_nonce(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
+    ),
 )
 def test_boot_threads_same_nonce_into_comms_graph(
     monkeypatch: pytest.MonkeyPatch,
@@ -165,7 +177,13 @@ def test_boot_threads_same_nonce_into_comms_graph(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: daemon boot brings up AF_UNIX comms sockets + os.getuid-based peer auth",
+    reason=(
+        "POSIX-only: a full daemon boot crosses SEVERAL POSIX-only gates in sequence — "
+        "write_pidfile's bare os.O_NOFOLLOW first, then DaemonControlServer.start()'s "
+        "AF_UNIX control socket + os.getuid peer auth. Named by SYMBOL, not by line "
+        "number and not by whichever gate fires first, so this reason cannot rot when "
+        "the file shifts or any one gate is ported."
+    ),
 )
 def test_boot_does_not_double_call_factory(
     monkeypatch: pytest.MonkeyPatch,

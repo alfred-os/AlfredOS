@@ -166,6 +166,12 @@ services:
       # Crosses to the child ONLY over fd 3 (never the scrubbed spawn env) — see
       # _child_env / fd3_key_delivery.
       ALFRED_QUARANTINE_PROVIDER_API_KEY: ${ALFRED_QUARANTINE_PROVIDER_API_KEY:-}
+      # #587: which provider the quarantine child uses. Forwarded here or the setting
+      # is silently inert under this compose topology — mirrors the API key above.
+      ALFRED_QUARANTINE_PROVIDER: ${ALFRED_QUARANTINE_PROVIDER:-anthropic}
+      # #586: opt-in enforcement that the quarantine and privileged providers differ.
+      # Forwarded here or an operator's `require=true` silently does nothing.
+      ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION: ${ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION:-false}
       # Spec C G7-1b (#333): the SAME base URL the gateway derives its egress allowlist from
       # (threaded to alfred-gateway too). An operator override MUST reach BOTH or the core
       # would dial a host the gateway's allowlist denies — a silent egress mismatch.

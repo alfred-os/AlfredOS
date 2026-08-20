@@ -194,6 +194,9 @@ async def test_control_fd_with_no_egress_config_raises(_spawn_capture: dict[str,
         (None, 8192),  # model omitted
         ("claude-haiku-4-5", None),  # budget omitted
         (None, None),  # both omitted
+        ("", 8192),  # model blank (round-5 review fleet, 1E)
+        (" ", 8192),  # model whitespace-only
+        ("\t", 8192),  # model whitespace-only, tab
     ],
 )
 async def test_control_fd_without_provider_config_refuses(
@@ -209,6 +212,14 @@ async def test_control_fd_without_provider_config_refuses(
     (``_run_mcp_server``) — after the two-frame handshake has already reported the child
     healthy. Refusing pre-spawn keeps every ``control_fd=True`` misconfiguration one loud
     failure of the same shape, and costs no spawn.
+
+    The blank-model rows (round-5 review fleet, 1E) are the mirror of the deepseek
+    blank-``base_url`` rows in the test below: ``model is None`` alone missed a
+    whitespace-only argument, which is non-``None`` and so takes the OPPOSITE path through
+    ``_child_env`` — the var is actually SET, and the child boots with an unusable model id
+    whose every extraction the dispatch retry loop launders into a generic
+    ``cannot_extract``, the identical failure shape ``_build_provider``'s own blank-model
+    guard closes independently, one process over.
     """
     with pytest.raises(QuarantineChildSpawnError):
         await spawn_quarantine_child_io(
@@ -219,6 +230,78 @@ async def test_control_fd_without_provider_config_refuses(
             max_tokens=max_tokens,
         )
     assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
+
+
+@pytest.mark.parametrize("unusable", [None, "", " ", "\t", "\n"])
+async def test_control_fd_deepseek_without_base_url_refuses(
+    _spawn_capture: dict[str, Any], unusable: str | None
+) -> None:
+    """A deepseek live spawn with no USABLE ``base_url`` refuses PRE-FORK (CodeRabbit r2/r3).
+
+    DeepSeek's OpenAI-compatible client needs an explicit endpoint; ``_child_env`` sets
+    ``ALFRED_QUARANTINE_BASE_URL`` only when the argument is non-``None``, so the same
+    late-and-obscure shape as the model/max_tokens case above applies. The CHILD's own
+    ``build_child_client`` already refuses this combination — this guard just moves the
+    refusal one step earlier, to before the fork, so no bwrap child is created only to be
+    reaped.
+
+    The BLANK rows are not padding (r3): ``None`` was the only value the guard originally
+    caught, and a ``""``/whitespace argument takes the OPPOSITE path through ``_child_env``
+    — it is non-``None``, so the var is actually SET, and the child boots with an unusable
+    endpoint whose every extraction the dispatch retry loop launders into a generic
+    ``cannot_extract``. "Absent" and "present but empty" are the same fact to this guard and
+    must produce the same pre-fork refusal.
+
+    ``proc is None`` is the load-bearing assertion, not merely the raised type: it is what
+    distinguishes "refused pre-fork" from "spawned, then failed".
+    """
+    with pytest.raises(QuarantineChildSpawnError):
+        await spawn_quarantine_child_io(
+            provider_key="k",
+            control_fd=True,
+            egress_config=_Cfg(),
+            model="deepseek-chat",
+            max_tokens=8192,
+            provider="deepseek",
+            base_url=unusable,
+        )
+    assert _spawn_capture["proc"] is None  # refused BEFORE any Popen
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: socket.AF_UNIX (not exposed by CPython on Windows)",
+)
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("deepseek", "https://api.deepseek.com/v1"),  # deepseek WITH its endpoint
+        ("anthropic", None),  # anthropic legitimately has none
+        (None, None),  # provider unthreaded (pre-#587 caller shape)
+    ],
+)
+async def test_control_fd_base_url_guard_is_deepseek_scoped(
+    _spawn_capture: dict[str, Any], provider: str | None, base_url: str | None
+) -> None:
+    """Oracle guard: the new base_url check must not become an unconditional requirement.
+
+    Anthropic's SDK supplies its own endpoint, and a ``provider=None`` caller predates #587
+    entirely — an over-broad ``base_url is not None`` guard would refuse both and take the
+    default deployment down. Each row here is a live spawn that MUST still succeed.
+    """
+    io = await spawn_quarantine_child_io(
+        provider_key="k",
+        control_fd=True,
+        egress_config=_Cfg(),
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+        provider=provider,
+        base_url=base_url,
+    )
+    try:
+        assert _spawn_capture["proc"] is not None
+    finally:
+        await io.aclose()
 
 
 async def test_dormant_spawn_still_ignores_provider_config(
@@ -476,7 +559,12 @@ async def test_aclose_closes_the_parent_control_end() -> None:
 #: scrubbed child env. The dormant/echo (control_fd=False) spawn sets NONE of them —
 #: the ADR-0050 dormancy byte-identity invariant.
 _GOLIVE_ENV_KEYS = frozenset(
-    {"ALFRED_QUARANTINE_MODEL", "ALFRED_QUARANTINE_MAX_TOKENS", "SSL_CERT_FILE"}
+    {
+        "ALFRED_QUARANTINE_MODEL",
+        "ALFRED_QUARANTINE_MAX_TOKENS",
+        "SSL_CERT_FILE",
+        "ALFRED_QUARANTINE_PROVIDER",
+    }
 )
 
 
@@ -490,9 +578,11 @@ def test_child_env_default_omits_golive_provider_config(
 ) -> None:
     """A no-arg (dormant/control_fd=False) ``_child_env`` sets NONE of the golive keys.
 
-    The three keys are on the scrubbed allowlist (Task 2), so ``delenv`` them first
-    to isolate the FUNCTION's behaviour from an ambient host value — the assertion is
-    "``_child_env`` does not ADD them", not "the host had none".
+    All four keys (``ALFRED_QUARANTINE_MODEL``, ``ALFRED_QUARANTINE_MAX_TOKENS``,
+    ``SSL_CERT_FILE``, ``ALFRED_QUARANTINE_PROVIDER``) are on the scrubbed allowlist
+    (Task 2), so ``delenv`` them first to isolate the FUNCTION's behaviour from an
+    ambient host value — the assertion is "``_child_env`` does not ADD them", not
+    "the host had none".
     """
     for key in _GOLIVE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -512,13 +602,60 @@ def test_child_env_live_carries_model_budget_and_ssl() -> None:
     assert env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-certificates.crt"
 
 
-def test_child_env_live_is_dormant_plus_exactly_the_three_keys(
+def test_child_env_live_sets_provider_and_base_url_when_given() -> None:
+    env = qcio._child_env(
+        model="deepseek-chat",
+        max_tokens=8192,
+        ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+        provider="deepseek",
+        base_url="https://api.deepseek.com/v1",
+    )
+    assert env["ALFRED_QUARANTINE_PROVIDER"] == "deepseek"
+    assert env["ALFRED_QUARANTINE_BASE_URL"] == "https://api.deepseek.com/v1"
+
+
+def test_child_env_live_omits_provider_and_base_url_when_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Live env == dormant env + EXACTLY the three golive keys (strict byte-identity).
+    """Omitting both keys is CONSTRUCTION behaviour, not a clean-environment artifact.
 
-    Nothing else in the dormant env changes value; the live path only ADDS the three
+    ``_child_env`` builds a scrubbed ALLOWLIST — it must never read the host's own
+    ``ALFRED_QUARANTINE_*`` vars. Asserting absence in a pristine environment could not tell
+    "the function never sets these" apart from "the function inherits them and there happened
+    to be nothing to inherit" (CodeRabbit r2): the daemon process legitimately HAS both vars
+    set in production, so the ambient-clean version of this test was green for the wrong
+    reason on the only environment that matters.
+
+    Poisoning ``os.environ`` first makes the two hypotheses give different answers. The values
+    are deliberately conspicuous so a leak is unmistakable in the failure output.
+    """
+    monkeypatch.setenv("ALFRED_QUARANTINE_PROVIDER", "deepseek")
+    monkeypatch.setenv("ALFRED_QUARANTINE_BASE_URL", "https://example.invalid/v1")
+
+    env = qcio._child_env(
+        model="claude-haiku-4-5",
+        max_tokens=8192,
+        ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+    )
+
+    assert "ALFRED_QUARANTINE_PROVIDER" not in env, env
+    assert "ALFRED_QUARANTINE_BASE_URL" not in env, env
+    # Value-level too: a future refactor could re-add the keys under different names or
+    # copy the values onto some other allowlisted key. Nothing from the ambient env leaks.
+    assert "deepseek" not in env.values(), env
+    assert "https://example.invalid/v1" not in env.values(), env
+
+
+def test_child_env_live_is_dormant_plus_exactly_the_four_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live env == dormant env + EXACTLY the four golive keys (strict byte-identity).
+
+    Nothing else in the dormant env changes value; the live path only ADDS the four
     host-passed keys — the precise contract the ADR-0050 dormancy invariant rests on.
+    `base_url` is intentionally NOT part of this assertion: the anthropic default
+    never sets `ALFRED_QUARANTINE_BASE_URL` (only a DeepSeek spawn does), so it stays
+    out of the fixed four-key set this test pins.
     """
     for key in _GOLIVE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -527,6 +664,7 @@ def test_child_env_live_is_dormant_plus_exactly_the_three_keys(
         model="claude-haiku-4-5",
         max_tokens=8192,
         ssl_cert_file="/etc/ssl/certs/ca-certificates.crt",
+        provider="anthropic",
     )
     assert set(live) - set(dormant) == _GOLIVE_ENV_KEYS
     for key in dormant:

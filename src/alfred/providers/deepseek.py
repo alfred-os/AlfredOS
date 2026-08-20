@@ -302,6 +302,13 @@ class DeepSeekProvider:
             model=model,
         )
 
+    async def aclose(self) -> None:
+        """Close the underlying AsyncOpenAI SDK client (and, transitively, its httpx transport).
+
+        Required for resource cleanup in the quarantine child's brokered-egress source.
+        """
+        await self._client.close()
+
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         ensure_tool_capability(
             has_tools=bool(request.tools),

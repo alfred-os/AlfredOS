@@ -88,6 +88,7 @@ def test_the_slice_markers_still_match_the_script() -> None:
     block = _credential_gate_block()
     assert "ALFRED_DEEPSEEK_API_KEY" in block
     assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" in block
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in block
     assert "read_env_var" in block
 
 
@@ -167,3 +168,369 @@ def test_empty_env_file_reports_both(tmp_path: Path) -> None:
     assert code == 1
     assert "ALFRED_DEEPSEEK_API_KEY" in err
     assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" in err
+
+
+# --------------------------------------------------------------------------- #
+# #587: ALFRED_QUARANTINE_PROVIDER is a CLOSED SET the gate was blind to.
+#
+# The gate validated the quarantine KEY while ignoring the setting that decides
+# which key is even correct, so a typo (`Anthropic`, `openai`, a quoted value)
+# passed setup and surfaced as a settings_invalid crash-loop.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "openai",
+        "Anthropic",
+        "DeepSeek",
+        "gpt-4",
+        "none",
+        "not-a-real-secret-quarantine-provider-test-placeholder",
+    ],
+)
+def test_out_of_closed_set_quarantine_provider_is_reported(tmp_path: Path, bad: str) -> None:
+    """An out-of-set value fails the gate, in the SAME accumulated report as everything else.
+
+    Case variants are pinned deliberately: ``Settings.quarantine_provider`` is a
+    ``Literal["anthropic", "deepseek"]`` with no case/whitespace normalisation, so
+    ``Anthropic`` really does refuse boot. A gate that accepted it would be worse than
+    no gate — it would actively certify a value that crash-loops. The credential-shaped
+    row (CodeRabbit) covers the actual incident this parametrize doesn't otherwise
+    exercise: ALFRED_QUARANTINE_PROVIDER_API_KEY sits right next to this variable in
+    .env, so a credential pasted onto the wrong line is a plausible mistake.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        f"ALFRED_QUARANTINE_PROVIDER={bad}\n",
+    )
+    assert code == 1, f"{bad!r} must not pass the gate"
+    assert "ALFRED_QUARANTINE_PROVIDER" in err
+    # Actionable: names the admissible set...
+    assert "anthropic" in err and "deepseek" in err
+    # ...but the offending value itself must NEVER be reprinted — the report must not
+    # become the leak it exists to prevent (CodeRabbit).
+    assert bad not in err, err
+
+
+@pytest.mark.parametrize("good", ["anthropic", "deepseek"])
+def test_supported_quarantine_provider_passes(tmp_path: Path, good: str) -> None:
+    """Oracle guard: both real values pass.
+
+    Without this the refusal test above would stay green under a check that rejected
+    every value and hard-blocked every operator who set the knob at all.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        f"ALFRED_QUARANTINE_PROVIDER={good}\n",
+    )
+    assert code == 0, err
+
+
+def test_unset_quarantine_provider_passes(tmp_path: Path) -> None:
+    """Unset is the shipped default (``anthropic``), not a problem to report."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\nALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n",
+    )
+    assert code == 0, err
+    assert "ALFRED_QUARANTINE_PROVIDER is" not in err
+
+
+def test_shell_set_quarantine_provider_beats_a_valid_dotenv_value(tmp_path: Path) -> None:
+    """The gate must check the value the STACK will use, not the one `.env` happens to hold.
+
+    docker compose gives the shell environment precedence over `.env` (the same precedence
+    the quarantine-key branch documents). A gate reading `.env` alone would certify the
+    dotenv value and wave through a broken shell override — so this pins the direction:
+    a bad shell value fails even though `.env` is valid.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n",
+        extra_env={"ALFRED_QUARANTINE_PROVIDER": "openai"},
+    )
+    assert code == 1, "a bad shell override must fail even with a valid .env value"
+    # Stronger than asserting the raw value: the gate no longer reprints it at all
+    # (CodeRabbit), so the discriminator is that it names WHICH source it read from —
+    # proving it actually preferred the shell over .env, not just that it read
+    # something bad.
+    assert "shell environment" in err, err
+
+
+def test_explicitly_empty_shell_quarantine_provider_does_not_fall_back_to_dotenv(
+    tmp_path: Path,
+) -> None:
+    """An EXPORTED-BUT-EMPTY shell var is the compose default, not "consult .env" (CodeRabbit r2).
+
+    docker-compose.yaml forwards ``ALFRED_QUARANTINE_PROVIDER:
+    ${ALFRED_QUARANTINE_PROVIDER:-anthropic}``. Under compose an explicitly-empty shell var
+    still WINS over ``.env`` and the container therefore receives the ``anthropic`` default —
+    ``.env`` is never consulted. The gate's ``${VAR:-$(read_env_var VAR)}`` collapsed that
+    case into "unset" (``:-`` fires on empty as well as unset) and validated the ``.env``
+    value instead: a value the stack will not use.
+
+    Discriminating by construction: ``.env`` holds an OUT-OF-SET value, so the two behaviours
+    give opposite verdicts. Under the old ``:-`` the gate read ``openai`` from ``.env`` and
+    exited 1; under ``${VAR+x}`` it resolves the compose default and exits 0. (The same
+    scenario with a VALID ``.env`` value passes either way, so it could not tell fixed from
+    broken and is deliberately not the pin here.)
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=openai\n",
+        extra_env={"ALFRED_QUARANTINE_PROVIDER": ""},
+    )
+    assert code == 0, (
+        "an explicitly-empty shell var means the container takes the anthropic default; "
+        f"the gate must not validate the unused .env value. stderr: {err}"
+    )
+    assert "openai" not in err, err
+
+
+def test_the_report_never_echoes_the_offending_provider_value(tmp_path: Path) -> None:
+    """A dedicated oracle for the anti-echo property (CodeRabbit), not a side condition
+    of some other test. ``ALFRED_QUARANTINE_PROVIDER_API_KEY`` sits directly beside
+    ``ALFRED_QUARANTINE_PROVIDER`` in ``.env`` — a credential pasted onto the wrong line
+    is a plausible mistake, and the gate must never copy it into setup output, shell
+    scrollback, or a CI log.
+    """
+    credential = "sk-not-a-real-secret-pasted-onto-the-wrong-env-line"
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        f"ALFRED_QUARANTINE_PROVIDER={credential}\n",
+    )
+    assert code == 1
+    assert credential not in err, err
+    # Actionable without the echo: names the field, the source, and the accepted set.
+    assert "ALFRED_QUARANTINE_PROVIDER" in err
+    assert ".env" in err
+    assert "anthropic" in err and "deepseek" in err
+
+
+# --------------------------------------------------------------------------- #
+# #586: ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION is an opt-in REFUSE-BOOT
+# posture, newly forwarded to alfred-core by this PR, and the gate was blind to it.
+# An operator who enabled the strict posture with one provider for both roles
+# passed setup cleanly and only met the crash-loop on `docker compose up -d`.
+# --------------------------------------------------------------------------- #
+
+
+def test_required_separation_with_colliding_providers_is_reported(tmp_path: Path) -> None:
+    """The headline scenario this whole check exists for."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true\n",
+    )
+    assert code == 1
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in err
+    assert "crash-loop" in err.lower()
+
+
+def test_required_separation_with_distinct_providers_passes(tmp_path: Path) -> None:
+    """Oracle guard: the check does not block a genuinely non-colliding, opted-in config."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=anthropic\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true\n",
+    )
+    assert code == 0, err
+
+
+def test_required_separation_unset_with_colliding_providers_passes(tmp_path: Path) -> None:
+    """The default (unset) posture is warn-only at boot, not refuse — the setup-time
+    check mirrors that: no ``require`` line means no collision problem to report,
+    even though the providers collide."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n",
+    )
+    assert code == 0, err
+
+
+def test_explicit_false_separation_with_colliding_providers_passes(tmp_path: Path) -> None:
+    """An explicit ``false`` is the same permitted-but-warned posture as unset."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false\n",
+    )
+    assert code == 0, err
+
+
+def test_dotenv_primary_provider_does_not_change_the_verdict(tmp_path: Path) -> None:
+    """The load-bearing test for this whole check's design.
+
+    docker-compose.yaml does not forward ``ALFRED_PRIMARY_PROVIDER`` to ``alfred-core``
+    at all (no ``env_file:``, not in the ``environment:`` block, no ``.env`` bind-mount)
+    — so under the deployment this script sets up, ``Settings.primary_provider`` ALWAYS
+    resolves to its ``deepseek`` default, whatever ``.env`` says. A naive gate that read
+    ``ALFRED_PRIMARY_PROVIDER`` from ``.env`` would get this scenario backwards: it would
+    see ``anthropic`` here and wave the collision through, while the real container still
+    compares ``deepseek`` (its fixed default) against ``ALFRED_QUARANTINE_PROVIDER=
+    deepseek`` and crash-loops. This pins that the gate models the CONTAINER's value, not
+    the .env value.
+    """
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true\n"
+        "ALFRED_PRIMARY_PROVIDER=anthropic\n",
+    )
+    assert code == 1, (
+        "a .env-only ALFRED_PRIMARY_PROVIDER=anthropic must NOT clear the collision — "
+        f"the container never sees it and still dials deepseek. stderr: {err}"
+    )
+
+
+def test_dotenv_primary_provider_does_not_cause_a_false_failure(tmp_path: Path) -> None:
+    """The other direction of the test above: a genuinely non-colliding .env-only
+    ALFRED_PRIMARY_PROVIDER must not be treated as if it changed the container's fixed
+    ``deepseek`` privileged provider — only ALFRED_QUARANTINE_PROVIDER can clear this."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=anthropic\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true\n"
+        "ALFRED_PRIMARY_PROVIDER=anthropic\n",
+    )
+    assert code == 0, err
+
+
+@pytest.mark.parametrize("truthy", ["true", "True", "TRUE", "1", "yes", "y", "on", "t"])
+def test_required_separation_accepts_pydantics_full_truthy_set(tmp_path: Path, truthy: str) -> None:
+    """Every spelling pydantic's bool coercion accepts as True must arm the check —
+    a gate that only recognised "true" would silently pass an operator who wrote "1"
+    or "yes" straight into a crash-loop."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        f"ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION={truthy}\n",
+    )
+    assert code == 1, f"{truthy!r} must arm the collision check. stderr: {err}"
+
+
+@pytest.mark.parametrize("falsy", ["false", "False", "0", "no", "off", "f", "n"])
+def test_required_separation_accepts_pydantics_full_falsy_set(tmp_path: Path, falsy: str) -> None:
+    """The complementary closed-set pin: every accepted False spelling stays warn-only."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        f"ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION={falsy}\n",
+    )
+    assert code == 0, err
+
+
+def test_whitespace_padded_separation_flag_is_reported_not_silently_stripped(
+    tmp_path: Path,
+) -> None:
+    """Round-6 review fleet (CodeRabbit): pydantic's bool parser has NO whitespace
+    tolerance, so a padded value (unlike ALFRED_QUARANTINE_PROVIDER, which has its own
+    earlier raw-value gate) must be REPORTED here, not silently normalised into a
+    matching truthy/falsy spelling. Before the fix this gate stripped whitespace before
+    comparing, so ' true' passed as clean while the real daemon would refuse boot on
+    settings_invalid — the exact silent-miss this test pins shut."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION= true\n",
+    )
+    assert code == 1
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in err
+    assert "unsupported boolean value" in err
+
+
+def test_unparseable_separation_flag_is_reported(tmp_path: Path) -> None:
+    """A value outside pydantic's closed bool set refuses boot on settings_invalid —
+    the gate must catch it too, not just the collision it might also be hiding."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=maybe\n",
+    )
+    assert code == 1
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in err
+    assert "unsupported boolean value" in err
+    # Round-6 review fleet: the offending value is deliberately NOT echoed (same
+    # credential-adjacency rationale as the ALFRED_QUARANTINE_PROVIDER diagnostic).
+    assert "maybe" not in err
+
+
+def test_shell_set_separation_beats_a_dotenv_value(tmp_path: Path) -> None:
+    """Same shell-over-.env precedence as the quarantine-provider check above, for the
+    separation flag: a shell override must decide the verdict, not a stale .env value."""
+    code, _out, _err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=false\n",
+        extra_env={"ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION": "true"},
+    )
+    assert code == 1, "a shell-set true must arm the check even over a false .env value"
+
+
+def test_explicitly_empty_shell_separation_does_not_fall_back_to_dotenv(tmp_path: Path) -> None:
+    """The ``${VAR+x}`` discriminator, mirrored for the separation flag: an explicitly
+    empty shell var is the compose ``false`` default, not "consult .env"."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=deepseek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true\n",
+        extra_env={"ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION": ""},
+    )
+    assert code == 0, (
+        "an explicitly-empty shell var means the container takes the false default; "
+        f"the gate must not validate the unused .env value. stderr: {err}"
+    )
+
+
+def test_miscased_colliding_quarantine_provider_reports_both_problems(tmp_path: Path) -> None:
+    """A value that is BOTH mis-cased (fails the closed-set check) AND would collide once
+    normalised must report BOTH problems in one run — case-normalising only for the
+    collision check (deliberately, unlike the closed-set check above, which is
+    case-sensitive to match ``Settings.quarantine_provider``'s ``Literal``) means an
+    operator who fixes the case on the next run immediately meets the collision too,
+    rather than fix-case / re-run / discover-collision."""
+    code, _out, err = _run_gate(
+        tmp_path,
+        "ALFRED_DEEPSEEK_API_KEY=sk-real\n"
+        "ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-quar\n"
+        "ALFRED_QUARANTINE_PROVIDER=DeepSeek\n"
+        "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true\n",
+    )
+    assert code == 1
+    assert "is set to an unsupported value" in err, err
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in err, err

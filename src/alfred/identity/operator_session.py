@@ -60,10 +60,36 @@ from alfred.security._hkdf import hkdf_expand
 
 _log = structlog.get_logger(__name__)
 
-# ``O_NOFOLLOW`` / ``O_DIRECTORY`` are POSIX-only; on Windows they are
-# absent and the open-time symlink/dir refusal is not enforced (Windows
-# operators are directed at the WSL2 path — PR-S4-10). Falling back to 0
-# keeps the module importable on Windows CI runners.
+# ``O_NOFOLLOW`` / ``O_DIRECTORY`` are POSIX-only. The ``getattr`` fallback is
+# load-bearing for IMPORT: these are module-scope constants, so a bare
+# ``os.O_NOFOLLOW`` here would make ``import alfred.identity.operator_session``
+# raise on Windows and take down collection of every module that imports it.
+# (Contrast ``alfred.cli.daemon._daemon_pidfile``, which references the flag
+# INSIDE a function and therefore keeps the bare form — the dominant pattern,
+# see also ``alfred.policies.load``.)
+#
+# Read plainly, a 0 fallback looks like a silent security downgrade: OR-ing 0
+# into the open flags drops the symlink (``O_NOFOLLOW``) and is-a-directory
+# (``O_DIRECTORY``) refusals. It is worth stating explicitly why that exposure
+# is NOT reachable, so nobody "fixes" it the way this PR first tried to and
+# breaks a working path (see below).
+#
+# ``load_session_file`` cannot complete a DEGRADED-BUT-SUCCESSFUL load on a
+# platform missing these flags, because the same platforms lack ``dir_fd``
+# support: ``os.supports_dir_fd`` is empty on Windows, so the
+# ``os.open(..., dir_fd=parent_fd)`` below raises ``NotImplementedError``
+# regardless of the flag values. The file is never read with weakened
+# protections — the call fails first.
+#
+# What DOES work on such a platform is the benign miss: a non-existent parent
+# dir raises ``FileNotFoundError`` -> ``OperatorSessionMissing``, which the
+# operator-session CLI relies on to report "not logged in". An earlier revision
+# of this PR added an upfront "refuse if the flags are absent" guard; it turned
+# that working path into a hard error and reddened the Windows CI leg
+# (``tests/unit/cli/test_operator_session_cli.py``). Do not re-add it: refusing
+# here buys no security (the degraded open is already impossible) and costs a
+# path that legitimately works. Windows operators are directed at WSL2
+# (PR-S4-10), where both flags are present and nothing degrades at all.
 _O_NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
 

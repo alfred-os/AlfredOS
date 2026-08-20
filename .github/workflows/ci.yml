@@ -469,12 +469,17 @@ jobs:
         # a ``NoReturn`` _refuse_boot (the refuse arm itself IS covered); and one
         # ``# pragma: no branch`` on a reap-finally pidfile leak-guard whose not-taken
         # arc is only reached during exception unwinding (coverage.py can't record it).
-        # ``_failures.py`` is the ``DaemonBootFailure`` union. Fully covered by the unit
-        # tier. Combined job names both too (two-gates pattern — keep BOTH in sync).
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != ''
+        # ``_failures.py`` is the ``DaemonBootFailure`` union. ``_settings_errors.py``
+        # (#589) is the value-free settings-error renderer both this module's daemon-boot
+        # bootstrap AND ``alfred.cli._bootstrap``'s interactive-CLI bootstrap share — it
+        # joined THIS gate rather than the ungated ``cli/_bootstrap.py`` because every
+        # branch in it decides whether an operator-supplied value reaches an output sink.
+        # All three fully covered by the unit tier. Combined job names all three too
+        # (two-gates pattern — keep BOTH in sync).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != '' && hashFiles('src/alfred/cli/_settings_errors.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/cli/daemon/_commands.py,src/alfred/cli/daemon/_failures.py' \
+            --include='src/alfred/cli/daemon/_commands.py,src/alfred/cli/daemon/_failures.py,src/alfred/cli/_settings_errors.py' \
             --fail-under=100
       - name: Gateway kernel trust-boundary 100% line+branch coverage
         # Spec A G3-3a (#237, ADR-0032): ``src/alfred/gateway/`` is the
@@ -2727,12 +2732,13 @@ jobs:
       - name: Daemon boot orchestrator + failures 100% line+branch coverage (combined)
         # #256 PR-4 (closeout): sibling of the python-job ``Daemon boot orchestrator +
         # failures`` gate (the two-gates pattern). ``_commands.py`` (thin orchestrator +
-        # refuse-DECISION arms) + ``_failures.py`` (the DaemonBootFailure union).
+        # refuse-DECISION arms) + ``_failures.py`` (the DaemonBootFailure union) +
+        # ``_settings_errors.py`` (#589, the shared value-free settings-error renderer).
         # Keep BOTH in sync when this file changes.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_commands.py') != '' && hashFiles('src/alfred/cli/daemon/_failures.py') != '' && hashFiles('src/alfred/cli/_settings_errors.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/cli/daemon/_commands.py,src/alfred/cli/daemon/_failures.py' \
+            --include='src/alfred/cli/daemon/_commands.py,src/alfred/cli/daemon/_failures.py,src/alfred/cli/_settings_errors.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor

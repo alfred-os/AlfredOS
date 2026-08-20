@@ -23,7 +23,7 @@ PR-S3-0 establishes foundations: schema constants, Alembic migrations (`0007`-`0
 
 1. **Fork 3 + 6 — Trust-tier type system:** `T1` and `T3` `TrustTier` subclasses added to `_APPROVED_TIERS` (`src/alfred/security/tiers.py`); `TaggedContent[T1]` and `TaggedContent[T3]` as type-level discriminants per ADR-0013's literal spelling; `Protocol AnyTaggedContent` read-only view; capability-gated `tag(T3, ...)` overload; wire-format serializer; `quarantined_to_structured` boundary fn in `src/alfred/security/quarantine.py`; T1 ingress via `IdentityResolver` (role × adapter).
 2. **Fork 2 — MCP plugin transport:** `PluginTransport` Protocol + `StdioTransport` sole implementation; plugin manifest schema; host-side secret-broker substitution; DLP-wrapped transport surface; SIGKILL on protocol violation; lifecycle audit family; `bin/alfred-plugin-launcher` stub; manifest version pin.
-3. **Fork 1 — Dual-LLM split:** quarantined-LLM as MCP stdio subprocess; dedicated `alfred-quarantine` UID; env scrubbing + stdin handshake for provider key; different provider from privileged; `QuarantinedUnavailable` exception; audit-field discipline; co-merged ADR-0015 Slice-4 containerisation commitment.
+3. **Fork 1 — Dual-LLM split:** quarantined-LLM as MCP stdio subprocess; dedicated `alfred-quarantine` UID; env scrubbing + stdin handshake for provider key; different provider from privileged (§5.4 below — superseded by [ADR-0064](../../adr/0064-quarantine-provider-separation-is-opt-in.md), now opt-in/default-off, not default-refuse); `QuarantinedUnavailable` exception; audit-field discipline; co-merged ADR-0015 Slice-4 containerisation commitment.
 4. **Fork 5 — Quarantined structured output:** `Provider.capabilities() -> frozenset[ProviderCapability]`; native constrained-generation per provider with prompt-embedded fallback; `QuarantinedExtractor` as orchestrator-side MCP client; hookpoint `security.quarantined.extract`; `schema_version: Literal[1]` mandatory; discriminated-union `ExtractionResult`; audit row fields.
 5. **Fork 4 — `web.fetch`:** in-tree MCP plugin; `ContentHandle` return to orchestrator; three-way allowlist intersection; `tool.web.fetch` hookpoint (all four kinds) restricted to system-only; `InboundCanaryScanner` as system-tier hook subscriber; Redis rate-limits; cookie policy; per-conversation depth=1; `WebFetchError` hierarchy; audit row.
 6. **Fork 7 — Real `CapabilityGate`:** hybrid storage (state.git source of truth + Postgres runtime cache); Protocol surface extension; reviewer-gated proposal flow for high-blast grants; `DevGate`/`RealGate` co-existence + flag-day.
@@ -384,6 +384,8 @@ Wire framing on fd 3: the host writes a 4-byte big-endian length prefix followed
 The existing AST-scan at `tests/unit/security/test_no_direct_env_reads.py` is extended to cover `src/alfred/plugins/stdio_transport.py` (the subprocess spawn site), asserting that `os.environ` is not read and that the `env=` argument to `create_subprocess_exec` is always an explicit dict, never `None` (which would inherit parent env).
 
 ### 5.4 Different provider from privileged (defence-in-depth)
+
+> **Superseded by [ADR-0064](../../adr/0064-quarantine-provider-separation-is-opt-in.md)** (#586/#587): this section's default-refuse / reviewer-gated posture was replaced with an opt-in, default-off posture. Kept here for historical record.
 
 The quarantined LLM uses a different provider from the privileged orchestrator by default (PRD §6.4 reviewer-agent requirement: "Different provider from primary by default"). `alfred config quarantined-provider <provider>` proposals go through state.git reviewer-gate (§11.1). Default: if privileged uses DeepSeek (ADR-0001), quarantined uses Anthropic Claude Haiku; if privileged uses Anthropic, quarantined uses DeepSeek.
 
@@ -1246,7 +1248,7 @@ The Slice-2.5 spec §6.11 "Out of scope" items (supply-chain signing, ContextVar
 
 All open questions from the synthesis (`.slice-3-synthesis.md §2`) are resolved here.
 
-**Fork 1:** Provider for quarantined LLM: **different provider from privileged** (defence-in-depth; PRD §6.4 reviewer-agent requirement). `QuarantinedUnavailable` is distinct from `HookSubscriberError`. Audit-field discipline: name + type only, never `str(exc)`. Quarantined system prompt versioning: in the plugin manifest.
+**Fork 1:** Provider for quarantined LLM: **different provider from privileged** (defence-in-depth; PRD §6.4 reviewer-agent requirement) — superseded by [ADR-0064](../../adr/0064-quarantine-provider-separation-is-opt-in.md) (#586/#587): this default-refuse posture is now opt-in, default-off; see §5.4. `QuarantinedUnavailable` is distinct from `HookSubscriberError`. Audit-field discipline: name + type only, never `str(exc)`. Quarantined system prompt versioning: in the plugin manifest.
 
 **Fork 2:** `bin/alfred-plugin-launcher` ADR: follow-on ADR (OS-dependent sandbox); stub fail-closes when policy absent. Plugin lifecycle audit family: confirmed as `plugin.lifecycle.{loaded, load_refused, crashed, quarantined, reloaded}`.
 

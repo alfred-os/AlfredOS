@@ -272,6 +272,8 @@ def _child_env(
     model: str | None = None,
     max_tokens: int | None = None,
     ssl_cert_file: str | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
 ) -> dict[str, str]:
     """Build the SCRUBBED child env (allowlist only — never ``dict(os.environ)``).
 
@@ -298,7 +300,12 @@ def _child_env(
     assignment of a caller value. Each key is set ONLY when its argument is
     provided, so a DORMANT/echo (``control_fd=False``) spawn — which passes none —
     yields the pre-golive env BYTE-FOR-BYTE (the ADR-0050 dormancy invariant;
-    ``test_child_env_live_is_dormant_plus_exactly_the_three_keys``).
+    ``test_child_env_live_is_dormant_plus_exactly_the_four_keys``).
+
+    **#587 provider dispatch.** ``provider`` -> ``ALFRED_QUARANTINE_PROVIDER`` and
+    ``base_url`` -> ``ALFRED_QUARANTINE_BASE_URL`` thread the same way — set ONLY
+    when non-``None``, so an anthropic (or dormant) spawn never carries
+    ``ALFRED_QUARANTINE_BASE_URL`` at all (only a DeepSeek spawn needs a base_url).
     """
     env = _scrubbed_base()
     env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(
@@ -320,6 +327,10 @@ def _child_env(
         env["ALFRED_QUARANTINE_MAX_TOKENS"] = str(max_tokens)
     if ssl_cert_file is not None:
         env["SSL_CERT_FILE"] = ssl_cert_file
+    if provider is not None:
+        env["ALFRED_QUARANTINE_PROVIDER"] = provider
+    if base_url is not None:
+        env["ALFRED_QUARANTINE_BASE_URL"] = base_url
     return env
 
 
@@ -1045,6 +1056,8 @@ async def spawn_quarantine_child_io(
     egress_config: EgressProxyConfig | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
     ssl_cert_file: str = _DEFAULT_SSL_CERT_FILE,
     refusal_recorder: SandboxRefusalRecorder | None = None,
 ) -> _SubprocessChildIO:
@@ -1127,27 +1140,59 @@ async def spawn_quarantine_child_io(
         raise QuarantineChildSpawnError(t("security.quarantine_child.child_module_not_allowed"))
     if control_fd and egress_config is None:
         raise QuarantineChildSpawnError(t("security.quarantine_child.broker_unconfigured"))
-    if (
-        control_fd
-        and child_module in _MODULES_REQUIRING_PROVIDER_CONFIG
-        and (model is None or max_tokens is None)
-    ):
+    if control_fd and child_module in _MODULES_REQUIRING_PROVIDER_CONFIG:
         # SYMMETRY with the egress guard above. ``_child_env`` sets each provider-config var
         # ONLY when its argument is non-``None`` (the ADR-0050 dormancy invariant), so a live
-        # spawn missing either one produces a child that boots without it and fails LATE and
+        # spawn missing any of them produces a child that boots without it and fails LATE and
         # obscurely: ``_build_provider`` ``KeyError``s on ``ALFRED_QUARANTINE_MODEL`` at boot,
         # and a missing ``ALFRED_QUARANTINE_MAX_TOKENS`` ``KeyError``s inside the extract loop
         # — AFTER the two-frame handshake already reported the child healthy. Refusing here
         # makes every live misconfiguration one loud pre-spawn failure of the same shape, and
         # costs no spawn (hard rule #7).
-        raise QuarantineChildSpawnError(t("security.quarantine_child.provider_config_missing"))
+        #
+        # A deepseek spawn with no usable ``base_url`` joins the same guard (CodeRabbit r2).
+        # DeepSeek's OpenAI-compatible client REQUIRES an explicit endpoint; anthropic's SDK
+        # has its own default, so the check is provider-scoped rather than an unconditional
+        # ``base_url is not None`` — a dormant or anthropic spawn passes ``None`` legitimately
+        # and must keep passing. The child's own ``build_child_client`` already refuses this
+        # combination, so this is DEFENCE-IN-DEPTH that fails one step earlier still: before
+        # the fork, so no bwrap child is created only to be reaped.
+        #
+        # BLANK, not just ``None`` (CodeRabbit r3): ``_child_env`` sets the var for any
+        # non-``None`` argument, so a ``""``/whitespace base_url is FORWARDED — it survives
+        # this guard, reaches ``AsyncOpenAI(base_url="")``, and fails per extraction, where
+        # the dispatch retry loop launders it into a generic ``cannot_extract`` (hard rule
+        # #7). ``None`` and blank are the same fact here — "no endpoint" — so they take the
+        # same pre-fork refusal. (The child's ``_build_provider`` and the host's
+        # ``_resolve_quarantine_base_url`` both already treat blank as missing; this was the
+        # one layer in the chain that did not.)
+        #
+        # ``model`` gets the SAME blank check as ``base_url`` above, not just ``is None``
+        # (round-5 review fleet, 1E): the mirror gap this comment used to leave open — a
+        # whitespace-only ``model=""`` argument is not ``None``, so it survived the old
+        # ``model is None`` check, reached ``_child_env`` (which forwards any non-``None``
+        # value verbatim), and produced the identical laundered-into-``cannot_extract``
+        # failure the base_url guard exists to prevent. The child's own ``_build_provider``
+        # closed this same hole independently; this is the pre-fork layer.
+        missing_core = model is None or not model.strip() or max_tokens is None
+        missing_deepseek_base_url = provider == "deepseek" and (
+            base_url is None or not base_url.strip()
+        )
+        if missing_core or missing_deepseek_base_url:
+            raise QuarantineChildSpawnError(t("security.quarantine_child.provider_config_missing"))
 
     # Build the scrubbed child env ONCE, up front (no ``await``, no fd op — safe
     # anywhere). The LIVE (``control_fd=True``) spawn threads the golive provider
     # config into it; the DORMANT/echo (``control_fd=False``) spawn passes NONE, so
     # ``_child_env`` yields the pre-golive env byte-for-byte (ADR-0050 dormancy).
     child_env = (
-        _child_env(model=model, max_tokens=max_tokens, ssl_cert_file=ssl_cert_file)
+        _child_env(
+            model=model,
+            max_tokens=max_tokens,
+            ssl_cert_file=ssl_cert_file,
+            provider=provider,
+            base_url=base_url,
+        )
         if control_fd
         else _child_env()
     )

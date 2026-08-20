@@ -65,6 +65,7 @@ from alfred.security.quarantine import QuarantinedExtractor
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge
+    from alfred.config.settings import Settings
     from alfred.egress._config_protocols import EgressProxyConfig
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import ExtractionResult
@@ -210,6 +211,11 @@ class CommsInboundOrchestratorAdapter:
         """
         sender = self._require_sender()
         if not isinstance(ingested, Mapping):
+            # Round-6 review fleet (err-002): log before raising, matching the
+            # fail-loud-with-context standard of the sibling guards below
+            # (_require_ingested_key, _require_sender) — this arm was the one
+            # left silent.
+            _log.error("comms.daemon_runtime.dispatch_bad_ingested")
             raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
         # MANDATORY DLP chokepoint: mint the ScannedOutboundBody from the raw ack
         # content text. This is the ONLY way to obtain the body type the request
@@ -395,6 +401,151 @@ def _resolve_quarantine_model_config() -> tuple[str, int]:
     return _QUARANTINE_MODEL, max_tokens
 
 
+class QuarantineProviderConfigInvalidError(AlfredError):
+    """The quarantine child's provider/model/base_url cannot be resolved — refuse boot.
+
+    Round-5 review fleet, Tier A: :func:`_resolve_quarantine_model` and
+    :func:`_resolve_quarantine_base_url` below used to raise a bare ``ValueError`` for
+    all four of their default-deny arms (blank model, blank base_url, and each
+    function's out-of-closed-set ``provider_id`` arm). A bare ``ValueError`` is caught
+    by NO arm of the daemon boot cascade (``_build_comms_boot_graph`` re-raises
+    unchanged; none of ``_commands.py``'s typed arms was ``ValueError``; ``start_daemon``
+    catches only ``_BootRefusedError``), so on its own it produced an uncaught crash —
+    exit 1 with ZERO ``daemon.boot.failed`` rows, the #368 anti-pattern this whole PR
+    exists to close everywhere else. Rooted at :class:`AlfredError`, matching this
+    module's sibling :class:`QuarantineProviderKeyUnsetError` /
+    :class:`QuarantineMaxTokensInvalidError`, so the CLI boot path's ``except`` arm maps
+    it into an audited ``daemon.boot.failed`` refusal (exit 2) instead.
+    """
+
+
+def _resolve_quarantine_model(provider_id: str, settings: Settings) -> str:
+    """The quarantine child's model id, provider-aware (#587 — prov-001 fix).
+
+    Anthropic keeps the existing hardcoded quarantine model (``_QUARANTINE_MODEL``,
+    "claude-haiku-4-5") — a fixed, cheap-model choice independent of the privileged
+    path's own model selection; there has never been a per-deployment Anthropic
+    quarantine-model setting. DeepSeek has no equivalent hardcoded quarantine
+    constant, so this reuses ``Settings.deepseek_model`` (the SAME setting the
+    privileged DeepSeek path already reads) rather than adding a second,
+    quarantine-specific DeepSeek model setting an operator would have to keep in
+    sync with the first — mirroring ``_resolve_quarantine_base_url``'s reuse of
+    ``Settings.deepseek_base_url`` below.
+
+    The BLANK-string guard (HARD #7) is the exact analogue of the one in
+    ``_resolve_quarantine_base_url`` below, on the OTHER field the deepseek branch
+    reuses — and, like it, is DEFENCE-IN-DEPTH, not the primary guard.
+    ``Settings._reject_blank_deepseek_model`` refuses ``ALFRED_DEEPSEEK_MODEL=""`` at
+    config-load time, which is what routes the misconfiguration onto the audited
+    ``settings_invalid`` boot refusal (exit 2 + a ``daemon.boot.failed`` row) on a
+    well-behaved ``Settings`` instance — unreachable there today, same as this
+    function's sibling ``provider_id`` guard, per this codebase's "unreachable today is
+    not a safety argument" lesson. Kept because this function is a public-ish
+    resolution seam reachable from ``Settings.model_construct`` doubles and future
+    non-``Settings`` callers: without it a blank would be threaded into the child's
+    ``ALFRED_QUARANTINE_MODEL``, and every extraction would name an unusable model and
+    launder into a generic ``cannot_extract`` via the dispatch retry loop. Both this
+    guard and the ``provider_id`` guard below now raise
+    :class:`QuarantineProviderConfigInvalidError`, routed through the audited
+    ``quarantine_provider_config_invalid`` boot refusal (round-5 review fleet, Tier A)
+    rather than escaping as an uncaught ``ValueError``.
+    """
+    if provider_id == "deepseek":
+        model = settings.deepseek_model
+        if not model.strip():
+            # Non-secret routing config (a model id, never a credential) — but blank
+            # by construction at this point, so there is nothing worth naming beyond
+            # the field itself; provider_id is closed-set, safe to log alongside it.
+            _log.error(
+                "comms.daemon_runtime.quarantine_provider_config_invalid",
+                field="deepseek_model",
+                provider_id=provider_id,
+            )
+            raise QuarantineProviderConfigInvalidError(
+                "_resolve_quarantine_model: provider_id='deepseek' but "
+                "deepseek_model is blank — refusing to spawn a quarantine child "
+                "whose every extraction would name an unusable model and launder "
+                "into cannot_extract (HARD #7). Set ALFRED_DEEPSEEK_MODEL to a "
+                "real DeepSeek model id (default deepseek-chat)"
+            )
+        return model
+    if provider_id == "anthropic":
+        return _QUARANTINE_MODEL
+    # provider_id deliberately NOT logged/echoed: it is ALFRED_QUARANTINE_PROVIDER,
+    # the exact field bin/alfred-setup.sh's own diagnostic stopped echoing this same
+    # round because ALFRED_QUARANTINE_PROVIDER_API_KEY sits on the adjacent .env line
+    # — the field name alone is the safe, sufficient triage key (round-6 review fleet).
+    _log.error(
+        "comms.daemon_runtime.quarantine_provider_config_invalid",
+        field="quarantine_provider",
+    )
+    raise QuarantineProviderConfigInvalidError(
+        "_resolve_quarantine_model: unsupported provider_id — refusing to silently "
+        "resolve the anthropic model for an out-of-closed-set ALFRED_QUARANTINE_PROVIDER "
+        "value (HARD #7, prov-r2-001)"
+    )
+
+
+def _resolve_quarantine_base_url(provider_id: str, settings: Settings) -> str | None:
+    """The quarantine child's base_url, when its provider needs one (#587).
+
+    Only DeepSeek's OpenAI-compatible endpoint requires an explicit base_url — Anthropic's
+    SDK has its own default. Reuses ``Settings.deepseek_base_url`` (the SAME setting the
+    privileged path already reads) rather than introducing a second, quarantine-specific
+    base-URL setting an operator would have to keep in sync with the first.
+
+    The BLANK-string guard (HARD #7) is not redundant with ``build_child_client``'s
+    ``base_url is None`` refusal: ``Settings.deepseek_base_url`` is ``str``-typed and
+    always present, so that ``None`` check can never fire for the deepseek branch — but
+    ``ALFRED_DEEPSEEK_BASE_URL=""`` passes it, reaches ``AsyncOpenAI(base_url="")``, and
+    surfaces only as an untyped per-extraction failure that the dispatch retry loop
+    LAUNDERS into a generic ``cannot_extract`` — a boot-time misconfiguration wearing a
+    runtime-extraction-failure costume. Refusing here keeps it pre-spawn and loud. Like
+    its sibling guard in :func:`_resolve_quarantine_model` above, unreachable from a
+    well-behaved ``Settings`` instance today (``Settings._validate_deepseek_base_url``
+    refuses a blank value at config-load time) — retained as defence-in-depth for the
+    same non-``Settings``-caller reasons. Raises
+    :class:`QuarantineProviderConfigInvalidError` (round-5 review fleet, Tier A), routed
+    through the audited ``quarantine_provider_config_invalid`` boot refusal rather than
+    escaping as an uncaught ``ValueError``.
+    """
+    if provider_id == "deepseek":
+        base_url = settings.deepseek_base_url
+        if not base_url.strip():
+            # The field name only, deliberately NOT the value (unlike the model guard
+            # above): base_url may legitimately front a self-hosted relay with inline
+            # credentials on a non-``Settings`` caller, and this module's own
+            # ``_validate_deepseek_base_url`` precedent treats that as a real exposure
+            # vector, not a hypothetical one.
+            _log.error(
+                "comms.daemon_runtime.quarantine_provider_config_invalid",
+                field="deepseek_base_url",
+                provider_id=provider_id,
+            )
+            raise QuarantineProviderConfigInvalidError(
+                "_resolve_quarantine_base_url: provider_id='deepseek' but "
+                "deepseek_base_url is blank — refusing to spawn a quarantine "
+                "child whose every extraction would fail an unusable endpoint "
+                "and launder into cannot_extract (HARD #7). Set "
+                "ALFRED_DEEPSEEK_BASE_URL to the DeepSeek API base "
+                "(default https://api.deepseek.com/v1)"
+            )
+        return base_url
+    if provider_id == "anthropic":
+        return None
+    # provider_id deliberately NOT logged/echoed — see the identical rationale on the
+    # sibling out-of-closed-set guard in _resolve_quarantine_model above.
+    _log.error(
+        "comms.daemon_runtime.quarantine_provider_config_invalid",
+        field="quarantine_provider",
+    )
+    raise QuarantineProviderConfigInvalidError(
+        "_resolve_quarantine_base_url: unsupported provider_id — refusing to silently "
+        "resolve None for an out-of-closed-set ALFRED_QUARANTINE_PROVIDER value "
+        "(HARD #7, prov-r2-001)"
+    )
+
+
 def _resolve_egress_config(egress_config: EgressProxyConfig) -> EgressProxyConfig:
     """Validate the quarantine child's egress proxy config; refuse boot if unusable.
 
@@ -438,6 +589,9 @@ async def _build_comms_inbound_extractor(
     staging: QuarantineStagingMap,
     environment: str,
     egress_config: EgressProxyConfig,
+    quarantine_provider: str,
+    quarantine_model: str,
+    quarantine_base_url: str | None,
 ) -> tuple[QuarantinedExtractor, QuarantineStdioTransport]:
     """Construct a REAL :class:`QuarantinedExtractor` over a LIVE quarantined child.
 
@@ -453,12 +607,17 @@ async def _build_comms_inbound_extractor(
     #340 PR2b-golive Task 8 (ADR-0050 Decision 8, the posture change under sign-off):
     the spawn is now ``control_fd=True``, carrying the child its fd-4 control channel
     plus the real-LLM provider config — ``egress_config`` (the ``EgressProxyConfig``
-    the child brokers its gateway socket through), the routing.yaml ``[quarantine]``
-    ``model`` + ``max_tokens`` (:func:`_resolve_quarantine_model_config`), and the
-    default system CA bundle. All three are non-secret, non-T3 config; the provider
-    KEY still crosses ONLY over fd 3. The per-extraction brokered-egress wiring (the
-    transport driving :meth:`_SubprocessChildIO.broker_sockets` before the extract
-    frame — connect-defer) landed in Task 9; Task 10 threads the durable
+    the child brokers its gateway socket through), the ``max_tokens`` budget
+    (:func:`_resolve_quarantine_model_config`), and the default system CA bundle. The
+    MODEL (``quarantine_model``) and the provider id / base_url (``quarantine_provider``
+    / ``quarantine_base_url``) are now resolved by the CALLER (#587 prov-001 fix —
+    :func:`_resolve_quarantine_model` / :func:`_resolve_quarantine_base_url`, both
+    provider-aware) and passed in as required params, rather than derived here from
+    the anthropic-only ``_resolve_quarantine_model_config``. All are non-secret,
+    non-T3 config; the provider KEY still crosses ONLY over fd 3. The per-extraction
+    brokered-egress wiring (the transport driving
+    :meth:`_SubprocessChildIO.broker_sockets` before the extract frame —
+    connect-defer) landed in Task 9; Task 10 threads the durable
     success/failure audit rows live by constructing an
     :class:`alfred.egress.broker_audit.EgressBrokerAuditor` here and passing it to
     the transport as ``broker_auditor=`` — the ``egress.broker.*`` hookpoints its
@@ -494,7 +653,14 @@ async def _build_comms_inbound_extractor(
     # model/budget mirror routing.yaml [quarantine], and `_resolve_egress_config` raises
     # IOPlaneUnavailableError here on an unset/blank OR non-blank-but-malformed egress proxy
     # (§20.2 fail-closed; malformed host:port now caught at BOOT — Task-9 boot/extraction parity).
-    model, max_tokens = _resolve_quarantine_model_config()
+    # #587 prov-001 fix: the MODEL is now provider-aware (the caller already
+    # resolved quarantine_provider/quarantine_model above the call — mirrors how
+    # quarantine_base_url is resolved by the caller, not re-derived here).
+    # `_resolve_quarantine_model_config()` still owns max_tokens validation
+    # (the routing.yaml-mirrored budget, `<=0` refuses boot) — only its MODEL
+    # return value is now superseded.
+    model = quarantine_model
+    _, max_tokens = _resolve_quarantine_model_config()
     resolved_egress = _resolve_egress_config(egress_config)
     # SandboxRefusalAuditor construction is SYNCHRONOUS — it does NOT add an await
     # to the fd-3-clobber window; the await below remains the only one that touches it.
@@ -519,6 +685,8 @@ async def _build_comms_inbound_extractor(
         egress_config=resolved_egress,
         model=model,
         max_tokens=max_tokens,
+        provider=quarantine_provider,
+        base_url=quarantine_base_url,
     )
     # Reap the just-spawned child if the (synchronous) transport/extractor
     # construction raises: this builder hasn't returned the transport yet, so the
@@ -567,5 +735,6 @@ __all__ = [
     "CommsInboundOrchestratorAdapter",
     "OutboundSenderLike",
     "QuarantineMaxTokensInvalidError",
+    "QuarantineProviderConfigInvalidError",
     "QuarantineProviderKeyUnsetError",
 ]

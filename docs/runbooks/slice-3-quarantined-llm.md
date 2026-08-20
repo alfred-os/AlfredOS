@@ -37,30 +37,82 @@ audit row. A manifest with `subscriber_tier` set to any T0–T3 string raises
 
 ```yaml
 quarantine:
-  provider: "anthropic"        # anthropic | deepseek | openai
+  provider: "anthropic"        # anthropic | deepseek
   model: "claude-haiku-4-5"   # fast + cheap; adequate for structured extraction
   secret_id: "quarantine_provider_api_key"
 ```
 
-`provider` drives which `ProviderCapability` flags the plugin advertises,
-which determines the `ExtractionMode` the dispatch path selects:
+This `routing.yaml` value does **not** drive runtime capability advertisement
+— no loader reads it yet ("slice 4+"). The actual runtime source of truth is
+the `ALFRED_QUARANTINE_PROVIDER` .env setting (`Settings.quarantine_provider`,
+default `"anthropic"`), which determines which `ProviderCapability` flags the
+plugin advertises, which in turn determines the `ExtractionMode` the dispatch
+path selects:
 
-| `provider` | `ProviderCapability` | `ExtractionMode` |
+| `ALFRED_QUARANTINE_PROVIDER` | Declared `ProviderCapability` | `ExtractionMode` |
 | --- | --- | --- |
 | `anthropic` | `NATIVE_CONSTRAINED_GENERATION` | `native_constrained` |
-| `deepseek` (chat model) | `JSON_OBJECT_MODE` | `json_object_unconstrained` |
-| `openai` or unknown model | none | `prompt_embedded_fallback` |
+| `deepseek` (`deepseek-chat`) | `JSON_OBJECT_MODE`, `TOOL_USE` | `prompt_embedded_fallback` |
+| `deepseek` (`deepseek-reasoner`, or any unknown model) | none | `prompt_embedded_fallback` |
 
-The quarantined provider **should** differ from the privileged provider
-(defence-in-depth, spec §5.4). If both sides use the same provider, a
+Both DeepSeek rows land on `prompt_embedded_fallback` because dispatch selects
+the mode on `NATIVE_CONSTRAINED_GENERATION` alone — neither `JSON_OBJECT_MODE`
+nor `TOOL_USE` participates in that decision, so `deepseek-chat`'s two declared
+capabilities are advertised but unused on the quarantine path. They are listed
+here because this table's job is to state what each provider actually declares
+(`_DEEPSEEK_MODEL_CAPABILITIES` in `src/alfred/providers/deepseek.py`); reading
+"none" for `deepseek-chat` would be simply wrong.
+
+`routing.yaml [quarantine].provider` stays as the alfred-config-proposal
+target (the state.git reviewer-gate flow below) and as documentation of the
+shipped default, but changing it alone does nothing until the loader lands.
+
+The quarantined provider **should** differ from the privileged provider by
+default (defence-in-depth, ADR-0064). If both sides use the same provider, a
 compromised provider API could see both T0–T2 orchestrator context and T3
 raw content at the same time — the failure mode that the split exists to
-prevent.
+prevent. This is **opt-in**, not enforced by default: set
+`ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true` to make AlfredOS refuse
+to boot on a same-provider collision. Left at its default (`false`),
+same-provider is permitted — logged and audited once per boot, not blocked.
+See [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md) for
+the full rationale (no PRD section states a "providers must differ"
+invariant — do not cite "spec §5.4 / PRD §6.4").
 
-Changing `provider` or `secret_id` is a reviewer-gated configuration change
-(`alfred config quarantined-provider <provider>`); it lands via the
-state.git proposal flow (spec §11.1). `model` changes are lower blast-radius
-but still flow through the same gate.
+**What that opt-in check actually compares — and what it does not.** It
+compares `Settings.quarantine_provider` against `Settings.primary_provider`:
+two `.env` settings. `Settings.primary_provider`
+(`ALFRED_PRIMARY_PROVIDER`) is NOT the privileged provider the system
+dials — `build_router` (`src/alfred/cli/_bootstrap.py`) hardcodes DeepSeek
+as primary and wires Anthropic in as a live fallback whenever
+`ALFRED_ANTHROPIC_API_KEY` is set, and never reads the field. So the
+privileged half of this pair has no working knob at all;
+`ALFRED_QUARANTINE_PROVIDER` is the only one of the two that changes what
+a provider call actually goes to. Read a passing check as "the two
+configured provider settings differ", not as "no privileged path can ever
+reach the quarantine provider": on the shipped defaults
+(`primary_provider=deepseek`, `quarantine_provider=anthropic`) the check
+PASSES while the privileged router's Anthropic fallback is exactly the
+provider the quarantine child uses.
+[#590](https://github.com/alfred-os/AlfredOS/issues/590) tracks narrowing
+the check to `build_router`'s actually-resolved pair.
+
+**Which knob actually controls runtime behaviour today: `ALFRED_QUARANTINE_PROVIDER`
+(the privileged side has none — see the paragraph above).** It is a plain, ungated
+`.env` setting — set it, restart, done. The
+reviewer-gated `alfred config quarantined-provider <provider>` flow described immediately
+below is **aspirational**: that `state.git` proposal flow does not exist yet, and even
+once it does it targets `routing.yaml [quarantine].provider`, which no loader reads
+(see the "does **not** drive runtime capability advertisement" note above). Read the next
+paragraph as the intended future shape, not as a step you can perform now — and do not
+read it as a gate protecting the provider choice, because there is none. ADR-0064's
+Alternatives section records why that flow was not adopted as the mechanism for this
+decision.
+
+Changing `routing.yaml [quarantine].provider` or `secret_id` is intended to be a
+reviewer-gated configuration change (`alfred config quarantined-provider
+<provider>`), landing via the state.git proposal flow (spec §11.1). `model`
+changes are lower blast-radius but still flow through the same gate.
 
 ## Environment setup
 
@@ -76,6 +128,34 @@ ALFRED_QUARANTINE_PROVIDER_API_KEY=sk-ant-...
 The literal key never appears in `config/routing.yaml` — the file holds only
 the broker ID. The broker substitutes the key at subprocess spawn time,
 delivering it over fd 3 (spec §5.3). See `.env.example` for the template.
+
+> **The key must match `ALFRED_QUARANTINE_PROVIDER`, and nothing checks that it does.**
+> This is one shared variable serving both providers, so its correct content depends
+> entirely on the current `ALFRED_QUARANTINE_PROVIDER` value:
+>
+> | `ALFRED_QUARANTINE_PROVIDER` | `ALFRED_QUARANTINE_PROVIDER_API_KEY` must be |
+> | --- | --- |
+> | `anthropic` (default) | an Anthropic key (`sk-ant-…`) |
+> | `deepseek` | a **separate** DeepSeek key — not a copy of `ALFRED_DEEPSEEK_API_KEY` |
+>
+> It is never derived from, defaulted to, or forwarded from the privileged path's
+> `ALFRED_DEEPSEEK_API_KEY` / `ALFRED_ANTHROPIC_API_KEY`. Reusing the privileged
+> DeepSeek key here puts both halves of the dual-LLM split on one provider account —
+> the exact posture [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md)
+> makes an explicit, opt-out-able choice rather than an accident.
+>
+> **There is no key-shape validation and a mismatch is NOT caught at boot.** Boot checks
+> only that the variable is non-empty (`quarantine_provider_key_unset`); a key belonging to
+> the other provider passes every startup check. It surfaces at the **first extraction**, as
+> a generic `provider_unavailable` typed refusal — not as a boot error, and not with any
+> message naming the key. The provider's own error text is deliberately withheld from that
+> refusal and from the host-side log line: the quarantine child handles T3 (untrusted)
+> content and provider error strings can echo request fragments, so carrying them across
+> that boundary is a leak channel (see the `quarantine.child.provider_unavailable` log
+> site in `src/alfred/security/quarantine_child/provider_dispatch.py`, which omits the
+> exception message for exactly this reason). That redaction is working as intended, not a
+> reporting bug. **Triage rule:** extractions failing immediately after a provider switch,
+> with a healthy boot, means check this key first.
 
 ### macOS development
 

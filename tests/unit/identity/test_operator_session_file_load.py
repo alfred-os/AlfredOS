@@ -231,3 +231,33 @@ def test_bad_file_owner_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
     with pytest.raises(OperatorSessionBadFileOwner):
         load_session_file(path)
+
+
+def test_degraded_open_flags_cannot_yield_a_successful_load_without_dir_fd() -> None:
+    """Pin WHY the ``getattr(os, "O_NOFOLLOW", 0)`` fallback is not a fail-open.
+
+    The fallback reads like a silent security downgrade: OR-ing 0 drops the
+    symlink and is-a-directory refusals. It is not reachable as one, because the
+    only platforms missing those flags also lack ``dir_fd`` support — so the
+    ``os.open(..., dir_fd=parent_fd)`` in ``load_session_file`` raises
+    ``NotImplementedError`` before anything is read, whatever the flags say.
+
+    This asserts the LINK between the two facts on the host actually running the
+    suite, so the claim in the module comment is checked rather than asserted:
+    a host that has the flags must also support ``dir_fd``. If some future
+    platform ever broke that pairing (flags absent BUT ``dir_fd`` present), the
+    degraded read would become genuinely reachable and this test is what says so.
+
+    Deliberately NOT re-adding an upfront "refuse when the flags are absent"
+    guard: an earlier revision of this PR did, which converted the benign
+    "no session file" miss (``FileNotFoundError`` -> ``OperatorSessionMissing``,
+    which the operator-session CLI depends on) into a hard error and reddened
+    the Windows CI leg.
+    """
+    have_flags = bool(getattr(os, "O_NOFOLLOW", 0)) and bool(getattr(os, "O_DIRECTORY", 0))
+    have_dir_fd = os.open in os.supports_dir_fd
+    assert have_flags == have_dir_fd, (
+        "O_NOFOLLOW/O_DIRECTORY availability diverged from dir_fd support: the "
+        "degraded-open path in load_session_file may now be genuinely reachable "
+        f"(flags={have_flags}, dir_fd={have_dir_fd})"
+    )

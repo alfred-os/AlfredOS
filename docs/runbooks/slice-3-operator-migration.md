@@ -287,11 +287,47 @@ quarantine:
   max_tokens_per_extraction: 8192
 ```
 
+The `[quarantine]` block above is documentation only — nothing loads
+`routing.yaml` at runtime (nor does anything load `config/alfred.toml`,
+despite an earlier version of this doc implying otherwise). The real
+runtime source of truth for the QUARANTINED side is `.env`:
+`ALFRED_QUARANTINE_PROVIDER` (`Settings.quarantine_provider`, default
+`anthropic`) selects the provider the quarantine child dials, and
+`docker-compose.yaml` forwards it to `alfred-core`.
+
+**The privileged side has no working knob at all.**
+`ALFRED_PRIMARY_PROVIDER` (`Settings.primary_provider`, default
+`deepseek`) does NOT select the privileged provider: `build_router`
+(`src/alfred/cli/_bootstrap.py`) hardcodes DeepSeek as primary and
+wires Anthropic in as a live fallback whenever
+`ALFRED_ANTHROPIC_API_KEY` is set — it never reads the field. The
+field is read only by `alfred status` and by the opt-in separation
+check below. On the compose stack it is doubly inert:
+`docker-compose.yaml` does not forward `ALFRED_PRIMARY_PROVIDER` to
+`alfred-core` and declares no `env_file:`, and `.env` is not
+bind-mounted (the service mounts only `alfred_state_git` and
+`alfred_run`) — so the variable never reaches the container and
+`Settings.primary_provider` always takes its `deepseek` default there.
+`ALFRED_FALLBACK_PROVIDER` (`Settings.fallback_provider`, default
+`anthropic`) has the identical gap, for the identical reason: also
+absent from `alfred-core`'s forwarded environment, also read only by
+`alfred status` and the separation check, never by `build_router`.
+See [ADR-0064](../adr/0064-quarantine-provider-separation-is-opt-in.md);
+[#590](https://github.com/alfred-os/AlfredOS/issues/590) tracks wiring
+both fields to the router.
+
 The bootstrap-time check in
 `alfred.bootstrap.quarantine.assert_provider_separation` refuses to
-start when the privileged and quarantined provider IDs collide. By
-default `config/alfred.toml [provider]` selects the privileged
-provider; `routing.yaml [quarantine]` must select a different one.
+start when the two configured provider SETTINGS collide, but only when
+opted in via `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true`
+(ADR-0064). The default (`false`) permits a same-provider
+configuration — a home/self-hosted operator is never forced into
+running two paid provider accounts — and logs + audits the collision
+instead of refusing boot. Because of the gap above, read a PASS as
+"the two configured provider settings differ", not as "no privileged
+path can ever reach the quarantine provider": on the shipped defaults
+the check passes while the privileged router's Anthropic fallback is
+the same provider the quarantine child uses.
 
 Provider capabilities determine the `ExtractionMode` the quarantined
 LLM uses:

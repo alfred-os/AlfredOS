@@ -32,6 +32,7 @@ import typer
 
 from alfred.audit.audit_row_schemas import (
     COMMS_SOCKET_PEER_REJECTED_FIELDS,
+    DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS,
     DAEMON_CONTROL_PEER_REJECTED_FIELDS,
 )
 
@@ -39,6 +40,18 @@ from alfred.audit.audit_row_schemas import (
 # false-liveness defense: a forged/stale epoch is refused). Module-scope so the
 # boot-wiring unit tests can monkeypatch it.
 from alfred.bootstrap.lifecycle_epoch import current_boot_epoch
+
+# #586: assert_provider_separation()'s own BEHAVIOUR is unmodified (design spec §9) —
+# this file adds the new call site + the local exception wrapper below. The one
+# exception to "unmodified" is provider_ids_collide(), extracted from inside
+# assert_provider_separation() so the not-required WARN path below shares the SAME
+# collision predicate instead of re-implementing the normalisation inline.
+from alfred.bootstrap.quarantine import (
+    ProviderIdBlankError,
+    ProviderSeparationViolatedError,
+    assert_provider_separation,
+    provider_ids_collide,
+)
 from alfred.cli.daemon._boot_audit import (
     LifecycleBroadcaster,
     _emit_or_quarantine,
@@ -59,6 +72,7 @@ from alfred.cli.daemon._failures import (
 from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
 )
+from alfred.errors import AlfredError
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.i18n import t
 from alfred.memory.db import ConnectionRole
@@ -273,6 +287,17 @@ class _UnknownAdapterKindError(_CommsAdapterManifestError):
 # closed vocabulary), mirroring ``REQUIRED_CLASSIFIERS_BY_KIND`` / the promoter
 # factory — NOT the per-instance launcher id.
 _FORWARDED_INBOUND_KINDS: Final[tuple[str, ...]] = ("discord",)
+
+
+class QuarantineProviderSeparationCollisionError(AlfredError):
+    """#586: require_quarantine_provider_separation=True and the privileged/quarantine
+    provider ids collide. A distinct, catchable type so _commands.py's typed
+    except-cascade can route this through the audited _refuse_boot path —
+    assert_provider_separation() itself raises alfred.bootstrap.quarantine.
+    ProviderIdBlankError or ProviderSeparationViolatedError (both AlfredError
+    subclasses, round-5 review fleet 1G; assert_provider_separation()'s own BEHAVIOUR
+    is unmodified, design spec §9), which would otherwise escape uncaught past every
+    arm (arch-002 / sec-001 / test-001 — the #368 anti-pattern)."""
 
 
 class _ForwardedInboundRegistryMisconfiguredError(Exception):
@@ -618,6 +643,111 @@ class _CommsBootGraph:
                 await self.content_store.close()
 
 
+async def enforce_quarantine_provider_separation(
+    *, settings: Settings, audit: AuditWriter, boot_id: str
+) -> None:
+    """#586: the opt-in provider-separation gate, run on EVERY daemon boot.
+
+    Lived inside :func:`_build_comms_boot_graph` until CodeRabbit pointed out that
+    ``_start_async`` only calls that builder under ``if settings.comms_enabled_adapters``.
+    So a daemon with ``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true``, colliding
+    providers and NO enabled adapter booted CLEAN: the operator opted into a security
+    posture, got a green boot, and the control never ran — the same false-all-clear
+    shape as the compose-forwarding gap the whole-branch review caught, this time on
+    this PR's own feature. Hoisted here and called unconditionally so whether comms is
+    enabled cannot decide whether a security gate applies.
+
+    Compares the two CONFIGURED provider settings only —
+    ``settings.primary_provider`` is not the provider a privileged call actually
+    dials: ``alfred.cli._bootstrap.build_router`` hardcodes DeepSeek as primary
+    with an Anthropic fallback and never reads this field (issue #590). A clean
+    pass through this gate means "the two settings differ", not "no privileged
+    path can reach the quarantine provider".
+
+    Raises:
+        QuarantineProviderSeparationCollisionError: separation required and the ids
+            collide. A distinct, catchable type so ``_commands.py`` routes it through
+            the audited ``_refuse_boot`` path instead of letting
+            ``assert_provider_separation``'s typed ``ProviderIdBlankError`` /
+            ``ProviderSeparationViolatedError`` (round-5 review fleet, 1G) escape
+            uncaught (the #368 anti-pattern).
+    """
+    # #586: opt-in provider-separation enforcement, checked FIRST (no I/O yet, so a
+    # refusal here can never leak a partially-constructed secret_broker/content_store —
+    # core-003/sec-003). assert_provider_separation()'s behaviour is unmodified (design
+    # spec §9) — this call site, the re-raise, and the not-required+colliding
+    # audited-warning path are new.
+    #
+    # The warn arm calls the SAME provider_ids_collide() predicate assert_provider_separation()
+    # uses internally, never a second inline copy of the .strip().lower() comparison: two
+    # copies of a security predicate drift, and a warn path that stopped agreeing with the
+    # refuse path about what a collision IS would silently emit no operator signal for a
+    # dual-LLM split that had quietly collapsed.
+    #
+    # devex-002 (#586/#587): emit the resolved quarantine posture UNCONDITIONALLY, before
+    # the branch below. Until this line the happy path — providers differ, or separation
+    # simply is not required — said NOTHING about which provider the quarantined child
+    # would dial: only a COLLISION produced any signal at all, so the operator whose
+    # config is fine had no boot-log evidence that their ALFRED_QUARANTINE_PROVIDER was
+    # even read. Placed here (rather than inside either arm) so it fires on EVERY boot —
+    # comms-enabled or not, since 7213f2f6 hoisted this gate out of the comms-gated boot
+    # graph — regardless of which arm runs, and before any I/O — a later refusal still
+    # leaves this breadcrumb behind. Non-secret closed-set routing config, safe to log
+    # (hard rule #5); ``alfred status`` renders the same two values for the operator who
+    # is not reading logs.
+    #
+    # NOTE: ``privileged_provider`` below is ``settings.primary_provider`` — config
+    # only, not what a privileged call actually dials (see the function docstring;
+    # issue #590).
+    log.info(
+        "comms.comms_boot.quarantine_provider_resolved",
+        quarantine_provider=settings.quarantine_provider,
+        privileged_provider=settings.primary_provider,
+        require_separation=settings.require_quarantine_provider_separation,
+    )
+    if settings.require_quarantine_provider_separation:
+        try:
+            assert_provider_separation(
+                privileged_provider_id=settings.primary_provider,
+                quarantined_provider_id=settings.quarantine_provider,
+            )
+        except (ProviderIdBlankError, ProviderSeparationViolatedError) as exc:
+            # Precisely typed (round-5 review fleet, 1G), not a blanket ``except
+            # AlfredError`` — the two types this catches are the ONLY things
+            # assert_provider_separation can raise, so this is no longer a relabel
+            # resting on a comment's honesty, but an exhaustive type list the checker
+            # itself can verify. ProviderIdBlankError is UNREACHABLE from this call site
+            # today (quarantine_provider and primary_provider are both Literal fields, so
+            # a blank/unsupported value refuses at Settings construction first, onto the
+            # accurately-labelled settings_invalid boot refusal) — retained in the catch
+            # rather than split out, matching this codebase's own "unreachable today is
+            # not a safety argument" lesson: if that Literal guarantee is ever relaxed,
+            # a blank id gets an AUDITED refusal here (mislabelled as a collision, no
+            # worse than before this change) rather than an uncaught crash
+            # (``test_boot_refuses_blank_primary_provider_as_settings_invalid_not_
+            # collision`` pins the guarantee this rests on).
+            raise QuarantineProviderSeparationCollisionError(str(exc)) from exc
+    elif provider_ids_collide(settings.primary_provider, settings.quarantine_provider):
+        log.warning(
+            "comms.comms_boot.quarantine_provider_separation_not_enforced",
+            privileged_provider=settings.primary_provider,
+            quarantine_provider=settings.quarantine_provider,
+        )
+        await _emit_or_quarantine(
+            audit,
+            fields=DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS,
+            schema_name="DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS",
+            event="daemon.boot.quarantine_provider_separation_not_enforced",
+            subject={
+                "boot_id": boot_id,
+                "privileged_provider": settings.primary_provider,
+                "quarantine_provider": settings.quarantine_provider,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            result="warned",
+        )
+
+
 async def _build_comms_boot_graph(
     *,
     settings: Settings,
@@ -642,6 +772,13 @@ async def _build_comms_boot_graph(
     host the spawn raises ``QuarantineChildSpawnError``, which propagates so the
     daemon refuses to boot (the caller wraps it in an audited refusal) rather than
     silently degrading to a fixture (CLAUDE.md hard rule #7).
+
+    The #586 provider-separation gate does NOT run here. It lives in the sibling
+    :func:`enforce_quarantine_provider_separation` above, which ``_commands.py``
+    calls unconditionally on every boot — comms-enabled or not (7213f2f6). It used
+    to run inside this function and took a ``boot_id`` parameter purely to stamp its
+    audited not-enforced warning row; both moved out together, which is why this
+    signature no longer carries one.
 
     ``t3_nonce`` is the per-process authorised :class:`CapabilityGateNonce` the
     daemon minted + registered at boot. PR-S4-11c-2b CONSUMES it: it is injected
@@ -679,7 +816,11 @@ async def _build_comms_boot_graph(
     )
     from alfred.cli.daemon._commands import build_boot_session_scope
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge, SyncIdentityResolverBridge
-    from alfred.comms_mcp.daemon_runtime import _build_comms_inbound_extractor
+    from alfred.comms_mcp.daemon_runtime import (
+        _build_comms_inbound_extractor,
+        _resolve_quarantine_base_url,
+        _resolve_quarantine_model,
+    )
     from alfred.comms_mcp.real_turn_adapter import RealTurnOrchestratorAdapter
     from alfred.memory.forwarded_dispatch_attempts import (
         PostgresForwardedDispatchAttemptStore,
@@ -729,6 +870,16 @@ async def _build_comms_boot_graph(
             # PRE-spawn. ``settings`` structurally satisfies EgressProxyConfig
             # (it exposes ``egress_proxy_url``) — the SAME field build_router reads.
             egress_config=settings,
+            # #587 prov-001 fix: the quarantine child's MODEL, provider id, and
+            # base_url are all resolved from ``settings.quarantine_provider`` HERE
+            # (not re-derived inside the builder) so a DeepSeek-configured child
+            # asks DeepSeek's API for a DeepSeek model id, never the hardcoded
+            # Anthropic quarantine model.
+            quarantine_provider=settings.quarantine_provider,
+            quarantine_model=_resolve_quarantine_model(settings.quarantine_provider, settings),
+            quarantine_base_url=_resolve_quarantine_base_url(
+                settings.quarantine_provider, settings
+            ),
         )
     except Exception:
         with suppress(Exception):

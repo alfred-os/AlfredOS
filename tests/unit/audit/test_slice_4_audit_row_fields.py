@@ -30,7 +30,7 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 44 entries (post-marker field-set surface).
+    """Roster must contain exactly 45 entries (post-marker field-set surface).
 
     Adding a new post-marker ``*_FIELDS`` constant requires bumping this
     assertion AND extending ``AUDIT_FIELDSET_ROSTER`` in the same commit. The
@@ -65,9 +65,14 @@ def test_slice_4_fieldset_names_count() -> None:
     Task 1 added ``EGRESS_BROKER_SUCCESS_FIELDS`` + ``EGRESS_BROKER_REFUSED_FIELDS``
     — the 43rd-44th (the SCM_RIGHTS gateway-socket broker's payload-blind success/
     refused rows, mirroring ``EGRESS_RELAY_REFUSED_FIELDS``; schemas only, the
-    auditor lands in Task 2).
+    auditor lands in Task 2); and #586 Task 4 added
+    ``DAEMON_BOOT_QUARANTINE_PROVIDER_SEPARATION_WARNED_FIELDS`` — the 45th (the
+    opt-in provider-separation not-enforced warning row: boot_id + the two
+    colliding provider ids + occurred_at, ``result="warned"``, distinct from the
+    ``DAEMON_BOOT_FAILED_FIELDS`` refusal the same collision takes when
+    ``require_quarantine_provider_separation=True``).
     """
-    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 44
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 45
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:

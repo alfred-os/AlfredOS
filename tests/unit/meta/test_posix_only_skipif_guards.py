@@ -83,6 +83,32 @@ _GUARDED: Final[tuple[tuple[str, str], ...]] = (
         "tests.unit.security.test_brokered_provider_source",
         "test_factory_build_resolves_read_timeout",
     ),
+    # #587: the three tests this PR added that drive a FULL, *successful*
+    # ``alfred daemon start``. A completed boot unconditionally binds the daemon
+    # control plane's AF_UNIX socket (``DaemonControlServer.start()`` ->
+    # ``bind_owner_only_unix_socket``), and CPython does not expose
+    # ``socket.AF_UNIX`` on Windows (upstream gh-77589 is still open; its PR
+    # gh-137420 targets 3.16 and omits asyncio) — nor does
+    # ``asyncio.start_unix_server`` exist there, being defined only under
+    # ``hasattr(socket, "AF_UNIX")``. A Windows equivalent security model DOES
+    # exist and is scoped in #471 Phase 2 — AppContainer for containment,
+    # ``WSADuplicateSocket``/``DuplicateHandle`` for the fd-4 broker, named pipes
+    # + ``GetNamedPipeClientProcessId`` for this control plane. It is UNBUILT, not
+    # impossible, and until it lands ``kind:full`` refuses in production on native
+    # Windows. PRD.md:602 makes native Windows an explicit non-goal; the supported
+    # path is WSL2.
+    (
+        "tests.unit.cli.daemon.test_daemon_boot_egress_refuse",
+        "test_boot_proceeds_when_separation_required_and_providers_differ",
+    ),
+    (
+        "tests.unit.cli.daemon.test_daemon_boot_egress_refuse",
+        "test_happy_path_boot_logs_the_resolved_quarantine_provider",
+    ),
+    (
+        "tests.unit.cli.daemon.test_daemon_boot_egress_refuse",
+        "test_boot_proceeds_with_warning_when_separation_not_required_and_providers_collide",
+    ),
 )
 
 

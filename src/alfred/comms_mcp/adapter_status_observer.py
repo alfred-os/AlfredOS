@@ -69,7 +69,9 @@ log = structlog.get_logger(__name__)
 _STATUS_TRUST_TIER: Final[str] = "T0"
 
 AdapterState = Literal["up", "down", "crashed", "breaker_open"]
-_RejectionReason = Literal["malformed_frame", "epoch_mismatch", "unknown_method"]
+_RejectionReason = Literal[
+    "malformed_frame", "epoch_mismatch", "unknown_method", "epoch_unavailable"
+]
 
 # Re-exported so the bound is asserted against the SAME constant the in-child
 # crash path uses (correction #1 — do NOT introduce a new bound).
@@ -214,11 +216,26 @@ class AdapterStatusObserver:
             await self._reject(method, "", "malformed_frame")
             return
 
-        if isinstance(parsed, AdapterUpNotification) and parsed.epoch != self._expected_epoch():
-            # THE FORGERY DEFENSE (Spec B §3, the G3 lesson): an ``up`` against a
-            # stale/foreign epoch is a false-liveness assertion. Refuse — no record.
-            await self._reject(method, parsed.adapter_id, "epoch_mismatch")
-            return
+        if isinstance(parsed, AdapterUpNotification):
+            try:
+                expected_epoch = self._expected_epoch()
+            except RuntimeError:
+                # Round-6 review fleet (err-001): ``_expected_epoch`` raises when the
+                # boot epoch isn't minted yet — unreachable from a real boot (the epoch
+                # is minted in ``_start_async`` before this observer is ever
+                # constructed), same "unreachable today is not a safety argument"
+                # class as the quarantine-provider guards elsewhere in this PR. This
+                # method's own docstring promises it NEVER raises except on a genuine
+                # audit-write failure; letting a RuntimeError escape here would break
+                # that promise with zero audit row. Route it through the SAME loud,
+                # audited refusal path as every other bad frame instead.
+                await self._reject(method, parsed.adapter_id, "epoch_unavailable")
+                return
+            if parsed.epoch != expected_epoch:
+                # THE FORGERY DEFENSE (Spec B §3, the G3 lesson): an ``up`` against a
+                # stale/foreign epoch is a false-liveness assertion. Refuse — no record.
+                await self._reject(method, parsed.adapter_id, "epoch_mismatch")
+                return
 
         await self._accept(parsed, fields, schema_name, str(method), state)
 

@@ -107,6 +107,17 @@ _ORIGIN_PORT = 443
 # The exact first line the stub MUST see on a used brokered socket (HARD #5).
 _EXPECTED_CONNECT_PREFIX = f"CONNECT {_ORIGIN_HOST}:{_ORIGIN_PORT} HTTP/".encode()
 
+# #587: the DeepSeek origin host, for the prompt-embedded-fallback proof below —
+# a SEPARATE constant (not a parametrization of the Anthropic-only fixtures above)
+# since this file has no existing precedent for parametrizing an _ORIGIN_HOST-keyed
+# fixture; a new sibling CA/proxy pair mirrors the Anthropic ones exactly instead.
+_DEEPSEEK_ORIGIN_HOST = "api.deepseek.com"
+# The DeepSeek-path counterpart of _EXPECTED_CONNECT_PREFIX. Same port: the child's
+# base_url is ``https://api.deepseek.com/v1``, so httpcore's proxy still CONNECTs to
+# :443. HARD #5 is a per-provider fact — the expected first bytes name the origin the
+# child dialled — so the assertion helper takes the prefix rather than hardcoding one.
+_EXPECTED_DEEPSEEK_CONNECT_PREFIX = f"CONNECT {_DEEPSEEK_ORIGIN_HOST}:{_ORIGIN_PORT} HTTP/".encode()
+
 _MODEL = "claude-haiku-4-5"
 _MAX_TOKENS = 8192
 # NON-EMPTY so the child's Section 20.2 secondary refuse-boot guard does not fire;
@@ -226,6 +237,72 @@ def _canned_ca(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     """
     certdir = tmp_path_factory.mktemp("canned_anthropic_ca")
     return _generate_and_install_ca(certdir)
+
+
+def _generate_and_install_deepseek_ca(certdir: Path) -> tuple[Path, Path]:
+    """Generate a throwaway CA + an ``api.deepseek.com`` server cert; install the CA.
+
+    #587: a sibling of :func:`_generate_and_install_ca`, mirroring its structure
+    exactly (same openssl invocations, same cert-shape requirements — see that
+    function's docstring) with only the SAN swapped to :data:`_DEEPSEEK_ORIGIN_HOST`.
+
+    A SIBLING function (not a parametrized extension of the Anthropic one) so this
+    installs under a DIFFERENT trust-anchor filename
+    (``alfred-t14-canned-deepseek-ca.crt`` vs. the Anthropic fixture's
+    ``alfred-t14-canned-ca.crt``) — both module-scoped CA fixtures can coexist in
+    the SAME container's trust store across a full-file run without one's
+    ``update-ca-certificates`` install clobbering the other's trust-anchor file
+    (same basename would mean whichever fixture instantiates LAST wins, silently
+    untrusting the other CA for any connection still to come).
+    """
+    ca_key = certdir / "ca.key"
+    ca_crt = certdir / "ca.crt"
+    srv_key = certdir / "server.key"
+    srv_csr = certdir / "server.csr"
+    srv_crt = certdir / "server.crt"
+    srv_ext = certdir / "server.ext"
+
+    def _openssl(*args: str) -> None:
+        subprocess.run(["openssl", *args], check=True, capture_output=True)  # noqa: S607, S603
+
+    _openssl(
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(ca_key), "-out", str(ca_crt),
+        "-subj", "/CN=alfred-t14-canned-deepseek-CA", "-days", "2",
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+    )  # fmt: skip
+    _openssl(
+        "req", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(srv_key), "-out", str(srv_csr), "-subj", f"/CN={_DEEPSEEK_ORIGIN_HOST}",
+    )  # fmt: skip
+    srv_ext.write_text(
+        "basicConstraints=CA:FALSE\n"
+        "keyUsage=digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n"
+        f"subjectAltName=DNS:{_DEEPSEEK_ORIGIN_HOST}\n"
+    )
+    _openssl(
+        "x509", "-req", "-in", str(srv_csr), "-CA", str(ca_crt), "-CAkey", str(ca_key),
+        "-CAcreateserial", "-out", str(srv_crt), "-days", "2", "-extfile", str(srv_ext),
+    )  # fmt: skip
+
+    trust_anchor = Path("/usr/local/share/ca-certificates/alfred-t14-canned-deepseek-ca.crt")
+    trust_anchor.write_bytes(ca_crt.read_bytes())
+    subprocess.run(["update-ca-certificates"], check=True, capture_output=True)  # noqa: S607
+    return srv_crt, srv_key
+
+
+@pytest.fixture(scope="module")
+def _canned_deepseek_ca(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """Module-scoped: generate + install the DeepSeek-SAN CA once for the deepseek test.
+
+    Mirrors ``_canned_ca`` exactly, using ``_generate_and_install_deepseek_ca`` /
+    ``_DEEPSEEK_ORIGIN_HOST`` instead of the Anthropic CA generator/host. Only
+    instantiated when the ``_DOCKER_ONLY``-gated deepseek test actually runs.
+    """
+    certdir = tmp_path_factory.mktemp("canned_deepseek_ca")
+    return _generate_and_install_deepseek_ca(certdir)
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +437,11 @@ class _CannedAnthropicProxy:
         self._tls_ctx.load_cert_chain(str(cert), str(key))
         self._lock = threading.Lock()
         self._first_bytes: list[bytes] = []
+        # #587 r3: the DECRYPTED request line of each tunnelled POST, e.g.
+        # ``b"POST /v1/chat/completions HTTP/1.1"``. ``_first_bytes`` only ever sees the
+        # plaintext CONNECT (host:port), which cannot show that the configured base_url's
+        # PATH reached the provider's real endpoint — only this can.
+        self._request_lines: list[bytes] = []
         self._post_index = 0
         self._threads: list[threading.Thread] = []
         self._reject = False
@@ -460,20 +542,27 @@ class _CannedAnthropicProxy:
         return buf
 
     @staticmethod
-    def _drain_http_request(tls: ssl.SSLSocket) -> None:
+    def _drain_http_request(tls: ssl.SSLSocket) -> bytes:
         """Read the child's ``POST`` request (headers + Content-Length body).
 
         Reading the whole request before replying keeps the child's SDK from seeing
         a reset mid-write. Over TLS the response closes the connection, so there is
         no over-read hazard here (unlike the plaintext CONNECT read above).
+
+        Returns the decrypted REQUEST LINE (e.g. ``b"POST /v1/chat/completions HTTP/1.1"``)
+        so a caller can assert the tunnelled request reached the provider's real endpoint
+        path, or ``b""`` when the peer EOF'd before a complete header block arrived. A
+        mid-BODY EOF still returns the line — the request line was fully observed, and the
+        truncated body is not what this records.
         """
         buf = b""
         while b"\r\n\r\n" not in buf:
             chunk = tls.recv(4096)
             if not chunk:
-                return
+                return b""
             buf += chunk
         header, _, rest = buf.partition(b"\r\n\r\n")
+        request_line = header.split(b"\r\n", 1)[0]
         needed = 0
         for line in header.split(b"\r\n"):
             if line.lower().startswith(b"content-length:"):
@@ -482,8 +571,9 @@ class _CannedAnthropicProxy:
         while needed > 0:
             chunk = tls.recv(min(4096, needed))
             if not chunk:
-                return
+                return request_line
             needed -= len(chunk)
+        return request_line
 
     def _handle(self, conn: socket.socket) -> None:
         conn.settimeout(_STUB_RECV_TIMEOUT_S)
@@ -501,8 +591,10 @@ class _CannedAnthropicProxy:
                 conn.close()
             return
         try:
-            self._drain_http_request(tls)
+            request_line = self._drain_http_request(tls)
             with self._lock:
+                if request_line:
+                    self._request_lines.append(request_line)
                 index = self._post_index
                 self._post_index += 1
             with suppress(OSError, ssl.SSLError):
@@ -516,6 +608,11 @@ class _CannedAnthropicProxy:
     def first_bytes(self) -> list[bytes]:
         with self._lock:
             return list(self._first_bytes)
+
+    def request_lines(self) -> list[bytes]:
+        """The decrypted request line of every tunnelled POST this stub served (#587 r3)."""
+        with self._lock:
+            return list(self._request_lines)
 
     def post_count(self) -> int:
         with self._lock:
@@ -540,6 +637,63 @@ class _CannedAnthropicProxy:
         # (see set_reject), so no separate accept-thread join is needed here.
         self.set_reject(True)
         self.settle()
+
+
+# #587: the DeepSeek-shaped canned response — a full OpenAI chat-completion JSON
+# body (NOT an Anthropic Messages tool_use block), matching exactly what
+# ``DeepSeekProvider.complete()`` (src/alfred/providers/deepseek.py) reads off the
+# wire via the real openai SDK: ``response.choices[0].message.content`` /
+# ``.finish_reason`` / ``response.usage.prompt_tokens``. deepseek-chat has no
+# ``NATIVE_CONSTRAINED_GENERATION`` capability (provider_dispatch.py's own
+# docstring: the JSON_OBJECT_MODE branch was removed in fork (b), so any provider
+# without that capability — including deepseek-chat/deepseek-reasoner — dispatches
+# via prompt_embedded_fallback), so ``message.content`` carries the extraction
+# payload as a bare JSON string the host parses directly (provider_dispatch.py's
+# ``_validate_response`` does ``json.loads(raw)`` with no unwrapping) — exactly
+# analogous to how ``_valid_extract_body`` above is a full raw Anthropic body, not
+# a ``CompletionResponse``-shaped Python object.
+_DEEPSEEK_CANNED_CHAT_COMPLETION = {
+    "id": "chatcmpl-canned-extract",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "deepseek-chat",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({"text": _CANNED_TEXT, "intent": _CANNED_INTENT}),
+            },
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 21, "completion_tokens": 9, "total_tokens": 30},
+}
+
+
+def _always_valid_deepseek(_index: int) -> bytes:
+    return _http_response(json.dumps(_DEEPSEEK_CANNED_CHAT_COMPLETION).encode("utf-8"))
+
+
+class _CannedDeepSeekProxy(_CannedAnthropicProxy):
+    """Same loopback CONNECT-proxy/TLS-terminator as :class:`_CannedAnthropicProxy`.
+
+    #587: a SUBCLASS, not a byte-for-byte duplicate of the ~200-line parent — the
+    CONNECT/TLS-terminate/HARD-#5-first-bytes-record/reject-toggle/settle/close
+    machinery is identical for either provider (this stub only ever blind-terminates
+    a TLS tunnel and replies with whatever ``responder`` returns); duplicating that
+    security-sensitive threading/TLS logic would create two copies that could drift
+    silently (this repo's own drift-trap lesson: a shared helper fails loud, N
+    copies drift silently). The ONLY difference from the Anthropic proxy is the
+    default ``responder``, which here serves the OpenAI-chat-completion-shaped
+    :data:`_DEEPSEEK_CANNED_CHAT_COMPLETION` body instead of the Anthropic
+    ``tool_use`` body.
+    """
+
+    def __init__(
+        self, cert: Path, key: Path, responder: _Responder = _always_valid_deepseek
+    ) -> None:
+        super().__init__(cert, key, responder=responder)
 
 
 class _ProxyCfg:
@@ -632,24 +786,52 @@ def _count_open_fds() -> int:
     return sum(1 for _ in Path("/proc/self/fd").iterdir())
 
 
-async def _spawn_real_child(proxy: _CannedAnthropicProxy) -> _SubprocessChildIO:
-    """Spawn the REAL golive quarantine child wired to the canned-Anthropic stub."""
+async def _spawn_real_child(
+    proxy: _CannedAnthropicProxy | _CannedDeepSeekProxy,
+    *,
+    provider: str = "anthropic",
+    model: str = _MODEL,
+    base_url: str | None = None,
+) -> _SubprocessChildIO:
+    """Spawn the REAL golive quarantine child wired to the canned provider stub.
+
+    #587: ``provider``/``model``/``base_url`` thread straight into
+    ``spawn_quarantine_child_io`` (Task 3 already added those params there — this
+    helper only forwards them). Defaults reproduce the pre-#587 Anthropic call
+    shape byte-for-byte, so every pre-existing ``_spawn_real_child(proxy)`` call
+    site in this file is unaffected.
+    """
     return await spawn_quarantine_child_io(
         provider_key=_PLACEHOLDER_KEY,
         control_fd=True,
         egress_config=_ProxyCfg(proxy.host, proxy.port),
-        model=_MODEL,
+        model=model,
         max_tokens=_MAX_TOKENS,
+        provider=provider,
+        base_url=base_url,
     )
 
 
-def _assert_hard5_first_bytes(proxy: _CannedAnthropicProxy, *, min_used: int) -> None:
+def _assert_hard5_first_bytes(
+    proxy: _CannedAnthropicProxy,
+    *,
+    min_used: int,
+    expected_prefix: bytes = _EXPECTED_CONNECT_PREFIX,
+) -> None:
     """HARD #5: every non-empty first-bytes blob is the child's CONNECT; >= min_used seen.
 
     Empty blobs are brokered sockets the child drained+closed without a byte (the
     unused pre-brokered sockets an early-success retry never consumed). NO blob may
     be anything other than the child's ``CONNECT`` line — a core-authored payload
     would appear here as non-CONNECT first bytes.
+
+    ``expected_prefix`` names the origin the CHILD is configured to dial (#587): the
+    assertion is "the first bytes are the child's CONNECT to ITS provider", which is a
+    per-provider fact, not a constant. It defaults to the Anthropic prefix because every
+    caller but one runs the Anthropic path; the DeepSeek test passes
+    :data:`_EXPECTED_DEEPSEEK_CONNECT_PREFIX`. Passing the wrong prefix fails loudly
+    (the CONNECT host would not match), so the default cannot weaken the check — it can
+    only make a mismatched call fail with an obvious message.
     """
     recorded = proxy.first_bytes()
     used = [fb for fb in recorded if fb]
@@ -659,9 +841,10 @@ def _assert_hard5_first_bytes(proxy: _CannedAnthropicProxy, *, min_used: int) ->
     )
     for blob in used:
         first_line = blob.split(b"\r\n", 1)[0]
-        assert blob.startswith(_EXPECTED_CONNECT_PREFIX), (
+        assert blob.startswith(expected_prefix), (
             "HARD #5: the core must write ZERO application bytes to the brokered "
-            f"socket — the first bytes must be the child's CONNECT, got {first_line!r}"
+            f"socket — the first bytes must be the child's CONNECT ({expected_prefix!r}), "
+            f"got {first_line!r}"
         )
 
 
@@ -974,6 +1157,87 @@ async def test_pi_2026_015_schema_break_reply_is_refused_end_to_end(
             # The child DID reach the provider (a real CONNECT happened) before the
             # orchestrator refused the schema-broken reply — HARD #5 still holds.
             _assert_hard5_first_bytes(proxy, min_used=1)
+    finally:
+        if child_io is not None:
+            await child_io.aclose()
+        proxy.close()
+
+
+# ---------------------------------------------------------------------------
+# #587: a real bwrap child, configured for DeepSeek (an OpenAI-compatible
+# transport, not the Anthropic-shaped default), extracts via the
+# prompt-embedded-fallback path — the release-blocking proof that Piece A's
+# transport-parametrization (build_child_client / _ProviderFactory) genuinely
+# works against DeepSeek's real wire shape end to end through a real bwrap
+# child, not just that the branch type-checks.
+# ---------------------------------------------------------------------------
+
+
+@_DOCKER_ONLY
+@pytest.mark.usefixtures("_launcher_environment")
+@pytest.mark.asyncio
+async def test_real_extract_deepseek_returns_extracted_via_prompt_embedded_fallback(
+    _canned_deepseek_ca: tuple[Path, Path],
+) -> None:
+    """#587: a real bwrap child, configured for DeepSeek, extracts via the
+    prompt-embedded-fallback path (deepseek-chat has no native constrained generation)."""
+    cert, key = _canned_deepseek_ca
+    proxy = _CannedDeepSeekProxy(cert, key)
+    child_io: _SubprocessChildIO | None = None
+    try:
+        # rev-004 fix: base_url is REQUIRED here — Task 1's build_child_client
+        # raises ValueError on provider_id="deepseek" + base_url=None (its own new
+        # HARD #7 refusal). Omitting it would make this "proves DeepSeek genuinely
+        # works" test hit that refusal instead of extracting.
+        child_io = await _spawn_real_child(
+            proxy,
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+        )
+        async with _extraction_stack(child_io) as (bridge, audit_writer):
+            proxy.settle()
+            result = await bridge.extract(
+                body=_INBOUND_BODY, canonical_user_id="alice", source_tier="T3"
+            )
+            assert isinstance(result, Extracted), result
+            assert result.data == {"text": _CANNED_TEXT, "intent": _CANNED_INTENT}
+            assert result.extraction_mode == "prompt_embedded_fallback"
+
+            # HARD #5 on the DeepSeek path too — the same discipline the six sibling
+            # Anthropic tests apply. The core must write ZERO application-layer bytes
+            # onto the brokered fd; the first bytes must be the CHILD's CONNECT, and
+            # here specifically a CONNECT to api.deepseek.com (proving the #587
+            # provider/base_url threading reached the WIRE, not just the spawn kwargs).
+            _assert_hard5_first_bytes(
+                proxy, min_used=1, expected_prefix=_EXPECTED_DEEPSEEK_CONNECT_PREFIX
+            )
+
+            # r3: the CONNECT prefix above proves only which HOST:PORT the child dialled.
+            # This proves the configured base_url's PATH reached DeepSeek's real endpoint:
+            # ``AsyncOpenAI(base_url="https://api.deepseek.com/v1")`` +
+            # ``chat.completions.create`` must produce ``POST /v1/chat/completions``. A
+            # base_url that lost its ``/v1``, or a provider branch that fell through to
+            # Anthropic's ``/v1/messages``, would satisfy every other assertion in this
+            # test and fail here. Prefix-matched, not equality: the trailing ``HTTP/1.1``
+            # is httpx's protocol choice, not part of the contract under test.
+            request_lines = proxy.request_lines()
+            assert request_lines, (
+                "expected >= 1 decrypted request line from the canned DeepSeek proxy; "
+                "got none — the child never completed a tunnelled POST"
+            )
+            assert all(
+                line.startswith(b"POST /v1/chat/completions HTTP/") for line in request_lines
+            ), (
+                # CodeRabbit r4: the bare prefix (no trailing delimiter) would also match
+                # an unintended ``/v1/chat/completions-suffix`` path — require the space
+                # before HTTP/ that the comment above already promised this assertion checks.
+                request_lines
+            )
+
+            extract_rows = audit_writer.rows_for("quarantine.extract")
+            assert len(extract_rows) == 1, extract_rows
+            assert extract_rows[0]["result"] == "extracted", extract_rows
     finally:
         if child_io is not None:
             await child_io.aclose()

@@ -458,6 +458,23 @@ adapter can serve a turn; each failure mode is audited and refuses boot fail-clo
   operator`, or `alfred user list` + `alfred user set --authorization
   trusted <slug>` to demote extras).
 
+**Two refuse-boot arms guard the quarantine-provider config itself (`#586`
+`#587`).** `enforce_quarantine_provider_separation` runs unconditionally in
+`_start_async`, before any comms-enabled branch — a comms-disabled boot still
+gets these checks:
+
+- `quarantine_provider_separation_violated` — `ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION`
+  is enabled and `quarantine_provider`/the effective privileged provider
+  resolve to the same value. See ADR-0064 and issue #590 (the privileged side's
+  effective provider is config-only today — `build_router` does not yet read
+  `Settings.primary_provider`).
+- `quarantine_provider_config_invalid` — the quarantine child's resolved
+  model or base_url is blank (`_resolve_quarantine_model` /
+  `_resolve_quarantine_base_url` in `daemon_runtime.py`). Defense-in-depth:
+  unreachable via a real boot today because `Settings`'s own field
+  validators already refuse a blank `deepseek_model`/`deepseek_base_url`
+  first — retained for non-`Settings` callers of these resolvers.
+
 ### Spec B G6-3: the gateway adapter credential path (core-injects-at-spawn)
 
 The always-up gateway hosts the comms adapter children (ADR-0036 inversion); the

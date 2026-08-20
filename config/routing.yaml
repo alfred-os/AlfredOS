@@ -12,18 +12,25 @@
 # provider must match or the plugin receives plugin.load_refused at handshake
 # (spec §5.4, index plan §3 cross-PR contract).
 
-# Primary (privileged) provider — governed by config/alfred.toml [provider].
-# Repeated here for documentation; alfred.toml is the authoritative source.
-# primary_provider: "deepseek"  # informational only; set in alfred.toml
+# Primary (privileged) provider — NOT configured here, and NOT in config/alfred.toml
+# either (nothing loads that file; its [provider] block is inert). The runtime source
+# of truth is the ALFRED_PRIMARY_PROVIDER .env setting (Settings.primary_provider,
+# a Literal["anthropic", "deepseek"], default "deepseek"). Even that is read only by
+# `alfred status` and the opt-in separation check below — build_router still hardcodes
+# DeepSeek as privileged (ADR-0064; #590 tracks closing that gap).
 
 quarantine:
-  # Provider for the quarantined LLM — MUST differ from the privileged
-  # provider by default (defence-in-depth, spec §5.4, PRD §6.4).
-  # If privileged uses deepseek, quarantined uses anthropic (and vice versa).
-  # The bootstrap-time check in alfred.bootstrap.quarantine.assert_provider_separation
-  # refuses to start when the privileged + quarantined ids collide (AI-3 fix).
-  # Changing this field requires a state.git reviewer-gate proposal — see
-  # docs/runbooks/slice-3-quarantined-llm.md (spec §11.1).
+  # Provider for the quarantined LLM. NOTE (#587): this routing.yaml value is NOT
+  # read at runtime — no loader exists yet ("slice 4+"). The actual runtime source
+  # of truth is the ALFRED_QUARANTINE_PROVIDER .env setting (Settings.quarantine_provider,
+  # default "anthropic"). This field stays here as the alfred-config-proposal target
+  # (the state.git reviewer-gate flow, docs/runbooks/slice-3-quarantined-llm.md) and
+  # as documentation of the shipped default, but changing it alone does nothing.
+  #
+  # Provider-separation enforcement (ADR-0064 — see Step 0 of this task; no PRD
+  # section states this invariant, do not re-cite "spec §5.4 / PRD §6.4") is
+  # OPT-IN (#586): set ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION=true to
+  # refuse boot on a same-provider collision. Default: permitted, with a warning.
   provider: "anthropic"
 
   # Model identifier for the quarantined LLM.

@@ -360,6 +360,106 @@ def test_quarantine_provider_key_never_reaches_the_gateway(compose: dict[str, An
     assert "ALFRED_QUARANTINE_PROVIDER_API_KEY" not in env
 
 
+def test_alfred_core_has_quarantine_provider_env(compose: dict[str, Any]) -> None:
+    """#587: alfred-core forwards ALFRED_QUARANTINE_PROVIDER — the setting that picks
+    which provider the quarantine child dials.
+
+    `docker compose up -d` is the documented deployment. A setting Settings knows about
+    but compose never forwards is INERT under that deployment: the operator writes
+    ``ALFRED_QUARANTINE_PROVIDER=deepseek`` into `.env`, sees no error, and silently keeps
+    the anthropic default. Pinned so the headline #587 capability cannot be un-wired by a
+    future compose edit without a failing test.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_QUARANTINE_PROVIDER" in env
+
+
+def test_quarantine_provider_defaults_to_anthropic(compose: dict[str, Any]) -> None:
+    """The forward carries the ``:-anthropic`` default — the same default Settings uses.
+
+    Pinned as an exact string so the compose default and the Settings default cannot
+    drift apart: a bare ``${VAR}`` would make compose WARN on every keyless invocation,
+    and a DIFFERENT default here would mean the compose stack and a bare `alfred` process
+    silently disagree about which provider the quarantine child talks to.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert env["ALFRED_QUARANTINE_PROVIDER"] == "${ALFRED_QUARANTINE_PROVIDER:-anthropic}"
+
+
+def test_alfred_core_has_require_quarantine_provider_separation_env(
+    compose: dict[str, Any],
+) -> None:
+    """#586: alfred-core forwards ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION.
+
+    This one is a SECURITY control (ADR-0064): opt-in enforcement that the quarantine and
+    privileged providers differ. Unforwarded, an operator who sets ``true`` in `.env` gets
+    a control that appears armed and does nothing — the silent fail-open CLAUDE.md hard
+    rule #7 forbids. Worse than the inert-capability case above, because the failure mode
+    is a false sense of enforcement rather than a visibly-wrong provider.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" in env
+
+
+def test_require_quarantine_provider_separation_defaults_to_false(
+    compose: dict[str, Any],
+) -> None:
+    """The forward carries the ``:-false`` default — enforcement is OPT-IN (ADR-0064).
+
+    Exact-string pinned for two reasons: a ``:-true`` default would flip a deliberately
+    opt-in control into a boot-refusing one for every existing deployment, and a bare
+    ``${VAR}`` would emit compose warnings for the overwhelmingly common case of an
+    operator who never sets it.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert (
+        env["ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION"]
+        == "${ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION:-false}"
+    )
+
+
+def test_primary_and_fallback_provider_are_not_forwarded_to_core(compose: dict[str, Any]) -> None:
+    """Pins TODAY's behaviour, not a desired end state (round-5 review fleet).
+
+    Unlike ``ALFRED_QUARANTINE_PROVIDER``/``ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION``
+    above, ``ALFRED_PRIMARY_PROVIDER`` and ``ALFRED_FALLBACK_PROVIDER`` are deliberately
+    left unforwarded (see the ``NOT FORWARDED UNDER DOCKER COMPOSE`` disclosure in both
+    fields' ``.env.example`` blocks) — forwarding ``ALFRED_PRIMARY_PROVIDER`` today would
+    give it the power to flip ``bin/alfred-setup.sh``'s separation-collision check and the
+    real boot-time separation check from pass to refuse for existing deployments, without
+    changing which provider ``build_router`` actually dials (#590 owns that half).
+
+    This is a MECHANICAL COUPLING GATE, not a preference: ``bin/alfred-setup.sh``'s
+    ``compose_primary_provider="deepseek"`` constant (the #586 separation-collision check)
+    is correct ONLY because this test is green. #590 will legitimately flip this test one
+    day — whoever does MUST, in the same commit, convert that bash constant to the same
+    ``${VAR+x}`` shell-precedence resolution the script already uses for
+    ``ALFRED_QUARANTINE_PROVIDER``, or the setup gate will silently certify the wrong pair.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_PRIMARY_PROVIDER" not in env
+    assert "ALFRED_FALLBACK_PROVIDER" not in env
+
+
+def test_quarantine_provider_settings_never_reach_the_gateway(compose: dict[str, Any]) -> None:
+    """Neither #586/#587 setting reaches alfred-gateway — it holds no provider config.
+
+    The gateway is a pure relay: it brokers egress and hosts adapters, and never decides
+    which provider the quarantine child uses nor whether separation is enforced. Pinned
+    alongside the provider-key gateway invariant above so the same 'just add it
+    everywhere' edit fails loudly for the non-secret settings too.
+    """
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    env = gw.get("environment", {}) or {}
+    assert "ALFRED_QUARANTINE_PROVIDER" not in env
+    assert "ALFRED_REQUIRE_QUARANTINE_PROVIDER_SEPARATION" not in env
+
+
 def test_alfred_gateway_defaults_to_no_hosted_adapter(compose: dict[str, Any]) -> None:
     """#469 Blocker 2: Discord is opt-in — the shipped default hosts NO adapter, but the
     ALFRED_GATEWAY_HOSTED_ADAPTERS override is still wired so an operator can enable it."""

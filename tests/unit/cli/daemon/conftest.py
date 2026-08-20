@@ -103,6 +103,34 @@ class FakeSupervisor:
         return coro
 
 
+@pytest.fixture(autouse=True)
+def _reset_fake_supervisor_last_instance() -> Iterator[None]:
+    """Reset ``FakeSupervisor.last_instance`` before every daemon-boot test.
+
+    "The #255 isolation quirk" (already named as such in comments in this package,
+    e.g. ``test_daemon_comms_spawn.py`` and ``test_daemon_promoter_wiring.py``):
+    ``FakeSupervisor.last_instance`` is a bare ``ClassVar`` set in ``__init__`` and
+    never cleared, so a test whose boot refuses BEFORE ``Supervisor()`` is ever
+    constructed reads whatever supervisor the PREVIOUS test in collection order
+    happened to leave behind — ``None`` if that prior test never got that far
+    either, or a live (possibly pump-populated) instance if it did. On Linux CI
+    this accidentally self-heals via file/test ordering; on Windows CI (or any
+    reordering — pytest-randomly, ``-p no:randomly`` overrides, a new test file
+    sorting differently) it does not, and the resulting failure looks like a
+    coroutine leak or a missing supervisor in a test that changed nothing.
+
+    Autouse and RESET-AT-SETUP (not just at teardown) so every test — including
+    ones that never construct a real ``FakeSupervisor`` at all — starts from a
+    known ``None`` baseline, matching a fresh pytest process. This is what makes
+    a plain ``assert sup is None`` the actual, deterministic outcome for every
+    pre-Supervisor refusal test in this package, instead of an accident of
+    ordering that would otherwise need an ``or sup.registered_tasks == []``
+    fallback.
+    """
+    FakeSupervisor.last_instance = None
+    yield
+
+
 @pytest.fixture
 def fake_audit_writer() -> FakeAuditWriter:
     return FakeAuditWriter()
@@ -437,10 +465,17 @@ class _FakeQuarantineChildIO:
     inbound turn is driven); ``aclose`` is an idempotent no-op.
     """
 
-    def __init__(self, *, provider_key: str) -> None:
+    def __init__(self, *, provider_key: str, spawn_kwargs: dict[str, Any] | None = None) -> None:
         # Recorded so a test can assert the key flowed into the spawn (the real
         # spawn delivers it over fd 3; here we only prove the seam carried it).
         self.provider_key = provider_key
+        # #586/#587: the remaining (non-secret) golive spawn kwargs — provider,
+        # base_url, model, max_tokens, control_fd, egress_config. Recorded rather than
+        # discarded so a BOOT-level test can prove an operator's `.env` provider choice
+        # survives the whole `.env` -> Settings -> _comms_boot -> builder -> spawn chain,
+        # not merely the daemon_runtime-unit hop. prov-001 was exactly a value that
+        # resolved correctly and then never reached the spawn call.
+        self.spawn_kwargs: dict[str, Any] = dict(spawn_kwargs or {})
         # Counts aclose() calls so a test can prove the daemon reaps the live child
         # on its exit paths (CR #255 — the boot graph's quarantine teardown).
         self.aclose_calls = 0
@@ -473,12 +508,14 @@ def patch_quarantine_child_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeQ
     spawned: list[_FakeQuarantineChildIO] = []
 
     async def _fake_spawn(
-        *, provider_key: str, refusal_recorder: object = None, **_golive: object
+        *, provider_key: str, refusal_recorder: object = None, **golive: Any
     ) -> _FakeQuarantineChildIO:
-        # ``**_golive`` absorbs the #340 PR2b-golive Task-8 spawn kwargs the builder
-        # now passes (control_fd / egress_config / model / max_tokens / ssl_cert_file);
-        # this boot-wiring fake proves the seam + key flow, not the golive config.
-        child = _FakeQuarantineChildIO(provider_key=provider_key)
+        # ``**golive`` absorbs the #340 PR2b-golive Task-8 spawn kwargs the builder
+        # passes (control_fd / egress_config / model / max_tokens / ssl_cert_file) plus
+        # #587's provider / base_url. They are RECORDED on the fake (not discarded) so a
+        # boot test can assert the golive config actually reached the spawn — see
+        # _FakeQuarantineChildIO.spawn_kwargs.
+        child = _FakeQuarantineChildIO(provider_key=provider_key, spawn_kwargs=golive)
         spawned.append(child)
         return child
 
