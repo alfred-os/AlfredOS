@@ -34,7 +34,7 @@ dependencies = [
   # + the source-identity `__name__`/type-name key it uses to key its per-source
   # `states` dict), an undocumented 2.14.x internal not covered by semver. Widen
   # the cap only after re-verifying that internal against the target minor.
-  "pydantic-settings>=2.14.2,<2.15",
+  "pydantic-settings>=2.15.0,<2.16",
   # python-dotenv loads .env for the Settings environment resolver (#469);
   # promoted from a transitive pydantic-settings dep to an explicit direct
   # dependency so its version is pinned by our own floor, not whatever
