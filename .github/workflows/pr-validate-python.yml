@@ -75,7 +75,7 @@ jobs:
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           # Cache `~/.cache/uv` keyed on the lock file so the 5 jobs share
@@ -138,7 +138,7 @@ jobs:
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           # Cache `~/.cache/uv` keyed on the lock file so the 5 jobs share
@@ -200,7 +200,7 @@ jobs:
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           # Cache `~/.cache/uv` keyed on the lock file so the 5 jobs share
@@ -258,7 +258,7 @@ jobs:
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           # Cache `~/.cache/uv` keyed on the lock file so the 5 jobs share
@@ -491,7 +491,7 @@ jobs:
           fi
       - name: Install uv
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
