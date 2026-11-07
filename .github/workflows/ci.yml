@@ -15,7 +15,7 @@ concurrency:
 env:
   # Single source of truth: .prototools. Pinned by tests/unit/test_workflow_invariants.py
   # (#525) — every setup-uv use must consume this, never the action default.
-  UV_VERSION: "0.11.32"
+  UV_VERSION: "0.13.7"
 
 permissions:
   contents: read  # Minimal: read repo content for lint / type / unit / integration
@@ -1188,7 +1188,7 @@ jobs:
           # is new enough to install CPython 3.14.6 (the repo's .python-version / requires-python
           # floor; 0.11.6 embeds only up to 3.14.4). curl comes from setup-wsl additional-
           # packages; sha256sum/tar are in the base rootfs (coreutils).
-          UV_VERSION=0.11.32
+          UV_VERSION=0.13.7
           UV_TARBALL=uv-x86_64-unknown-linux-gnu.tar.gz
           UV_SHA256=aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967
           for attempt in 1 2 3; do
