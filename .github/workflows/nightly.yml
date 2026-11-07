@@ -18,7 +18,7 @@ concurrency:
 env:
   # Single source of truth: .prototools. Pinned by tests/unit/test_workflow_invariants.py
   # (#525) — every setup-uv use must consume this, never the action default.
-  UV_VERSION: "0.11.32"
+  UV_VERSION: "0.13.7"
 
 permissions:
   contents: read  # Minimal: read repo content for e2e + adversarial runs

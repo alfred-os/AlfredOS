@@ -37,7 +37,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Pinned to the SAME uv as .prototools and every workflow (#525). This builds the SHIPPED
 # image, so it resolves the production dependency set — it was 0.5.4, the oldest uv in the
 # repo, and invisible to both the drift guard and Renovate. Both now cover it.
-COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
 # curl/ca-certificates: fetch the proto installer + the PBS tarball.
 # xz-utils: proto's python-build-standalone tarball is `.tar.xz`; the slim base
