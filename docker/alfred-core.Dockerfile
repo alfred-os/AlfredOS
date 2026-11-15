@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.29
 #
 # Multi-stage build for the alfred-core container.
 #
